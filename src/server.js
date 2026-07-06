@@ -443,7 +443,7 @@ streamWss.on('connection', (ws) => {
   });
 });
 
-export function startServer(port = 7421) {
+export function startServer(port = 7421, host = '127.0.0.1') {
   server.on('error', (e) => {
     if (e.code === 'EADDRINUSE') {
       console.error(`\nwarden: port ${port} is already in use — another warden running? Stop it, or start with PORT=<other> npm start.\n`);
@@ -452,8 +452,8 @@ export function startServer(port = 7421) {
     }
     process.exit(1);
   });
-  server.listen(port, () => {
-    console.log(`warden ui → http://localhost:${port}`);
+  server.listen(port, host, () => {
+    console.log(`warden ui → http://${host}:${port}`);
     console.log(`  hosts: ${cfg.hosts.join(', ')}   model: ${resolveModel()}   tmux: ${TMUX_BIN}`);
   });
 }

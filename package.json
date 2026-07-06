@@ -1,12 +1,12 @@
 {
   "name": "warden",
   "version": "0.1.0",
-  "description": "Local manager for yatfa agent chats (SSH + docker + tmux).",
+  "description": "Yatfa Warden — dashboard for AI agent chats",
   "type": "module",
   "bin": {
     "warden": "src/cli.js"
   },
-  "main": "src/cli.js",
+  "main": "electron/main.cjs",
   "engines": {
     "node": ">=18"
   },
@@ -15,11 +15,45 @@
     "build": "npm --prefix web run build",
     "dev": "node src/cli.js dev",
     "ui": "node src/cli.js ui",
-    "scan": "node src/cli.js scan"
+    "scan": "node src/cli.js scan",
+    "electron": "electron .",
+    "electron:dev": "npm run build && electron .",
+    "dist": "npm run build && electron-builder",
+    "postinstall": ""
   },
   "dependencies": {
     "express": "^5.2.1",
     "node-pty": "^1.1.0",
     "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.1.0",
+    "electron": "^43.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "io.yatfa.warden",
+    "productName": "Yatfa Warden",
+    "files": [
+      "src/**/*",
+      "web/dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": ["nsis"],
+      "artifactName": "yatfa-warden-setup-${version}.${ext}"
+    },
+    "mac": {
+      "target": ["dmg"],
+      "artifactName": "yatfa-warden-${version}.${ext}"
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "artifactName": "yatfa-warden-${version}.${ext}"
+    }
   }
 }

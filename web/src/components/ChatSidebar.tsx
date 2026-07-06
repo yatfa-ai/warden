@@ -50,7 +50,7 @@ const TYPE_COLOR: Record<string, string> = {
 
 function findChat(chats: Chat[], id: string) { return chats.find((c) => (c.key || c.id) === id); }
 
-export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onClosePane, onRemoveActive, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, loading }: Props) {
+export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, loading }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string }>({ kind: 'root' });
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
   const [hostSessions, setHostSessions] = useState<Record<string, { sessions: ClaudeSession[]; claudeAvailable?: boolean }>>({});

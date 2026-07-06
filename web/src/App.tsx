@@ -106,7 +106,6 @@ function App() {
 
   const openPaneSet = new Set(openPanes);
   const tiles = openPanes.map((id) => ({ id }));
-  const hostInfo = chats[0]?.host || '…';
 
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">

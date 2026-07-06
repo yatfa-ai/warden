@@ -4,3 +4,7 @@ web/dist/
 *.log
 .env
 .DS_Store
+release/
+electron-download/
+apikey.txt
+.mcp.json

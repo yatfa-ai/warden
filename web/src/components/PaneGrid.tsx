@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { PaneTile } from './PaneTile';
-import { streamApi } from '@/lib/stream';
 import type { Chat } from '@/lib/types';
 
 export interface OpenTile { id: string }
