@@ -53,9 +53,9 @@ export function attach(host, cmd, _opts = {}) {
 // Live web pane (remote): ssh inside a real local PTY (node-pty) whose size we can
 // change → SIGWINCH → ssh → remote tmux. Returns a node-pty IPty.
 export function attachPty(host, cmd, { cols = 100, rows = 30 } = {}) {
-  const remote = `bash -lc ${shellQuote(cmd)}`;
+  const remote = `export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8; bash -lc ${shellQuote(cmd)}`;
   const args = ['-tt', ...SSH_BASE_OPTS, host, remote];
-  return nodePty.spawn(SSH_BIN, args, { cols, rows, useConpty: false });
+  return nodePty.spawn(SSH_BIN, args, { cols, rows, useConpty: true });
 }
 
 // ---------------- local transport (this machine) ----------------
@@ -95,7 +95,8 @@ export function runLocalTmux(args) {
 
 // Local live pane: spawn tmux attach in a local PTY (node-pty).
 export function attachLocalTmux(args, { cols = 100, rows = 30 } = {}) {
-  return nodePty.spawn(TMUX_BIN, args, { cols, rows, env: LOCAL_ENV, useConpty: false });
+  const env = { ...LOCAL_ENV, LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' };
+  return nodePty.spawn(TMUX_BIN, args, { cols, rows, env, useConpty: true });
 }
 
 // ---------------- unified tmux transport ----------------

@@ -41,14 +41,13 @@ export async function hasSession(chat, cfg) {
   return r.ok;
 }
 
-// Resize the window so the agent renders at the browser pane's size (yatfa
-// sessions are `new-session -x -y` locked, so window-size manual + resize-window).
+// Set window-size latest so tmux follows whichever client is active (Warden's
+// ConPTY SIGWINCH propagates through ssh → tmux automatically). Don't use
+// `manual` — it locks the window and prevents other clients from resizing.
+// One call on attach is enough; ConPTY handles subsequent resizes via SIGWINCH.
 export async function resize(chat, cfg, cols, rows) {
   const s = sess(chat, cfg);
-  const c = Math.max(20, Math.min(400, Math.floor(cols || 80)));
-  const r = Math.max(6, Math.min(120, Math.floor(rows || 24)));
-  await runTmux(chat, ['set-option', '-t', s, 'window-size', 'manual']);
-  await runTmux(chat, ['resize-window', '-t', s, '-x', String(c), '-y', String(r)]);
+  await runTmux(chat, ['set-option', '-t', s, 'window-size', 'latest']);
 }
 
 // Spawn the chat's tmux session (detached): new-session -d, cwd (msys-translated

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { streamApi } from '@/lib/stream';
 
 interface Props {
@@ -28,11 +29,18 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    const term = new Terminal({ fontFamily: 'ui-monospace, Menlo, Consolas, monospace', fontSize, convertEol: false, scrollback: 5000, cursorBlink: true });
+    const term = new Terminal({
+      fontFamily: '"Cascadia Code", "JetBrains Mono", "Fira Code", "Symbols Nerd Font", ui-monospace, Menlo, Consolas, monospace',
+      fontSize, convertEol: false, scrollback: 10000, cursorBlink: true,
+      allowProposedApi: true,
+    });
     const fit = new FitAddon();
     const search = new SearchAddon();
+    const unicode11 = new Unicode11Addon();
     term.loadAddon(fit);
     term.loadAddon(search);
+    term.loadAddon(unicode11);
+    term.unicode.activeVersion = '11';
     term.open(wrapRef.current!);
     termRef.current = term; fitRef.current = fit; searchRef.current = search;
     term.onData((d) => streamApi.send({ type: 'input', id, data: d }));

@@ -1,7 +1,7 @@
 // Yatfa Warden — Electron main process (CommonJS).
 // Spawns the backend server (ESM) as a child process, then opens a window.
 const { app, BrowserWindow } = require('electron');
-const { fork } = require('child_process');
+const { fork, execSync } = require('child_process');
 const path = require('path');
 const http = require('http');
 
@@ -11,9 +11,24 @@ const HOST = '127.0.0.1';
 let serverProcess = null;
 let win = null;
 
+// Kill anything occupying the port (stale server from a previous run)
+function killStalePort() {
+  try {
+    const out = execSync(`netstat -ano | findstr ":${PORT} " | findstr LISTENING`, { encoding: 'utf8' });
+    const pids = [...new Set(out.trim().split('\n').map(l => l.trim().split(/\s+/).pop()))];
+    for (const pid of pids) {
+      if (pid && pid !== '0') {
+        try { execSync(`taskkill /F /PID ${pid}`, { stdio: 'ignore' }); } catch {}
+      }
+    }
+  } catch { /* port is free */ }
+}
+
 function waitForServer(cb) {
+  let attempts = 0;
   const tryConnect = () => {
-    const req = http.get(`http://${HOST}:${PORT}/`, (res) => {
+    if (attempts++ > 50) { console.error('Server did not start in time'); return; }
+    const req = http.get(`http://${HOST}:${PORT}/api/chats`, (res) => {
       if (res.statusCode === 200) cb();
       else setTimeout(tryConnect, 200);
       res.destroy();
@@ -31,17 +46,21 @@ function createWindow() {
     minWidth: 900,
     minHeight: 600,
     title: 'Yatfa Warden',
-    icon: path.join(__dirname, 'icon.png'),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
-  win.loadURL(`http://${HOST}:${PORT}/`);
+  win.webContents.session.clearCache().then(() => {
+    win.loadURL(`http://${HOST}:${PORT}/?_t=${Date.now()}`);
+  });
   win.on('closed', () => { win = null; });
 }
 
 app.whenReady().then(() => {
+  // Kill any stale server from a previous run
+  killStalePort();
+
   // Start the backend (ESM — can't require() it, so fork it)
   serverProcess = fork(path.join(__dirname, '..', 'src', 'server.js'), [], {
     env: { ...process.env, PORT: String(PORT) },
@@ -49,16 +68,24 @@ app.whenReady().then(() => {
   });
   serverProcess.stdout.on('data', (d) => console.log(`[server] ${d.toString().trim()}`));
   serverProcess.stderr.on('data', (d) => console.error(`[server] ${d.toString().trim()}`));
+  serverProcess.on('exit', (code) => {
+    console.error(`[server] exited with code ${code}`);
+  });
 
-  // Wait for the server to be ready, then open the window
+  // Clean up server when Electron is killed externally
+  process.on('SIGTERM', cleanup);
+  process.on('SIGINT', cleanup);
+
   waitForServer(createWindow);
 });
 
-app.on('window-all-closed', () => {
-  if (serverProcess) serverProcess.kill();
-  app.quit();
-});
+function cleanup() {
+  if (serverProcess) {
+    try { serverProcess.kill('SIGTERM'); } catch {}
+    // Force kill after 2s if still alive
+    setTimeout(() => { try { serverProcess.kill('SIGKILL'); } catch {} }, 2000);
+  }
+}
 
-app.on('before-quit', () => {
-  if (serverProcess) serverProcess.kill();
-});
+app.on('window-all-closed', () => { cleanup(); app.quit(); });
+app.on('before-quit', () => { cleanup(); });
