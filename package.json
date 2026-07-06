@@ -1,0 +1,25 @@
+{
+  "name": "warden",
+  "version": "0.1.0",
+  "description": "Local manager for yatfa agent chats (SSH + docker + tmux).",
+  "type": "module",
+  "bin": {
+    "warden": "src/cli.js"
+  },
+  "main": "src/cli.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node scripts/start.mjs",
+    "build": "npm --prefix web run build",
+    "dev": "node src/cli.js dev",
+    "ui": "node src/cli.js ui",
+    "scan": "node src/cli.js scan"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "node-pty": "^1.1.0",
+    "ws": "^8.21.0"
+  }
+}

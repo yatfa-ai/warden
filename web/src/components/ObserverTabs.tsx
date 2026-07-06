@@ -1,0 +1,87 @@
+import { useCallback, useEffect, useState } from 'react';
+import { ObserverPanel } from './ObserverPanel';
+import { Button } from '@/components/ui/button';
+import { loadObs, saveObs } from '@/lib/storage';
+import type { SessionMeta } from '@/lib/types';
+
+// Manages persisted observer sessions as tabs. Every open tab keeps its own
+// ObserverPanel (and WS) mounted; inactive ones are display:none so their
+// conversations stay live. Open tabs + active tab persist in localStorage.
+export function ObserverTabs() {
+  const [sessions, setSessions] = useState<SessionMeta[]>([]);
+  const [openIds, setOpenIds] = useState<string[]>(() => loadObs().openIds);
+  const [activeId, setActiveId] = useState<string | null>(() => loadObs().activeId);
+  const [booted, setBooted] = useState(false);
+
+  const refresh = useCallback(async () => {
+    const r = await fetch('/api/sessions');
+    const j = await r.json();
+    const list: SessionMeta[] = j.sessions || [];
+    setSessions(list);
+    return list;
+  }, []);
+
+  const createNew = useCallback(async () => {
+    const r = await fetch('/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: null }) });
+    const s: SessionMeta = await r.json();
+    setSessions((p) => [s, ...p]);
+    setOpenIds((p) => (p.includes(s.id) ? p : [...p, s.id]));
+    setActiveId(s.id);
+  }, []);
+
+  // boot: load sessions, restore tabs, ensure at least one session exists & is open
+  useEffect(() => {
+    (async () => {
+      const list = await refresh();
+      const stored = loadObs();
+      let open = stored.openIds.filter((id) => list.some((s) => s.id === id));
+      let active = stored.activeId && open.includes(stored.activeId) ? stored.activeId : (open[0] || null);
+      if (list.length === 0) {
+        const r = await fetch('/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: null }) });
+        const s: SessionMeta = await r.json();
+        setSessions([s]); open = [s.id]; active = s.id;
+      } else if (open.length === 0) {
+        open = [list[0].id]; active = list[0].id;
+      }
+      setOpenIds(open);
+      setActiveId(active);
+      setBooted(true);
+    })();
+  }, [refresh]);
+
+  useEffect(() => { if (booted) saveObs({ openIds, activeId }); }, [openIds, activeId, booted]);
+
+  const closeTab = (id: string) => {
+    setOpenIds((p) => p.filter((x) => x !== id));
+    setActiveId((a) => (a === id ? (openIds.find((x) => x !== id) || null) : a));
+  };
+  const nameOf = (id: string) => sessions.find((s) => s.id === id)?.name || id.slice(0, 6);
+
+  return (
+    <div className="flex flex-col h-full min-h-0">
+      <div className="flex items-center gap-1 px-2 py-1.5 border-b shrink-0 overflow-x-auto">
+        {openIds.map((id) => (
+          <button
+            key={id}
+            onClick={() => setActiveId(id)}
+            className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap shrink-0 ${activeId === id ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50'}`}
+          >
+            {nameOf(id)}
+            <span
+              className="ml-1.5 opacity-50 hover:opacity-100"
+              onClick={(e) => { e.stopPropagation(); closeTab(id); }}
+            >×</span>
+          </button>
+        ))}
+        <Button size="sm" variant="ghost" className="h-7 px-2 text-base shrink-0" onClick={createNew} title="new observer session">+</Button>
+      </div>
+      <div className="flex-1 min-h-0">
+        {openIds.map((id) => (
+          <div key={id} className={activeId === id ? 'h-full' : 'hidden'}>
+            <ObserverPanel sessionId={id} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
