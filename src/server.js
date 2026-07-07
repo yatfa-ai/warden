@@ -6,6 +6,7 @@ import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer } from 'ws';
@@ -392,6 +393,54 @@ app.get('/api/claude-sessions', async (req, res) => {
   const sessions = host === LOCAL ? localClaudeSessions() : await remoteClaudeSessions(host);
   const claudeAvailable = !!(await detectClaude(host));
   res.json({ sessions, claudeAvailable });
+});
+
+app.get('/api/git-status', async (req, res) => {
+  const chatId = String(req.query.id || '');
+  const { chat, error } = await resolve(chatId);
+  if (error) return res.status(404).json({ error });
+
+  try {
+    const cwd = chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
+    if (!cwd) return res.json({ branch: null, clean: null, cwd: '', error: 'no cwd' });
+
+    let branch = '';
+    let clean = true;
+
+    if (chat.host === LOCAL) {
+      // Local execution: use spawnSync directly
+      const branchResult = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        cwd,
+        stdio: ['ignore', 'pipe', 'inherit'],
+      });
+      branch = branchResult.stdout?.toString().trim() || '';
+
+      const statusResult = spawnSync('git', ['status', '--porcelain'], {
+        cwd,
+        stdio: ['ignore', 'pipe', 'inherit'],
+      });
+      clean = statusResult.stdout?.toString().trim() === '' || !statusResult.stdout;
+    } else {
+      // Remote execution: use SSH
+      const gitBranchCmd = `cd ${shellQuote(cwd)} && git rev-parse --abbrev-ref HEAD 2>/dev/null`;
+      const gitStatusCmd = `cd ${shellQuote(cwd)} && git status --porcelain 2>/dev/null`;
+
+      const r1 = await run(chat.host, gitBranchCmd, { timeout: 8000 });
+      branch = r1.ok ? r1.stdout.trim() : '';
+
+      const r2 = await run(chat.host, gitStatusCmd, { timeout: 8000 });
+      clean = r2.ok ? r2.stdout.trim() === '' : true;
+    }
+
+    res.json({
+      branch: branch || null,
+      clean: branch ? clean : null,
+      cwd,
+      error: null,
+    });
+  } catch (e) {
+    res.json({ branch: null, clean: null, cwd: chat.cwd || '', error: e.message });
+  }
 });
 
 // If cmd invokes bare `claude`, replace it with the full path found on the host —
