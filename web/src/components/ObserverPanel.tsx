@@ -56,7 +56,11 @@ export function ObserverPanel({ sessionId }: Props) {
     if (!wsRef.current || wsRef.current.readyState !== 1) return;
     setItems((p) => [...p, { kind: 'user', text }]);
     setBusy(true);
-    wsRef.current.send(JSON.stringify({ type: 'user', text }));
+    const panes = Array.from(document.querySelectorAll('[data-pane-id]')).map((el) => el.getAttribute('data-pane-id')).filter(Boolean);
+    wsRef.current.send(JSON.stringify({ type: 'user', text, panes }));
+  };
+  const stop = () => {
+    if (wsRef.current) { wsRef.current.close(); setBusy(false); setItems((p) => [...p, { kind: 'tool', text: '(stopped)' }]); }
   };
   const decide = (requestId: string, approved: boolean, edited?: string) => {
     wsRef.current?.send(JSON.stringify({ type: 'gate_decision', requestId, approved, edited }));
@@ -94,13 +98,14 @@ export function ObserverPanel({ sessionId }: Props) {
           })}
         </div>
       </ScrollArea>
-      <form
-        className="flex items-center gap-2 px-2 py-2 border-t shrink-0"
-        onSubmit={(e) => { e.preventDefault(); const el = e.currentTarget.elements.namedItem('msg') as HTMLInputElement; if (el?.value.trim()) { send(el.value.trim()); el.value = ''; } }}
-      >
-        <Input name="msg" placeholder="ask the observer…" />
-        <Button type="submit" size="sm">send</Button>
-      </form>
+      <div className="flex items-end gap-2 px-2 py-2 border-t shrink-0">
+        <textarea name="msg" placeholder="ask the observer… (Shift+Enter for newline)" rows={1}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); const el = e.target as HTMLTextAreaElement; if (el.value.trim()) { send(el.value.trim()); el.value = ''; } } }}
+          className="flex-1 bg-background border rounded px-2 py-1.5 text-sm resize-none min-h-[36px] max-h-32 overflow-auto" />
+        {busy && <Button type="button" size="sm" variant="destructive" onClick={stop} className="shrink-0">stop</Button>}
+        <Button type="button" size="sm" disabled={busy} className="shrink-0"
+          onClick={() => { const el = document.querySelector('textarea[name="msg"]') as HTMLTextAreaElement; if (el?.value.trim()) { send(el.value.trim()); el.value = ''; }}>send</Button>
+      </div>
     </div>
   );
 }

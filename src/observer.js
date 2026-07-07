@@ -29,6 +29,9 @@ A "proper" directive is a self-contained message addressed to the receiving agen
 Rules:
 - Never claim you sent something without calling send_directive (and the gate approving).
 - Never fabricate an agent's state — call read_chat first.
+- Chats marked "open": true in list_chats are the ones the user is actively watching (open panes).
+  ONLY read those by default. If the user asks about others, read them on request.
+- Do NOT read every chat on every turn. Read only the open ones, and only when needed.
 - If you're unsure which agent or what exactly to send, ask the user.
 - Keep your own replies to the user concise.`;
 
@@ -121,9 +124,11 @@ export class Observer {
     if (this.onTool) this.onTool(name, input);
     if (name === 'list_chats') {
       const chats = await this._refreshChats();
+      const open = new Set(this.openTabs || []);
       return chats.map((c) => ({
-        id: c.container, host: c.host, project: c.project, role: c.role,
+        id: c.container || c.session, host: c.host, project: c.project, role: c.role,
         active: c.active, status: c.status,
+        open: open.has(c.container || c.session) || open.has(c.key),
       }));
     }
     if (name === 'read_chat') {

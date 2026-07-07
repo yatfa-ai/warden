@@ -364,6 +364,7 @@ wss.on('connection', (ws, req) => {
     try { msg = JSON.parse(data.toString()); } catch { return; }
     if (msg.type === 'user') {
       send({ type: 'thinking' });
+      obs.openTabs = Array.isArray(msg.panes) ? msg.panes : [];
       try { send({ type: 'done', text: await obs.step(String(msg.text || '')) }); }
       catch (e) { send({ type: 'error', error: e.message }); }
     } else if (msg.type === 'gate_decision') {
