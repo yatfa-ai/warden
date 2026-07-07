@@ -75,7 +75,7 @@ async function preflightTmux(host) {
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 // Capture panes for a set of chats in one round per host (local: runLocalTmux each;
 // remote: one ssh batching all, docker-exec for yatfa, plain tmux for manual).
-async function capturePanes(chats) {
+export async function capturePanes(chats) {
   const byHost = {};
   for (const c of chats) (byHost[c.host] ||= []).push(c);
   const out = {};

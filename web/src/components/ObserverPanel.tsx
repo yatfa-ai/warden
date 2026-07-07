@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ObserveMsg } from '@/lib/types';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 
 type Item =
@@ -103,8 +102,19 @@ export function ObserverPanel({ sessionId }: Props) {
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); const el = e.target as HTMLTextAreaElement; if (el.value.trim()) { send(el.value.trim()); el.value = ''; } } }}
           className="flex-1 bg-background border rounded px-2 py-1.5 text-sm resize-none min-h-[36px] max-h-32 overflow-auto" />
         {busy && <Button type="button" size="sm" variant="destructive" onClick={stop} className="shrink-0">stop</Button>}
+        <Button type="button" size="sm" variant="outline" disabled={busy} className="shrink-0"
+          onClick={() => send('summarize what everyone is working on')}
+          title="Ask the Observer to read all open tabs and summarize"
+        >summarize</Button>
         <Button type="button" size="sm" disabled={busy} className="shrink-0"
-          onClick={() => { const el = document.querySelector('textarea[name="msg"]') as HTMLTextAreaElement; if (el?.value.trim()) { send(el.value.trim()); el.value = ''; }}>send</Button>
+          onClick={() => {
+            const el = document.querySelector('textarea[name="msg"]') as HTMLTextAreaElement;
+            if (el?.value.trim()) {
+              send(el.value.trim());
+              el.value = '';
+            }
+          }}
+        >send</Button>
       </div>
     </div>
   );
