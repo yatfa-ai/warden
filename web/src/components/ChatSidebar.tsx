@@ -80,6 +80,8 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   }, [chats]);
   const [hostSessions, setHostSessions] = useState<Record<string, { sessions: ClaudeSession[]; claudeAvailable?: boolean }>>({});
   const [loadingHost, setLoadingHost] = useState<string | null>(null);
+  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string }>>({});
+  const [loadingGit, setLoadingGit] = useState<Set<string>>(new Set());
 
   const fetchHostSessions = async (host: string) => {
     setLoadingHost(host);
@@ -89,6 +91,18 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       setHostSessions((p) => ({ ...p, [host]: { sessions: j.sessions || [], claudeAvailable: j.claudeAvailable } }));
     } catch { /* noop */ }
     setLoadingHost(null);
+  };
+  const fetchGitStatus = async (chatId: string) => {
+    if (loadingGit.has(chatId) || gitStatus[chatId]) return; // already loading or cached
+    setLoadingGit((p) => new Set(p).add(chatId));
+    try {
+      const r = await fetch(`/api/git-status?id=${encodeURIComponent(chatId)}`);
+      const j = await r.json();
+      if (j.branch) {
+        setGitStatus((p) => ({ ...p, [chatId]: { branch: j.branch, clean: j.clean, cwd: j.cwd } }));
+      }
+    } catch { /* noop */ }
+    setLoadingGit((p) => { const s = new Set(p); s.delete(chatId); return s; });
   };
   const enterHost = (host: string) => { setView({ kind: 'host', host }); fetchHostSessions(host); };
 
@@ -115,6 +129,14 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   useEffect(() => {
     fetchCollections();
   }, []);
+
+  // Fetch git status for active chats (lazy loading)
+  useEffect(() => {
+    activeTabs.forEach((id) => {
+      const c = findChat(chats, id);
+      if (c) fetchGitStatus(id);
+    });
+  }, [chats, activeTabs]);
 
   const handleSpawned = (chat: Chat) => { onRefresh(); onOpenChat(chat.key || chat.id); setView({ kind: 'root' }); };
   const hosts = [THIS_MACHINE, ...sshHosts];
@@ -214,7 +236,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             {(visibleActive.length > 0 || idle.length > 0 || hiddenActive.length > 0) && (
               <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">● live (tmux)</div>
             )}
-            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => onKill(c.key || c.id)} onRename={onRename} onHide={() => onHideTab(c.key || c.id)} />)}
+            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => onKill(c.key || c.id)} onRename={onRename} onHide={() => onHideTab(c.key || c.id)} gitInfo={gitStatus[c.key || c.id]} />)}
             {hiddenActive.length > 0 && (
               <>
                 <button onClick={() => setHiddenExpanded(!hiddenExpanded)} className="flex items-center gap-1 px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60 hover:text-foreground w-full">
@@ -222,14 +244,14 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                   <span>hidden ({hiddenActive.length})</span>
                 </button>
                 {hiddenExpanded && hiddenActive.map((c) => (
-                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => onKill(c.key || c.id)} onRename={onRename} onUnhide={() => onUnhideTab(c.key || c.id)} dim />
+                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => onKill(c.key || c.id)} onRename={onRename} onUnhide={() => onUnhideTab(c.key || c.id)} dim gitInfo={gitStatus[c.key || c.id]} />
                 ))}
               </>
             )}
             {idle.length > 0 && (
               <>
                 <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">idle</div>
-                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => onKill(c.key || c.id)} onRename={onRename} dim />)}
+                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => onKill(c.key || c.id)} onRename={onRename} dim gitInfo={gitStatus[c.key || c.id]} />)}
               </>
             )}
             <div className="mt-3 mb-1 border-t border-border/50" />
@@ -297,6 +319,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             const hostTag = c ? (c.host === THIS_MACHINE ? 'local' : c.host) : '';
             const dead = !c || c.active === false;
             const originalIdx = activeTabs.indexOf(id);
+            const gitInfo = gitStatus[id];
             return (
               <div key={id} data-tab-id={id} draggable
                 onDragStart={() => setDragIdx(originalIdx)}
@@ -310,6 +333,12 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                 <span className={`truncate flex-1 ${dead ? 'line-through text-muted-foreground' : ''}`}>{c?.name || id}</span>
                 {!dead && <span className={`text-[10px] ${TYPE_COLOR[type] || ''}`}>{type}</span>}
                 {!dead && hostTag && <span className="text-[10px] text-muted-foreground">{hostTag}</span>}
+                {!dead && gitInfo?.branch && (
+                  <>
+                    <span className="text-[10px] text-cyan-400">{gitInfo.branch}</span>
+                    {gitInfo.clean === false && <span className="text-[10px] text-yellow-400">±</span>}
+                  </>
+                )}
                 <button className={`px-1 text-sm ${dead ? 'text-red-500 font-bold' : 'opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500'}`} title={dead ? 'remove dead tab' : 'remove'} onClick={(e) => { e.stopPropagation(); onRemoveActive(id); }}>×</button>
               </div>
             );
@@ -421,10 +450,11 @@ function CtxItem({ label, onClick, danger }: { label: string; onClick: () => voi
   );
 }
 
-function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim }: {
+function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, gitInfo }: {
   c: Chat; open: boolean; onOpen: () => void; onKill: () => void;
   onRename: (session: string, kind: string, name: string) => void;
   onHide?: () => void; onUnhide?: () => void; dim?: boolean;
+  gitInfo?: { branch: string | null; clean: boolean | null };
 }) {
   const isUser = c.kind === 'tmux';
   const canRename = isUser;
@@ -450,6 +480,12 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim }: {
           <span className={`ml-1 text-[10px] ${typeColor}`}>{type}</span>
           {c.role && !isUser && <span className="ml-1 text-[10px] text-muted-foreground">{c.role}</span>}
           {isUser && hostTag && <span className="ml-1 text-[10px] text-muted-foreground">{hostTag}</span>}
+          {gitInfo?.branch && (
+            <>
+              <span className="ml-1 text-[10px] text-cyan-400">{gitInfo.branch}</span>
+              {gitInfo.clean === false && <span className="ml-0.5 text-[10px] text-yellow-400">±</span>}
+            </>
+          )}
         </span>
       )}
       {isUser && !editing && (
