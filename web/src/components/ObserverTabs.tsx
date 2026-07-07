@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ObserverPanel } from './ObserverPanel';
+import { ActivityTimeline } from './ActivityTimeline';
 import { Button } from '@/components/ui/button';
 import { loadObs, saveObs } from '@/lib/storage';
 import type { SessionMeta } from '@/lib/types';
@@ -7,10 +8,14 @@ import type { SessionMeta } from '@/lib/types';
 // Manages persisted observer sessions as tabs. Every open tab keeps its own
 // ObserverPanel (and WS) mounted; inactive ones are display:none so their
 // conversations stay live. Open tabs + active tab persist in localStorage.
-export function ObserverTabs() {
+interface ObserverTabsProps {
+  externalViewMode?: 'sessions' | 'activity' | null;
+}
+export function ObserverTabs({ externalViewMode }: ObserverTabsProps = {}) {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [openIds, setOpenIds] = useState<string[]>(() => loadObs().openIds);
   const [activeId, setActiveId] = useState<string | null>(() => loadObs().activeId);
+  const [viewMode, setViewMode] = useState<'sessions' | 'activity'>(() => loadObs().viewMode || 'sessions');
   const [booted, setBooted] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -49,7 +54,14 @@ export function ObserverTabs() {
     })();
   }, [refresh]);
 
-  useEffect(() => { if (booted) saveObs({ openIds, activeId }); }, [openIds, activeId, booted]);
+  useEffect(() => { if (booted) saveObs({ openIds, activeId, viewMode }); }, [openIds, activeId, viewMode, booted]);
+
+  // Respond to external view mode changes
+  useEffect(() => {
+    if (externalViewMode && externalViewMode !== viewMode) {
+      setViewMode(externalViewMode);
+    }
+  }, [externalViewMode, viewMode]);
 
   const closeTab = (id: string) => {
     setOpenIds((p) => p.filter((x) => x !== id));
@@ -59,29 +71,60 @@ export function ObserverTabs() {
 
   return (
     <div className="flex flex-col h-full min-h-0">
-      <div className="flex items-center gap-1 px-2 py-1.5 border-b shrink-0 overflow-x-auto">
-        {openIds.map((id) => (
+      <div className="flex items-center justify-between px-2 py-1.5 border-b shrink-0">
+        <div className="flex items-center gap-1">
           <button
-            key={id}
-            onClick={() => setActiveId(id)}
-            className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap shrink-0 ${activeId === id ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50'}`}
+            onClick={() => setViewMode('sessions')}
+            className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap shrink-0 ${viewMode === 'sessions' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50'}`}
           >
-            {nameOf(id)}
-            <span
-              className="ml-1.5 opacity-50 hover:opacity-100"
-              onClick={(e) => { e.stopPropagation(); closeTab(id); }}
-            >×</span>
+            Sessions
           </button>
-        ))}
-        <Button size="sm" variant="ghost" className="h-7 px-2 text-base shrink-0" onClick={createNew} title="new observer session">+</Button>
+          <button
+            onClick={() => setViewMode('activity')}
+            className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap shrink-0 ${viewMode === 'activity' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50'}`}
+          >
+            Activity
+          </button>
+        </div>
+        {viewMode === 'sessions' && (
+          <Button size="sm" variant="ghost" className="h-7 px-2 text-base shrink-0" onClick={createNew} title="new observer session">+</Button>
+        )}
       </div>
-      <div className="flex-1 min-h-0">
-        {openIds.map((id) => (
-          <div key={id} className={activeId === id ? 'h-full' : 'hidden'}>
-            <ObserverPanel sessionId={id} />
+
+      {/* Sessions view */}
+      {viewMode === 'sessions' && (
+        <>
+          <div className="flex items-center gap-1 px-2 py-1.5 border-b shrink-0 overflow-x-auto">
+            {openIds.map((id) => (
+              <button
+                key={id}
+                onClick={() => setActiveId(id)}
+                className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap shrink-0 ${activeId === id ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50'}`}
+              >
+                {nameOf(id)}
+                <span
+                  className="ml-1.5 opacity-50 hover:opacity-100"
+                  onClick={(e) => { e.stopPropagation(); closeTab(id); }}
+                >×</span>
+              </button>
+            ))}
           </div>
-        ))}
-      </div>
+          <div className="flex-1 min-h-0">
+            {openIds.map((id) => (
+              <div key={id} className={activeId === id ? 'h-full' : 'hidden'}>
+                <ObserverPanel sessionId={id} />
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* Activity view */}
+      {viewMode === 'activity' && (
+        <div className="flex-1 min-h-0">
+          <ActivityTimeline />
+        </div>
+      )}
     </div>
   );
 }

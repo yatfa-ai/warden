@@ -16,6 +16,7 @@ import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude } from './ssh.js'
 import { Observer } from './observer.js';
 import { hasCredentials, resolveModel } from './llm.js';
 import { listSessions, createSession, renameSession, deleteSession } from './sessions.js';
+import { appendEvent, rotateEvents, readEvents, getStatsSince } from './activity.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = load();
@@ -127,6 +128,21 @@ app.patch('/api/sessions/:id', (req, res) => {
   return s ? res.json(s) : res.status(404).json({ error: 'not found' });
 });
 app.delete('/api/sessions/:id', (req, res) => { deleteSession(String(req.params.id)); res.json({ ok: true }); });
+
+// Activity timeline endpoints
+app.get('/api/activity', (req, res) => {
+  const after = req.query.after ? new Date(req.query.after).getTime() : undefined;
+  const before = req.query.before ? new Date(req.query.before).getTime() : undefined;
+  const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : undefined;
+  const events = readEvents({ after, before, limit });
+  res.json({ events });
+});
+
+app.get('/api/activity/stats', (req, res) => {
+  const after = req.query.after ? new Date(req.query.after).getTime() : Date.now() - (24 * 60 * 60 * 1000); // Default: last 24 hours
+  const stats = getStatsSince(after);
+  res.json(stats);
+});
 
 app.get('/api/ssh-hosts', (_req, res) => res.json({ hosts: allSshHosts(), configured: cfg.hosts }));
 
@@ -363,6 +379,7 @@ wss.on('connection', (ws, req) => {
     gate: async (chat, directive) => {
       const requestId = String(++reqCounter);
       send({ type: 'directive_proposed', requestId, container: chat.container, host: chat.host, role: chat.role, directive });
+      appendEvent({ type: 'directive_proposed', container: chat.container, host: chat.host, role: chat.role, directive });
       return new Promise((resolveDecision) => pending.set(requestId, resolveDecision));
     },
   });
@@ -375,7 +392,10 @@ wss.on('connection', (ws, req) => {
       send({ type: 'thinking' });
       obs.openTabs = Array.isArray(msg.panes) ? msg.panes : [];
       try { send({ type: 'done', text: await obs.step(String(msg.text || '')) }); }
-      catch (e) { send({ type: 'error', error: e.message }); }
+      catch (e) {
+        send({ type: 'error', error: e.message });
+        appendEvent({ type: 'error', error: e.message });
+      }
     } else if (msg.type === 'gate_decision') {
       const r = pending.get(msg.requestId);
       if (r) { pending.delete(msg.requestId); r({ approved: !!msg.approved, edited: msg.edited }); }
@@ -407,7 +427,10 @@ streamWss.on('connection', (ws) => {
     if (!chats.length) return;
     let out;
     try { out = await capturePanes(chats); } catch { return; }
-    for (const [k, pane] of Object.entries(out)) send({ type: 'snapshot', id: k, pane });
+    for (const [k, pane] of Object.entries(out)) {
+      send({ type: 'snapshot', id: k, pane });
+      appendEvent({ type: 'snapshot', id: k, host: chats.find(c => c.key === k)?.host, container: chats.find(c => c.key === k)?.container });
+    }
   };
   const startMonitor = () => { if (!monitorTimer) { monitorTimer = setInterval(tickMonitor, 2000); tickMonitor(); } };
   const stopMonitorIfEmpty = () => { if (monitorTimer && !monitors.size) { clearInterval(monitorTimer); monitorTimer = null; } };
@@ -420,18 +443,23 @@ streamWss.on('connection', (ws) => {
     else if (m.type === 'attach') {
       if (attaches.has(m.id)) return;
       const r = await resolve(String(m.id));
-      if (r.error) { send({ type: 'attach_error', id: m.id, error: r.error }); return; }
+      if (r.error) { send({ type: 'attach_error', id: m.id, error: r.error }); appendEvent({ type: 'error', error: r.error, context: 'attach', id: m.id }); return; }
       const chat = r.chat;
       const cols = Math.max(20, Math.floor(m.cols || 100));
       const rows = Math.max(6, Math.floor(m.rows || 30));
       let pty;
       try { pty = attachStream(chat, cfg, { cols, rows }); }
-      catch (e) { send({ type: 'attach_error', id: m.id, error: String((e && e.message) || e) }); return; }
+      catch (e) {
+        send({ type: 'attach_error', id: m.id, error: String((e && e.message) || e) });
+        appendEvent({ type: 'error', error: String((e && e.message) || e), context: 'attach', id: m.id, host: chat.host, container: chat.container });
+        return;
+      }
       attaches.set(m.id, { pty, chat });
       pty.onData((d) => send({ type: 'pty', id: m.id, data: d }));
-      pty.onExit(({ exitCode }) => { attaches.delete(m.id); send({ type: 'ended', id: m.id, code: exitCode }); });
+      pty.onExit(({ exitCode }) => { attaches.delete(m.id); send({ type: 'ended', id: m.id, code: exitCode }); appendEvent({ type: 'ended', id: m.id, code: exitCode, host: chat.host, container: chat.container }); });
       try { await resize(chat, cfg, cols, rows); } catch { /* noop */ }
       send({ type: 'attached', id: m.id });
+      appendEvent({ type: 'attached', id: m.id, host: chat.host, container: chat.container });
     } else if (m.type === 'input') {
       const a = attaches.get(m.id);
       if (a) { try { a.pty.write(String(m.data || '')); } catch { /* noop */ } }
@@ -454,6 +482,9 @@ streamWss.on('connection', (ws) => {
     if (monitorTimer) clearInterval(monitorTimer);
   });
 });
+
+// Rotate old activity events on startup
+try { rotateEvents(); } catch { /* ignore */ }
 
 export function startServer(port = 7421, host = '127.0.0.1') {
   server.on('error', (e) => {
