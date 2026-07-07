@@ -13,6 +13,28 @@ export interface Chat {
   isAgent?: boolean;
   active?: boolean;
   status?: string;
+  lastActivity?: number;  // Timestamp of last activity (ms since epoch)
+  healthState?: string;  // Health state (healthy, warning, critical, idle, unknown)
+}
+
+export interface HealthData {
+  agents: Chat[];  // Agents with healthState
+  groups: {
+    healthy: Chat[];
+    warning: Chat[];
+    critical: Chat[];
+    idle: Chat[];
+    unknown: Chat[];
+  };
+  summary: {
+    healthy: number;
+    warning: number;
+    critical: number;
+    idle: number;
+    total: number;
+    label: string;
+  };
+  timestamp: number;
 }
 
 export type StreamMsg =

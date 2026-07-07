@@ -41,10 +41,33 @@ export async function discover(host, cfg) {
     const status = parts.slice(1, -1).join('\t');
     const active = parts[parts.length - 1] === '1';
     const { project, role } = parseContainerName(name);
+
+    // Capture last activity timestamp from tmux pane
+    let lastActivity = null;
+    if (active) {
+      try {
+        const activityRes = await run(host, `docker exec ${name} tmux capture-pane -t ${session} -p -S - -E - 2>/dev/null | head -1`, { timeout: 8000 });
+        if (activityRes.ok && activityRes.stdout.trim()) {
+          // Try to extract timestamp from common Claude agent output formats
+          // Many agents output timestamps like "[2025-01-07 14:32:15]" or similar
+          const timestampMatch = activityRes.stdout.match(/\[?(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2})\]?/);
+          if (timestampMatch) {
+            const date = new Date(timestampMatch[1]);
+            if (!isNaN(date.getTime())) {
+              lastActivity = date.getTime();
+            }
+          }
+        }
+      } catch (e) {
+        // If timestamp capture fails, continue without it
+      }
+    }
+
     chats.push({
       id: `${host}:${name}`, key: name, kind: 'yatfa',
       host, container: name, session,
       project, role, isAgent: ROLES.has(role), active, status,
+      lastActivity, // Add last activity timestamp
     });
   }
   chats.sort((a, b) => (b.active - a.active) || a.key.localeCompare(b.key));
@@ -63,7 +86,33 @@ async function discoverManual(host, entries, cfg) {
       if (m) activeMap[m[2]] = m[1] === '1';
     }
   }
-  return entries.map((e) => ({ ...e, active: !!activeMap[e.session] }));
+  const result = [];
+  for (const e of entries) {
+    const active = !!activeMap[e.session];
+    let lastActivity = null;
+
+    // Capture last activity timestamp for active sessions
+    if (active) {
+      try {
+        const activityRes = await run(host, `tmux capture-pane -t ${e.session} -p -S - -E - 2>/dev/null | head -1`, { timeout: 8000 });
+        if (activityRes.ok && activityRes.stdout.trim()) {
+          // Try to extract timestamp from common output formats
+          const timestampMatch = activityRes.stdout.match(/\[?(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2})\]?/);
+          if (timestampMatch) {
+            const date = new Date(timestampMatch[1]);
+            if (!isNaN(date.getTime())) {
+              lastActivity = date.getTime();
+            }
+          }
+        }
+      } catch (e) {
+        // If timestamp capture fails, continue without it
+      }
+    }
+
+    result.push({ ...e, active, lastActivity });
+  }
+  return result;
 }
 
 export async function discoverAll(hosts, cfg) {
@@ -82,12 +131,32 @@ export async function discoverAll(hosts, cfg) {
         ? entries.map((e) => ({ e, active: runLocalTmux(['has-session', '-t', e.session]).ok }))
         : (await discoverManual(host, entries, cfg)).map((e) => ({ e, active: e.active }));
       for (const { e, active } of actives) {
+        // Capture last activity timestamp for local sessions
+        let lastActivity = null;
+        if (active) {
+          try {
+            const activityRes = runLocalTmux(['capture-pane', '-t', e.session, '-p', '-S', '-', '-E', '-']);
+            if (activityRes.ok && activityRes.stdout.trim()) {
+              const timestampMatch = activityRes.stdout.match(/\[?(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2})\]?/);
+              if (timestampMatch) {
+                const date = new Date(timestampMatch[1]);
+                if (!isNaN(date.getTime())) {
+                  lastActivity = date.getTime();
+                }
+              }
+            }
+          } catch (e) {
+            // If timestamp capture fails, continue without it
+          }
+        }
+
         all.push({
           id: `${host}:${e.session}`, key: e.session, kind: 'tmux',
           host, container: null, session: e.session,
           project: host === LOCAL ? 'local' : 'manual', role: 'claude', name: e.name || e.session,
           cwd: e.cwd, cmd: e.cmd,
           active, status: active ? 'running' : 'idle',
+          lastActivity, // Add last activity timestamp
         });
       }
     }));

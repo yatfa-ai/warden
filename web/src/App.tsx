@@ -7,6 +7,7 @@ import { PaneGrid } from '@/components/PaneGrid';
 import { ObserverTabs } from '@/components/ObserverTabs';
 import { SettingsDialog } from '@/components/SettingsDialog';
 import { GlobalSearchDialog } from '@/components/GlobalSearchDialog';
+import { HealthDashboard } from '@/components/HealthDashboard';
 
 function App() {
   const [chats, setChats] = useState<Chat[]>([]);
@@ -32,6 +33,7 @@ function App() {
   const uiState = loadUi();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(uiState.sidebarCollapsed);
   const [observerCollapsed, setObserverCollapsed] = useState(uiState.observerCollapsed);
+  const [healthCollapsed, setHealthCollapsed] = useState(uiState.healthCollapsed ?? true);
 
   useEffect(() => {
     streamApi.onOpen = () => setStreamConn(true);
@@ -86,7 +88,8 @@ function App() {
     if (focused) setNewActivity((prev) => { if (!prev.has(focused)) return prev; const n = new Set(prev); n.delete(focused); return n; });
   }, [focused]);
 
-  useEffect(() => { saveUi({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, sidebarWidth, observerWidth }); }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, sidebarWidth, observerWidth]);
+<<<<<<< HEAD
+  useEffect(() => { saveUi({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth }); }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -287,8 +290,9 @@ function App() {
         <span className="flex-1" />
         <span className={`size-2 rounded-full ${streamConn ? 'bg-green-500' : 'bg-red-500'}`} title={streamConn ? 'connected' : 'disconnected'} />
         <button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground px-2" title="global search (Ctrl+Shift+F)">⌕</button>
-        <button onClick={() => setSettingsOpen(true)} className="text-muted-foreground hover:text-foreground" title="settings">⚙</button>
+        <button onClick={() => setHealthCollapsed(!healthCollapsed)} className="text-muted-foreground hover:text-foreground" title="toggle health panel">{healthCollapsed ? '◂' : '▸'} Health</button>
         <button onClick={() => setObserverCollapsed(!observerCollapsed)} className="text-muted-foreground hover:text-foreground" title="toggle observer">{observerCollapsed ? '◂' : '▸'}</button>
+        <button onClick={() => setSettingsOpen(true)} className="text-muted-foreground hover:text-foreground" title="settings">⚙</button>
       </header>
       <main className="flex flex-1 min-h-0">
         {!sidebarCollapsed && (
@@ -334,15 +338,27 @@ function App() {
             externalSearchQuery={externalSearchQuery}
           />
         </section>
-        {!observerCollapsed && (
-          <section className="border-l min-h-0 relative" style={{ width: observerWidth, flexShrink: 0 }}>
-            <div
-              className="absolute top-0 left-0 bottom-0 w-1 hover:bg-accent hover:w-1.5 transition-all cursor-col-resize z-10"
-              onMouseDown={handleObserverMouseDown}
-              title="Drag to resize observer panel"
-            />
-            <ObserverTabs externalViewMode={externalViewMode} />
-          </section>
+        {(!observerCollapsed || !healthCollapsed) && (
+          <div className="flex border-l min-h-0" style={{ flexShrink: 0 }}>
+            {!observerCollapsed && (
+              <section className="border-l min-h-0 relative" style={{ width: observerWidth, flexShrink: 0 }}>
+                <div
+                  className="absolute top-0 left-0 bottom-0 w-1 hover:bg-accent hover:w-1.5 transition-all cursor-col-resize z-10"
+                  onMouseDown={handleObserverMouseDown}
+                  title="Drag to resize observer panel"
+                />
+                <ObserverTabs externalViewMode={externalViewMode} />
+              </section>
+            )}
+            {!healthCollapsed && (
+              <section className="border-l min-h-0" style={{ width: 320, flexShrink: 0 }}>
+                <HealthDashboard
+                  onOpenChat={openChat}
+                  onClose={() => setHealthCollapsed(true)}
+                />
+              </section>
+            )}
+          </div>
         )}
       </main>
       <SettingsDialog
