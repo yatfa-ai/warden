@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { load, loadCatalog, saveCatalog, allSshHosts } from './config.js';
-import { discoverAll } from './chats.js';
+import { discoverAll, capturePanes } from './chats.js';
 import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream } from './tmux.js';
 import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude } from './ssh.js';
 import { Observer } from './observer.js';
@@ -73,39 +73,6 @@ async function preflightTmux(host) {
 }
 
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
-// Capture panes for a set of chats in one round per host (local: runLocalTmux each;
-// remote: one ssh batching all, docker-exec for yatfa, plain tmux for manual).
-export async function capturePanes(chats) {
-  const byHost = {};
-  for (const c of chats) (byHost[c.host] ||= []).push(c);
-  const out = {};
-  await Promise.all(Object.entries(byHost).map(async ([host, list]) => {
-    if (host === LOCAL) {
-      for (const c of list) {
-        const r = runLocalTmux(['capture-pane', '-t', c.session || c.container, '-p', '-e', '-S', '-60', '-E', '-']);
-        if (r.ok) out[c.key] = r.stdout;
-      }
-      return;
-    }
-    const script = list.map((c) => {
-      const t = c.container ? `docker exec ${shellQuote(c.container)} tmux` : 'tmux';
-      const s = shellQuote(c.session || c.container || 'agent');
-      return `printf '___B_${c.key}___\\n'; ${t} capture-pane -t ${s} -p -e -S -60 -E - 2>/dev/null; printf '\\n___E_${c.key}___\\n'`;
-    }).join('; ');
-    const res = await run(host, script, { timeout: 15000 });
-    if (!res.ok) return;
-    let cur = null;
-    const buf = [];
-    for (const ln of res.stdout.split('\n')) {
-      const b = ln.match(/^___B_(.+)___$/);
-      if (b) { cur = b[1]; buf.length = 0; continue; }
-      const e = ln.match(/^___E_(.+)___$/);
-      if (e) { if (cur) out[cur] = buf.join('\n'); cur = null; continue; }
-      if (cur != null) buf.push(ln);
-    }
-  }));
-  return out;
-}
 
 app.get('/api/chats', async (_req, res) => {
   const { chats, errors } = await discoverAll(cfg.hosts, cfg);

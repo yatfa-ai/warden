@@ -3,7 +3,7 @@
 //   manual → user-spawned `claude` in a host tmux session (from the catalog).
 // Both share one shape; tmux.js switches between docker-exec and bare tmux by
 // whether `container` is set, and uses `session` for the tmux target.
-import { run, runLocalTmux } from './ssh.js';
+import { run, runLocalTmux, shellQuote } from './ssh.js';
 import { loadCatalog } from './config.js';
 
 const ROLES = new Set(['planner', 'worker', 'reviewer', 'researcher']);
@@ -101,4 +101,38 @@ export async function discoverAll(hosts, cfg) {
     return (b.active - a.active) || a.id.localeCompare(b.id);
   });
   return { chats: all, errors };
+}
+
+// Capture tmux pane content from multiple chats concurrently.
+// Groups by host to minimize SSH round-trips. Returns a map of chat key -> pane content.
+export async function capturePanes(chats) {
+  const byHost = {};
+  for (const c of chats) (byHost[c.host] ||= []).push(c);
+  const out = {};
+  await Promise.all(Object.entries(byHost).map(async ([host, list]) => {
+    if (host === LOCAL) {
+      for (const c of list) {
+        const r = runLocalTmux(['capture-pane', '-t', c.session || c.container, '-p', '-e', '-S', '-60', '-E', '-']);
+        if (r.ok) out[c.key] = r.stdout;
+      }
+      return;
+    }
+    const script = list.map((c) => {
+      const t = c.container ? `docker exec ${shellQuote(c.container)} tmux` : 'tmux';
+      const s = shellQuote(c.session || c.container || 'agent');
+      return `printf '___B_${c.key}___\\n'; ${t} capture-pane -t ${s} -p -e -S -60 -E - 2>/dev/null; printf '\\n___E_${c.key}___\\n'`;
+    }).join('; ');
+    const res = await run(host, script, { timeout: 15000 });
+    if (!res.ok) return;
+    let cur = null;
+    const buf = [];
+    for (const ln of res.stdout.split('\n')) {
+      const b = ln.match(/^___B_(.+)___$/);
+      if (b) { cur = b[1]; buf.length = 0; continue; }
+      const e = ln.match(/^___E_(.+)___$/);
+      if (e) { if (cur) out[cur] = buf.join('\n'); cur = null; continue; }
+      if (cur != null) buf.push(ln);
+    }
+  }));
+  return out;
 }
