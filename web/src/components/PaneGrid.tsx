@@ -56,14 +56,14 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, onFocu
       <div className="flex items-center px-3 py-2 border-b text-xs text-muted-foreground gap-2 shrink-0 relative">
         <span className="truncate">{focused ? nameOf(focused) : 'open a chat →'}</span>
         <span className="flex-1" />
-        <button onClick={() => setSplitOpen(!splitOpen)} className="text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded hover:bg-accent/50" title="split — open another chat as a pane">＋ split</button>
+        <button onClick={() => setSplitOpen(!splitOpen)} className="text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded hover:bg-accent/50 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background" title="split — open another chat as a pane">＋ split</button>
         {splitOpen && (
           <>
             <div className="fixed inset-0 z-40" onClick={() => setSplitOpen(false)} />
             <div className="absolute right-2 top-full mt-1 z-50 w-72 max-h-80 overflow-auto bg-popover border rounded-md shadow-lg p-1">
               {chats.filter((c) => c.active).map((c) => (
                 <button key={c.id} onClick={() => { onOpenChat(c.key || c.id); setSplitOpen(false); }}
-                  className={`flex items-center gap-2 w-full text-left px-2 py-1.5 rounded text-xs hover:bg-accent ${tiles.some(t => t.id === (c.key||c.id)) ? 'opacity-50' : ''}`}>
+                  className={`flex items-center gap-2 w-full text-left px-2 py-1.5 rounded text-xs hover:bg-accent transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${tiles.some(t => t.id === (c.key||c.id)) ? 'opacity-50' : ''}`}>
                   <span className="truncate flex-1">{c.name || c.key || c.id}</span>
                   <span className="text-[10px] text-muted-foreground">{c.host === '(local)' ? 'local' : c.host}</span>
                   {tiles.some(t => t.id === (c.key||c.id)) && <span className="text-[10px] text-green-500">open</span>}
@@ -78,7 +78,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, onFocu
         {n === 0 ? (
           <div className="text-xs text-muted-foreground p-8 text-center">click a chat to open a live pane</div>
         ) : (
-          <div data-pane-grid className="grid gap-2 h-full min-h-0"
+          <div data-pane-grid className="grid gap-2 h-full min-h-0 transition-all duration-200 ease-in-out"
             style={{ gridTemplateColumns: `repeat(${maximized ? 1 : cols}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${maximized ? 1 : rows}, minmax(0, 1fr))` }}>
             {visible.map((t) => {
               const chat = chats.find((c) => (c.key || c.id) === t.id);

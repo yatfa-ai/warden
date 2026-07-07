@@ -176,12 +176,12 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const stop = (e: React.MouseEvent) => e.stopPropagation();
   const Btn = ({ children, onClick, title, active, disabled }: { children: React.ReactNode; onClick: () => void; title: string; active?: boolean; disabled?: boolean }) => (
     <button onClick={(e) => { if (!disabled) { stop(e); onClick(); } }} title={title} disabled={disabled}
-      className={`px-1 py-0.5 text-[10px] rounded ${disabled ? 'text-muted-foreground opacity-30 cursor-not-allowed' : (active ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent/50')}`}>{children}</button>
+      className={`px-1 py-0.5 text-[10px] rounded transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${disabled ? 'text-muted-foreground opacity-30 cursor-not-allowed' : (active ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent/50')}`}>{children}</button>
   );
 
   return (
     <div onClick={onFocus}
-      className={`flex flex-col h-full w-full min-h-0 rounded-lg overflow-hidden border bg-black ${focused ? 'border-primary' : 'border-border'}`}>
+      className={`flex flex-col h-full w-full min-h-0 rounded-lg overflow-hidden border bg-black transition-all duration-200 ease-in-out ${focused ? 'border-primary shadow-lg shadow-primary/20' : 'border-border'}`}>
       {/* header toolbar */}
       <div onDoubleClick={(e) => { stop(e); onToggleMax(); }}
         className="flex items-center gap-1 px-2 py-1 bg-muted text-xs shrink-0 select-none">
