@@ -296,12 +296,13 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             const isOpen = openPanes.has(id);
             const hostTag = c ? (c.host === THIS_MACHINE ? 'local' : c.host) : '';
             const dead = !c || c.active === false;
+            const originalIdx = activeTabs.indexOf(id);
             return (
               <div key={id} data-tab-id={id} draggable
-                onDragStart={() => setDragIdx(idx)}
-                onDragOver={(e) => { e.preventDefault(); setDragOverIdx(idx); }}
+                onDragStart={() => setDragIdx(originalIdx)}
+                onDragOver={(e) => { e.preventDefault(); setDragOverIdx(originalIdx); }}
                 onDragEnd={() => { if (dragIdx !== null && dragOverIdx !== null && dragIdx !== dragOverIdx) onReorder(dragIdx, dragOverIdx); setDragIdx(null); setDragOverIdx(null); }}
-                onDrop={(e) => { e.preventDefault(); if (dragIdx !== null && idx !== dragIdx) onReorder(dragIdx, idx); setDragIdx(null); setDragOverIdx(null); }}
+                onDrop={(e) => { e.preventDefault(); if (dragIdx !== null && originalIdx !== dragIdx) onReorder(dragIdx, originalIdx); setDragIdx(null); setDragOverIdx(null); }}
                 onClick={() => onOpenChat(id)}
                 className={`group flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent cursor-pointer ${dead ? 'opacity-50' : ''} ${dragIdx === idx ? 'opacity-40' : ''} ${dragOverIdx === idx && dragIdx !== null ? 'border-t-2 border-primary' : ''}`}>
                 <span className="text-muted-foreground/40 cursor-grab active:cursor-grabbing select-none">⠿</span>
