@@ -50,7 +50,11 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       const ctrl = e.ctrlKey || e.metaKey;
       if (!ctrl) return true;
       if (e.code === 'KeyC') { const s = term.getSelection(); if (s) { navigator.clipboard?.writeText(s).catch(() => {}); return false; } return true; }
-      if (e.code === 'KeyV') { navigator.clipboard?.readText().then((t) => { if (t) term.paste(t); }).catch(() => {}); return false; }
+      if (e.code === 'KeyV') {
+        e.preventDefault();
+        navigator.clipboard?.readText().then((t) => { if (t) streamApi.send({ type: 'input', id, data: t }); }).catch(() => {});
+        return false;
+      }
       return true;
     });
     const doFit = () => { try { fit.fit(); } catch {} };

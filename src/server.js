@@ -312,9 +312,11 @@ app.post('/api/kill', async (req, res) => {
   const r = await resolve(String(req.body?.id || ''));
   if (r.error) return res.status(404).json(r);
   const chat = r.chat;
-  if (chat.kind !== 'tmux') return res.status(400).json({ error: 'only spawned chats can be removed from here' });
+  // Kill the tmux session for ANY chat type (yatfa or spawned). For yatfa this
+  // kills the agent's tmux session inside the container (container keeps running).
   try { await killTmux(chat, cfg); } catch { /* noop */ }
-  saveCatalog(loadCatalog().filter((c) => c.session !== chat.session));
+  // Remove from catalog (spawned chats only; yatfa are auto-discovered)
+  if (chat.kind === 'tmux') saveCatalog(loadCatalog().filter((c) => c.session !== chat.session));
   res.json({ ok: true });
 });
 

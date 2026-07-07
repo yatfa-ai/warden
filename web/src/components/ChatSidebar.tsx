@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -16,6 +17,7 @@ interface Props {
   onOpenChat: (id: string) => void;
   onClosePane: (id: string) => void;
   onRemoveActive: (id: string) => void;
+  onReorder: (from: number, to: number) => void;
   onHideTab: (id: string) => void;
   onUnhideTab: (id: string) => void;
   onKill: (id: string) => void;
@@ -50,9 +52,26 @@ const TYPE_COLOR: Record<string, string> = {
 
 function findChat(chats: Chat[], id: string) { return chats.find((c) => (c.key || c.id) === id); }
 
-export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, loading }: Props) {
+export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, loading }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string }>({ kind: 'root' });
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
+  const [dragIdx, setDragIdx] = useState<number | null>(null);
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
+  const [ctx, setCtx] = useState<{ id: string; x: number; y: number; dead: boolean } | null>(null);
+
+  // Native context menu listener — only fires for tab rows, leaves everything else (xterm/tmux) alone.
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      const tab = (e.target as HTMLElement).closest('[data-tab-id]');
+      if (!tab) return; // not a tab — let the default happen (xterm paste etc.)
+      e.preventDefault();
+      const id = tab.getAttribute('data-tab-id')!;
+      const c = findChat(chats, id);
+      setCtx({ id, x: e.clientX, y: e.clientY, dead: !c || c.active === false });
+    };
+    document.addEventListener('contextmenu', handler);
+    return () => document.removeEventListener('contextmenu', handler);
+  }, [chats]);
   const [hostSessions, setHostSessions] = useState<Record<string, { sessions: ClaudeSession[]; claudeAvailable?: boolean }>>({});
   const [loadingHost, setLoadingHost] = useState<string | null>(null);
 
@@ -152,18 +171,26 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           {activeTabs.length > 0 && (
             <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">tabs</div>
           )}
-          {activeTabs.map((id) => {
+          {activeTabs.map((id, idx) => {
             const c = findChat(chats, id);
             const type = chatType(c);
             const isOpen = openPanes.has(id);
             const hostTag = c ? (c.host === THIS_MACHINE ? 'local' : c.host) : '';
+            const dead = !c || c.active === false;
             return (
-              <div key={id} onClick={() => onOpenChat(id)} className="group flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent cursor-pointer">
-                <span className={`size-2 rounded-full shrink-0 ${isOpen ? 'bg-green-500' : 'bg-muted-foreground/40'}`} title={isOpen ? 'pane open' : 'click to open pane'} />
-                <span className="truncate flex-1">{c?.name || id}</span>
-                <span className={`text-[10px] ${TYPE_COLOR[type] || ''}`}>{type}</span>
-                {hostTag && <span className="text-[10px] text-muted-foreground">{hostTag}</span>}
-                <button className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500 px-0.5" title="remove from active" onClick={(e) => { e.stopPropagation(); onRemoveActive(id); }}>×</button>
+              <div key={id} data-tab-id={id} draggable
+                onDragStart={() => setDragIdx(idx)}
+                onDragOver={(e) => { e.preventDefault(); setDragOverIdx(idx); }}
+                onDragEnd={() => { if (dragIdx !== null && dragOverIdx !== null && dragIdx !== dragOverIdx) onReorder(dragIdx, dragOverIdx); setDragIdx(null); setDragOverIdx(null); }}
+                onDrop={(e) => { e.preventDefault(); if (dragIdx !== null && idx !== dragIdx) onReorder(dragIdx, idx); setDragIdx(null); setDragOverIdx(null); }}
+                onClick={() => onOpenChat(id)}
+                className={`group flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent cursor-pointer ${dead ? 'opacity-50' : ''} ${dragOverIdx === idx && dragIdx !== null ? 'border-t-2 border-primary' : ''}`}>
+                <span className="text-muted-foreground/40 cursor-grab active:cursor-grabbing select-none">⠿</span>
+                <span className={`size-2 rounded-full shrink-0 ${dead ? 'bg-red-500' : isOpen ? 'bg-green-500' : 'bg-muted-foreground/40'}`} />
+                <span className={`truncate flex-1 ${dead ? 'line-through text-muted-foreground' : ''}`}>{c?.name || id}</span>
+                {!dead && <span className={`text-[10px] ${TYPE_COLOR[type] || ''}`}>{type}</span>}
+                {!dead && hostTag && <span className="text-[10px] text-muted-foreground">{hostTag}</span>}
+                <button className={`px-1 text-sm ${dead ? 'text-red-500 font-bold' : 'opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500'}`} title={dead ? 'remove dead tab' : 'remove'} onClick={(e) => { e.stopPropagation(); onRemoveActive(id); }}>×</button>
               </div>
             );
           })}
@@ -186,7 +213,24 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           })}
         </div>
       </ScrollArea>
+      {ctx && createPortal(
+        <>
+          <div style={{ position: 'fixed', inset: 0, zIndex: 9998 }} onClick={() => setCtx(null)} onContextMenu={(e) => { e.preventDefault(); setCtx(null); }} />
+          <div style={{ position: 'fixed', left: ctx.x, top: ctx.y, zIndex: 9999, minWidth: '10rem', background: 'var(--popover, #1c232c)', border: '1px solid var(--border, #2a313a)', borderRadius: '6px', boxShadow: '0 4px 12px rgba(0,0,0,0.4)', padding: '4px 0' }}>
+            <CtxItem label="Open" onClick={() => { onOpenChat(ctx.id); setCtx(null); }} />
+            {!ctx.dead && <CtxItem label="Hide" onClick={() => { onHideTab(ctx.id); setCtx(null); }} />}
+            {!ctx.dead && <CtxItem label="Kill session" onClick={() => { onKill(ctx.id); setCtx(null); }} />}
+            <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
+            <CtxItem label="Remove tab" danger onClick={() => { onRemoveActive(ctx.id); setCtx(null); }} />
+          </div>
+        </>, document.body)}
     </div>
+  );
+}
+
+function CtxItem({ label, onClick, danger }: { label: string; onClick: () => void; danger?: boolean }) {
+  return (
+    <button onClick={onClick} className={`flex w-full text-left px-3 py-1.5 hover:bg-accent ${danger ? 'text-red-500' : ''}`}>{label}</button>
   );
 }
 

@@ -68,6 +68,14 @@ function App() {
     setOpenPanes((p) => p.filter((x) => x !== id));
     setFocused((f) => (f === id ? null : f));
   }, []);
+  const reorderTabs = useCallback((from: number, to: number) => {
+    setActiveTabs((p) => {
+      const n = [...p];
+      const [item] = n.splice(from, 1);
+      n.splice(to, 0, item);
+      return n;
+    });
+  }, []);
   const hideTab = useCallback((id: string) => {
     setHiddenTabs((p) => p.includes(id) ? p : [...p, id]);
     setOpenPanes((p) => p.filter((x) => x !== id));
@@ -107,35 +115,43 @@ function App() {
   const openPaneSet = new Set(openPanes);
   const tiles = openPanes.map((id) => ({ id }));
 
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [observerCollapsed, setObserverCollapsed] = useState(false);
+
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">
       <header className="flex items-center gap-3 px-3 h-11 border-b shrink-0">
-        <span className="font-semibold tracking-wide">warden</span>
+        <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)} className="text-muted-foreground hover:text-foreground" title="toggle sidebar">{sidebarCollapsed ? '▸' : '◂'}</button>
+        <span className="font-semibold tracking-wide">Yatfa Warden</span>
         <span className="text-xs text-muted-foreground">{activeTabs.length} active · {openPanes.length} open</span>
         <span className="flex-1" />
         <span className={`size-2 rounded-full ${streamConn ? 'bg-green-500' : 'bg-red-500'}`} title={streamConn ? 'connected' : 'disconnected'} />
+        <button onClick={() => setObserverCollapsed(!observerCollapsed)} className="text-muted-foreground hover:text-foreground" title="toggle observer">{observerCollapsed ? '◂' : '▸'}</button>
       </header>
-      <main className="grid grid-cols-[220px_1fr_380px] grid-rows-[minmax(0,1fr)] flex-1 min-h-0">
-        <section className="border-r min-h-0">
-          <ChatSidebar
-            chats={chats}
-            sshHosts={sshHosts}
-            activeTabs={activeTabs}
-            hiddenTabs={hiddenTabs}
-            openPanes={openPaneSet}
-            onOpenChat={openChat}
-            onClosePane={closePane}
-            onRemoveActive={removeActive}
-            onHideTab={hideTab}
-            onUnhideTab={unhideTab}
-            onKill={killChat}
-            onRename={renameChat}
-            onResume={resumeSession}
-            onRefresh={refresh}
-            loading={loading}
-          />
-        </section>
-        <section className="min-h-0">
+      <main className="flex flex-1 min-h-0">
+        {!sidebarCollapsed && (
+          <section className="border-r min-h-0" style={{ width: 220, flexShrink: 0 }}>
+            <ChatSidebar
+              chats={chats}
+              sshHosts={sshHosts}
+              activeTabs={activeTabs}
+              hiddenTabs={hiddenTabs}
+              openPanes={openPaneSet}
+              onOpenChat={openChat}
+              onClosePane={closePane}
+              onRemoveActive={removeActive}
+              onReorder={reorderTabs}
+              onHideTab={hideTab}
+              onUnhideTab={unhideTab}
+              onKill={killChat}
+              onRename={renameChat}
+              onResume={resumeSession}
+              onRefresh={refresh}
+              loading={loading}
+            />
+          </section>
+        )}
+        <section className="flex-1 min-h-0 min-w-0">
           <PaneGrid
             tiles={tiles}
             focused={focused}
@@ -150,9 +166,11 @@ function App() {
             onForceKill={forceKill}
           />
         </section>
-        <section className="border-l min-h-0">
-          <ObserverTabs />
-        </section>
+        {!observerCollapsed && (
+          <section className="border-l min-h-0" style={{ width: 380, flexShrink: 0 }}>
+            <ObserverTabs />
+          </section>
+        )}
       </main>
     </div>
   );
