@@ -9,7 +9,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer } from 'ws';
-import { load, loadCatalog, saveCatalog, allSshHosts } from './config.js';
+import { load, save, loadCatalog, saveCatalog, allSshHosts } from './config.js';
 import { discoverAll, capturePanes } from './chats.js';
 import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream } from './tmux.js';
 import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude } from './ssh.js';
