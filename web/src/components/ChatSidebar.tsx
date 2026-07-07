@@ -90,6 +90,11 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [resumingSessionId, setResumingSessionId] = useState<string | null>(null);
   const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
   const [projectFilter, setProjectFilter] = useState<string | null>(null);
+  const [hostSessions, setHostSessions] = useState<Record<string, { sessions: ClaudeSession[]; claudeAvailable?: boolean }>>({});
+  const [loadingHost, setLoadingHost] = useState<string | null>(null);
+  const [allSessions, setAllSessions] = useState<(ClaudeSession & { host: string })[]>([]);
+  const [loadingAllSessions, setLoadingAllSessions] = useState(false);
+  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string }>>({});
 
   // Native context menu listener — only fires for tab rows, leaves everything else (xterm/tmux) alone.
   useEffect(() => {
@@ -113,9 +118,8 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     return acc;
   }, {} as Record<string, number>);
 
-  const [hostSessions, setHostSessions] = useState<Record<string, { sessions: ClaudeSession[]; claudeAvailable?: boolean }>>({});
-  const [loadingHost, setLoadingHost] = useState<string | null>(null);
-  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string }>>({});
+  // Fetch all sessions on mount
+  useEffect(() => { fetchAllSessions(); }, []);
 
   const fetchHostSessions = async (host: string) => {
     setLoadingHost(host);
@@ -126,6 +130,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     } catch { /* noop */ }
     setLoadingHost(null);
   };
+
   const fetchGitStatus = useCallback(async (chatId: string) => {
     try {
       const r = await fetch(`/api/git-status?id=${encodeURIComponent(chatId)}`);
@@ -135,6 +140,16 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       }
     } catch { /* noop */ }
   }, []);
+
+  const fetchAllSessions = async () => {
+    setLoadingAllSessions(true);
+    try {
+      const r = await fetch('/api/claude-sessions-all');
+      const j = await r.json();
+      setAllSessions(j.sessions || []);
+    } catch { /* noop */ }
+    setLoadingAllSessions(false);
+  };
   const enterHost = (host: string) => { setView({ kind: 'host', host }); fetchHostSessions(host); };
 
   // Collections management
@@ -540,6 +555,28 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
               </button>
             );
           })}
+          {allSessions.length > 0 && (
+            <>
+              <div className="mt-3 mb-1 border-t border-border/50" />
+              <div className="flex items-center gap-2 px-2 py-1">
+                <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-cyan-500/80 font-semibold">☁ sessions</div>
+                <div className="flex-1" />
+                <span className="text-[10px] text-muted-foreground">all hosts</span>
+                <button className="text-xs text-muted-foreground hover:text-foreground" onClick={() => fetchAllSessions()} disabled={loadingAllSessions}>{loadingAllSessions ? '…' : '↻'}</button>
+              </div>
+              <div className="flex flex-col gap-0.5">
+                {allSessions.slice(0, 15).map((s) => {
+                  const hostLabel = s.host === THIS_MACHINE ? 'local' : s.host;
+                  return (
+                    <button key={s.id} onClick={() => { onResume(s.id, s.summary, s.cwd, s.host); setView({ kind: 'root' }); }} className="flex flex-col gap-0.5 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent" title={`resume ${s.id}\n${s.cwd}\n${hostLabel}`}>
+                      <span className="truncate">{s.summary || <span className="text-muted-foreground">(no summary)</span>}</span>
+                      <span className="text-[10px] text-muted-foreground truncate">{ago(s.mtime)} · {hostLabel} · {basename(s.cwd)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          )}
         </div>
       </ScrollArea>
       {ctx && createPortal(
