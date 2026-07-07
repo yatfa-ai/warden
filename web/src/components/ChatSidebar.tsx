@@ -89,6 +89,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [killingChatId, setKillingChatId] = useState<string | null>(null);
   const [resumingSessionId, setResumingSessionId] = useState<string | null>(null);
   const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
+  const [projectFilter, setProjectFilter] = useState<string | null>(null);
 
   // Native context menu listener — only fires for tab rows, leaves everything else (xterm/tmux) alone.
   useEffect(() => {
@@ -103,6 +104,15 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     document.addEventListener('contextmenu', handler);
     return () => document.removeEventListener('contextmenu', handler);
   }, [chats]);
+
+  // Extract project counts from active agents
+  const projectCounts = chats.reduce((acc, c) => {
+    if (c.active && c.project) {
+      acc[c.project] = (acc[c.project] || 0) + 1;
+    }
+    return acc;
+  }, {} as Record<string, number>);
+
   const [hostSessions, setHostSessions] = useState<Record<string, { sessions: ClaudeSession[]; claudeAvailable?: boolean }>>({});
   const [loadingHost, setLoadingHost] = useState<string | null>(null);
   const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string }>>({});
@@ -268,7 +278,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
 
   if (view.kind === 'host') {
     const H = view.host;
-    const hostChats = chats.filter((c) => c.host === H);
+    const hostChats = chats.filter((c) => c.host === H && (!projectFilter || c.project === projectFilter));
     const active = hostChats.filter((c) => c.active);
     const idle = hostChats.filter((c) => !c.active);
     const visibleActive = active.filter((c) => !hiddenTabs.includes(c.key || c.id));
@@ -397,7 +407,32 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           {activeTabs.length > 0 && (
             <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">tabs</div>
           )}
-          {filteredTabs.map((id) => {
+          {Object.keys(projectCounts).length > 1 && (
+            <div className="flex flex-wrap gap-1 px-2 pb-1">
+              <button
+                onClick={() => setProjectFilter(null)}
+                className={`text-xs px-2 py-1 rounded ${!projectFilter ? 'bg-accent' : 'hover:bg-accent/50'}`}
+              >
+                All Projects ({chats.filter(c => c.active).length})
+              </button>
+              {Object.entries(projectCounts).map(([project, count]) => (
+                <button
+                  key={project}
+                  onClick={() => setProjectFilter(project)}
+                  className={`text-xs px-2 py-1 rounded ${projectFilter === project ? 'bg-accent' : 'hover:bg-accent/50'}`}
+                >
+                  {project} ({count})
+                </button>
+              ))}
+            </div>
+          )}
+          {filteredTabs
+            .filter((id) => {
+              if (!projectFilter) return true;
+              const c = findChat(chats, id);
+              return c && c.project === projectFilter;
+            })
+            .map((id, idx) => {
             const c = findChat(chats, id);
             const type = chatType(c);
             const isOpen = openPanes.has(id);
@@ -487,9 +522,15 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             onEnterCollection={enterCollection}
             onCreateCollection={handleCreateCollection}
           />
-          {hosts.map((h) => {
-            const n = chats.filter((c) => c.host === h && c.active).length;
-            return (
+          {hosts
+            .filter((h) => {
+              if (!projectFilter) return true;
+              const n = chats.filter((c) => c.host === h && c.active && c.project === projectFilter).length;
+              return n > 0;
+            })
+            .map((h) => {
+              const n = chats.filter((c) => c.host === h && c.active && (!projectFilter || c.project === projectFilter)).length;
+              return (
               <button key={h} onClick={() => enterHost(h)} className="flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent w-full transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background">
                 <span className={`size-2 rounded-full ${n ? 'bg-green-500' : 'bg-muted-foreground/40'}`} />
                 <span className="flex-1 truncate">{LABEL[h] || h}</span>
