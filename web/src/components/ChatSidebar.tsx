@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
+import { Skeleton } from '@/components/ui/skeleton';
+import { MessageSquare, FolderOpen } from 'lucide-react';
 import { NewChatForm } from './NewChatForm';
 import { CollectionsSection } from './CollectionsSection';
 import { CreateCollectionDialog } from './CreateCollectionDialog';
@@ -54,6 +56,26 @@ const TYPE_COLOR: Record<string, string> = {
 
 function findChat(chats: Chat[], id: string) { return chats.find((c) => (c.key || c.id) === id); }
 
+// Skeleton components for loading states
+function ChatRowSkeleton({ dim = false }: { dim?: boolean }) {
+  return (
+    <div className={`flex items-center gap-2 px-2 py-1.5 rounded-md ${dim ? 'opacity-60' : ''}`}>
+      <Skeleton className="size-2 rounded-full" />
+      <Skeleton className="flex-1 h-3" />
+      <Skeleton className="h-3 w-12" />
+    </div>
+  );
+}
+
+function SessionRowSkeleton() {
+  return (
+    <div className="flex flex-col gap-0.5 px-2 py-1.5 rounded-md">
+      <Skeleton className="h-3 w-3/4" />
+      <Skeleton className="h-2.5 w-1/2" />
+    </div>
+  );
+}
+
 export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, loading }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
@@ -64,6 +86,9 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [tabSearchQuery, setTabSearchQuery] = useState('');
+  const [killingChatId, setKillingChatId] = useState<string | null>(null);
+  const [resumingSessionId, setResumingSessionId] = useState<string | null>(null);
+  const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
 
   // Native context menu listener — only fires for tab rows, leaves everything else (xterm/tmux) alone.
   useEffect(() => {
@@ -137,6 +162,37 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const handleSpawned = (chat: Chat) => { onRefresh(); onOpenChat(chat.key || chat.id); setView({ kind: 'root' }); };
   const hosts = [THIS_MACHINE, ...sshHosts];
 
+  // Wrapper functions for loading states
+  const handleResume = async (id: string, description: string, cwd: string, host: string) => {
+    if (resumingSessionId) return; // Prevent double-click
+    setResumingSessionId(id);
+    try {
+      await onResume(id, description, cwd, host);
+    } finally {
+      setResumingSessionId(null);
+    }
+  };
+
+  const handleKill = async (id: string) => {
+    if (killingChatId) return;
+    setKillingChatId(id);
+    try {
+      await onKill(id);
+    } finally {
+      setKillingChatId(null);
+    }
+  };
+
+  const handleRename = async (session: string, kind: string, name: string) => {
+    if (renamingChatId) return;
+    setRenamingChatId(session);
+    try {
+      await onRename(session, kind, name);
+    } finally {
+      setRenamingChatId(null);
+    }
+  };
+
   if (view.kind === 'collection') {
     const { collection: C } = view;
     const agents = collections.length > 0
@@ -183,7 +239,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             {(visibleActive.length > 0 || idle.length > 0 || hiddenActive.length > 0) && (
               <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">● matching agents</div>
             )}
-            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} onKill={() => onKill(c.key || c.id)} onRename={onRename} onHide={() => onHideTab(c.key || c.id)} />)}
+            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onHide={() => onHideTab(c.key || c.id)} killingChatId={killingChatId} renamingChatId={renamingChatId} />)}
             {hiddenActive.length > 0 && (
               <>
                 <button onClick={() => setHiddenExpanded(!hiddenExpanded)} className="flex items-center gap-1 px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60 hover:text-foreground w-full">
@@ -191,14 +247,14 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                   <span>hidden ({hiddenActive.length})</span>
                 </button>
                 {hiddenExpanded && hiddenActive.map((c) => (
-                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} onKill={() => onKill(c.key || c.id)} onRename={onRename} onUnhide={() => onUnhideTab(c.key || c.id)} dim />
+                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onUnhide={() => onUnhideTab(c.key || c.id)} dim killingChatId={killingChatId} renamingChatId={renamingChatId} />
                 ))}
               </>
             )}
             {idle.length > 0 && (
               <>
                 <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">idle</div>
-                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} onKill={() => onKill(c.key || c.id)} onRename={onRename} dim />)}
+                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} dim killingChatId={killingChatId} renamingChatId={renamingChatId} />)}
               </>
             )}
             {agents.length === 0 && (
@@ -225,14 +281,16 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
         <div className="flex items-center gap-2 px-2 py-2 border-b shrink-0">
           <button className="text-xs text-muted-foreground hover:text-foreground px-1 rounded transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => setView({ kind: 'root' })} title="back">‹</button>
           <span className="text-xs font-medium flex-1 truncate">{LABEL[H] || H}</span>
-          <button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => fetchHostSessions(H)} disabled={loadingHost === H} title="rescan">{loadingHost === H ? '…' : '↻'}</button>
+          <button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => fetchHostSessions(H)} disabled={loadingHost === H} title="rescan">
+            {loadingHost === H ? <Skeleton className="h-3 w-3" /> : '↻'}
+          </button>
         </div>
         <ScrollArea className="flex-1 min-h-0">
           <div className="p-1.5 flex flex-col gap-0.5">
             {(visibleActive.length > 0 || idle.length > 0 || hiddenActive.length > 0) && (
               <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">● live (tmux)</div>
             )}
-            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => onKill(c.key || c.id)} onRename={onRename} onHide={() => onHideTab(c.key || c.id)} gitInfo={gitStatus[c.key || c.id]} />)}
+            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onHide={() => onHideTab(c.key || c.id)} gitInfo={gitStatus[c.key || c.id]} killingChatId={killingChatId} renamingChatId={renamingChatId} />)}
             {hiddenActive.length > 0 && (
               <>
                 <button onClick={() => setHiddenExpanded(!hiddenExpanded)} className="flex items-center gap-1 px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60 hover:text-foreground w-full transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded">
@@ -240,19 +298,22 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                   <span>hidden ({hiddenActive.length})</span>
                 </button>
                 {hiddenExpanded && hiddenActive.map((c) => (
-                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => onKill(c.key || c.id)} onRename={onRename} onUnhide={() => onUnhideTab(c.key || c.id)} dim gitInfo={gitStatus[c.key || c.id]} />
+                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onUnhide={() => onUnhideTab(c.key || c.id)} dim gitInfo={gitStatus[c.key || c.id]} killingChatId={killingChatId} renamingChatId={renamingChatId} />
                 ))}
               </>
             )}
             {idle.length > 0 && (
               <>
                 <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">idle</div>
-                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => onKill(c.key || c.id)} onRename={onRename} dim gitInfo={gitStatus[c.key || c.id]} />)}
+                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} dim gitInfo={gitStatus[c.key || c.id]} killingChatId={killingChatId} renamingChatId={renamingChatId} />)}
               </>
             )}
             <div className="mt-3 mb-1 border-t border-border/50" />
             {H !== THIS_MACHINE && loadingHost === H && !sessions.length && (
-              <div className="text-xs text-muted-foreground p-3 text-center">scanning sessions…</div>
+              <>
+                <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/40">scanning sessions</div>
+                {[1, 2, 3, 4].map((i) => <SessionRowSkeleton key={i} />)}
+              </>
             )}
             {info.claudeAvailable === false && (
               <div className="mx-1 my-2 px-2 py-2 text-[11px] text-yellow-400 bg-yellow-500/10 border border-yellow-500/30 rounded-md">
@@ -262,15 +323,35 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-cyan-500/80 font-semibold">☁ sessions (history — click to resume)</div>
             {sessions.slice(0, 12).map((s) => {
               const running = hostChats.some((c) => c.key === `resume-${s.id.slice(0, 8)}`);
+              const isLoading = resumingSessionId === s.id;
               return (
-                <button key={s.id} onClick={() => { onResume(s.id, s.summary, s.cwd, H); setView({ kind: 'root' }); }} className="flex flex-col gap-0.5 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background" title={`resume ${s.id}\n${s.cwd}`}>
-                  <span className="truncate">{s.summary || <span className="text-muted-foreground">(no summary)</span>}{running && <span className="ml-1 text-green-400">● live</span>}</span>
-                  <span className="text-[10px] text-muted-foreground truncate">{ago(s.mtime)} · {basename(s.cwd)}</span>
+                <button
+                  key={s.id}
+                  onClick={() => { handleResume(s.id, s.summary, s.cwd, H); setView({ kind: 'root' }); }}
+                  disabled={isLoading}
+                  className="flex flex-col gap-0.5 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                  title={`resume ${s.id}\n${s.cwd}`}
+                >
+                  <span className="truncate">
+                    {isLoading ? (
+                      <Skeleton className="h-3 w-3/4 inline-block" />
+                    ) : (
+                      s.summary || <span className="text-muted-foreground">(no summary)</span>
+                    )}
+                    {running && <span className="ml-1 text-green-400">● live</span>}
+                  </span>
+                  <span className="text-[10px] text-muted-foreground truncate">
+                    {isLoading ? <Skeleton className="h-2.5 w-1/2 inline-block" /> : `${ago(s.mtime)} · ${basename(s.cwd)}`}
+                  </span>
                 </button>
               );
             })}
             {hostChats.length === 0 && sessions.length === 0 && loadingHost !== H && (
-              <div className="text-xs text-muted-foreground p-3 text-center">nothing here</div>
+              <div className="flex flex-col items-center justify-center p-4 gap-2 text-center">
+                <FolderOpen className="size-6 text-muted-foreground/40" />
+                <div className="text-xs text-muted-foreground">nothing here</div>
+                <div className="text-[10px] text-muted-foreground/60">start a new chat or resume a session</div>
+              </div>
             )}
           </div>
         </ScrollArea>
@@ -300,11 +381,19 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           className="h-6 text-[10px] px-2 flex-1 max-w-[120px]"
         />
         <Badge variant="secondary" className="text-xs">{filteredTabs.length}</Badge>
-        <button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={onRefresh} disabled={loading}>{loading ? '…' : '↻'}</button>
+        <button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={onRefresh} disabled={loading}>
+          {loading ? <Skeleton className="h-3 w-3" /> : '↻'}
+        </button>
       </div>
       <NewChatForm onSpawned={handleSpawned} />
       <ScrollArea className="flex-1 min-h-0">
         <div className="p-1.5 flex flex-col gap-0.5">
+          {loading && activeTabs.length === 0 ? (
+            <>
+              <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/40">loading tabs</div>
+              {[1, 2, 3].map((i) => <ChatRowSkeleton key={i} />)}
+            </>
+          ) : null}
           {activeTabs.length > 0 && (
             <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">tabs</div>
           )}
@@ -342,8 +431,12 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           {filteredTabs.length === 0 && tabSearchQuery && (
             <div className="text-xs text-muted-foreground p-3 text-center">no tabs match "{tabSearchQuery}"</div>
           )}
-          {activeTabs.length === 0 && (
-            <div className="text-xs text-muted-foreground p-3 text-center">no tabs — browse hosts below</div>
+          {activeTabs.length === 0 && !loading && (
+            <div className="flex flex-col items-center justify-center p-4 gap-2 text-center">
+              <MessageSquare className="size-6 text-muted-foreground/40" />
+              <div className="text-xs text-muted-foreground">no active tabs</div>
+              <div className="text-[10px] text-muted-foreground/60">browse hosts below to start</div>
+            </div>
           )}
           {!showAllChats && chats.filter(c => c.active).length > 0 && (
             <div className="px-2 pt-1 pb-1">
@@ -425,7 +518,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           }}>
             <CtxItem label="Open" onClick={() => { onOpenChat(ctx.id); setCtx(null); }} />
             {!ctx.dead && <CtxItem label="Hide" onClick={() => { onHideTab(ctx.id); setCtx(null); }} />}
-            {!ctx.dead && <CtxItem label="Kill session" onClick={() => { onKill(ctx.id); setCtx(null); }} />}
+            {!ctx.dead && <CtxItem label="Kill session" onClick={() => { handleKill(ctx.id); setCtx(null); }} isLoading={killingChatId === ctx.id} />}
             <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
             <CtxItem label="Remove tab" danger onClick={() => { onRemoveActive(ctx.id); setCtx(null); }} />
           </div>
@@ -440,17 +533,20 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   );
 }
 
-function CtxItem({ label, onClick, danger }: { label: string; onClick: () => void; danger?: boolean }) {
+function CtxItem({ label, onClick, danger, isLoading }: { label: string; onClick: () => void; danger?: boolean; isLoading?: boolean }) {
   return (
-    <button onClick={onClick} className={`flex w-full text-left px-3 py-1.5 hover:bg-accent transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${danger ? 'text-red-500' : ''}`}>{label}</button>
+    <button onClick={onClick} disabled={isLoading} className={`flex w-full text-left px-3 py-1.5 hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${danger ? 'text-red-500' : ''}`}>
+      {isLoading ? <Skeleton className="h-3 w-16" /> : label}
+    </button>
   );
 }
 
-function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, gitInfo }: {
+function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, gitInfo, killingChatId, renamingChatId }: {
   c: Chat; open: boolean; onOpen: () => void; onKill: () => void;
   onRename: (session: string, kind: string, name: string) => void;
   onHide?: () => void; onUnhide?: () => void; dim?: boolean;
   gitInfo?: { branch: string | null; clean: boolean | null };
+  killingChatId?: string | null; renamingChatId?: string | null;
 }) {
   const isUser = c.kind === 'tmux';
   const canRename = isUser;
@@ -459,7 +555,18 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
   const type = chatType(c);
   const typeColor = TYPE_COLOR[type] || 'text-violet-400';
   const hostTag = isUser ? (c.host === '(local)' ? 'local' : (c.host || '')) : null;
-  const commit = () => { setEditing(false); const v = val.trim(); if (v && v !== (c.name || c.key)) onRename(c.key || c.id, c.kind || 'tmux', v); };
+  const chatId = c.key || c.id;
+  const isKilling = killingChatId === chatId;
+  const isRenaming = renamingChatId === chatId;
+  const commit = () => {
+    const v = val.trim();
+    if (v && v !== (c.name || c.key)) {
+      setEditing(false);
+      onRename(c.key || c.id, c.kind || 'tmux', v);
+    } else {
+      setEditing(false);
+    }
+  };
 
   return (
     <div
@@ -488,7 +595,14 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
         <>
           {onHide && <button className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground px-0.5 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded" title="hide" onClick={(e) => { e.stopPropagation(); onHide(); }}>▾</button>}
           {onUnhide && <button className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground px-0.5 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded" title="unhide" onClick={(e) => { e.stopPropagation(); onUnhide(); }}>▴</button>}
-          <button className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500 px-0.5 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded" title="kill + forget" onClick={(e) => { e.stopPropagation(); onKill(); }}>×</button>
+          <button
+            className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500 px-0.5 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded"
+            title="kill + forget"
+            onClick={(e) => { e.stopPropagation(); onKill(); }}
+            disabled={isKilling || isRenaming}
+          >
+            {isKilling ? <Skeleton className="h-3 w-3" /> : '×'}
+          </button>
         </>
       )}
     </div>
