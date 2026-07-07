@@ -8,6 +8,7 @@ import { ObserverTabs } from '@/components/ObserverTabs';
 import { SettingsDialog } from '@/components/SettingsDialog';
 import { GlobalSearchDialog } from '@/components/GlobalSearchDialog';
 import { HealthDashboard } from '@/components/HealthDashboard';
+import { toast } from 'sonner';
 
 function App() {
   const [chats, setChats] = useState<Chat[]>([]);
@@ -149,29 +150,50 @@ function App() {
   const toggleMax = useCallback((id: string) => setMaximized((m) => (m === id ? null : id)), []);
   const clearNew = useCallback((id: string) => setNewActivity((prev) => { if (!prev.has(id)) return prev; const n = new Set(prev); n.delete(id); return n; }), []);
   const forceKill = useCallback(async (id: string) => {
-    try { await fetch('/api/session-kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) }); } catch { /* noop */ }
+    try {
+      await fetch('/api/session-kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) });
+      toast.success('Session force-killed');
+    } catch (error) {
+      toast.error(`Failed to force-kill: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }, []);
 
   const killChat = useCallback(async (id: string) => {
     if (!window.confirm('kill this chat and forget it?')) return;
-    try { await fetch('/api/kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) }); } catch { /* noop */ }
-    removeActive(id);
-    refresh();
+    try {
+      await fetch('/api/kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) });
+      toast.success('Chat killed');
+      removeActive(id);
+      refresh();
+    } catch (error) {
+      toast.error(`Failed to kill chat: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }, [refresh, removeActive]);
 
   const resumeSession = useCallback(async (id: string, description: string, cwd: string, host: string) => {
     try {
       const r = await fetch('/api/resume', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, cwd, host, name: description || undefined }) });
       const j = await r.json();
-      if (!r.ok) { window.alert(j.error || 'resume failed'); return; }
+      if (!r.ok) {
+        toast.error(j.error || 'resume failed');
+        return;
+      }
       await refresh();
       openChat(j.chat.key);
-    } catch (e) { window.alert(e instanceof Error ? e.message : String(e)); }
+      toast.success('Session resumed');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    }
   }, [refresh, openChat]);
 
   const renameChat = useCallback(async (session: string, kind: string, name: string) => {
-    try { await fetch('/api/rename', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session, kind, name }) }); } catch { /* noop */ }
-    refresh();
+    try {
+      await fetch('/api/rename', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session, kind, name }) });
+      toast.success('Chat renamed');
+      refresh();
+    } catch (error) {
+      toast.error(`Failed to rename: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }, [refresh]);
 
   const openActivityTab = useCallback(() => {
