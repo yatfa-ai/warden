@@ -5,6 +5,7 @@ import type { Chat } from '@/lib/types';
 import { ChatSidebar } from '@/components/ChatSidebar';
 import { PaneGrid } from '@/components/PaneGrid';
 import { ObserverTabs } from '@/components/ObserverTabs';
+import { SettingsDialog } from '@/components/SettingsDialog';
 
 function App() {
   const [chats, setChats] = useState<Chat[]>([]);
@@ -119,6 +120,8 @@ function App() {
   const openPaneSet = new Set(openPanes);
   const tiles = openPanes.map((id) => ({ id }));
 
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">
       <header className="flex items-center gap-3 px-3 h-11 border-b shrink-0">
@@ -127,6 +130,7 @@ function App() {
         <span className="text-xs text-muted-foreground">{activeTabs.length} active · {openPanes.length} open</span>
         <span className="flex-1" />
         <span className={`size-2 rounded-full ${streamConn ? 'bg-green-500' : 'bg-red-500'}`} title={streamConn ? 'connected' : 'disconnected'} />
+        <button onClick={() => setSettingsOpen(true)} className="text-muted-foreground hover:text-foreground" title="settings">⚙</button>
         <button onClick={() => setObserverCollapsed(!observerCollapsed)} className="text-muted-foreground hover:text-foreground" title="toggle observer">{observerCollapsed ? '◂' : '▸'}</button>
       </header>
       <main className="flex flex-1 min-h-0">
@@ -173,6 +177,11 @@ function App() {
           </section>
         )}
       </main>
+      <SettingsDialog
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onConfigChange={refresh}
+      />
     </div>
   );
 }
