@@ -136,3 +136,81 @@ export async function capturePanes(chats) {
   }));
   return out;
 }
+
+/**
+ * Resolve a chat ID substring to a single chat object.
+ * @param {string} id - User-provided ID substring
+ * @param {Array} cachedChats - Current cached chat list
+ * @param {Function} refreshFn - Async function that returns {chats, errors}
+ * @returns {{chat?: object, error?: string}} Returns {chat} on success, {error} on failure
+ */
+export function resolveChat(id, cachedChats, refreshFn) {
+  // First pass: exact matches (highest priority)
+  const exactMatches = cachedChats.filter((c) =>
+    c.id === id ||
+    (c.key && c.key === id) ||
+    c.container === id ||
+    (c.session && c.session === id)
+  );
+
+  if (exactMatches.length === 1) return { chat: exactMatches[0] };
+  if (exactMatches.length > 1) {
+    return { error: `ambiguous "${id}" matches: ${exactMatches.map((c) => c.id).join(', ')}` };
+  }
+
+  // Second pass: substring matches (lower priority)
+  const substringMatches = cachedChats.filter((c) =>
+    (c.id && c.id.endsWith(':' + id)) ||
+    (c.container && c.container.includes(id)) ||
+    (c.session && c.session.includes(id)) ||
+    (c.id && c.id.includes(id)) ||
+    c.project === id ||
+    c.role === id
+  );
+
+  if (substringMatches.length === 1) return { chat: substringMatches[0] };
+  if (substringMatches.length > 1) {
+    return { error: `ambiguous "${id}" matches: ${substringMatches.map((c) => c.id).join(', ')}` };
+  }
+
+  // No match found - signal that refresh is needed (caller will invoke refreshFn)
+  return { needsRefresh: true };
+}
+
+/**
+ * Resolve a chat with automatic refresh on no match.
+ * This is a convenience wrapper that handles the refresh logic inline.
+ * @param {string} id - User-provided ID substring
+ * @param {Array} cachedChats - Current cached chat list (will be updated if refresh happens)
+ * @param {Function} refreshFn - Async function that returns {chats, errors}
+ * @returns {{chat?: object, error?: string, errors?: Array}} Returns {chat} on success, {error} on failure
+ */
+export async function resolveChatWithRefresh(id, cachedChats, refreshFn) {
+  const result = resolveChat(id, cachedChats, refreshFn);
+
+  // If we got a definitive result or error, return it
+  if (!result.needsRefresh) {
+    return result;
+  }
+
+  // No match in cache - trigger refresh
+  const { chats, errors } = await refreshFn();
+
+  // Try matching again with fresh data (only substring/project/role matches after refresh)
+  const matches = chats.filter((c) =>
+    (c.container && c.container.includes(id)) ||
+    (c.session && c.session.includes(id)) ||
+    (c.id && c.id.includes(id)) ||
+    c.project === id ||
+    c.role === id
+  );
+
+  if (matches.length === 0) {
+    return { error: `no chat matches "${id}"`, errors };
+  }
+  if (matches.length > 1) {
+    return { error: `ambiguous "${id}" matches: ${matches.map((c) => c.id).join(', ')}`, errors };
+  }
+
+  return { chat: matches[0], errors };
+}

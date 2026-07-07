@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { load, save, configPath, cachePath } from './config.js';
-import { discover, discoverAll } from './chats.js';
+import { discover, discoverAll, resolveChatWithRefresh } from './chats.js';
 import { read, send, sendKey, attachInteractive } from './tmux.js';
 import { run } from './ssh.js';
 
@@ -49,19 +49,18 @@ function writeCache(chats) {
 async function resolveChat(idArg, cfg) {
   const cache = readCache();
   const pool = cache?.chats || [];
-  const matches = pool.filter((c) =>
-    c.id === idArg || c.id.endsWith(':' + idArg) || c.container === idArg ||
-    c.container.includes(idArg) || c.project === idArg || c.role === idArg);
-  if (matches.length === 1) return matches[0];
-  if (matches.length > 1) die(`ambiguous "${idArg}" matches: ${matches.map((c) => c.id).join(', ')}`);
-  // no match in cache — try a fresh discover
-  const { chats, errors } = await discoverAll(cfg.hosts, cfg);
-  for (const e of errors) console.error(paint(`! ${e.host}: ${e.error}`, C.red));
-  const m2 = chats.filter((c) => c.container.includes(idArg) || c.project === idArg || c.role === idArg);
-  if (m2.length === 0) die(`no chat matches "${idArg}". run \`warden scan\`.`);
-  if (m2.length > 1) die(`ambiguous "${idArg}" matches: ${m2.map((c) => c.id).join(', ')}`);
-  writeCache(chats);
-  return m2[0];
+
+  const result = await resolveChatWithRefresh(idArg, pool, async () => {
+    const { chats, errors } = await discoverAll(cfg.hosts, cfg);
+    // Log refresh errors (cli.js specific behavior)
+    for (const e of errors) console.error(paint(`! ${e.host}: ${e.error}`, C.red));
+    // Update cache and return
+    writeCache(chats);
+    return { chats, errors };
+  });
+
+  if (result.error) die(result.error);
+  return result.chat;
 }
 
 // ---------- commands ----------
