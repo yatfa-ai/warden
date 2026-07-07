@@ -15,6 +15,8 @@ function App() {
   const [hiddenTabs, setHiddenTabs] = useState<string[]>(() => loadUi().hiddenTabs);
   const [openPanes, setOpenPanes] = useState<string[]>(() => loadUi().openPanes);
   const [focused, setFocused] = useState<string | null>(() => loadUi().focused);
+  const [sidebarWidth, setSidebarWidth] = useState(() => loadUi().sidebarWidth ?? 220);
+  const [observerWidth, setObserverWidth] = useState(() => loadUi().observerWidth ?? 380);
   const [maximized, setMaximized] = useState<string | null>(null);
   const [newActivity, setNewActivity] = useState<Set<string>>(new Set());
   const [streamConn, setStreamConn] = useState(false);
@@ -81,7 +83,7 @@ function App() {
     if (focused) setNewActivity((prev) => { if (!prev.has(focused)) return prev; const n = new Set(prev); n.delete(focused); return n; });
   }, [focused]);
 
-  useEffect(() => { saveUi({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed }); }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed]);
+  useEffect(() => { saveUi({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, sidebarWidth, observerWidth }); }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, sidebarWidth, observerWidth]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -163,6 +165,55 @@ function App() {
   const tiles = openPanes.map((id) => ({ id }));
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Resize drag state
+  const [isResizingSidebar, setIsResizingSidebar] = useState(false);
+  const [isResizingObserver, setIsResizingObserver] = useState(false);
+  const dragStartX = useRef<number>(0);
+  const dragStartSidebarWidth = useRef<number>(0);
+  const dragStartObserverWidth = useRef<number>(0);
+
+  const handleSidebarMouseDown = (e: React.MouseEvent) => {
+    setIsResizingSidebar(true);
+    dragStartX.current = e.clientX;
+    dragStartSidebarWidth.current = sidebarWidth;
+    e.preventDefault();
+  };
+
+  const handleObserverMouseDown = (e: React.MouseEvent) => {
+    setIsResizingObserver(true);
+    dragStartX.current = e.clientX;
+    dragStartObserverWidth.current = observerWidth;
+    e.preventDefault();
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (isResizingSidebar) {
+        const delta = e.clientX - dragStartX.current;
+        const newWidth = dragStartSidebarWidth.current + delta;
+        setSidebarWidth(Math.max(180, Math.min(400, newWidth)));
+      }
+      if (isResizingObserver) {
+        const delta = dragStartX.current - e.clientX;
+        const newWidth = dragStartObserverWidth.current + delta;
+        setObserverWidth(Math.max(300, Math.min(600, newWidth)));
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsResizingSidebar(false);
+      setIsResizingObserver(false);
+    };
+
+    if (isResizingSidebar || isResizingObserver) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+      return () => {
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+      };
+    }
+  }, [isResizingSidebar, isResizingObserver]);
 
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">
@@ -212,7 +263,12 @@ function App() {
       </header>
       <main className="flex flex-1 min-h-0">
         {!sidebarCollapsed && (
-          <section className="border-r min-h-0" style={{ width: 220, flexShrink: 0 }}>
+          <section className="border-r min-h-0 relative" style={{ width: sidebarWidth, flexShrink: 0 }}>
+            <div
+              className="absolute top-0 right-0 bottom-0 w-1 hover:bg-accent hover:w-1.5 transition-all cursor-col-resize z-10"
+              onMouseDown={handleSidebarMouseDown}
+              title="Drag to resize sidebar"
+            />
             <ChatSidebar
               chats={chats}
               sshHosts={sshHosts}
@@ -249,7 +305,12 @@ function App() {
           />
         </section>
         {!observerCollapsed && (
-          <section className="border-l min-h-0" style={{ width: 380, flexShrink: 0 }}>
+          <section className="border-l min-h-0 relative" style={{ width: observerWidth, flexShrink: 0 }}>
+            <div
+              className="absolute top-0 left-0 bottom-0 w-1 hover:bg-accent hover:w-1.5 transition-all cursor-col-resize z-10"
+              onMouseDown={handleObserverMouseDown}
+              title="Drag to resize observer panel"
+            />
             <ObserverTabs externalViewMode={externalViewMode} />
           </section>
         )}
