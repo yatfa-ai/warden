@@ -6,6 +6,7 @@ import { ChatSidebar } from '@/components/ChatSidebar';
 import { PaneGrid } from '@/components/PaneGrid';
 import { ObserverTabs } from '@/components/ObserverTabs';
 import { SettingsDialog } from '@/components/SettingsDialog';
+import { GlobalSearchDialog } from '@/components/GlobalSearchDialog';
 
 function App() {
   const [chats, setChats] = useState<Chat[]>([]);
@@ -21,6 +22,8 @@ function App() {
   const [activitySinceClose, setActivitySinceClose] = useState<any>(null);
   const [showActivityBanner, setShowActivityBanner] = useState(false);
   const [externalViewMode, setExternalViewMode] = useState<'sessions' | 'activity' | null>(null);
+  const [showGlobalSearch, setShowGlobalSearch] = useState(false);
+  const [externalSearchQuery, setExternalSearchQuery] = useState<{ paneId: string; query: string } | null>(null);
   const focusedRef = useRef(focused);
   focusedRef.current = focused;
 
@@ -82,6 +85,18 @@ function App() {
   }, [focused]);
 
   useEffect(() => { saveUi({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed }); }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed]);
+
+  // keyboard shortcut for global search
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.shiftKey && e.key === 'F') {
+        e.preventDefault();
+        setShowGlobalSearch(true);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -159,6 +174,19 @@ function App() {
     setObserverCollapsed(false);
     setExternalViewMode('activity');
   }, []);
+
+  const handleFocusPane = useCallback((id: string) => {
+    setFocused(id);
+    setActiveTabs((p) => p.includes(id) ? p : [...p, id]);
+    setOpenPanes((p) => p.includes(id) ? p : [...p, id]);
+  }, []);
+
+  const handleJumpToMatch = useCallback((id: string, query: string) => {
+    setFocused(id);
+    setActiveTabs((p) => p.includes(id) ? p : [...p, id]);
+    setOpenPanes((p) => p.includes(id) ? p : [...p, id]);
+    setExternalSearchQuery({ paneId: id, query });
+  }, []);
   const openPaneSet = new Set(openPanes);
   const tiles = openPanes.map((id) => ({ id }));
 
@@ -207,6 +235,7 @@ function App() {
         <span className="text-xs text-muted-foreground">{activeTabs.length} active · {openPanes.length} open</span>
         <span className="flex-1" />
         <span className={`size-2 rounded-full ${streamConn ? 'bg-green-500' : 'bg-red-500'}`} title={streamConn ? 'connected' : 'disconnected'} />
+        <button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground px-2" title="global search (Ctrl+Shift+F)">⌕</button>
         <button onClick={() => setSettingsOpen(true)} className="text-muted-foreground hover:text-foreground" title="settings">⚙</button>
         <button onClick={() => setObserverCollapsed(!observerCollapsed)} className="text-muted-foreground hover:text-foreground" title="toggle observer">{observerCollapsed ? '◂' : '▸'}</button>
       </header>
@@ -246,6 +275,7 @@ function App() {
             onClearNew={clearNew}
             onOpenChat={openChat}
             onForceKill={forceKill}
+            externalSearchQuery={externalSearchQuery}
           />
         </section>
         {!observerCollapsed && (
@@ -258,6 +288,14 @@ function App() {
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         onConfigChange={refresh}
+      />
+      <GlobalSearchDialog
+        open={showGlobalSearch}
+        onClose={() => setShowGlobalSearch(false)}
+        openPanes={openPanes}
+        onFocusPane={handleFocusPane}
+        onJumpToMatch={handleJumpToMatch}
+      />
       />
     </div>
   );

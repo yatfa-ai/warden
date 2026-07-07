@@ -16,11 +16,12 @@ interface Props {
   onClearNew: (id: string) => void;
   onOpenChat: (id: string) => void;
   onForceKill: (id: string) => void;
+  externalSearchQuery?: { paneId: string; query: string } | null;
 }
 
 function colsFor(n: number) { return n <= 1 ? 1 : Math.ceil(Math.sqrt(n)); }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, onFocus, onClose, onToggleMax, onClearNew, onOpenChat, onForceKill }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, onFocus, onClose, onToggleMax, onClearNew, onOpenChat, onForceKill, externalSearchQuery }: Props) {
   const [splitOpen, setSplitOpen] = useState(false);
   const nameOf = (id: string) => chats.find((c) => (c.key || c.id) === id)?.name || id;
 
@@ -86,7 +87,9 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, onFocu
                   <PaneTile id={t.id} label={nameOf(t.id)} focused={focused === t.id} maximized={maximized === t.id}
                     hasNew={newActivity.has(t.id)} onClearNew={() => onClearNew(t.id)}
                     onFocus={() => onFocus(t.id)} onClose={() => onClose(t.id)} onToggleMax={() => onToggleMax(t.id)}
-                    onKill={() => onForceKill(t.id)} chat={chat} />
+                    onKill={() => onForceKill(t.id)} chat={chat}
+                    externalSearchQuery={externalSearchQuery?.paneId === t.id ? externalSearchQuery.query : undefined}
+                  />
                 </div>
               );
             })}
