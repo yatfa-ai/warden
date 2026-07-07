@@ -9,6 +9,7 @@ import { discoverAll } from './chats.js';
 import { read as readPane, send as sendPane } from './tmux.js';
 import { complete } from './llm.js';
 import { getSession, saveMessages, appendTranscript } from './sessions.js';
+import { capturePanes } from './server.js';
 
 const DIRECTIVES_LOG = path.join(os.homedir(), '.yatfa-warden', 'directives.md');
 
@@ -18,6 +19,7 @@ You operate ONLY through these tools:
 - list_chats(): discover every agent chat + whether it is active (running its TUI) or idle.
 - read_chat({id, lines}): read an agent's current terminal pane. ALWAYS read before you advise on a specific agent — never assume.
 - send_directive({id, directive}): propose a message to an agent. The user MUST approve every send; you propose and wait for the gate.
+- summarize_chats(): read all open tabs in one efficient batch. Use this when the user asks "what's happening", "what are they working on", or you need a complete picture to advise well. Returns pane content + metadata for every open chat.
 
 Your job:
 1. Watch — read the chats the user cares about; keep an accurate, current picture of each agent's work.
@@ -33,7 +35,15 @@ Rules:
   ONLY read those by default. If the user asks about others, read them on request.
 - Do NOT read every chat on every turn. Read only the open ones, and only when needed.
 - If you're unsure which agent or what exactly to send, ask the user.
-- Keep your own replies to the user concise.`;
+- Keep your own replies to the user concise.
+
+When using summarize_chats, synthesize insights not raw dumps:
+- What each agent is actively working on (goal, progress, current step)
+- Actionable states: stuck agents (repeating output, errors), idle agents (waiting for input), completed tasks
+- Coordination needs: which agents depend on others, workflow bottlenecks
+- Human attention needed: decisions, approvals, failures, unexpected states
+
+Be concise. Highlight what needs attention NOW.`;
 
 export const TOOLS = [
   {
@@ -58,6 +68,11 @@ export const TOOLS = [
       properties: { id: { type: 'string' }, directive: { type: 'string' } },
       required: ['id', 'directive'],
     },
+  },
+  {
+    name: 'summarize_chats',
+    description: 'Read all open tabs at once and synthesize what each agent is working on. Returns pane captures and metadata for every open chat. Use this to get a complete picture of current agent activity before advising the user.',
+    input_schema: { type: 'object', properties: {}, required: [] },
   },
 ];
 
@@ -150,6 +165,40 @@ export class Observer {
         logDirective(chat, text);
         return { sent: true, to: `${chat.container}@${chat.host}`, chars: text.length };
       } catch (e) { return { error: e.message }; }
+    }
+    if (name === 'summarize_chats') {
+      const open = new Set(this.openTabs || []);
+      if (open.size === 0) return { error: 'no tabs are open. open some agent panes first.' };
+
+      // Filter to only open tabs
+      const openChats = this.lastChats.filter(c =>
+        open.has(c.container || c.session) || open.has(c.key)
+      );
+
+      if (openChats.length === 0) {
+        return { error: 'open tabs do not match any discovered chats. try refreshing with list_chats.' };
+      }
+
+      try {
+        // Import capturePanes from server (needs module import at top)
+        const panes = await capturePanes(openChats);
+
+        // Return structured result with metadata + panes
+        return {
+          chats: openChats.map(c => ({
+            id: c.container || c.session,
+            host: c.host,
+            project: c.project,
+            role: c.role,
+            active: c.active,
+            status: c.status,
+            pane: panes[c.key] || '(no pane content)',
+          })),
+          count: openChats.length,
+        };
+      } catch (e) {
+        return { error: e.message };
+      }
     }
     return { error: `unknown tool ${name}` };
   }
