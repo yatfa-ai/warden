@@ -108,8 +108,8 @@ export class Observer {
 
   async _resolve(id) {
     const match = (list) => list.filter((c) =>
-      c.id === id || c.id.endsWith(':' + id) || c.container === id ||
-      c.container.includes(id) || c.project === id || c.role === id);
+      c.id === id || (c.id && c.id.endsWith(':' + id)) || c.container === id ||
+      (c.container && c.container.includes(id)) || c.project === id || c.role === id);
     let m = match(this.lastChats);
     if (!m.length) m = match(await this._refreshChats());
     if (m.length === 1) return m[0];
