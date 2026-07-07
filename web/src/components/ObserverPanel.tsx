@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { toast } from 'sonner';
-import type { ObserveMsg } from '@/lib/types';
+import type { ChatContextMeta, ObserveMsg } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Textarea } from '@/components/ui/textarea';
@@ -28,6 +28,7 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
   const [userStopped, setUserStopped] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [loadingTimeout, setLoadingTimeout] = useState(false);
+  const [chatContext, setChatContext] = useState<ChatContextMeta | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -60,6 +61,7 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
     setUserStopped(false);
     setConnectionError(null);
     setLoadingTimeout(false);
+    setChatContext(null);
     connectionTimeoutShownRef.current = false;
 
     // Set loading timeout (10 seconds)
@@ -108,12 +110,14 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
       if (!mountedRef.current) return;
       const m: ObserveMsg = JSON.parse(e.data);
       if (m.type === 'history') {
+        setChatContext(m.chatContext ?? null);
         setItems(m.items.map((i) => i.role === 'user'
           ? { kind: 'user', text: i.text || '' }
           : i.role === 'assistant' ? { kind: 'obs', text: i.text || '' }
           : { kind: 'tool', text: `➐ ${i.name}(${i.id || ''})` }));
         return;
       }
+      if (m.type === 'session_created') { setChatContext(m.chatContext ?? null); }
       if (m.type === 'thinking') { setBusy(true); return; }
       setBusy(false);
       if (m.type === 'tool') setItems((p) => [...p, { kind: 'tool', text: `➐ ${m.name}(${m.input?.id || ''})` }]);
@@ -172,7 +176,14 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
     <div className="flex flex-col h-full min-h-0">
       <div className="flex items-center gap-2 px-3 py-2 border-b text-xs text-muted-foreground shrink-0">
         <span className={`size-2 rounded-full ${conn ? 'bg-green-500' : 'bg-red-500'}`} title={conn ? 'connected' : connectionError || 'reconnecting…'} />
-        <span className="flex-1">drafts directives you approve</span>
+        {chatContext?.chatKey ? (
+          <span className="flex-1 truncate" title={`bound to ${chatContext.container || chatContext.chatKey}${chatContext.role ? ` (${chatContext.role})` : ''} @ ${chatContext.host || 'local'}`}>
+            👁 <span className="text-foreground/80">{chatContext.container || chatContext.chatKey}</span>
+            {chatContext.host && chatContext.host !== '(local)' ? ` @${chatContext.host}` : ''}
+          </span>
+        ) : (
+          <span className="flex-1">drafts directives you approve</span>
+        )}
         {busy && <span className="italic">thinking…</span>}
         {loadingTimeout && !conn && (
           <span className="text-yellow-400 text-[10px] italic">taking longer than expected…</span>

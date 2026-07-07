@@ -3,20 +3,25 @@ import { toast } from 'sonner';
 import { ObserverPanel } from './ObserverPanel';
 import { ActivityTimeline } from './ActivityTimeline';
 import { Button } from '@/components/ui/button';
-import { EmptyState } from '@/components/EmptyState';
+import { EmptyState } from './EmptyState';
 import { loadObs, saveObs } from '@/lib/storage';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
-import type { SessionMeta } from '@/lib/types';
+import type { Chat, SessionMeta } from '@/lib/types';
 
 interface Props {
   externalViewMode?: 'sessions' | 'activity' | null;
   onFocusAgent?: (id: string) => void;
+  // The currently-focused chat pane, used to bind a new observer session to
+  // the agent the user is looking at ("observe this agent").
+  focusedChat?: Chat | null;
+  // Called when a resumed observer session should reconnect to its bound chat.
+  onReconnectChat?: (chatKey: string, host?: string | null) => void;
 }
 
 // Manages persisted observer sessions as tabs. Every open tab keeps its own
 // ObserverPanel (and WS) mounted; inactive ones are display:none so their
 // conversations stay live. Open tabs + active tab persist in localStorage.
-export function ObserverTabs({ externalViewMode, onFocusAgent }: Props = {}) {
+export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onReconnectChat }: Props = {}) {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [openIds, setOpenIds] = useState<string[]>(() => loadObs().openIds);
   const [activeId, setActiveId] = useState<string | null>(() => loadObs().activeId);
@@ -63,9 +68,20 @@ export function ObserverTabs({ externalViewMode, onFocusAgent }: Props = {}) {
     }
   }, []);
 
-  const createNew = useCallback(async () => {
+  const createNew = useCallback(async (chat?: Chat | null) => {
     try {
-      const r = await fetch('/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: null }) });
+      // Bind the new session to `chat` when provided — "observe this agent".
+      // The chat context is persisted with the session and used on resume to
+      // reconnect to the same agent across hosts.
+      const body: { name: string | null; host?: string | null; container?: string | null; project?: string | null; role?: string | null; chatKey?: string | null } = { name: null };
+      if (chat) {
+        body.host = chat.host ?? null;
+        body.container = chat.container ?? null;
+        body.project = chat.project ?? null;
+        body.role = chat.role ?? null;
+        body.chatKey = chat.key || chat.id || null;
+      }
+      const r = await fetch('/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
       if (!r.ok) {
         throw new Error(`HTTP ${r.status}: Failed to create session`);
       }
@@ -73,7 +89,9 @@ export function ObserverTabs({ externalViewMode, onFocusAgent }: Props = {}) {
       setSessions((p) => [s, ...p]);
       setOpenIds((p) => (p.includes(s.id) ? p : [...p, s.id]));
       setActiveId(s.id);
-      if (prefsRef.current.notifySuccess) toast.success('New observer session created');
+      if (prefsRef.current.notifySuccess) {
+        toast.success(chat ? `Observing ${chat.name || chat.key || chat.id}` : 'New observer session created');
+      }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';
       if (prefsRef.current.notifyErrors) toast.error(`Failed to create session: ${errorMsg}`);
@@ -102,6 +120,21 @@ export function ObserverTabs({ externalViewMode, onFocusAgent }: Props = {}) {
 
   useEffect(() => { if (booted) saveObs({ openIds, activeId, viewMode }); }, [openIds, activeId, viewMode, booted]);
 
+  // Seamless resume: when a session bound to an agent chat becomes active,
+  // reconnect to that chat (open its pane on the right host) exactly once. This
+  // is the cross-host resumption promised by the stored chat context — the user
+  // no longer has to remember which host the agent was on.
+  const reconnectedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!booted || !onReconnectChat || !activeId) return;
+    if (reconnectedRef.current.has(activeId)) return;
+    const session = sessions.find((s) => s.id === activeId);
+    if (session?.chatKey) {
+      reconnectedRef.current.add(activeId);
+      onReconnectChat(session.chatKey, session.host);
+    }
+  }, [booted, activeId, sessions, onReconnectChat]);
+
   // Respond to external view mode changes
   useEffect(() => {
     if (externalViewMode && externalViewMode !== viewMode) {
@@ -114,6 +147,10 @@ export function ObserverTabs({ externalViewMode, onFocusAgent }: Props = {}) {
     setActiveId((a) => (a === id ? (openIds.find((x) => x !== id) || null) : a));
   };
   const nameOf = (id: string) => sessions.find((s) => s.id === id)?.name || id.slice(0, 6);
+  const hostLabel = (id: string) => {
+    const session = sessions.find((s) => s.id === id);
+    return session?.host ? `@${session.host}` : '';
+  };
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -133,7 +170,17 @@ export function ObserverTabs({ externalViewMode, onFocusAgent }: Props = {}) {
           </button>
         </div>
         {viewMode === 'sessions' && (
-          <Button size="sm" variant="ghost" className="h-7 px-2 text-base shrink-0" onClick={createNew} title="new observer session">+</Button>
+          <div className="flex items-center gap-0.5">
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 px-2 text-sm shrink-0 disabled:opacity-40"
+              onClick={() => createNew(focusedChat ?? null)}
+              disabled={!focusedChat}
+              title={focusedChat ? `observe ${focusedChat.name || focusedChat.key || focusedChat.id} (binds this session to the focused chat)` : 'focus a chat pane, then click to observe it'}
+            >👁</Button>
+            <Button size="sm" variant="ghost" className="h-7 px-2 text-base shrink-0" onClick={() => createNew(null)} title="new observer session">+</Button>
+          </div>
         )}
       </div>
 
@@ -151,19 +198,24 @@ export function ObserverTabs({ externalViewMode, onFocusAgent }: Props = {}) {
             </div>
           )}
           <div className="flex items-center gap-1 px-2 py-1.5 border-b shrink-0 overflow-x-auto">
-            {openIds.map((id) => (
-              <button
-                key={id}
-                onClick={() => setActiveId(id)}
-                className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap shrink-0 transition-all duration-150 ease-out active:scale-95 ${activeId === id ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50'}`}
-              >
-                {nameOf(id)}
-                <span
-                  className="ml-1.5 opacity-50 hover:opacity-100"
-                  onClick={(e) => { e.stopPropagation(); closeTab(id); }}
-                >×</span>
-              </button>
-            ))}
+            {openIds.map((id) => {
+              const session = sessions.find((s) => s.id === id);
+              const hostLbl = hostLabel(id);
+              return (
+                <button
+                  key={id}
+                  onClick={() => setActiveId(id)}
+                  className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap shrink-0 transition-all duration-150 ease-out active:scale-95 ${activeId === id ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50'}`}
+                  title={session ? `${session.container || 'Unknown'}${session.project ? ` (${session.project})` : ''} @ ${session.host || 'local'}` : ''}
+                >
+                  {nameOf(id)}{hostLbl && <span className="ml-1 opacity-70">{hostLbl}</span>}
+                  <span
+                    className="ml-1.5 opacity-50 hover:opacity-100"
+                    onClick={(e) => { e.stopPropagation(); closeTab(id); }}
+                  >×</span>
+                </button>
+              );
+            })}
           </div>
           <div className="flex-1 min-h-0">
             {openIds.map((id) => (

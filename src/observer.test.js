@@ -1,6 +1,7 @@
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert';
 import { summarizeOpenChats, suggestNextActions, Observer, TOOLS } from './observer.js';
+import { createSession, deleteSession } from './sessions.js';
 
 // Shared config passed through to capturePanes.
 const cfg = { hosts: [] };
@@ -464,5 +465,105 @@ describe('suggestNextActions (pure classifier)', () => {
       assert.ok(typeof s.action === 'string' && s.action.length > 0);
       assert.ok(typeof s.pane_excerpt === 'string');
     });
+  });
+});
+
+// Chat context metadata — what makes observer resume seamless across hosts.
+// The session remembers which agent it was bound to so a reconnect restores it.
+describe('Observer chat context (cross-host resumption)', () => {
+  it('stores chat context passed at creation', () => {
+    const ctx = { host: 'host1', container: 'c1', project: 'p', role: 'worker', chatKey: 'c1' };
+    const obs = new Observer(cfg, { chatContext: ctx });
+
+    assert.deepStrictEqual(obs.getChatContext(), ctx);
+    assert.strictEqual(obs.boundKey, 'c1');
+  });
+
+  it('boundKey falls back to chatKey when container is null (manual/tmux chat)', () => {
+    const obs = new Observer(cfg, { chatContext: { chatKey: 'manual-session', host: '(local)' } });
+    assert.strictEqual(obs.boundKey, 'manual-session');
+  });
+
+  it('has no bound key and empty effective tabs without chat context', () => {
+    const obs = new Observer(cfg, {});
+    assert.strictEqual(obs.boundKey, null);
+    assert.deepStrictEqual(obs.effectiveOpenTabs(), []);
+  });
+
+  it('effectiveOpenTabs includes the bound chat even when no panes are open', () => {
+    const obs = new Observer(cfg, { chatContext: { container: 'myproject-worker', host: 'host1' } });
+    obs.openTabs = [];
+    assert.deepStrictEqual(obs.effectiveOpenTabs(), ['myproject-worker']);
+  });
+
+  it('effectiveOpenTabs dedupes the bound chat with already-open panes', () => {
+    const obs = new Observer(cfg, { chatContext: { container: 'worker-a' } });
+    obs.openTabs = ['worker-a', 'worker-b'];
+    assert.deepStrictEqual(obs.effectiveOpenTabs().sort(), ['worker-a', 'worker-b']);
+  });
+
+  it('summarize_chats watches the bound chat with no panes open (seamless resume)', async () => {
+    // The bound chat is auto-included via effectiveOpenTabs, so summarize sees
+    // it even though the UI has no panes open — the core resumption behavior.
+    const chat = yatfaChat();
+    const capturePanes = mock.fn(async (chats) => ({ [chats[0].key]: 'bound pane' }));
+    const obs = new Observer(cfg, { chatContext: { container: chat.container, host: chat.host } });
+    obs.openTabs = [];
+    obs.lastChats = [chat];
+
+    const result = await summarizeOpenChats(obs.effectiveOpenTabs(), obs.lastChats, capturePanes, cfg);
+
+    assert.strictEqual(result.count, 1);
+    assert.strictEqual(result.chats[0].id, 'myproject-worker');
+    assert.strictEqual(result.chats[0].pane, 'bound pane');
+  });
+
+  it('suggest_next_actions watches the bound chat with no panes open (seamless resume)', async () => {
+    // Sibling to summarize_chats: the bound chat is auto-included via
+    // effectiveOpenTabs, so suggest_next_actions sees it even with no panes open.
+    const chat = yatfaChat();
+    const capturePanes = mock.fn(async (chats) => ({ [chats[0].key]: 'Error: build failed' }));
+    const obs = new Observer(cfg, { chatContext: { container: chat.container, host: chat.host } });
+    obs.openTabs = [];
+    obs.lastChats = [chat];
+
+    const result = await suggestNextActions(obs.effectiveOpenTabs(), obs.lastChats, capturePanes, cfg);
+
+    assert.ok(Array.isArray(result.suggestions), 'should produce suggestions, not the empty-tabs guard error');
+    assert.strictEqual(result.suggestions.length, 1);
+    assert.strictEqual(result.suggestions[0].agentId, 'myproject-worker');
+  });
+
+  it('restores chat context from the persisted session on resume', () => {
+    const s = createSession(null, { host: 'host1', container: 'c1', project: 'p', role: 'worker', chatKey: 'c1' });
+    try {
+      const obs = new Observer(cfg, { sid: s.id }); // resume path: sid set, no chatContext
+      assert.strictEqual(obs.boundKey, 'c1');
+      assert.strictEqual(obs.getChatContext().host, 'host1');
+      assert.strictEqual(obs.getChatContext().role, 'worker');
+    } finally {
+      deleteSession(s.id);
+    }
+  });
+
+  it('persisted session context takes precedence over a passed chatContext on resume', () => {
+    const s = createSession(null, { host: 'host1', container: 'c1', chatKey: 'c1', role: 'worker' });
+    try {
+      const obs = new Observer(cfg, { sid: s.id, chatContext: { container: 'OTHER', chatKey: 'OTHER' } });
+      assert.strictEqual(obs.boundKey, 'c1', 'the persisted context is the source of truth');
+    } finally {
+      deleteSession(s.id);
+    }
+  });
+
+  it('a legacy session without chat context resumes unbound (backward compatible)', () => {
+    const s = createSession(null); // no context
+    try {
+      const obs = new Observer(cfg, { sid: s.id });
+      assert.strictEqual(obs.boundKey, null);
+      assert.strictEqual(obs.getChatContext(), null);
+    } finally {
+      deleteSession(s.id);
+    }
   });
 });

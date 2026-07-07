@@ -60,10 +60,20 @@ export type ObserveMsg =
   | { type: 'directive_proposed'; requestId: string; container: string; host: string; role?: string; directive: string }
   | { type: 'suggestion_card'; agentId: string; agentName: string; role?: string; urgency: string; state: string; action: string }
   | { type: 'error'; error: string }
-  | { type: 'history'; name?: string; items: { role: 'user' | 'assistant' | 'tool'; text?: string; name?: string; id?: string }[] }
-  | { type: 'session_created'; sid: string; name: string };
+  | { type: 'history'; name?: string; chatContext?: ChatContextMeta; items: { role: 'user' | 'assistant' | 'tool'; text?: string; name?: string; id?: string }[] }
+  | { type: 'session_created'; sid: string; name: string; chatContext?: ChatContextMeta };
 
-export interface SessionMeta {
+// Which agent chat an observer session is bound to. Lets a resumed session
+// reconnect to its original agent (host becomes an attribute of the session).
+export interface ChatContextMeta {
+  host?: string | null;
+  container?: string | null;
+  project?: string | null;
+  role?: string | null;
+  chatKey?: string | null;
+}
+
+export interface SessionMeta extends ChatContextMeta {
   id: string;
   name: string;
   createdAt?: number;

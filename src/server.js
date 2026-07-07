@@ -191,7 +191,10 @@ app.post('/api/key', async (req, res) => {
 });
 
 app.get('/api/sessions', (_req, res) => res.json({ sessions: listSessions() }));
-app.post('/api/sessions', (req, res) => res.json(createSession(req.body?.name)));
+app.post('/api/sessions', (req, res) => {
+  const { name, host, container, project, role, chatKey } = req.body || {};
+  res.json(createSession(name, { host, container, project, role, chatKey }));
+});
 app.patch('/api/sessions/:id', (req, res) => {
   const s = renameSession(String(req.params.id), String(req.body?.name || ''));
   return s ? res.json(s) : res.status(404).json({ error: 'not found' });
@@ -673,7 +676,20 @@ wss.on('connection', (ws, req) => {
   }
   const u = new URL(req.url || '', 'http://localhost');
   let sid = u.searchParams.get('sid');
-  if (!sid) { const s = createSession(); sid = s.id; ws.send(JSON.stringify({ type: 'session_created', sid: s.id, name: s.name })); }
+  // NEW: extract chat context
+  const chatHost = u.searchParams.get('host') || null;
+  const chatContainer = u.searchParams.get('container') || null;
+  const chatProject = u.searchParams.get('project') || null;
+  const chatRole = u.searchParams.get('role') || null;
+  const chatKey = u.searchParams.get('chatKey') || null;
+  if (!sid) {
+    const s = createSession(null, { host: chatHost, container: chatContainer, project: chatProject, role: chatRole, chatKey: chatKey });
+    sid = s.id;
+    ws.send(JSON.stringify({
+      type: 'session_created', sid: s.id, name: s.name,
+      chatContext: { host: s.host, container: s.container, project: s.project, role: s.role, chatKey: s.chatKey },
+    }));
+  }
 
   let reqCounter = 0;
   const pending = new Map();
@@ -681,6 +697,11 @@ wss.on('connection', (ws, req) => {
 
   const obs = new Observer(cfg, {
     sid,
+    // Pass chat context so a freshly-created session binds to its agent; on
+    // resume the Observer re-reads it from the persisted session instead.
+    chatContext: (chatHost || chatContainer || chatProject || chatRole || chatKey)
+      ? { host: chatHost, container: chatContainer, project: chatProject, role: chatRole, chatKey: chatKey }
+      : null,
     onTool: (name, input) => send({ type: 'tool', name, input: { ...input, id: input?.id } }),
     onToolResult: (name, result) => {
       try {
@@ -722,7 +743,7 @@ wss.on('connection', (ws, req) => {
       return new Promise((resolveDecision) => pending.set(requestId, resolveDecision));
     },
   });
-  send({ type: 'history', name: obs.name, items: obs.serializeForUi() });
+  send({ type: 'history', name: obs.name, items: obs.serializeForUi(), chatContext: obs.getChatContext() });
 
   ws.on('message', async (data) => {
     let msg;

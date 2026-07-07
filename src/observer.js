@@ -254,7 +254,7 @@ export async function suggestNextActions(openTabs, lastChats, capturePanes, cfg)
 }
 
 export class Observer {
-  constructor(cfg, { sid, gate, onTool, onToolResult, onText } = {}) {
+  constructor(cfg, { sid, gate, onTool, onToolResult, onText, chatContext } = {}) {
     this.cfg = cfg;
     this.sid = sid || null;
     // gate: async (chat, directive) => { approved: boolean, edited?: string }
@@ -270,6 +270,39 @@ export class Observer {
     const existing = sid ? getSession(sid) : null;
     this.name = existing?.name || null;
     this.messages = existing?.messages || [];
+    // Chat context: which agent chat this observer session is bound to. On
+    // resume, the context persisted with the session is the source of truth
+    // (so a reconnect restores the bound agent); otherwise use the context
+    // passed at creation. This is what makes resume seamless across hosts —
+    // the observer remembers which agent it was watching.
+    this.chatContext = (existing && (existing.chatKey || existing.container || existing.host))
+      ? {
+          host: existing.host || null,
+          container: existing.container || null,
+          project: existing.project || null,
+          role: existing.role || null,
+          chatKey: existing.chatKey || null,
+        }
+      : (chatContext || null);
+  }
+
+  // The chat key (container name) this session is bound to, if any.
+  get boundKey() {
+    return this.chatContext?.container || this.chatContext?.chatKey || null;
+  }
+
+  // The open tabs plus the bound chat. The bound agent is always treated as
+  // "open" so observer tools (summarize/analyze) watch it even when its pane
+  // isn't open in the UI — the core of seamless cross-host resumption.
+  effectiveOpenTabs() {
+    const tabs = new Set(this.openTabs || []);
+    const key = this.boundKey;
+    if (key) tabs.add(key);
+    return Array.from(tabs);
+  }
+
+  getChatContext() {
+    return this.chatContext;
   }
 
   // Reconstruct a UI-visible conversation from the raw LLM message history.
@@ -317,7 +350,7 @@ export class Observer {
     if (this.onTool) this.onTool(name, input);
     if (name === 'list_chats') {
       const chats = await this._refreshChats();
-      const open = new Set(this.openTabs || []);
+      const open = new Set(this.effectiveOpenTabs());
       return chats.map((c) => ({
         id: c.container || c.session, host: c.host, project: c.project, role: c.role,
         active: c.active, status: c.status,
@@ -345,10 +378,10 @@ export class Observer {
       } catch (e) { return { error: e.message }; }
     }
     if (name === 'summarize_chats') {
-      return summarizeOpenChats(this.openTabs, this.lastChats, capturePanes, this.cfg);
+      return summarizeOpenChats(this.effectiveOpenTabs(), this.lastChats, capturePanes, this.cfg);
     }
     if (name === 'analyze_agents') {
-      const open = new Set(this.openTabs || []);
+      const open = new Set(this.effectiveOpenTabs());
       if (open.size === 0) return { error: 'no tabs are open. open some agent panes first.' };
 
       // Filter to only open tabs
@@ -413,7 +446,7 @@ export class Observer {
       }
     }
     if (name === 'suggest_next_actions') {
-      return suggestNextActions(this.openTabs, this.lastChats, capturePanes, this.cfg);
+      return suggestNextActions(this.effectiveOpenTabs(), this.lastChats, capturePanes, this.cfg);
     }
     return { error: `unknown tool ${name}` };
   }

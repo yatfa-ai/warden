@@ -21,6 +21,8 @@ export function listSessions() {
         id: j.id, name: j.name,
         createdAt: j.createdAt, updatedAt: j.updatedAt,
         messageCount: (j.messages || []).length,
+        // NEW: include chat context
+        host: j.host || null, container: j.container || null, project: j.project || null, role: j.role || null, chatKey: j.chatKey || null,
       });
     } catch { /* skip corrupt */ }
   }
@@ -32,11 +34,15 @@ export function getSession(id) {
   try { return JSON.parse(fs.readFileSync(jsonPath(id), 'utf8')); } catch { return null; }
 }
 
-export function createSession(name) {
+export function createSession(name, { host, container, project, role, chatKey } = {}) {
   ensure();
   const id = randomBytes(6).toString('hex');
   const now = Date.now();
-  const s = { id, name: name || `session ${id.slice(0, 4)}`, createdAt: now, updatedAt: now, messages: [] };
+  const s = {
+    id, name: name || `session ${id.slice(0, 4)}`, createdAt: now, updatedAt: now, messages: [],
+    // NEW: chat context metadata
+    host: host || null, container: container || null, project: project || null, role: role || null, chatKey: chatKey || null,
+  };
   fs.writeFileSync(jsonPath(id), JSON.stringify(s, null, 2));
   fs.writeFileSync(mdPath(id), `# ${s.name}\n\n`);
   return s;
@@ -68,6 +74,8 @@ export function saveMessages(id, messages, name) {
     createdAt: prev?.createdAt || now,
     updatedAt: now,
     messages,
+    // NEW: preserve chat context from previous session
+    host: prev?.host || null, container: prev?.container || null, project: prev?.project || null, role: prev?.role || null, chatKey: prev?.chatKey || null,
   };
   ensure();
   fs.writeFileSync(jsonPath(id), JSON.stringify(out, null, 2));
