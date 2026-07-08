@@ -628,6 +628,64 @@ app.post('/api/session-kill', async (req, res) => {
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// POST /api/read-file — read a file from a chat's working directory.
+// Body: { id: string, path: string }
+// Response: { content: string, path: string, error?: string }
+app.post('/api/read-file', async (req, res) => {
+  const r = await resolve(String(req.body?.id || ''));
+  if (r.error) return res.status(404).json(r);
+
+  const filePath = String(req.body?.path || '').trim();
+  if (!filePath) return res.status(400).json({ error: 'path is required' });
+
+  const chat = r.chat;
+  const cwd = chat.cwd || '.';
+
+  // Security: resolve the path and verify it's within the chat's working directory
+  // For local hosts, use path.resolve; for remote, we'll validate on the remote side
+  if (chat.host === LOCAL) {
+    const resolvedPath = path.resolve(cwd, filePath);
+    const resolvedCwd = path.resolve(cwd);
+
+    // Check if the resolved path starts with the resolved cwd (prevent path traversal)
+    if (!resolvedPath.startsWith(resolvedCwd + path.sep) && resolvedPath !== resolvedCwd) {
+      return res.status(403).json({ error: 'path must be within working directory' });
+    }
+
+    try {
+      // Check file size (limit to 1MB to prevent server issues)
+      const stats = fs.statSync(resolvedPath);
+      if (stats.size > 1024 * 1024) {
+        return res.status(413).json({ error: 'file too large (max 1MB)' });
+      }
+
+      // Read file content
+      const content = fs.readFileSync(resolvedPath, 'utf8');
+      return res.json({ content, path: filePath });
+    } catch (e) {
+      if (e.code === 'ENOENT') return res.status(404).json({ error: 'file not found' });
+      if (e.code === 'EISDIR') return res.status(400).json({ error: 'path is a directory' });
+      return res.status(500).json({ error: `read failed: ${e.message}` });
+    }
+  } else {
+    // Remote host: use SSH to read the file
+    // Build a safe command that reads the file and validates the path
+    const script = `CWD="${shellQuote(cwd)}"; FILE="${shellQuote(filePath)}"; RESOLVED="$(cd "$CWD" 2>/dev/null && realpath -m "$FILE" 2>/dev/null || echo FAILED)"; [ "$RESOLVED" = "FAILED" ] && echo "ERROR invalid path" && exit 1; RESOLVED_CWD="$(realpath -m "$CWD" 2>/dev/null || echo "$CWD")"; case "$RESOLVED" in "$RESOLVED_CWD"*) ;; *) echo "ERROR path traversal" && exit 1 ;; esac; [ -f "$RESOLVED" ] || { echo "ERROR not a file"; exit 1; }; SIZE=$(stat -c %s "$RESOLVED" 2>/dev/null || stat -f %z "$RESOLVED" 2>/dev/null); [ "$SIZE" -gt 1048576 ] && { echo "ERROR file too large"; exit 1; }; cat "$RESOLVED"`;
+
+    const result = await run(chat.host, script, { timeout: 10000 });
+    if (!result.ok) {
+      const stderr = result.stderr || '';
+      if (stderr.includes('ERROR invalid path')) return res.status(400).json({ error: 'invalid path' });
+      if (stderr.includes('ERROR path traversal')) return res.status(403).json({ error: 'path must be within working directory' });
+      if (stderr.includes('ERROR not a file')) return res.status(400).json({ error: 'not a file' });
+      if (stderr.includes('ERROR file too large')) return res.status(413).json({ error: 'file too large (max 1MB)' });
+      return res.status(500).json({ error: `read failed: ${stderr}` });
+    }
+
+    return res.json({ content: result.stdout, path: filePath });
+  }
+});
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 

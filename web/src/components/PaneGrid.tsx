@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { PaneTile } from './PaneTile';
+import { FileViewer } from './FileViewer';
 import type { Chat } from '@/lib/types';
 
 export interface OpenTile { id: string }
@@ -24,7 +25,29 @@ function colsFor(n: number) { return n <= 1 ? 1 : Math.ceil(Math.sqrt(n)); }
 
 export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onOpenChat, onForceKill, externalSearchQuery }: Props) {
   const [splitOpen, setSplitOpen] = useState(false);
+  const [fileOpen, setFileOpen] = useState(false);
+  const [filePath, setFilePath] = useState('');
+  const [fileInput, setFileInput] = useState('');
   const nameOf = (id: string) => chats.find((c) => (c.key || c.id) === id)?.name || id;
+
+  const focusedChat = focused ? chats.find((c) => (c.key || c.id) === focused) : null;
+
+  const handleOpenFile = () => {
+    if (!focusedChat || !fileInput.trim()) return;
+    setFilePath(fileInput.trim());
+    setFileOpen(true);
+  };
+
+  const handleFilePrompt = () => {
+    if (!focusedChat) return;
+    // Auto-fill with common files if cwd exists
+    const cwd = focusedChat.cwd || '.';
+    setFileInput(`${cwd}/`);
+    setFileOpen(false);
+    setSplitOpen(false); // Close split menu if open
+    // Focus on the file input (will be rendered in the dialog)
+    (document.querySelector('[data-file-input]') as HTMLInputElement)?.focus();
+  };
 
   // keyboard shortcuts: Alt+←/→ switch panes, Ctrl+W close
   useEffect(() => {
@@ -57,6 +80,9 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
       <div className="flex items-center px-3 py-2 border-b text-xs text-muted-foreground gap-2 shrink-0 relative">
         <span className="truncate">{focused ? nameOf(focused) : 'open a chat →'}</span>
         <span className="flex-1" />
+        {focusedChat && (
+          <button onClick={handleFilePrompt} className="text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded hover:bg-accent/50 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background" title="open file from chat directory">📄 file</button>
+        )}
         <button onClick={() => setSplitOpen(!splitOpen)} className="text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded hover:bg-accent/50 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background" title="split — open another chat as a pane">＋ split</button>
         {splitOpen && (
           <>
@@ -97,6 +123,40 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
           </div>
         )}
       </div>
+
+      {/* File Viewer Dialog */}
+      {focusedChat && filePath && (
+        <FileViewer
+          chatId={focusedChat.id}
+          filePath={filePath}
+          open={fileOpen}
+          onOpenChange={setFileOpen}
+        />
+      )}
+
+      {/* File Path Input Dialog */}
+      {fileInput && !fileOpen && focusedChat && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/10" onClick={() => setFileInput('')}>
+          <div className="bg-popover border rounded-lg shadow-lg p-4 w-96" onClick={(e) => e.stopPropagation()}>
+            <div className="text-sm font-medium mb-2">Open file from chat directory</div>
+            <div className="text-xs text-muted-foreground mb-3">Working directory: {focusedChat.cwd || '.'}</div>
+            <input
+              data-file-input
+              type="text"
+              value={fileInput}
+              onChange={(e) => setFileInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleOpenFile(); if (e.key === 'Escape') setFileInput(''); }}
+              placeholder="relative/path/to/file.txt"
+              className="w-full px-3 py-2 text-sm bg-muted border rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
+              autoFocus
+            />
+            <div className="flex gap-2 mt-3 justify-end">
+              <button onClick={() => setFileInput('')} className="px-3 py-1.5 text-sm rounded-md hover:bg-accent">Cancel</button>
+              <button onClick={handleOpenFile} className="px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90">Open</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
