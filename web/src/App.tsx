@@ -296,7 +296,6 @@ function App() {
         onFocusPane={handleFocusPane}
         onJumpToMatch={handleJumpToMatch}
       />
-      />
     </div>
   );
 }
