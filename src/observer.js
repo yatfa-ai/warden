@@ -231,9 +231,9 @@ export class Observer {
         const suggestions = [];
 
         // Classification patterns (regex-based, no LLM calls)
-        const STUCK_RE = /^(.+)\\1\\1/m;
+        const STUCK_RE = /^(.+)\1\1/m;
         const ERROR_RE = /error|failed|exception|traceback/i;
-        const WAITING_RE = /please|respond|continue\\?|input|press enter/i;
+        const WAITING_RE = /please|respond|continue\?|input|press enter/i;
         const BLOCKED_RE = /waiting for|blocked by|depends on/i;
 
         for (const chat of openChats) {
