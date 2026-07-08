@@ -429,7 +429,8 @@ streamWss.on('connection', (ws) => {
     try { out = await capturePanes(chats); } catch { return; }
     for (const [k, pane] of Object.entries(out)) {
       send({ type: 'snapshot', id: k, pane });
-      appendEvent({ type: 'snapshot', id: k, host: chats.find(c => c.key === k)?.host, container: chats.find(c => c.key === k)?.container });
+      // Snapshot logging disabled due to performance: 2s intervals create 300K+ events/pane/7 days
+      // appendEvent({ type: 'snapshot', id: k, host: chats.find(c => c.key === k)?.host, container: chats.find(c => c.key === k)?.container });
     }
   };
   const startMonitor = () => { if (!monitorTimer) { monitorTimer = setInterval(tickMonitor, 2000); tickMonitor(); } };

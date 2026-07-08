@@ -47,8 +47,9 @@ export function readEvents({ after, before, limit } = {}) {
       if (before && ts > before) continue;
 
       events.push(event);
-    } catch {
-      // Skip malformed lines
+    } catch (e) {
+      // Log malformed lines for debugging
+      console.warn(`[activity] Malformed line skipped: ${e.message}`);
     }
   }
 
@@ -111,15 +112,12 @@ export function getStatsSince(after) {
     attached: 0,
     ended: 0,
     error: 0,
-    snapshot: 0,
   };
 
   for (const event of events) {
     const type = event.type;
     if (stats.hasOwnProperty(type)) {
       stats[type]++;
-    } else if (type === 'directive_proposed') {
-      stats.directive_proposed++;
     }
   }
 
