@@ -81,7 +81,7 @@ export function ObserverPanel({ sessionId }: Props) {
   const onTextareaInput = (e: React.FormEvent<HTMLTextAreaElement>) => {
     const ta = e.target as HTMLTextAreaElement;
     ta.style.height = 'auto';
-    ta.style.height = Math.min(ta.scrollHeight, 128) + 'px';
+    ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
   };
   const decide = (requestId: string, approved: boolean, edited?: string) => {
     wsRef.current?.send(JSON.stringify({ type: 'gate_decision', requestId, approved, edited }));
