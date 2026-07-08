@@ -1,254 +1,235 @@
-import { describe, it, mock } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { checkHost } from './hostStatus.js';
 
 /**
- * Unit tests for /api/hosts/status endpoint logic
+ * Tests for the /api/hosts/status feature.
  *
- * These tests verify the core logic of the hosts status endpoint without
- * requiring a full server to be running. The endpoint logic:
- * 1. Checks each configured host using validateHost()
- * 2. Returns structured status with online/offline, latency_ms, and error details
- * 3. Handles both local and remote hosts
- * 4. Provides graceful degradation for failures
+ * These tests exercise REAL production code — they do not re-implement the
+ * endpoint logic. Two layers are covered:
+ *
+ *   1. Unit tests of the real `checkHost` transformation (src/hostStatus.js) —
+ *      the per-host logic the endpoint delegates to. `validateHost` is stubbed
+ *      per-case so every outcome (online / offline / throw) is deterministic
+ *      with no SSH. Crucially, these assert against checkHost's actual return
+ *      value, so they FAIL if the status ternary is inverted or a field is
+ *      dropped — unlike the previous (tautological) suite which re-derived the
+ *      expected value from a local copy of the same logic.
+ *
+ *   2. An HTTP integration test of the real Express app (src/server.js): it
+ *      boots the actual route on an ephemeral port (validateHost left real, so
+ *      the local host is probed with no SSH) and asserts on the wire response —
+ *      the { hosts: [...] } envelope, the [LOCAL, ...cfg.hosts] composition,
+ *      the online local host, and that only GET is served.
+ *
+ * The online/offline/throw branching is covered by the unit tests (validateHost
+ * is injectable there). Mocking validateHost at the HTTP/module boundary would
+ * need node:test's `mock.module`, which is unavailable on this repo's Node 20
+ * runtime, so the split keeps coverage real without that dependency.
  */
 
-describe('/api/hosts/status endpoint logic', () => {
-  describe('status calculation logic', () => {
-    it('should set status to online when validateHost returns ok:true', () => {
-      const mockResult = { ok: true, error: null };
-      const start = Date.now();
+function assertValidIso(value, label = 'last_check') {
+  assert.strictEqual(typeof value, 'string', `${label} should be a string`);
+  const parsed = new Date(value);
+  assert.ok(!Number.isNaN(parsed.getTime()), `${label} should be a valid ISO timestamp, got: ${value}`);
+}
 
-      const status = mockResult.ok ? 'online' : 'offline';
-      const latency_ms = mockResult.ok ? Date.now() - start : null;
+describe('checkHost — real transformation logic (stubbed validateHost)', () => {
+  describe('online host (validateHost resolves ok:true)', () => {
+    it('sets status "online" with a numeric latency_ms and no error', async () => {
+      const validateHost = async () => ({ ok: true });
+      const result = await checkHost('a-host', validateHost, {});
 
-      assert.strictEqual(status, 'online', 'Should be online when validateHost succeeds');
-      assert.ok(typeof latency_ms === 'number', 'Should include latency for online hosts');
-      assert.ok(latency_ms >= 0, 'Latency should be non-negative');
+      assert.strictEqual(result.host, 'a-host');
+      assert.strictEqual(result.status, 'online');
+      assert.strictEqual(typeof result.latency_ms, 'number', 'online latency_ms must be a number');
+      assert.ok(result.latency_ms >= 0, 'online latency_ms must be non-negative');
+      assert.strictEqual(result.error, undefined, 'online result must not carry an error');
+      assertValidIso(result.last_check);
     });
 
-    it('should set status to offline when validateHost returns ok:false', () => {
-      const mockResult = { ok: false, error: 'SSH connection failed' };
-      const start = Date.now();
-
-      const status = mockResult.ok ? 'online' : 'offline';
-      const latency_ms = mockResult.ok ? Date.now() - start : null;
-
-      assert.strictEqual(status, 'offline', 'Should be offline when validateHost fails');
-      assert.strictEqual(latency_ms, null, 'Should not include latency for offline hosts');
-    });
-
-    it('should include error message when validation fails', () => {
-      const mockResult = { ok: false, error: 'SSH connection failed' };
-      const error = mockResult.error;
-
-      assert.ok(error, 'Should include error message');
-      assert.strictEqual(typeof error, 'string', 'Error should be string');
-      assert.ok(error.length > 0, 'Error should not be empty');
-    });
-
-    it('should handle exceptions gracefully', () => {
-      const exception = new Error('Network timeout');
-
-      const status = 'offline';
-      const error = exception.message;
-      const latency_ms = null;
-
-      assert.strictEqual(status, 'offline', 'Should be offline on exception');
-      assert.strictEqual(latency_ms, null, 'Should not include latency on exception');
-      assert.strictEqual(error, 'Network timeout', 'Should include exception message');
-    });
-  });
-
-  describe('response structure', () => {
-    it('should include all required fields for online hosts', () => {
-      const host = 'test-host';
-      const validateResult = { ok: true, error: null };
-      const start = Date.now();
-
-      const result = {
-        host,
-        status: validateResult.ok ? 'online' : 'offline',
-        latency_ms: validateResult.ok ? Date.now() - start : null,
-        error: validateResult.error,
-        last_check: new Date().toISOString()
+    it('measures latency from the actual validateHost duration', async () => {
+      const validateHost = async () => {
+        await new Promise((r) => setTimeout(r, 60));
+        return { ok: true };
       };
+      const result = await checkHost('slow-host', validateHost, {});
 
-      assert.strictEqual(result.host, host, 'Should include host field');
-      assert.strictEqual(result.status, 'online', 'Should include status field');
-      assert.ok(typeof result.latency_ms === 'number', 'Should include latency_ms for online');
-      assert.strictEqual(result.error, null, 'Error should be null for successful validation');
-      assert.ok(typeof result.last_check === 'string', 'Should include timestamp');
+      assert.strictEqual(result.status, 'online');
+      assert.ok(result.latency_ms >= 50, `latency_ms (${result.latency_ms}) should reflect the ~60ms probe`);
+    });
+  });
+
+  describe('offline host (validateHost resolves ok:false)', () => {
+    it('sets status "offline", null latency_ms, and surfaces the error', async () => {
+      const validateHost = async () => ({ ok: false, error: 'SSH connection refused' });
+      const result = await checkHost('bad-host', validateHost, {});
+
+      assert.strictEqual(result.host, 'bad-host');
+      assert.strictEqual(result.status, 'offline');
+      assert.strictEqual(result.latency_ms, null, 'offline latency_ms must be null');
+      assert.strictEqual(result.error, 'SSH connection refused', 'offline error must come from validateHost');
+      assertValidIso(result.last_check);
     });
 
-    it('should include all required fields for offline hosts', () => {
-      const host = 'offline-host';
-      const validateResult = { ok: false, error: 'SSH failed' };
-      const start = Date.now();
+    it('preserves a descriptive error verbatim', async () => {
+      const message = 'Permission denied (publickey)';
+      const validateHost = async () => ({ ok: false, error: message });
+      const result = await checkHost('auth-host', validateHost, {});
 
-      const result = {
-        host,
-        status: validateResult.ok ? 'online' : 'offline',
-        latency_ms: validateResult.ok ? Date.now() - start : null,
-        error: validateResult.error,
-        last_check: new Date().toISOString()
+      assert.strictEqual(result.error, message);
+    });
+  });
+
+  describe('throwing host (validateHost rejects)', () => {
+    it('sets status "offline", null latency_ms, and error = exception message', async () => {
+      const validateHost = async () => { throw new Error('Network timeout'); };
+      const result = await checkHost('throwing-host', validateHost, {});
+
+      assert.strictEqual(result.status, 'offline');
+      assert.strictEqual(result.latency_ms, null);
+      assert.strictEqual(result.error, 'Network timeout');
+      assertValidIso(result.last_check);
+    });
+  });
+
+  describe('validateHost contract', () => {
+    it('passes host and cfg through to validateHost', async () => {
+      let received = null;
+      const validateHost = async (host, cfg) => {
+        received = { host, cfg };
+        return { ok: true };
       };
+      const cfg = { tmuxSession: 'agent', hosts: ['x'] };
+      await checkHost('h', validateHost, cfg);
 
-      assert.strictEqual(result.host, host, 'Should include host field');
-      assert.strictEqual(result.status, 'offline', 'Should include offline status');
-      assert.strictEqual(result.latency_ms, null, 'Latency should be null for offline');
-      assert.strictEqual(result.error, 'SSH failed', 'Should include error message');
-      assert.ok(typeof result.last_check === 'string', 'Should include timestamp');
-    });
-
-    it('should generate valid ISO timestamp for last_check', () => {
-      const last_check = new Date().toISOString();
-      const date = new Date(last_check);
-
-      assert.ok(!isNaN(date.getTime()), 'last_check should be valid ISO date');
-      assert.strictEqual(typeof last_check, 'string', 'last_check should be string');
+      assert.deepStrictEqual(received, { host: 'h', cfg });
     });
   });
+});
 
-  describe('host type handling', () => {
-    it('should treat local host (local) specially', () => {
-      const LOCAL = '(local)';
-      const hosts = [LOCAL, 'remote-host'];
+describe('checkHost — endpoint composition (Promise.all over hosts)', () => {
+  it('returns one result per host, preserving order and per-host status', async () => {
+    const hosts = ['(local)', 'online-1', 'offline-1', 'online-2'];
+    const validateHost = async (host) =>
+      host === 'offline-1' ? { ok: false, error: 'down' } : { ok: true };
 
-      assert.ok(hosts.includes(LOCAL), 'Should include local host in host list');
-      assert.strictEqual(LOCAL, '(local)', 'Local host identifier should be (local)');
-    });
+    const results = await Promise.all(hosts.map((h) => checkHost(h, validateHost, {})));
 
-    it('should include all configured hosts plus local', () => {
-      const LOCAL = '(local)';
-      const configuredHosts = ['host1', 'host2'];
-      const hosts = [LOCAL, ...configuredHosts];
-
-      assert.strictEqual(hosts.length, 3, 'Should have local + 2 configured hosts');
-      assert.ok(hosts.includes('(local)'), 'Should include local host');
-      assert.ok(hosts.includes('host1'), 'Should include first configured host');
-      assert.ok(hosts.includes('host2'), 'Should include second configured host');
-    });
+    assert.strictEqual(results.length, hosts.length);
+    assert.deepStrictEqual(
+      results.map((r) => r.host),
+      hosts,
+      'order must match the input host list',
+    );
+    assert.strictEqual(results[0].status, 'online');
+    assert.strictEqual(results[1].status, 'online');
+    assert.strictEqual(results[2].status, 'offline');
+    assert.strictEqual(results[2].error, 'down');
+    assert.strictEqual(results[3].status, 'online');
   });
 
-  describe('Promise.all parallel execution', () => {
-    it('should process all hosts in parallel', async () => {
-      const hosts = ['host1', 'host2', 'host3'];
-      const validateHostMock = mock.fn((host) => {
-        return Promise.resolve({ ok: true, error: null });
-      });
+  it('runs host checks concurrently (the endpoint relies on Promise.all parallelism)', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const validateHost = async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((r) => setTimeout(r, 30));
+      active -= 1;
+      return { ok: true };
+    };
+    const hosts = ['h1', 'h2', 'h3', 'h4'];
 
-      const start = Date.now();
-      const results = await Promise.all(
-        hosts.map(async (host) => {
-          const start = Date.now();
-          try {
-            const result = await validateHostMock(host);
-            return {
-              host,
-              status: result.ok ? 'online' : 'offline',
-              latency_ms: result.ok ? Date.now() - start : null,
-              error: result.error,
-              last_check: new Date().toISOString()
-            };
-          } catch (e) {
-            return {
-              host,
-              status: 'offline',
-              latency_ms: null,
-              error: e.message,
-              last_check: new Date().toISOString()
-            };
-          }
-        })
-      );
-      const duration = Date.now() - start;
+    await Promise.all(hosts.map((h) => checkHost(h, validateHost, {})));
 
-      assert.strictEqual(results.length, 3, 'Should return result for each host');
-      assert.strictEqual(validateHostMock.mock.callCount(), 3, 'Should call validateHost for each host');
-      assert.ok(duration < 100, 'Parallel execution should be fast');
-    });
-
-    it('should continue even if some hosts fail', async () => {
-      const hosts = ['good-host', 'bad-host', 'good-host-2'];
-      const validateHostMock = mock.fn((host) => {
-        if (host === 'bad-host') {
-          return Promise.resolve({ ok: false, error: 'Connection failed' });
-        }
-        return Promise.resolve({ ok: true, error: null });
-      });
-
-      const results = await Promise.all(
-        hosts.map(async (host) => {
-          const start = Date.now();
-          try {
-            const result = await validateHostMock(host);
-            return {
-              host,
-              status: result.ok ? 'online' : 'offline',
-              latency_ms: result.ok ? Date.now() - start : null,
-              error: result.error,
-              last_check: new Date().toISOString()
-            };
-          } catch (e) {
-            return {
-              host,
-              status: 'offline',
-              latency_ms: null,
-              error: e.message,
-              last_check: new Date().toISOString()
-            };
-          }
-        })
-      );
-
-      assert.strictEqual(results.length, 3, 'Should still return all host results');
-      assert.strictEqual(results[0].status, 'online', 'First host should be online');
-      assert.strictEqual(results[1].status, 'offline', 'Second host should be offline');
-      assert.strictEqual(results[2].status, 'online', 'Third host should be online');
-    });
+    assert.ok(maxActive > 1, `checks should overlap in parallel; observed maxActive=${maxActive}`);
   });
 
-  describe('edge cases', () => {
-    it('should handle empty host list', async () => {
-      const hosts = [];
-      const results = await Promise.all(hosts.map(async () => ({})));
+  it('a single throwing host does not abort the batch', async () => {
+    const hosts = ['ok-host', 'boom', 'ok-host-2'];
+    const validateHost = async (host) => {
+      if (host === 'boom') throw new Error('kaboom');
+      return { ok: true };
+    };
 
-      assert.strictEqual(results.length, 0, 'Should return empty array for no hosts');
+    const results = await Promise.all(hosts.map((h) => checkHost(h, validateHost, {})));
+
+    assert.strictEqual(results.length, 3);
+    assert.strictEqual(results[0].status, 'online');
+    assert.strictEqual(results[1].status, 'offline');
+    assert.strictEqual(results[1].error, 'kaboom');
+    assert.strictEqual(results[2].status, 'online');
+  });
+});
+
+describe('/api/hosts/status HTTP endpoint (real Express app from server.js)', () => {
+  let httpServer;
+  let baseUrl;
+  let originalHome;
+  let tempHome;
+
+  // Boot the real app on an ephemeral port. We point HOME at a throwaway dir
+  // whose config has no remote hosts, so the endpoint only probes '(local)' —
+  // validateHost('(local)') returns ok:true with no SSH, keeping this fast and
+  // deterministic regardless of the host machine's real config.
+  before(async () => {
+    originalHome = process.env.HOME;
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-hosts-status-'));
+    process.env.HOME = tempHome;
+    const wardenDir = path.join(tempHome, '.yatfa-warden');
+    fs.mkdirSync(wardenDir, { recursive: true });
+    fs.writeFileSync(path.join(wardenDir, 'config.json'), JSON.stringify({ hosts: [] }));
+
+    const { app } = await import('./server.js');
+    httpServer = app.listen(0, '127.0.0.1');
+    await new Promise((resolve, reject) => {
+      httpServer.once('listening', resolve);
+      httpServer.once('error', reject);
     });
+    baseUrl = `http://127.0.0.1:${httpServer.address().port}`;
+  });
 
-    it('should handle validateHost throwing exceptions', async () => {
-      const hosts = ['throwing-host'];
-      const validateHostMock = mock.fn(() => {
-        throw new Error('Unexpected error');
-      });
+  after(async () => {
+    if (httpServer) await new Promise((r) => httpServer.close(r));
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
 
-      const results = await Promise.all(
-        hosts.map(async (host) => {
-          const start = Date.now();
-          try {
-            const result = await validateHostMock();
-            return {
-              host,
-              status: result.ok ? 'online' : 'offline',
-              latency_ms: result.ok ? Date.now() - start : null,
-              error: result.error,
-              last_check: new Date().toISOString()
-            };
-          } catch (e) {
-            return {
-              host,
-              status: 'offline',
-              latency_ms: null,
-              error: e.message,
-              last_check: new Date().toISOString()
-            };
-          }
-        })
-      );
+  it('responds to GET with 200 + JSON { hosts: [...] } envelope', async () => {
+    const res = await fetch(`${baseUrl}/api/hosts/status`);
 
-      assert.strictEqual(results.length, 1, 'Should return result for throwing host');
-      assert.strictEqual(results[0].status, 'offline', 'Should be offline on exception');
-      assert.strictEqual(results[0].error, 'Unexpected error', 'Should capture exception message');
-    });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.headers.get('content-type'), 'application/json; charset=utf-8');
+    const body = await res.json();
+    assert.ok(Array.isArray(body.hosts), 'response body must be { hosts: [...] }');
+  });
+
+  it('always includes the (local) host first and reports it online', async () => {
+    const body = await (await fetch(`${baseUrl}/api/hosts/status`)).json();
+
+    assert.ok(body.hosts.length >= 1);
+    const local = body.hosts.find((h) => h.host === '(local)');
+    assert.ok(local, 'must include the (local) host');
+    assert.strictEqual(local.status, 'online');
+    assert.strictEqual(typeof local.latency_ms, 'number');
+    assertValidIso(local.last_check);
+  });
+
+  it('with empty cfg.hosts, returns exactly the one local host (proves [LOCAL, ...cfg.hosts])', async () => {
+    const body = await (await fetch(`${baseUrl}/api/hosts/status`)).json();
+
+    assert.strictEqual(body.hosts.length, 1, 'empty config must yield only the (local) host');
+    assert.strictEqual(body.hosts[0].host, '(local)');
+  });
+
+  it('only serves GET (POST is not handled → 404)', async () => {
+    const res = await fetch(`${baseUrl}/api/hosts/status`, { method: 'POST' });
+
+    assert.strictEqual(res.status, 404);
   });
 });

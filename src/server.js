@@ -20,6 +20,7 @@ import { hasCredentials, resolveModel } from './llm.js';
 import { listSessions, createSession, renameSession, deleteSession } from './sessions.js';
 import { appendEvent, rotateEvents, readEvents, getStatsSince } from './activity.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
+import { checkHost } from './hostStatus.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = load();
@@ -195,27 +196,7 @@ app.get('/api/hosts/health', async (req, res) => {
 app.get('/api/hosts/status', async (_req, res) => {
   const hosts = [LOCAL, ...cfg.hosts];
   const results = await Promise.all(
-    hosts.map(async (host) => {
-      const start = Date.now();
-      try {
-        const result = await validateHost(host, cfg);
-        return {
-          host,
-          status: result.ok ? 'online' : 'offline',
-          latency_ms: result.ok ? Date.now() - start : null,
-          error: result.error,
-          last_check: new Date().toISOString()
-        };
-      } catch (e) {
-        return {
-          host,
-          status: 'offline',
-          latency_ms: null,
-          error: e.message,
-          last_check: new Date().toISOString()
-        };
-      }
-    })
+    hosts.map((host) => checkHost(host, validateHost, cfg))
   );
   res.json({ hosts: results });
 });
@@ -770,6 +751,11 @@ streamWss.on('connection', (ws) => {
 
 // Rotate old activity events on startup
 try { rotateEvents(); } catch { /* ignore */ }
+
+// Exported for HTTP-level integration tests (see src/server-hosts-status.test.js).
+// Not used by the running server — startServer() below drives the module-level
+// `server` directly.
+export { app };
 
 export function startServer(port = 7421, host = '127.0.0.1') {
   server.on('error', (e) => {
