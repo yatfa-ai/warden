@@ -8,6 +8,8 @@ export interface UiState {
   hiddenTabs: string[];
   openPanes: string[];
   focused: string | null;
+  sidebarCollapsed: boolean;
+  observerCollapsed: boolean;
 }
 
 export function loadUi(): UiState {
@@ -19,10 +21,12 @@ export function loadUi(): UiState {
         hiddenTabs: Array.isArray(v.hiddenTabs) ? v.hiddenTabs : [],
         openPanes: Array.isArray(v.openPanes) ? v.openPanes.map((t: any) => typeof t === 'string' ? t : t.id) : [],
         focused: v.focused ?? null,
+        sidebarCollapsed: v.sidebarCollapsed ?? false,
+        observerCollapsed: v.observerCollapsed ?? false,
       };
     }
   } catch { /* ignore */ }
-  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null };
+  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false };
 }
 
 export function saveUi(s: UiState) {

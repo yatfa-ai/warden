@@ -184,7 +184,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                 onDragEnd={() => { if (dragIdx !== null && dragOverIdx !== null && dragIdx !== dragOverIdx) onReorder(dragIdx, dragOverIdx); setDragIdx(null); setDragOverIdx(null); }}
                 onDrop={(e) => { e.preventDefault(); if (dragIdx !== null && idx !== dragIdx) onReorder(dragIdx, idx); setDragIdx(null); setDragOverIdx(null); }}
                 onClick={() => onOpenChat(id)}
-                className={`group flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent cursor-pointer ${dead ? 'opacity-50' : ''} ${dragOverIdx === idx && dragIdx !== null ? 'border-t-2 border-primary' : ''}`}>
+                className={`group flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent cursor-pointer ${dead ? 'opacity-50' : ''} ${dragIdx === idx ? 'opacity-40' : ''} ${dragOverIdx === idx && dragIdx !== null ? 'border-t-2 border-primary' : ''}`}>
                 <span className="text-muted-foreground/40 cursor-grab active:cursor-grabbing select-none">⠿</span>
                 <span className={`size-2 rounded-full shrink-0 ${dead ? 'bg-red-500' : isOpen ? 'bg-green-500' : 'bg-muted-foreground/40'}`} />
                 <span className={`truncate flex-1 ${dead ? 'line-through text-muted-foreground' : ''}`}>{c?.name || id}</span>
@@ -215,8 +215,19 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       </ScrollArea>
       {ctx && createPortal(
         <>
-          <div style={{ position: 'fixed', inset: 0, zIndex: 9998 }} onClick={() => setCtx(null)} onContextMenu={(e) => { e.preventDefault(); setCtx(null); }} />
-          <div style={{ position: 'fixed', left: ctx.x, top: ctx.y, zIndex: 9999, minWidth: '10rem', background: 'var(--popover, #1c232c)', border: '1px solid var(--border, #2a313a)', borderRadius: '6px', boxShadow: '0 4px 12px rgba(0,0,0,0.4)', padding: '4px 0' }}>
+          <div style={{ position: 'fixed', inset: 0, zIndex: 9998 }} onClick={() => setCtx(null)} onContextMenu={(e) => { e.preventDefault(); setCtx(null); }} onKeyDown={(e) => { if (e.key === 'Escape') setCtx(null); }} tabIndex={0} />
+          <div style={{
+            position: 'fixed',
+            left: Math.min(ctx.x, window.innerWidth - 180),
+            top: Math.min(ctx.y, window.innerHeight - 160),
+            zIndex: 9999,
+            minWidth: '10rem',
+            background: 'var(--popover, #1c232c)',
+            border: '1px solid var(--border, #2a313a)',
+            borderRadius: '6px',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+            padding: '4px 0'
+          }}>
             <CtxItem label="Open" onClick={() => { onOpenChat(ctx.id); setCtx(null); }} />
             {!ctx.dead && <CtxItem label="Hide" onClick={() => { onHideTab(ctx.id); setCtx(null); }} />}
             {!ctx.dead && <CtxItem label="Kill session" onClick={() => { onKill(ctx.id); setCtx(null); }} />}

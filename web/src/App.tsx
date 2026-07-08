@@ -20,6 +20,10 @@ function App() {
   const focusedRef = useRef(focused);
   focusedRef.current = focused;
 
+  const uiState = loadUi();
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(uiState.sidebarCollapsed);
+  const [observerCollapsed, setObserverCollapsed] = useState(uiState.observerCollapsed);
+
   useEffect(() => {
     streamApi.onOpen = () => setStreamConn(true);
     streamApi.onClose = () => setStreamConn(false);
@@ -38,7 +42,7 @@ function App() {
     if (focused) setNewActivity((prev) => { if (!prev.has(focused)) return prev; const n = new Set(prev); n.delete(focused); return n; });
   }, [focused]);
 
-  useEffect(() => { saveUi({ activeTabs, hiddenTabs, openPanes, focused }); }, [activeTabs, hiddenTabs, openPanes, focused]);
+  useEffect(() => { saveUi({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed }); }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -114,9 +118,6 @@ function App() {
 
   const openPaneSet = new Set(openPanes);
   const tiles = openPanes.map((id) => ({ id }));
-
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [observerCollapsed, setObserverCollapsed] = useState(false);
 
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">
