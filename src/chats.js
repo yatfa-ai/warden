@@ -33,6 +33,9 @@ export async function discover(host, cfg) {
   }
   const session = cfg.tmuxSession || 'agent';
   const chats = [];
+  const activeAgents = [];
+
+  // First pass: parse all agents and collect active ones
   for (const line of res.stdout.split('\n')) {
     if (!line.trim()) continue;
     const parts = line.split('\t');
@@ -42,34 +45,43 @@ export async function discover(host, cfg) {
     const active = parts[parts.length - 1] === '1';
     const { project, role } = parseContainerName(name);
 
-    // Capture last activity timestamp from tmux pane
-    let lastActivity = null;
-    if (active) {
-      try {
-        const activityRes = await run(host, `docker exec ${name} tmux capture-pane -t ${session} -p -S - -E - 2>/dev/null | head -1`, { timeout: 8000 });
-        if (activityRes.ok && activityRes.stdout.trim()) {
-          // Try to extract timestamp from common Claude agent output formats
-          // Many agents output timestamps like "[2025-01-07 14:32:15]" or similar
-          const timestampMatch = activityRes.stdout.match(/\[?(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2})\]?/);
-          if (timestampMatch) {
-            const date = new Date(timestampMatch[1]);
-            if (!isNaN(date.getTime())) {
-              lastActivity = date.getTime();
-            }
-          }
-        }
-      } catch (e) {
-        // If timestamp capture fails, continue without it
-      }
-    }
-
-    chats.push({
+    const chat = {
       id: `${host}:${name}`, key: name, kind: 'yatfa',
       host, container: name, session,
       project, role, isAgent: ROLES.has(role), active, status,
-      lastActivity, // Add last activity timestamp
-    });
+      lastActivity: null,
+    };
+
+    chats.push(chat);
+    if (active) {
+      activeAgents.push(chat);
+    }
   }
+
+  // Second pass: capture activity timestamps concurrently for all active agents
+  if (activeAgents.length > 0) {
+    const activityResults = await Promise.all(
+      activeAgents.map(chat =>
+        run(host, `docker exec ${chat.container} tmux capture-pane -t ${session} -p -S - -E - 2>/dev/null | head -1`, { timeout: 1000 })
+          .then(activityRes => {
+            if (activityRes.ok && activityRes.stdout.trim()) {
+              const timestampMatch = activityRes.stdout.match(/\[?(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2})\]?/);
+              if (timestampMatch) {
+                const date = new Date(timestampMatch[1]);
+                if (!isNaN(date.getTime())) {
+                  chat.lastActivity = date.getTime();
+                }
+              }
+            }
+            return chat;
+          })
+          .catch(err => {
+            console.warn(`Failed to capture activity for ${chat.container}:`, err instanceof Error ? err.message : String(err));
+            return chat;
+          })
+    );
+  }
+
   chats.sort((a, b) => (b.active - a.active) || a.key.localeCompare(b.key));
   return { host, ok: true, chats };
 }
@@ -86,32 +98,34 @@ async function discoverManual(host, entries, cfg) {
       if (m) activeMap[m[2]] = m[1] === '1';
     }
   }
-  const result = [];
-  for (const e of entries) {
-    const active = !!activeMap[e.session];
-    let lastActivity = null;
 
-    // Capture last activity timestamp for active sessions
-    if (active) {
-      try {
-        const activityRes = await run(host, `tmux capture-pane -t ${e.session} -p -S - -E - 2>/dev/null | head -1`, { timeout: 8000 });
-        if (activityRes.ok && activityRes.stdout.trim()) {
-          // Try to extract timestamp from common output formats
-          const timestampMatch = activityRes.stdout.match(/\[?(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2})\]?/);
-          if (timestampMatch) {
-            const date = new Date(timestampMatch[1]);
-            if (!isNaN(date.getTime())) {
-              lastActivity = date.getTime();
+  // First pass: create result objects and identify active sessions
+  const result = entries.map(e => ({ ...e, active: !!activeMap[e.session], lastActivity: null }));
+  const activeEntries = result.filter(e => e.active);
+
+  // Second pass: capture activity timestamps concurrently for all active sessions
+  if (activeEntries.length > 0) {
+    await Promise.all(
+      activeEntries.map(entry =>
+        run(host, `tmux capture-pane -t ${entry.session} -p -S - -E - 2>/dev/null | head -1`, { timeout: 1000 })
+          .then(activityRes => {
+            if (activityRes.ok && activityRes.stdout.trim()) {
+              const timestampMatch = activityRes.stdout.match(/\[?(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2})\]?/);
+              if (timestampMatch) {
+                const date = new Date(timestampMatch[1]);
+                if (!isNaN(date.getTime())) {
+                  entry.lastActivity = date.getTime();
+                }
+              }
             }
-          }
-        }
-      } catch (e) {
-        // If timestamp capture fails, continue without it
-      }
-    }
-
-    result.push({ ...e, active, lastActivity });
+          })
+          .catch(err => {
+            console.warn(`Failed to capture activity for ${entry.session}:`, err instanceof Error ? err.message : String(err));
+          })
+      )
+    );
   }
+
   return result;
 }
 
@@ -130,35 +144,42 @@ export async function discoverAll(hosts, cfg) {
       const actives = host === LOCAL
         ? entries.map((e) => ({ e, active: runLocalTmux(['has-session', '-t', e.session]).ok }))
         : (await discoverManual(host, entries, cfg)).map((e) => ({ e, active: e.active }));
-      for (const { e, active } of actives) {
-        // Capture last activity timestamp for local sessions
-        let lastActivity = null;
-        if (active) {
-          try {
-            const activityRes = runLocalTmux(['capture-pane', '-t', e.session, '-p', '-S', '-', '-E', '-']);
-            if (activityRes.ok && activityRes.stdout.trim()) {
-              const timestampMatch = activityRes.stdout.match(/\[?(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2})\]?/);
-              if (timestampMatch) {
-                const date = new Date(timestampMatch[1]);
-                if (!isNaN(date.getTime())) {
-                  lastActivity = date.getTime();
-                }
-              }
-            }
-          } catch (e) {
-            // If timestamp capture fails, continue without it
-          }
-        }
 
-        all.push({
-          id: `${host}:${e.session}`, key: e.session, kind: 'tmux',
-          host, container: null, session: e.session,
-          project: host === LOCAL ? 'local' : 'manual', role: 'claude', name: e.name || e.session,
-          cwd: e.cwd, cmd: e.cmd,
-          active, status: active ? 'running' : 'idle',
-          lastActivity, // Add last activity timestamp
-        });
+      // Create result objects first
+      const resultObjects = actives.map(({ e, active }) => ({
+        id: `${host}:${e.session}`, key: e.session, kind: 'tmux',
+        host, container: null, session: e.session,
+        project: host === LOCAL ? 'local' : 'manual', role: 'claude', name: e.name || e.session,
+        cwd: e.cwd, cmd: e.cmd,
+        active, status: active ? 'running' : 'idle',
+        lastActivity: null,
+      }));
+
+      // Capture activity timestamps concurrently for active local sessions
+      const activeLocalSessions = resultObjects.filter(obj => obj.active && host === LOCAL);
+      if (activeLocalSessions.length > 0) {
+        await Promise.all(
+          activeLocalSessions.map(obj =>
+            Promise.resolve(runLocalTmux(['capture-pane', '-t', obj.session, '-p', '-S', '-', '-E', '-']))
+              .then(activityRes => {
+                if (activityRes.ok && activityRes.stdout.trim()) {
+                  const timestampMatch = activityRes.stdout.match(/\[?(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2})\]?/);
+                  if (timestampMatch) {
+                    const date = new Date(timestampMatch[1]);
+                    if (!isNaN(date.getTime())) {
+                      obj.lastActivity = date.getTime();
+                    }
+                  }
+                }
+              })
+              .catch(err => {
+                console.warn(`Failed to capture activity for local session ${obj.session}:`, err instanceof Error ? err.message : String(err));
+              })
+          )
+        );
       }
+
+      all.push(...resultObjects);
     }));
   }
 

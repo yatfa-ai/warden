@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { HealthBadge } from './HealthBadge';
 import type { HealthData } from '@/lib/types';
-import { getHealthBgColor } from '@/lib/healthUtils';
+import { getHealthBgColor, HealthState } from '@/lib/healthUtils';
+import type { HealthStateValue } from '@/lib/healthUtils';
 
 interface Props {
   onOpenChat: (id: string) => void;
@@ -25,6 +26,20 @@ function ago(ms: number) {
   if (s < 3600) return `${Math.floor(s / 60)}m`;
   if (s < 86400) return `${Math.floor(s / 3600)}h`;
   return `${Math.floor(s / 86400)}d`;
+}
+
+// Safely normalize health state to a valid HealthStateValue
+function normalizeHealthState(state: string | undefined): HealthStateValue {
+  if (!state) return HealthState.UNKNOWN;
+  // Check if the state is a valid HealthStateValue
+  const validStates: Record<string, HealthStateValue> = {
+    healthy: HealthState.HEALTHY,
+    warning: HealthState.WARNING,
+    critical: HealthState.CRITICAL,
+    idle: HealthState.IDLE,
+    unknown: HealthState.UNKNOWN
+  };
+  return validStates[state.toLowerCase()] ?? HealthState.UNKNOWN;
 }
 
 export function HealthDashboard({ onOpenChat, onClose }: Props) {
@@ -125,7 +140,7 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
                         className="flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent transition-colors"
                       >
                         {/* Status Indicator */}
-                        <span className={`size-2 rounded-full shrink-0 ${getHealthBgColor((agent.healthState || 'unknown') as any)}`} />
+                        <span className={`size-2 rounded-full shrink-0 ${getHealthBgColor(normalizeHealthState(agent.healthState))}`} />
 
                         {/* Agent Name */}
                         <span className="truncate flex-1">
@@ -155,7 +170,7 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
 
                         {/* Health Badge */}
                         {agent.healthState && (
-                          <HealthBadge state={agent.healthState as any} showLabel={false} size="sm" />
+                          <HealthBadge state={normalizeHealthState(agent.healthState)} showLabel={false} size="sm" />
                         )}
                       </button>
                     ))}
@@ -163,13 +178,6 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
                 </div>
               );
             })}
-
-            {/* Empty State */}
-            {healthData.summary.total === 0 && (
-              <div className="px-2 py-4 text-center text-xs text-muted-foreground">
-                No agents detected
-              </div>
-            )}
           </div>
         </ScrollArea>
       )}
