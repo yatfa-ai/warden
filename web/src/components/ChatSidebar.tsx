@@ -29,6 +29,7 @@ interface Props {
   onRename: (session: string, kind: string, name: string) => void;
   onResume: (id: string, description: string, cwd: string, host: string) => void;
   onRefresh: () => void;
+  onDiscoverHost: (host: string) => void;
   loading: boolean;
 }
 
@@ -77,7 +78,7 @@ function SessionRowSkeleton() {
   );
 }
 
-export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, loading }: Props) {
+export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
   const [showAllChats, setShowAllChats] = useState(false);
@@ -158,7 +159,6 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     } catch { /* noop */ }
     setLoadingAllSessions(false);
   };
-
   const enterHost = (host: string) => {
     const status = hostStatuses[host];
     if (status?.status === 'offline') {
@@ -171,6 +171,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     }
     setView({ kind: 'host', host });
     fetchHostSessions(host);
+    onDiscoverHost(host);
   };
 
   // Collections management

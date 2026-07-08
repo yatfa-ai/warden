@@ -11,7 +11,7 @@ export interface Chat {
   cwd?: string;
   cmd?: string;
   isAgent?: boolean;
-  active?: boolean;
+  active?: boolean | null;  // null = undiscovered (lazy mode, before host is clicked)
   status?: string;
   lastActivity?: number;  // Timestamp of last activity (ms since epoch)
   healthState?: string;  // Health state (healthy, warning, critical, idle, unknown)
@@ -47,7 +47,7 @@ export type StreamMsg =
 export type StreamReq =
   | { type: 'monitor'; id: string }
   | { type: 'unmonitor'; id: string }
-  | { type: 'attach'; id: string; cols: number; rows: number }
+  | { type: 'attach'; id: string; cols: number; rows: number; host?: string }
   | { type: 'detach'; id: string }
   | { type: 'input'; id: string; data: string }
   | { type: 'resize'; id: string; cols: number; rows: number };

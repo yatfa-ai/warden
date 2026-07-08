@@ -12,9 +12,9 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import { load, save, loadCatalog, saveCatalog, allSshHosts } from './config.js';
 import * as collections from './collections.js';
-import { discoverAll, capturePanes, resolveChatWithRefresh } from './chats.js';
+import { capturePanes, resolveChatWithRefresh, catalogChats, discoverHost } from './chats.js';
 import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream } from './tmux.js';
-import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude, startConnectionPoolCleanup, validateHost, preWarmConnectionPool } from './ssh.js';
+import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude, startConnectionPoolCleanup, validateHost } from './ssh.js';
 import { Observer } from './observer.js';
 import { hasCredentials, resolveModel } from './llm.js';
 import { listSessions, createSession, renameSession, deleteSession } from './sessions.js';
@@ -48,9 +48,27 @@ if (fs.existsSync(DIST)) {
 let cache = [];
 async function resolve(id) {
   const result = await resolveChatWithRefresh(id, cache, async () => {
-    const { chats } = await discoverAll(cfg.hosts, cfg);
-    cache = chats;
-    return { chats, errors: [] };
+    // Lazy mode: never do a full fleet discoverAll. Seed cache from disk (instant, zero
+    // ssh), then — only if the id carries a known "<host>:..." prefix — discover that one
+    // host. Bare container names (restored yatfa tabs) stay unresolved until the user
+    // clicks the host. resolveChatWithRefresh re-matches against the refreshed cache.
+    if (!cache.length) cache = catalogChats(cfg).chats;
+    const colon = id.lastIndexOf(':');
+    if (colon > 0) {
+      const hostHint = id.slice(0, colon);
+      if (hostHint === LOCAL || cfg.hosts.includes(hostHint)) {
+        const { chats } = await discoverHost(hostHint, cfg);
+        cache = [...cache.filter((c) => c.host !== hostHint), ...chats];
+      }
+    } else if (cfg.hosts.length) {
+      // Bare name (e.g. a restored yatfa tab like "yatfa-worker") with no host hint.
+      // Locate it across configured hosts so already-open remote panes resolve on app
+      // start. Demand-driven + cached: runs at most once per unresolved bare name.
+      const settled = await Promise.allSettled(cfg.hosts.map((h) => discoverHost(h, cfg)));
+      const found = settled.filter((r) => r.status === 'fulfilled').flatMap((r) => r.value.chats);
+      cache = [...cache.filter((c) => !cfg.hosts.includes(c.host)), ...found];
+    }
+    return { chats: cache, errors: [] };
   });
 
   if (result.chat) return { chat: result.chat };
@@ -77,16 +95,37 @@ async function preflightTmux(host) {
 
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 
-app.get('/api/chats', async (_req, res) => {
-  const { chats, errors } = await discoverAll(cfg.hosts, cfg);
-  cache = chats;
+// Disk-only catalog list — instant, zero ssh (lazy mode). Live active/status are
+// resolved per host on demand via /api/discover.
+app.get('/api/chats', (_req, res) => {
+  const { chats, errors } = catalogChats(cfg);
+  // Refresh catalog (disk) chats in the cache but KEEP any lazily-discovered yatfa chats,
+  // so already-open remote panes keep streaming across list refreshes.
+  const yatfa = cache.filter((c) => c.kind === 'yatfa');
+  cache = [...yatfa, ...chats];
   res.json({ chats, errors });
 });
 
-// Health endpoint for fleet health monitoring
-app.get('/api/health', async (_req, res) => {
+// Discover ONE host on demand (user clicked it). Returns that host's chats with live
+// active/lastActivity and merges them into the cache.
+app.get('/api/discover', async (req, res) => {
+  const host = String(req.query.host || '');
+  if (!host) return res.status(400).json({ error: 'missing ?host=' });
   try {
-    const { chats } = await discoverAll(cfg.hosts, cfg);
+    const { chats } = await discoverHost(host, cfg);
+    cache = [...cache.filter((c) => c.host !== host), ...chats];
+    res.json({ host, chats });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Health endpoint for fleet health monitoring
+app.get('/api/health', (_req, res) => {
+  try {
+    // Cache-derived (zero ssh). Under lazy mode only discovered/catalog chats are present;
+    // catalog chats report UNKNOWN until their host is clicked.
+    const chats = cache;
 
     // Calculate health state for each agent
     const agentsWithHealth = chats.map(chat => ({
@@ -269,7 +308,7 @@ app.get('/api/collections/:id/agents', async (req, res) => {
     if (!collection) {
       return res.status(404).json({ error: 'Collection not found' });
     }
-    const { chats } = await discoverAll(cfg.hosts, cfg);
+    const chats = cache;
     const agents = collections.getAgentsInCollection(collection, chats);
     res.json({ agents, count: agents.length });
   } catch (e) {
@@ -708,6 +747,14 @@ streamWss.on('connection', (ws) => {
     else if (m.type === 'unmonitor') { monitors.delete(String(m.id)); stopMonitorIfEmpty(); }
     else if (m.type === 'attach') {
       if (attaches.has(m.id)) return;
+      // Lazy restore: if the client knows the host (stored when the pane was first
+      // opened), discover just that one host so resolve() hits cache — no all-hosts scan.
+      if (m.host && !cache.some((c) => c.key === m.id || c.id === m.id)) {
+        try {
+          const { chats } = await discoverHost(String(m.host), cfg);
+          cache = [...cache.filter((c) => c.host !== m.host), ...chats];
+        } catch { /* fall through; resolve() still has a locate fallback */ }
+      }
       const r = await resolve(String(m.id));
       if (r.error) { send({ type: 'attach_error', id: m.id, error: r.error }); appendEvent({ type: 'error', error: r.error, context: 'attach', id: m.id }); return; }
       const chat = r.chat;
@@ -771,8 +818,7 @@ export function startServer(port = 7421, host = '127.0.0.1') {
     console.log(`  hosts: ${cfg.hosts.join(', ')}   model: ${resolveModel()}   tmux: ${TMUX_BIN}`);
     // Start connection pool cleanup task
     startConnectionPoolCleanup();
-    // Pre-warm SSH connections for configured hosts
-    await preWarmConnectionPool(cfg.hosts, cfg);
+    // Lazy mode: no startup SSH. Connections open on demand (per-host discover / pane read).
   });
 }
 

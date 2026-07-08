@@ -20,6 +20,9 @@ function App() {
   const [hiddenTabs, setHiddenTabs] = useState<string[]>(() => loadUi().hiddenTabs);
   const [openPanes, setOpenPanes] = useState<string[]>(() => loadUi().openPanes);
   const [focused, setFocused] = useState<string | null>(() => loadUi().focused);
+  const [paneHost, setPaneHost] = useState<Record<string, string>>(() => loadUi().paneHost ?? {});
+  const chatsRef = useRef(chats);
+  useEffect(() => { chatsRef.current = chats; }, [chats]);
   const [sidebarWidth, setSidebarWidth] = useState(() => loadUi().sidebarWidth ?? 220);
   const [observerWidth, setObserverWidth] = useState(() => loadUi().observerWidth ?? 380);
   const [maximized, setMaximized] = useState<string | null>(null);
@@ -107,7 +110,7 @@ function App() {
     }
   }, [theme]);
 
-  useEffect(() => { saveUi({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, theme }); }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, theme]);
+  useEffect(() => { saveUi({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, theme, paneHost }); }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, theme, paneHost]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -131,11 +134,26 @@ function App() {
     setLoading(false);
   }, []);
 
+  // Discover one host on demand (lazy mode): fetch live chats for that host and replace
+  // its entries in the chats list so dots update to green/red.
+  const discoverHost = useCallback(async (host: string) => {
+    try {
+      const r = await fetch(`/api/discover?host=${encodeURIComponent(host)}`);
+      const j = await r.json();
+      if (Array.isArray(j.chats)) {
+        setChats((prev) => [...prev.filter((c) => c.host !== host), ...j.chats]);
+      }
+    } catch (e) { console.error('discoverHost failed:', e); }
+  }, []);
+
   // open chat: add to active tabs + open pane + focus
   const openChat = useCallback((id: string) => {
     setActiveTabs((p) => p.includes(id) ? p : [...p, id]);
     setOpenPanes((p) => p.includes(id) ? p : [...p, id]);
     setFocused(id);
+    // remember this pane's host so a restored remote pane knows which host to discover
+    const c = chatsRef.current.find((x) => (x.key || x.id) === id);
+    if (c?.host) setPaneHost((p) => (p[id] === c.host ? p : { ...p, [id]: c.host }));
   }, []);
 
   // handle focus-agent callback from Observer suggestion cards
@@ -376,6 +394,7 @@ function App() {
               onRename={renameChat}
               onResume={resumeSession}
               onRefresh={refresh}
+              onDiscoverHost={discoverHost}
               loading={loading}
             />
           </ErrorBoundary>
@@ -387,6 +406,7 @@ function App() {
             maximized={maximized}
             newActivity={newActivity}
             chats={chats}
+            paneHost={paneHost}
             onFocus={setFocused}
             onClose={closePane}
             onToggleMax={toggleMax}

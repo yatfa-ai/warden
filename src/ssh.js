@@ -152,6 +152,13 @@ async function ensureControlMaster(host, cfg) {
 async function getConnection(host, cfg) {
   if (host === '(local)') return null;
 
+  // Windows OpenSSH does not support ControlMaster socket multiplexing — it fails
+  // with "getsockname failed: Not a socket". (In dev this was masked because Git's
+  // MSYS ssh was on PATH and does emulate the sockets; a double-clicked packaged
+  // app resolves Windows OpenSSH instead.) Skip pooling on win32 and use plain
+  // direct ssh, which works everywhere. ControlMaster only helps on macOS/Linux.
+  if (process.platform === 'win32') return { socketPath: null };
+
   const cached = connectionPool.get(host);
   const timeout = (cfg?.connectTimeout ?? 10);
 
@@ -363,10 +370,9 @@ export async function runWithPool(host, cmd, opts = {}, cfg = {}) {
     releaseConnection(host);
     return result;
   } catch (e) {
-    if (e instanceof HostConnectionError) {
-      throw e;
-    }
-    // Fallback to direct connection if pooling fails
+    // Pool failed (ControlMaster unsupported, host down, etc.). Fall back to a
+    // plain direct ssh call — never let a pool failure propagate and crash the
+    // server. run() resolves {ok:false} on failure rather than throwing.
     return run(host, cmd, opts, cfg);
   }
 }

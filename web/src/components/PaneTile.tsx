@@ -18,10 +18,11 @@ interface Props {
   onToggleMax: () => void;
   onKill: () => void;     // force-kill the tmux session
   chat?: Chat | null;     // chat metadata for export
+  host?: string;          // host hint for restore (which host to discover)
   externalSearchQuery?: string;  // external search trigger from global search
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, externalSearchQuery }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -30,6 +31,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [connected, setConnected] = useState(false);
+  const [errored, setErrored] = useState(false);
   const [downloading, setDownloading] = useState(false);
 
   useEffect(() => {
@@ -90,19 +92,20 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   useEffect(() => {
     return streamApi.on(id, (m) => {
       const term = termRef.current; if (!term) return;
-      if (m.type === 'pty') { term.write(m.data); setConnected(true); }
-      else if (m.type === 'attached') setConnected(true);
+      if (m.type === 'pty') { term.write(m.data); setConnected(true); setErrored(false); }
+      else if (m.type === 'attached') { setConnected(true); setErrored(false); }
       else if (m.type === 'ended') setConnected(false);
-      else if (m.type === 'attach_error') { term.write('\r\n[error: ' + m.error + ']\r\n'); setConnected(false); }
+      else if (m.type === 'attach_error') { term.write('\r\n[error: ' + m.error + ']\r\n'); setConnected(false); setErrored(true); }
     });
   }, [id]);
 
   useEffect(() => {
     const term = termRef.current; if (!term) return;
+    setConnected(false); setErrored(false);
     try { fitRef.current?.fit(); } catch {}
-    streamApi.send({ type: 'attach', id, cols: term.cols, rows: term.rows });
+    streamApi.send({ type: 'attach', id, host, cols: term.cols, rows: term.rows });
     return () => { streamApi.send({ type: 'detach', id }); };
-  }, [id]);
+  }, [id, host]);
 
   // clear "new" badge on focus
   useEffect(() => { if (focused && hasNew) onClearNew(); }, [focused]);
@@ -185,7 +188,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       {/* header toolbar */}
       <div onDoubleClick={(e) => { stop(e); onToggleMax(); }}
         className="flex items-center gap-1 px-2 py-1 bg-muted text-xs shrink-0 select-none">
-        <span className={`size-2 rounded-full shrink-0 ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
+        <span className={`size-2 rounded-full shrink-0 ${connected ? 'bg-green-500' : errored ? 'bg-red-500' : 'bg-yellow-500/80 animate-pulse'}`} />
         <span className="truncate flex-1 font-medium">{label || id}</span>
         {hasNew && <span className="text-[9px] text-cyan-400 bg-cyan-500/10 px-1 rounded animate-pulse">new</span>}
         <Btn title="search" active={showSearch} onClick={() => setShowSearch(!showSearch)}>⌕</Btn>
@@ -209,7 +212,14 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           <Btn title="close search" onClick={() => setShowSearch(false)}>×</Btn>
         </div>
       )}
-      <div ref={wrapRef} className="flex-1 min-h-0 px-1 py-0.5 overflow-hidden" onClick={() => termRef.current?.focus()} />
+      <div ref={wrapRef} className="flex-1 min-h-0 px-1 py-0.5 overflow-hidden relative" onClick={() => termRef.current?.focus()}>
+        {!connected && !errored && (
+          <div className="absolute inset-0 flex items-center justify-center gap-2 text-[11px] text-muted-foreground pointer-events-none select-none">
+            <span className="size-3 rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground animate-spin" />
+            connecting…
+          </div>
+        )}
+      </div>
     </div>
   );
 }
