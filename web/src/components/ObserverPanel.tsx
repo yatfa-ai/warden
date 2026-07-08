@@ -33,6 +33,19 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
   const connectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connectionTimeoutShownRef = useRef(false);
   const mountedRef = useRef(true);
+  const [config, setConfig] = useState<{
+    notifyChatOps: boolean;
+    notifyAgentLifecycle: boolean;
+    notifyErrors: boolean;
+    notifySuccess: boolean;
+    notifyObserver: boolean;
+  }>({
+    notifyChatOps: true,
+    notifyAgentLifecycle: true,
+    notifyErrors: true,
+    notifySuccess: true,
+    notifyObserver: true,
+  });
 
   const connect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
@@ -67,7 +80,7 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
       if (!conn && !connectionTimeoutShownRef.current && mountedRef.current) {
         connectionTimeoutShownRef.current = true;
         setConnectionError('Connection timeout. Unable to establish WebSocket connection.');
-        toast.error('Observer connection timeout. Please try reconnecting.');
+        if (config.notifyObserver) toast.error('Observer connection timeout. Please try reconnecting.');
       }
     }, 15000);
 
@@ -123,6 +136,24 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
     important: 'bg-yellow-900/40 border-yellow-600/50 text-yellow-300',
     informational: 'bg-gray-800/40 border-gray-600/50 text-gray-300'
   };
+
+  // Load notification preferences on mount
+  useEffect(() => {
+    fetch('/api/config')
+      .then((r) => r.json())
+      .then((configData) => {
+        setConfig({
+          notifyChatOps: configData.notifyChatOps ?? true,
+          notifyAgentLifecycle: configData.notifyAgentLifecycle ?? true,
+          notifyErrors: configData.notifyErrors ?? true,
+          notifySuccess: configData.notifySuccess ?? true,
+          notifyObserver: configData.notifyObserver ?? true,
+        });
+      })
+      .catch((err) => {
+        console.error('Failed to load notification preferences:', err);
+      });
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;

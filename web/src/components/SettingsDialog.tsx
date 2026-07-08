@@ -21,6 +21,11 @@ interface ConfigData {
   observerConfirmMode: 'always' | 'auto-safe';
   observerAutoStart: boolean;
   observerSessionTimeout: number | null;
+  notifyChatOps: boolean;
+  notifyAgentLifecycle: boolean;
+  notifyErrors: boolean;
+  notifySuccess: boolean;
+  notifyObserver: boolean;
 }
 
 interface Props {
@@ -40,6 +45,11 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
     observerConfirmMode: 'always',
     observerAutoStart: false,
     observerSessionTimeout: 30,
+    notifyChatOps: true,
+    notifyAgentLifecycle: true,
+    notifyErrors: true,
+    notifySuccess: true,
+    notifyObserver: true,
   });
   const [availableHosts, setAvailableHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -64,6 +74,11 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
               : 'always',
             observerAutoStart: configData.observerAutoStart || false,
             observerSessionTimeout: configData.observerSessionTimeout ?? 30,
+            notifyChatOps: configData.notifyChatOps ?? true,
+            notifyAgentLifecycle: configData.notifyAgentLifecycle ?? true,
+            notifyErrors: configData.notifyErrors ?? true,
+            notifySuccess: configData.notifySuccess ?? true,
+            notifyObserver: configData.notifyObserver ?? true,
           });
           setAvailableHosts(hostsData.hosts || []);
         })
@@ -292,6 +307,101 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
                 </select>
                 <p className="text-xs text-muted-foreground">
                   Choose how Warden appears. "System" automatically switches between light and dark based on your OS settings.
+                </p>
+              </div>
+            </div>
+
+            {/* Notification Preferences Section */}
+            <div className="flex flex-col gap-3 pt-2 border-t">
+              <div className="text-sm font-medium text-foreground">Notifications</div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <input
+                    id="notifyChatOps"
+                    type="checkbox"
+                    checked={config.notifyChatOps}
+                    onChange={(e) => setConfig({ ...config, notifyChatOps: e.target.checked })}
+                    className="w-4 h-4"
+                  />
+                  <Label htmlFor="notifyChatOps" className="cursor-pointer">
+                    Chat operations
+                  </Label>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Session kill, rename, and resume notifications
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <input
+                    id="notifyAgentLifecycle"
+                    type="checkbox"
+                    checked={config.notifyAgentLifecycle}
+                    onChange={(e) => setConfig({ ...config, notifyAgentLifecycle: e.target.checked })}
+                    className="w-4 h-4"
+                  />
+                  <Label htmlFor="notifyAgentLifecycle" className="cursor-pointer">
+                    Agent lifecycle
+                  </Label>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Agent start, stop, and status change notifications
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <input
+                    id="notifyErrors"
+                    type="checkbox"
+                    checked={config.notifyErrors}
+                    onChange={(e) => setConfig({ ...config, notifyErrors: e.target.checked })}
+                    className="w-4 h-4"
+                  />
+                  <Label htmlFor="notifyErrors" className="cursor-pointer">
+                    Errors
+                  </Label>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Error toast notifications
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <input
+                    id="notifySuccess"
+                    type="checkbox"
+                    checked={config.notifySuccess}
+                    onChange={(e) => setConfig({ ...config, notifySuccess: e.target.checked })}
+                    className="w-4 h-4"
+                  />
+                  <Label htmlFor="notifySuccess" className="cursor-pointer">
+                    Success messages
+                  </Label>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Success toast notifications
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <input
+                    id="notifyObserver"
+                    type="checkbox"
+                    checked={config.notifyObserver}
+                    onChange={(e) => setConfig({ ...config, notifyObserver: e.target.checked })}
+                    className="w-4 h-4"
+                  />
+                  <Label htmlFor="notifyObserver" className="cursor-pointer">
+                    Observer events
+                  </Label>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Observer connection timeout and gate prompt notifications
                 </p>
               </div>
             </div>

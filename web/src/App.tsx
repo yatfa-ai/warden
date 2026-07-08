@@ -41,6 +41,19 @@ function App() {
   const [observerCollapsed, setObserverCollapsed] = useState(uiState.observerCollapsed);
   const [healthCollapsed, setHealthCollapsed] = useState(uiState.healthCollapsed ?? true);
   const [theme, setTheme] = useState<Theme>(() => uiState.theme ?? 'system');
+  const [config, setConfig] = useState<{
+    notifyChatOps: boolean;
+    notifyAgentLifecycle: boolean;
+    notifyErrors: boolean;
+    notifySuccess: boolean;
+    notifyObserver: boolean;
+  }>({
+    notifyChatOps: true,
+    notifyAgentLifecycle: true,
+    notifyErrors: true,
+    notifySuccess: true,
+    notifyObserver: true,
+  });
 
   useEffect(() => {
     streamApi.onOpen = () => setStreamConn(true);
@@ -52,6 +65,22 @@ function App() {
     };
     streamApi.connect();
     refresh();
+
+    // Load notification preferences
+    fetch('/api/config')
+      .then((r) => r.json())
+      .then((configData) => {
+        setConfig({
+          notifyChatOps: configData.notifyChatOps ?? true,
+          notifyAgentLifecycle: configData.notifyAgentLifecycle ?? true,
+          notifyErrors: configData.notifyErrors ?? true,
+          notifySuccess: configData.notifySuccess ?? true,
+          notifyObserver: configData.notifyObserver ?? true,
+        });
+      })
+      .catch((err) => {
+        console.error('Failed to load notification preferences:', err);
+      });
 
     // Check for activity since last close
     const checkActivitySinceClose = async () => {
@@ -195,60 +224,60 @@ function App() {
     try {
       const r = await fetch('/api/session-kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) });
       if (!r.ok) {
-        toast.error('Failed to force-kill session');
+        if (config.notifyErrors) toast.error('Failed to force-kill session');
         return;
       }
-      toast.success('Session force-killed');
+      if (config.notifySuccess) toast.success('Session force-killed');
     } catch (error) {
-      toast.error(`Failed to force-kill: ${error instanceof Error ? error.message : String(error)}`);
+      if (config.notifyErrors) toast.error(`Failed to force-kill: ${error instanceof Error ? error.message : String(error)}`);
     }
-  }, []);
+  }, [config.notifyErrors, config.notifySuccess]);
 
   const killChat = useCallback(async (id: string) => {
     if (!window.confirm('kill this chat and forget it?')) return;
     try {
       const r = await fetch('/api/kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) });
       if (!r.ok) {
-        toast.error('Failed to kill chat');
+        if (config.notifyErrors) toast.error('Failed to kill chat');
         return;
       }
       removeActive(id);
       refresh();
-      toast.success('Chat killed');
+      if (config.notifySuccess) toast.success('Chat killed');
     } catch (error) {
-      toast.error(`Failed to kill chat: ${error instanceof Error ? error.message : String(error)}`);
+      if (config.notifyErrors) toast.error(`Failed to kill chat: ${error instanceof Error ? error.message : String(error)}`);
     }
-  }, [refresh, removeActive]);
+  }, [refresh, removeActive, config.notifyErrors, config.notifySuccess]);
 
   const resumeSession = useCallback(async (id: string, description: string, cwd: string, host: string) => {
     try {
       const r = await fetch('/api/resume', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, cwd, host, name: description || undefined }) });
       const j = await r.json();
       if (!r.ok) {
-        toast.error(j.error || 'resume failed');
+        if (config.notifyErrors) toast.error(j.error || 'resume failed');
         return;
       }
       await refresh();
       openChat(j.chat.key);
-      toast.success('Session resumed');
+      if (config.notifySuccess) toast.success('Session resumed');
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
+      if (config.notifyErrors) toast.error(e instanceof Error ? e.message : String(e));
     }
-  }, [refresh, openChat]);
+  }, [refresh, openChat, config.notifyErrors, config.notifySuccess]);
 
   const renameChat = useCallback(async (session: string, kind: string, name: string) => {
     try {
       const r = await fetch('/api/rename', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session, kind, name }) });
       if (!r.ok) {
-        toast.error('Failed to rename chat');
+        if (config.notifyErrors) toast.error('Failed to rename chat');
         return;
       }
       refresh();
-      toast.success('Chat renamed');
+      if (config.notifySuccess) toast.success('Chat renamed');
     } catch (error) {
-      toast.error(`Failed to rename: ${error instanceof Error ? error.message : String(error)}`);
+      if (config.notifyErrors) toast.error(`Failed to rename: ${error instanceof Error ? error.message : String(error)}`);
     }
-  }, [refresh]);
+  }, [refresh, config.notifyErrors, config.notifySuccess]);
 
   const openActivityTab = useCallback(() => {
     setObserverCollapsed(false);
