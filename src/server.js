@@ -118,6 +118,28 @@ app.get('/api/pane', async (req, res) => {
   try { res.json({ pane: await readPane(r.chat, cfg, parseInt(req.query.lines || '200', 10)) }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
+app.get('/api/pane-export', async (req, res) => {
+  const r = await resolve(String(req.query.id || ''));
+  if (r.error) return res.status(404).json(r);
+  try {
+    const lines = parseInt(req.query.lines || '5000', 10);
+    const pane = await readPane(r.chat, cfg, lines);
+    const chat = r.chat;
+    res.json({
+      pane,
+      meta: {
+        name: chat.name || chat.key || chat.id,
+        host: chat.host,
+        container: chat.container || null,
+        session: chat.session || null,
+        project: chat.project || null,
+        role: chat.role || null,
+        kind: chat.kind || null,
+        timestamp: new Date().toISOString(),
+      },
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 app.post('/api/send', async (req, res) => {
   const r = await resolve(String(req.body?.id || ''));
   if (r.error) return res.status(404).json(r);

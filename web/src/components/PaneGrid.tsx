@@ -79,14 +79,17 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, onFocu
         ) : (
           <div data-pane-grid className="grid gap-2 h-full min-h-0"
             style={{ gridTemplateColumns: `repeat(${maximized ? 1 : cols}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${maximized ? 1 : rows}, minmax(0, 1fr))` }}>
-            {visible.map((t) => (
-              <div key={t.id} data-pane-id={t.id} className="min-h-0 min-w-0">
-                <PaneTile id={t.id} label={nameOf(t.id)} focused={focused === t.id} maximized={maximized === t.id}
-                  hasNew={newActivity.has(t.id)} onClearNew={() => onClearNew(t.id)}
-                  onFocus={() => onFocus(t.id)} onClose={() => onClose(t.id)} onToggleMax={() => onToggleMax(t.id)}
-                  onKill={() => onForceKill(t.id)} />
-              </div>
-            ))}
+            {visible.map((t) => {
+              const chat = chats.find((c) => (c.key || c.id) === t.id);
+              return (
+                <div key={t.id} data-pane-id={t.id} className="min-h-0 min-w-0">
+                  <PaneTile id={t.id} label={nameOf(t.id)} focused={focused === t.id} maximized={maximized === t.id}
+                    hasNew={newActivity.has(t.id)} onClearNew={() => onClearNew(t.id)}
+                    onFocus={() => onFocus(t.id)} onClose={() => onClose(t.id)} onToggleMax={() => onToggleMax(t.id)}
+                    onKill={() => onForceKill(t.id)} chat={chat} />
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

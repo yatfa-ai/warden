@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { streamApi } from '@/lib/stream';
+import type { Chat } from '@/lib/types';
 
 interface Props {
   id: string;
@@ -16,9 +17,10 @@ interface Props {
   onClose: () => void;
   onToggleMax: () => void;
   onKill: () => void;     // force-kill the tmux session
+  chat?: Chat | null;     // chat metadata for export
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -27,6 +29,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [connected, setConnected] = useState(false);
+  const [downloading, setDownloading] = useState(false);
 
   useEffect(() => {
     const term = new Terminal({
@@ -113,10 +116,57 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     else searchRef.current.findPrevious(searchQuery);
   };
 
+  // download pane content as text file with metadata
+  const downloadPane = async () => {
+    if (!chat || downloading) return;
+    setDownloading(true);
+    try {
+      const res = await fetch(`/api/pane-export?id=${encodeURIComponent(chat.id)}`);
+      if (!res.ok) throw new Error('Failed to fetch pane content');
+      const data = await res.json();
+
+      // Build metadata header
+      const header = [
+        `Chat: ${data.meta.name}`,
+        `Host: ${data.meta.host}`,
+        `Container: ${data.meta.container || 'N/A'}`,
+        `Session: ${data.meta.session || 'N/A'}`,
+        `Project: ${data.meta.project || 'N/A'}`,
+        `Role: ${data.meta.role || 'N/A'}`,
+        `Type: ${data.meta.kind || 'N/A'}`,
+        `Timestamp: ${data.meta.timestamp}`,
+        '---',
+        '',
+      ].join('\n');
+
+      // Sanitize filename
+      const sanitizedName = (data.meta.name || chat.id).replace(/[^a-zA-Z0-9_.-]/g, '_');
+      const ts = new Date().toISOString().replace(/[:.]/g, '').split('T')[0] + '_' +
+                 new Date().toTimeString().split(' ')[0].replace(/:/g, '');
+      const filename = `${sanitizedName}_${ts}.txt`;
+
+      // Create download
+      const blob = new Blob([header + data.pane], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Download failed:', err);
+      alert('Failed to download pane content');
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   const stop = (e: React.MouseEvent) => e.stopPropagation();
-  const Btn = ({ children, onClick, title, active }: { children: React.ReactNode; onClick: () => void; title: string; active?: boolean }) => (
-    <button onClick={(e) => { stop(e); onClick(); }} title={title}
-      className={`px-1 py-0.5 text-[10px] rounded ${active ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent/50'}`}>{children}</button>
+  const Btn = ({ children, onClick, title, active, disabled }: { children: React.ReactNode; onClick: () => void; title: string; active?: boolean; disabled?: boolean }) => (
+    <button onClick={(e) => { if (!disabled) { stop(e); onClick(); } }} title={title} disabled={disabled}
+      className={`px-1 py-0.5 text-[10px] rounded ${disabled ? 'text-muted-foreground opacity-30 cursor-not-allowed' : (active ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent/50')}`}>{children}</button>
   );
 
   return (
@@ -130,6 +180,9 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
         {hasNew && <span className="text-[9px] text-cyan-400 bg-cyan-500/10 px-1 rounded animate-pulse">new</span>}
         <Btn title="search" active={showSearch} onClick={() => setShowSearch(!showSearch)}>⌕</Btn>
         <Btn title="clear" onClick={() => termRef.current?.clear()}>⊘</Btn>
+        <Btn title="download as text file" onClick={downloadPane} disabled={downloading || !chat}>
+          {downloading ? '⋯' : '⬇'}
+        </Btn>
         <Btn title="force-kill tmux session" onClick={onKill}>⏹</Btn>
         <Btn title="smaller font" onClick={() => setFontSize((f) => Math.max(8, f - 1))}>A−</Btn>
         <Btn title="bigger font" onClick={() => setFontSize((f) => Math.min(24, f + 1))}>A+</Btn>
