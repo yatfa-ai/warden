@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { toast } from 'sonner';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
-import { MessageSquare, FolderOpen } from 'lucide-react';
+import { EmptyState } from '@/components/EmptyState';
 import { NewChatForm } from './NewChatForm';
 import { CollectionsSection } from './CollectionsSection';
 import { CreateCollectionDialog } from './CreateCollectionDialog';
@@ -123,7 +124,9 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       const r = await fetch(`/api/claude-sessions?host=${encodeURIComponent(host)}`);
       const j = await r.json();
       setHostSessions((p) => ({ ...p, [host]: { sessions: j.sessions || [], claudeAvailable: j.claudeAvailable } }));
-    } catch { /* noop */ }
+    } catch (error) {
+      toast.error(`Failed to fetch sessions for ${host}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
     setLoadingHost(null);
   };
   const fetchGitStatus = useCallback(async (chatId: string) => {
@@ -133,7 +136,10 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       if (j.branch) {
         setGitStatus((p) => ({ ...p, [chatId]: { branch: j.branch, clean: j.clean, cwd: j.cwd } }));
       }
-    } catch { /* noop */ }
+    } catch (error) {
+      // Git status is non-critical, so just log it without showing a toast
+      console.error('Failed to fetch git status:', error);
+    }
   }, []);
   const enterHost = (host: string) => { setView({ kind: 'host', host }); fetchHostSessions(host); };
 
@@ -143,7 +149,9 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       const r = await fetch('/api/collections');
       const j = await r.json();
       setCollections(j.collections || []);
-    } catch { /* noop */ }
+    } catch (error) {
+      toast.error(`Failed to fetch collections: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   };
 
   const enterCollection = (collection: Collection) => { setView({ kind: 'collection', collection }); };
@@ -268,7 +276,9 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
               </>
             )}
             {agents.length === 0 && (
-              <div className="text-xs text-muted-foreground p-3 text-center">no agents match this collection</div>
+              <div className="p-3">
+                <EmptyState type="no-results" message="no agents match this collection" />
+              </div>
             )}
           </div>
         </ScrollArea>
@@ -357,11 +367,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
               );
             })}
             {hostChats.length === 0 && sessions.length === 0 && loadingHost !== H && (
-              <div className="flex flex-col items-center justify-center p-4 gap-2 text-center">
-                <FolderOpen className="size-6 text-muted-foreground/40" />
-                <div className="text-xs text-muted-foreground">nothing here</div>
-                <div className="text-[10px] text-muted-foreground/60">start a new chat or resume a session</div>
-              </div>
+              <EmptyState type="nothing-here" />
             )}
           </div>
         </ScrollArea>
@@ -467,11 +473,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             <div className="text-xs text-muted-foreground p-3 text-center">no tabs match "{tabSearchQuery}"</div>
           )}
           {activeTabs.length === 0 && !loading && (
-            <div className="flex flex-col items-center justify-center p-4 gap-2 text-center">
-              <MessageSquare className="size-6 text-muted-foreground/40" />
-              <div className="text-xs text-muted-foreground">no active tabs</div>
-              <div className="text-[10px] text-muted-foreground/60">browse hosts below to start</div>
-            </div>
+            <EmptyState type="no-tabs" />
           )}
           {!showAllChats && chats.filter(c => c.active).length > 0 && (
             <div className="px-2 pt-1 pb-1">
