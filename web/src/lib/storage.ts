@@ -10,6 +10,8 @@ export interface UiState {
   focused: string | null;
   sidebarCollapsed: boolean;
   observerCollapsed: boolean;
+  sidebarWidth?: number;
+  observerWidth?: number;
 }
 
 export function loadUi(): UiState {
@@ -23,10 +25,12 @@ export function loadUi(): UiState {
         focused: v.focused ?? null,
         sidebarCollapsed: v.sidebarCollapsed ?? false,
         observerCollapsed: v.observerCollapsed ?? false,
+        sidebarWidth: typeof v.sidebarWidth === 'number' ? v.sidebarWidth : 220,
+        observerWidth: typeof v.observerWidth === 'number' ? v.observerWidth : 380,
       };
     }
   } catch { /* ignore */ }
-  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false };
+  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, sidebarWidth: 220, observerWidth: 380 };
 }
 
 export function saveUi(s: UiState) {
