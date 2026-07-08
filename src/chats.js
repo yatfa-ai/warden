@@ -196,7 +196,7 @@ export async function discoverAll(hosts, cfg) {
 
 // Capture tmux pane content from multiple chats concurrently.
 // Groups by host to minimize SSH round-trips. Returns a map of chat key -> pane content.
-export async function capturePanes(chats) {
+export async function capturePanes(chats, cfg = {}) {
   const byHost = {};
   for (const c of chats) (byHost[c.host] ||= []).push(c);
   const out = {};
@@ -213,7 +213,7 @@ export async function capturePanes(chats) {
       const s = shellQuote(c.session || c.container || 'agent');
       return `printf '___B_${c.key}___\\n'; ${t} capture-pane -t ${s} -p -e -S -60 -E - 2>/dev/null; printf '\\n___E_${c.key}___\\n'`;
     }).join('; ');
-    const res = await runWithPool(host, script, { timeout: 15000 }, { connectTimeout: 10 });
+    const res = await runWithPool(host, script, { timeout: 15000 }, cfg);
     if (!res.ok) return;
     let cur = null;
     const buf = [];

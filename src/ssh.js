@@ -27,7 +27,10 @@ const connectionPool = new Map(); // host -> { conn: SSHClient, lastUsed: number
 const POOL_IDLE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 const POOL_HEALTH_CHECK_INTERVAL = 60 * 1000; // 1 minute
 
-// Simple SSH client wrapper for persistent connections
+// Simple SSH client wrapper for persistent connections.
+// NOTE: This class is currently unused. The implementation uses SSH ControlMaster
+// sockets instead (see ensureControlMaster below). This class is retained for
+// potential future implementation alternatives or reference.
 class SSHClient {
   constructor(host, connectTimeout) {
     this.host = host;
@@ -175,6 +178,13 @@ async function getConnection(host, cfg) {
   try {
     const { socketPath, existing, process } = await ensureControlMaster(host, { connectTimeout: timeout });
 
+    // Monitor process exit to mark connection unhealthy
+    if (process) {
+      process.on('exit', () => {
+        markConnectionUnhealthy(host);
+      });
+    }
+
     connectionPool.set(host, {
       socketPath,
       lastUsed: Date.now(),
@@ -196,7 +206,7 @@ async function getConnection(host, cfg) {
 function releaseConnection(host) {
   const cached = connectionPool.get(host);
   if (cached) {
-    cached.refs--;
+    cached.refs = Math.max(0, cached.refs - 1); // Prevent underflow
     // Don't close immediately - keep alive for reuse
     // Background cleanup task closes idle connections
   }
@@ -285,7 +295,7 @@ export async function validateHost(host, cfg) {
 
   try {
     // Quick health check: run a simple command via the pool
-    const result = await run(host, 'echo OK', { timeout: 5000, usePool: true }, cfg);
+    const result = await runWithPool(host, 'echo OK', { timeout: 5000 }, cfg);
     if (result.ok) return { ok: true, host };
 
     return {

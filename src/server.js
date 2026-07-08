@@ -303,7 +303,7 @@ app.get('/api/search-pane', async (req, res) => {
   if (chats.length === 0) return res.json({ results: [], query });
 
   try {
-    const captures = await capturePanes(chats);
+    const captures = await capturePanes(chats, cfg);
     const results = [];
 
     for (const [key, content] of Object.entries(captures)) {
@@ -653,7 +653,7 @@ streamWss.on('connection', (ws) => {
     const chats = [...monitors].map((k) => cache.find((c) => c.key === k)).filter(Boolean);
     if (!chats.length) return;
     let out;
-    try { out = await capturePanes(chats); } catch { return; }
+    try { out = await capturePanes(chats, cfg); } catch { return; }
     for (const [k, pane] of Object.entries(out)) {
       send({ type: 'snapshot', id: k, pane });
       // Snapshot logging disabled due to performance: 2s intervals create 300K+ events/pane/7 days
