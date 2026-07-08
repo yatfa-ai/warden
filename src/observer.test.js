@@ -1,6 +1,6 @@
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert';
-import { summarizeOpenChats, Observer } from './observer.js';
+import { summarizeOpenChats, Observer, TOOLS } from './observer.js';
 
 // Shared config passed through to capturePanes.
 const cfg = { hosts: [] };
@@ -262,6 +262,49 @@ describe('Observer _execTool summarize_chats dispatch', () => {
     obs.lastChats = [yatfaChat()];
 
     const result = await obs._execTool('summarize_chats', {});
+
+    assert.ok(result.error);
+    assert.strictEqual(result.error, 'no tabs are open. open some agent panes first.');
+  });
+});
+
+describe('suggest_next_actions tool registration', () => {
+  it('is registered in the TOOLS array with an object input schema', () => {
+    const tool = TOOLS.find((t) => t.name === 'suggest_next_actions');
+    assert.ok(tool, 'suggest_next_actions tool should be registered');
+    assert.strictEqual(tool.input_schema.type, 'object');
+    assert.deepStrictEqual(tool.input_schema.required, []);
+  });
+});
+
+describe('Observer _execTool suggest_next_actions dispatch', () => {
+  it('returns the empty-tabs error when openTabs is empty', async () => {
+    const obs = new Observer(cfg, {});
+    obs.openTabs = [];
+    obs.lastChats = [yatfaChat()];
+
+    const result = await obs._execTool('suggest_next_actions', {});
+
+    assert.ok(result.error);
+    assert.strictEqual(result.error, 'no tabs are open. open some agent panes first.');
+  });
+
+  it('returns the stale-state error when open tabs do not match any chat', async () => {
+    const obs = new Observer(cfg, {});
+    obs.openTabs = ['ghost-tab'];
+    obs.lastChats = [yatfaChat()];
+
+    const result = await obs._execTool('suggest_next_actions', {});
+
+    assert.ok(result.error);
+    assert.strictEqual(result.error, 'open tabs do not match any discovered chats. try refreshing with list_chats.');
+  });
+
+  it('treats an unset openTabs as empty', async () => {
+    const obs = new Observer(cfg, {});
+    obs.lastChats = [yatfaChat()];
+
+    const result = await obs._execTool('suggest_next_actions', {});
 
     assert.ok(result.error);
     assert.strictEqual(result.error, 'no tabs are open. open some agent panes first.');
