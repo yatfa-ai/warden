@@ -119,14 +119,9 @@ function App() {
     setFocused(id);
   }, []);
 
-  // handle focus-agent events from Observer suggestion cards
-  useEffect(() => {
-    const handleFocusAgent = (e: Event) => {
-      const customEvent = e as CustomEvent<{ id: string; name: string }>;
-      openChat(customEvent.detail.id);
-    };
-    window.addEventListener('focus-agent', handleFocusAgent);
-    return () => window.removeEventListener('focus-agent', handleFocusAgent);
+  // handle focus-agent callback from Observer suggestion cards
+  const handleFocusAgent = useCallback((id: string) => {
+    openChat(id);
   }, [openChat]);
 
   // close pane: pane gone, tab stays
@@ -357,7 +352,7 @@ function App() {
                   onMouseDown={handleObserverMouseDown}
                   title="Drag to resize observer panel"
                 />
-                <ObserverTabs externalViewMode={externalViewMode} />
+                <ObserverTabs externalViewMode={externalViewMode} onFocusAgent={handleFocusAgent} />
               </section>
             )}
             {!healthCollapsed && (

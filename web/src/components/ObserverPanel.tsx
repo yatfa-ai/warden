@@ -10,11 +10,14 @@ type Item =
   | { kind: 'card'; requestId: string; container: string; role?: string; directive: string; resolved?: boolean; result?: string }
   | { kind: 'suggestion'; agentId: string; agentName: string; role?: string; urgency: string; state: string; action: string; dismissed?: boolean };
 
-interface Props { sessionId: string }
+interface Props {
+  sessionId: string;
+  onFocusAgent?: (id: string) => void;
+}
 
 // One observer conversation, bound to a persisted session (?sid=). History is
 // replayed on connect so a refresh/restore shows the prior conversation.
-export function ObserverPanel({ sessionId }: Props) {
+export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
   const [items, setItems] = useState<Item[]>([]);
   const [busy, setBusy] = useState(false);
   const [conn, setConn] = useState(false);
@@ -130,9 +133,7 @@ export function ObserverPanel({ sessionId }: Props) {
                 <div className="bg-black/60 border rounded-md p-2 whitespace-pre-wrap break-words text-xs">{it.action}</div>
                 <div className="flex gap-1.5 mt-2">
                   <Button size="sm" className="h-7" onClick={() => {
-                    // Focus agent pane - emit event for parent to handle
-                    const event = new CustomEvent('focus-agent', { detail: { id: it.agentId, name: it.agentName } });
-                    window.dispatchEvent(event);
+                    onFocusAgent?.(it.agentId);
                     setItems((p) => p.map((item, idx) => idx === i ? { ...item, dismissed: true } : item));
                   }}>Focus</Button>
                   <Button size="sm" variant="ghost" className="h-7" onClick={() => {

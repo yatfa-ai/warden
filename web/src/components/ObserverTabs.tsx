@@ -5,13 +5,15 @@ import { Button } from '@/components/ui/button';
 import { loadObs, saveObs } from '@/lib/storage';
 import type { SessionMeta } from '@/lib/types';
 
+interface Props {
+  externalViewMode?: 'sessions' | 'activity' | null;
+  onFocusAgent?: (id: string) => void;
+}
+
 // Manages persisted observer sessions as tabs. Every open tab keeps its own
 // ObserverPanel (and WS) mounted; inactive ones are display:none so their
 // conversations stay live. Open tabs + active tab persist in localStorage.
-interface ObserverTabsProps {
-  externalViewMode?: 'sessions' | 'activity' | null;
-}
-export function ObserverTabs({ externalViewMode }: ObserverTabsProps = {}) {
+export function ObserverTabs({ externalViewMode, onFocusAgent }: Props = {}) {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [openIds, setOpenIds] = useState<string[]>(() => loadObs().openIds);
   const [activeId, setActiveId] = useState<string | null>(() => loadObs().activeId);
@@ -112,7 +114,7 @@ export function ObserverTabs({ externalViewMode }: ObserverTabsProps = {}) {
           <div className="flex-1 min-h-0">
             {openIds.map((id) => (
               <div key={id} className={activeId === id ? 'h-full' : 'hidden'}>
-                <ObserverPanel sessionId={id} />
+                <ObserverPanel sessionId={id} onFocusAgent={onFocusAgent} />
               </div>
             ))}
           </div>
