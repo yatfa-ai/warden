@@ -432,7 +432,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
               const c = findChat(chats, id);
               return c && c.project === projectFilter;
             })
-            .map((id, idx) => {
+            .map((id) => {
             const c = findChat(chats, id);
             const type = chatType(c);
             const isOpen = openPanes.has(id);
