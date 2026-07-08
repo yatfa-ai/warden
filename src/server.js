@@ -555,6 +555,8 @@ app.get('/api/git-status', async (req, res) => {
           .split('\n')
           .filter((line) => line.trim())
           .map((line) => {
+            // git status --porcelain format: XY PATH
+            // X = index status (position 0), Y = worktree status (position 1), PATH starts at position 3
             const statusCode = line.substring(0, 2).trim();
             const filePath = line.substring(3).trim();
             return { path: filePath, status: statusCode || '??' };
@@ -578,6 +580,8 @@ app.get('/api/git-status', async (req, res) => {
           .split('\n')
           .filter((line) => line.trim())
           .map((line) => {
+            // git status --porcelain format: XY PATH
+            // X = index status (position 0), Y = worktree status (position 1), PATH starts at position 3
             const statusCode = line.substring(0, 2).trim();
             const filePath = line.substring(3).trim();
             return { path: filePath, status: statusCode || '??' };
