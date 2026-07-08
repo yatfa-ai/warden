@@ -19,7 +19,7 @@ You operate ONLY through these tools:
 - read_chat({id, lines}): read an agent's current terminal pane. ALWAYS read before you advise on a specific agent — never assume.
 - send_directive({id, directive}): propose a message to an agent. The user MUST approve every send; you propose and wait for the gate.
 - summarize_chats(): read all open tabs in one efficient batch. Use this when the user asks "what's happening", "what are they working on", or you need a complete picture to advise well. Returns pane content + metadata for every open chat.
-- suggest_next_actions(): analyze all open agent tabs and suggest prioritized next actions. Classifies agent states (stuck, erroring, waiting, blocked, idle, active) and returns actionable suggestions with urgency levels. Use this to quickly identify which agents need attention.
+- analyze_agents(): detect patterns across all open tabs. Returns structured insights about which agents are stuck, erroring, idle, or need coordination. Use this to answer "what needs attention?" or diagnose workflow issues.
 
 Your job:
 1. Watch — read the chats the user cares about; keep an accurate, current picture of each agent's work.
@@ -42,6 +42,14 @@ When using summarize_chats, synthesize insights not raw dumps:
 - Actionable states: stuck agents (repeating output, errors), idle agents (waiting for input), completed tasks
 - Coordination needs: which agents depend on others, workflow bottlenecks
 - Human attention needed: decisions, approvals, failures, unexpected states
+
+When using analyze_agents, prioritize:
+1. Stuck agents (repeating output) — need human intervention or restart
+2. Erroring agents — surface the error type and suggest next steps
+3. Coordination blockers — which agents are waiting on others
+4. Idle agents — what input they need to proceed
+
+Be specific. Name the agents, state the problem, and suggest concrete actions.
 
 Be concise. Highlight what needs attention NOW.`;
 
@@ -75,8 +83,8 @@ export const TOOLS = [
     input_schema: { type: 'object', properties: {}, required: [] },
   },
   {
-    name: 'suggest_next_actions',
-    description: 'Analyze all open agent tabs and suggest prioritized, concrete next actions for the human. Classifies agent states (stuck, erroring, waiting, blocked, idle, active) and identifies urgent issues requiring immediate attention.',
+    name: 'analyze_agents',
+    description: 'Analyze all open agent tabs for actionable patterns and states. Returns structured insights about stuck agents, errors, idle agents, and coordination needs. Use this when the user asks "what needs attention", "is anyone stuck", or you need to diagnose issues.',
     input_schema: { type: 'object', properties: {}, required: [] },
   },
 ];
@@ -214,7 +222,7 @@ export class Observer {
         return { error: e.message };
       }
     }
-    if (name === 'suggest_next_actions') {
+    if (name === 'analyze_agents') {
       const open = new Set(this.openTabs || []);
       if (open.size === 0) return { error: 'no tabs are open. open some agent panes first.' };
 
@@ -223,63 +231,57 @@ export class Observer {
       );
 
       if (openChats.length === 0) {
-        return { error: 'open tabs do not match any discovered chats.' };
+        return { error: 'open tabs do not match any discovered chats. try refreshing with list_chats.' };
       }
 
       try {
         const panes = await capturePanes(openChats);
-        const suggestions = [];
 
-        // Classification patterns (regex-based, no LLM calls)
-        const STUCK_RE = /^(.+)\1\1/m;
-        const ERROR_RE = /error|failed|exception|traceback/i;
-        const WAITING_RE = /please|respond|continue\?|input|press enter/i;
-        const BLOCKED_RE = /waiting for|blocked by|depends on/i;
+        const insights = openChats.map(c => {
+          const pane = panes[c.key] || '';
+          const lines = pane.split('\n');
 
-        for (const chat of openChats) {
-          const pane = panes[chat.key] || '';
-          let state = 'active';
-          let urgency = 'informational';
-          let action = `Monitoring ${chat.container} activity`;
+          // Detect repeating output (stuck agent)
+          const last3 = lines.slice(-3).join('\n');
+          const prev3 = lines.slice(-6, -3).join('\n');
+          const stuck = last3 === prev3 && last3.length > 50;
 
-          if (STUCK_RE.test(pane)) {
-            state = 'stuck';
-            urgency = 'urgent';
-            action = 'Agent appears stuck (repeating output)';
-          } else if (ERROR_RE.test(pane)) {
-            state = 'erroring';
-            urgency = 'urgent';
-            action = 'Agent encountered an error';
-          } else if (WAITING_RE.test(pane)) {
-            state = 'waiting';
-            urgency = 'important';
-            action = 'Agent is waiting for human input';
-          } else if (BLOCKED_RE.test(pane)) {
-            state = 'blocked';
-            urgency = 'important';
-            action = 'Agent is blocked by dependency';
-          } else if (!pane.trim() || pane.length < 50) {
-            state = 'idle';
-            urgency = 'informational';
-            action = 'Agent appears idle';
-          }
+          // Detect errors
+          const hasError = /error|exception|failed|traceback|fatal/i.test(pane);
+          const errorLines = lines.filter(l => /error|exception|failed/i.test(l)).slice(-2);
 
-          suggestions.push({
-            agentId: chat.key,
-            agentName: chat.container || chat.session,
-            host: chat.host,
-            role: chat.role,
-            urgency,
-            state,
-            action
-          });
-        }
+          // Detect idle/waiting
+          const isIdle = /prompt|waiting|input|approval|press|continue/i.test(pane);
 
-        // Sort by urgency (urgent → important → informational)
-        const urgencyOrder = { urgent: 0, important: 1, informational: 2 };
-        suggestions.sort((a, b) => urgencyOrder[a.urgency] - urgencyOrder[b.urgency]);
+          // Detect coordination signals
+          const mentionsAgent = /agent|worker|planner|reviewer|researcher/i.test(pane);
+          const blocked = /blocked|waiting on|depends|need.*from/i.test(pane);
 
-        return { suggestions };
+          return {
+            id: c.container || c.session,
+            host: c.host,
+            role: c.role,
+            state: stuck ? 'stuck' : (hasError ? 'erroring' : (isIdle ? 'idle' : 'active')),
+            signals: {
+              stuck,
+              hasError,
+              errorSample: errorLines.join('; '),
+              isIdle,
+              mentionsAgent,
+              blocked,
+            },
+          };
+        });
+
+        const summary = {
+          total: insights.length,
+          stuck: insights.filter(i => i.state === 'stuck').length,
+          erroring: insights.filter(i => i.state === 'erroring').length,
+          idle: insights.filter(i => i.state === 'idle').length,
+          active: insights.filter(i => i.state === 'active').length,
+        };
+
+        return { insights, summary };
       } catch (e) {
         return { error: e.message };
       }
