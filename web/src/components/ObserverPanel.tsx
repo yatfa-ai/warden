@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import type { ObserveMsg } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -17,39 +17,50 @@ export function ObserverPanel({ sessionId }: Props) {
   const [items, setItems] = useState<Item[]>([]);
   const [busy, setBusy] = useState(false);
   const [conn, setConn] = useState(false);
+  const [userStopped, setUserStopped] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const connect = useCallback(() => {
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
+    setUserStopped(false);
+    const url = (location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + '/api/observe?sid=' + encodeURIComponent(sessionId);
+    const ws = new WebSocket(url);
+    wsRef.current = ws;
+    ws.onopen = () => { setConn(true); setItems((p) => p.length ? p : [{ kind: 'tool', text: 'observer connected (GLM)' }]); };
+    ws.onclose = () => { wsRef.current = null; setConn(false); if (!userStopped) reconnectTimeoutRef.current = setTimeout(connect, 1500); };
+    ws.onmessage = (e) => {
+      const m: ObserveMsg = JSON.parse(e.data);
+      if (m.type === 'history') {
+        setItems(m.items.map((i) => i.role === 'user'
+          ? { kind: 'user', text: i.text || '' }
+          : i.role === 'assistant' ? { kind: 'obs', text: i.text || '' }
+          : { kind: 'tool', text: `➐ ${i.name}(${i.id || ''})` }));
+        return;
+      }
+      if (m.type === 'thinking') { setBusy(true); return; }
+      setBusy(false);
+      if (m.type === 'tool') setItems((p) => [...p, { kind: 'tool', text: `➐ ${m.name}(${m.input?.id || ''})` }]);
+      else if (m.type === 'assistant') setItems((p) => [...p, { kind: 'obs', text: m.text }]);
+      else if (m.type === 'done') { if (m.text?.trim()) setItems((p) => [...p, { kind: 'obs', text: m.text }]); }
+      else if (m.type === 'directive_proposed') setItems((p) => [...p, { kind: 'card', requestId: m.requestId, container: m.container, role: m.role, directive: m.directive }]);
+      else if (m.type === 'error') setItems((p) => [...p, { kind: 'tool', text: 'error: ' + m.error }]);
+    };
+  }, [sessionId]);
 
   useEffect(() => {
-    let disposed = false;
-    let reconnect: ReturnType<typeof setTimeout>;
-    const open = () => {
-      if (disposed) return;
-      const url = (location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + '/api/observe?sid=' + encodeURIComponent(sessionId);
-      const ws = new WebSocket(url);
-      wsRef.current = ws;
-      ws.onopen = () => { if (!disposed) { setConn(true); setItems((p) => p.length ? p : [{ kind: 'tool', text: 'observer connected (GLM)' }]); } };
-      ws.onclose = () => { wsRef.current = null; setConn(false); if (!disposed) reconnect = setTimeout(open, 1500); };
-      ws.onmessage = (e) => {
-        const m: ObserveMsg = JSON.parse(e.data);
-        if (m.type === 'history') {
-          setItems(m.items.map((i) => i.role === 'user'
-            ? { kind: 'user', text: i.text || '' }
-            : i.role === 'assistant' ? { kind: 'obs', text: i.text || '' }
-            : { kind: 'tool', text: `➐ ${i.name}(${i.id || ''})` }));
-          return;
-        }
-        if (m.type === 'thinking') { setBusy(true); return; }
-        setBusy(false);
-        if (m.type === 'tool') setItems((p) => [...p, { kind: 'tool', text: `➐ ${m.name}(${m.input?.id || ''})` }]);
-        else if (m.type === 'assistant') setItems((p) => [...p, { kind: 'obs', text: m.text }]);
-        else if (m.type === 'done') { if (m.text?.trim()) setItems((p) => [...p, { kind: 'obs', text: m.text }]); }
-        else if (m.type === 'directive_proposed') setItems((p) => [...p, { kind: 'card', requestId: m.requestId, container: m.container, role: m.role, directive: m.directive }]);
-        else if (m.type === 'error') setItems((p) => [...p, { kind: 'tool', text: 'error: ' + m.error }]);
-      };
+    connect();
+    return () => {
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      wsRef.current?.close();
     };
-    open();
-    return () => { disposed = true; clearTimeout(reconnect); wsRef.current?.close(); };
-  }, [sessionId]);
+  }, [connect]);
 
   const send = (text: string) => {
     if (!wsRef.current || wsRef.current.readyState !== 1) return;
@@ -59,7 +70,17 @@ export function ObserverPanel({ sessionId }: Props) {
     wsRef.current.send(JSON.stringify({ type: 'user', text, panes }));
   };
   const stop = () => {
+    setUserStopped(true);
     if (wsRef.current) { wsRef.current.close(); setBusy(false); setItems((p) => [...p, { kind: 'tool', text: '(stopped)' }]); }
+  };
+  const reconnect = () => {
+    connect();
+    setItems((p) => [...p, { kind: 'tool', text: '(reconnecting…)' }]);
+  };
+  const onTextareaInput = (e: React.FormEvent<HTMLTextAreaElement>) => {
+    const ta = e.target as HTMLTextAreaElement;
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 128) + 'px';
   };
   const decide = (requestId: string, approved: boolean, edited?: string) => {
     wsRef.current?.send(JSON.stringify({ type: 'gate_decision', requestId, approved, edited }));
@@ -99,19 +120,30 @@ export function ObserverPanel({ sessionId }: Props) {
       </ScrollArea>
       <div className="flex items-end gap-2 px-2 py-2 border-t shrink-0">
         <textarea name="msg" placeholder="ask the observer… (Shift+Enter for newline)" rows={1}
-          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); const el = e.target as HTMLTextAreaElement; if (el.value.trim()) { send(el.value.trim()); el.value = ''; } } }}
-          className="flex-1 bg-background border rounded px-2 py-1.5 text-sm resize-none min-h-[36px] max-h-32 overflow-auto" />
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); const el = e.target as HTMLTextAreaElement; if (el.value.trim()) { send(el.value.trim()); el.value = ''; el.style.height = 'auto'; } } }}
+          onInput={onTextareaInput}
+          disabled={!conn}
+          className="flex-1 bg-background border rounded px-2 py-1.5 text-sm resize-none min-h-[36px] max-h-32 overflow-auto disabled:opacity-50" />
         {busy && <Button type="button" size="sm" variant="destructive" onClick={stop} className="shrink-0">stop</Button>}
-        <Button type="button" size="sm" variant="outline" disabled={busy} className="shrink-0"
-          onClick={() => send('summarize what everyone is working on')}
-          title="Ask the Observer to read all open tabs and summarize"
-        >summarize</Button>
-        <Button type="button" size="sm" disabled={busy} className="shrink-0"
+        {!conn && !busy && <Button type="button" size="sm" variant="outline" onClick={reconnect} className="shrink-0">reconnect</Button>}
+        <Button type="button" size="sm" variant="outline" disabled={busy || !conn} className="shrink-0"
           onClick={() => {
             const el = document.querySelector('textarea[name="msg"]') as HTMLTextAreaElement;
             if (el?.value.trim()) {
               send(el.value.trim());
               el.value = '';
+              el.style.height = 'auto';
+            }
+          }}
+          title="Ask the Observer to read all open tabs and summarize"
+        >summarize</Button>
+        <Button type="button" size="sm" disabled={busy || !conn} className="shrink-0"
+          onClick={() => {
+            const el = document.querySelector('textarea[name="msg"]') as HTMLTextAreaElement;
+            if (el?.value.trim()) {
+              send(el.value.trim());
+              el.value = '';
+              el.style.height = 'auto';
             }
           }}
         >send</Button>
