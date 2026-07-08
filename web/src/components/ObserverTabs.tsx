@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { ObserverPanel } from './ObserverPanel';
 import { ActivityTimeline } from './ActivityTimeline';
 import { Button } from '@/components/ui/button';
 import { EmptyState } from '@/components/EmptyState';
 import { loadObs, saveObs } from '@/lib/storage';
+import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import type { SessionMeta } from '@/lib/types';
 
 interface Props {
@@ -24,6 +25,12 @@ export function ObserverTabs({ externalViewMode, onFocusAgent }: Props = {}) {
   const [loading, setLoading] = useState(false);
   const [loadingTimeout, setLoadingTimeout] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { prefs } = useNotificationPrefs();
+  // `refresh` is memoized with [] deps and drives the boot effect; reading
+  // prefs directly there would retrigger boot on every preference change. The
+  // ref always holds the latest prefs without changing callback identity.
+  const prefsRef = useRef(prefs);
+  useEffect(() => { prefsRef.current = prefs; }, [prefs]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -47,7 +54,7 @@ export function ObserverTabs({ externalViewMode, onFocusAgent }: Props = {}) {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';
       setError(errorMsg);
-      toast.error(`Failed to fetch sessions: ${errorMsg}`);
+      if (prefsRef.current.notifyErrors) toast.error(`Failed to fetch sessions: ${errorMsg}`);
       return [];
     } finally {
       clearTimeout(timeoutId);
@@ -66,10 +73,10 @@ export function ObserverTabs({ externalViewMode, onFocusAgent }: Props = {}) {
       setSessions((p) => [s, ...p]);
       setOpenIds((p) => (p.includes(s.id) ? p : [...p, s.id]));
       setActiveId(s.id);
-      toast.success('New observer session created');
+      if (prefsRef.current.notifySuccess) toast.success('New observer session created');
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';
-      toast.error(`Failed to create session: ${errorMsg}`);
+      if (prefsRef.current.notifyErrors) toast.error(`Failed to create session: ${errorMsg}`);
     }
   }, []);
 

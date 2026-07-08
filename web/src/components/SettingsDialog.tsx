@@ -22,7 +22,6 @@ interface ConfigData {
   observerAutoStart: boolean;
   observerSessionTimeout: number | null;
   notifyChatOps: boolean;
-  notifyAgentLifecycle: boolean;
   notifyErrors: boolean;
   notifySuccess: boolean;
   notifyObserver: boolean;
@@ -46,7 +45,6 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
     observerAutoStart: false,
     observerSessionTimeout: 30,
     notifyChatOps: true,
-    notifyAgentLifecycle: true,
     notifyErrors: true,
     notifySuccess: true,
     notifyObserver: true,
@@ -75,7 +73,6 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
             observerAutoStart: configData.observerAutoStart || false,
             observerSessionTimeout: configData.observerSessionTimeout ?? 30,
             notifyChatOps: configData.notifyChatOps ?? true,
-            notifyAgentLifecycle: configData.notifyAgentLifecycle ?? true,
             notifyErrors: configData.notifyErrors ?? true,
             notifySuccess: configData.notifySuccess ?? true,
             notifyObserver: configData.notifyObserver ?? true,
@@ -329,25 +326,7 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
                   </Label>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Session kill, rename, and resume notifications
-                </p>
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center gap-2">
-                  <input
-                    id="notifyAgentLifecycle"
-                    type="checkbox"
-                    checked={config.notifyAgentLifecycle}
-                    onChange={(e) => setConfig({ ...config, notifyAgentLifecycle: e.target.checked })}
-                    className="w-4 h-4"
-                  />
-                  <Label htmlFor="notifyAgentLifecycle" className="cursor-pointer">
-                    Agent lifecycle
-                  </Label>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Agent start, stop, and status change notifications
+                  Session kill, chat kill, resume, and rename notifications
                 </p>
               </div>
 

@@ -9,6 +9,7 @@ import { EmptyState } from '@/components/EmptyState';
 import { NewChatForm } from './NewChatForm';
 import { CollectionsSection } from './CollectionsSection';
 import { CreateCollectionDialog } from './CreateCollectionDialog';
+import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import type { Chat, Collection } from '@/lib/types';
 
 export interface ClaudeSession { id: string; cwd: string; summary: string; mtime: number }
@@ -97,19 +98,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [allSessions, setAllSessions] = useState<(ClaudeSession & { host: string })[]>([]);
   const [loadingAllSessions, setLoadingAllSessions] = useState(false);
   const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string }>>({});
-  const [config, setConfig] = useState<{
-    notifyChatOps: boolean;
-    notifyAgentLifecycle: boolean;
-    notifyErrors: boolean;
-    notifySuccess: boolean;
-    notifyObserver: boolean;
-  }>({
-    notifyChatOps: true,
-    notifyAgentLifecycle: true,
-    notifyErrors: true,
-    notifySuccess: true,
-    notifyObserver: true,
-  });
+  const { prefs } = useNotificationPrefs();
 
   // Native context menu listener — only fires for tab rows, leaves everything else (xterm/tmux) alone.
   useEffect(() => {
@@ -136,24 +125,6 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   // Fetch all sessions on mount
   useEffect(() => { fetchAllSessions(); }, []);
 
-  // Load notification preferences on mount
-  useEffect(() => {
-    fetch('/api/config')
-      .then((r) => r.json())
-      .then((configData) => {
-        setConfig({
-          notifyChatOps: configData.notifyChatOps ?? true,
-          notifyAgentLifecycle: configData.notifyAgentLifecycle ?? true,
-          notifyErrors: configData.notifyErrors ?? true,
-          notifySuccess: configData.notifySuccess ?? true,
-          notifyObserver: configData.notifyObserver ?? true,
-        });
-      })
-      .catch((err) => {
-        console.error('Failed to load notification preferences:', err);
-      });
-  }, []);
-
   const fetchHostSessions = async (host: string) => {
     setLoadingHost(host);
     try {
@@ -161,7 +132,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       const j = await r.json();
       setHostSessions((p) => ({ ...p, [host]: { sessions: j.sessions || [], claudeAvailable: j.claudeAvailable } }));
     } catch (error) {
-      if (config.notifyErrors) toast.error(`Failed to fetch sessions for ${host}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      if (prefs.notifyErrors) toast.error(`Failed to fetch sessions for ${host}: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
     setLoadingHost(null);
   };
@@ -197,7 +168,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       const j = await r.json();
       setCollections(j.collections || []);
     } catch (error) {
-      if (config.notifyErrors) toast.error(`Failed to fetch collections: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      if (prefs.notifyErrors) toast.error(`Failed to fetch collections: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   };
 

@@ -10,6 +10,7 @@ import { ObserverTabs } from '@/components/ObserverTabs';
 import { SettingsDialog } from '@/components/SettingsDialog';
 import { GlobalSearchDialog } from '@/components/GlobalSearchDialog';
 import { HealthDashboard } from '@/components/HealthDashboard';
+import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { toast } from 'sonner';
 
 function App() {
@@ -41,19 +42,7 @@ function App() {
   const [observerCollapsed, setObserverCollapsed] = useState(uiState.observerCollapsed);
   const [healthCollapsed, setHealthCollapsed] = useState(uiState.healthCollapsed ?? true);
   const [theme, setTheme] = useState<Theme>(() => uiState.theme ?? 'system');
-  const [config, setConfig] = useState<{
-    notifyChatOps: boolean;
-    notifyAgentLifecycle: boolean;
-    notifyErrors: boolean;
-    notifySuccess: boolean;
-    notifyObserver: boolean;
-  }>({
-    notifyChatOps: true,
-    notifyAgentLifecycle: true,
-    notifyErrors: true,
-    notifySuccess: true,
-    notifyObserver: true,
-  });
+  const { prefs, reload: reloadNotificationPrefs } = useNotificationPrefs();
 
   useEffect(() => {
     streamApi.onOpen = () => setStreamConn(true);
@@ -65,22 +54,6 @@ function App() {
     };
     streamApi.connect();
     refresh();
-
-    // Load notification preferences
-    fetch('/api/config')
-      .then((r) => r.json())
-      .then((configData) => {
-        setConfig({
-          notifyChatOps: configData.notifyChatOps ?? true,
-          notifyAgentLifecycle: configData.notifyAgentLifecycle ?? true,
-          notifyErrors: configData.notifyErrors ?? true,
-          notifySuccess: configData.notifySuccess ?? true,
-          notifyObserver: configData.notifyObserver ?? true,
-        });
-      })
-      .catch((err) => {
-        console.error('Failed to load notification preferences:', err);
-      });
 
     // Check for activity since last close
     const checkActivitySinceClose = async () => {
@@ -163,6 +136,14 @@ function App() {
     setLoading(false);
   }, []);
 
+  // Called after Settings saves: reload chats/ssh-hosts AND refresh notification
+  // prefs everywhere (the shared hook broadcasts to all subscribers) so toggles
+  // take effect immediately without a page reload.
+  const handleConfigChange = useCallback(() => {
+    refresh();
+    reloadNotificationPrefs();
+  }, [refresh, reloadNotificationPrefs]);
+
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
   // its entries in the chats list so dots update to green/red.
   const discoverHost = useCallback(async (host: string) => {
@@ -224,60 +205,60 @@ function App() {
     try {
       const r = await fetch('/api/session-kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) });
       if (!r.ok) {
-        if (config.notifyErrors) toast.error('Failed to force-kill session');
+        if (prefs.notifyChatOps) toast.error('Failed to force-kill session');
         return;
       }
-      if (config.notifySuccess) toast.success('Session force-killed');
+      if (prefs.notifyChatOps) toast.success('Session force-killed');
     } catch (error) {
-      if (config.notifyErrors) toast.error(`Failed to force-kill: ${error instanceof Error ? error.message : String(error)}`);
+      if (prefs.notifyChatOps) toast.error(`Failed to force-kill: ${error instanceof Error ? error.message : String(error)}`);
     }
-  }, [config.notifyErrors, config.notifySuccess]);
+  }, [prefs.notifyChatOps]);
 
   const killChat = useCallback(async (id: string) => {
     if (!window.confirm('kill this chat and forget it?')) return;
     try {
       const r = await fetch('/api/kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) });
       if (!r.ok) {
-        if (config.notifyErrors) toast.error('Failed to kill chat');
+        if (prefs.notifyChatOps) toast.error('Failed to kill chat');
         return;
       }
       removeActive(id);
       refresh();
-      if (config.notifySuccess) toast.success('Chat killed');
+      if (prefs.notifyChatOps) toast.success('Chat killed');
     } catch (error) {
-      if (config.notifyErrors) toast.error(`Failed to kill chat: ${error instanceof Error ? error.message : String(error)}`);
+      if (prefs.notifyChatOps) toast.error(`Failed to kill chat: ${error instanceof Error ? error.message : String(error)}`);
     }
-  }, [refresh, removeActive, config.notifyErrors, config.notifySuccess]);
+  }, [refresh, removeActive, prefs.notifyChatOps]);
 
   const resumeSession = useCallback(async (id: string, description: string, cwd: string, host: string) => {
     try {
       const r = await fetch('/api/resume', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, cwd, host, name: description || undefined }) });
       const j = await r.json();
       if (!r.ok) {
-        if (config.notifyErrors) toast.error(j.error || 'resume failed');
+        if (prefs.notifyChatOps) toast.error(j.error || 'resume failed');
         return;
       }
       await refresh();
       openChat(j.chat.key);
-      if (config.notifySuccess) toast.success('Session resumed');
+      if (prefs.notifyChatOps) toast.success('Session resumed');
     } catch (e) {
-      if (config.notifyErrors) toast.error(e instanceof Error ? e.message : String(e));
+      if (prefs.notifyChatOps) toast.error(e instanceof Error ? e.message : String(e));
     }
-  }, [refresh, openChat, config.notifyErrors, config.notifySuccess]);
+  }, [refresh, openChat, prefs.notifyChatOps]);
 
   const renameChat = useCallback(async (session: string, kind: string, name: string) => {
     try {
       const r = await fetch('/api/rename', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session, kind, name }) });
       if (!r.ok) {
-        if (config.notifyErrors) toast.error('Failed to rename chat');
+        if (prefs.notifyChatOps) toast.error('Failed to rename chat');
         return;
       }
       refresh();
-      if (config.notifySuccess) toast.success('Chat renamed');
+      if (prefs.notifyChatOps) toast.success('Chat renamed');
     } catch (error) {
-      if (config.notifyErrors) toast.error(`Failed to rename: ${error instanceof Error ? error.message : String(error)}`);
+      if (prefs.notifyChatOps) toast.error(`Failed to rename: ${error instanceof Error ? error.message : String(error)}`);
     }
-  }, [refresh, config.notifyErrors, config.notifySuccess]);
+  }, [refresh, prefs.notifyChatOps]);
 
   const openActivityTab = useCallback(() => {
     setObserverCollapsed(false);
@@ -467,7 +448,7 @@ function App() {
       <SettingsDialog
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        onConfigChange={refresh}
+        onConfigChange={handleConfigChange}
         theme={theme}
         setTheme={setTheme}
       />
