@@ -31,6 +31,8 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connectionTimeoutShownRef = useRef(false);
+  const mountedRef = useRef(true);
 
   const connect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
@@ -51,15 +53,19 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
     setUserStopped(false);
     setConnectionError(null);
     setLoadingTimeout(false);
+    connectionTimeoutShownRef.current = false;
 
     // Set loading timeout (10 seconds)
     loadingTimeoutRef.current = setTimeout(() => {
-      setLoadingTimeout(true);
+      if (mountedRef.current) {
+        setLoadingTimeout(true);
+      }
     }, 10000);
 
     // Set connection timeout (15 seconds)
     connectionTimeoutRef.current = setTimeout(() => {
-      if (!conn) {
+      if (!conn && !connectionTimeoutShownRef.current && mountedRef.current) {
+        connectionTimeoutShownRef.current = true;
         setConnectionError('Connection timeout. Unable to establish WebSocket connection.');
         toast.error('Observer connection timeout. Please try reconnecting.');
       }
@@ -69,23 +75,30 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
     const ws = new WebSocket(url);
     wsRef.current = ws;
     ws.onopen = () => {
+      if (!mountedRef.current) return;
       setConn(true);
       setConnectionError(null);
       setLoadingTimeout(false);
+      connectionTimeoutShownRef.current = false;
       if (loadingTimeoutRef.current) clearTimeout(loadingTimeoutRef.current);
       if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
       setItems((p) => p.length ? p : [{ kind: 'tool', text: 'observer connected (GLM)' }]);
     };
     ws.onclose = () => {
+      if (!mountedRef.current) return;
       wsRef.current = null;
       setConn(false);
-      if (!userStopped) reconnectTimeoutRef.current = setTimeout(connect, 1500);
+      if (!userStopped) reconnectTimeoutRef.current = setTimeout(() => {
+        if (mountedRef.current) connect();
+      }, 1500);
     };
     ws.onerror = (e) => {
+      if (!mountedRef.current) return;
       setConnectionError('WebSocket connection error. Will attempt to reconnect...');
       console.error('WebSocket error:', e);
     };
     ws.onmessage = (e) => {
+      if (!mountedRef.current) return;
       const m: ObserveMsg = JSON.parse(e.data);
       if (m.type === 'history') {
         setItems(m.items.map((i) => i.role === 'user'
@@ -112,8 +125,10 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
   };
 
   useEffect(() => {
+    mountedRef.current = true;
     connect();
     return () => {
+      mountedRef.current = false;
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
       if (loadingTimeoutRef.current) clearTimeout(loadingTimeoutRef.current);
       if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
