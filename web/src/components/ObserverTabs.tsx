@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
+import { toast } from 'sonner';
 import { ObserverPanel } from './ObserverPanel';
 import { ActivityTimeline } from './ActivityTimeline';
 import { Button } from '@/components/ui/button';
+import { EmptyState } from '@/components/EmptyState';
 import { loadObs, saveObs } from '@/lib/storage';
 import type { SessionMeta } from '@/lib/types';
 
@@ -19,21 +21,56 @@ export function ObserverTabs({ externalViewMode, onFocusAgent }: Props = {}) {
   const [activeId, setActiveId] = useState<string | null>(() => loadObs().activeId);
   const [viewMode, setViewMode] = useState<'sessions' | 'activity'>(() => loadObs().viewMode || 'sessions');
   const [booted, setBooted] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [loadingTimeout, setLoadingTimeout] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    const r = await fetch('/api/sessions');
-    const j = await r.json();
-    const list: SessionMeta[] = j.sessions || [];
-    setSessions(list);
-    return list;
+    setLoading(true);
+    setError(null);
+    setLoadingTimeout(false);
+
+    // Set loading timeout (10 seconds)
+    const timeoutId = setTimeout(() => {
+      setLoadingTimeout(true);
+    }, 10000);
+
+    try {
+      const r = await fetch('/api/sessions');
+      if (!r.ok) {
+        throw new Error(`HTTP ${r.status}: ${r.statusText}`);
+      }
+      const j = await r.json();
+      const list: SessionMeta[] = j.sessions || [];
+      setSessions(list);
+      return list;
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+      setError(errorMsg);
+      toast.error(`Failed to fetch sessions: ${errorMsg}`);
+      return [];
+    } finally {
+      clearTimeout(timeoutId);
+      setLoading(false);
+      setLoadingTimeout(false);
+    }
   }, []);
 
   const createNew = useCallback(async () => {
-    const r = await fetch('/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: null }) });
-    const s: SessionMeta = await r.json();
-    setSessions((p) => [s, ...p]);
-    setOpenIds((p) => (p.includes(s.id) ? p : [...p, s.id]));
-    setActiveId(s.id);
+    try {
+      const r = await fetch('/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: null }) });
+      if (!r.ok) {
+        throw new Error(`HTTP ${r.status}: Failed to create session`);
+      }
+      const s: SessionMeta = await r.json();
+      setSessions((p) => [s, ...p]);
+      setOpenIds((p) => (p.includes(s.id) ? p : [...p, s.id]));
+      setActiveId(s.id);
+      toast.success('New observer session created');
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+      toast.error(`Failed to create session: ${errorMsg}`);
+    }
   }, []);
 
   // boot: load sessions, restore tabs, ensure at least one session exists & is open
@@ -96,6 +133,16 @@ export function ObserverTabs({ externalViewMode, onFocusAgent }: Props = {}) {
       {/* Sessions view */}
       {viewMode === 'sessions' && (
         <>
+          {error && (
+            <div className="mx-2 my-2 px-2 py-2 text-xs text-destructive bg-destructive/10 border border-destructive/30 rounded-md">
+              ⚠ {error}
+            </div>
+          )}
+          {loading && !booted && !error && (
+            <div className="p-4">
+              <EmptyState type="no-data" message={loadingTimeout ? 'Loading sessions (taking longer than expected)...' : 'Loading sessions...'} />
+            </div>
+          )}
           <div className="flex items-center gap-1 px-2 py-1.5 border-b shrink-0 overflow-x-auto">
             {openIds.map((id) => (
               <button

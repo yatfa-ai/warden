@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { loadUi, saveUi } from '@/lib/storage';
 import type { Chat } from '@/lib/types';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ChatSidebar } from '@/components/ChatSidebar';
 import { PaneGrid } from '@/components/PaneGrid';
 import { ObserverTabs } from '@/components/ObserverTabs';
@@ -341,24 +342,26 @@ function App() {
             onMouseDown={handleSidebarMouseDown}
             title="Drag to resize sidebar"
           />
-          <ChatSidebar
-            chats={chats}
-            sshHosts={sshHosts}
-            activeTabs={activeTabs}
-            hiddenTabs={hiddenTabs}
-            openPanes={openPaneSet}
-            onOpenChat={openChat}
-            onClosePane={closePane}
-            onRemoveActive={removeActive}
-            onReorder={reorderTabs}
-            onHideTab={hideTab}
-            onUnhideTab={unhideTab}
-            onKill={killChat}
-            onRename={renameChat}
-            onResume={resumeSession}
-            onRefresh={refresh}
-            loading={loading}
-          />
+          <ErrorBoundary>
+            <ChatSidebar
+              chats={chats}
+              sshHosts={sshHosts}
+              activeTabs={activeTabs}
+              hiddenTabs={hiddenTabs}
+              openPanes={openPaneSet}
+              onOpenChat={openChat}
+              onClosePane={closePane}
+              onRemoveActive={removeActive}
+              onReorder={reorderTabs}
+              onHideTab={hideTab}
+              onUnhideTab={unhideTab}
+              onKill={killChat}
+              onRename={renameChat}
+              onResume={resumeSession}
+              onRefresh={refresh}
+              loading={loading}
+            />
+          </ErrorBoundary>
         </section>
         <section className="flex-1 min-h-0 min-w-0">
           <PaneGrid
@@ -383,7 +386,9 @@ function App() {
             onMouseDown={handleObserverMouseDown}
             title="Drag to resize observer panel"
           />
-          <ObserverTabs externalViewMode={externalViewMode} onFocusAgent={handleFocusAgent} />
+          <ErrorBoundary>
+            <ObserverTabs externalViewMode={externalViewMode} onFocusAgent={handleFocusAgent} />
+          </ErrorBoundary>
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden"
           style={{ width: healthCollapsed ? 0 : 320, flexShrink: 0, opacity: healthCollapsed ? 0 : 1 }}>

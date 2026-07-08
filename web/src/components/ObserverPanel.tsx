@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { toast } from 'sonner';
 import type { ObserveMsg } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Textarea } from '@/components/ui/textarea';
+import { EmptyState } from '@/components/EmptyState';
 
 type Item =
   | { kind: 'user'; text: string }
@@ -23,23 +25,66 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
   const [busy, setBusy] = useState(false);
   const [conn, setConn] = useState(false);
   const [userStopped, setUserStopped] = useState(false);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [loadingTimeout, setLoadingTimeout] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const loadingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const connect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
     }
+    if (loadingTimeoutRef.current) {
+      clearTimeout(loadingTimeoutRef.current);
+      loadingTimeoutRef.current = null;
+    }
+    if (connectionTimeoutRef.current) {
+      clearTimeout(connectionTimeoutRef.current);
+      connectionTimeoutRef.current = null;
+    }
     if (wsRef.current) {
       wsRef.current.close();
     }
     setUserStopped(false);
+    setConnectionError(null);
+    setLoadingTimeout(false);
+
+    // Set loading timeout (10 seconds)
+    loadingTimeoutRef.current = setTimeout(() => {
+      setLoadingTimeout(true);
+    }, 10000);
+
+    // Set connection timeout (15 seconds)
+    connectionTimeoutRef.current = setTimeout(() => {
+      if (!conn) {
+        setConnectionError('Connection timeout. Unable to establish WebSocket connection.');
+        toast.error('Observer connection timeout. Please try reconnecting.');
+      }
+    }, 15000);
+
     const url = (location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + '/api/observe?sid=' + encodeURIComponent(sessionId);
     const ws = new WebSocket(url);
     wsRef.current = ws;
-    ws.onopen = () => { setConn(true); setItems((p) => p.length ? p : [{ kind: 'tool', text: 'observer connected (GLM)' }]); };
-    ws.onclose = () => { wsRef.current = null; setConn(false); if (!userStopped) reconnectTimeoutRef.current = setTimeout(connect, 1500); };
+    ws.onopen = () => {
+      setConn(true);
+      setConnectionError(null);
+      setLoadingTimeout(false);
+      if (loadingTimeoutRef.current) clearTimeout(loadingTimeoutRef.current);
+      if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
+      setItems((p) => p.length ? p : [{ kind: 'tool', text: 'observer connected (GLM)' }]);
+    };
+    ws.onclose = () => {
+      wsRef.current = null;
+      setConn(false);
+      if (!userStopped) reconnectTimeoutRef.current = setTimeout(connect, 1500);
+    };
+    ws.onerror = (e) => {
+      setConnectionError('WebSocket connection error. Will attempt to reconnect...');
+      console.error('WebSocket error:', e);
+    };
     ws.onmessage = (e) => {
       const m: ObserveMsg = JSON.parse(e.data);
       if (m.type === 'history') {
@@ -70,6 +115,8 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
     connect();
     return () => {
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      if (loadingTimeoutRef.current) clearTimeout(loadingTimeoutRef.current);
+      if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
       wsRef.current?.close();
     };
   }, [connect]);
@@ -102,12 +149,27 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
   return (
     <div className="flex flex-col h-full min-h-0">
       <div className="flex items-center gap-2 px-3 py-2 border-b text-xs text-muted-foreground shrink-0">
-        <span className={`size-2 rounded-full ${conn ? 'bg-green-500' : 'bg-red-500'}`} title={conn ? 'connected' : 'reconnecting…'} />
+        <span className={`size-2 rounded-full ${conn ? 'bg-green-500' : 'bg-red-500'}`} title={conn ? 'connected' : connectionError || 'reconnecting…'} />
         <span className="flex-1">drafts directives you approve</span>
         {busy && <span className="italic">thinking…</span>}
+        {loadingTimeout && !conn && (
+          <span className="text-yellow-400 text-[10px] italic">taking longer than expected…</span>
+        )}
       </div>
       <ScrollArea className="flex-1 min-h-0">
         <div className="flex flex-col gap-2 p-3">
+          {connectionError && !conn && (
+            <div className="text-xs text-destructive bg-destructive/10 px-2 py-1 rounded">
+              {connectionError}
+            </div>
+          )}
+          {items.length === 0 && conn && !busy && (
+            <EmptyState
+              type="no-data"
+              message="Observer is ready. Start a conversation above."
+              className="py-8"
+            />
+          )}
           {items.map((it, i) => {
             if (it.kind === 'user') return <div key={i} className="self-end max-w-full bg-primary/15 border border-primary/30 rounded-2xl px-3 py-1.5 text-sm whitespace-pre-wrap break-words">{it.text}</div>;
             if (it.kind === 'obs') return <div key={i} className="self-start max-w-full bg-secondary border rounded-2xl px-3 py-1.5 text-sm whitespace-pre-wrap break-words">{it.text}</div>;
