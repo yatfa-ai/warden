@@ -35,13 +35,13 @@ export function saveUi(s: UiState) {
 
 // Observer tabs
 const OBS_KEY = 'warden:observer:v1';
-export interface ObsUi { openIds: string[]; activeId: string | null }
+export interface ObsUi { openIds: string[]; activeId: string | null; viewMode?: 'sessions' | 'activity' }
 export function loadObs(): ObsUi {
   try {
     const v = JSON.parse(localStorage.getItem(OBS_KEY) || '');
-    if (v && Array.isArray(v.openIds)) return { openIds: v.openIds, activeId: v.activeId ?? null };
+    if (v && Array.isArray(v.openIds)) return { openIds: v.openIds, activeId: v.activeId ?? null, viewMode: v.viewMode || 'sessions' };
   } catch { /* ignore */ }
-  return { openIds: [], activeId: null };
+  return { openIds: [], activeId: null, viewMode: 'sessions' };
 }
 export function saveObs(s: ObsUi) {
   try { localStorage.setItem(OBS_KEY, JSON.stringify(s)); } catch { /* ignore */ }

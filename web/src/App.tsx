@@ -18,6 +18,9 @@ function App() {
   const [maximized, setMaximized] = useState<string | null>(null);
   const [newActivity, setNewActivity] = useState<Set<string>>(new Set());
   const [streamConn, setStreamConn] = useState(false);
+  const [activitySinceClose, setActivitySinceClose] = useState<any>(null);
+  const [showActivityBanner, setShowActivityBanner] = useState(false);
+  const [externalViewMode, setExternalViewMode] = useState<'sessions' | 'activity' | null>(null);
   const focusedRef = useRef(focused);
   focusedRef.current = focused;
 
@@ -35,7 +38,42 @@ function App() {
     };
     streamApi.connect();
     refresh();
-    return () => { streamApi.onOpen = null; streamApi.onClose = null; streamApi.onAnyMessage = null; };
+
+    // Check for activity since last close
+    const checkActivitySinceClose = async () => {
+      const lastCloseStr = localStorage.getItem('warden:lastClose');
+      if (lastCloseStr) {
+        const lastClose = parseInt(lastCloseStr, 10);
+        const now = Date.now();
+        if (now - lastClose > 60000) { // Only show if closed for more than 1 minute
+          try {
+            const res = await fetch(`/api/activity/stats?after=${new Date(lastClose).toISOString()}`);
+            const stats = await res.json();
+            if (stats.total > 0) {
+              setActivitySinceClose(stats);
+              setShowActivityBanner(true);
+            }
+          } catch (e) {
+            console.error('Failed to fetch activity stats:', e);
+          }
+        }
+      }
+    };
+    checkActivitySinceClose();
+
+    // Store close timestamp on unmount
+    const handleBeforeUnload = () => {
+      localStorage.setItem('warden:lastClose', String(Date.now()));
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      streamApi.onOpen = null;
+      streamApi.onClose = null;
+      streamApi.onAnyMessage = null;
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      handleBeforeUnload();
+    };
   }, []);
 
   // clear "new" badge when a pane becomes focused
@@ -117,6 +155,10 @@ function App() {
     refresh();
   }, [refresh]);
 
+  const openActivityTab = useCallback(() => {
+    setObserverCollapsed(false);
+    setExternalViewMode('activity');
+  }, []);
   const openPaneSet = new Set(openPanes);
   const tiles = openPanes.map((id) => ({ id }));
 
@@ -124,6 +166,41 @@ function App() {
 
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">
+      {showActivityBanner && activitySinceClose && (
+        <div className="flex items-center justify-between px-3 py-2 bg-blue-50 dark:bg-blue-950 border-b border-blue-200 dark:border-blue-800">
+          <div className="flex items-center gap-3 text-sm">
+            <span className="font-medium text-blue-900 dark:text-blue-100">While you were away:</span>
+            <span className="text-blue-700 dark:text-blue-300">
+              {activitySinceClose.directive_proposed > 0 && (
+                <span className="mr-3">{activitySinceClose.directive_proposed} directive{activitySinceClose.directive_proposed !== 1 ? 's' : ''} sent</span>
+              )}
+              {activitySinceClose.attached > 0 && (
+                <span className="mr-3">{activitySinceClose.attached} session{activitySinceClose.attached !== 1 ? 's' : ''} attached</span>
+              )}
+              {activitySinceClose.error > 0 && (
+                <span className="mr-3 text-red-600 dark:text-red-400">{activitySinceClose.error} error{activitySinceClose.error !== 1 ? 's' : ''}</span>
+              )}
+              {activitySinceClose.total > 0 && (
+                <span className="text-blue-600 dark:text-blue-400">{activitySinceClose.total} total event{activitySinceClose.total !== 1 ? 's' : ''}</span>
+              )}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={openActivityTab}
+              className="text-xs px-2 py-1 bg-blue-200 dark:bg-blue-800 text-blue-900 dark:text-blue-100 rounded hover:bg-blue-300 dark:hover:bg-blue-700 transition-colors"
+            >
+              View Activity
+            </button>
+            <button
+              onClick={() => setShowActivityBanner(false)}
+              className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
       <header className="flex items-center gap-3 px-3 h-11 border-b shrink-0">
         <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)} className="text-muted-foreground hover:text-foreground" title="toggle sidebar">{sidebarCollapsed ? '▸' : '◂'}</button>
         <span className="font-semibold tracking-wide">Yatfa Warden</span>
@@ -173,7 +250,7 @@ function App() {
         </section>
         {!observerCollapsed && (
           <section className="border-l min-h-0" style={{ width: 380, flexShrink: 0 }}>
-            <ObserverTabs />
+            <ObserverTabs externalViewMode={externalViewMode} />
           </section>
         )}
       </main>

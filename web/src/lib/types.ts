@@ -49,3 +49,26 @@ export interface SessionMeta {
 }
 
 export type TileMode = 'monitor' | 'live';
+
+export interface ActivityEvent {
+  timestamp: string;
+  type: 'directive_proposed' | 'attached' | 'ended' | 'error' | 'snapshot';
+  id?: string;
+  container?: string;
+  host?: string;
+  role?: string;
+  directive?: string;
+  error?: string;
+  code?: number;
+  context?: string;
+  [key: string]: any; // Allow additional properties
+}
+
+export interface ActivityStats {
+  total: number;
+  directive_proposed: number;
+  attached: number;
+  ended: number;
+  error: number;
+  snapshot: number;
+}
