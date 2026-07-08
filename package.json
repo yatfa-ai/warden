@@ -20,7 +20,11 @@
     "electron:dev": "npm run build && electron .",
     "dist": "npm run build && electron-builder",
     "postinstall": "",
-    "test": "node --test src/**/*.test.js"
+    "test": "node --test src/**/*.test.js",
+    "dev:server": "node scripts/dev.mjs server",
+    "dev:git": "node scripts/dev.mjs git",
+    "dev:build": "node scripts/dev.mjs build",
+    "dev:test": "node scripts/dev.mjs test"
   },
   "dependencies": {
     "express": "^5.2.1",
