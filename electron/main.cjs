@@ -28,7 +28,7 @@ function waitForServer(cb) {
   let attempts = 0;
   const tryConnect = () => {
     if (attempts++ > 50) { console.error('Server did not start in time'); return; }
-    const req = http.get(`http://${HOST}:${PORT}/api/chats`, (res) => {
+    const req = http.get(`http://${HOST}:${PORT}/`, (res) => {
       if (res.statusCode === 200) cb();
       else setTimeout(tryConnect, 200);
       res.destroy();
