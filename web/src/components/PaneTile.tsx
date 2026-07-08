@@ -18,9 +18,10 @@ interface Props {
   onToggleMax: () => void;
   onKill: () => void;     // force-kill the tmux session
   chat?: Chat | null;     // chat metadata for export
+  externalSearchQuery?: string;  // external search trigger from global search
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, externalSearchQuery }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -108,6 +109,15 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
 
   // font size
   useEffect(() => { if (termRef.current) { termRef.current.options.fontSize = fontSize; try { fitRef.current?.fit(); } catch {} } }, [fontSize]);
+
+  // external search trigger from global search
+  useEffect(() => {
+    if (externalSearchQuery && searchRef.current) {
+      setSearchQuery(externalSearchQuery);
+      setShowSearch(true);
+      setTimeout(() => searchRef.current?.findNext(externalSearchQuery), 100);
+    }
+  }, [externalSearchQuery]);
 
   // search
   const doSearch = (dir: 'next' | 'prev') => {

@@ -169,6 +169,49 @@ app.get('/api/this-session', (_req, res) => res.json({
   cwd: process.cwd(),
 }));
 
+// Global cross-pane search: captures and searches across all open panes
+app.get('/api/search-pane', async (req, res) => {
+  const query = String(req.query.query || '').trim();
+  if (!query) return res.status(400).json({ error: 'query required' });
+
+  const paneKeys = String(req.query.panes || '').split(',').filter(Boolean);
+  const chats = paneKeys.map((key) => cache.find((c) => c.key === key)).filter(Boolean);
+
+  if (chats.length === 0) return res.json({ results: [], query });
+
+  try {
+    const captures = await capturePanes(chats);
+    const results = [];
+
+    for (const [key, content] of Object.entries(captures)) {
+      const lines = content.split('\n');
+      const chat = chats.find((c) => c.key === key);
+      if (!chat) continue;
+
+      const lowerQuery = query.toLowerCase();
+      lines.forEach((line, idx) => {
+        if (line.toLowerCase().includes(lowerQuery)) {
+          results.push({
+            key,
+            host: chat.host || 'unknown',
+            name: chat.name || key,
+            line: idx,
+            text: line.trim(),
+            context: {
+              before: lines[Math.max(0, idx - 2)]?.trim() || '',
+              after: lines[Math.min(lines.length - 1, idx + 2)]?.trim() || '',
+            },
+          });
+        }
+      });
+    }
+
+    res.json({ results, query });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ---- Claude Code session list (for the per-host "resume" list) ----
 function parseJsonlHead(text) {
   let cwd = '';
