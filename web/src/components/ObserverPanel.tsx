@@ -133,12 +133,7 @@ export function ObserverPanel({ sessionId }: Props) {
         {!conn && !busy && <Button type="button" size="sm" variant="outline" onClick={reconnect} className="shrink-0">reconnect</Button>}
         <Button type="button" size="sm" variant="outline" disabled={busy || !conn} className="shrink-0"
           onClick={() => {
-            const el = document.querySelector('textarea[name="msg"]') as HTMLTextAreaElement;
-            if (el?.value.trim()) {
-              send(el.value.trim());
-              el.value = '';
-              el.style.height = 'auto';
-            }
+            send("summarize what everyone is working on");
           }}
           title="Ask the Observer to read all open tabs and summarize"
         >summarize</Button>
