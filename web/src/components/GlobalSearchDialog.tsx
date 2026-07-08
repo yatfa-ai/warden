@@ -64,11 +64,11 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
           <button
             onClick={doSearch}
             disabled={searching || !query.trim()}
-            className="px-4 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-50"
+            className="px-4 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 active:scale-95 transition-all duration-150 ease-out disabled:opacity-50"
           >
             {searching ? 'Searching...' : 'Search'}
           </button>
-          <button onClick={onClose} className="text-muted-foreground hover:text-foreground px-2">×</button>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground px-2 active:scale-95 transition-all duration-150 ease-out">×</button>
         </div>
 
         {/* Results */}
