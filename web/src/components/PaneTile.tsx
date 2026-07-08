@@ -49,10 +49,29 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       if (e.type !== 'keydown') return true;
       const ctrl = e.ctrlKey || e.metaKey;
       if (!ctrl) return true;
-      if (e.code === 'KeyC') { const s = term.getSelection(); if (s) { navigator.clipboard?.writeText(s).catch(() => {}); return false; } return true; }
+      if (e.code === 'KeyC') {
+        const s = term.getSelection();
+        if (s) {
+          // Use execCommand fallback (navigator.clipboard fails silently in Electron)
+          const ta = document.createElement('textarea');
+          ta.value = s; ta.style.position = 'fixed'; ta.style.opacity = '0';
+          document.body.appendChild(ta); ta.select();
+          try { document.execCommand('copy'); } catch {}
+          document.body.removeChild(ta);
+          return false;
+        }
+        return true;
+      }
       if (e.code === 'KeyV') {
         e.preventDefault();
-        navigator.clipboard?.readText().then((t) => { if (t) streamApi.send({ type: 'input', id, data: t }); }).catch(() => {});
+        navigator.clipboard?.readText().then((t) => { if (t) streamApi.send({ type: 'input', id, data: t }); }).catch(() => {
+          // Electron fallback: read from a paste event
+          const ta = document.createElement('textarea');
+          ta.style.position = 'fixed'; ta.style.opacity = '0';
+          document.body.appendChild(ta); ta.focus();
+          document.execCommand('paste');
+          setTimeout(() => { if (ta.value) streamApi.send({ type: 'input', id, data: ta.value }); document.body.removeChild(ta); }, 100);
+        });
         return false;
       }
       return true;
