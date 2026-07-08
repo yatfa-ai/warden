@@ -103,7 +103,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [loadingHost, setLoadingHost] = useState<string | null>(null);
   const [allSessions, setAllSessions] = useState<(ClaudeSession & { host: string })[]>([]);
   const [loadingAllSessions, setLoadingAllSessions] = useState(false);
-  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string }>>({});
+  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string; files?: Array<{ path: string; status: string }> }>>({});
   const { prefs } = useNotificationPrefs();
 
   // Native context menu listener — only fires for tab rows, leaves everything else (xterm/tmux) alone.
@@ -150,7 +150,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       const r = await fetch(`/api/git-status?id=${encodeURIComponent(chatId)}`);
       const j = await r.json();
       if (j.branch) {
-        setGitStatus((p) => ({ ...p, [chatId]: { branch: j.branch, clean: j.clean, cwd: j.cwd } }));
+        setGitStatus((p) => ({ ...p, [chatId]: { branch: j.branch, clean: j.clean, cwd: j.cwd, files: j.files } }));
       }
     } catch (error) {
       // Git status is non-critical, so just log it without showing a toast
@@ -541,6 +541,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             const dead = !c || c.active === false;
             const originalIdx = activeTabs.indexOf(id);
             const gitInfo = gitStatus[id];
+            const hasFiles = !dead && gitInfo?.clean === false && gitInfo.files && gitInfo.files.length > 0;
             return (
               <div key={id} data-tab-id={id} draggable
                 onDragStart={() => setDragIdx(originalIdx)}
@@ -548,20 +549,37 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                 onDragEnd={() => { if (dragIdx !== null && dragOverIdx !== null && dragIdx !== dragOverIdx) onReorder(dragIdx, dragOverIdx); setDragIdx(null); setDragOverIdx(null); }}
                 onDrop={(e) => { e.preventDefault(); if (dragIdx !== null && originalIdx !== dragIdx) onReorder(dragIdx, originalIdx); setDragIdx(null); setDragOverIdx(null); }}
                 onClick={() => onOpenChat(id)}
-                className={`group flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent cursor-pointer transition-all duration-150 ease-out focus-within:ring-2 focus-within:ring-primary focus-within:ring-offset-2 focus-within:ring-offset-background ${dead ? 'opacity-50' : ''} ${dragOverIdx === originalIdx && dragIdx !== null ? 'border-t-2 border-primary' : ''}`}>
-                <span className="text-muted-foreground/40 cursor-grab active:cursor-grabbing select-none">⠿</span>
-                {showStatusIndicators !== false && <span className={`size-2 rounded-full shrink-0 ${dead ? 'bg-red-500' : isOpen ? 'bg-green-500' : 'bg-muted-foreground/40'}`} />}
-                <span className={`truncate flex-1 ${dead ? 'line-through text-muted-foreground' : ''}`}>{c?.name || id}</span>
-                {!dead && showTypeBadges !== false && <span className={`text-[10px] ${TYPE_COLOR[type] || ''}`}>{type}</span>}
-                {!dead && showHostTags !== false && hostTag && <span className="text-[10px] text-muted-foreground">{hostTag}</span>}
-                {!dead && showProjectBadges && c?.project && <span className="text-[10px] text-muted-foreground">{c.project}</span>}
-                {!dead && gitInfo?.branch && (
-                  <>
-                    <span className="text-[10px] text-cyan-400">{gitInfo.branch}</span>
-                    {gitInfo.clean === false && <span className="text-[10px] text-yellow-400">±</span>}
-                  </>
+                className={`group flex flex-col gap-0.5 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent cursor-pointer transition-all duration-150 ease-out focus-within:ring-2 focus-within:ring-primary focus-within:ring-offset-2 focus-within:ring-offset-background ${dead ? 'opacity-50' : ''} ${dragOverIdx === originalIdx && dragIdx !== null ? 'border-t-2 border-primary' : ''}`}>
+                <div className="flex items-center gap-2">
+                  <span className="text-muted-foreground/40 cursor-grab active:cursor-grabbing select-none">⠿</span>
+                  {showStatusIndicators !== false && <span className={`size-2 rounded-full shrink-0 ${dead ? 'bg-red-500' : isOpen ? 'bg-green-500' : 'bg-muted-foreground/40'}`} />}
+                  <span className={`truncate flex-1 ${dead ? 'line-through text-muted-foreground' : ''}`}>{c?.name || id}</span>
+                  {!dead && showTypeBadges !== false && <span className={`text-[10px] ${TYPE_COLOR[type] || ''}`}>{type}</span>}
+                  {!dead && showHostTags !== false && hostTag && <span className="text-[10px] text-muted-foreground">{hostTag}</span>}
+                  {!dead && showProjectBadges && c?.project && <span className="text-[10px] text-muted-foreground">{c.project}</span>}
+                  {!dead && gitInfo?.branch && (
+                    <>
+                      <span className="text-[10px] text-cyan-400">{gitInfo.branch}</span>
+                      {gitInfo.clean === false && <span className="text-[10px] text-yellow-400">±</span>}
+                    </>
+                  )}
+                  <button className={`px-1 text-sm active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded ${dead ? 'text-red-500 font-bold' : 'opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500'}`} title={dead ? 'remove dead tab' : 'remove'} onClick={(e) => { e.stopPropagation(); onRemoveActive(id); }}>×</button>
+                </div>
+                {hasFiles && gitInfo.files && (
+                  <div className="ml-6 flex flex-col gap-0.5">
+                    {gitInfo.files.map((file, i) => (
+                      <div key={i} className="flex items-center gap-1 text-[9px] text-muted-foreground">
+                        <span className={
+                          file.status === 'M' ? 'text-yellow-400' :
+                          file.status === 'A' ? 'text-green-400' :
+                          file.status === 'D' ? 'text-red-400' :
+                          'text-gray-400'
+                        }>{file.status}</span>
+                        <span className="truncate">{file.path}</span>
+                      </div>
+                    ))}
+                  </div>
                 )}
-                <button className={`px-1 text-sm active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded ${dead ? 'text-red-500 font-bold' : 'opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500'}`} title={dead ? 'remove dead tab' : 'remove'} onClick={(e) => { e.stopPropagation(); onRemoveActive(id); }}>×</button>
               </div>
             );
           })}
@@ -719,7 +737,7 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
   c: Chat; open: boolean; onOpen: () => void; onKill: () => void;
   onRename: (session: string, kind: string, name: string) => void;
   onHide?: () => void; onUnhide?: () => void; dim?: boolean;
-  gitInfo?: { branch: string | null; clean: boolean | null };
+  gitInfo?: { branch: string | null; clean: boolean | null; files?: Array<{ path: string; status: string }> };
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
   killingChatId?: string | null; renamingChatId?: string | null;
   isPinned?: boolean; onTogglePin?: () => void;
@@ -769,6 +787,21 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
                 </>
               )}
             </>
+          )}
+          {gitInfo?.clean === false && gitInfo.files && gitInfo.files.length > 0 && (
+            <div className="ml-1 mt-0.5 flex flex-col gap-0.5">
+              {gitInfo.files.map((file, i) => (
+                <div key={i} className="flex items-center gap-1 text-[9px] text-muted-foreground">
+                  <span className={
+                    file.status === 'M' ? 'text-yellow-400' :
+                    file.status === 'A' ? 'text-green-400' :
+                    file.status === 'D' ? 'text-red-400' :
+                    'text-gray-400'
+                  }>{file.status}</span>
+                  <span className="truncate">{file.path}</span>
+                </div>
+              ))}
+            </div>
           )}
         </span>
       )}

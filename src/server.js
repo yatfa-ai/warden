@@ -532,6 +532,7 @@ app.get('/api/git-status', async (req, res) => {
 
     let branch = '';
     let clean = true;
+    let files = [];
 
     if (chat.host === LOCAL) {
       // Local execution: use spawnSync directly
@@ -545,7 +546,20 @@ app.get('/api/git-status', async (req, res) => {
         cwd,
         stdio: ['ignore', 'pipe', 'inherit'],
       });
-      clean = statusResult.stdout?.toString().trim() === '' || !statusResult.stdout;
+      const statusOutput = statusResult.stdout?.toString().trim() || '';
+      clean = statusOutput === '' || !statusResult.stdout;
+
+      // Parse git status output to extract file paths and status
+      if (statusOutput) {
+        files = statusOutput
+          .split('\n')
+          .filter((line) => line.trim())
+          .map((line) => {
+            const statusCode = line.substring(0, 2).trim();
+            const filePath = line.substring(3).trim();
+            return { path: filePath, status: statusCode || '??' };
+          });
+      }
     } else {
       // Remote execution: use SSH
       const gitBranchCmd = `cd ${shellQuote(cwd)} && git rev-parse --abbrev-ref HEAD 2>/dev/null`;
@@ -555,17 +569,31 @@ app.get('/api/git-status', async (req, res) => {
       branch = r1.ok ? r1.stdout.trim() : '';
 
       const r2 = await run(chat.host, gitStatusCmd, { timeout: 8000 });
-      clean = r2.ok ? r2.stdout.trim() === '' : true;
+      const statusOutput = r2.ok ? r2.stdout.trim() : '';
+      clean = statusOutput === '' || !r2.ok;
+
+      // Parse git status output to extract file paths and status
+      if (statusOutput) {
+        files = statusOutput
+          .split('\n')
+          .filter((line) => line.trim())
+          .map((line) => {
+            const statusCode = line.substring(0, 2).trim();
+            const filePath = line.substring(3).trim();
+            return { path: filePath, status: statusCode || '??' };
+          });
+      }
     }
 
     res.json({
       branch: branch || null,
       clean: branch ? clean : null,
       cwd,
+      files: branch ? files : null,
       error: null,
     });
   } catch (e) {
-    res.json({ branch: null, clean: null, cwd: chat.cwd || '', error: e.message });
+    res.json({ branch: null, clean: null, cwd: chat.cwd || '', files: null, error: e.message });
   }
 });
 
@@ -1011,3 +1039,4 @@ const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === fil
 if (invokedDirectly) {
   startServer(parseInt(process.env.PORT || '7421', 10));
 }
+modified
