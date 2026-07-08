@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
@@ -81,7 +81,6 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [hostSessions, setHostSessions] = useState<Record<string, { sessions: ClaudeSession[]; claudeAvailable?: boolean }>>({});
   const [loadingHost, setLoadingHost] = useState<string | null>(null);
   const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string }>>({});
-  const [loadingGit, setLoadingGit] = useState<Set<string>>(new Set());
 
   const fetchHostSessions = async (host: string) => {
     setLoadingHost(host);
@@ -92,9 +91,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     } catch { /* noop */ }
     setLoadingHost(null);
   };
-  const fetchGitStatus = async (chatId: string) => {
-    if (loadingGit.has(chatId) || gitStatus[chatId]) return; // already loading or cached
-    setLoadingGit((p) => new Set(p).add(chatId));
+  const fetchGitStatus = useCallback(async (chatId: string) => {
     try {
       const r = await fetch(`/api/git-status?id=${encodeURIComponent(chatId)}`);
       const j = await r.json();
@@ -102,8 +99,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
         setGitStatus((p) => ({ ...p, [chatId]: { branch: j.branch, clean: j.clean, cwd: j.cwd } }));
       }
     } catch { /* noop */ }
-    setLoadingGit((p) => { const s = new Set(p); s.delete(chatId); return s; });
-  };
+  }, []);
   const enterHost = (host: string) => { setView({ kind: 'host', host }); fetchHostSessions(host); };
 
   // Collections management
@@ -136,7 +132,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       const c = findChat(chats, id);
       if (c) fetchGitStatus(id);
     });
-  }, [chats, activeTabs]);
+  }, [chats, activeTabs, fetchGitStatus]);
 
   const handleSpawned = (chat: Chat) => { onRefresh(); onOpenChat(chat.key || chat.id); setView({ kind: 'root' }); };
   const hosts = [THIS_MACHINE, ...sshHosts];
