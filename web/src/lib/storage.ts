@@ -14,6 +14,8 @@ export interface UiState {
   sidebarWidth?: number;
   observerWidth?: number;
   theme?: 'light' | 'dark' | 'system';
+  // pane id (chat key) -> host, so restored remote panes know which host to discover.
+  paneHost?: Record<string, string>;
 }
 
 export function loadUi(): UiState {
@@ -31,10 +33,11 @@ export function loadUi(): UiState {
         sidebarWidth: typeof v.sidebarWidth === 'number' ? v.sidebarWidth : 220,
         observerWidth: typeof v.observerWidth === 'number' ? v.observerWidth : 380,
         theme: v.theme ?? 'system',
+        paneHost: (v.paneHost && typeof v.paneHost === 'object') ? v.paneHost : {},
       };
     }
   } catch { /* ignore */ }
-  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, theme: 'system' };
+  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, theme: 'system', paneHost: {} };
 }
 
 export function saveUi(s: UiState) {

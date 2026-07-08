@@ -27,6 +27,10 @@ export const HealthState = {
  * @returns {string} Health state
  */
 export function getHealthState(agent, lastActivity) {
+  // Undiscovered (lazy) chats: active is null/undefined — not dead, just unknown.
+  if (agent.active == null) {
+    return HealthState.UNKNOWN;
+  }
   // If agent is not active (tmux session dead), it's critical
   if (!agent.active) {
     return HealthState.CRITICAL;

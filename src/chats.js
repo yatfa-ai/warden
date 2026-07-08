@@ -194,6 +194,79 @@ export async function discoverAll(hosts, cfg) {
   return { chats: all, errors };
 }
 
+// ---------------- lazy discovery ----------------
+
+// Build the chat object for a catalog/manual entry. `active` may be true | false | null
+// (null = undiscovered, in lazy mode). Single source of truth for the tmux-catalog shape
+// (mirrors the inline build in discoverAll above).
+function toCatalogChat(host, entry, active, lastActivity) {
+  return {
+    id: `${host}:${entry.session}`, key: entry.session, kind: 'tmux',
+    host, container: null, session: entry.session,
+    project: host === LOCAL ? 'local' : 'manual', role: 'claude',
+    name: entry.name || entry.session, cwd: entry.cwd, cmd: entry.cmd,
+    active,
+    status: active == null ? 'unknown' : (active ? 'running' : 'idle'),
+    lastActivity: lastActivity ?? null,
+  };
+}
+
+// Disk-only catalog list — ZERO ssh. Used for the instant initial /api/chats in lazy mode.
+export function catalogChats(cfg) {
+  const pins = new Set(cfg.pins || []);
+  const chats = loadCatalog().map((e) => toCatalogChat(e.host || LOCAL, e, null, null));
+  chats.sort((a, b) => {
+    const pa = pins.has(a.id) ? 0 : 1;
+    const pb = pins.has(b.id) ? 0 : 1;
+    if (pa !== pb) return pa - pb;
+    return a.id.localeCompare(b.id);
+  });
+  return { chats, errors: [] };
+}
+
+// Discover ONE host on demand: yatfa docker containers + that host's catalog chats, with
+// live active/lastActivity. Called when the user clicks a host. SSH cost is bounded to the
+// single host. Returns { host, chats }.
+export async function discoverHost(host, cfg) {
+  const pins = new Set(cfg.pins || []);
+  const chats = [];
+
+  if (host === LOCAL) {
+    const entries = loadCatalog().filter((e) => (e.host || LOCAL) === LOCAL);
+    const objs = entries.map((e) => ({
+      e, o: toCatalogChat(LOCAL, e, runLocalTmux(['has-session', '-t', e.session]).ok, null),
+    })).map((x) => x.o);
+    await Promise.all(objs.filter((o) => o.active).map((o) =>
+      Promise.resolve(runLocalTmux(['capture-pane', '-t', o.session, '-p', '-S', '-', '-E', '-']))
+        .then((r) => {
+          if (r.ok && r.stdout.trim()) {
+            const m = r.stdout.match(/\[?(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2})\]?/);
+            if (m) { const d = new Date(m[1]); if (!isNaN(d.getTime())) o.lastActivity = d.getTime(); }
+          }
+        }).catch(() => {})
+    ));
+    chats.push(...objs);
+  } else {
+    const yatfa = await discover(host, cfg); // already in chat shape
+    if (yatfa.ok) chats.push(...yatfa.chats);
+    const entries = loadCatalog().filter((e) => (e.host || LOCAL) === host);
+    if (entries.length) {
+      const manual = await discoverManual(host, entries, cfg); // sets .active + .lastActivity
+      chats.push(...manual.map((m) => toCatalogChat(host, m, m.active, m.lastActivity)));
+    }
+  }
+
+  chats.sort((a, b) => {
+    const pa = pins.has(a.id) ? 0 : 1;
+    const pb = pins.has(b.id) ? 0 : 1;
+    if (pa !== pb) return pa - pb;
+    const aa = a.active ? 1 : 0, ab = b.active ? 1 : 0;
+    if (aa !== ab) return ab - aa;
+    return a.id.localeCompare(b.id);
+  });
+  return { host, chats };
+}
+
 // Capture tmux pane content from multiple chats concurrently.
 // Groups by host to minimize SSH round-trips. Returns a map of chat key -> pane content.
 export async function capturePanes(chats, cfg = {}) {
