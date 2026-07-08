@@ -57,6 +57,7 @@ function findChat(chats: Chat[], id: string) { return chats.find((c) => (c.key |
 export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, loading }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
+  const [showAllChats, setShowAllChats] = useState(false);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
   const [ctx, setCtx] = useState<{ id: string; x: number; y: number; dead: boolean } | null>(null);
@@ -297,6 +298,48 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           })}
           {activeTabs.length === 0 && (
             <div className="text-xs text-muted-foreground p-3 text-center">no tabs — browse hosts below</div>
+          )}
+          {!showAllChats && chats.filter(c => c.active).length > 0 && (
+            <div className="px-2 pt-1 pb-1">
+              <button
+                onClick={() => setShowAllChats(true)}
+                className="text-xs text-blue-400 hover:text-blue-300"
+              >
+                show all active chats →
+              </button>
+            </div>
+          )}
+          {showAllChats && (
+            <>
+              <div className="px-2 pt-1 pb-1 flex items-center gap-2">
+                <span className="text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">active chats</span>
+                <span className="text-[10px] text-muted-foreground">all hosts</span>
+                <button onClick={() => setShowAllChats(false)} className="text-xs text-muted-foreground hover:text-foreground ml-auto">✕</button>
+              </div>
+              <div className="flex flex-col gap-0.5">
+                {chats
+                  .filter(c => c.active)
+                  .sort((a, b) => ((b.active ? 1 : 0) - (a.active ? 1 : 0)) || a.id.localeCompare(b.id))
+                  .slice(0, 20)
+                  .map((c) => {
+                    const type = chatType(c);
+                    const hostLabel = c.host === THIS_MACHINE ? 'local' : c.host;
+                    return (
+                      <button
+                        key={c.id}
+                        onClick={() => onOpenChat(c.key || c.id)}
+                        className="flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent cursor-pointer"
+                        title={`${c.id}\n${c.project || '?'} ${c.role || '?'}\n${hostLabel}`}
+                      >
+                        <span className="truncate flex-1">{c.key || c.id}</span>
+                        <span className={`text-[10px] ${TYPE_COLOR[type] || ''}`}>{type}</span>
+                        {c.project && <span className="text-[10px] text-muted-foreground">{c.project}</span>}
+                        <span className="text-[10px] text-muted-foreground">{hostLabel}</span>
+                      </button>
+                    );
+                  })}
+              </div>
+            </>
           )}
           <div className="mt-3 mb-1 border-t border-border/50" />
           <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">hosts</div>
