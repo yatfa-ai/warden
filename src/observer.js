@@ -97,6 +97,43 @@ function logDirective(chat, text) {
   fs.appendFileSync(DIRECTIVES_LOG, entry);
 }
 
+// Pure, dependency-injected core of the summarize_chats tool. capturePanes is passed
+// in so this logic is unit-testable without SSH/tmux (mock.module is unavailable on
+// the project's Node version). Behavior is identical to the inlined tool handler.
+export async function summarizeOpenChats(openTabs, lastChats, capturePanes, cfg) {
+  const open = new Set(openTabs || []);
+  if (open.size === 0) return { error: 'no tabs are open. open some agent panes first.' };
+
+  // Filter to only open tabs
+  const openChats = lastChats.filter(c =>
+    open.has(c.container || c.session) || open.has(c.key)
+  );
+
+  if (openChats.length === 0) {
+    return { error: 'open tabs do not match any discovered chats. try refreshing with list_chats.' };
+  }
+
+  try {
+    const panes = await capturePanes(openChats, cfg);
+
+    // Return structured result with metadata + panes
+    return {
+      chats: openChats.map(c => ({
+        id: c.container || c.session,
+        host: c.host,
+        project: c.project,
+        role: c.role,
+        active: c.active,
+        status: c.status,
+        pane: panes[c.key] || '(no pane content)',
+      })),
+      count: openChats.length,
+    };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
 export class Observer {
   constructor(cfg, { sid, gate, onTool, onToolResult, onText } = {}) {
     this.cfg = cfg;
@@ -189,38 +226,7 @@ export class Observer {
       } catch (e) { return { error: e.message }; }
     }
     if (name === 'summarize_chats') {
-      const open = new Set(this.openTabs || []);
-      if (open.size === 0) return { error: 'no tabs are open. open some agent panes first.' };
-
-      // Filter to only open tabs
-      const openChats = this.lastChats.filter(c =>
-        open.has(c.container || c.session) || open.has(c.key)
-      );
-
-      if (openChats.length === 0) {
-        return { error: 'open tabs do not match any discovered chats. try refreshing with list_chats.' };
-      }
-
-      try {
-        // Import capturePanes from server (needs module import at top)
-        const panes = await capturePanes(openChats, this.cfg);
-
-        // Return structured result with metadata + panes
-        return {
-          chats: openChats.map(c => ({
-            id: c.container || c.session,
-            host: c.host,
-            project: c.project,
-            role: c.role,
-            active: c.active,
-            status: c.status,
-            pane: panes[c.key] || '(no pane content)',
-          })),
-          count: openChats.length,
-        };
-      } catch (e) {
-        return { error: e.message };
-      }
+      return summarizeOpenChats(this.openTabs, this.lastChats, capturePanes, this.cfg);
     }
     if (name === 'analyze_agents') {
       const open = new Set(this.openTabs || []);
