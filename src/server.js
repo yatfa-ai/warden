@@ -9,7 +9,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer } from 'ws';
-import { load, loadCatalog, saveCatalog, allSshHosts } from './config.js';
+import { load, save, loadCatalog, saveCatalog, allSshHosts } from './config.js';
 import { discoverAll, capturePanes } from './chats.js';
 import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream } from './tmux.js';
 import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude } from './ssh.js';
@@ -129,6 +129,26 @@ app.patch('/api/sessions/:id', (req, res) => {
 app.delete('/api/sessions/:id', (req, res) => { deleteSession(String(req.params.id)); res.json({ ok: true }); });
 
 app.get('/api/ssh-hosts', (_req, res) => res.json({ hosts: allSshHosts(), configured: cfg.hosts }));
+
+// GET /api/config — return current configuration (safe subset)
+app.get('/api/config', (_req, res) => res.json({
+  hosts: cfg.hosts,
+  pollIntervalMs: cfg.pollIntervalMs,
+  tmuxSession: cfg.tmuxSession,
+  connectTimeout: cfg.connectTimeout,
+}));
+
+// PUT /api/config — update configuration and persist
+app.put('/api/config', (req, res) => {
+  const { hosts, pollIntervalMs, tmuxSession, connectTimeout } = req.body;
+  if (hosts && Array.isArray(hosts)) cfg.hosts = hosts;
+  if (typeof pollIntervalMs === 'number') cfg.pollIntervalMs = pollIntervalMs;
+  if (typeof tmuxSession === 'string') cfg.tmuxSession = tmuxSession;
+  if (typeof connectTimeout === 'number') cfg.connectTimeout = connectTimeout;
+  save(cfg); // persist to ~/.yatfa-warden/config.json
+  res.json({ ok: true });
+});
+
 app.get('/api/this-session', (_req, res) => res.json({
   sessionId: process.env.CLAUDE_CODE_SESSION_ID || null,
   claudePath: process.env.CLAUDE_CODE_EXECPATH || null,
