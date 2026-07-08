@@ -271,7 +271,10 @@ app.put('/api/config', (req, res) => {
   if (typeof connectTimeout === 'number') cfg.connectTimeout = connectTimeout;
   if (observerConfirmMode && ['always', 'auto-safe'].includes(observerConfirmMode)) cfg.observerConfirmMode = observerConfirmMode;
   if (typeof observerAutoStart === 'boolean') cfg.observerAutoStart = observerAutoStart;
-  if (observerSessionTimeout === null || typeof observerSessionTimeout === 'number') cfg.observerSessionTimeout = observerSessionTimeout;
+  if (observerSessionTimeout === null ||
+      (typeof observerSessionTimeout === 'number' &&
+       Number.isFinite(observerSessionTimeout) &&
+       observerSessionTimeout > 0)) cfg.observerSessionTimeout = observerSessionTimeout;
   save(cfg); // persist to ~/.yatfa-warden/config.json
   res.json({ ok: true });
 });

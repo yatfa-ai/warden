@@ -56,7 +56,9 @@ export function SettingsDialog({ open, onClose, onConfigChange }: Props) {
             pollIntervalMs: configData.pollIntervalMs || 1500,
             tmuxSession: configData.tmuxSession || 'agent',
             connectTimeout: configData.connectTimeout || 10,
-            observerConfirmMode: configData.observerConfirmMode || 'always',
+            observerConfirmMode: ['always', 'auto-safe'].includes(configData.observerConfirmMode)
+              ? configData.observerConfirmMode
+              : 'always',
             observerAutoStart: configData.observerAutoStart || false,
             observerSessionTimeout: configData.observerSessionTimeout ?? 30,
           });
