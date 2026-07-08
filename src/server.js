@@ -419,6 +419,18 @@ app.get('/api/claude-sessions', async (req, res) => {
   const claudeAvailable = !!(await detectClaude(host));
   res.json({ sessions, claudeAvailable });
 });
+app.get('/api/claude-sessions-all', async (_req, res) => {
+  const hosts = [LOCAL, ...cfg.hosts];
+  const results = await Promise.allSettled(hosts.map(async (host) => {
+    const sessions = host === LOCAL ? localClaudeSessions() : await remoteClaudeSessions(host);
+    return { host, sessions: sessions.slice(0, 20) }; // limit per host
+  }));
+  const all = results
+    .filter((r) => r.status === 'fulfilled')
+    .flatMap((r) => r.value.sessions.map((s) => ({ ...s, host: r.value.host })));
+  all.sort((a, b) => b.mtime - a.mtime);
+  res.json({ sessions: all.slice(0, 40) });
+});
 
 app.get('/api/git-status', async (req, res) => {
   const chatId = String(req.query.id || '');
