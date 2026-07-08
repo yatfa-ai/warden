@@ -118,6 +118,17 @@ function App() {
     setOpenPanes((p) => p.includes(id) ? p : [...p, id]);
     setFocused(id);
   }, []);
+
+  // handle focus-agent events from Observer suggestion cards
+  useEffect(() => {
+    const handleFocusAgent = (e: Event) => {
+      const customEvent = e as CustomEvent<{ id: string; name: string }>;
+      openChat(customEvent.detail.id);
+    };
+    window.addEventListener('focus-agent', handleFocusAgent);
+    return () => window.removeEventListener('focus-agent', handleFocusAgent);
+  }, [openChat]);
+
   // close pane: pane gone, tab stays
   const closePane = useCallback((id: string) => {
     setOpenPanes((p) => p.filter((x) => x !== id));

@@ -19,6 +19,7 @@ You operate ONLY through these tools:
 - read_chat({id, lines}): read an agent's current terminal pane. ALWAYS read before you advise on a specific agent — never assume.
 - send_directive({id, directive}): propose a message to an agent. The user MUST approve every send; you propose and wait for the gate.
 - summarize_chats(): read all open tabs in one efficient batch. Use this when the user asks "what's happening", "what are they working on", or you need a complete picture to advise well. Returns pane content + metadata for every open chat.
+- suggest_next_actions(): analyze all open agent tabs and suggest prioritized next actions. Classifies agent states (stuck, erroring, waiting, blocked, idle, active) and returns actionable suggestions with urgency levels. Use this to quickly identify which agents need attention.
 
 Your job:
 1. Watch — read the chats the user cares about; keep an accurate, current picture of each agent's work.
@@ -73,6 +74,11 @@ export const TOOLS = [
     description: 'Read all open tabs at once and synthesize what each agent is working on. Returns pane captures and metadata for every open chat. Use this to get a complete picture of current agent activity before advising the user.',
     input_schema: { type: 'object', properties: {}, required: [] },
   },
+  {
+    name: 'suggest_next_actions',
+    description: 'Analyze all open agent tabs and suggest prioritized, concrete next actions for the human. Classifies agent states (stuck, erroring, waiting, blocked, idle, active) and identifies urgent issues requiring immediate attention.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
 ];
 
 function logDirective(chat, text) {
@@ -84,13 +90,15 @@ function logDirective(chat, text) {
 }
 
 export class Observer {
-  constructor(cfg, { sid, gate, onTool, onText } = {}) {
+  constructor(cfg, { sid, gate, onTool, onToolResult, onText } = {}) {
     this.cfg = cfg;
     this.sid = sid || null;
     // gate: async (chat, directive) => { approved: boolean, edited?: string }
     this.gate = gate;
     // onTool: optional (name, input) => void  for UI tracing
     this.onTool = onTool;
+    // onToolResult: optional (name, result) => void  for handling tool results
+    this.onToolResult = onToolResult;
     // onText: optional (text) => void  streams assistant text emitted mid-loop
     this.onText = onText;
     this.lastChats = [];
@@ -206,6 +214,76 @@ export class Observer {
         return { error: e.message };
       }
     }
+    if (name === 'suggest_next_actions') {
+      const open = new Set(this.openTabs || []);
+      if (open.size === 0) return { error: 'no tabs are open. open some agent panes first.' };
+
+      const openChats = this.lastChats.filter(c =>
+        open.has(c.container || c.session) || open.has(c.key)
+      );
+
+      if (openChats.length === 0) {
+        return { error: 'open tabs do not match any discovered chats.' };
+      }
+
+      try {
+        const panes = await capturePanes(openChats);
+        const suggestions = [];
+
+        // Classification patterns (regex-based, no LLM calls)
+        const STUCK_RE = /^(.+)\\1\\1/m;
+        const ERROR_RE = /error|failed|exception|traceback/i;
+        const WAITING_RE = /please|respond|continue\\?|input|press enter/i;
+        const BLOCKED_RE = /waiting for|blocked by|depends on/i;
+
+        for (const chat of openChats) {
+          const pane = panes[chat.key] || '';
+          let state = 'active';
+          let urgency = 'informational';
+          let action = `Monitoring ${chat.container} activity`;
+
+          if (STUCK_RE.test(pane)) {
+            state = 'stuck';
+            urgency = 'urgent';
+            action = 'Agent appears stuck (repeating output)';
+          } else if (ERROR_RE.test(pane)) {
+            state = 'erroring';
+            urgency = 'urgent';
+            action = 'Agent encountered an error';
+          } else if (WAITING_RE.test(pane)) {
+            state = 'waiting';
+            urgency = 'important';
+            action = 'Agent is waiting for human input';
+          } else if (BLOCKED_RE.test(pane)) {
+            state = 'blocked';
+            urgency = 'important';
+            action = 'Agent is blocked by dependency';
+          } else if (!pane.trim() || pane.length < 50) {
+            state = 'idle';
+            urgency = 'informational';
+            action = 'Agent appears idle';
+          }
+
+          suggestions.push({
+            agentId: chat.key,
+            agentName: chat.container || chat.session,
+            host: chat.host,
+            role: chat.role,
+            urgency,
+            state,
+            action
+          });
+        }
+
+        // Sort by urgency (urgent → important → informational)
+        const urgencyOrder = { urgent: 0, important: 1, informational: 2 };
+        suggestions.sort((a, b) => urgencyOrder[a.urgency] - urgencyOrder[b.urgency]);
+
+        return { suggestions };
+      } catch (e) {
+        return { error: e.message };
+      }
+    }
     return { error: `unknown tool ${name}` };
   }
 
@@ -225,6 +303,7 @@ export class Observer {
       const results = [];
       for (const tu of toolUses) {
         const out = await this._execTool(tu.name, tu.input || {});
+        if (this.onToolResult) this.onToolResult(tu.name, out);
         results.push({
           type: 'tool_result',
           tool_use_id: tu.id,
