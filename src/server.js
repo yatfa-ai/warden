@@ -14,7 +14,7 @@ import { load, save, loadCatalog, saveCatalog, allSshHosts } from './config.js';
 import * as collections from './collections.js';
 import { discoverAll, capturePanes, resolveChatWithRefresh } from './chats.js';
 import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream } from './tmux.js';
-import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude } from './ssh.js';
+import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude, startConnectionPoolCleanup, validateHost, preWarmConnectionPool } from './ssh.js';
 import { Observer } from './observer.js';
 import { hasCredentials, resolveModel } from './llm.js';
 import { listSessions, createSession, renameSession, deleteSession } from './sessions.js';
@@ -174,6 +174,22 @@ app.get('/api/activity/stats', (req, res) => {
 });
 
 app.get('/api/ssh-hosts', (_req, res) => res.json({ hosts: allSshHosts(), configured: cfg.hosts }));
+
+// Host health check endpoint
+app.get('/api/hosts/health', async (req, res) => {
+  const hosts = Array.isArray(req.query.hosts) ? req.query.hosts : cfg.hosts;
+  const healthChecks = await Promise.all(
+    hosts.map(async (host) => {
+      try {
+        const result = await validateHost(host, cfg);
+        return { host, ...result };
+      } catch (e) {
+        return { host, ok: false, error: e.message };
+      }
+    })
+  );
+  res.json({ hosts: healthChecks, timestamp: Date.now() });
+});
 
 // ---- Collections API ----
 // GET /api/collections - List all collections
@@ -707,9 +723,13 @@ export function startServer(port = 7421, host = '127.0.0.1') {
     }
     process.exit(1);
   });
-  server.listen(port, host, () => {
+  server.listen(port, host, async () => {
     console.log(`warden ui → http://${host}:${port}`);
     console.log(`  hosts: ${cfg.hosts.join(', ')}   model: ${resolveModel()}   tmux: ${TMUX_BIN}`);
+    // Start connection pool cleanup task
+    startConnectionPoolCleanup();
+    // Pre-warm SSH connections for configured hosts
+    await preWarmConnectionPool(cfg.hosts, cfg);
   });
 }
 

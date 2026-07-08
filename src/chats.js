@@ -3,7 +3,7 @@
 //   manual → user-spawned `claude` in a host tmux session (from the catalog).
 // Both share one shape; tmux.js switches between docker-exec and bare tmux by
 // whether `container` is set, and uses `session` for the tmux target.
-import { run, runLocalTmux, shellQuote } from './ssh.js';
+import { run, runWithPool, runLocalTmux, shellQuote } from './ssh.js';
 import { loadCatalog } from './config.js';
 
 const ROLES = new Set(['planner', 'worker', 'reviewer', 'researcher']);
@@ -27,7 +27,7 @@ function parseContainerName(name) {
 
 export async function discover(host, cfg) {
   const timeout = (cfg.connectTimeout ?? 10) * 1000 + 25000;
-  const res = await run(host, DISCOVER_SCRIPT, { timeout });
+  const res = await runWithPool(host, DISCOVER_SCRIPT, { timeout }, cfg);
   if (!res.ok) {
     return { host, ok: false, error: (res.stderr || '').trim() || `ssh exited ${res.code}`, chats: [] };
   }
@@ -93,7 +93,7 @@ async function discoverManual(host, entries, cfg) {
   const activeMap = {};
   if (sessions.length) {
     const script = `for s in ${sessions.join(' ')}; do if tmux has-session -t "$s" >/dev/null 2>&1; then printf '1 %s\\n' "$s"; else printf '0 %s\\n' "$s"; fi; done`;
-    const res = await run(host, script, { timeout: (cfg.connectTimeout ?? 10) * 1000 + 15000 });
+    const res = await runWithPool(host, script, { timeout: (cfg.connectTimeout ?? 10) * 1000 + 15000 }, cfg);
     if (res.ok) for (const line of res.stdout.split('\n')) {
       const m = line.match(/^([01]) (\S+)$/);
       if (m) activeMap[m[2]] = m[1] === '1';
@@ -213,7 +213,7 @@ export async function capturePanes(chats) {
       const s = shellQuote(c.session || c.container || 'agent');
       return `printf '___B_${c.key}___\\n'; ${t} capture-pane -t ${s} -p -e -S -60 -E - 2>/dev/null; printf '\\n___E_${c.key}___\\n'`;
     }).join('; ');
-    const res = await run(host, script, { timeout: 15000 });
+    const res = await runWithPool(host, script, { timeout: 15000 }, { connectTimeout: 10 });
     if (!res.ok) return;
     let cur = null;
     const buf = [];
