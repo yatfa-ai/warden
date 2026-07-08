@@ -196,21 +196,11 @@ export async function resolveChatWithRefresh(id, cachedChats, refreshFn) {
   // No match in cache - trigger refresh
   const { chats, errors } = await refreshFn();
 
-  // Try matching again with fresh data (only substring/project/role matches after refresh)
-  const matches = chats.filter((c) =>
-    (c.container && c.container.includes(id)) ||
-    (c.session && c.session.includes(id)) ||
-    (c.id && c.id.includes(id)) ||
-    c.project === id ||
-    c.role === id
-  );
+  // Try matching again with fresh data (FULL matching logic via resolveChat)
+  const result2 = resolveChat(id, chats, null);
 
-  if (matches.length === 0) {
-    return { error: `no chat matches "${id}"`, errors };
-  }
-  if (matches.length > 1) {
-    return { error: `ambiguous "${id}" matches: ${matches.map((c) => c.id).join(', ')}`, errors };
-  }
+  if (result2.chat) return { chat: result2.chat, errors };
+  if (result2.error) return { error: result2.error, errors };
 
-  return { chat: matches[0], errors };
+  return { error: `no chat matches "${id}"`, errors };
 }
