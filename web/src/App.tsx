@@ -151,7 +151,11 @@ function App() {
   const clearNew = useCallback((id: string) => setNewActivity((prev) => { if (!prev.has(id)) return prev; const n = new Set(prev); n.delete(id); return n; }), []);
   const forceKill = useCallback(async (id: string) => {
     try {
-      await fetch('/api/session-kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) });
+      const r = await fetch('/api/session-kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) });
+      if (!r.ok) {
+        toast.error('Failed to force-kill session');
+        return;
+      }
       toast.success('Session force-killed');
     } catch (error) {
       toast.error(`Failed to force-kill: ${error instanceof Error ? error.message : String(error)}`);
@@ -161,10 +165,14 @@ function App() {
   const killChat = useCallback(async (id: string) => {
     if (!window.confirm('kill this chat and forget it?')) return;
     try {
-      await fetch('/api/kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) });
-      toast.success('Chat killed');
+      const r = await fetch('/api/kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) });
+      if (!r.ok) {
+        toast.error('Failed to kill chat');
+        return;
+      }
       removeActive(id);
       refresh();
+      toast.success('Chat killed');
     } catch (error) {
       toast.error(`Failed to kill chat: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -188,9 +196,13 @@ function App() {
 
   const renameChat = useCallback(async (session: string, kind: string, name: string) => {
     try {
-      await fetch('/api/rename', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session, kind, name }) });
-      toast.success('Chat renamed');
+      const r = await fetch('/api/rename', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session, kind, name }) });
+      if (!r.ok) {
+        toast.error('Failed to rename chat');
+        return;
+      }
       refresh();
+      toast.success('Chat renamed');
     } catch (error) {
       toast.error(`Failed to rename: ${error instanceof Error ? error.message : String(error)}`);
     }
