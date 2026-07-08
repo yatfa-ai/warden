@@ -88,7 +88,6 @@ function App() {
     if (focused) setNewActivity((prev) => { if (!prev.has(focused)) return prev; const n = new Set(prev); n.delete(focused); return n; });
   }, [focused]);
 
-<<<<<<< HEAD
   useEffect(() => { saveUi({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth }); }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth]);
 
   // keyboard shortcut for global search
