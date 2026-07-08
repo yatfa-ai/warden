@@ -628,6 +628,23 @@ app.post('/api/session-kill', async (req, res) => {
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Helper function to detect binary files by extension
+function isBinaryFile(path) {
+  const binaryExtensions = [
+    '.png', '.jpg', '.jpeg', '.gif', '.ico', '.bmp', '.webp', '.svg', // images
+    '.pdf', '.ps', '.eps', '.ai', '.sketch', // documents
+    '.zip', '.tar', '.gz', '.bz2', '.xz', '.7z', '.rar', // archives
+    '.exe', '.dll', '.so', '.dylib', '.app', '.bin', '.rom', // executables
+    '.mp3', '.mp4', '.avi', '.mov', '.wav', '.flac', '.ogg', '.webm', // media
+    '.ttf', '.otf', '.woff', '.woff2', '.eot', // fonts
+    '.class', '.jar', '.war', '.ear', // Java
+    '.obj', '.o', '.a', '.lib', // compiled code
+    '.pdb', '.min', '.map', // debug/map files
+  ];
+  const ext = path.extname(path).toLowerCase();
+  return binaryExtensions.includes(ext);
+}
+
 // POST /api/read-file — read a file from a chat's working directory.
 // Body: { id: string, path: string }
 // Response: { content: string, path: string, error?: string }
@@ -642,12 +659,20 @@ app.post('/api/read-file', async (req, res) => {
   const cwd = chat.cwd || '.';
 
   // Security: resolve the path and verify it's within the chat's working directory
-  // For local hosts, use path.resolve; for remote, we'll validate on the remote side
+  // For local hosts, use fs.realpathSync.native to resolve symlinks; for remote, we'll validate on the remote side
   if (chat.host === LOCAL) {
-    const resolvedPath = path.resolve(cwd, filePath);
-    const resolvedCwd = path.resolve(cwd);
+    let resolvedPath;
+    let resolvedCwd;
+    try {
+      // Resolve both paths to their final targets after following all symlinks
+      resolvedCwd = fs.realpathSync.native(cwd);
+      resolvedPath = fs.realpathSync.native(path.join(cwd, filePath));
+    } catch (e) {
+      if (e.code === 'ENOENT') return res.status(404).json({ error: 'file not found' });
+      return res.status(400).json({ error: 'invalid path' });
+    }
 
-    // Check if the resolved path starts with the resolved cwd (prevent path traversal)
+    // Check if the resolved path starts with the resolved cwd (prevent path traversal and symlink escapes)
     if (!resolvedPath.startsWith(resolvedCwd + path.sep) && resolvedPath !== resolvedCwd) {
       return res.status(403).json({ error: 'path must be within working directory' });
     }
@@ -659,27 +684,37 @@ app.post('/api/read-file', async (req, res) => {
         return res.status(413).json({ error: 'file too large (max 1MB)' });
       }
 
+      // Check for binary files by extension
+      if (isBinaryFile(resolvedPath)) {
+        return res.status(400).json({ error: 'cannot read binary files' });
+      }
+
       // Read file content
       const content = fs.readFileSync(resolvedPath, 'utf8');
       return res.json({ content, path: filePath });
     } catch (e) {
       if (e.code === 'ENOENT') return res.status(404).json({ error: 'file not found' });
       if (e.code === 'EISDIR') return res.status(400).json({ error: 'path is a directory' });
-      return res.status(500).json({ error: `read failed: ${e.message}` });
+      return res.status(500).json({ error: 'read failed' });
     }
   } else {
     // Remote host: use SSH to read the file
     // Build a safe command that reads the file and validates the path
-    const script = `CWD="${shellQuote(cwd)}"; FILE="${shellQuote(filePath)}"; RESOLVED="$(cd "$CWD" 2>/dev/null && realpath -m "$FILE" 2>/dev/null || echo FAILED)"; [ "$RESOLVED" = "FAILED" ] && echo "ERROR invalid path" && exit 1; RESOLVED_CWD="$(realpath -m "$CWD" 2>/dev/null || echo "$CWD")"; case "$RESOLVED" in "$RESOLVED_CWD"*) ;; *) echo "ERROR path traversal" && exit 1 ;; esac; [ -f "$RESOLVED" ] || { echo "ERROR not a file"; exit 1; }; SIZE=$(stat -c %s "$RESOLVED" 2>/dev/null || stat -f %z "$RESOLVED" 2>/dev/null); [ "$SIZE" -gt 1048576 ] && { echo "ERROR file too large"; exit 1; }; cat "$RESOLVED"`;
+    // Security: use realpath -e to resolve symlinks and validate the final target
+    // Also check for binary files by extension
+    const script = `CWD="${shellQuote(cwd)}"; FILE="${shellQuote(filePath)}"; RESOLVED_CWD="$(realpath -e "$CWD" 2>/dev/null)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -e "$FILE" 2>/dev/null)" || { echo "ERROR file not found"; exit 1; }; case "$RESOLVED" in "$RESOLVED_CWD"*) ;; *) echo "ERROR path must be within working directory"; exit 1 ;; esac; [ -d "$RESOLVED" ] && { echo "ERROR path is a directory"; exit 1; }; [ -f "$RESOLVED" ] || { echo "ERROR not a file"; exit 1; }; SIZE=$(stat -c %s "$RESOLVED" 2>/dev/null || stat -f %z "$RESOLVED" 2>/dev/null); [ "$SIZE" -gt 1048576 ] && { echo "ERROR file too large"; exit 1; }; EXT="${RESOLVED##*.}"; BINARY="(png|jpg|jpeg|gif|ico|bmp|webp|svg|pdf|ps|eps|ai|sketch|zip|tar|gz|bz2|xz|7z|rar|exe|dll|so|dylib|app|bin|rom|mp3|mp4|avi|mov|wav|flac|ogg|webm|ttf|otf|woff|woff2|eot|class|jar|war|ear|obj|o|a|lib|pdb|min|map)"; case "$EXT" in $BINARY) echo "ERROR cannot read binary files"; exit 1 ;; esac; cat "$RESOLVED"`;
 
     const result = await run(chat.host, script, { timeout: 10000 });
     if (!result.ok) {
       const stderr = result.stderr || '';
-      if (stderr.includes('ERROR invalid path')) return res.status(400).json({ error: 'invalid path' });
-      if (stderr.includes('ERROR path traversal')) return res.status(403).json({ error: 'path must be within working directory' });
+      if (stderr.includes('ERROR invalid path')) return res.status(400).json({ error: 'file not found' });
+      if (stderr.includes('ERROR file not found')) return res.status(404).json({ error: 'file not found' });
+      if (stderr.includes('ERROR path must be within working directory')) return res.status(403).json({ error: 'path must be within working directory' });
+      if (stderr.includes('ERROR path is a directory')) return res.status(400).json({ error: 'path is a directory' });
       if (stderr.includes('ERROR not a file')) return res.status(400).json({ error: 'not a file' });
       if (stderr.includes('ERROR file too large')) return res.status(413).json({ error: 'file too large (max 1MB)' });
-      return res.status(500).json({ error: `read failed: ${stderr}` });
+      if (stderr.includes('ERROR cannot read binary files')) return res.status(400).json({ error: 'cannot read binary files' });
+      return res.status(500).json({ error: 'read failed' });
     }
 
     return res.json({ content: result.stdout, path: filePath });

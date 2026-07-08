@@ -28,14 +28,31 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
   const [fileInput, setFileInput] = useState('');
+  const [fileInputError, setFileInputError] = useState('');
   const nameOf = (id: string) => chats.find((c) => (c.key || c.id) === id)?.name || id;
 
   const focusedChat = focused ? chats.find((c) => (c.key || c.id) === focused) : null;
 
   const handleOpenFile = () => {
-    if (!focusedChat || !fileInput.trim()) return;
-    setFilePath(fileInput.trim());
+    if (!focusedChat) return;
+
+    const trimmedInput = fileInput.trim();
+    if (!trimmedInput) {
+      setFileInputError('Please enter a file path');
+      return;
+    }
+
+    // Check for obvious path traversal attempts
+    if (trimmedInput.includes('..') || trimmedInput.includes('~')) {
+      setFileInputError('Path traversal not allowed');
+      return;
+    }
+
+    // Clear error and open the file
+    setFileInputError('');
+    setFilePath(trimmedInput);
     setFileOpen(true);
+    setFileInput(''); // Clear file input to prevent both dialogs from showing
   };
 
   const handleFilePrompt = () => {
@@ -43,6 +60,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
     // Auto-fill with common files if cwd exists
     const cwd = focusedChat.cwd || '.';
     setFileInput(`${cwd}/`);
+    setFileInputError(''); // Clear any previous error
     setFileOpen(false);
     setSplitOpen(false); // Close split menu if open
     // Focus on the file input (will be rendered in the dialog)
@@ -130,7 +148,10 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
           chatId={focusedChat.id}
           filePath={filePath}
           open={fileOpen}
-          onOpenChange={setFileOpen}
+          onOpenChange={(open) => {
+            setFileOpen(open);
+            if (!open) setFilePath(''); // Clear file path when dialog closes
+          }}
         />
       )}
 
@@ -144,12 +165,15 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
               data-file-input
               type="text"
               value={fileInput}
-              onChange={(e) => setFileInput(e.target.value)}
+              onChange={(e) => { setFileInput(e.target.value); setFileInputError(''); }}
               onKeyDown={(e) => { if (e.key === 'Enter') handleOpenFile(); if (e.key === 'Escape') setFileInput(''); }}
               placeholder="relative/path/to/file.txt"
               className="w-full px-3 py-2 text-sm bg-muted border rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
               autoFocus
             />
+            {fileInputError && (
+              <div className="text-xs text-red-400 mt-1">{fileInputError}</div>
+            )}
             <div className="flex gap-2 mt-3 justify-end">
               <button onClick={() => setFileInput('')} className="px-3 py-1.5 text-sm rounded-md hover:bg-accent">Cancel</button>
               <button onClick={handleOpenFile} className="px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90">Open</button>
