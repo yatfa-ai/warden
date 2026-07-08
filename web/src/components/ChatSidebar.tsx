@@ -223,9 +223,9 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     return (
       <div className="flex flex-col h-full min-h-0 animate-in slide-in-from-right-2 duration-150">
         <div className="flex items-center gap-2 px-2 py-2 border-b shrink-0">
-          <button className="text-xs text-muted-foreground hover:text-foreground px-1" onClick={() => setView({ kind: 'root' })} title="back">‹</button>
+          <button className="text-xs text-muted-foreground hover:text-foreground px-1 rounded transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => setView({ kind: 'root' })} title="back">‹</button>
           <span className="text-xs font-medium flex-1 truncate">{LABEL[H] || H}</span>
-          <button className="text-xs text-muted-foreground hover:text-foreground" onClick={() => fetchHostSessions(H)} disabled={loadingHost === H} title="rescan">{loadingHost === H ? '…' : '↻'}</button>
+          <button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => fetchHostSessions(H)} disabled={loadingHost === H} title="rescan">{loadingHost === H ? '…' : '↻'}</button>
         </div>
         <ScrollArea className="flex-1 min-h-0">
           <div className="p-1.5 flex flex-col gap-0.5">
@@ -235,7 +235,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => onKill(c.key || c.id)} onRename={onRename} onHide={() => onHideTab(c.key || c.id)} gitInfo={gitStatus[c.key || c.id]} />)}
             {hiddenActive.length > 0 && (
               <>
-                <button onClick={() => setHiddenExpanded(!hiddenExpanded)} className="flex items-center gap-1 px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60 hover:text-foreground w-full">
+                <button onClick={() => setHiddenExpanded(!hiddenExpanded)} className="flex items-center gap-1 px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60 hover:text-foreground w-full transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded">
                   <span>{hiddenExpanded ? '▾' : '▸'}</span>
                   <span>hidden ({hiddenActive.length})</span>
                 </button>
@@ -263,7 +263,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             {sessions.slice(0, 12).map((s) => {
               const running = hostChats.some((c) => c.key === `resume-${s.id.slice(0, 8)}`);
               return (
-                <button key={s.id} onClick={() => { onResume(s.id, s.summary, s.cwd, H); setView({ kind: 'root' }); }} className="flex flex-col gap-0.5 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent" title={`resume ${s.id}\n${s.cwd}`}>
+                <button key={s.id} onClick={() => { onResume(s.id, s.summary, s.cwd, H); setView({ kind: 'root' }); }} className="flex flex-col gap-0.5 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background" title={`resume ${s.id}\n${s.cwd}`}>
                   <span className="truncate">{s.summary || <span className="text-muted-foreground">(no summary)</span>}{running && <span className="ml-1 text-green-400">● live</span>}</span>
                   <span className="text-[10px] text-muted-foreground truncate">{ago(s.mtime)} · {basename(s.cwd)}</span>
                 </button>
@@ -300,7 +300,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           className="h-6 text-[10px] px-2 flex-1 max-w-[120px]"
         />
         <Badge variant="secondary" className="text-xs">{filteredTabs.length}</Badge>
-        <button className="text-xs text-muted-foreground hover:text-foreground" onClick={onRefresh} disabled={loading}>{loading ? '…' : '↻'}</button>
+        <button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={onRefresh} disabled={loading}>{loading ? '…' : '↻'}</button>
       </div>
       <NewChatForm onSpawned={handleSpawned} />
       <ScrollArea className="flex-1 min-h-0">
@@ -323,7 +323,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                 onDragEnd={() => { if (dragIdx !== null && dragOverIdx !== null && dragIdx !== dragOverIdx) onReorder(dragIdx, dragOverIdx); setDragIdx(null); setDragOverIdx(null); }}
                 onDrop={(e) => { e.preventDefault(); if (dragIdx !== null && originalIdx !== dragIdx) onReorder(dragIdx, originalIdx); setDragIdx(null); setDragOverIdx(null); }}
                 onClick={() => onOpenChat(id)}
-                className={`group flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent cursor-pointer ${dead ? 'opacity-50' : ''} ${dragOverIdx === originalIdx && dragIdx !== null ? 'border-t-2 border-primary' : ''}`}>
+                className={`group flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent cursor-pointer transition-all duration-150 ease-out focus-within:ring-2 focus-within:ring-primary focus-within:ring-offset-2 focus-within:ring-offset-background ${dead ? 'opacity-50' : ''} ${dragOverIdx === originalIdx && dragIdx !== null ? 'border-t-2 border-primary' : ''}`}>
                 <span className="text-muted-foreground/40 cursor-grab active:cursor-grabbing select-none">⠿</span>
                 <span className={`size-2 rounded-full shrink-0 ${dead ? 'bg-red-500' : isOpen ? 'bg-green-500' : 'bg-muted-foreground/40'}`} />
                 <span className={`truncate flex-1 ${dead ? 'line-through text-muted-foreground' : ''}`}>{c?.name || id}</span>
@@ -335,7 +335,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                     {gitInfo.clean === false && <span className="text-[10px] text-yellow-400">±</span>}
                   </>
                 )}
-                <button className={`px-1 text-sm ${dead ? 'text-red-500 font-bold' : 'opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500'}`} title={dead ? 'remove dead tab' : 'remove'} onClick={(e) => { e.stopPropagation(); onRemoveActive(id); }}>×</button>
+                <button className={`px-1 text-sm transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded ${dead ? 'text-red-500 font-bold' : 'opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500'}`} title={dead ? 'remove dead tab' : 'remove'} onClick={(e) => { e.stopPropagation(); onRemoveActive(id); }}>×</button>
               </div>
             );
           })}
@@ -397,7 +397,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           {hosts.map((h) => {
             const n = chats.filter((c) => c.host === h && c.active).length;
             return (
-              <button key={h} onClick={() => enterHost(h)} className="flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent w-full">
+              <button key={h} onClick={() => enterHost(h)} className="flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent w-full transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background">
                 <span className={`size-2 rounded-full ${n ? 'bg-green-500' : 'bg-muted-foreground/40'}`} />
                 <span className="flex-1 truncate">{LABEL[h] || h}</span>
                 {h === THIS_MACHINE && <span className="text-[10px] text-cyan-400">local</span>}
@@ -442,7 +442,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
 
 function CtxItem({ label, onClick, danger }: { label: string; onClick: () => void; danger?: boolean }) {
   return (
-    <button onClick={onClick} className={`flex w-full text-left px-3 py-1.5 hover:bg-accent ${danger ? 'text-red-500' : ''}`}>{label}</button>
+    <button onClick={onClick} className={`flex w-full text-left px-3 py-1.5 hover:bg-accent transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${danger ? 'text-red-500' : ''}`}>{label}</button>
   );
 }
 
@@ -465,7 +465,7 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
     <div
       data-chat-key={c.key || c.id}
       onClick={onOpen}
-      className={`group flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent cursor-pointer ${open ? 'bg-accent' : ''} ${dim ? 'opacity-60' : ''}`}
+      className={`group flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent cursor-pointer transition-all duration-150 ease-out focus-within:ring-2 focus-within:ring-primary focus-within:ring-offset-2 focus-within:ring-offset-background ${open ? 'bg-accent' : ''} ${dim ? 'opacity-60' : ''}`}
     >
       <span className={`size-2 rounded-full shrink-0 ${open ? 'bg-green-500' : c.active ? 'bg-green-500/50' : 'bg-muted-foreground/40'}`} />
       {editing ? (
@@ -486,9 +486,9 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
       )}
       {isUser && !editing && (
         <>
-          {onHide && <button className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground px-0.5" title="hide" onClick={(e) => { e.stopPropagation(); onHide(); }}>▾</button>}
-          {onUnhide && <button className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground px-0.5" title="unhide" onClick={(e) => { e.stopPropagation(); onUnhide(); }}>▴</button>}
-          <button className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500 px-0.5" title="kill + forget" onClick={(e) => { e.stopPropagation(); onKill(); }}>×</button>
+          {onHide && <button className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground px-0.5 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded" title="hide" onClick={(e) => { e.stopPropagation(); onHide(); }}>▾</button>}
+          {onUnhide && <button className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground px-0.5 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded" title="unhide" onClick={(e) => { e.stopPropagation(); onUnhide(); }}>▴</button>}
+          <button className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500 px-0.5 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded" title="kill + forget" onClick={(e) => { e.stopPropagation(); onKill(); }}>×</button>
         </>
       )}
     </div>

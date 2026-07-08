@@ -289,44 +289,43 @@ function App() {
         </div>
       )}
       <header className="flex items-center gap-3 px-3 h-11 border-b shrink-0">
-        <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)} className="text-muted-foreground hover:text-foreground" title="toggle sidebar">{sidebarCollapsed ? '▸' : '◂'}</button>
+        <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50" title="toggle sidebar">{sidebarCollapsed ? '▸' : '◂'}</button>
         <span className="font-semibold tracking-wide">Yatfa Warden</span>
         <span className="text-xs text-muted-foreground">{activeTabs.length} active · {openPanes.length} open</span>
         <span className="flex-1" />
-        <span className={`size-2 rounded-full ${streamConn ? 'bg-green-500' : 'bg-red-500'}`} title={streamConn ? 'connected' : 'disconnected'} />
-        <button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground px-2" title="global search (Ctrl+Shift+F)">⌕</button>
-        <button onClick={() => setHealthCollapsed(!healthCollapsed)} className="text-muted-foreground hover:text-foreground" title="toggle health panel">{healthCollapsed ? '◂' : '▸'} Health</button>
-        <button onClick={() => setObserverCollapsed(!observerCollapsed)} className="text-muted-foreground hover:text-foreground" title="toggle observer">{observerCollapsed ? '◂' : '▸'}</button>
-        <button onClick={() => setSettingsOpen(true)} className="text-muted-foreground hover:text-foreground" title="settings">⚙</button>
+        <span className={`size-2 rounded-full transition-colors duration-300 ease-in-out ${streamConn ? 'bg-green-500' : 'bg-red-500'}`} title={streamConn ? 'connected' : 'disconnected'} />
+        <button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50" title="global search (Ctrl+Shift+F)">⌕</button>
+        <button onClick={() => setHealthCollapsed(!healthCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50" title="toggle health panel">{healthCollapsed ? '◂' : '▸'} Health</button>
+        <button onClick={() => setObserverCollapsed(!observerCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50" title="toggle observer">{observerCollapsed ? '◂' : '▸'}</button>
+        <button onClick={() => setSettingsOpen(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50" title="settings">⚙</button>
       </header>
       <main className="flex flex-1 min-h-0">
-        {!sidebarCollapsed && (
-          <section className="border-r min-h-0 relative" style={{ width: sidebarWidth, flexShrink: 0 }}>
-            <div
-              className="absolute top-0 right-0 bottom-0 w-1 hover:bg-accent hover:w-1.5 transition-all cursor-col-resize z-10"
-              onMouseDown={handleSidebarMouseDown}
-              title="Drag to resize sidebar"
-            />
-            <ChatSidebar
-              chats={chats}
-              sshHosts={sshHosts}
-              activeTabs={activeTabs}
-              hiddenTabs={hiddenTabs}
-              openPanes={openPaneSet}
-              onOpenChat={openChat}
-              onClosePane={closePane}
-              onRemoveActive={removeActive}
-              onReorder={reorderTabs}
-              onHideTab={hideTab}
-              onUnhideTab={unhideTab}
-              onKill={killChat}
-              onRename={renameChat}
-              onResume={resumeSession}
-              onRefresh={refresh}
-              loading={loading}
-            />
-          </section>
-        )}
+        <section className="border-r min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"
+          style={{ width: sidebarCollapsed ? 0 : sidebarWidth, flexShrink: 0, opacity: sidebarCollapsed ? 0 : 1 }}>
+          <div
+            className="absolute top-0 right-0 bottom-0 w-1 hover:bg-accent hover:w-1.5 transition-all cursor-col-resize z-10"
+            onMouseDown={handleSidebarMouseDown}
+            title="Drag to resize sidebar"
+          />
+          <ChatSidebar
+            chats={chats}
+            sshHosts={sshHosts}
+            activeTabs={activeTabs}
+            hiddenTabs={hiddenTabs}
+            openPanes={openPaneSet}
+            onOpenChat={openChat}
+            onClosePane={closePane}
+            onRemoveActive={removeActive}
+            onReorder={reorderTabs}
+            onHideTab={hideTab}
+            onUnhideTab={unhideTab}
+            onKill={killChat}
+            onRename={renameChat}
+            onResume={resumeSession}
+            onRefresh={refresh}
+            loading={loading}
+          />
+        </section>
         <section className="flex-1 min-h-0 min-w-0">
           <PaneGrid
             tiles={tiles}
@@ -343,28 +342,22 @@ function App() {
             externalSearchQuery={externalSearchQuery}
           />
         </section>
-        {(!observerCollapsed || !healthCollapsed) && (
-          <div className="flex border-l min-h-0" style={{ flexShrink: 0 }}>
-            {!observerCollapsed && (
-              <section className="border-l min-h-0 relative" style={{ width: observerWidth, flexShrink: 0 }}>
-                <div
-                  className="absolute top-0 left-0 bottom-0 w-1 hover:bg-accent hover:w-1.5 transition-all cursor-col-resize z-10"
-                  onMouseDown={handleObserverMouseDown}
-                  title="Drag to resize observer panel"
-                />
-                <ObserverTabs externalViewMode={externalViewMode} onFocusAgent={handleFocusAgent} />
-              </section>
-            )}
-            {!healthCollapsed && (
-              <section className="border-l min-h-0" style={{ width: 320, flexShrink: 0 }}>
-                <HealthDashboard
-                  onOpenChat={openChat}
-                  onClose={() => setHealthCollapsed(true)}
-                />
-              </section>
-            )}
-          </div>
-        )}
+        <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"
+          style={{ width: observerCollapsed ? 0 : observerWidth, flexShrink: 0, opacity: observerCollapsed ? 0 : 1 }}>
+          <div
+            className="absolute top-0 left-0 bottom-0 w-1 hover:bg-accent hover:w-1.5 transition-all cursor-col-resize z-10"
+            onMouseDown={handleObserverMouseDown}
+            title="Drag to resize observer panel"
+          />
+          <ObserverTabs externalViewMode={externalViewMode} onFocusAgent={handleFocusAgent} />
+        </section>
+        <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden"
+          style={{ width: healthCollapsed ? 0 : 320, flexShrink: 0, opacity: healthCollapsed ? 0 : 1 }}>
+          <HealthDashboard
+            onOpenChat={openChat}
+            onClose={() => setHealthCollapsed(true)}
+          />
+        </section>
       </main>
       <SettingsDialog
         open={settingsOpen}
