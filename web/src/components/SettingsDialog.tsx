@@ -10,6 +10,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import { Badge } from '@/components/ui/badge';
 import { type Theme } from '@/lib/theme';
 
@@ -250,12 +251,10 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
 
               {/* Auto-Start Toggle */}
               <div className="flex items-center gap-2">
-                <input
+                <Switch
                   id="observerAutoStart"
-                  type="checkbox"
                   checked={config.observerAutoStart}
-                  onChange={(e) => setConfig({ ...config, observerAutoStart: e.target.checked })}
-                  className="w-4 h-4"
+                  onCheckedChange={(v) => setConfig({ ...config, observerAutoStart: v })}
                 />
                 <Label htmlFor="observerAutoStart" className="cursor-pointer">
                   Auto-start Observer
@@ -314,12 +313,10 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
 
               <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2">
-                  <input
+                  <Switch
                     id="notifyChatOps"
-                    type="checkbox"
                     checked={config.notifyChatOps}
-                    onChange={(e) => setConfig({ ...config, notifyChatOps: e.target.checked })}
-                    className="w-4 h-4"
+                    onCheckedChange={(v) => setConfig({ ...config, notifyChatOps: v })}
                   />
                   <Label htmlFor="notifyChatOps" className="cursor-pointer">
                     Chat operations
@@ -332,12 +329,10 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
 
               <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2">
-                  <input
+                  <Switch
                     id="notifyErrors"
-                    type="checkbox"
                     checked={config.notifyErrors}
-                    onChange={(e) => setConfig({ ...config, notifyErrors: e.target.checked })}
-                    className="w-4 h-4"
+                    onCheckedChange={(v) => setConfig({ ...config, notifyErrors: v })}
                   />
                   <Label htmlFor="notifyErrors" className="cursor-pointer">
                     Errors
@@ -350,12 +345,10 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
 
               <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2">
-                  <input
+                  <Switch
                     id="notifySuccess"
-                    type="checkbox"
                     checked={config.notifySuccess}
-                    onChange={(e) => setConfig({ ...config, notifySuccess: e.target.checked })}
-                    className="w-4 h-4"
+                    onCheckedChange={(v) => setConfig({ ...config, notifySuccess: v })}
                   />
                   <Label htmlFor="notifySuccess" className="cursor-pointer">
                     Success messages
@@ -368,12 +361,10 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
 
               <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2">
-                  <input
+                  <Switch
                     id="notifyObserver"
-                    type="checkbox"
                     checked={config.notifyObserver}
-                    onChange={(e) => setConfig({ ...config, notifyObserver: e.target.checked })}
-                    className="w-4 h-4"
+                    onCheckedChange={(v) => setConfig({ ...config, notifyObserver: v })}
                   />
                   <Label htmlFor="notifyObserver" className="cursor-pointer">
                     Observer events
