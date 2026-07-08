@@ -121,6 +121,9 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
 
   const [hostStatuses, setHostStatuses] = useState<Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }>>({});
 
+  // Fetch all sessions on mount
+  useEffect(() => { fetchAllSessions(); }, []);
+
   const fetchHostSessions = async (host: string) => {
     setLoadingHost(host);
     try {
