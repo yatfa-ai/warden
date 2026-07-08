@@ -629,7 +629,7 @@ app.post('/api/session-kill', async (req, res) => {
 });
 
 // Helper function to detect binary files by extension
-function isBinaryFile(path) {
+export function isBinaryFile(filePath) {
   const binaryExtensions = [
     '.png', '.jpg', '.jpeg', '.gif', '.ico', '.bmp', '.webp', '.svg', // images
     '.pdf', '.ps', '.eps', '.ai', '.sketch', // documents
@@ -641,8 +641,25 @@ function isBinaryFile(path) {
     '.obj', '.o', '.a', '.lib', // compiled code
     '.pdb', '.min', '.map', // debug/map files
   ];
-  const ext = path.extname(path).toLowerCase();
+  const ext = path.extname(filePath).toLowerCase();
   return binaryExtensions.includes(ext);
+}
+
+// Build the remote (SSH) shell script that safely reads a file under `cwd`.
+// Extracted so it can be unit-tested — this template has been fragile (a bash
+// `${...}` parameter expansion collides with JS template-literal interpolation,
+// and the already-quoted shellQuote() output must NOT be wrapped in double quotes
+// or the literal single-quotes end up inside the variable value). `shellQuote`
+// produces a single-quoted POSIX token, so we splice it in bare.
+export function buildReadFileScript(cwd, filePath) {
+  // NOTE: `\${RESOLVED##*.}` is an *escaped* JS template expression on purpose —
+  // it emits the literal bash `${RESOLVED##*.}` parameter expansion (strip to the
+  // file extension) into the script. Do not "fix" it to `${...}`.
+  // The binary extensions are inlined directly in the `case` pattern (not read
+  // from a variable): bash tokenizes case-pattern `|` alternation at parse time,
+  // before expansion, so `case "$EXT" in $BINARY)` would match the literal string
+  // "png|jpg|...", never any extension.
+  return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; RESOLVED_CWD="$(realpath -e "$CWD" 2>/dev/null)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -e "$FILE" 2>/dev/null)" || { echo "ERROR file not found"; exit 1; }; case "$RESOLVED" in "$RESOLVED_CWD"*) ;; *) echo "ERROR path must be within working directory"; exit 1 ;; esac; [ -d "$RESOLVED" ] && { echo "ERROR path is a directory"; exit 1; }; [ -f "$RESOLVED" ] || { echo "ERROR not a file"; exit 1; }; SIZE=$(stat -c %s "$RESOLVED" 2>/dev/null || stat -f %z "$RESOLVED" 2>/dev/null); [ "$SIZE" -gt 1048576 ] && { echo "ERROR file too large"; exit 1; }; EXT="\${RESOLVED##*.}"; case "$EXT" in png|jpg|jpeg|gif|ico|bmp|webp|svg|pdf|ps|eps|ai|sketch|zip|tar|gz|bz2|xz|7z|rar|exe|dll|so|dylib|app|bin|rom|mp3|mp4|avi|mov|wav|flac|ogg|webm|ttf|otf|woff|woff2|eot|class|jar|war|ear|obj|o|a|lib|pdb|min|map) echo "ERROR cannot read binary files"; exit 1 ;; esac; cat "$RESOLVED"`;
 }
 
 // POST /api/read-file — read a file from a chat's working directory.
@@ -702,18 +719,20 @@ app.post('/api/read-file', async (req, res) => {
     // Build a safe command that reads the file and validates the path
     // Security: use realpath -e to resolve symlinks and validate the final target
     // Also check for binary files by extension
-    const script = `CWD="${shellQuote(cwd)}"; FILE="${shellQuote(filePath)}"; RESOLVED_CWD="$(realpath -e "$CWD" 2>/dev/null)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -e "$FILE" 2>/dev/null)" || { echo "ERROR file not found"; exit 1; }; case "$RESOLVED" in "$RESOLVED_CWD"*) ;; *) echo "ERROR path must be within working directory"; exit 1 ;; esac; [ -d "$RESOLVED" ] && { echo "ERROR path is a directory"; exit 1; }; [ -f "$RESOLVED" ] || { echo "ERROR not a file"; exit 1; }; SIZE=$(stat -c %s "$RESOLVED" 2>/dev/null || stat -f %z "$RESOLVED" 2>/dev/null); [ "$SIZE" -gt 1048576 ] && { echo "ERROR file too large"; exit 1; }; EXT="${RESOLVED##*.}"; BINARY="(png|jpg|jpeg|gif|ico|bmp|webp|svg|pdf|ps|eps|ai|sketch|zip|tar|gz|bz2|xz|7z|rar|exe|dll|so|dylib|app|bin|rom|mp3|mp4|avi|mov|wav|flac|ogg|webm|ttf|otf|woff|woff2|eot|class|jar|war|ear|obj|o|a|lib|pdb|min|map)"; case "$EXT" in $BINARY) echo "ERROR cannot read binary files"; exit 1 ;; esac; cat "$RESOLVED"`;
+    const script = buildReadFileScript(cwd, filePath);
 
     const result = await run(chat.host, script, { timeout: 10000 });
     if (!result.ok) {
-      const stderr = result.stderr || '';
-      if (stderr.includes('ERROR invalid path')) return res.status(400).json({ error: 'file not found' });
-      if (stderr.includes('ERROR file not found')) return res.status(404).json({ error: 'file not found' });
-      if (stderr.includes('ERROR path must be within working directory')) return res.status(403).json({ error: 'path must be within working directory' });
-      if (stderr.includes('ERROR path is a directory')) return res.status(400).json({ error: 'path is a directory' });
-      if (stderr.includes('ERROR not a file')) return res.status(400).json({ error: 'not a file' });
-      if (stderr.includes('ERROR file too large')) return res.status(413).json({ error: 'file too large (max 1MB)' });
-      if (stderr.includes('ERROR cannot read binary files')) return res.status(400).json({ error: 'cannot read binary files' });
+      // The remote script writes its diagnostics ("ERROR ...") via `echo` on stdout;
+      // pool/ssh failures land on stderr. Check both so specific errors map correctly.
+      const out = `${result.stdout || ''}${result.stderr || ''}`;
+      if (out.includes('ERROR invalid path')) return res.status(400).json({ error: 'file not found' });
+      if (out.includes('ERROR file not found')) return res.status(404).json({ error: 'file not found' });
+      if (out.includes('ERROR path must be within working directory')) return res.status(403).json({ error: 'path must be within working directory' });
+      if (out.includes('ERROR path is a directory')) return res.status(400).json({ error: 'path is a directory' });
+      if (out.includes('ERROR not a file')) return res.status(400).json({ error: 'not a file' });
+      if (out.includes('ERROR file too large')) return res.status(413).json({ error: 'file too large (max 1MB)' });
+      if (out.includes('ERROR cannot read binary files')) return res.status(400).json({ error: 'cannot read binary files' });
       return res.status(500).json({ error: 'read failed' });
     }
 
