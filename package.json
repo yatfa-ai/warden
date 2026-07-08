@@ -19,7 +19,8 @@
     "electron": "electron .",
     "electron:dev": "npm run build && electron .",
     "dist": "npm run build && electron-builder",
-    "postinstall": ""
+    "postinstall": "",
+    "test": "node --test src/**/*.test.js"
   },
   "dependencies": {
     "express": "^5.2.1",
