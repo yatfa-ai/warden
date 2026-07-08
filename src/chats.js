@@ -79,6 +79,7 @@ export async function discover(host, cfg) {
             console.warn(`Failed to capture activity for ${chat.container}:`, err instanceof Error ? err.message : String(err));
             return chat;
           })
+      )
     );
   }
 
