@@ -325,11 +325,15 @@ app.get('/api/config', (_req, res) => res.json({
   observerConfirmMode: cfg.observerConfirmMode,
   observerAutoStart: cfg.observerAutoStart,
   observerSessionTimeout: cfg.observerSessionTimeout,
+  notifyChatOps: cfg.notifyChatOps,
+  notifyErrors: cfg.notifyErrors,
+  notifySuccess: cfg.notifySuccess,
+  notifyObserver: cfg.notifyObserver,
 }));
 
 // PUT /api/config — update configuration and persist
 app.put('/api/config', (req, res) => {
-  const { hosts, pollIntervalMs, tmuxSession, connectTimeout, observerConfirmMode, observerAutoStart, observerSessionTimeout } = req.body;
+  const { hosts, pollIntervalMs, tmuxSession, connectTimeout, observerConfirmMode, observerAutoStart, observerSessionTimeout, notifyChatOps, notifyErrors, notifySuccess, notifyObserver } = req.body;
   if (hosts && Array.isArray(hosts)) cfg.hosts = hosts;
   if (typeof pollIntervalMs === 'number') cfg.pollIntervalMs = pollIntervalMs;
   if (typeof tmuxSession === 'string') cfg.tmuxSession = tmuxSession;
@@ -340,6 +344,12 @@ app.put('/api/config', (req, res) => {
       (typeof observerSessionTimeout === 'number' &&
        Number.isFinite(observerSessionTimeout) &&
        observerSessionTimeout > 0)) cfg.observerSessionTimeout = observerSessionTimeout;
+  // Notification preferences (toast categories). Only accept booleans so a
+  // malformed body can't blank out a preference.
+  if (typeof notifyChatOps === 'boolean') cfg.notifyChatOps = notifyChatOps;
+  if (typeof notifyErrors === 'boolean') cfg.notifyErrors = notifyErrors;
+  if (typeof notifySuccess === 'boolean') cfg.notifySuccess = notifySuccess;
+  if (typeof notifyObserver === 'boolean') cfg.notifyObserver = notifyObserver;
   save(cfg); // persist to ~/.yatfa-warden/config.json
   res.json({ ok: true });
 });

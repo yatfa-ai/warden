@@ -9,6 +9,7 @@ import { EmptyState } from '@/components/EmptyState';
 import { NewChatForm } from './NewChatForm';
 import { CollectionsSection } from './CollectionsSection';
 import { CreateCollectionDialog } from './CreateCollectionDialog';
+import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import type { Chat, Collection } from '@/lib/types';
 
 export interface ClaudeSession { id: string; cwd: string; summary: string; mtime: number }
@@ -97,6 +98,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [allSessions, setAllSessions] = useState<(ClaudeSession & { host: string })[]>([]);
   const [loadingAllSessions, setLoadingAllSessions] = useState(false);
   const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string }>>({});
+  const { prefs } = useNotificationPrefs();
 
   // Native context menu listener — only fires for tab rows, leaves everything else (xterm/tmux) alone.
   useEffect(() => {
@@ -132,7 +134,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       const j = await r.json();
       setHostSessions((p) => ({ ...p, [host]: { sessions: j.sessions || [], claudeAvailable: j.claudeAvailable } }));
     } catch (error) {
-      toast.error(`Failed to fetch sessions for ${host}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      if (prefs.notifyErrors) toast.error(`Failed to fetch sessions for ${host}: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
     setLoadingHost(null);
   };
@@ -181,7 +183,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       const j = await r.json();
       setCollections(j.collections || []);
     } catch (error) {
-      toast.error(`Failed to fetch collections: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      if (prefs.notifyErrors) toast.error(`Failed to fetch collections: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   };
 

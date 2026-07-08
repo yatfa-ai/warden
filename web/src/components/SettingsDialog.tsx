@@ -10,6 +10,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import { Badge } from '@/components/ui/badge';
 import { type Theme } from '@/lib/theme';
 
@@ -21,6 +22,10 @@ interface ConfigData {
   observerConfirmMode: 'always' | 'auto-safe';
   observerAutoStart: boolean;
   observerSessionTimeout: number | null;
+  notifyChatOps: boolean;
+  notifyErrors: boolean;
+  notifySuccess: boolean;
+  notifyObserver: boolean;
 }
 
 interface Props {
@@ -40,6 +45,10 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
     observerConfirmMode: 'always',
     observerAutoStart: false,
     observerSessionTimeout: 30,
+    notifyChatOps: true,
+    notifyErrors: true,
+    notifySuccess: true,
+    notifyObserver: true,
   });
   const [availableHosts, setAvailableHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -64,6 +73,10 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
               : 'always',
             observerAutoStart: configData.observerAutoStart || false,
             observerSessionTimeout: configData.observerSessionTimeout ?? 30,
+            notifyChatOps: configData.notifyChatOps ?? true,
+            notifyErrors: configData.notifyErrors ?? true,
+            notifySuccess: configData.notifySuccess ?? true,
+            notifyObserver: configData.notifyObserver ?? true,
           });
           setAvailableHosts(hostsData.hosts || []);
         })
@@ -238,12 +251,10 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
 
               {/* Auto-Start Toggle */}
               <div className="flex items-center gap-2">
-                <input
+                <Switch
                   id="observerAutoStart"
-                  type="checkbox"
                   checked={config.observerAutoStart}
-                  onChange={(e) => setConfig({ ...config, observerAutoStart: e.target.checked })}
-                  className="w-4 h-4"
+                  onCheckedChange={(v) => setConfig({ ...config, observerAutoStart: v })}
                 />
                 <Label htmlFor="observerAutoStart" className="cursor-pointer">
                   Auto-start Observer
@@ -292,6 +303,75 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
                 </select>
                 <p className="text-xs text-muted-foreground">
                   Choose how Warden appears. "System" automatically switches between light and dark based on your OS settings.
+                </p>
+              </div>
+            </div>
+
+            {/* Notification Preferences Section */}
+            <div className="flex flex-col gap-3 pt-2 border-t">
+              <div className="text-sm font-medium text-foreground">Notifications</div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="notifyChatOps"
+                    checked={config.notifyChatOps}
+                    onCheckedChange={(v) => setConfig({ ...config, notifyChatOps: v })}
+                  />
+                  <Label htmlFor="notifyChatOps" className="cursor-pointer">
+                    Chat operations
+                  </Label>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Session kill, chat kill, resume, and rename notifications
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="notifyErrors"
+                    checked={config.notifyErrors}
+                    onCheckedChange={(v) => setConfig({ ...config, notifyErrors: v })}
+                  />
+                  <Label htmlFor="notifyErrors" className="cursor-pointer">
+                    Errors
+                  </Label>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Error toast notifications
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="notifySuccess"
+                    checked={config.notifySuccess}
+                    onCheckedChange={(v) => setConfig({ ...config, notifySuccess: v })}
+                  />
+                  <Label htmlFor="notifySuccess" className="cursor-pointer">
+                    Success messages
+                  </Label>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Success toast notifications
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="notifyObserver"
+                    checked={config.notifyObserver}
+                    onCheckedChange={(v) => setConfig({ ...config, notifyObserver: v })}
+                  />
+                  <Label htmlFor="notifyObserver" className="cursor-pointer">
+                    Observer events
+                  </Label>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Observer connection timeout and gate prompt notifications
                 </p>
               </div>
             </div>

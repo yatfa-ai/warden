@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Textarea } from '@/components/ui/textarea';
 import { EmptyState } from '@/components/EmptyState';
+import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 
 type Item =
   | { kind: 'user'; text: string }
@@ -33,6 +34,12 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
   const connectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connectionTimeoutShownRef = useRef(false);
   const mountedRef = useRef(true);
+  const { prefs } = useNotificationPrefs();
+  // `connect` is memoized on [sessionId] only (adding prefs would reconnect the
+  // WebSocket on every preference change), so the 15s timeout closure would
+  // capture a stale notifyObserver value. Read the latest value from a ref.
+  const notifyObserverRef = useRef(prefs.notifyObserver);
+  useEffect(() => { notifyObserverRef.current = prefs.notifyObserver; }, [prefs.notifyObserver]);
 
   const connect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
@@ -67,7 +74,7 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
       if (!conn && !connectionTimeoutShownRef.current && mountedRef.current) {
         connectionTimeoutShownRef.current = true;
         setConnectionError('Connection timeout. Unable to establish WebSocket connection.');
-        toast.error('Observer connection timeout. Please try reconnecting.');
+        if (notifyObserverRef.current) toast.error('Observer connection timeout. Please try reconnecting.');
       }
     }, 15000);
 
