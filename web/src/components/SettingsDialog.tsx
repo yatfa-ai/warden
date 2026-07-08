@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
+import { type Theme } from '@/lib/theme';
 
 interface ConfigData {
   hosts: string[];
@@ -26,9 +27,11 @@ interface Props {
   open: boolean;
   onClose: () => void;
   onConfigChange: () => void;
+  theme: Theme;
+  setTheme: (theme: Theme) => void;
 }
 
-export function SettingsDialog({ open, onClose, onConfigChange }: Props) {
+export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -267,6 +270,28 @@ export function SettingsDialog({ open, onClose, onConfigChange }: Props) {
                 />
                 <p className="text-xs text-muted-foreground">
                   Automatically stop Observer after N minutes of inactivity. Leave empty to disable.
+                </p>
+              </div>
+            </div>
+
+            {/* Theme Preferences Section */}
+            <div className="flex flex-col gap-3 pt-2 border-t">
+              <div className="text-sm font-medium text-foreground">Theme</div>
+
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="theme">Color Scheme</Label>
+                <select
+                  id="theme"
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  value={theme}
+                  onChange={(e) => setTheme(e.target.value as Theme)}
+                >
+                  <option value="system">System (follow OS preference)</option>
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                </select>
+                <p className="text-xs text-muted-foreground">
+                  Choose how Warden appears. "System" automatically switches between light and dark based on your OS settings.
                 </p>
               </div>
             </div>

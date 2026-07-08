@@ -13,6 +13,7 @@ export interface UiState {
   healthCollapsed?: boolean;
   sidebarWidth?: number;
   observerWidth?: number;
+  theme?: 'light' | 'dark' | 'system';
 }
 
 export function loadUi(): UiState {
@@ -29,10 +30,11 @@ export function loadUi(): UiState {
         healthCollapsed: v.healthCollapsed ?? true,
         sidebarWidth: typeof v.sidebarWidth === 'number' ? v.sidebarWidth : 220,
         observerWidth: typeof v.observerWidth === 'number' ? v.observerWidth : 380,
+        theme: v.theme ?? 'system',
       };
     }
   } catch { /* ignore */ }
-  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380 };
+  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, theme: 'system' };
 }
 
 export function saveUi(s: UiState) {
