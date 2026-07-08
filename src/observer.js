@@ -5,11 +5,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { discoverAll } from './chats.js';
+import { discoverAll, capturePanes } from './chats.js';
 import { read as readPane, send as sendPane } from './tmux.js';
 import { complete } from './llm.js';
 import { getSession, saveMessages, appendTranscript } from './sessions.js';
-import { capturePanes } from './server.js';
 
 const DIRECTIVES_LOG = path.join(os.homedir(), '.yatfa-warden', 'directives.md');
 
