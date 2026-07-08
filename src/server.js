@@ -14,7 +14,7 @@ import { load, save, loadCatalog, saveCatalog, allSshHosts } from './config.js';
 import * as collections from './collections.js';
 import { discoverAll, capturePanes, resolveChatWithRefresh } from './chats.js';
 import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream } from './tmux.js';
-import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude } from './ssh.js';
+import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude, startConnectionPoolCleanup, validateHost, preWarmConnectionPool } from './ssh.js';
 import { Observer } from './observer.js';
 import { hasCredentials, resolveModel } from './llm.js';
 import { listSessions, createSession, renameSession, deleteSession } from './sessions.js';
@@ -175,6 +175,22 @@ app.get('/api/activity/stats', (req, res) => {
 
 app.get('/api/ssh-hosts', (_req, res) => res.json({ hosts: allSshHosts(), configured: cfg.hosts }));
 
+// Host health check endpoint
+app.get('/api/hosts/health', async (req, res) => {
+  const hosts = Array.isArray(req.query.hosts) ? req.query.hosts : cfg.hosts;
+  const healthChecks = await Promise.all(
+    hosts.map(async (host) => {
+      try {
+        const result = await validateHost(host, cfg);
+        return { host, ...result };
+      } catch (e) {
+        return { host, ok: false, error: e.message };
+      }
+    })
+  );
+  res.json({ hosts: healthChecks, timestamp: Date.now() });
+});
+
 // ---- Collections API ----
 // GET /api/collections - List all collections
 app.get('/api/collections', (_req, res) => {
@@ -296,7 +312,7 @@ app.get('/api/search-pane', async (req, res) => {
   if (chats.length === 0) return res.json({ results: [], query });
 
   try {
-    const captures = await capturePanes(chats);
+    const captures = await capturePanes(chats, cfg);
     const results = [];
 
     for (const [key, content] of Object.entries(captures)) {
@@ -653,7 +669,7 @@ streamWss.on('connection', (ws) => {
     const chats = [...monitors].map((k) => cache.find((c) => c.key === k)).filter(Boolean);
     if (!chats.length) return;
     let out;
-    try { out = await capturePanes(chats); } catch { return; }
+    try { out = await capturePanes(chats, cfg); } catch { return; }
     for (const [k, pane] of Object.entries(out)) {
       send({ type: 'snapshot', id: k, pane });
       // Snapshot logging disabled due to performance: 2s intervals create 300K+ events/pane/7 days
@@ -723,9 +739,13 @@ export function startServer(port = 7421, host = '127.0.0.1') {
     }
     process.exit(1);
   });
-  server.listen(port, host, () => {
+  server.listen(port, host, async () => {
     console.log(`warden ui → http://${host}:${port}`);
     console.log(`  hosts: ${cfg.hosts.join(', ')}   model: ${resolveModel()}   tmux: ${TMUX_BIN}`);
+    // Start connection pool cleanup task
+    startConnectionPoolCleanup();
+    // Pre-warm SSH connections for configured hosts
+    await preWarmConnectionPool(cfg.hosts, cfg);
   });
 }
 

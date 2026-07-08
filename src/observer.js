@@ -203,7 +203,7 @@ export class Observer {
 
       try {
         // Import capturePanes from server (needs module import at top)
-        const panes = await capturePanes(openChats);
+        const panes = await capturePanes(openChats, this.cfg);
 
         // Return structured result with metadata + panes
         return {
@@ -235,7 +235,7 @@ export class Observer {
       }
 
       try {
-        const panes = await capturePanes(openChats);
+        const panes = await capturePanes(openChats, this.cfg);
 
         const insights = openChats.map(c => {
           const pane = panes[c.key] || '';
