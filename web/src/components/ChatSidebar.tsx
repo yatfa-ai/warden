@@ -63,6 +63,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [ctx, setCtx] = useState<{ id: string; x: number; y: number; dead: boolean } | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [collections, setCollections] = useState<Collection[]>([]);
+  const [tabSearchQuery, setTabSearchQuery] = useState('');
 
   // Native context menu listener — only fires for tab rows, leaves everything else (xterm/tmux) alone.
   useEffect(() => {
@@ -260,11 +261,27 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   }
 
   // ROOT VIEW — persistent active tabs + hosts
+  const filteredTabs = activeTabs.filter((id) => {
+    const c = findChat(chats, id);
+    if (!c) return false;
+    const query = tabSearchQuery.toLowerCase();
+    const name = (c.name || id).toLowerCase();
+    const host = (c.host || '').toLowerCase();
+    const type = chatType(c).toLowerCase();
+    return name.includes(query) || host.includes(query) || type.includes(query);
+  });
+
   return (
     <div className="flex flex-col h-full min-h-0">
       <div className="flex items-center gap-2 px-3 py-2 border-b shrink-0">
-        <span className="text-xs text-muted-foreground flex-1">active</span>
-        <Badge variant="secondary" className="text-xs">{activeTabs.length}</Badge>
+        <span className="text-xs text-muted-foreground">active</span>
+        <Input
+          placeholder="filter..."
+          value={tabSearchQuery}
+          onChange={(e) => setTabSearchQuery(e.target.value)}
+          className="h-6 text-[10px] px-2 flex-1 max-w-[120px]"
+        />
+        <Badge variant="secondary" className="text-xs">{filteredTabs.length}</Badge>
         <button className="text-xs text-muted-foreground hover:text-foreground" onClick={onRefresh} disabled={loading}>{loading ? '…' : '↻'}</button>
       </div>
       <NewChatForm onSpawned={handleSpawned} />
@@ -273,20 +290,21 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           {activeTabs.length > 0 && (
             <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">tabs</div>
           )}
-          {activeTabs.map((id, idx) => {
+          {filteredTabs.map((id) => {
             const c = findChat(chats, id);
             const type = chatType(c);
             const isOpen = openPanes.has(id);
             const hostTag = c ? (c.host === THIS_MACHINE ? 'local' : c.host) : '';
             const dead = !c || c.active === false;
+            const originalIdx = activeTabs.indexOf(id);
             return (
               <div key={id} data-tab-id={id} draggable
-                onDragStart={() => setDragIdx(idx)}
-                onDragOver={(e) => { e.preventDefault(); setDragOverIdx(idx); }}
+                onDragStart={() => setDragIdx(originalIdx)}
+                onDragOver={(e) => { e.preventDefault(); setDragOverIdx(originalIdx); }}
                 onDragEnd={() => { if (dragIdx !== null && dragOverIdx !== null && dragIdx !== dragOverIdx) onReorder(dragIdx, dragOverIdx); setDragIdx(null); setDragOverIdx(null); }}
-                onDrop={(e) => { e.preventDefault(); if (dragIdx !== null && idx !== dragIdx) onReorder(dragIdx, idx); setDragIdx(null); setDragOverIdx(null); }}
+                onDrop={(e) => { e.preventDefault(); if (dragIdx !== null && originalIdx !== dragIdx) onReorder(dragIdx, originalIdx); setDragIdx(null); setDragOverIdx(null); }}
                 onClick={() => onOpenChat(id)}
-                className={`group flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent cursor-pointer ${dead ? 'opacity-50' : ''} ${dragIdx === idx ? 'opacity-40' : ''} ${dragOverIdx === idx && dragIdx !== null ? 'border-t-2 border-primary' : ''}`}>
+                className={`group flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent cursor-pointer ${dead ? 'opacity-50' : ''} ${dragOverIdx === originalIdx && dragIdx !== null ? 'border-t-2 border-primary' : ''}`}>
                 <span className="text-muted-foreground/40 cursor-grab active:cursor-grabbing select-none">⠿</span>
                 <span className={`size-2 rounded-full shrink-0 ${dead ? 'bg-red-500' : isOpen ? 'bg-green-500' : 'bg-muted-foreground/40'}`} />
                 <span className={`truncate flex-1 ${dead ? 'line-through text-muted-foreground' : ''}`}>{c?.name || id}</span>
@@ -296,6 +314,9 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
               </div>
             );
           })}
+          {filteredTabs.length === 0 && tabSearchQuery && (
+            <div className="text-xs text-muted-foreground p-3 text-center">no tabs match "{tabSearchQuery}"</div>
+          )}
           {activeTabs.length === 0 && (
             <div className="text-xs text-muted-foreground p-3 text-center">no tabs — browse hosts below</div>
           )}
