@@ -18,6 +18,7 @@ import { Observer } from './observer.js';
 import { hasCredentials, resolveModel } from './llm.js';
 import { listSessions, createSession, renameSession, deleteSession } from './sessions.js';
 import { appendEvent, rotateEvents, readEvents, getStatsSince } from './activity.js';
+import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = load();
@@ -78,6 +79,34 @@ app.get('/api/chats', async (_req, res) => {
   const { chats, errors } = await discoverAll(cfg.hosts, cfg);
   cache = chats;
   res.json({ chats, errors });
+});
+
+// Health endpoint for fleet health monitoring
+app.get('/api/health', async (_req, res) => {
+  try {
+    const { chats } = await discoverAll(cfg.hosts, cfg);
+
+    // Calculate health state for each agent
+    const agentsWithHealth = chats.map(chat => ({
+      ...chat,
+      healthState: getHealthState(chat, chat.lastActivity)
+    }));
+
+    // Group by health state
+    const groups = groupByHealth(agentsWithHealth);
+
+    // Get summary
+    const summary = getHealthSummary(groups);
+
+    res.json({
+      agents: agentsWithHealth,
+      groups,
+      summary,
+      timestamp: Date.now()
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 app.get('/api/pane', async (req, res) => {
   const r = await resolve(String(req.query.id || ''));
