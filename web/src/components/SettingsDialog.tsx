@@ -17,6 +17,9 @@ interface ConfigData {
   pollIntervalMs: number;
   tmuxSession: string;
   connectTimeout: number;
+  observerConfirmMode: 'always' | 'auto-safe';
+  observerAutoStart: boolean;
+  observerSessionTimeout: number | null;
 }
 
 interface Props {
@@ -31,6 +34,9 @@ export function SettingsDialog({ open, onClose, onConfigChange }: Props) {
     pollIntervalMs: 1500,
     tmuxSession: 'agent',
     connectTimeout: 10,
+    observerConfirmMode: 'always',
+    observerAutoStart: false,
+    observerSessionTimeout: 30,
   });
   const [availableHosts, setAvailableHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -50,6 +56,11 @@ export function SettingsDialog({ open, onClose, onConfigChange }: Props) {
             pollIntervalMs: configData.pollIntervalMs || 1500,
             tmuxSession: configData.tmuxSession || 'agent',
             connectTimeout: configData.connectTimeout || 10,
+            observerConfirmMode: ['always', 'auto-safe'].includes(configData.observerConfirmMode)
+              ? configData.observerConfirmMode
+              : 'always',
+            observerAutoStart: configData.observerAutoStart || false,
+            observerSessionTimeout: configData.observerSessionTimeout ?? 30,
           });
           setAvailableHosts(hostsData.hosts || []);
         })
@@ -195,6 +206,69 @@ export function SettingsDialog({ open, onClose, onConfigChange }: Props) {
                   setConfig({ ...config, connectTimeout: parseInt(e.target.value) || 10 })
                 }
               />
+            </div>
+
+            {/* Observer Preferences Section */}
+            <div className="flex flex-col gap-3 pt-2 border-t">
+              <div className="text-sm font-medium text-foreground">Observer Preferences</div>
+
+              {/* Confirmation Mode */}
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="observerConfirmMode">Directive Confirmation</Label>
+                <select
+                  id="observerConfirmMode"
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  value={config.observerConfirmMode}
+                  onChange={(e) =>
+                    setConfig({ ...config, observerConfirmMode: e.target.value as 'always' | 'auto-safe' })
+                  }
+                >
+                  <option value="always">Always confirm (default)</option>
+                  <option value="auto-safe">Auto-send safe directives</option>
+                </select>
+                {config.observerConfirmMode === 'auto-safe' && (
+                  <p className="text-xs text-muted-foreground">
+                    When "Auto-send safe", read-only directives (list, read) skip confirmation.
+                  </p>
+                )}
+              </div>
+
+              {/* Auto-Start Toggle */}
+              <div className="flex items-center gap-2">
+                <input
+                  id="observerAutoStart"
+                  type="checkbox"
+                  checked={config.observerAutoStart}
+                  onChange={(e) => setConfig({ ...config, observerAutoStart: e.target.checked })}
+                  className="w-4 h-4"
+                />
+                <Label htmlFor="observerAutoStart" className="cursor-pointer">
+                  Auto-start Observer
+                </Label>
+              </div>
+
+              {/* Session Timeout */}
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="observerSessionTimeout">Session Auto-stop (minutes)</Label>
+                <Input
+                  id="observerSessionTimeout"
+                  type="number"
+                  min="1"
+                  max="180"
+                  step="1"
+                  value={config.observerSessionTimeout ?? ''}
+                  onChange={(e) =>
+                    setConfig({
+                      ...config,
+                      observerSessionTimeout: e.target.value ? parseInt(e.target.value) : null,
+                    })
+                  }
+                  placeholder="Disabled when empty"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Automatically stop Observer after N minutes of inactivity. Leave empty to disable.
+                </p>
+              </div>
             </div>
           </div>
         )}

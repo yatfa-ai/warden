@@ -257,15 +257,24 @@ app.get('/api/config', (_req, res) => res.json({
   pollIntervalMs: cfg.pollIntervalMs,
   tmuxSession: cfg.tmuxSession,
   connectTimeout: cfg.connectTimeout,
+  observerConfirmMode: cfg.observerConfirmMode,
+  observerAutoStart: cfg.observerAutoStart,
+  observerSessionTimeout: cfg.observerSessionTimeout,
 }));
 
 // PUT /api/config — update configuration and persist
 app.put('/api/config', (req, res) => {
-  const { hosts, pollIntervalMs, tmuxSession, connectTimeout } = req.body;
+  const { hosts, pollIntervalMs, tmuxSession, connectTimeout, observerConfirmMode, observerAutoStart, observerSessionTimeout } = req.body;
   if (hosts && Array.isArray(hosts)) cfg.hosts = hosts;
   if (typeof pollIntervalMs === 'number') cfg.pollIntervalMs = pollIntervalMs;
   if (typeof tmuxSession === 'string') cfg.tmuxSession = tmuxSession;
   if (typeof connectTimeout === 'number') cfg.connectTimeout = connectTimeout;
+  if (observerConfirmMode && ['always', 'auto-safe'].includes(observerConfirmMode)) cfg.observerConfirmMode = observerConfirmMode;
+  if (typeof observerAutoStart === 'boolean') cfg.observerAutoStart = observerAutoStart;
+  if (observerSessionTimeout === null ||
+      (typeof observerSessionTimeout === 'number' &&
+       Number.isFinite(observerSessionTimeout) &&
+       observerSessionTimeout > 0)) cfg.observerSessionTimeout = observerSessionTimeout;
   save(cfg); // persist to ~/.yatfa-warden/config.json
   res.json({ ok: true });
 });
@@ -588,6 +597,13 @@ wss.on('connection', (ws, req) => {
     },
     onText: (text) => send({ type: 'assistant', text }),
     gate: async (chat, directive) => {
+      // Auto-send read-looking directives when in auto-safe mode
+      const isReadOnlyDirective = /^(?:\?|list|read|show|get|find|search|check|status|info|display)/i.test(directive.trim());
+      if (cfg.observerConfirmMode === 'auto-safe' && isReadOnlyDirective) {
+        return { approved: true, edited: null };
+      }
+
+      // Otherwise, require confirmation
       const requestId = String(++reqCounter);
       send({ type: 'directive_proposed', requestId, container: chat.container, host: chat.host, role: chat.role, directive });
       appendEvent({ type: 'directive_proposed', container: chat.container, host: chat.host, role: chat.role, directive });
