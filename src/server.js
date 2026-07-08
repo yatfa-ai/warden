@@ -1039,4 +1039,3 @@ const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === fil
 if (invokedDirectly) {
   startServer(parseInt(process.env.PORT || '7421', 10));
 }
-modified
