@@ -119,8 +119,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     return acc;
   }, {} as Record<string, number>);
 
-  // Fetch all sessions on mount
-  useEffect(() => { fetchAllSessions(); }, []);
+  const [hostStatuses, setHostStatuses] = useState<Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }>>({});
 
   const fetchHostSessions = async (host: string) => {
     setLoadingHost(host);
@@ -156,7 +155,20 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     } catch { /* noop */ }
     setLoadingAllSessions(false);
   };
-  const enterHost = (host: string) => { setView({ kind: 'host', host }); fetchHostSessions(host); };
+
+  const enterHost = (host: string) => {
+    const status = hostStatuses[host];
+    if (status?.status === 'offline') {
+      // Show helpful error instead of navigating
+      toast.error(`Cannot reach ${host} — SSH connection failed. Please check:
+• Network connectivity
+• SSH daemon is running
+• SSH keys are configured`);
+      return;
+    }
+    setView({ kind: 'host', host });
+    fetchHostSessions(host);
+  };
 
   // Collections management
   const fetchCollections = async () => {
@@ -182,6 +194,30 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   // Fetch collections on mount
   useEffect(() => {
     fetchCollections();
+  }, []);
+
+  // Fetch host connectivity statuses every 30 seconds
+  useEffect(() => {
+    const fetchHostStatuses = async () => {
+      try {
+        const r = await fetch('/api/hosts/status');
+        const j = await r.json();
+        const statuses: Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }> = {};
+        j.hosts.forEach((h: { host: string; status: string; latency_ms: number | null }) => {
+          statuses[h.host] = {
+            status: h.status as 'online' | 'offline' | 'unknown',
+            latency_ms: h.latency_ms
+          };
+        });
+        setHostStatuses(statuses);
+      } catch {
+        // Graceful degradation - show unknown status
+      }
+    };
+
+    fetchHostStatuses();
+    const interval = setInterval(fetchHostStatuses, 30000);
+    return () => clearInterval(interval);
   }, []);
 
   // Fetch git status for active chats (lazy loading)
@@ -547,11 +583,24 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             })
             .map((h) => {
               const n = chats.filter((c) => c.host === h && c.active && (!projectFilter || c.project === projectFilter)).length;
+              const hostStatus = hostStatuses[h];
               return (
               <button key={h} onClick={() => enterHost(h)} className="flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent w-full transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background">
                 <span className={`size-2 rounded-full ${n ? 'bg-green-500' : 'bg-muted-foreground/40'}`} />
                 <span className="flex-1 truncate">{LABEL[h] || h}</span>
                 {h === THIS_MACHINE && <span className="text-[10px] text-cyan-400">local</span>}
+                {h !== THIS_MACHINE && (
+                  <span
+                    className={`size-2 rounded-full ${
+                      hostStatus?.status === 'online' ? 'bg-green-500' :
+                      hostStatus?.status === 'offline' ? 'bg-red-500' :
+                      'bg-gray-400'
+                    }`}
+                    title={hostStatus?.status === 'online' && hostStatus?.latency_ms ?
+                      `${hostStatus.status} (${hostStatus.latency_ms}ms)` :
+                      hostStatus?.status || 'unknown'}
+                  />
+                )}
                 {n > 0 && <span className="text-[10px] text-muted-foreground">{n}</span>}
                 <span className="text-muted-foreground/60">›</span>
               </button>

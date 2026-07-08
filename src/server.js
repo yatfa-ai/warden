@@ -191,6 +191,35 @@ app.get('/api/hosts/health', async (req, res) => {
   res.json({ hosts: healthChecks, timestamp: Date.now() });
 });
 
+// Host connectivity status endpoint for sidebar indicators
+app.get('/api/hosts/status', async (_req, res) => {
+  const hosts = [LOCAL, ...cfg.hosts];
+  const results = await Promise.all(
+    hosts.map(async (host) => {
+      const start = Date.now();
+      try {
+        const result = await validateHost(host, cfg);
+        return {
+          host,
+          status: result.ok ? 'online' : 'offline',
+          latency_ms: result.ok ? Date.now() - start : null,
+          error: result.error,
+          last_check: new Date().toISOString()
+        };
+      } catch (e) {
+        return {
+          host,
+          status: 'offline',
+          latency_ms: null,
+          error: e.message,
+          last_check: new Date().toISOString()
+        };
+      }
+    })
+  );
+  res.json({ hosts: results });
+});
+
 // ---- Collections API ----
 // GET /api/collections - List all collections
 app.get('/api/collections', (_req, res) => {
