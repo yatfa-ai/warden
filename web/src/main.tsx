@@ -5,8 +5,6 @@ import App from './App.tsx'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Toaster } from '@/components/ui/sonner'
 
-document.documentElement.classList.add('dark');
-
 createRoot(document.getElementById('root')!).render(
   <TooltipProvider>
     <App />

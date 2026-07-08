@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { loadUi, saveUi } from '@/lib/storage';
+import { applyTheme, listenSystemThemeChange, type Theme } from '@/lib/theme';
 import type { Chat } from '@/lib/types';
 import { ChatSidebar } from '@/components/ChatSidebar';
 import { PaneGrid } from '@/components/PaneGrid';
@@ -35,6 +36,7 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(uiState.sidebarCollapsed);
   const [observerCollapsed, setObserverCollapsed] = useState(uiState.observerCollapsed);
   const [healthCollapsed, setHealthCollapsed] = useState(uiState.healthCollapsed ?? true);
+  const [theme, setTheme] = useState<Theme>(() => uiState.theme ?? 'system');
 
   useEffect(() => {
     streamApi.onOpen = () => setStreamConn(true);
@@ -89,7 +91,22 @@ function App() {
     if (focused) setNewActivity((prev) => { if (!prev.has(focused)) return prev; const n = new Set(prev); n.delete(focused); return n; });
   }, [focused]);
 
-  useEffect(() => { saveUi({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth }); }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth]);
+  // apply theme on mount and when theme changes
+  useEffect(() => {
+    // Apply theme immediately
+    applyTheme(theme);
+    saveUi({ ...loadUi(), theme });
+
+    // If system mode, listen for system theme changes
+    if (theme === 'system') {
+      const cleanup = listenSystemThemeChange(() => {
+        applyTheme('system');
+      });
+      return cleanup;
+    }
+  }, [theme]);
+
+  useEffect(() => { saveUi({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, theme }); }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, theme]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -397,6 +414,8 @@ function App() {
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         onConfigChange={refresh}
+        theme={theme}
+        setTheme={setTheme}
       />
       <GlobalSearchDialog
         open={showGlobalSearch}
