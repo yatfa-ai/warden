@@ -144,16 +144,16 @@ export function attachInteractiveTmux(chat, args) {
   }
   // For remote: after tmux exits (detached), continue to an interactive shell.
   // This keeps the SSH session open and drops the user at a shell prompt.
-  // Command structure: cd <dir> && tmux attach -t agent; exec <shell>
+  // Command structure: tmux attach -t agent; <shell>
   const prefix = chat.container ? `docker exec -it ${shellQuote(chat.container)} ` : '';
   const tmuxCmd = prefix + 'tmux ' + args.map(shellQuote).join(' ');
 
-  // Build the shell command that runs after tmux exits
-  const cwdPart = chat.cwd ? `cd ${shellQuote(chat.cwd)} && ` : '';
-  const innerCmd = cwdPart + 'exec bash';
+  // Build the shell command that runs after tmux exits.
+  // For docker: skip cwd (host path doesn't exist in container), just start bash.
+  // For bare: use cwd if available (it's a valid host path).
   const shellCmd = chat.container
-    ? `docker exec -it ${shellQuote(chat.container)} bash -lc ${shellQuote(innerCmd)}`
-    : `bash -lc ${shellQuote(innerCmd)}`;
+    ? `docker exec -it ${shellQuote(chat.container)} bash`
+    : (chat.cwd ? `bash -lc ${shellQuote(`cd ${shellQuote(chat.cwd)} && exec bash`)}` : `bash`);
 
   const cmd = `${tmuxCmd}; ${shellCmd}`;
   return attach(chat.host, cmd);
