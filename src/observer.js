@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { discoverAll, capturePanes } from './chats.js';
+import { discoverAll, capturePanes, resolveChat } from './chats.js';
 import { read as readPane, send as sendPane } from './tmux.js';
 import { complete } from './llm.js';
 import { getSession, saveMessages, appendTranscript } from './sessions.js';
@@ -124,14 +124,21 @@ export class Observer {
   }
 
   async _resolve(id) {
-    const match = (list) => list.filter((c) =>
-      c.id === id || (c.id && c.id.endsWith(':' + id)) || c.container === id ||
-      (c.container && c.container.includes(id)) || c.project === id || c.role === id);
-    let m = match(this.lastChats);
-    if (!m.length) m = match(await this._refreshChats());
-    if (m.length === 1) return m[0];
-    if (!m.length) return { error: `no chat matches "${id}". try one of: ${this.lastChats.map((c) => c.container).join(', ')}` };
-    return { error: `"${id}" is ambiguous: ${m.map((c) => c.id).join(', ')}` };
+    const result = resolveChat(id, this.lastChats, null);
+
+    // If we got a definitive result, return it (converting to chat or error object)
+    if (result.chat) return result.chat;
+    if (result.error) return { error: result.error };
+
+    // No match in cache - refresh and try again
+    const chats = await this._refreshChats();
+    const result2 = resolveChat(id, chats, null);
+
+    if (result2.chat) return result2.chat;
+    if (result2.error) return { error: result2.error };
+
+    // Should not reach here, but just in case
+    return { error: `no chat matches "${id}". try one of: ${this.lastChats.map((c) => c.container).join(', ')}` };
   }
 
   async _execTool(name, input) {

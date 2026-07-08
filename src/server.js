@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { load, save, loadCatalog, saveCatalog, allSshHosts } from './config.js';
-import { discoverAll, capturePanes } from './chats.js';
+import { discoverAll, capturePanes, resolveChatWithRefresh } from './chats.js';
 import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream } from './tmux.js';
 import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude } from './ssh.js';
 import { Observer } from './observer.js';
@@ -42,25 +42,23 @@ if (fs.existsSync(DIST)) {
 
 // chat cache + resolver
 let cache = [];
-function matchIn(list, id) {
-  const exact = list.filter((c) => c.id === id || c.key === id || c.container === id || c.session === id);
-  if (exact.length) return exact;
-  return list.filter((c) =>
-    (c.container && c.container.includes(id)) ||
-    (c.session && c.session.includes(id)) ||
-    (c.id && c.id.includes(id)) ||
-    c.project === id || c.role === id);
-}
 async function resolve(id) {
-  let found = matchIn(cache, id);
-  if (found.length !== 1) {
+  const result = await resolveChatWithRefresh(id, cache, async () => {
     const { chats } = await discoverAll(cfg.hosts, cfg);
     cache = chats;
-    found = matchIn(chats, id);
+    return { chats, errors: [] };
+  });
+
+  if (result.chat) return { chat: result.chat };
+  if (result.error) {
+    // Parse the error to maintain compatibility with existing error handling
+    if (result.error.includes('ambiguous')) {
+      const matches = result.error.match(/matches: (.+)$/)?.[1]?.split(', ') || [];
+      return { error: 'ambiguous', matches };
+    }
+    return { error: result.error };
   }
-  if (found.length === 1) return { chat: found[0] };
-  if (!found.length) return { error: `no chat matches "${id}"` };
-  return { error: 'ambiguous', matches: found.map((c) => c.id) };
+  return { error: `no chat matches "${id}"` };
 }
 
 // Verify tmux is available (local exec or remote host). Returns null or an error string.

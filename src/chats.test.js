@@ -1,0 +1,279 @@
+import { describe, it, mock } from 'node:test';
+import assert from 'node:assert';
+import { resolveChat, resolveChatWithRefresh } from './chats.js';
+
+describe('resolveChat', () => {
+  const mockChats = [
+    { id: 'host1:myproject-worker', key: 'myproject-worker', container: 'myproject-worker', session: 'agent', project: 'myproject', role: 'worker' },
+    { id: 'host1:myproject-researcher', key: 'myproject-researcher', container: 'myproject-researcher', session: 'agent', project: 'myproject', role: 'researcher' },
+    { id: 'host2:other-project', key: 'other-project', container: 'other-project', session: 'agent', project: 'other', role: 'planner' },
+    { id: 'local:manual-session', key: 'manual-session', container: null, session: 'manual-session', project: 'local', role: 'claude' },
+  ];
+
+  describe('exact matches (highest priority)', () => {
+    it('should match by exact id', () => {
+      const result = resolveChat('host1:myproject-worker', mockChats, null);
+      assert.ok(result.chat, 'Should find chat by exact id');
+      assert.strictEqual(result.chat.id, 'host1:myproject-worker');
+      assert.strictEqual(result.chat.role, 'worker');
+    });
+
+    it('should match by exact key', () => {
+      const result = resolveChat('myproject-worker', mockChats, null);
+      assert.ok(result.chat, 'Should find chat by exact key');
+      assert.strictEqual(result.chat.key, 'myproject-worker');
+      assert.strictEqual(result.chat.role, 'worker');
+    });
+
+    it('should match by exact container', () => {
+      const result = resolveChat('myproject-worker', mockChats, null);
+      assert.ok(result.chat, 'Should find chat by exact container');
+      assert.strictEqual(result.chat.container, 'myproject-worker');
+    });
+
+    it('should match by exact session', () => {
+      const result = resolveChat('manual-session', mockChats, null);
+      assert.ok(result.chat, 'Should find chat by exact session');
+      assert.strictEqual(result.chat.session, 'manual-session');
+      assert.strictEqual(result.chat.project, 'local');
+    });
+  });
+
+  describe('substring matches (lower priority)', () => {
+    it('should match by role equality', () => {
+      const result = resolveChat('worker', mockChats, null);
+      assert.ok(result.chat, 'Should find chat by role equality');
+      assert.strictEqual(result.chat.role, 'worker');
+      assert.strictEqual(result.chat.project, 'myproject');
+    });
+
+    it('should match by suffix (id.endsWith(\':\' + id))', () => {
+      const result = resolveChat('worker', mockChats, null);
+      assert.ok(result.chat, 'Should find chat by suffix match');
+      assert.strictEqual(result.chat.role, 'worker');
+    });
+
+    it('should match by container substring (unique)', () => {
+      const result = resolveChat('other-project', mockChats, null);
+      assert.ok(result.chat, 'Should find chat by container substring');
+      assert.ok(result.chat.container.includes('other-project'));
+    });
+
+    it('should return error for ambiguous container substring', () => {
+      const result = resolveChat('myproject', mockChats, null);
+      assert.ok(result.error, 'Should return error for ambiguous container substring');
+      assert.ok(result.error.includes('ambiguous'), 'Error should mention ambiguity');
+    });
+
+    it('should match by session substring', () => {
+      const result = resolveChat('manual', mockChats, null);
+      assert.ok(result.chat, 'Should find chat by session substring');
+      assert.ok(result.chat.session.includes('manual'));
+    });
+
+    it('should match by id substring', () => {
+      const result = resolveChat('host2', mockChats, null);
+      assert.ok(result.chat, 'Should find chat by id substring');
+      assert.ok(result.chat.id.includes('host2'));
+    });
+
+    it('should return error for ambiguous project equality', () => {
+      const result = resolveChat('myproject', mockChats, null);
+      assert.ok(result.error, 'Should return error for ambiguous project match');
+      assert.ok(result.error.includes('ambiguous'), 'Error should mention ambiguity');
+    });
+
+    it('should match by unique project', () => {
+      const result = resolveChat('other', mockChats, null);
+      assert.ok(result.chat, 'Should find chat by unique project');
+      assert.strictEqual(result.chat.project, 'other');
+    });
+
+    it('should match by role equality', () => {
+      const result = resolveChat('researcher', mockChats, null);
+      assert.ok(result.chat, 'Should find chat by role');
+      assert.strictEqual(result.chat.role, 'researcher');
+    });
+  });
+
+  describe('exact-first priority behavior', () => {
+    it('should prioritize exact match over substring/project match', () => {
+      const chats = [
+        { id: 'host:myproject', key: 'myproject', container: 'myproject', session: 'agent', project: 'other', role: 'worker' },
+        { id: 'host:other-project', key: 'other-project', container: 'other-project', session: 'agent', project: 'myproject', role: 'worker' },
+      ];
+
+      // Search for "myproject" - there's an exact match (id='host:myproject')
+      // AND a project match (project='myproject' on other chat)
+      const result = resolveChat('myproject', chats, null);
+
+      // Should find exact match, not fail with ambiguity
+      assert.ok(result.chat, 'Should prioritize exact match over project match');
+      assert.strictEqual(result.chat.id, 'host:myproject');
+      assert.strictEqual(result.chat.key, 'myproject');
+    });
+
+    it('should return error for multiple exact matches', () => {
+      const chats = [
+        { id: 'host1:myproject', key: 'myproject', container: 'myproject', session: 'agent', project: 'p1', role: 'worker' },
+        { id: 'host2:myproject', key: 'myproject', container: 'myproject', session: 'agent', project: 'p2', role: 'worker' },
+      ];
+
+      const result = resolveChat('myproject', chats, null);
+      assert.ok(result.error, 'Should return error for ambiguous exact matches');
+      assert.ok(result.error.includes('ambiguous'), 'Error should mention ambiguity');
+      assert.ok(result.error.includes('myproject'), 'Error should include the matched ids');
+    });
+
+    it('should return error for multiple substring matches', () => {
+      const result = resolveChat('project', mockChats, null);
+      assert.ok(result.error, 'Should return error for ambiguous substring matches');
+      assert.ok(result.error.includes('ambiguous'), 'Error should mention ambiguity');
+    });
+  });
+
+  describe('edge cases', () => {
+    it('should return needsRefresh when no matches found', () => {
+      const result = resolveChat('nonexistent', mockChats, null);
+      assert.ok(result.needsRefresh, 'Should signal refresh needed when no matches');
+      assert.strictEqual(result.chat, undefined);
+      assert.strictEqual(result.error, undefined);
+    });
+
+    it('should handle empty chat list', () => {
+      const result = resolveChat('anything', [], null);
+      assert.ok(result.needsRefresh, 'Should signal refresh needed for empty list');
+    });
+
+    it('should handle null/undefined fields gracefully', () => {
+      const chatsWithNulls = [
+        { id: 'host:chat1', key: 'chat1', container: null, session: null, project: 'p1', role: 'worker' },
+        { id: 'host:chat2', key: 'chat2', container: 'chat2', session: 'agent', project: 'p2', role: 'worker' },
+      ];
+
+      // Should still match by exact key even with null container/session
+      const result = resolveChat('chat1', chatsWithNulls, null);
+      assert.ok(result.chat, 'Should handle null fields');
+      assert.strictEqual(result.chat.key, 'chat1');
+    });
+  });
+});
+
+describe('resolveChatWithRefresh', () => {
+  describe('refresh behavior', () => {
+    it('should return cached result without refresh when match found', async () => {
+      const mockChats = [
+        { id: 'host:myproject', key: 'myproject', container: 'myproject', session: 'agent', project: 'p1', role: 'worker' },
+      ];
+
+      const refreshFn = mock.fn(async () => ({ chats: [], errors: [] }));
+
+      const result = await resolveChatWithRefresh('myproject', mockChats, refreshFn);
+
+      assert.ok(result.chat, 'Should find chat in cache');
+      assert.strictEqual(result.chat.id, 'host:myproject');
+      assert.strictEqual(refreshFn.mock.callCount(), 0, 'Should not call refresh when cache hit');
+    });
+
+    it('should call refreshFn when no match in cache', async () => {
+      const mockChats = [
+        { id: 'host:existing', key: 'existing', container: 'existing', session: 'agent', project: 'p1', role: 'worker' },
+      ];
+
+      const refreshedChats = [
+        { id: 'host:new-chat', key: 'new-chat', container: 'new-chat', session: 'agent', project: 'p2', role: 'worker' },
+      ];
+
+      const refreshFn = mock.fn(async () => ({
+        chats: refreshedChats,
+        errors: []
+      }));
+
+      const result = await resolveChatWithRefresh('new-chat', mockChats, refreshFn);
+
+      assert.strictEqual(refreshFn.mock.callCount(), 1, 'Should call refresh when cache miss');
+      assert.ok(result.chat, 'Should find chat after refresh');
+      assert.strictEqual(result.chat.id, 'host:new-chat');
+    });
+
+    it('should pass through refresh errors', async () => {
+      const mockChats = [];
+      const refreshErrors = [{ host: 'host1', error: 'Connection timeout' }];
+
+      const refreshFn = mock.fn(async () => ({
+        chats: [],
+        errors: refreshErrors
+      }));
+
+      const result = await resolveChatWithRefresh('nonexistent', mockChats, refreshFn);
+
+      assert.ok(result.error, 'Should return error when no match after refresh');
+      assert.ok(result.error.includes('no chat matches'), 'Error should mention no matches');
+      assert.deepStrictEqual(result.errors, refreshErrors, 'Should include refresh errors');
+    });
+
+    it('should apply full matching logic after refresh', async () => {
+      const mockChats = [];
+
+      // Simulate refresh returning multiple chats
+      const refreshedChats = [
+        { id: 'host1:myproject-worker', key: 'myproject-worker', container: 'myproject-worker', session: 'agent', project: 'myproject', role: 'worker' },
+        { id: 'host1:myproject-researcher', key: 'myproject-researcher', container: 'myproject-researcher', session: 'agent', project: 'myproject', role: 'researcher' },
+      ];
+
+      const refreshFn = mock.fn(async () => ({
+        chats: refreshedChats,
+        errors: []
+      }));
+
+      // Test exact match after refresh
+      const result = await resolveChatWithRefresh('myproject-worker', mockChats, refreshFn);
+
+      assert.ok(result.chat, 'Should find exact match after refresh');
+      assert.strictEqual(result.chat.role, 'worker');
+    });
+
+    it('should return ambiguous error after refresh if multiple matches', async () => {
+      const mockChats = [];
+
+      const refreshedChats = [
+        { id: 'host1:chat', key: 'chat', container: 'chat', session: 'agent', project: 'p1', role: 'worker' },
+        { id: 'host2:chat', key: 'chat', container: 'chat', session: 'agent', project: 'p2', role: 'worker' },
+      ];
+
+      const refreshFn = mock.fn(async () => ({
+        chats: refreshedChats,
+        errors: []
+      }));
+
+      const result = await resolveChatWithRefresh('chat', mockChats, refreshFn);
+
+      assert.ok(result.error, 'Should return ambiguous error after refresh');
+      assert.ok(result.error.includes('ambiguous'), 'Error should mention ambiguity');
+    });
+  });
+
+  describe('exact-first priority with refresh', () => {
+    it('should prioritize exact match over substring after refresh', async () => {
+      const mockChats = [];
+
+      // After refresh, we have both exact and project matches
+      const refreshedChats = [
+        { id: 'host:myproject', key: 'myproject', container: 'myproject', session: 'agent', project: 'other', role: 'worker' },
+        { id: 'host:other-project', key: 'other-project', container: 'other-project', session: 'agent', project: 'myproject', role: 'worker' },
+      ];
+
+      const refreshFn = mock.fn(async () => ({
+        chats: refreshedChats,
+        errors: []
+      }));
+
+      const result = await resolveChatWithRefresh('myproject', mockChats, refreshFn);
+
+      // Should find exact match, not fail with ambiguity
+      assert.ok(result.chat, 'Should prioritize exact match after refresh');
+      assert.strictEqual(result.chat.id, 'host:myproject');
+      assert.strictEqual(result.chat.key, 'myproject');
+    });
+  });
+});
