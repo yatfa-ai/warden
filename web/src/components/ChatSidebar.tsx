@@ -4,7 +4,9 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { NewChatForm } from './NewChatForm';
-import type { Chat } from '@/lib/types';
+import { CollectionsSection } from './CollectionsSection';
+import { CreateCollectionDialog } from './CreateCollectionDialog';
+import type { Chat, Collection } from '@/lib/types';
 
 export interface ClaudeSession { id: string; cwd: string; summary: string; mtime: number }
 
@@ -53,11 +55,13 @@ const TYPE_COLOR: Record<string, string> = {
 function findChat(chats: Chat[], id: string) { return chats.find((c) => (c.key || c.id) === id); }
 
 export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, loading }: Props) {
-  const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string }>({ kind: 'root' });
+  const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
   const [ctx, setCtx] = useState<{ id: string; x: number; y: number; dead: boolean } | null>(null);
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [collections, setCollections] = useState<Collection[]>([]);
 
   // Native context menu listener — only fires for tab rows, leaves everything else (xterm/tmux) alone.
   useEffect(() => {
@@ -86,8 +90,105 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   };
   const enterHost = (host: string) => { setView({ kind: 'host', host }); fetchHostSessions(host); };
 
+  // Collections management
+  const fetchCollections = async () => {
+    try {
+      const r = await fetch('/api/collections');
+      const j = await r.json();
+      setCollections(j.collections || []);
+    } catch { /* noop */ }
+  };
+
+  const enterCollection = (collection: Collection) => { setView({ kind: 'collection', collection }); };
+
+  const handleCreateCollection = () => { setCreateDialogOpen(true); fetchCollections(); };
+
+  const handleCollectionCreated = (_collection: Collection) => {
+    fetchCollections();
+    // Optionally enter the newly created collection
+    // enterCollection(_collection);
+  };
+
+  // Fetch collections on mount
+  useEffect(() => {
+    fetchCollections();
+  }, []);
+
   const handleSpawned = (chat: Chat) => { onRefresh(); onOpenChat(chat.key || chat.id); setView({ kind: 'root' }); };
   const hosts = [THIS_MACHINE, ...sshHosts];
+
+  if (view.kind === 'collection') {
+    const { collection: C } = view;
+    const agents = collections.length > 0
+      ? chats.filter((chat) => {
+          // Apply the same filtering logic as getAgentsInCollection
+          if (!C.criteria) return true;
+          const { criteria } = C;
+          let matches = true;
+          if (criteria.role && chat.role !== criteria.role) matches = false;
+          if (matches && criteria.project && chat.project !== criteria.project) matches = false;
+          if (matches && criteria.host && chat.host !== criteria.host) matches = false;
+          if (matches && criteria.custom && Array.isArray(criteria.custom) && criteria.custom.length > 0) {
+            const customMatch = criteria.custom.some((value) =>
+              chat.role === value || chat.project === value || chat.host === value || chat.name === value
+            );
+            if (!customMatch) matches = false;
+          }
+          return matches;
+        })
+      : [];
+
+    const active = agents.filter((c) => c.active);
+    const idle = agents.filter((c) => !c.active);
+    const visibleActive = active.filter((c) => !hiddenTabs.includes(c.key || c.id));
+    const hiddenActive = active.filter((c) => hiddenTabs.includes(c.key || c.id));
+    const openFromCollection = (key: string) => { onOpenChat(key); setView({ kind: 'root' }); };
+
+    return (
+      <div className="flex flex-col h-full min-h-0 animate-in slide-in-from-right-2 duration-150">
+        <div className="flex items-center gap-2 px-2 py-2 border-b shrink-0">
+          <button className="text-xs text-muted-foreground hover:text-foreground px-1" onClick={() => setView({ kind: 'root' })} title="back">‹</button>
+          <span
+            className="w-2 h-2 rounded-full shrink-0"
+            style={{ backgroundColor: C.metadata?.color || '#6366f1' }}
+          />
+          <span className="text-xs font-medium flex-1 truncate">{C.name}</span>
+          <span className="text-[10px] text-muted-foreground">{agents.length}</span>
+        </div>
+        <ScrollArea className="flex-1 min-h-0">
+          <div className="p-1.5 flex flex-col gap-0.5">
+            {C.metadata?.description && (
+              <div className="px-2 pt-1 pb-2 text-[10px] text-muted-foreground">{C.metadata.description}</div>
+            )}
+            {(visibleActive.length > 0 || idle.length > 0 || hiddenActive.length > 0) && (
+              <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">● matching agents</div>
+            )}
+            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} onKill={() => onKill(c.key || c.id)} onRename={onRename} onHide={() => onHideTab(c.key || c.id)} />)}
+            {hiddenActive.length > 0 && (
+              <>
+                <button onClick={() => setHiddenExpanded(!hiddenExpanded)} className="flex items-center gap-1 px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60 hover:text-foreground w-full">
+                  <span>{hiddenExpanded ? '▾' : '▸'}</span>
+                  <span>hidden ({hiddenActive.length})</span>
+                </button>
+                {hiddenExpanded && hiddenActive.map((c) => (
+                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} onKill={() => onKill(c.key || c.id)} onRename={onRename} onUnhide={() => onUnhideTab(c.key || c.id)} dim />
+                ))}
+              </>
+            )}
+            {idle.length > 0 && (
+              <>
+                <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">idle</div>
+                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} onKill={() => onKill(c.key || c.id)} onRename={onRename} dim />)}
+              </>
+            )}
+            {agents.length === 0 && (
+              <div className="text-xs text-muted-foreground p-3 text-center">no agents match this collection</div>
+            )}
+          </div>
+        </ScrollArea>
+      </div>
+    );
+  }
 
   if (view.kind === 'host') {
     const H = view.host;
@@ -199,6 +300,11 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           )}
           <div className="mt-3 mb-1 border-t border-border/50" />
           <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">hosts</div>
+          <CollectionsSection
+            chats={chats}
+            onEnterCollection={enterCollection}
+            onCreateCollection={handleCreateCollection}
+          />
           {hosts.map((h) => {
             const n = chats.filter((c) => c.host === h && c.active).length;
             return (
@@ -235,6 +341,12 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             <CtxItem label="Remove tab" danger onClick={() => { onRemoveActive(ctx.id); setCtx(null); }} />
           </div>
         </>, document.body)}
+      <CreateCollectionDialog
+        open={createDialogOpen}
+        onOpenChange={setCreateDialogOpen}
+        onCreated={handleCollectionCreated}
+        existingCollections={collections}
+      />
     </div>
   );
 }

@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { load, save, loadCatalog, saveCatalog, allSshHosts } from './config.js';
+import * as collections from './collections.js';
 import { discoverAll, capturePanes, resolveChatWithRefresh } from './chats.js';
 import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream } from './tmux.js';
 import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude } from './ssh.js';
@@ -143,6 +144,82 @@ app.get('/api/activity/stats', (req, res) => {
 });
 
 app.get('/api/ssh-hosts', (_req, res) => res.json({ hosts: allSshHosts(), configured: cfg.hosts }));
+
+// ---- Collections API ----
+// GET /api/collections - List all collections
+app.get('/api/collections', (_req, res) => {
+  try {
+    const allCollections = collections.loadCollections();
+    res.json({ collections: allCollections });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/collections - Create new collection
+app.post('/api/collections', (req, res) => {
+  try {
+    const { name, criteria, metadata } = req.body;
+    if (!name || typeof name !== 'string') {
+      return res.status(400).json({ error: 'name is required (string)' });
+    }
+    const newCollection = collections.createCollection(name, criteria, metadata);
+    res.json({ collection: newCollection });
+  } catch (e) {
+    if (e.message.includes('already exists')) {
+      res.status(409).json({ error: e.message });
+    } else {
+      res.status(400).json({ error: e.message });
+    }
+  }
+});
+
+// PATCH /api/collections/:id - Update collection
+app.patch('/api/collections/:id', (req, res) => {
+  try {
+    const id = String(req.params.id);
+    const updates = req.body;
+    const updated = collections.updateCollection(id, updates);
+    res.json({ collection: updated });
+  } catch (e) {
+    if (e.message.includes('not found')) {
+      res.status(404).json({ error: e.message });
+    } else {
+      res.status(400).json({ error: e.message });
+    }
+  }
+});
+
+// DELETE /api/collections/:id - Delete collection
+app.delete('/api/collections/:id', (req, res) => {
+  try {
+    const id = String(req.params.id);
+    const deleted = collections.deleteCollection(id);
+    if (!deleted) {
+      return res.status(404).json({ error: 'Collection not found' });
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/collections/:id/agents - Get agents matching collection criteria
+app.get('/api/collections/:id/agents', async (req, res) => {
+  try {
+    const id = String(req.params.id);
+    const allCollections = collections.loadCollections();
+    const collection = allCollections.find((c) => c.id === id);
+    if (!collection) {
+      return res.status(404).json({ error: 'Collection not found' });
+    }
+    const { chats } = await discoverAll(cfg.hosts, cfg);
+    const agents = collections.getAgentsInCollection(collection, chats);
+    res.json({ agents, count: agents.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // GET /api/config — return current configuration (safe subset)
 app.get('/api/config', (_req, res) => res.json({
