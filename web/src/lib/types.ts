@@ -50,6 +50,15 @@ export interface SessionMeta {
 
 export type TileMode = 'monitor' | 'live';
 
+export interface Collection {
+  id: string;
+  name: string;
+  criteria?: { role?: string; project?: string; host?: string; custom?: string[] };
+  metadata?: { description?: string; color?: string };
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface ActivityEvent {
   timestamp: string;
   type: 'directive_proposed' | 'attached' | 'ended' | 'error' | 'snapshot';
