@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import type { ObserveMsg } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { Textarea } from '@/components/ui/textarea';
 
 type Item =
   | { kind: 'user'; text: string }
@@ -118,12 +119,16 @@ export function ObserverPanel({ sessionId }: Props) {
           })}
         </div>
       </ScrollArea>
-      <div className="flex items-end gap-2 px-2 py-2 border-t shrink-0">
-        <textarea name="msg" placeholder="ask the observer… (Shift+Enter for newline)" rows={1}
-          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); const el = e.target as HTMLTextAreaElement; if (el.value.trim()) { send(el.value.trim()); el.value = ''; el.style.height = 'auto'; } } }}
+      <div className="flex items-end gap-2 px-3 py-3 border-t shrink-0">
+        <Textarea
+          name="msg"
+          placeholder="ask the observer… (Shift+Enter for newline)"
+          rows={1}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); const el = e.target as HTMLTextAreaElement; if (el.value.trim()) { send(el.value.trim()); el.value = ''; } } }}
           onInput={onTextareaInput}
           disabled={!conn}
-          className="flex-1 bg-background border rounded px-2 py-1.5 text-sm resize-none min-h-[36px] max-h-32 overflow-auto disabled:opacity-50" />
+          className="flex-1 resize-y min-h-[80px] max-h-[200px] overflow-y-auto disabled:opacity-50"
+        />
         {busy && <Button type="button" size="sm" variant="destructive" onClick={stop} className="shrink-0">stop</Button>}
         {!conn && !busy && <Button type="button" size="sm" variant="outline" onClick={reconnect} className="shrink-0">reconnect</Button>}
         <Button type="button" size="sm" variant="outline" disabled={busy || !conn} className="shrink-0"
