@@ -322,6 +322,7 @@ app.get('/api/config', (_req, res) => res.json({
   pollIntervalMs: cfg.pollIntervalMs,
   tmuxSession: cfg.tmuxSession,
   connectTimeout: cfg.connectTimeout,
+  // Observer settings
   observerConfirmMode: cfg.observerConfirmMode,
   observerAutoStart: cfg.observerAutoStart,
   observerSessionTimeout: cfg.observerSessionTimeout,
@@ -329,15 +330,24 @@ app.get('/api/config', (_req, res) => res.json({
   notifyErrors: cfg.notifyErrors,
   notifySuccess: cfg.notifySuccess,
   notifyObserver: cfg.notifyObserver,
+  // Display customization
+  showHostTags: cfg.showHostTags,
+  showTypeBadges: cfg.showTypeBadges,
+  showStatusIndicators: cfg.showStatusIndicators,
+  showProjectBadges: cfg.showProjectBadges,
 }));
 
 // PUT /api/config — update configuration and persist
 app.put('/api/config', (req, res) => {
-  const { hosts, pollIntervalMs, tmuxSession, connectTimeout, observerConfirmMode, observerAutoStart, observerSessionTimeout, notifyChatOps, notifyErrors, notifySuccess, notifyObserver } = req.body;
+  const { hosts, pollIntervalMs, tmuxSession, connectTimeout,
+          observerConfirmMode, observerAutoStart, observerSessionTimeout,
+          notifyChatOps, notifyErrors, notifySuccess, notifyObserver,
+          showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges } = req.body;
   if (hosts && Array.isArray(hosts)) cfg.hosts = hosts;
   if (typeof pollIntervalMs === 'number') cfg.pollIntervalMs = pollIntervalMs;
   if (typeof tmuxSession === 'string') cfg.tmuxSession = tmuxSession;
   if (typeof connectTimeout === 'number') cfg.connectTimeout = connectTimeout;
+  // Observer settings
   if (observerConfirmMode && ['always', 'auto-safe'].includes(observerConfirmMode)) cfg.observerConfirmMode = observerConfirmMode;
   if (typeof observerAutoStart === 'boolean') cfg.observerAutoStart = observerAutoStart;
   if (observerSessionTimeout === null ||
@@ -350,6 +360,11 @@ app.put('/api/config', (req, res) => {
   if (typeof notifyErrors === 'boolean') cfg.notifyErrors = notifyErrors;
   if (typeof notifySuccess === 'boolean') cfg.notifySuccess = notifySuccess;
   if (typeof notifyObserver === 'boolean') cfg.notifyObserver = notifyObserver;
+  // Display customization
+  if (typeof showHostTags === 'boolean') cfg.showHostTags = showHostTags;
+  if (typeof showTypeBadges === 'boolean') cfg.showTypeBadges = showTypeBadges;
+  if (typeof showStatusIndicators === 'boolean') cfg.showStatusIndicators = showStatusIndicators;
+  if (typeof showProjectBadges === 'boolean') cfg.showProjectBadges = showProjectBadges;
   save(cfg); // persist to ~/.yatfa-warden/config.json
   res.json({ ok: true });
 });
