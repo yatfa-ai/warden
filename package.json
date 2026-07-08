@@ -47,6 +47,7 @@
     },
     "win": {
       "target": ["nsis"],
+      "icon": "build/icon.png",
       "artifactName": "yatfa-warden-setup-${version}.${ext}"
     },
     "mac": {

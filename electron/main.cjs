@@ -46,6 +46,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 600,
     title: 'Yatfa Warden',
+    icon: path.join(__dirname, '..', 'build', 'icon.png'),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
