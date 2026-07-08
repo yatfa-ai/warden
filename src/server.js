@@ -571,6 +571,21 @@ wss.on('connection', (ws, req) => {
   const obs = new Observer(cfg, {
     sid,
     onTool: (name, input) => send({ type: 'tool', name, input: { ...input, id: input?.id } }),
+    onToolResult: (name, result) => {
+      if (name === 'suggest_next_actions' && result.suggestions) {
+        for (const suggestion of result.suggestions) {
+          send({
+            type: 'suggestion_card',
+            agentId: suggestion.agentId,
+            agentName: suggestion.agentName,
+            role: suggestion.role,
+            urgency: suggestion.urgency,
+            state: suggestion.state,
+            action: suggestion.action
+          });
+        }
+      }
+    },
     onText: (text) => send({ type: 'assistant', text }),
     gate: async (chat, directive) => {
       const requestId = String(++reqCounter);

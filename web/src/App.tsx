@@ -118,6 +118,12 @@ function App() {
     setOpenPanes((p) => p.includes(id) ? p : [...p, id]);
     setFocused(id);
   }, []);
+
+  // handle focus-agent callback from Observer suggestion cards
+  const handleFocusAgent = useCallback((id: string) => {
+    openChat(id);
+  }, [openChat]);
+
   // close pane: pane gone, tab stays
   const closePane = useCallback((id: string) => {
     setOpenPanes((p) => p.filter((x) => x !== id));
@@ -346,7 +352,7 @@ function App() {
                   onMouseDown={handleObserverMouseDown}
                   title="Drag to resize observer panel"
                 />
-                <ObserverTabs externalViewMode={externalViewMode} />
+                <ObserverTabs externalViewMode={externalViewMode} onFocusAgent={handleFocusAgent} />
               </section>
             )}
             {!healthCollapsed && (

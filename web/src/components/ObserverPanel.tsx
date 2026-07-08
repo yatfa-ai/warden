@@ -7,13 +7,17 @@ type Item =
   | { kind: 'user'; text: string }
   | { kind: 'obs'; text: string }
   | { kind: 'tool'; text: string }
-  | { kind: 'card'; requestId: string; container: string; role?: string; directive: string; resolved?: boolean; result?: string };
+  | { kind: 'card'; requestId: string; container: string; role?: string; directive: string; resolved?: boolean; result?: string }
+  | { kind: 'suggestion'; agentId: string; agentName: string; role?: string; urgency: string; state: string; action: string; dismissed?: boolean };
 
-interface Props { sessionId: string }
+interface Props {
+  sessionId: string;
+  onFocusAgent?: (id: string) => void;
+}
 
 // One observer conversation, bound to a persisted session (?sid=). History is
 // replayed on connect so a refresh/restore shows the prior conversation.
-export function ObserverPanel({ sessionId }: Props) {
+export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
   const [items, setItems] = useState<Item[]>([]);
   const [busy, setBusy] = useState(false);
   const [conn, setConn] = useState(false);
@@ -50,9 +54,16 @@ export function ObserverPanel({ sessionId }: Props) {
       else if (m.type === 'assistant') setItems((p) => [...p, { kind: 'obs', text: m.text }]);
       else if (m.type === 'done') { if (m.text?.trim()) setItems((p) => [...p, { kind: 'obs', text: m.text }]); }
       else if (m.type === 'directive_proposed') setItems((p) => [...p, { kind: 'card', requestId: m.requestId, container: m.container, role: m.role, directive: m.directive }]);
+      else if (m.type === 'suggestion_card') setItems((p) => [...p, { kind: 'suggestion', agentId: m.agentId, agentName: m.agentName, role: m.role, urgency: m.urgency, state: m.state, action: m.action }]);
       else if (m.type === 'error') setItems((p) => [...p, { kind: 'tool', text: 'error: ' + m.error }]);
     };
   }, [sessionId]);
+
+  const urgencyColors = {
+    urgent: 'bg-red-900/40 border-red-600/50 text-red-300',
+    important: 'bg-yellow-900/40 border-yellow-600/50 text-yellow-300',
+    informational: 'bg-gray-800/40 border-gray-600/50 text-gray-300'
+  };
 
   useEffect(() => {
     connect();
@@ -100,7 +111,7 @@ export function ObserverPanel({ sessionId }: Props) {
             if (it.kind === 'user') return <div key={i} className="self-end max-w-full bg-primary/15 border border-primary/30 rounded-2xl px-3 py-1.5 text-sm whitespace-pre-wrap break-words">{it.text}</div>;
             if (it.kind === 'obs') return <div key={i} className="self-start max-w-full bg-secondary border rounded-2xl px-3 py-1.5 text-sm whitespace-pre-wrap break-words">{it.text}</div>;
             if (it.kind === 'tool') return <div key={i} className="self-start text-xs italic text-muted-foreground">{it.text}</div>;
-            return (
+            if (it.kind === 'card') return (
               <div key={i} className={`self-start max-w-full bg-green-900/30 border border-green-600/40 rounded-2xl p-2.5 text-sm ${it.resolved ? 'opacity-60' : ''}`}>
                 <div className="text-xs text-green-400 mb-1">→ proposed directive: {it.container}{it.role ? ` · ${it.role}` : ''}</div>
                 <div className="bg-black/60 border rounded-md p-2 whitespace-pre-wrap break-words">{it.directive}</div>
@@ -115,6 +126,23 @@ export function ObserverPanel({ sessionId }: Props) {
                 )}
               </div>
             );
+            if (it.kind === 'suggestion' && !it.dismissed) return (
+              <div key={i} className={`self-start max-w-full bg-secondary/40 border rounded-2xl p-2.5 text-sm ${urgencyColors[it.urgency as keyof typeof urgencyColors] || urgencyColors.informational}`}>
+                <div className="text-xs mb-1 font-medium">{it.agentName}{it.role ? ` · ${it.role}` : ''}</div>
+                <div className="text-xs opacity-80 mb-1">{it.state}</div>
+                <div className="bg-black/60 border rounded-md p-2 whitespace-pre-wrap break-words text-xs">{it.action}</div>
+                <div className="flex gap-1.5 mt-2">
+                  <Button size="sm" className="h-7" onClick={() => {
+                    onFocusAgent?.(it.agentId);
+                    setItems((p) => p.map((item, idx) => idx === i ? { ...item, dismissed: true } : item));
+                  }}>Focus</Button>
+                  <Button size="sm" variant="ghost" className="h-7" onClick={() => {
+                    setItems((p) => p.map((item, idx) => idx === i ? { ...item, dismissed: true } : item));
+                  }}>Dismiss</Button>
+                </div>
+              </div>
+            );
+            return <div key={i} className="self-start text-xs italic text-muted-foreground">(unknown item kind)</div>;
           })}
         </div>
       </ScrollArea>

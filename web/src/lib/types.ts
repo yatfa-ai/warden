@@ -58,6 +58,7 @@ export type ObserveMsg =
   | { type: 'assistant'; text: string }
   | { type: 'done'; text: string }
   | { type: 'directive_proposed'; requestId: string; container: string; host: string; role?: string; directive: string }
+  | { type: 'suggestion_card'; agentId: string; agentName: string; role?: string; urgency: string; state: string; action: string }
   | { type: 'error'; error: string }
   | { type: 'history'; name?: string; items: { role: 'user' | 'assistant' | 'tool'; text?: string; name?: string; id?: string }[] }
   | { type: 'session_created'; sid: string; name: string };
