@@ -14,6 +14,9 @@ const DEFAULTS = {
   connectTimeout: 10,
   pollIntervalMs: 1500,
   pins: [],             // chat ids to surface first in listings / UI
+  observerConfirmMode: 'always',  // 'always' | 'auto-safe' - whether to auto-approve read-only directives
+  observerAutoStart: false,       // boolean - whether to auto-start observer on first connection
+  observerSessionTimeout: 30,     // minutes - auto-stop observer after inactivity, null to disable
 };
 
 export function load() {
