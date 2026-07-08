@@ -316,7 +316,6 @@ export class Observer {
         const panes = await capturePanes(openChats);
 
         // Classification patterns (regex-based, no LLM calls)
-        const STUCK_RE = /^(.+)\1\1/m; // Line repeats 3+ times
         const ERROR_RE = /error|failed|exception|traceback|panic/i;
         const WAITING_RE = /please|respond|continue\?|input|press enter|waiting for user/i;
         const BLOCKED_RE = /waiting for|blocked by|depends on|blocked on/i;
@@ -334,12 +333,18 @@ export class Observer {
           let urgency = 'informational';
           let action = 'No action needed - agent is idle.';
 
+          // Detect repeating output (stuck agent) using line-by-line comparison
+          const lines = pane.split('\n');
+          const last3 = lines.slice(-3).join('\n');
+          const prev3 = lines.slice(-6, -3).join('\n');
+          const stuck = last3 === prev3 && last3.length > 50;
+
           // Classify agent state using regex patterns
           if (ERROR_RE.test(pane)) {
             state = 'erroring';
             urgency = 'urgent';
             action = `Agent encountered an error. Review the pane content and investigate the failure. Consider sending a directive to retry or fix the issue.`;
-          } else if (STUCK_RE.test(pane)) {
+          } else if (stuck) {
             state = 'stuck';
             urgency = 'urgent';
             action = `Agent appears stuck (repeating output detected). Interrupt and redirect with a new directive, or terminate if needed.`;
@@ -366,7 +371,8 @@ export class Observer {
           }
 
           suggestions.push({
-            agent: agentId,
+            agentId: agentId,
+            agentName: agentId,
             role,
             project,
             host: c.host,
