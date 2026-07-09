@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import { IconTooltip } from '@/components/ui/icon-tooltip';
 import type { Chat } from '@/lib/types';
 
 export interface OpenTile { id: string }
@@ -168,9 +169,9 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
         <span className="truncate">{focused ? nameOf(focused) : 'open a chat →'}</span>
         <span className="flex-1" />
         {focusedChat && (
-          <Button variant="ghost" size="xs" onClick={handleFilePrompt} title="open file from chat directory">📄 file</Button>
+          <IconTooltip label="open file from chat directory"><Button variant="ghost" size="xs" onClick={handleFilePrompt}>📄 file</Button></IconTooltip>
         )}
-        <Button variant="ghost" size="xs" onClick={() => setSplitOpen(!splitOpen)} title="split — open another chat as a pane">＋ split</Button>
+        <IconTooltip label="split — open another chat as a pane"><Button variant="ghost" size="xs" onClick={() => setSplitOpen(!splitOpen)}>＋ split</Button></IconTooltip>
         {splitOpen && (
           <>
             <div className="fixed inset-0 z-40" onClick={() => setSplitOpen(false)} />
