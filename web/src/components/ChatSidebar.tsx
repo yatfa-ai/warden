@@ -56,6 +56,7 @@ interface Props {
   onRefresh: () => void;
   onDiscoverHost: (host: string) => void;
   loading: boolean;
+  lastRefreshAt?: number | null;
   // Display customization
   showHostTags?: boolean;
   showTypeBadges?: boolean;
@@ -108,7 +109,20 @@ function SessionRowSkeleton() {
   );
 }
 
-export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges }: Props) {
+// Subtle "updated Xs ago" affordance next to the sidebar ↻ button, signalling
+// the agent list is live. Re-renders only itself each second (not the whole
+// sidebar) so the relative time visibly advances between auto-refresh ticks.
+function UpdatedAgo({ at }: { at?: number | null }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+  if (!at) return null;
+  return <span className="text-[10px] text-muted-foreground tabular-nums">{ago(at)} ago</span>;
+}
+
+export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
   const [showAllChats, setShowAllChats] = useState(false);
@@ -585,7 +599,8 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           className="h-6 text-[10px] px-2 flex-1 max-w-[120px]"
         />
         <Badge variant="secondary" className="text-xs">{filteredTabs.length}</Badge>
-        <button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={onRefresh} disabled={loading}>
+        <UpdatedAgo at={lastRefreshAt} />
+        <button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={onRefresh} disabled={loading} title="refresh">
           {loading ? <Skeleton className="h-3 w-3" /> : '↻'}
         </button>
       </div>

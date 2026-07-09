@@ -16,10 +16,16 @@ import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { toast } from 'sonner';
 
+// Canonical id of this machine's own tmux host (mirrors LOCAL in src/chats.js). Local agents
+// are auto-discovered on mount so their dots are live without a click; remote SSH hosts stay
+// on-demand per lazy mode.
+const THIS_MACHINE = '(local)';
+
 function App() {
   const [chats, setChats] = useState<Chat[]>([]);
   const [sshHosts, setSshHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(null);
   const [activeTabs, setActiveTabs] = useState<string[]>(() => loadUi().activeTabs);
   const [hiddenTabs, setHiddenTabs] = useState<string[]>(() => loadUi().hiddenTabs);
   const [openPanes, setOpenPanes] = useState<string[]>(() => loadUi().openPanes);
@@ -27,6 +33,12 @@ function App() {
   const [paneHost, setPaneHost] = useState<Record<string, string>>(() => loadUi().paneHost ?? {});
   const chatsRef = useRef(chats);
   useEffect(() => { chatsRef.current = chats; }, [chats]);
+  // Hosts the user has engaged with (sidebar host-click / observer reconnect / resume). In
+  // lazy mode only these get live SSH discovery; the auto-refresh re-discovers them so their
+  // active/idle dot + last-activity advance without a manual click. /api/chats alone is
+  // disk-only (active=null), so this set is what bounds the live-refresh SSH cost to visited
+  // hosts rather than the whole fleet.
+  const discoveredHostsRef = useRef<Set<string>>(new Set());
   const [sidebarWidth, setSidebarWidth] = useState(() => loadUi().sidebarWidth ?? 220);
   const [observerWidth, setObserverWidth] = useState(() => loadUi().observerWidth ?? 380);
   const [maximized, setMaximized] = useState<string | null>(null);
@@ -143,15 +155,38 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
+  // Refresh the chat list from the disk catalog (/api/chats, zero SSH in lazy mode). `silent`
+  // skips the loading toggle so background auto-refresh ticks don't flash the ↻ button. In
+  // lazy mode /api/chats returns disk-only chats (active=null), so we MERGE instead of
+  // replacing: for hosts already discovered live we restore their last-known
+  // active/lastActivity/status (and keep live-only chats — yatfa containers / external
+  // spawns — that aren't in the catalog). A catalog refresh therefore never wipes green/red
+  // dots back to "unknown". Live data itself is advanced by refreshDiscoveredHosts().
+  const applyCatalog = useCallback(async (silent: boolean) => {
+    if (!silent) setLoading(true);
     fetch('/api/ssh-hosts').then((r) => r.json()).then((j) => setSshHosts(j.hosts || [])).catch(() => {});
     try {
       const cr = await fetch('/api/chats');
-      setChats((await cr.json()).chats || []);
+      const diskChats: Chat[] = (await cr.json()).chats || [];
+      setChats((prev) => {
+        const discovered = discoveredHostsRef.current;
+        if (!discovered.size) return diskChats;
+        const liveById = new Map<string, Chat>();
+        for (const c of prev) if (discovered.has(c.host)) liveById.set(c.id, c);
+        const diskIds = new Set(diskChats.map((c) => c.id));
+        const merged = diskChats.map((c) => {
+          const live = liveById.get(c.id);
+          return live ? { ...c, active: live.active, lastActivity: live.lastActivity, status: live.status } : c;
+        });
+        const extraLive = [...liveById.values()].filter((c) => !diskIds.has(c.id));
+        return [...merged, ...extraLive];
+      });
+      setLastRefreshAt(Date.now());
     } catch (e) { console.error(e); }
-    setLoading(false);
+    if (!silent) setLoading(false);
   }, []);
+
+  const refresh = useCallback(async () => { await applyCatalog(false); }, [applyCatalog]);
 
   // Refresh backend-backed preferences from /api/config (display customization
   // + the "Confirm before destructive actions" safety toggle). Called on mount
@@ -183,6 +218,7 @@ function App() {
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
   // its entries in the chats list so dots update to green/red.
   const discoverHost = useCallback(async (host: string) => {
+    discoveredHostsRef.current.add(host);
     try {
       const r = await fetch(`/api/discover?host=${encodeURIComponent(host)}`);
       const j = await r.json();
@@ -191,6 +227,51 @@ function App() {
       }
     } catch (e) { console.error('discoverHost failed:', e); }
   }, []);
+
+  // Re-discover every host the user has engaged with, concurrently. This is what keeps
+  // active/idle dots + last-activity live: /api/discover is the only source of live status in
+  // lazy mode (/api/chats is disk-only). Bounded to visited hosts — not the whole fleet — so
+  // SSH cost tracks user engagement, and only invoked while the tab is visible (see the
+  // auto-refresh effect below).
+  const refreshDiscoveredHosts = useCallback(async () => {
+    const hosts = [...discoveredHostsRef.current];
+    if (!hosts.length) return;
+    await Promise.all(hosts.map((h) => discoverHost(h)));
+  }, [discoverHost]);
+
+  // Auto-refresh the agent list so active/idle dots + last-activity stay live in the sidebar
+  // without a manual refresh. Lazy mode serves /api/chats from disk only (active=null); live
+  // status comes from /api/discover, which the client normally runs just on host-click. So
+  // each visible tick silently re-pulls the catalog AND re-discovers every host the user has
+  // already engaged with — that is what advances dots/timestamps and surfaces external spawns.
+  // Ticks are gated on Page Visibility so a backgrounded tab never burns SSH; on regaining
+  // focus we refresh immediately because state may be stale while hidden.
+  useEffect(() => {
+    const REFRESH_MS = 60_000;
+    const poll = async () => {
+      if (document.visibilityState !== 'visible') return;
+      await applyCatalog(true);
+      void refreshDiscoveredHosts();
+    };
+    const onVisibilityChange = async () => {
+      if (document.visibilityState !== 'visible') return;
+      await applyCatalog(true);
+      void refreshDiscoveredHosts();
+    };
+    const intervalId = window.setInterval(poll, REFRESH_MS);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [applyCatalog, refreshDiscoveredHosts]);
+
+  // Discover this machine's own agents once on mount. Local discovery is cheap (no SSH) and is
+  // the common case, so local agents show live immediately and the auto-refresh above keeps
+  // them live — no host-click required. Remote hosts remain on-demand per lazy mode.
+  useEffect(() => {
+    void discoverHost(THIS_MACHINE);
+  }, [discoverHost]);
 
   // open chat: add to active tabs + open pane + focus
   const openChat = useCallback((id: string) => {
@@ -301,6 +382,7 @@ function App() {
   const killResolveRef = useRef<(() => void) | null>(null);
 
   const performKill = useCallback(async (id: string) => {
+    const host = chatsRef.current.find((x) => (x.key || x.id) === id)?.host;
     try {
       const r = await fetch('/api/kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) });
       if (!r.ok) {
@@ -308,12 +390,21 @@ function App() {
         return;
       }
       removeActive(id);
+      // Drop the killed chat from `chats` synchronously so the catalog merge in
+      // refresh() can't re-append it: a discovered host's live-only entries are
+      // preserved by that merge, so without this the killed chat would briefly
+      // resurrect with its last-known status until discoverHost(host) resolves
+      // (1-3s for a remote host) — easily misread as "the kill failed".
+      setChats((prev) => prev.filter((c) => (c.key || c.id) !== id));
       refresh();
+      // discoverHost re-pulls that host's live list, confirming the kill and
+      // refreshing the rest of the host's agents.
+      if (host) void discoverHost(host);
       if (prefs.notifyChatOps) toast.success('Chat killed');
     } catch (error) {
       if (prefs.notifyChatOps) toast.error(`Failed to kill chat: ${error instanceof Error ? error.message : String(error)}`);
     }
-  }, [refresh, removeActive, prefs.notifyChatOps]);
+  }, [refresh, discoverHost, removeActive, prefs.notifyChatOps]);
 
   const requestKill = useCallback((id: string) => {
     // Returns a promise that resolves when the kill flow finishes (confirm+fetch,
@@ -360,13 +451,24 @@ function App() {
         if (prefs.notifyChatOps) toast.error(j.error || 'resume failed');
         return;
       }
+      // Drop any stale entry for this resumed chat before refresh() so the catalog
+      // merge can't carry forward its pre-resume status. Re-resuming the same Claude
+      // session reuses the `resume-<sid>` tmux session, so the existing live entry
+      // would otherwise briefly flash its old (e.g. idle) status until discoverHost
+      // re-marks it active. (j.chat's key/id — not the bare Claude session id passed
+      // in — is what matches a chat already in the list.)
+      const resumedId = j.chat.key || j.chat.id;
+      setChats((prev) => prev.filter((c) => (c.key || c.id) !== resumedId));
       await refresh();
+      // Resuming activates the chat; re-discover the host so it shows green immediately
+      // instead of waiting for the next auto-refresh tick.
+      if (host) void discoverHost(host);
       openChat(j.chat.key);
       if (prefs.notifyChatOps) toast.success('Session resumed');
     } catch (e) {
       if (prefs.notifyChatOps) toast.error(e instanceof Error ? e.message : String(e));
     }
-  }, [refresh, openChat, prefs.notifyChatOps]);
+  }, [refresh, discoverHost, openChat, prefs.notifyChatOps]);
 
   const renameChat = useCallback(async (session: string, kind: string, name: string) => {
     try {
@@ -537,6 +639,7 @@ function App() {
               onRefresh={refresh}
               onDiscoverHost={discoverHost}
               loading={loading}
+              lastRefreshAt={lastRefreshAt}
               showHostTags={displaySettings.showHostTags}
               showTypeBadges={displaySettings.showTypeBadges}
               showStatusIndicators={displaySettings.showStatusIndicators}
