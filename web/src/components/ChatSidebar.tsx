@@ -4,6 +4,7 @@ import { Popover } from 'radix-ui';
 import { toast } from 'sonner';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState } from '@/components/EmptyState';
@@ -156,6 +157,9 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                     dateRange === 'week' ? weekStart.getTime() :
                     dateRange === 'month' ? monthStart.getTime() :
                     0;
+    // "Yesterday" is a day-specific window (the calendar day before today, excluding today).
+    // All other ranges are cumulative "since boundary" windows, so they have no upper bound.
+    const maxTime = dateRange === 'yesterday' ? todayStart.getTime() : Infinity;
 
     const query = sessionSearchQuery.toLowerCase();
     return allSessions.filter((s) => {
@@ -163,7 +167,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
         (s.summary || '').toLowerCase().includes(query) ||
         s.cwd.toLowerCase().includes(query) ||
         s.id.toLowerCase().includes(query);
-      const matchesDate = s.mtime >= minTime;
+      const matchesDate = s.mtime >= minTime && s.mtime < maxTime;
       return matchesSearch && matchesDate;
     });
   })();
@@ -760,7 +764,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                   placeholder="Search sessions..."
                   value={sessionSearchQuery}
                   onChange={(e) => setSessionSearchQuery(e.target.value)}
-                  className="h-7 text-xs px-2"
+                  className="text-xs"
                 />
                 <div className="flex items-center gap-1 flex-wrap">
                   {([
@@ -770,25 +774,24 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                     { key: 'week', label: 'Week' },
                     { key: 'month', label: 'Month' },
                   ] as const).map((range) => (
-                    <button
+                    <Button
                       key={range.key}
+                      size="xs"
+                      variant={dateRange === range.key ? 'secondary' : 'ghost'}
                       onClick={() => setDateRange(range.key)}
-                      className={`text-[10px] px-2 py-1 rounded transition-colors ${
-                        dateRange === range.key
-                          ? 'bg-accent text-accent-foreground'
-                          : 'text-muted-foreground hover:text-foreground'
-                      }`}
                     >
                       {range.label}
-                    </button>
+                    </Button>
                   ))}
                   {(sessionSearchQuery || dateRange !== 'all') && (
-                    <button
+                    <Button
+                      size="xs"
+                      variant="ghost"
                       onClick={() => { setSessionSearchQuery(''); setDateRange('all'); }}
-                      className="text-[10px] px-2 py-1 text-red-400 hover:text-red-300 ml-auto"
+                      className="ml-auto text-destructive"
                     >
                       Clear
-                    </button>
+                    </Button>
                   )}
                 </div>
               </div>
@@ -803,13 +806,13 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                   </div>
                 ) : (
                   filteredSessions.slice(0, 15).map((s) => {
-                  const hostLabel = s.host === THIS_MACHINE ? 'local' : s.host;
-                  return (
-                    <button key={s.id} onClick={() => { onResume(s.id, s.summary, s.cwd, s.host); setView({ kind: 'root' }); }} className="flex flex-col gap-0.5 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 transition-colors" title={`resume ${s.id}\n${s.cwd}\n${hostLabel}`}>
-                      <span className="truncate">{s.summary || <span className="text-muted-foreground">(no summary)</span>}</span>
-                      <span className="text-[10px] text-muted-foreground truncate">{ago(s.mtime)} · {hostLabel} · {basename(s.cwd)}</span>
-                    </button>
-                  );
+                    const hostLabel = s.host === THIS_MACHINE ? 'local' : s.host;
+                    return (
+                      <button key={s.id} onClick={() => { onResume(s.id, s.summary, s.cwd, s.host); setView({ kind: 'root' }); }} className="flex flex-col gap-0.5 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 transition-colors" title={`resume ${s.id}\n${s.cwd}\n${hostLabel}`}>
+                        <span className="truncate">{s.summary || <span className="text-muted-foreground">(no summary)</span>}</span>
+                        <span className="text-[10px] text-muted-foreground truncate">{ago(s.mtime)} · {hostLabel} · {basename(s.cwd)}</span>
+                      </button>
+                    );
                   })
                 )}
               </div>
