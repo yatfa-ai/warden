@@ -615,8 +615,18 @@ export async function searchLocalClaudeSessions(q) {
     } catch { continue; }
     const { cwd, summary } = parseJsonlHead(head);
     if (!cwd) continue;
+    // Push UNCONDITIONALLY — grep genuinely matched this file, so the session
+    // must surface even when a clean snippet can't be built. snippetFromLine
+    // returns '' when the needle sits past the 1500-byte matched-line transfer
+    // cap (e.g. an error string deep inside a large tool_result blob): the cap
+    // chops the line before the needle, but that's a snippet-quality issue, not
+    // a "this session didn't match" signal. Dropping it here would be a false
+    // negative that breaks "a phrase inside the body returns that session". The
+    // remote twin pushes regardless of snippet (see remoteSearchClaudeSessions),
+    // the frontend renders an empty snippet as nothing — so push here too, to
+    // keep the two implementations consistent.
     const snippet = snippetFromLine(e.text, needle);
-    if (snippet) out.push({ id: path.basename(e.file, '.jsonl'), cwd, summary, snippet, mtime: e.mtime });
+    out.push({ id: path.basename(e.file, '.jsonl'), cwd, summary, snippet, mtime: e.mtime });
   }
   return out;
 }

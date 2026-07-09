@@ -98,6 +98,21 @@ before(async () => {
     { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: `${LONG_PAD}the SSH pool leak is the root cause${LONG_PAD}` }] } },
   ], 4000);
 
+  // S5: the DANGEROUS input class — the session's ONLY occurrence of the needle
+  // sits past the 1500-byte matched-line transfer cap. The needle lives deep
+  // inside a large tool_result blob (>2000 chars of padding precede it), exactly
+  // where real error strings / log lines hide. The first line carries cwd (so
+  // the session is otherwise returnable) but NOT the needle. grep -m1 matches
+  // the long second line; streamBoundedSearch caps that row to 1500 chars BEFORE
+  // the needle; snippetFromLine therefore returns ''. The endpoint must STILL
+  // return this session (grep matched it) — pushing regardless of snippet is the
+  // property under test. (WARDEN-161 reviewer finding: local search dropped it.)
+  const DEEP_PAD = 'x'.repeat(2200); // >> 1500-byte transfer cap
+  writeSession(tempHome, 'projC', 'sess-eee', [
+    { type: 'user', cwd: '/repo/eee', message: { role: 'user', content: 'go' } },
+    { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: `${DEEP_PAD}DeepNeedlePhraseZQ9` }] } },
+  ], 5000);
+
   // Import server.js ONCE — after HOME/config/archive are in place.
   const server = await import('./server.js');
   extractMessageText = server.extractMessageText;
@@ -290,6 +305,29 @@ describe('/api/claude-sessions-search HTTP endpoint (real Express app from serve
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     assert.deepStrictEqual(body.results, []);
+  });
+
+  it('returns a session whose ONLY match is past the 1500-byte line cap (deep needle)', async () => {
+    // sess-eee's needle "DeepNeedlePhraseZQ9" lives >2200 bytes into a large
+    // tool_result line. grep genuinely matches the file, but the matched-line
+    // transfer cap (1500) chops the line before the needle, so snippetFromLine
+    // can only build an EMPTY snippet. The session must still be returned —
+    // dropping it on an empty snippet would be a false negative that breaks the
+    // core "a phrase inside the body returns that session" criterion. This is
+    // the exact input the WARDEN-161 reviewer reproduced against the real
+    // function; it went red under the old `if (snippet)` drop and stays green
+    // now that the local path pushes unconditionally (matching the remote twin).
+    const body = await (await fetch(`${baseUrl}/api/claude-sessions-search?q=${encodeURIComponent('DeepNeedlePhraseZQ9')}`)).json();
+    const ids = body.results.map((r) => r.sessionId);
+    assert.ok(ids.includes('sess-eee'),
+      `deep-needle session must be returned even with an empty snippet; got: ${ids.join(',')}`);
+    const eee = body.results.find((r) => r.sessionId === 'sess-eee');
+    // The snippet is empty (needle past the cap) but the rest of the row is intact
+    // — host/sessionId/cwd/summary/mtime all present, so the result is still useful
+    // and resumable. An empty string is the honest, graceful representation.
+    assert.strictEqual(eee.host, '(local)');
+    assert.strictEqual(eee.cwd, '/repo/eee');
+    assert.strictEqual(eee.snippet, '');
   });
 
   it('returns 400 for an empty query', async () => {
