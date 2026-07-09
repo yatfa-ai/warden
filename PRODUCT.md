@@ -77,6 +77,21 @@ Agents spread across your build server, CI box, or your local machine? warden co
 ### Session resume
 Your Claude Code conversations are saved automatically. warden lists them — click any past session to resume it. The agent loads the full history and continues.
 
+### Keyboard shortcuts
+**Pane navigation:**
+- `Alt+←/→` or `Ctrl+Tab/Shift+Tab`: Switch between open panes
+- `Alt+1` through `Alt+9`: Jump directly to the Nth open pane
+- `Alt+0`: Jump to the last pane (for 9+ open panes)
+
+**Pane actions:**
+- `Ctrl+W`: Close focused pane
+- `Alt+Enter`: Maximize focused pane
+- `Alt+Escape`: Restore pane grid (exit maximized view)
+
+**Panel toggles:**
+- `Alt+S`: Toggle sidebar visibility
+- `Alt+O`: Toggle observer panel visibility
+
 ### The Observer — your AI chief of staff
 The observer watches your agents and tells you what's happening in plain English:
 - *"The planner finished the roadmap and is waiting for your approval."*

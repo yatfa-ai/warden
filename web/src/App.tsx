@@ -479,6 +479,8 @@ function App() {
             onOpenChat={openChat}
             onForceKill={forceKill}
             externalSearchQuery={externalSearchQuery}
+            onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
+            onToggleObserver={() => setObserverCollapsed(!observerCollapsed)}
           />
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"
