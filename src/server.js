@@ -330,6 +330,7 @@ app.get('/api/config', (_req, res) => res.json({
   observerConfirmMode: cfg.observerConfirmMode,
   observerAutoStart: cfg.observerAutoStart,
   observerSessionTimeout: cfg.observerSessionTimeout,
+  confirmDestructiveActions: cfg.confirmDestructiveActions,
   notifyChatOps: cfg.notifyChatOps,
   notifyErrors: cfg.notifyErrors,
   notifySuccess: cfg.notifySuccess,
@@ -345,6 +346,7 @@ app.get('/api/config', (_req, res) => res.json({
 app.put('/api/config', (req, res) => {
   const { hosts, pollIntervalMs, tmuxSession, connectTimeout,
           observerConfirmMode, observerAutoStart, observerSessionTimeout,
+          confirmDestructiveActions,
           notifyChatOps, notifyErrors, notifySuccess, notifyObserver,
           showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges } = req.body;
   if (hosts && Array.isArray(hosts)) cfg.hosts = hosts;
@@ -358,6 +360,8 @@ app.put('/api/config', (req, res) => {
       (typeof observerSessionTimeout === 'number' &&
        Number.isFinite(observerSessionTimeout) &&
        observerSessionTimeout > 0)) cfg.observerSessionTimeout = observerSessionTimeout;
+  // Safety preference: confirm before destructive actions (force-kill, kill chat)
+  if (typeof confirmDestructiveActions === 'boolean') cfg.confirmDestructiveActions = confirmDestructiveActions;
   // Notification preferences (toast categories). Only accept booleans so a
   // malformed body can't blank out a preference.
   if (typeof notifyChatOps === 'boolean') cfg.notifyChatOps = notifyChatOps;

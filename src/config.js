@@ -18,6 +18,8 @@ const DEFAULTS = {
   observerConfirmMode: 'always',  // 'always' | 'auto-safe' - whether to auto-approve read-only directives
   observerAutoStart: false,       // boolean - whether to auto-start observer on first connection
   observerSessionTimeout: 30,     // minutes - auto-stop observer after inactivity, null to disable
+  // Safety
+  confirmDestructiveActions: true, // boolean - confirm before destructive kills (force-kill tmux session, kill chat)
   notifyChatOps: true,           // chat operations (session kill, chat kill, resume, rename)
   notifyErrors: true,            // error toasts
   notifySuccess: true,           // success toasts
