@@ -18,6 +18,7 @@ export interface UiState {
   sidebarWidth?: number;
   observerWidth?: number;
   terminalFontSize?: number;
+  terminalScrollback?: number;
   theme?: 'light' | 'dark' | 'system';
   // UI density: 'comfortable' (default = today's spacing) or 'compact' (tighter
   // rows/headers/gaps so more agents fit per screen). Pure client-side pref.
@@ -46,6 +47,7 @@ export function loadUi(): UiState {
         sidebarWidth: typeof v.sidebarWidth === 'number' ? v.sidebarWidth : 220,
         observerWidth: typeof v.observerWidth === 'number' ? v.observerWidth : 380,
         terminalFontSize: typeof v.terminalFontSize === 'number' ? v.terminalFontSize : 14,
+        terminalScrollback: typeof v.terminalScrollback === 'number' ? v.terminalScrollback : 10000,
         theme: v.theme ?? 'system',
         density: v.density === 'compact' ? 'compact' : 'comfortable',
         restoreOnStartup: v.restoreOnStartup === 'empty' ? 'empty' : 'previous',
@@ -55,7 +57,7 @@ export function loadUi(): UiState {
       };
     }
   } catch { /* ignore */ }
-  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14, theme: 'system', density: 'comfortable', restoreOnStartup: 'previous', paneHost: {}, agentFilter: 'all', agentSort: 'manual' };
+  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14, terminalScrollback: 10000, theme: 'system', density: 'comfortable', restoreOnStartup: 'previous', paneHost: {}, agentFilter: 'all', agentSort: 'manual' };
 }
 
 export function saveUi(s: UiState) {

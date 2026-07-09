@@ -70,6 +70,7 @@ function App() {
   const [theme, setTheme] = useState<Theme>(() => uiState.theme ?? 'system');
   const [density, setDensity] = useState<Density>(() => uiState.density ?? 'comfortable');
   const [terminalFontSize, setTerminalFontSize] = useState(() => uiState.terminalFontSize ?? 14);
+  const [terminalScrollback, setTerminalScrollback] = useState(() => uiState.terminalScrollback ?? 10000);
   const { prefs, reload: reloadNotificationPrefs } = useNotificationPrefs();
   // "Confirm before destructive actions" preference (default on). Gates both
   // destructive kill paths — force-kill (tmux session) and kill chat. Loaded
@@ -158,8 +159,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, theme, density, paneHost }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, theme, density, paneHost, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, theme, density, paneHost }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, theme, density, paneHost, restoreOnStartup, startedEmpty]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -684,6 +685,7 @@ function App() {
             onToggleObserver={toggleObserver}
             fontSize={terminalFontSize}
             onFontSizeChange={setTerminalFontSize}
+            scrollback={terminalScrollback}
           />
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"
@@ -717,6 +719,8 @@ function App() {
         setRestoreOnStartup={setRestoreOnStartup}
         terminalFontSize={terminalFontSize}
         setTerminalFontSize={setTerminalFontSize}
+        terminalScrollback={terminalScrollback}
+        setTerminalScrollback={setTerminalScrollback}
       />
       <GlobalSearchDialog
         open={showGlobalSearch}
