@@ -1,6 +1,6 @@
 // Yatfa Warden — Electron main process (CommonJS).
 // Spawns the backend server (ESM) as a child process, then opens a window.
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, dialog } = require('electron');
 const { fork, execSync } = require('child_process');
 const path = require('path');
 const http = require('http');
@@ -27,7 +27,16 @@ function killStalePort() {
 function waitForServer(cb) {
   let attempts = 0;
   const tryConnect = () => {
-    if (attempts++ > 50) { console.error('Server did not start in time'); return; }
+    if (attempts++ > 50) {
+      console.error('Server did not start in time. Exiting.');
+      dialog.showErrorBox(
+        'Yatfa Warden',
+        `The backend server did not start in time (port ${PORT}). Check that the port is free and retry.`,
+      );
+      cleanup();
+      app.quit();
+      return;
+    }
     const req = http.get(`http://${HOST}:${PORT}/`, (res) => {
       if (res.statusCode === 200) cb();
       else setTimeout(tryConnect, 200);
