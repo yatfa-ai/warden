@@ -25,8 +25,8 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
 
   useEffect(() => {
     if (!open) return;
-    fetch('/api/ssh-hosts').then((r) => r.json()).then((j) => setSshHosts(j.hosts || [])).catch(() => {});
-    fetch('/api/this-session').then((r) => r.json()).then((t) => { if (t.claudePath) setClaudePath(t.claudePath); }).catch(() => {});
+    fetch('/api/ssh-hosts').then((r) => r.json()).then((j) => setSshHosts(j.hosts || [])).catch((error) => console.error('[ssh-hosts] Failed:', error));
+    fetch('/api/this-session').then((r) => r.json()).then((t) => { if (t.claudePath) setClaudePath(t.claudePath); }).catch((error) => console.error('[this-session] Failed:', error));
   }, [open]);
 
   useEffect(() => {
