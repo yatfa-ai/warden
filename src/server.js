@@ -456,7 +456,48 @@ function parseJsonlHead(text) {
   }
   return { cwd, summary };
 }
-function localClaudeSessions() {
+
+// ---- full-content session-search helpers (WARDEN-161) ----
+// parseJsonlHead only extracts cwd + the first user message (the 100-char
+// "summary"). These helpers search the WHOLE conversation body so a session is
+// findable by what was actually discussed — not just its first line.
+
+// Pull the human-meaningful text out of one JSONL message line: the joined text
+// blocks of a user/assistant `message.content`. Returns null for anything else
+// (tool_result blobs, summary records, malformed JSON) so the caller can fall
+// back to a raw snippet instead of rendering a wall of base64/JSON.
+export function extractMessageText(line) {
+  let j;
+  try { j = JSON.parse(line); } catch { return null; }
+  const c = j && j.message && j.message.content;
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) {
+    const texts = c.filter((b) => b && b.type === 'text').map((b) => b.text || '');
+    if (texts.length) return texts.join(' ');
+  }
+  return null;
+}
+
+// Build a bounded, whitespace-collapsed snippet centered on the first occurrence
+// of `needleLower` (already lowercased) within `line`. Prefers the extracted
+// message text when it contains the needle, so snippets read like conversation
+// ("we debugged the SSH pool") rather than raw JSON. Returns '' if the line has
+// no occurrence of the needle (e.g. this is a truncated/bounded fragment).
+export function snippetFromLine(line, needleLower, maxLen = 180) {
+  if (!needleLower) return '';
+  const human = extractMessageText(line);
+  const source = human && human.toLowerCase().includes(needleLower) ? human : line;
+  const idx = source.toLowerCase().indexOf(needleLower);
+  if (idx === -1) return '';
+  const half = Math.max(24, Math.floor((maxLen - needleLower.length) / 2));
+  const start = Math.max(0, idx - half);
+  return source.slice(start, start + maxLen).replace(/\s+/g, ' ').trim();
+}
+
+// Enumerate ~/.claude/projects/*/*.jsonl, most-recent-first. Shared by the
+// top-40 list (localClaudeSessions) and full-content search so they walk the
+// same archive layout. Returns [] if the projects dir is absent.
+function collectLocalSessionFiles() {
   const dir = path.join(os.homedir(), '.claude', 'projects');
   const files = [];
   try {
@@ -471,7 +512,11 @@ function localClaudeSessions() {
     }
   } catch { return []; }
   files.sort((a, b) => b.mtime - a.mtime);
-  return files.slice(0, 40).map((f) => {
+  return files;
+}
+
+function localClaudeSessions() {
+  return collectLocalSessionFiles().slice(0, 40).map((f) => {
     let cwd = '';
     let summary = '';
     try {
@@ -507,6 +552,138 @@ async function remoteClaudeSessions(host) {
   out.sort((a, b) => b.mtime - a.mtime);
   return out.slice(0, 40);
 }
+
+// ---- full-content session search (WARDEN-161) ----
+// Caps: per-host before merge, then global after recency sort. A per-host cap
+// stops one prolific host from starving the others; the global cap bounds the
+// response. The remote transfer caps (head bytes for cwd/summary, snippet bytes
+// for the matched line) keep one giant tool_result line from flooding SSH.
+const SESSION_SEARCH_PER_HOST = 20;
+const SESSION_SEARCH_GLOBAL = 50;
+const SESSION_SEARCH_HEAD_BYTES = 6000;    // matches remoteClaudeSessions' `head -c`
+const SESSION_SEARCH_SNIP_TRANSFER = 1500; // bounded matched-line transfer over SSH
+// Cap on matching files gathered locally before the recency sort (grep -m1 emits
+// one row per file). High enough to honor recency ranking across a real archive,
+// bounded so a wildly common term can't stream unbounded output. statSync'ing a
+// few hundred files is cheap; only the top PER_HOST get a head read.
+const SESSION_SEARCH_LOCAL_SCAN = 500;
+
+// Search the local JSONL archive for sessions whose body contains `q` (literal,
+// case-insensitive — same fixed-string semantics as the remote `grep -F`). Returns
+// up to SESSION_SEARCH_PER_HOST matches, most-recent first, each with cwd/summary
+// (from the head) + a snippet (from the first matching line), so matches OUTSIDE
+// the top-40 list are found.
+//
+// Streams ONE `grep -r -m1` over the archive and bounds output AT THE SOURCE
+// (line count + per-line transfer cap via streamBoundedSearch) — it never reads
+// whole JSONL files into Node memory. This mirrors searchLocalRaw's pattern (the
+// workspace-content search): a whole-file readFileSync approach would block the
+// event loop and balloon memory on large transcripts. The query is a literal argv
+// element (no shell), so it needs no shellQuote.
+export async function searchLocalClaudeSessions(q) {
+  const needle = q.toLowerCase();
+  if (!needle) return [];
+  const archiveDir = path.join(os.homedir(), '.claude', 'projects');
+  try { if (!fs.statSync(archiveDir).isDirectory()) return []; } catch { return []; }
+  const raw = await streamBoundedSearch(
+    'grep', ['-r', '-m', '1', '--include=*.jsonl', '-F', '-i', '-I', '-n', '--', q, archiveDir], undefined,
+    { maxResults: SESSION_SEARCH_LOCAL_SCAN, transferLen: SESSION_SEARCH_SNIP_TRANSFER },
+  );
+  // grep -m1 emits one `file:line:text` row per matching file. Collect them, sort
+  // by recency, then enrich the most-recent SESSION_SEARCH_PER_HOST with cwd/summary
+  // (a small head read) + a cleaned snippet (from grep's matched-line text).
+  // parseSearchOutput's per-line cap is raised to the transfer cap so a needle
+  // deep in a long matched line (but within the bounded transfer) survives to the
+  // snippet builder instead of being chopped at the default 300-char display cap.
+  const ranked = [];
+  for (const row of parseSearchOutput(raw, SESSION_SEARCH_LOCAL_SCAN, SESSION_SEARCH_SNIP_TRANSFER)) {
+    let mtime;
+    try { mtime = fs.statSync(row.file).mtimeMs; } catch { continue; }
+    ranked.push({ file: row.file, text: row.text, mtime });
+  }
+  ranked.sort((a, b) => b.mtime - a.mtime);
+  const out = [];
+  for (const e of ranked) {
+    if (out.length >= SESSION_SEARCH_PER_HOST) break;
+    let head = '';
+    try {
+      const fd = fs.openSync(e.file, 'r');
+      const buf = Buffer.alloc(8192);
+      fs.readSync(fd, buf, 0, 8192, 0);
+      fs.closeSync(fd);
+      head = buf.toString('utf8');
+    } catch { continue; }
+    const { cwd, summary } = parseJsonlHead(head);
+    if (!cwd) continue;
+    // Push UNCONDITIONALLY — grep genuinely matched this file, so the session
+    // must surface even when a clean snippet can't be built. snippetFromLine
+    // returns '' when the needle sits past the 1500-byte matched-line transfer
+    // cap (e.g. an error string deep inside a large tool_result blob): the cap
+    // chops the line before the needle, but that's a snippet-quality issue, not
+    // a "this session didn't match" signal. Dropping it here would be a false
+    // negative that breaks "a phrase inside the body returns that session". The
+    // remote twin pushes regardless of snippet (see remoteSearchClaudeSessions),
+    // the frontend renders an empty snippet as nothing — so push here too, to
+    // keep the two implementations consistent.
+    const snippet = snippetFromLine(e.text, needle);
+    out.push({ id: path.basename(e.file, '.jsonl'), cwd, summary, snippet, mtime: e.mtime });
+  }
+  return out;
+}
+
+// Remote (SSH) twin of searchLocalClaudeSessions. Builds a `bash -lc` script that
+// walks the same ~/.claude/projects/*/*.jsonl archive, greps each file for the
+// literal query, and emits id/mtime/head/snippet per match — delimited with the
+// same ___S/___E markers remoteClaudeSessions uses. Exported so the quoting can
+// be unit-tested like buildSearchScript (the query is user input in a remote
+// shell: shellQuoted + `-F` literal + `--` option stop = no injection surface).
+export function buildSessionSearchScript(q) {
+  const sq = shellQuote(q);
+  return `set +o pipefail
+for f in ~/.claude/projects/*/*.jsonl; do
+  [ -f "$f" ] || continue
+  m=$(grep -m1 -F -i -I -- ${sq} "$f" 2>/dev/null | head -c ${SESSION_SEARCH_SNIP_TRANSFER})
+  [ -n "$m" ] || continue
+  id=$(basename "$f" .jsonl)
+  mt=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)
+  printf '___S\\t%s\\t%s\\n' "$id" "$mt"
+  head -c ${SESSION_SEARCH_HEAD_BYTES} "$f"
+  printf '\\n___SNIP\\t'
+  printf '%s' "$m"
+  printf '\\n___E\\t%s\\n' "$id"
+done`;
+}
+
+// Parse the remote script's delimited output into {id, cwd, summary, snippet,
+// mtime} rows. Mirrors remoteClaudeSessions' ___S/___E state machine, adding the
+// ___SNIP line (the bounded matched line, cleaned server-side via snippetFromLine
+// so the snippet stays human-readable regardless of where grep matched).
+async function remoteSearchClaudeSessions(host, q) {
+  const needle = q.toLowerCase();
+  const res = await run(host, buildSessionSearchScript(q), { timeout: 15000 });
+  if (!res.ok) return [];
+  const out = [];
+  let cur = null;
+  const buf = [];
+  for (const line of res.stdout.split('\n')) {
+    const sm = line.match(/^___S\t(\S+)\t(\d+)/);
+    if (sm) { cur = { id: sm[1], mtime: Number(sm[2]) * 1000, snippet: '' }; buf.length = 0; continue; }
+    const snm = line.match(/^___SNIP\t(.*)$/);
+    if (snm && cur) { cur.snippet = snippetFromLine(snm[1], needle); continue; }
+    if (/^___E\t/.test(line)) {
+      if (cur) {
+        const { cwd, summary } = parseJsonlHead(buf.join('\n'));
+        if (cwd) out.push({ id: cur.id, cwd, summary, snippet: cur.snippet, mtime: cur.mtime });
+      }
+      cur = null;
+      continue;
+    }
+    if (cur) buf.push(line);
+  }
+  out.sort((a, b) => b.mtime - a.mtime);
+  return out.slice(0, SESSION_SEARCH_PER_HOST);
+}
+
 app.get('/api/claude-sessions', async (req, res) => {
   const host = String(req.query.host || LOCAL);
   const sessions = host === LOCAL ? localClaudeSessions() : await remoteClaudeSessions(host);
@@ -524,6 +701,28 @@ app.get('/api/claude-sessions-all', async (_req, res) => {
     .flatMap((r) => r.value.sessions.map((s) => ({ ...s, host: r.value.host })));
   all.sort((a, b) => b.mtime - a.mtime);
   res.json({ sessions: all.slice(0, 40) });
+});
+
+// GET /api/claude-sessions-search?q= — full-content search across EVERY host's
+// JSONL archive, returning recency-ranked matches (incl. sessions outside the
+// top-40 list). One unreachable host degrades to "no matches from it" via
+// Promise.allSettled — it never fails the whole search. Response shape:
+//   { results: [{ host, sessionId, cwd, summary, snippet, mtime }] }
+app.get('/api/claude-sessions-search', async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  if (!q) return res.status(400).json({ error: 'query required' });
+  const hosts = [LOCAL, ...cfg.hosts];
+  const settled = await Promise.allSettled(hosts.map(async (host) => {
+    const sessions = host === LOCAL ? await searchLocalClaudeSessions(q) : await remoteSearchClaudeSessions(host, q);
+    return { host, sessions: sessions.slice(0, SESSION_SEARCH_PER_HOST) };
+  }));
+  const all = settled
+    .filter((r) => r.status === 'fulfilled')
+    .flatMap((r) => r.value.sessions.map((s) => ({
+      host: r.value.host, sessionId: s.id, cwd: s.cwd, summary: s.summary, snippet: s.snippet, mtime: s.mtime,
+    })));
+  all.sort((a, b) => b.mtime - a.mtime);
+  res.json({ results: all.slice(0, SESSION_SEARCH_GLOBAL) });
 });
 
 // Run git locally: captured stdout, inherited stderr, in a HIDDEN window. Centralizing
