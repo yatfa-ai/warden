@@ -164,7 +164,7 @@ function App() {
   // dots back to "unknown". Live data itself is advanced by refreshDiscoveredHosts().
   const applyCatalog = useCallback(async (silent: boolean) => {
     if (!silent) setLoading(true);
-    fetch('/api/ssh-hosts').then((r) => r.json()).then((j) => setSshHosts(j.hosts || [])).catch(() => {});
+    fetch('/api/ssh-hosts').then((r) => r.json()).then((j) => setSshHosts(j.hosts || [])).catch((error) => console.error('[ssh-hosts] Failed:', error));
     try {
       const cr = await fetch('/api/chats');
       const diskChats: Chat[] = (await cr.json()).chats || [];

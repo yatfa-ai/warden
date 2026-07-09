@@ -270,6 +270,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       const j = await r.json();
       setHostSessions((p) => ({ ...p, [host]: { sessions: j.sessions || [], claudeAvailable: j.claudeAvailable } }));
     } catch (error) {
+      console.error('[fetchHostSessions] Failed:', error);
       if (prefs.notifyErrors) toast.error(`Failed to fetch sessions for ${host}: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
     setLoadingHost(null);
@@ -284,7 +285,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       }
     } catch (error) {
       // Git status is non-critical, so just log it without showing a toast
-      console.error('Failed to fetch git status:', error);
+      console.error('[git-status] Failed:', error);
     }
   }, []);
 
@@ -368,6 +369,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       const j = await r.json();
       setCollections(j.collections || []);
     } catch (error) {
+      console.error('[collections] Failed:', error);
       if (prefs.notifyErrors) toast.error(`Failed to fetch collections: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   };
