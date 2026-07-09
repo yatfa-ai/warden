@@ -762,6 +762,7 @@ function SuggestionCard({
 const TOOL_LABELS: Record<string, string> = {
   list_chats: 'list chats',
   read_chat: 'read chat',
+  read_chats: 'read chats',
   send_directive: 'compose directive',
   summarize_chats: 'summarize chats',
   analyze_agents: 'analyze agents',

@@ -22,6 +22,7 @@ const SYSTEM = `You are Yatfa Warden — an observer and orchestrator for severa
 You operate ONLY through these tools:
 - list_chats(): discover every agent chat + whether it is active (running its TUI) or idle.
 - read_chat({id, lines}): read an agent's current terminal pane. ALWAYS read before you advise on a specific agent — never assume.
+- read_chats({ids, open_only?, lines?}): read several panes in ONE batched call — much cheaper than several read_chat round trips when you must read multiple agents in full. Pass ids (array of substrings) OR open_only: true to read all open panes at once. Returns each pane's raw content per pane; capture failures are reported per pane, never dropped.
 - send_directive({id, directive}): propose a message to an agent. The user MUST approve every send; you propose and wait for the gate.
 - summarize_chats({per_agent_lines?}): structured, size-bounded summary of every open chat — one entry per pane with role, state (active/idle/stuck/erroring/blocked/waiting), last action, errors, current step, and goal. Failed captures are flagged per-entry, never omitted. Use this when the user asks "what's happening", "what are they working on", or you need a complete picture to advise well.
 - analyze_agents(): detect patterns across all open tabs. Returns structured insights about which agents are stuck, erroring, idle, or need coordination. Use this to answer "what needs attention?" or diagnose workflow issues.
@@ -82,6 +83,19 @@ export const TOOLS = [
       type: 'object',
       properties: { id: { type: 'string' }, directive: { type: 'string' } },
       required: ['id', 'directive'],
+    },
+  },
+  {
+    name: 'read_chats',
+    description: "Read several agent panes at once in ONE batched call — far cheaper than many read_chat round trips when you must read multiple agents in full. Pass ids (array of unique substrings: container, project, or role) and an optional lines cap, OR pass open_only: true to read exactly the user's open panes. Returns each pane's raw content keyed per pane in one result. Per-pane capture or id-resolution failures are reported per pane, never dropped.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        ids: { type: 'array', items: { type: 'string' }, description: 'Agent ids (unique substrings) to read in full.' },
+        open_only: { type: 'boolean', description: "If true, read exactly the open panes (the user's watched tabs); ids are ignored." },
+        lines: { type: 'number', description: 'Max scrollback lines per pane (default 60; capture fetches up to 60).' },
+      },
+      required: [],
     },
   },
   {
@@ -399,6 +413,128 @@ export async function summarizeOpenChats(openTabs, lastChats, capturePanes, cfg,
   }
 }
 
+// Pure, dependency-injected core of the read_chats tool — a BATCHED read of many
+// panes in ONE capturePanes call. capturePanes groups by host and runs Promise.all
+// per host (chats.js), so worst-case latency scales with HOST count, not pane
+// count (WARDEN-88): reading 6 open panes is one round-trip, not six serial
+// read_chat calls. Distinct from summarize_chats (structured/lossy classification):
+// this returns the RAW pane text for specific panes the observer must read in full.
+//
+// Two resolution modes:
+//   openOnly === true → read exactly the observer's effective open tabs
+//                       (the caller passes effectiveOpenTabs()), matching the
+//                       summarize_chats filter so open_only reads what's watched,
+//                       bound chat included (seamless cross-host resume).
+//   ids (array)       → each id substring-resolved via resolveChat (same matcher
+//                       _resolve/read_chat use). Ambiguous/unmatched ids are
+//                       surfaced per-id, never dropped.
+//
+// Failures are reported, not dropped (WARDEN-89): capturePanes silently skips a
+// whole host on SSH failure (`if (!res.ok) return;`) and an individual local pane
+// on a capture error, so a MISSING key in the result map means that pane's capture
+// failed — surfaced here as a flagged entry. Output is bounded: `lines` (default
+// 60) trims each pane to its recent lines, and `maxPanes` (default 8) caps how
+// many panes are captured, with the overflow surfaced as skipped (no silent
+// truncation). capturePanes fetches up to 60 lines per pane, so `lines` trims
+// within that window.
+export async function readChats(ids, openOnly, openTabs, lastChats, capturePanes, cfg, opts = {}) {
+  const lines = Math.max(1, Number.isFinite(opts.lines) ? opts.lines : 60);
+  const maxPanes = Math.max(1, Number.isFinite(opts.maxPanes) ? opts.maxPanes : 8);
+  const chats = (lastChats || []);
+  const resolutionErrors = [];
+
+  let resolved;
+  if (openOnly) {
+    const open = new Set(openTabs || []);
+    resolved = chats.filter((c) => open.has(c.container || c.session) || open.has(c.key));
+    if (resolved.length === 0) {
+      return {
+        error: open.size === 0
+          ? 'no tabs are open. open some agent panes first.'
+          : 'open tabs do not match any discovered chats. try refreshing with list_chats.',
+      };
+    }
+  } else {
+    const idList = (Array.isArray(ids) ? ids : [])
+      .map((x) => (typeof x === 'string' ? x.trim() : ''))
+      .filter((x) => x.length > 0);
+    if (idList.length === 0) {
+      return { error: 'provide an array of ids or set open_only: true.' };
+    }
+    // Resolve each id via the same matcher read_chat/_resolve use. Dedupe by key so
+    // two ids that hit the same pane aren't read twice. Unmatched/ambiguous ids
+    // become per-id errors rather than aborting the whole batch.
+    const seen = new Set();
+    resolved = [];
+    for (const id of idList) {
+      const r = resolveChat(id, chats, null);
+      if (r.chat) {
+        if (!seen.has(r.chat.key)) { seen.add(r.chat.key); resolved.push(r.chat); }
+      } else if (r.error) {
+        resolutionErrors.push({ id, error: r.error });
+      } else {
+        // needsRefresh — not in the current cache. The core stays pure (no refresh);
+        // the observer refreshes via list_chats, so point the caller there.
+        resolutionErrors.push({ id, error: `no chat matches "${id}". try refreshing with list_chats.` });
+      }
+    }
+    if (resolved.length === 0) {
+      return {
+        error: 'none of the requested ids resolved to a chat. try refreshing with list_chats.',
+        errors: resolutionErrors,
+      };
+    }
+  }
+
+  // Overall cap: capture only the first `maxPanes`; surface the rest as skipped so
+  // the result stays token-safe without silently truncating.
+  const toCapture = resolved.slice(0, maxPanes);
+  const overflow = resolved.slice(maxPanes);
+
+  try {
+    const panes = await capturePanes(toCapture, cfg);
+
+    const base = (c) => ({
+      id: c.container || c.session, host: c.host, project: c.project, role: c.role, active: c.active,
+    });
+
+    const read = toCapture.map((c) => {
+      // A capture that succeeded always sets panes[c.key] (even to ''). A MISSING
+      // key means capturePanes silently dropped this pane (host SSH failure, or a
+      // local capture error) — surface it as a flagged failure, never omit it.
+      if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
+        return {
+          ...base(c), ok: false,
+          error: `failed to capture pane on ${c.host} (host unreachable or tmux capture error)`,
+        };
+      }
+      const raw = panes[c.key] || '';
+      return { ...base(c), ok: true, pane: raw.split('\n').slice(-lines).join('\n') };
+    });
+
+    const skipped = overflow.map((c) => ({
+      ...base(c), ok: false, skipped: true,
+      error: `omitted: max pane cap (${maxPanes}) reached — narrow your ids or raise max_panes.`,
+    }));
+
+    const entries = [...read, ...skipped];
+    return {
+      chats: entries,
+      errors: resolutionErrors,
+      count: entries.length,
+      summary: {
+        total: resolved.length,
+        read: read.filter((e) => e.ok).length,
+        captureFailed: read.filter((e) => !e.ok).length,
+        skipped: skipped.length,
+        resolutionFailed: resolutionErrors.length,
+      },
+    };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
 // Pure, dependency-injected core of the suggest_next_actions tool. capturePanes is
 // passed in so the classification logic is unit-testable without SSH/tmux
 // (mock.module is unavailable on the project's Node version). Behavior is identical
@@ -627,6 +763,10 @@ export class Observer {
         const pane = await readPane(chat, this.cfg, input.lines || 120);
         return { id: chat.container, host: chat.host, pane: pane.slice(-8000) };
       } catch (e) { return { error: e.message }; }
+    }
+    if (name === 'read_chats') {
+      return readChats(input.ids, !!input.open_only, this.effectiveOpenTabs(),
+        this.lastChats, capturePanes, this.cfg, input);
     }
     if (name === 'send_directive') {
       const chat = await this._resolve(input.id);
