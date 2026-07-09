@@ -91,7 +91,7 @@ describe('summarizeOpenChats', () => {
   });
 
   describe('success path', () => {
-    it('returns structured metadata + pane content for each open chat', async () => {
+    it('returns a structured per-agent entry (not raw pane) for each open chat', async () => {
       const chat = yatfaChat();
       const capturePanes = mock.fn(async (chats) => ({ [chats[0].key]: 'worker pane content' }));
 
@@ -107,8 +107,13 @@ describe('summarizeOpenChats', () => {
       assert.strictEqual(entry.project, 'myproject');
       assert.strictEqual(entry.role, 'worker');
       assert.strictEqual(entry.active, true);
-      assert.strictEqual(entry.status, 'running');
-      assert.strictEqual(entry.pane, 'worker pane content');
+      // Structured classification fields (WARDEN-165 criterion #2), not raw pane:
+      assert.ok(['active', 'idle', 'stuck', 'erroring', 'blocked', 'waiting'].includes(entry.state),
+        'state is a known classification');
+      assert.strictEqual(entry.captureError, false, 'a successful capture is not flagged');
+      assert.strictEqual(entry.excerpt, 'worker pane content', 'excerpt carries the cleaned pane');
+      assert.ok(!('pane' in entry), 'raw pane field is gone — output is structured, not a dump');
+      assert.ok(result.summary && result.summary.total === 1, 'result includes a summary counts block');
     });
 
     it('calls capturePanes once with the filtered open chats and the cfg', async () => {
@@ -131,16 +136,30 @@ describe('summarizeOpenChats', () => {
       const result = await summarizeOpenChats([chat.session], [chat], capturePanes, cfg);
 
       assert.strictEqual(result.chats[0].id, 'manual-session');
-      assert.strictEqual(result.chats[0].pane, 'manual pane');
+      assert.strictEqual(result.chats[0].excerpt, 'manual pane');
     });
 
-    it('pane falls back to "(no pane content)" when the key is missing from the panes map', async () => {
+    it('flags a capture failure (key missing from panes map) instead of dropping the entry', async () => {
+      // capturePanes returns no entry for this chat's key — the WARDEN-165 "1 of 6"
+      // root cause: a host whose SSH fails is silently skipped, so every pane on that
+      // host vanishes. summarizeOpenChats must surface it as a flagged failure, not
+      // omit it and not render it as '(no pane content)'.
       const chat = yatfaChat();
-      const capturePanes = mock.fn(async () => ({})); // no panes captured
+      const capturePanes = mock.fn(async () => ({})); // host SSH failed: no panes captured
 
       const result = await summarizeOpenChats([chat.container], [chat], capturePanes, cfg);
 
-      assert.strictEqual(result.chats[0].pane, '(no pane content)');
+      // The entry is STILL present — failures are surfaced, never silently dropped.
+      assert.strictEqual(result.count, 1);
+      assert.strictEqual(result.chats.length, 1);
+      const entry = result.chats[0];
+      assert.strictEqual(entry.id, 'myproject-worker');
+      assert.strictEqual(entry.captureError, true, 'a missing key means capture failed');
+      assert.strictEqual(entry.state, 'capture_failed');
+      assert.strictEqual(entry.excerpt, null, 'no pane content to excerpt');
+      assert.ok(typeof entry.error === 'string' && entry.error.length > 0, 'an error reason is reported on the entry');
+      assert.ok(entry.error.includes('host1'), 'the error names the unreachable host');
+      assert.strictEqual(result.summary.captureFailed, 1, 'summary counts the capture failure');
     });
   });
 
@@ -161,7 +180,7 @@ describe('summarizeOpenChats', () => {
     it('matches a chat by key', async () => {
       const result = await summarizeOpenChats(['myproject-worker'], [yatfaChat()], panesFn, cfg);
       assert.strictEqual(result.count, 1);
-      assert.strictEqual(result.chats[0].pane, 'pane-myproject-worker');
+      assert.strictEqual(result.chats[0].excerpt, 'pane-myproject-worker');
     });
 
     it('summarizes only chats whose tab is open (closed chats are excluded)', async () => {
@@ -231,6 +250,176 @@ describe('summarizeOpenChats', () => {
 
       assert.ok(result.error);
       assert.strictEqual(result.count, undefined, 'success shape not produced');
+    });
+  });
+
+  describe('capture failure across hosts (WARDEN-165 "1 of 6" root cause)', () => {
+    // capturePanes silently skips a host whose SSH fails (`if (!res.ok) return;`),
+    // so every pane on that host vanishes from its result map. summarizeOpenChats
+    // detects the missing key and surfaces a flagged failure entry instead of
+    // dropping it — every open pane yields an entry.
+    it('lists every open pane and flags the one whose host capture failed', async () => {
+      const worker = yatfaChat(); // host1
+      const planner = yatfaChat({
+        id: 'host1:proj-planner', key: 'proj-planner', container: 'proj-planner',
+        host: 'host1', project: 'proj', role: 'planner',
+      });
+      const reviewer = yatfaChat({
+        id: 'host2:proj-reviewer', key: 'proj-reviewer', container: 'proj-reviewer',
+        host: 'host2', project: 'proj', role: 'reviewer',
+      });
+
+      // host2's SSH failed: capturePanes returns no entry for the reviewer.
+      const capturePanes = mock.fn(async (chats) => {
+        const out = {};
+        for (const c of chats) if (c.host !== 'host2') out[c.key] = `pane for ${c.key}`;
+        return out;
+      });
+
+      const result = await summarizeOpenChats(
+        ['myproject-worker', 'proj-planner', 'proj-reviewer'],
+        [worker, planner, reviewer],
+        capturePanes, cfg,
+      );
+
+      assert.strictEqual(result.count, 3, 'all three open panes get an entry');
+      assert.strictEqual(result.chats.length, 3);
+      assert.strictEqual(result.summary.captureFailed, 1);
+
+      // The reviewer (host2) entry is present and flagged — NOT omitted.
+      const failed = result.chats.find((c) => c.id === 'proj-reviewer');
+      assert.ok(failed, 'the failed-host pane still has an entry');
+      assert.strictEqual(failed.captureError, true);
+      assert.strictEqual(failed.state, 'capture_failed');
+      assert.strictEqual(failed.host, 'host2');
+      assert.ok(failed.error.includes('host2'), 'the error names the unreachable host');
+
+      // The two captured panes are present, unflagged, with content.
+      const captured = result.chats.filter((c) => !c.captureError);
+      assert.strictEqual(captured.length, 2);
+      assert.deepStrictEqual(captured.map((c) => c.id).sort(), ['myproject-worker', 'proj-planner']);
+      assert.ok(captured.every((c) => c.excerpt != null));
+    });
+  });
+
+  describe('structured classification fields (WARDEN-165 criterion #2)', () => {
+    async function summarizeOne(pane, chatOverrides = {}) {
+      const chat = yatfaChat(chatOverrides);
+      const capturePanes = mock.fn(async (chats) => ({ [chats[0].key]: pane }));
+      return summarizeOpenChats([chat.container], [chat], capturePanes, cfg);
+    }
+
+    it('classifies an erroring pane and extracts the error line', async () => {
+      const result = await summarizeOne('Running build...\nError: compilation failed with exit 1\nSee log.');
+      const e = result.chats[0];
+      assert.strictEqual(e.state, 'erroring');
+      assert.ok(e.errors.length >= 1, 'the offending error line is extracted');
+      assert.ok(e.errors.some((x) => /compilation failed/.test(x)));
+      assert.ok(typeof e.lastAction === 'string' && e.lastAction.length > 0);
+    });
+
+    it('classifies a stuck pane (repeating output) as stuck', async () => {
+      const line = 'Retrying connection to host in 5 seconds...';
+      const result = await summarizeOne(Array(6).fill(line).join('\n'));
+      assert.strictEqual(result.chats[0].state, 'stuck');
+    });
+
+    it('classifies a waiting pane (human input) as waiting', async () => {
+      const result = await summarizeOne('I need your input to continue. Please respond.');
+      assert.strictEqual(result.chats[0].state, 'waiting');
+    });
+
+    it('classifies a blocked pane (coordination dependency) as blocked', async () => {
+      const result = await summarizeOne('Holding — blocked by the planner. Depends on the spec.');
+      assert.strictEqual(result.chats[0].state, 'blocked');
+    });
+
+    it('classifies an active pane as active and reports a current step', async () => {
+      const result = await summarizeOne('Building the project...\nRunning the test suite.');
+      const e = result.chats[0];
+      assert.strictEqual(e.state, 'active');
+      assert.ok(/Building|Running/.test(e.currentStep), 'currentStep reflects the activity');
+    });
+
+    it('infers the goal from a ticket reference in the pane', async () => {
+      const result = await summarizeOne('Working on WARDEN-165: structured summarize.\nRunning tests.');
+      assert.strictEqual(result.chats[0].goal, 'WARDEN-165');
+    });
+
+    it('falls back to a role/project goal when no ticket or action is inferable', async () => {
+      const result = await summarizeOne('all good here'); // no keywords at all → idle
+      assert.strictEqual(result.chats[0].goal, 'worker on myproject');
+    });
+
+    it('includes role/state/lastAction/errors/currentStep/goal on every entry', async () => {
+      const result = await summarizeOne('Error: build failed\nCompiling sources.');
+      const e = result.chats[0];
+      for (const f of ['role', 'state', 'lastAction', 'errors', 'currentStep', 'goal']) {
+        assert.ok(f in e, `entry includes the "${f}" field`);
+      }
+      assert.strictEqual(e.role, 'worker');
+    });
+  });
+
+  describe('bounded output (WARDEN-165 criterion #3)', () => {
+    it('defaults to a concise excerpt, not the full pane dump', async () => {
+      const chat = yatfaChat();
+      const longPane = Array.from({ length: 60 }, (_, i) => `line ${i} of output`).join('\n');
+      const capturePanes = mock.fn(async (chats) => ({ [chats[0].key]: longPane }));
+
+      const result = await summarizeOpenChats([chat.container], [chat], capturePanes, cfg);
+
+      const lines = result.chats[0].excerpt.split('\n');
+      assert.ok(lines.length <= 15, `default excerpt is bounded to <=15 lines (got ${lines.length})`);
+      assert.ok(/line 59 of output/.test(lines[lines.length - 1]), 'excerpt keeps the most recent lines');
+    });
+
+    it('honors per_agent_lines to bound the excerpt', async () => {
+      const chat = yatfaChat();
+      const longPane = Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n');
+      const capturePanes = mock.fn(async (chats) => ({ [chats[0].key]: longPane }));
+
+      const result = await summarizeOpenChats([chat.container], [chat], capturePanes, cfg, { per_agent_lines: 3 });
+
+      const lines = result.chats[0].excerpt.split('\n');
+      assert.strictEqual(lines.length, 3);
+      assert.deepStrictEqual(lines, ['line 37', 'line 38', 'line 39']);
+    });
+
+    it('treats per_agent_lines <= 0 as the minimum of 1 line', async () => {
+      const chat = yatfaChat();
+      const capturePanes = mock.fn(async (chats) => ({ [chats[0].key]: 'a\nb\nc' }));
+
+      const result = await summarizeOpenChats([chat.container], [chat], capturePanes, cfg, { per_agent_lines: 0 });
+
+      assert.strictEqual(result.chats[0].excerpt, 'c');
+    });
+  });
+
+  describe('ANSI stripping (raw capture-pane -e → clean classification)', () => {
+    it('strips escape sequences so state/excerpt read clean text', async () => {
+      const chat = yatfaChat();
+      // A red "Error" line wrapped in SGR codes plus a cursor-hide CSI sequence.
+      const pane = '\x1b[31mError: build failed\x1b[0m\n\x1b[?25lRunning setup.\x1b[0m';
+      const capturePanes = mock.fn(async (chats) => ({ [chats[0].key]: pane }));
+
+      const result = await summarizeOpenChats([chat.container], [chat], capturePanes, cfg);
+      const e = result.chats[0];
+
+      assert.strictEqual(e.state, 'erroring', 'an ANSI-wrapped error still classifies');
+      assert.ok(!e.excerpt.includes('\x1b'), 'the excerpt contains no escape sequences');
+      assert.ok(/Error: build failed/.test(e.excerpt), 'the clean text is preserved');
+      assert.ok(e.errors.some((x) => /build failed/.test(x)), 'the error is extracted from an ANSI-wrapped line');
+    });
+
+    it('does not misclassify ANSI-colored active output as erroring', async () => {
+      const chat = yatfaChat();
+      const pane = '\x1b[32mBuilding the project\x1b[0m\n\x1b[36mRunning tests\x1b[0m';
+      const capturePanes = mock.fn(async (chats) => ({ [chats[0].key]: pane }));
+
+      const result = await summarizeOpenChats([chat.container], [chat], capturePanes, cfg);
+
+      assert.strictEqual(result.chats[0].state, 'active');
     });
   });
 });
@@ -568,7 +757,7 @@ describe('Observer chat context (cross-host resumption)', () => {
 
     assert.strictEqual(result.count, 1);
     assert.strictEqual(result.chats[0].id, 'myproject-worker');
-    assert.strictEqual(result.chats[0].pane, 'bound pane');
+    assert.strictEqual(result.chats[0].excerpt, 'bound pane');
   });
 
   it('suggest_next_actions watches the bound chat with no panes open (seamless resume)', async () => {
