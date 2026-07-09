@@ -6,7 +6,7 @@ import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer } from 'ws';
@@ -878,7 +878,12 @@ app.post('/api/read-file', async (req, res) => {
 // against — it is shellQuoted and preceded by `--`, output is bounded, and
 // binaries are skipped (-I).
 const SEARCH_MAX_RESULTS = 30;
-const SEARCH_MAX_LINE_LEN = 300;
+const SEARCH_MAX_LINE_LEN = 300; // display cap applied by parseSearchOutput
+// Per-line transfer cap — the local/remote single source of truth for "how much
+// of one matched line we move before stopping". The remote script's `cut -c1-…`
+// and the local streamBoundedSearch both read this; SEARCH_MAX_LINE_LEN (300) is
+// a stricter display-only truncation applied afterward by parseSearchOutput.
+const SEARCH_TRANSFER_LINE_LEN = 1000;
 
 // Parse one `<path>:<line>:<text>` line as emitted by `git grep -n` / `rg -n` /
 // `grep -rn`. The line number is the FIRST ':digits:' after the path (non-greedy
@@ -925,43 +930,119 @@ export function parseSearchOutput(raw, maxResults = SEARCH_MAX_RESULTS, maxLineL
 // and skips binaries (-I). git rev-parse gates the rg/grep fallback to non-repos.
 export function buildSearchScript(cwd, query) {
   const q = shellQuote(query);
-  return `cd ${shellQuote(cwd)} 2>/dev/null || exit 0; set +o pipefail; if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git grep -n -I -F -- ${q}; elif command -v rg >/dev/null 2>&1; then rg --line-number --no-heading -F -- ${q} .; else grep -rnI -F -- ${q} .; fi | cut -c1-1000 | head -n 30`;
+  return `cd ${shellQuote(cwd)} 2>/dev/null || exit 0; set +o pipefail; if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git grep -n -I -F -- ${q}; elif command -v rg >/dev/null 2>&1; then rg --line-number --no-heading -F -- ${q} .; else grep -rnI -F -- ${q} .; fi | cut -c1-${SEARCH_TRANSFER_LINE_LEN} | head -n ${SEARCH_MAX_RESULTS}`;
 }
 
-// spawnSync wrapper for the local search tools: BOUNDED (4MB maxBuffer + 10s
-// timeout, mirroring the remote ceiling) and with stderr CAPTURED (not
-// inherited), so git's "fatal: not a git repository" / regex diagnostics don't
-// spam the server console on every search. Distinct from runLocalGit (shared by
-// git-status/log), which inherits stderr and uses the default ~1MB maxBuffer —
-// that default silently truncates large searches via ENOBUFS (status=null,
-// masked as success), so search needs its own bounded runner.
+// spawnSync wrapper for tiny local PROBE commands only (git rev-parse,
+// `rg --version`): bounded (1MB maxBuffer + 10s timeout) with stderr CAPTURED
+// (not inherited) so probe noise ("fatal: not a git repository") never hits the
+// server console. The workspace search itself is NOT run through here — it is
+// streamed by streamBoundedSearch below so its output is bounded AT THE SOURCE
+// (a spawnSync maxBuffer, once exceeded, masks a many-match search as ENOBUFS→'').
 function runLocalSearch(bin, args, cwd) {
   return spawnSync(bin, args, {
     cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
-    encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: 10000,
+    encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 10000,
   });
 }
 
-// Local raw search stdout for `query` under `cwd`: the spawnSync twin of the
+// PATH-presence probe — the local twin of the remote `command -v rg` gate that
+// decides whether the non-repo fallback runs ripgrep or plain grep. spawnSync so
+// an absent tool (ENOENT) is detected cleanly, not entangled with a streamed run.
+function hasBinary(bin) {
+  return runLocalSearch(bin, ['--version'], undefined).error?.code !== 'ENOENT';
+}
+
+// Stream a local search tool's stdout and bound it AT THE SOURCE — the local twin
+// of the remote `| cut -c1-<TRANSFER> | head -n <MAX>`. We read stdout
+// incrementally, cap each matched line to SEARCH_TRANSFER_LINE_LEN, and STOP
+// (kill the child) once we reach SEARCH_MAX_RESULTS lines. This NEVER depends on
+// a maxBuffer cap: the previous spawnSync twin collected the ENTIRE stdout into a
+// 4MB buffer and, on overflow (ENOBUFS), returned '' — so a search that had 30
+// real matches for a common term ("import") came back as "No results found".
+// Streaming caps where the results are PRODUCED, exactly like the remote script.
+// Spawned as an argv array with `{cwd}` (NO shell), so the query is a literal
+// argument with zero injection surface — it needs NO shellQuote here, unlike the
+// remote path which builds a shell string for SSH. Returns the bounded raw stdout
+// in the same `path:line:text` format the remote produces, so parseSearchOutput
+// parses both paths identically. Exported for direct unit testing of the bound.
+export function streamBoundedSearch(bin, args, cwd, opts = {}) {
+  const maxResults = opts.maxResults ?? SEARCH_MAX_RESULTS;
+  const transferLen = opts.transferLen ?? SEARCH_TRANSFER_LINE_LEN;
+  return new Promise((resolve) => {
+    const child = spawn(bin, args, {
+      cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    });
+    const lines = [];
+    let buf = '';
+    let skipping = false; // discarding the tail of an over-long (no-newline-yet) line
+    let stopped = false;
+    let settled = false;
+    const cap = (s) => (s.length > transferLen ? s.slice(0, transferLen) : s);
+    const done = (val) => { if (!settled) { settled = true; resolve(val); } };
+    const stop = () => { stopped = true; try { child.kill('SIGTERM'); } catch {} };
+
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      if (stopped || settled) return;
+      buf += chunk;
+      let nl;
+      while ((nl = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (skipping) { skipping = false; continue; } // remainder of an over-long line
+        lines.push(cap(line));
+        if (lines.length >= maxResults) { stop(); return; }
+      }
+      // No newline in buf. If buf already exceeds the cap, this single physical
+      // line is over-long (e.g. a minified bundle): emit its first transferLen
+      // chars, then drop the rest until the line's terminating newline arrives.
+      if (skipping) buf = '';
+      else if (buf.length > transferLen) {
+        lines.push(cap(buf));
+        buf = '';
+        skipping = true;
+        if (lines.length >= maxResults) stop();
+      }
+    });
+    // Drain stderr so it can't backpressure the pipe. It is NOT inherited, so the
+    // tool's diagnostics never spam the server console (mirrors runLocalSearch).
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', () => {});
+    child.on('error', () => done('')); // ENOENT (tool absent) / spawn failure → no results
+    child.on('close', () => {
+      // Flush a trailing newline-less line ONLY on natural EOF. When we `stop()`-ed
+      // at the cap, `buf` still holds the rest of that chunk — it must NOT be flushed
+      // (it would push past maxResults, chunk-delivery-dependent and flaky).
+      if (!stopped && !skipping && buf) lines.push(cap(buf));
+      done(lines.join('\n'));
+    });
+  });
+}
+
+// Local raw search stdout for `query` under `cwd`: the streamed twin of the
 // remote buildSearchScript. Prefers `git grep` (tracked files only, -F literal);
-// falls back to rg (presence-gated) then plain grep only when cwd is not a git
-// worktree. Returns '' for no matches / overflow / timeout (never throws —
-// matches git-status/git-log). All tools run with `{cwd}` so results are scoped.
-function searchLocalRaw(cwd, query) {
+// falls back to rg (PATH-gated via hasBinary, mirroring `command -v rg`) then
+// plain grep, only when cwd is not a git worktree. Output is bounded AT THE SOURCE
+// by streamBoundedSearch (line count + per-line transfer cap) — never by a
+// spawnSync maxBuffer — so a many-match search returns its real (≤30) results
+// instead of ENOBUFS→''. Returns '' for no matches / spawn failure and never
+// throws (matches git-status/git-log). Exported so the local path has test
+// coverage parity with the remote buildSearchScript.
+export async function searchLocalRaw(cwd, query) {
+  // Gate the rg/grep fallback to non-repos (mirrors remote `if git rev-parse…`).
+  // rev-parse output is tiny ("true"), so a spawnSync probe here is overflow-safe.
   const gitCheck = runLocalSearch('git', ['rev-parse', '--is-inside-work-tree'], cwd);
   const insideRepo = gitCheck.status === 0 && (gitCheck.stdout?.trim() === 'true');
   if (insideRepo) {
-    const r = runLocalSearch('git', ['grep', '-n', '-I', '-F', '--', query], cwd);
-    if (r.error) return ''; // ENOBUFS (overflow) or timeout → bounded; treat as no results
-    // status 1 = no matches in a valid repo (not an error); 0 = matches.
-    return r.status === 1 ? '' : (r.stdout || '');
+    // git grep: status 1 = no matches (yields ''); 0 = matches. -I skips binaries.
+    return streamBoundedSearch('git', ['grep', '-n', '-I', '-F', '--', query], cwd);
   }
   // Not a git repo → ripgrep (fast, respects .gitignore) then plain grep. -F = literal.
-  const rg = runLocalSearch('rg', ['--line-number', '--no-heading', '-F', '--', query, '.'], cwd);
-  if (rg.error?.code !== 'ENOENT') return rg.stdout || ''; // rg present (ran/overflowed); grep only if rg absent
-  const gr = runLocalSearch('grep', ['-rn', '-I', '-F', '--', query, '.'], cwd);
-  if (gr.error) return '';
-  return gr.status === 1 ? '' : (gr.stdout || ''); // grep: 1 = no match
+  if (hasBinary('rg')) {
+    return streamBoundedSearch('rg', ['--line-number', '--no-heading', '-F', '--', query, '.'], cwd);
+  }
+  return streamBoundedSearch('grep', ['-rn', '-I', '-F', '--', query, '.'], cwd);
 }
 
 // POST /api/search-files — content-search a chat's working directory (grep).
@@ -984,7 +1065,7 @@ app.post('/api/search-files', async (req, res) => {
     let raw = '';
     let error = null;
     if (chat.host === LOCAL) {
-      raw = searchLocalRaw(cwd, query);
+      raw = await searchLocalRaw(cwd, query);
     } else {
       const script = buildSearchScript(cwd, query);
       const result = await run(chat.host, script, { timeout: 10000 });

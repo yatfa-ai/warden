@@ -25,6 +25,27 @@ interface Props {
   onSelectFile: (file: string) => void;
 }
 
+// WARDEN-68 (UI std: don't add raw interactive elements): a NATIVE <button> is
+// the correct primitive here, not shadcn's <Button>. A result row is a
+// multi-line, block-layout list item; shadcn Button is styled for single-line
+// actions and would fight that layout. The native button gives keyboard
+// (Enter/Space) activation + the screen-reader "button" role for free — the
+// accessible choice over GlobalSearchDialog's `<div onClick>`. The kit has no
+// Command/cmdk list primitive to reach for instead, so the raw element is
+// contained here in its own component rather than inlined in the results map.
+function SearchResultRow({ result, onSelect }: { result: SearchResult; onSelect: (file: string) => void }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(result.file)}
+      className="flex flex-col w-full text-left mb-1 p-2 rounded hover:bg-accent transition-colors"
+    >
+      <span className="text-xs text-muted-foreground font-mono truncate">{result.file}:{result.line}</span>
+      <span className="text-sm font-mono whitespace-pre-wrap break-words">{result.text}</span>
+    </button>
+  );
+}
+
 // Workspace content-search dialog (WARDEN-145). Modeled on GlobalSearchDialog's
 // shape but built on the shadcn Dialog/Input/Button/ScrollArea primitives the
 // FileViewer and PaneGrid path-entry dialogs use, so it reads as one system.
@@ -117,6 +138,10 @@ export function WorkspaceSearchDialog({ chatId, cwd, open, onOpenChange, onSelec
 
         {error && <p className="text-xs text-destructive">{error}</p>}
 
+        {/* WARDEN-68: viewport-relative height matches the sibling FileViewer's own
+            ScrollArea (h-[60vh]); these file dialogs size scroll regions in vh so the
+            region flexes with the viewport instead of a fixed pixel. Search snippets
+            are short, so 40vh (vs the file viewer's 60vh) stays compact without overflow. */}
         <ScrollArea className="h-[40vh] w-full rounded-md border">
           <div className="p-2">
             {results.length === 0 && !searching && !error && (
@@ -125,14 +150,7 @@ export function WorkspaceSearchDialog({ chatId, cwd, open, onOpenChange, onSelec
               </div>
             )}
             {results.map((r, idx) => (
-              <button
-                key={`${r.file}-${r.line}-${idx}`}
-                onClick={() => handleSelect(r.file)}
-                className="flex flex-col w-full text-left mb-1 p-2 rounded hover:bg-accent transition-colors"
-              >
-                <span className="text-xs text-muted-foreground font-mono truncate">{r.file}:{r.line}</span>
-                <span className="text-sm font-mono whitespace-pre-wrap break-words">{r.text}</span>
-              </button>
+              <SearchResultRow key={`${r.file}-${r.line}-${idx}`} result={r} onSelect={handleSelect} />
             ))}
           </div>
         </ScrollArea>

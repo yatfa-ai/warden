@@ -19,7 +19,7 @@ const SERVER = path.join(__dirname, 'server.js');
 // activity logs at module load) touches only a temp dir, never the real
 // ~/.yatfa-warden. Top-level await lets us import AFTER setting HOME.
 process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-sf-home-'));
-const { buildSearchScript, parseSearchOutput } = await import('./server.js');
+const { buildSearchScript, parseSearchOutput, searchLocalRaw, streamBoundedSearch } = await import('./server.js');
 
 // --- Syntax guard: server.js MUST compile ---------------------------------
 // Mirrors read-file.test.js: `node --check` parses without executing, a clean
@@ -260,5 +260,158 @@ describe('parseSearchOutput', () => {
     const out = parseSearchOutput(raw, 30, 50);
     assert.equal(out.length, 30);
     assert.ok(out.every((r) => r.text.length <= 50), 'every line must be truncated to maxLineLen');
+  });
+});
+
+// Local-path bounder: streamBoundedSearch reads a child's stdout incrementally and
+// caps it AT THE SOURCE (line count + per-line transfer length), killing the child
+// once the cap is hit — so it never depends on a spawnSync maxBuffer. Uses a
+// controllable `node -e` producer so the bounding logic is tested in isolation.
+describe('streamBoundedSearch (local bounder — caps at the source, not a buffer)', () => {
+  const TMP = os.tmpdir();
+
+  it('stops at maxResults lines for a huge producer (never buffers it all)', async () => {
+    // ~1M lines (~13MB). The bounder must read incrementally, hit the cap, kill the
+    // child, and resolve with exactly 30 — not collect all 1M into memory.
+    const script = "for(let i=0;i<1000000;i++)process.stdout.write('gen.js:'+i+':TOKEN\\n')";
+    const out = await streamBoundedSearch(process.execPath, ['-e', script], TMP);
+    const lines = out.split('\n').filter(Boolean);
+    assert.equal(lines.length, 30, `expected 30 capped lines, got ${lines.length}`);
+  });
+
+  it('caps an over-long line to the transfer length (cut -c1-1000 twin)', async () => {
+    // One 5000-char line + newline → emitted line truncated to 1000 at the source.
+    const script = "process.stdout.write('x'.repeat(5000)+'\\n')";
+    const out = await streamBoundedSearch(process.execPath, ['-e', script], TMP);
+    const lines = out.split('\n').filter(Boolean);
+    assert.equal(lines.length, 1);
+    assert.equal(lines[0].length, 1000, `expected 1000-char cap, got ${lines[0].length}`);
+  });
+
+  it('caps an over-long line with NO trailing newline (flushed on close)', async () => {
+    const script = "process.stdout.write('y'.repeat(5000))";
+    const out = await streamBoundedSearch(process.execPath, ['-e', script], TMP);
+    const lines = out.split('\n').filter(Boolean);
+    assert.equal(lines.length, 1);
+    assert.equal(lines[0].length, 1000);
+  });
+
+  it('does not let an over-long line swallow the next line', async () => {
+    // 5000-char line then a short line: the long line yields ONE capped result,
+    // the short line is parsed normally (not eaten as the long line's tail).
+    const script = "process.stdout.write('z'.repeat(5000)+'\\nSHORTLINE\\n')";
+    const out = await streamBoundedSearch(process.execPath, ['-e', script], TMP);
+    const lines = out.split('\n').filter(Boolean);
+    assert.equal(lines.length, 2);
+    assert.equal(lines[0].length, 1000);
+    assert.equal(lines[1], 'SHORTLINE');
+  });
+
+  it('honors a custom cap (opts.maxResults / opts.transferLen)', async () => {
+    const script = "for(let i=0;i<100;i++)process.stdout.write('a'.repeat(50)+'\\n')";
+    const out = await streamBoundedSearch(process.execPath, ['-e', script], TMP, { maxResults: 5, transferLen: 20 });
+    const lines = out.split('\n').filter(Boolean);
+    assert.equal(lines.length, 5);
+    assert.ok(lines.every((l) => l.length <= 20));
+  });
+
+  it('returns "" when the binary is absent (ENOENT)', async () => {
+    const out = await streamBoundedSearch('definitely-not-a-real-bin-xyz', ['--version'], TMP);
+    assert.equal(out, '');
+  });
+});
+
+// Local-path parity: searchLocalRaw is the streamed twin of buildSearchScript.
+// These mirror the remote "under bash (real git repo)" suite but drive the LOCAL
+// code path directly — giving the local twin the same coverage the remote one
+// has, including the overflow regression that motivated streaming it.
+describe('searchLocalRaw (local streamed path — parity with remote)', () => {
+  let tmp;
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-sf-local-'));
+    spawnSync('git', ['-c', 'init.defaultBranch=main', 'init', '-q', tmp]);
+    fs.writeFileSync(path.join(tmp, 'app.js'), 'function hello() {\n  return "needle";\n}\n');
+    fs.writeFileSync(path.join(tmp, 'README.md'), '# project\nneedle here\n');
+    // Tracked BINARY file with the needle — must be skipped by -I (NUL = binary).
+    fs.writeFileSync(path.join(tmp, 'pic.png'), Buffer.from('needle\x00binary\xff\xfe\n'));
+    // Untracked text file with the needle — must be skipped (tracked-only).
+    fs.writeFileSync(path.join(tmp, 'untracked.log'), 'needle untracked\n');
+    spawnSync('git', ['-C', tmp, 'add', 'app.js', 'README.md', 'pic.png']);
+    spawnSync('git', ['-C', tmp, 'commit', '-q', '-m', 'init']);
+  });
+
+  it('finds tracked-text-file matches scoped to cwd', async () => {
+    const raw = await searchLocalRaw(tmp, 'needle');
+    const files = parseSearchOutput(raw).map((p) => p.file).sort();
+    assert.ok(files.includes('app.js'), `expected app.js in ${JSON.stringify(files)}`);
+    assert.ok(files.includes('README.md'), `expected README.md in ${JSON.stringify(files)}`);
+  });
+
+  it('excludes untracked files (git grep = tracked only)', async () => {
+    const raw = await searchLocalRaw(tmp, 'needle');
+    const files = parseSearchOutput(raw).map((p) => p.file);
+    assert.ok(!files.includes('untracked.log'), 'untracked file must not appear');
+  });
+
+  it('skips binary files (-I)', async () => {
+    const raw = await searchLocalRaw(tmp, 'needle');
+    const files = parseSearchOutput(raw).map((p) => p.file);
+    assert.ok(!files.includes('pic.png'), 'tracked binary file must be skipped by -I');
+  });
+
+  it('reports the correct line number and text', async () => {
+    const raw = await searchLocalRaw(tmp, 'hello');
+    const hit = parseSearchOutput(raw).find((p) => p.file === 'app.js');
+    assert.ok(hit, 'expected an app.js match');
+    assert.equal(hit.line, 1);
+    assert.match(hit.text, /function hello/);
+  });
+
+  it('has no shell surface locally: a metachar query is a literal argv element', async () => {
+    // Locally the query is passed as a literal arg to git grep (no shell), so
+    // `; echo PWNED` simply doesn't match — it must never execute. Contrast the
+    // remote path, where the same payload is shellQuoted into an SSH string.
+    const raw = await searchLocalRaw(tmp, 'needle; echo PWNED');
+    assert.equal(parseSearchOutput(raw).length, 0);
+    assert.ok(!raw.includes('PWNED'), 'no shell exists locally for the payload to execute in');
+  });
+
+  it('treats the query as a LITERAL substring (-F), not a regex', async () => {
+    fs.writeFileSync(path.join(tmp, 'lit.js'), 'const a.b = 1;\nconst aXb = 2;\n');
+    spawnSync('git', ['-C', tmp, 'add', 'lit.js']);
+    const raw = await searchLocalRaw(tmp, 'a.b');
+    const hits = parseSearchOutput(raw).map((p) => p.text);
+    assert.ok(hits.some((t) => t.includes('a.b')), 'literal a.b must match');
+    assert.ok(!hits.some((t) => t.includes('aXb')), 'regex-style aXb must NOT match under -F');
+  });
+
+  it('returns empty (not an error) for no matches', async () => {
+    const raw = await searchLocalRaw(tmp, 'zzz_no_such_token_zzz');
+    assert.equal(parseSearchOutput(raw).length, 0);
+  });
+
+  // THE REGRESSION: under the old spawnSync+maxBuffer, raw output past the buffer
+  // tripped ENOBUFS and searchLocalRaw returned '' — so a query with many real
+  // matches rendered as "No results found". Streaming bounds at the source, so a
+  // >4MB match set returns its real (30) results instead.
+  it('bounds a >4MB match set at the source (no ENOBUFS masking)', async () => {
+    // 300k matching lines in one tracked file → ~7MB of `file:N:TOKEN` output
+    // (well past the old 4MB spawnSync maxBuffer). Must return exactly 30 results.
+    fs.writeFileSync(path.join(tmp, 'huge.js'), 'BIGTOKEN\n'.repeat(300000));
+    spawnSync('git', ['-C', tmp, 'add', 'huge.js']);
+    const raw = await searchLocalRaw(tmp, 'BIGTOKEN');
+    const out = parseSearchOutput(raw);
+    assert.equal(out.length, 30, `expected 30 bounded results, got ${out.length}`);
+    assert.ok(out.every((r) => r.file === 'huge.js'));
+  });
+
+  it('caps each matched line at the transfer length (huge single line)', async () => {
+    // A committed minified-style single line (5000+ chars) must be truncated at the
+    // source before parsing — proven by checking the raw stdout line length.
+    fs.writeFileSync(path.join(tmp, 'oneline.js'), 'LINEOKEN' + 'x'.repeat(5000) + '\n');
+    spawnSync('git', ['-C', tmp, 'add', 'oneline.js']);
+    const raw = await searchLocalRaw(tmp, 'LINEOKEN');
+    const firstLine = raw.split('\n')[0];
+    assert.ok(firstLine.length <= 1000, `raw line not capped at source: ${firstLine.length}`);
   });
 });
