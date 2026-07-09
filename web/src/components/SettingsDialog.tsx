@@ -15,6 +15,7 @@ import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
 import { type Theme } from '@/lib/theme';
 import { type Density } from '@/lib/density';
+import { type RestoreOnStartup } from '@/lib/storage';
 import { putJson } from '@/lib/api';
 import { toast } from 'sonner';
 
@@ -49,11 +50,16 @@ interface Props {
   // effect. It must never be added to the `config` state / PUT /api/config body.
   density: Density;
   setDensity: (density: Density) => void;
+  // "Restore workspace on startup" is likewise a pure client-side localStorage
+  // pref: it gates App's workspace initializers and is persisted by App's saveUi
+  // effect. It must never be added to the `config` state / PUT /api/config body.
+  restoreOnStartup: RestoreOnStartup;
+  setRestoreOnStartup: (v: RestoreOnStartup) => void;
   terminalFontSize: number;
   setTerminalFontSize: (n: number) => void;
 }
 
-export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme, density, setDensity, terminalFontSize, setTerminalFontSize }: Props) {
+export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme, density, setDensity, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -439,6 +445,22 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme,
                 </select>
                 <p className="text-xs text-muted-foreground">
                   "Compact" tightens row and header spacing so more agents fit on screen. Applies instantly and is remembered across reloads.
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="restoreOnStartup">Restore workspace on startup</Label>
+                <select
+                  id="restoreOnStartup"
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  value={restoreOnStartup}
+                  onChange={(e) => setRestoreOnStartup(e.target.value as RestoreOnStartup)}
+                >
+                  <option value="previous">Reopen previous (default)</option>
+                  <option value="empty">Start empty</option>
+                </select>
+                <p className="text-xs text-muted-foreground">
+                  Reopen the tabs and panes you had open at last close, or start every launch with a clean workspace.
                 </p>
               </div>
             </div>
