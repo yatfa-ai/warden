@@ -21,24 +21,31 @@ interface Props {
   chat?: Chat | null;     // chat metadata for export
   host?: string;          // host hint for restore (which host to discover)
   externalSearchQuery?: string;  // external search trigger from global search
+  fontSize: number;       // global, persisted terminal font size (UiState)
+  onFontSizeChange: (n: number) => void;  // bump the shared global preference
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const searchRef = useRef<SearchAddon | null>(null);
-  const [fontSize, setFontSize] = useState(12);
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [connected, setConnected] = useState(false);
   const [errored, setErrored] = useState(false);
   const [downloading, setDownloading] = useState(false);
 
+  // Defensive clamp: the global font size can briefly fall outside 8–24 while a
+  // user types into the Settings field (coerced on blur). xterm must never receive
+  // an out-of-range size, so bound it at the use site — both the constructor
+  // (mount) and the live [fontSize] effect read this clamped value.
+  const safeFontSize = Math.max(8, Math.min(24, Math.round(fontSize)));
+
   useEffect(() => {
     const term = new Terminal({
       fontFamily: '"Cascadia Code", "JetBrains Mono", "Fira Code", "Symbols Nerd Font", ui-monospace, Menlo, Consolas, monospace',
-      fontSize, convertEol: false, scrollback: 10000, cursorBlink: true,
+      fontSize: safeFontSize, convertEol: false, scrollback: 10000, cursorBlink: true,
       allowProposedApi: true,
     });
     const fit = new FitAddon();
@@ -112,7 +119,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   useEffect(() => { if (focused && hasNew) onClearNew(); }, [focused]);
 
   // font size
-  useEffect(() => { if (termRef.current) { termRef.current.options.fontSize = fontSize; try { fitRef.current?.fit(); } catch {} } }, [fontSize]);
+  useEffect(() => { if (termRef.current) { termRef.current.options.fontSize = safeFontSize; try { fitRef.current?.fit(); } catch {} } }, [safeFontSize]);
 
   // external search trigger from global search
   useEffect(() => {
@@ -198,8 +205,8 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           {downloading ? '⋯' : '⬇'}
         </Btn>
         <Btn title="force-kill tmux session" onClick={onKill}>⏹</Btn>
-        <Btn title="smaller font" onClick={() => setFontSize((f) => Math.max(8, f - 1))}>A−</Btn>
-        <Btn title="bigger font" onClick={() => setFontSize((f) => Math.min(24, f + 1))}>A+</Btn>
+        <Btn title="smaller font" onClick={() => onFontSizeChange(Math.max(8, safeFontSize - 1))}>A−</Btn>
+        <Btn title="bigger font" onClick={() => onFontSizeChange(Math.min(24, safeFontSize + 1))}>A+</Btn>
         <Btn title={maximized ? 'restore' : 'maximize'} onClick={onToggleMax}>{maximized ? '⤡' : '⤢'}</Btn>
         <Btn title="close" onClick={onClose}>×</Btn>
       </div>

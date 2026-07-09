@@ -45,6 +45,7 @@ function App() {
   const [healthCollapsed, setHealthCollapsed] = useState(uiState.healthCollapsed ?? true);
   const [theme, setTheme] = useState<Theme>(() => uiState.theme ?? 'system');
   const [density, setDensity] = useState<Density>(() => uiState.density ?? 'comfortable');
+  const [terminalFontSize, setTerminalFontSize] = useState(() => uiState.terminalFontSize ?? 14);
   const { prefs, reload: reloadNotificationPrefs } = useNotificationPrefs();
   // "Confirm before destructive actions" preference (default on). Gates both
   // destructive kill paths — force-kill (tmux session) and kill chat. Loaded
@@ -127,7 +128,7 @@ function App() {
     applyDensity(density);
   }, [density]);
 
-  useEffect(() => { saveUi({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, theme, density, paneHost }); }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, theme, density, paneHost]);
+  useEffect(() => { saveUi({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, theme, density, paneHost }); }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, theme, density, paneHost]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -559,6 +560,8 @@ function App() {
             externalSearchQuery={externalSearchQuery}
             onToggleSidebar={toggleSidebar}
             onToggleObserver={toggleObserver}
+            fontSize={terminalFontSize}
+            onFontSizeChange={setTerminalFontSize}
           />
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"
@@ -588,6 +591,8 @@ function App() {
         setTheme={setTheme}
         density={density}
         setDensity={setDensity}
+        terminalFontSize={terminalFontSize}
+        setTerminalFontSize={setTerminalFontSize}
       />
       <GlobalSearchDialog
         open={showGlobalSearch}
