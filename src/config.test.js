@@ -62,3 +62,40 @@ describe('config notification preferences', () => {
     assert.strictEqual(cfg.notifyErrors, true, 'other categories unaffected');
   });
 });
+
+describe('config confirm-before-destructive-actions preference', () => {
+  afterEach(() => {
+    mock.restoreAll();
+  });
+
+  it('defaults to ON (true) on first run', () => {
+    // first run — no config file on disk; the footgun fix must apply immediately
+    mock.method(fs, 'readFileSync', () => {
+      throw new Error('ENOENT: config.json does not exist');
+    });
+    const cfg = load();
+    assert.strictEqual(cfg.confirmDestructiveActions, true);
+  });
+
+  it('honors a user opt-out (false) and round-trips through load()', () => {
+    // Simulates a power user disabling confirms in Settings and the app reloading
+    // — the opt-out must persist and read back as false.
+    mock.method(fs, 'readFileSync', () => JSON.stringify({ confirmDestructiveActions: false }));
+    const cfg = load();
+    assert.strictEqual(cfg.confirmDestructiveActions, false);
+  });
+
+  it('falls back to ON when the config file is corrupt', () => {
+    mock.method(fs, 'readFileSync', () => 'not valid json {{{');
+    const cfg = load();
+    assert.strictEqual(cfg.confirmDestructiveActions, true);
+  });
+
+  it('keeps the default ON even when other prefs are overridden', () => {
+    // An existing user who only customizes unrelated prefs must still get the
+    // safe default — no silent regression of the destructive-action guard.
+    mock.method(fs, 'readFileSync', () => JSON.stringify({ pollIntervalMs: 9999 }));
+    const cfg = load();
+    assert.strictEqual(cfg.confirmDestructiveActions, true);
+  });
+});

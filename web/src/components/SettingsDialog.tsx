@@ -25,6 +25,7 @@ interface ConfigData {
   observerConfirmMode: 'always' | 'auto-safe';
   observerAutoStart: boolean;
   observerSessionTimeout: number | null;
+  confirmDestructiveActions: boolean;
   notifyChatOps: boolean;
   notifyErrors: boolean;
   notifySuccess: boolean;
@@ -58,6 +59,7 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme,
     observerConfirmMode: 'always',
     observerAutoStart: false,
     observerSessionTimeout: 30,
+    confirmDestructiveActions: true,
     notifyChatOps: true,
     notifyErrors: true,
     notifySuccess: true,
@@ -91,6 +93,7 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme,
               : 'always',
             observerAutoStart: configData.observerAutoStart || false,
             observerSessionTimeout: configData.observerSessionTimeout ?? 30,
+            confirmDestructiveActions: configData.confirmDestructiveActions ?? true,
             notifyChatOps: configData.notifyChatOps ?? true,
             notifyErrors: configData.notifyErrors ?? true,
             notifySuccess: configData.notifySuccess ?? true,
@@ -304,6 +307,29 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme,
                 />
                 <p className="text-xs text-muted-foreground">
                   Automatically stop Observer after N minutes of inactivity. Leave empty to disable.
+                </p>
+              </div>
+            </div>
+
+            {/* Safety Section — destructive-action confirmation preference */}
+            <div className="flex flex-col gap-3 pt-2 border-t">
+              <div className="text-sm font-medium text-foreground">Safety</div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="confirmDestructiveActions"
+                    checked={config.confirmDestructiveActions}
+                    onCheckedChange={(checked) =>
+                      setConfig({ ...config, confirmDestructiveActions: checked === true })
+                    }
+                  />
+                  <Label htmlFor="confirmDestructiveActions" className="cursor-pointer">
+                    Confirm before destructive actions (force-kill, kill chat)
+                  </Label>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  When on, force-killing a session and killing a chat ask for confirmation. Turn off for less friction.
                 </p>
               </div>
             </div>
