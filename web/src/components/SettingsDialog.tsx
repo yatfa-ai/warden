@@ -48,9 +48,11 @@ interface Props {
   // effect. It must never be added to the `config` state / PUT /api/config body.
   density: Density;
   setDensity: (density: Density) => void;
+  terminalFontSize: number;
+  setTerminalFontSize: (n: number) => void;
 }
 
-export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme, density, setDensity }: Props) {
+export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme, density, setDensity, terminalFontSize, setTerminalFontSize }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -387,9 +389,29 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme,
               </div>
             </div>
 
-            {/* Appearance Section — client-side look preferences (color scheme + density) */}
+            {/* Appearance Section — client-side look preferences (terminal font, color scheme, density) */}
             <div className="flex flex-col gap-3 pt-2 border-t">
               <div className="text-sm font-medium text-foreground">Appearance</div>
+
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="terminalFontSize">Terminal font size</Label>
+                <Input
+                  id="terminalFontSize"
+                  type="number"
+                  min="8"
+                  max="24"
+                  step="1"
+                  value={terminalFontSize}
+                  onChange={(e) => setTerminalFontSize(parseInt(e.target.value, 10) || 14)}
+                  onBlur={(e) => {
+                    const n = parseInt(e.target.value, 10);
+                    setTerminalFontSize(Number.isNaN(n) ? 14 : Math.max(8, Math.min(24, n)));
+                  }}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Applies to all terminal panes (8–24). Use the A− / A+ buttons on any pane to adjust the same value.
+                </p>
+              </div>
 
               <div className="flex flex-col gap-2">
                 <Label htmlFor="theme">Color Scheme</Label>

@@ -13,6 +13,7 @@ export interface UiState {
   healthCollapsed?: boolean;
   sidebarWidth?: number;
   observerWidth?: number;
+  terminalFontSize?: number;
   theme?: 'light' | 'dark' | 'system';
   // UI density: 'comfortable' (default = today's spacing) or 'compact' (tighter
   // rows/headers/gaps so more agents fit per screen). Pure client-side pref.
@@ -35,13 +36,14 @@ export function loadUi(): UiState {
         healthCollapsed: v.healthCollapsed ?? true,
         sidebarWidth: typeof v.sidebarWidth === 'number' ? v.sidebarWidth : 220,
         observerWidth: typeof v.observerWidth === 'number' ? v.observerWidth : 380,
+        terminalFontSize: typeof v.terminalFontSize === 'number' ? v.terminalFontSize : 14,
         theme: v.theme ?? 'system',
         density: v.density === 'compact' ? 'compact' : 'comfortable',
         paneHost: (v.paneHost && typeof v.paneHost === 'object') ? v.paneHost : {},
       };
     }
   } catch { /* ignore */ }
-  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, theme: 'system', density: 'comfortable', paneHost: {} };
+  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14, theme: 'system', density: 'comfortable', paneHost: {} };
 }
 
 export function saveUi(s: UiState) {
