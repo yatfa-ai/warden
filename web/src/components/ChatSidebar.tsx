@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { Popover as RadixPopover } from 'radix-ui';
 import { toast } from 'sonner';
@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { EmptyState } from '@/components/EmptyState';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -151,6 +152,28 @@ const TYPE_COLOR: Record<string, string> = {
   yatfa: 'text-blue-400', manual: 'text-violet-400', '?': 'text-muted-foreground',
 };
 
+// Process + cwd basename label, e.g. "claude · warden". This is the guaranteed fallback
+// that ensures a spawned chat's meaningless random id (chat-xxxxx) is NEVER the label.
+function processCwdLabel(c: Chat): string {
+  const proc = chatType(c);
+  const dir = basename(c.cwd || '');
+  return dir ? `${proc} · ${dir}` : proc;
+}
+
+// Display-name precedence (WARDEN-163):
+//   yatfa agents     → project-role (the container/key name; not user-renameable)
+//   manual/spawned   → user rename > Claude description (carried as `name` on resume)
+//                      > process+cwd basename > internal key
+// The raw chat-xxxxx id is NEVER shown: a fresh spawn has name === key, so it falls
+// through to processCwdLabel. A user rename or a resumed session sets name ≠ key.
+function displayName(c?: Chat): string {
+  if (!c) return '?';
+  if (c.kind === 'yatfa') return c.key || c.id;
+  if (c.name && c.name !== c.key) return c.name;
+  return processCwdLabel(c);
+}
+
+
 function findChat(chats: Chat[], id: string) { return chats.find((c) => (c.key || c.id) === id); }
 
 // Skeleton components for loading states
@@ -189,7 +212,6 @@ function UpdatedAgo({ at }: { at?: number | null }) {
 export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
-  const [showAllChats, setShowAllChats] = useState(false);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
   const [ctx, setCtx] = useState<{ id: string; x: number; y: number; dead: boolean } | null>(null);
@@ -205,10 +227,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [loadingHost, setLoadingHost] = useState<string | null>(null);
   const [allSessions, setAllSessions] = useState<(ClaudeSession & { host: string })[]>([]);
   const [loadingAllSessions, setLoadingAllSessions] = useState(false);
-
-  // Search and filter state for unified sessions view
-  const [sessionSearchQuery, setSessionSearchQuery] = useState('');
-  const [dateRange, setDateRange] = useState<'all' | 'today' | 'yesterday' | 'week' | 'month'>('all');
+  const [browserOpen, setBrowserOpen] = useState(false);
   const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string; files?: GitFile[] }>>({});
   // recent commit history (git log) per chatId — cached so re-expanding the badge is instant
   const [gitLog, setGitLog] = useState<Record<string, GitCommit[]>>({});
@@ -216,42 +235,6 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const { prefs } = useNotificationPrefs();
   const [agentFilter, setAgentFilter] = useState<AgentFilter>('all');
   const [agentSort, setAgentSort] = useState<AgentSort>('manual');
-
-  // Filter sessions based on search query and date range (AND logic).
-  // Date ranges use calendar-day boundaries (since midnight), not rolling time windows.
-  const filteredSessions = (() => {
-    const now = new Date();
-    const todayStart = new Date(now);
-    todayStart.setHours(0, 0, 0, 0);
-
-    const yesterdayStart = new Date(todayStart);
-    yesterdayStart.setDate(yesterdayStart.getDate() - 1);
-
-    const weekStart = new Date(todayStart);
-    weekStart.setDate(weekStart.getDate() - 7);
-
-    const monthStart = new Date(todayStart);
-    monthStart.setDate(monthStart.getDate() - 30);
-
-    const minTime = dateRange === 'today' ? todayStart.getTime() :
-                    dateRange === 'yesterday' ? yesterdayStart.getTime() :
-                    dateRange === 'week' ? weekStart.getTime() :
-                    dateRange === 'month' ? monthStart.getTime() :
-                    0;
-    // "Yesterday" is a day-specific window (the calendar day before today, excluding today).
-    // All other ranges are cumulative "since boundary" windows, so they have no upper bound.
-    const maxTime = dateRange === 'yesterday' ? todayStart.getTime() : Infinity;
-
-    const query = sessionSearchQuery.toLowerCase();
-    return allSessions.filter((s) => {
-      const matchesSearch = !query ||
-        (s.summary || '').toLowerCase().includes(query) ||
-        s.cwd.toLowerCase().includes(query) ||
-        s.id.toLowerCase().includes(query);
-      const matchesDate = s.mtime >= minTime && s.mtime < maxTime;
-      return matchesSearch && matchesDate;
-    });
-  })();
 
   // Native context menu listener — only fires for tab rows, leaves everything else (xterm/tmux) alone.
   useEffect(() => {
@@ -680,7 +663,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     const c = findChat(chats, id);
     if (!c) return false;
     const query = tabSearchQuery.toLowerCase();
-    const name = (c.name || id).toLowerCase();
+    const name = displayName(c).toLowerCase();
     const host = (c.host || '').toLowerCase();
     const type = chatType(c).toLowerCase();
     const matchesSearch = name.includes(query) || host.includes(query) || type.includes(query);
@@ -756,50 +739,36 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             })
             .map((id) => {
             const c = findChat(chats, id);
-            const type = chatType(c);
-            const isOpen = openPanes.has(id);
-            const hostTag = c ? (c.host === THIS_MACHINE ? 'local' : c.host) : '';
-            const dead = !c || c.active === false;
             const originalIdx = activeTabs.indexOf(id);
-            const gitInfo = gitStatus[id];
-            const hasFiles = !dead && gitInfo?.clean === false && gitInfo.files && gitInfo.files.length > 0;
-            const gitCommits = gitLog[id];
-            const gitLoading = gitLogLoading[id];
-            const canDrag = agentSort === 'manual'; // Only allow drag in manual mode
+            // WARDEN-91: drag-reorder is only meaningful in manual sort order; in any
+            // sorted mode the list is derived from compareChats, so we disable drag.
+            const canDrag = agentSort === 'manual';
             return (
-              <div key={id} data-tab-id={id} draggable={canDrag}
-                onDragStart={canDrag ? () => setDragIdx(originalIdx) : undefined}
-                onDragOver={canDrag ? (e) => { e.preventDefault(); setDragOverIdx(originalIdx); } : undefined}
-                onDragEnd={canDrag ? () => { if (dragIdx !== null && dragOverIdx !== null && dragIdx !== dragOverIdx) onReorder(dragIdx, dragOverIdx); setDragIdx(null); setDragOverIdx(null); } : undefined}
-                onDrop={canDrag ? (e) => { e.preventDefault(); if (dragIdx !== null && originalIdx !== dragIdx) onReorder(dragIdx, originalIdx); setDragIdx(null); setDragOverIdx(null); } : undefined}
-                onClick={() => onOpenChat(id)}
-                className={`group flex flex-col gap-0.5 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent ${canDrag ? 'cursor-pointer' : 'cursor-default'} transition-all duration-150 ease-out focus-within:ring-2 focus-within:ring-primary focus-within:ring-offset-2 focus-within:ring-offset-background ${dead ? 'opacity-50' : ''} ${dragOverIdx === originalIdx && dragIdx !== null ? 'border-t-2 border-primary' : ''}`}>
-                <div className="flex items-center gap-2">
-                  <span className={`text-muted-foreground/40 ${canDrag ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'} select-none`}>⠿</span>
-                  {showStatusIndicators !== false && <span className={`size-2 rounded-full shrink-0 ${dead ? 'bg-red-500' : isOpen ? 'bg-green-500' : 'bg-muted-foreground/40'}`} />}
-                  <span className={`truncate flex-1 ${dead ? 'line-through text-muted-foreground' : ''}`}>{c?.name || id}</span>
-                  {!dead && showTypeBadges !== false && <span className={`text-[10px] ${TYPE_COLOR[type] || ''}`}>{type}</span>}
-                  {!dead && showHostTags !== false && hostTag && <span className="text-[10px] text-muted-foreground">{hostTag}</span>}
-                  {!dead && showProjectBadges && c?.project && <span className="text-[10px] text-muted-foreground">{c.project}</span>}
-                  {!dead && gitInfo?.branch && (
-                    <GitBranchBadge
-                      branch={gitInfo.branch}
-                      clean={gitInfo.clean}
-                      commits={gitCommits}
-                      loading={gitLoading}
-                      onFetch={() => fetchGitLog(id)}
-                    />
-                  )}
-                  <IconTooltip label={dead ? 'remove dead tab' : 'remove'}><button className={`px-1 text-sm active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded ${dead ? 'text-red-500 font-bold' : 'opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500'}`} onClick={(e) => { e.stopPropagation(); onRemoveActive(id); }}>×</button></IconTooltip>
-                </div>
-                {hasFiles && gitInfo.files && (
-                  <div className="ml-6 flex flex-col gap-0.5">
-                    {gitInfo.files.map((file, i) => (
-                      <GitChangedFile key={file.path + '-' + i} file={file} />
-                    ))}
-                  </div>
-                )}
-              </div>
+              <OpenedChatRow
+                key={id}
+                id={id}
+                c={c}
+                isOpen={openPanes.has(id)}
+                onOpen={() => onOpenChat(id)}
+                onRemove={() => onRemoveActive(id)}
+                onRename={(session, kind, name) => handleRename(session, kind, name)}
+                renamingChatId={renamingChatId}
+                canDrag={canDrag}
+                showHostTags={showHostTags}
+                showTypeBadges={showTypeBadges}
+                showStatusIndicators={showStatusIndicators}
+                showProjectBadges={showProjectBadges}
+                gitInfo={gitStatus[id]}
+                gitCommits={gitLog[id]}
+                gitLogLoading={gitLogLoading[id]}
+                onFetchGitLog={() => fetchGitLog(id)}
+                originalIdx={originalIdx}
+                dragIdx={dragIdx}
+                dragOverIdx={dragOverIdx}
+                setDragIdx={setDragIdx}
+                setDragOverIdx={setDragOverIdx}
+                onReorder={onReorder}
+              />
             );
           })}
           {sortedTabs.length === 0 && activeTabs.length > 0 && (
@@ -808,57 +777,17 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           {activeTabs.length === 0 && !loading && (
             <EmptyState type="no-tabs" />
           )}
-          {!showAllChats && chats.filter(c => c.active).length > 0 && (
-            <div className="px-2 pt-1 pb-1">
-              <button
-                onClick={() => setShowAllChats(true)}
-                className="text-xs text-blue-400 hover:text-blue-300 active:scale-95 transition-all duration-150 ease-out"
-              >
-                show all active chats →
-              </button>
-            </div>
-          )}
-          {showAllChats && (
-            <>
-              <div className="px-2 pt-1 pb-1 flex items-center gap-2">
-                <span className="text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">active chats</span>
-                <span className="text-[10px] text-muted-foreground">all hosts</span>
-                <button onClick={() => setShowAllChats(false)} className="text-xs text-muted-foreground hover:text-foreground ml-auto active:scale-95 transition-all duration-150 ease-out">✕</button>
-              </div>
-              <div className="flex flex-col gap-0.5">
-                {chats
-                  .filter(c => c.active)
-                  .sort((a, b) => ((b.active ? 1 : 0) - (a.active ? 1 : 0)) || a.id.localeCompare(b.id))
-                  .slice(0, 20)
-                  .map((c) => {
-                    const type = chatType(c);
-                    const hostLabel = c.host === THIS_MACHINE ? 'local' : c.host;
-                    return (
-                      <IconTooltip
-                        key={c.id}
-                        label={
-                          <span className="flex flex-col text-left gap-0.5">
-                            <span className="font-mono">{c.id}</span>
-                            <span className="opacity-70">{c.project || '?'} {c.role || '?'}</span>
-                            <span className="opacity-70">{hostLabel}</span>
-                          </span>
-                        }
-                      >
-                        <button
-                          onClick={() => onOpenChat(c.key || c.id)}
-                          className="flex items-center gap-2 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 cursor-pointer transition-colors"
-                        >
-                          <span className="truncate flex-1">{c.key || c.id}</span>
-                          {showTypeBadges !== false && <span className={`text-[10px] ${TYPE_COLOR[type] || ''}`}>{type}</span>}
-                          {showProjectBadges && c.project && <span className="text-[10px] text-muted-foreground">{c.project}</span>}
-                          {showHostTags !== false && <span className="text-[10px] text-muted-foreground">{hostLabel}</span>}
-                        </button>
-                      </IconTooltip>
-                    );
-                  })}
-              </div>
-            </>
-          )}
+          <div className="px-2 pt-2 pb-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setBrowserOpen(true)}
+              className="w-full justify-start gap-1 text-xs text-blue-400 hover:text-blue-300"
+            >
+              <span>↗</span>
+              <span>Open chat…</span>
+            </Button>
+          </div>
           <div className="mt-3 mb-1 border-t border-border/50" />
           <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">hosts</div>
           <CollectionsSection
@@ -897,86 +826,6 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
               </button>
             );
           })}
-          {allSessions.length > 0 && (
-            <>
-              <div className="mt-3 mb-1 border-t border-border/50" />
-              <div className="flex items-center gap-2 px-2 py-1">
-                <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-cyan-500/80 font-semibold">☁ sessions</div>
-                <div className="flex-1" />
-                <span className="text-[10px] text-muted-foreground">all hosts</span>
-                <button className="text-xs text-muted-foreground hover:text-foreground active:scale-95 transition-all duration-150 ease-out" onClick={() => fetchAllSessions()} disabled={loadingAllSessions}>{loadingAllSessions ? '…' : '↻'}</button>
-              </div>
-              {/* Filter controls */}
-              <div className="flex flex-col gap-1.5 px-2 py-1">
-                <Input
-                  placeholder="Search sessions..."
-                  value={sessionSearchQuery}
-                  onChange={(e) => setSessionSearchQuery(e.target.value)}
-                  className="text-xs"
-                />
-                <div className="flex items-center gap-1 flex-wrap">
-                  {([
-                    { key: 'all', label: 'All' },
-                    { key: 'today', label: 'Today' },
-                    { key: 'yesterday', label: 'Yesterday' },
-                    { key: 'week', label: 'Week' },
-                    { key: 'month', label: 'Month' },
-                  ] as const).map((range) => (
-                    <Button
-                      key={range.key}
-                      size="xs"
-                      variant={dateRange === range.key ? 'secondary' : 'ghost'}
-                      onClick={() => setDateRange(range.key)}
-                    >
-                      {range.label}
-                    </Button>
-                  ))}
-                  {(sessionSearchQuery || dateRange !== 'all') && (
-                    <Button
-                      size="xs"
-                      variant="ghost"
-                      onClick={() => { setSessionSearchQuery(''); setDateRange('all'); }}
-                      className="ml-auto text-destructive"
-                    >
-                      Clear
-                    </Button>
-                  )}
-                </div>
-              </div>
-
-              {/* Filtered sessions */}
-              <div className="flex flex-col gap-0.5">
-                {filteredSessions.length === 0 ? (
-                  <div className="text-xs text-muted-foreground p-3 text-center">
-                    {sessionSearchQuery || dateRange !== 'all'
-                      ? 'No sessions match your filters'
-                      : 'No sessions found'}
-                  </div>
-                ) : (
-                  filteredSessions.slice(0, 15).map((s) => {
-                    const hostLabel = s.host === THIS_MACHINE ? 'local' : s.host;
-                    return (
-                      <IconTooltip
-                        key={s.id}
-                        label={
-                          <span className="flex flex-col text-left gap-0.5">
-                            <span>resume <span className="font-mono">{s.id}</span></span>
-                            <span className="opacity-70">{s.cwd}</span>
-                            <span className="opacity-70">{hostLabel}</span>
-                          </span>
-                        }
-                      >
-                        <button onClick={() => { onResume(s.id, s.summary, s.cwd, s.host); setView({ kind: 'root' }); }} className="flex flex-col gap-0.5 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 transition-colors">
-                          <span className="truncate">{s.summary || <span className="text-muted-foreground">(no summary)</span>}</span>
-                          <span className="text-[10px] text-muted-foreground truncate">{ago(s.mtime)} · {hostLabel} · {basename(s.cwd)}</span>
-                        </button>
-                      </IconTooltip>
-                    );
-                  })
-                )}
-              </div>
-            </>
-          )}
         </div>
       </ScrollArea>
       {ctx && createPortal(
@@ -1006,6 +855,19 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
         onOpenChange={setCreateDialogOpen}
         onCreated={handleCollectionCreated}
         existingCollections={collections}
+      />
+      <OpenChatBrowser
+        open={browserOpen}
+        onOpenChange={setBrowserOpen}
+        hosts={hosts}
+        chats={chats}
+        allSessions={allSessions}
+        loadingAllSessions={loadingAllSessions}
+        onRefreshSessions={fetchAllSessions}
+        onOpenChat={onOpenChat}
+        onResume={onResume}
+        onDiscoverHost={onDiscoverHost}
+        hostStatuses={hostStatuses}
       />
     </div>
   );
@@ -1249,5 +1111,298 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
         </>
       )}
     </div>
+  );
+}
+
+// Host tag for display: (local) → "local", else the host name.
+function hostTagOf(host: string) { return host === THIS_MACHINE ? 'local' : host; }
+
+// A row in the primary "opened chats" list (the user's activeTabs working set).
+// Table-like columns: drag handle · status indicator · display name · last-activity time
+// · type/host/project/git badges · rename · remove. Rename works directly on the row for
+// manual/spawned chats via the ✎ affordance only (single-click the row opens/focuses it;
+// gating rename off double-click avoids the two-fires-before-dblclick open-then-edit jank);
+// yatfa agents are not renameable. Drag-reorder is preserved via the parent-owned
+// dragIdx/dragOverIdx pair.
+function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChatId, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, canDrag, originalIdx, dragIdx, dragOverIdx, setDragIdx, setDragOverIdx, onReorder }: {
+  id: string;
+  c?: Chat;
+  isOpen: boolean;
+  onOpen: () => void;
+  onRemove: () => void;
+  onRename: (session: string, kind: string, name: string) => void;
+  renamingChatId?: string | null;
+  showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
+  gitInfo?: { branch: string | null; clean: boolean | null; files?: GitFile[] };
+  gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
+  canDrag: boolean;
+  originalIdx: number;
+  dragIdx: number | null; dragOverIdx: number | null;
+  setDragIdx: (n: number | null) => void; setDragOverIdx: (n: number | null) => void;
+  onReorder: (from: number, to: number) => void;
+}) {
+  const type = c ? chatType(c) : '?';
+  const hostTag = c ? hostTagOf(c.host) : '';
+  const dead = !c || c.active === false;
+  const canRename = !!c && c.kind === 'tmux';
+  const chatKey = c?.key || c?.id || id;
+  const isRenaming = renamingChatId === chatKey;
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(() => (c ? displayName(c) : id));
+
+  const startEdit = () => { setVal(c ? displayName(c) : id); setEditing(true); };
+  const commit = () => {
+    const v = val.trim();
+    setEditing(false);
+    if (c && v && v !== displayName(c)) onRename(c.key || c.id, c.kind || 'tmux', v);
+  };
+
+  const hasFiles = !dead && gitInfo?.clean === false && gitInfo.files && gitInfo.files.length > 0;
+
+  return (
+    <div
+      data-tab-id={id}
+      draggable={canDrag}
+      onDragStart={canDrag ? () => setDragIdx(originalIdx) : undefined}
+      onDragOver={canDrag ? (e) => { e.preventDefault(); setDragOverIdx(originalIdx); } : undefined}
+      onDragEnd={canDrag ? () => { if (dragIdx !== null && dragOverIdx !== null && dragIdx !== dragOverIdx) onReorder(dragIdx, dragOverIdx); setDragIdx(null); setDragOverIdx(null); } : undefined}
+      onDrop={canDrag ? (e) => { e.preventDefault(); if (dragIdx !== null && originalIdx !== dragIdx) onReorder(dragIdx, originalIdx); setDragIdx(null); setDragOverIdx(null); } : undefined}
+      onClick={() => { if (!editing) onOpen(); }}
+      className={`group flex flex-col gap-0.5 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent ${canDrag ? 'cursor-pointer' : 'cursor-default'} transition-all duration-150 ease-out focus-within:ring-2 focus-within:ring-primary focus-within:ring-offset-2 focus-within:ring-offset-background ${dead ? 'opacity-50' : ''} ${dragOverIdx === originalIdx && dragIdx !== null ? 'border-t-2 border-primary' : ''}`}
+    >
+      <div className="flex items-center gap-2">
+        <span className={`text-muted-foreground/40 ${canDrag ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'} select-none`}>⠿</span>
+        {showStatusIndicators !== false && <span className={`size-2 rounded-full shrink-0 ${dead ? 'bg-red-500' : isOpen ? 'bg-green-500' : 'bg-muted-foreground/40'}`} />}
+        {editing ? (
+          <Input autoFocus value={val} onClick={(e) => e.stopPropagation()} onChange={(e) => setVal(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { setVal(c ? displayName(c) : id); setEditing(false); } }} className="h-5 text-[11px] px-1 flex-1" />
+        ) : (
+          <span className={`truncate flex-1 ${dead ? 'line-through text-muted-foreground' : ''}`}>
+            {c ? displayName(c) : id}
+          </span>
+        )}
+        {!dead && !editing && !!c?.lastActivity && (
+          <span className="text-[10px] text-muted-foreground shrink-0" title={new Date(c.lastActivity).toLocaleString()}>{ago(c.lastActivity)}</span>
+        )}
+        {!dead && !editing && showTypeBadges !== false && <span className={`text-[10px] ${TYPE_COLOR[type] || ''}`}>{type}</span>}
+        {!dead && !editing && showHostTags !== false && hostTag && <span className="text-[10px] text-muted-foreground">{hostTag}</span>}
+        {!dead && !editing && showProjectBadges && c?.project && <span className="text-[10px] text-muted-foreground">{c.project}</span>}
+        {!dead && !editing && gitInfo?.branch && (
+          <GitBranchBadge branch={gitInfo.branch} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} />
+        )}
+        {!editing && canRename && (
+          <IconTooltip label="rename"><Button variant="ghost" size="xs" className="px-1 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); startEdit(); }} disabled={isRenaming} aria-label="rename">{isRenaming ? <Skeleton className="h-3 w-3" /> : '✎'}</Button></IconTooltip>
+        )}
+        <IconTooltip label={dead ? 'remove dead tab' : 'remove'}><button className={`px-1 text-sm active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded ${dead ? 'text-red-500 font-bold' : 'opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500'}`} onClick={(e) => { e.stopPropagation(); onRemove(); }}>×</button></IconTooltip>
+      </div>
+      {hasFiles && gitInfo?.files && (
+        <div className="ml-6 flex flex-col gap-0.5">
+          {gitInfo.files.map((file, i) => (<GitChangedFile key={file.path + '-' + i} file={file} />))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---- "Open chat" discovery browser ----
+// Persisted host multiselect (the user's browsing scope). Stored under its own key so it
+// can't race with App's centralized UiState save. Undefined = first run → default later.
+const DISCOVER_HOSTS_KEY = 'warden:discover-hosts:v1';
+function loadDiscoverHosts(): string[] | undefined {
+  try {
+    const v = JSON.parse(localStorage.getItem(DISCOVER_HOSTS_KEY) || '');
+    if (Array.isArray(v)) return v.filter((h) => typeof h === 'string');
+  } catch { /* ignore */ }
+  return undefined;
+}
+function saveDiscoverHosts(hosts: string[]) {
+  try { localStorage.setItem(DISCOVER_HOSTS_KEY, JSON.stringify(hosts)); } catch { /* ignore */ }
+}
+
+// One normalized row in the merged discovery list.
+interface DiscoverItem {
+  id: string;            // unique list key
+  kind: 'live' | 'history';
+  label: string;         // display name
+  hostTag: string;
+  sub: string;           // secondary line: host · cwd · time
+  time: number;          // recency, for sorting (0 = unknown)
+  openId?: string;       // live: chat key/id to openChat
+  resume?: { id: string; description: string; cwd: string; host: string }; // history: resume params
+}
+
+function DiscoverItemRow({ it, resumingId, onOpen, onResume }: { it: DiscoverItem; resumingId: string | null; onOpen: () => void; onResume: () => void; }) {
+  if (it.kind === 'live') {
+    return (
+      <Button variant="ghost" onClick={onOpen} className="w-full h-auto justify-start gap-2 px-2 py-1.5 text-xs font-normal hover:bg-accent">
+        <span className="size-2 rounded-full shrink-0 bg-green-500" />
+        <span className="truncate flex-1">{it.label}</span>
+        {it.time ? <span className="text-[10px] text-muted-foreground shrink-0">{ago(it.time)}</span> : null}
+        <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span>
+        <span className="text-[10px] text-green-500/80 shrink-0">live</span>
+      </Button>
+    );
+  }
+  const isLoading = resumingId === it.id;
+  return (
+    <div className="group flex items-center gap-2 px-2 py-1.5 rounded-md text-xs hover:bg-accent transition-colors">
+      <span className="size-2 rounded-full shrink-0 bg-cyan-500/50" />
+      <Button variant="ghost" onClick={onResume} disabled={isLoading} className="flex-1 h-auto justify-start px-1 py-0 truncate text-xs font-normal">{it.label}</Button>
+      {it.time ? <span className="text-[10px] text-muted-foreground shrink-0">{ago(it.time)}</span> : null}
+      <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span>
+      <IconTooltip label="bump to live (resume)" disabled={isLoading}>
+        <Button variant="ghost" size="xs" onClick={onResume} disabled={isLoading} className="text-[10px] text-cyan-400 hover:text-cyan-300 px-1 h-auto">
+          {isLoading ? <Skeleton className="h-3 w-6 inline-block" /> : '↻ resume'}
+        </Button>
+      </IconTooltip>
+    </div>
+  );
+}
+
+// Single merged, host-scoped picker. Hosts are multiselect chips (persisted, defaulting to
+// the user's usual hosts). The list dedupes: a Claude history session already running as a
+// live resume-tmux appears once (as a live item), not in both live and history.
+function OpenChatBrowser({ open, onOpenChange, hosts, chats, allSessions, loadingAllSessions, onRefreshSessions, onOpenChat, onResume, onDiscoverHost, hostStatuses }: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  hosts: string[];
+  chats: Chat[];
+  allSessions: (ClaudeSession & { host: string })[];
+  loadingAllSessions: boolean;
+  onRefreshSessions: () => void;
+  onOpenChat: (id: string) => void;
+  onResume: (id: string, description: string, cwd: string, host: string) => void;
+  onDiscoverHost: (host: string) => void;
+  hostStatuses: Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }>;
+}) {
+  const [selected, setSelected] = useState<string[] | undefined>(undefined);
+  const [query, setQuery] = useState('');
+  const [resumingId, setResumingId] = useState<string | null>(null);
+
+  // Load persisted host selection once.
+  useEffect(() => { setSelected(loadDiscoverHosts()); }, []);
+
+  // "usual hosts" = hosts of the user's currently-active chats (their daily scope).
+  const usualHosts = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of chats) if (c.active && c.host) set.add(c.host);
+    return Array.from(set);
+  }, [chats]);
+
+  // Resolved selection: persisted → usual hosts → all hosts.
+  const effective = useMemo(() => {
+    if (selected && selected.length) return selected;
+    return usualHosts.length ? usualHosts : hosts;
+  }, [selected, usualHosts, hosts]);
+
+  // On open: refresh history sessions and discover selected remote hosts so live items
+  // populate. Fire-and-forget — chats update flows back as each host resolves.
+  useEffect(() => {
+    if (!open) return;
+    onRefreshSessions();
+    effective.forEach((h) => { if (h !== THIS_MACHINE) onDiscoverHost(h); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const toggleHost = (h: string) => {
+    setSelected((prev) => {
+      const base = prev && prev.length ? prev : effective;
+      const next = base.includes(h) ? base.filter((x) => x !== h) : [...base, h];
+      saveDiscoverHosts(next);
+      if (!base.includes(h) && h !== THIS_MACHINE) onDiscoverHost(h);
+      return next;
+    });
+  };
+
+  // Build the merged, deduped list. Live tmux sessions first (tracking resume- keys to
+  // dedupe), then Claude history sessions minus those already shown live.
+  const items = useMemo<DiscoverItem[]>(() => {
+    const sel = new Set(effective);
+    const out: DiscoverItem[] = [];
+    const liveResumeSid8 = new Set<string>();
+    for (const c of chats) {
+      if (!sel.has(c.host) || c.active !== true) continue;
+      const key = c.key || c.id;
+      if (key && key.startsWith('resume-')) liveResumeSid8.add(key.slice(7));
+      out.push({
+        id: 'live:' + key, kind: 'live', label: displayName(c),
+        hostTag: hostTagOf(c.host),
+        sub: `${hostTagOf(c.host)}${c.cwd ? ' · ' + basename(c.cwd) : ''}`,
+        time: c.lastActivity || 0, openId: key,
+      });
+    }
+    for (const s of allSessions) {
+      if (!sel.has(s.host)) continue;
+      if (liveResumeSid8.has(s.id.slice(0, 8))) continue; // already shown as live
+      out.push({
+        id: 'hist:' + s.host + ':' + s.id, kind: 'history',
+        label: s.summary || `${basename(s.cwd) || 'session'} · ${hostTagOf(s.host)}`,
+        hostTag: hostTagOf(s.host), sub: `${hostTagOf(s.host)} · ${basename(s.cwd)}`,
+        time: s.mtime, resume: { id: s.id, description: s.summary, cwd: s.cwd, host: s.host },
+      });
+    }
+    out.sort((a, b) => b.time - a.time);
+    return out;
+  }, [effective, chats, allSessions]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return items;
+    return items.filter((it) => it.label.toLowerCase().includes(q) || it.sub.toLowerCase().includes(q));
+  }, [items, query]);
+
+  const handleResume = async (it: DiscoverItem) => {
+    if (!it.resume || resumingId) return;
+    setResumingId(it.id);
+    try { await onResume(it.resume.id, it.resume.description, it.resume.cwd, it.resume.host); onOpenChange(false); }
+    finally { setResumingId(null); }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Open chat</DialogTitle>
+          <DialogDescription>
+            One merged list across your hosts — live tmux sessions and Claude history. Click a live session to open it, or resume a history session into a live tmux.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap gap-1.5">
+            {hosts.map((h) => {
+              const on = effective.includes(h);
+              const st = hostStatuses[h];
+              return (
+                <Button key={h} size="xs" variant={on ? 'secondary' : 'outline'} onClick={() => toggleHost(h)} className="gap-1">
+                  <span className={`size-1.5 rounded-full ${st?.status === 'online' ? 'bg-green-500' : st?.status === 'offline' ? 'bg-red-500' : 'bg-muted-foreground/50'}`} />
+                  {h === THIS_MACHINE ? 'this machine' : h}
+                </Button>
+              );
+            })}
+          </div>
+          <Input placeholder="Search live + history sessions…" value={query} onChange={(e) => setQuery(e.target.value)} className="text-xs" />
+          <ScrollArea className="max-h-80">
+            <div className="flex flex-col gap-0.5 pr-1">
+              {loadingAllSessions && items.length === 0 ? (
+                [1, 2, 3, 4].map((i) => <SessionRowSkeleton key={i} />)
+              ) : filtered.length === 0 ? (
+                <div className="text-xs text-muted-foreground p-4 text-center">
+                  {query ? 'No matches' : effective.length === 0 ? 'Select at least one host' : 'Nothing runnable on the selected hosts yet'}
+                </div>
+              ) : (
+                filtered.map((it) => (
+                  <DiscoverItemRow
+                    key={it.id}
+                    it={it}
+                    resumingId={resumingId}
+                    onOpen={() => { if (it.openId) { onOpenChat(it.openId); onOpenChange(false); } }}
+                    onResume={() => handleResume(it)}
+                  />
+                ))
+              )}
+            </div>
+          </ScrollArea>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
