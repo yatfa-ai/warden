@@ -81,7 +81,11 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
           {results.map((r, idx) => (
             <div
               key={`${r.key}-${idx}`}
+              role="button"
+              tabIndex={0}
+              aria-label={`open search result in ${r.name}`}
               onClick={() => handleResultClick(r)}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleResultClick(r); } }}
               className="mb-2 p-3 bg-muted rounded cursor-pointer hover:bg-muted/80 transition-colors"
             >
               <div className="flex justify-between items-center mb-1">

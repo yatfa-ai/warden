@@ -130,6 +130,24 @@
     }
 
   /*
+   * Global keyboard-focus baseline.
+   *
+   * Every focusable surface gets a consistent themed ring when reached via the
+   * KEYBOARD (:focus-visible only paints for keyboard navigation — a mouse click
+   * that focuses an element does not match, so mouse UX is unchanged). This is the
+   * safety net: per-component `focus-visible:*` utilities (the shadcn ring on
+   * <Button>/<Input>/<Tabs>/…, and the inline `focus-visible:ring-*` on the app's
+   * custom buttons) live in the utilities layer, which sorts AFTER base, so they
+   * override this rule wherever they apply — and any focusable element that lacks
+   * its own styling still falls back to this themed outline. Token-driven, so it
+   * adapts to both light and dark themes. (xterm's terminal keeps its own caret.)
+   */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    }
+
+  /*
    * Global themed scrollbars.
    *
    * Every native-overflow region (activity feed, search results, command-palette

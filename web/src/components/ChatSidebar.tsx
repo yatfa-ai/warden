@@ -1070,8 +1070,13 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
   return (
     <div
       data-chat-key={c.key || c.id}
+      role="button"
+      tabIndex={0}
+      aria-label={`open chat ${c.name || c.key || c.id}`}
+      aria-current={open ? 'true' : undefined}
       onClick={onOpen}
-      className={`group flex items-center gap-2 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent cursor-pointer transition-all duration-150 ease-out focus-within:ring-2 focus-within:ring-primary focus-within:ring-offset-2 focus-within:ring-offset-background ${open ? 'bg-accent' : ''} ${dim ? 'opacity-60' : ''}`}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(); } }}
+      className={`group flex items-center gap-2 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent cursor-pointer transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${open ? 'bg-accent' : ''} ${dim ? 'opacity-60' : ''}`}
     >
       {showStatusIndicators !== false && <span className={`size-2 rounded-full shrink-0 ${open ? 'bg-green-500' : c.active ? 'bg-green-500/50' : 'bg-muted-foreground/40'}`} />}
       {editing ? (
@@ -1111,7 +1116,7 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
       {!editing && onTogglePin && (
         <IconTooltip label={isPinned ? 'unpin' : 'pin'}>
           <button
-            className={`px-0.5 ${isPinned ? 'text-yellow-500' : 'text-muted-foreground hover:text-foreground'} ${isUser ? 'opacity-0 group-hover:opacity-100' : ''} active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded`}
+            className={`px-0.5 ${isPinned ? 'text-yellow-500' : 'text-muted-foreground hover:text-foreground'} ${isUser ? 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100' : ''} active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded`}
             onClick={(e) => { e.stopPropagation(); onTogglePin(); }}
           >
             📌
@@ -1120,11 +1125,11 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
       )}
       {isUser && !editing && (
         <>
-          {onHide && <IconTooltip label="hide"><button className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground px-0.5 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded" onClick={(e) => { e.stopPropagation(); onHide(); }}>▾</button></IconTooltip>}
-          {onUnhide && <IconTooltip label="unhide"><button className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground px-0.5 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded" onClick={(e) => { e.stopPropagation(); onUnhide(); }}>▴</button></IconTooltip>}
+          {onHide && <IconTooltip label="hide"><button className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground px-0.5 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded" onClick={(e) => { e.stopPropagation(); onHide(); }}>▾</button></IconTooltip>}
+          {onUnhide && <IconTooltip label="unhide"><button className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground px-0.5 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded" onClick={(e) => { e.stopPropagation(); onUnhide(); }}>▴</button></IconTooltip>}
           <IconTooltip label="kill + forget" disabled={isKilling || isRenaming}>
             <button
-              className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500 px-0.5 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded"
+              className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-red-500 px-0.5 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded"
               onClick={(e) => { e.stopPropagation(); onKill(); }}
               disabled={isKilling || isRenaming}
             >
@@ -1185,13 +1190,18 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChat
   return (
     <div
       data-tab-id={id}
+      role="button"
+      tabIndex={0}
+      aria-label={`open tab ${c ? displayName(c) : id}`}
+      aria-current={isOpen ? 'true' : undefined}
       draggable={canDrag}
       onDragStart={canDrag ? () => setDragIdx(originalIdx) : undefined}
       onDragOver={canDrag ? (e) => { e.preventDefault(); setDragOverIdx(originalIdx); } : undefined}
       onDragEnd={canDrag ? () => { if (dragIdx !== null && dragOverIdx !== null && dragIdx !== dragOverIdx) onReorder(dragIdx, dragOverIdx); setDragIdx(null); setDragOverIdx(null); } : undefined}
       onDrop={canDrag ? (e) => { e.preventDefault(); if (dragIdx !== null && originalIdx !== dragIdx) onReorder(dragIdx, originalIdx); setDragIdx(null); setDragOverIdx(null); } : undefined}
       onClick={() => { if (!editing) onOpen(); }}
-      className={`group flex flex-col gap-0.5 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent ${canDrag ? 'cursor-pointer' : 'cursor-default'} transition-all duration-150 ease-out focus-within:ring-2 focus-within:ring-primary focus-within:ring-offset-2 focus-within:ring-offset-background ${dead ? 'opacity-50' : ''} ${dragOverIdx === originalIdx && dragIdx !== null ? 'border-t-2 border-primary' : ''}`}
+      onKeyDown={(e) => { if (!editing && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onOpen(); } }}
+      className={`group flex flex-col gap-0.5 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent ${canDrag ? 'cursor-pointer' : 'cursor-default'} transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${dead ? 'opacity-50' : ''} ${dragOverIdx === originalIdx && dragIdx !== null ? 'border-t-2 border-primary' : ''}`}
     >
       <div className="flex items-center gap-2">
         <span className={`text-muted-foreground/40 ${canDrag ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'} select-none`}>⠿</span>
@@ -1213,9 +1223,9 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChat
           <GitBranchBadge branch={gitInfo.branch} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} ahead={gitInfo.ahead} behind={gitInfo.behind} />
         )}
         {!editing && canRename && (
-          <IconTooltip label="rename"><Button variant="ghost" size="xs" className="px-1 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); startEdit(); }} disabled={isRenaming} aria-label="rename">{isRenaming ? <Skeleton className="h-3 w-3" /> : '✎'}</Button></IconTooltip>
+          <IconTooltip label="rename"><Button variant="ghost" size="xs" className="px-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); startEdit(); }} disabled={isRenaming} aria-label="rename">{isRenaming ? <Skeleton className="h-3 w-3" /> : '✎'}</Button></IconTooltip>
         )}
-        <IconTooltip label={dead ? 'remove dead tab' : 'remove'}><button className={`px-1 text-sm active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded ${dead ? 'text-red-500 font-bold' : 'opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500'}`} onClick={(e) => { e.stopPropagation(); onRemove(); }}>×</button></IconTooltip>
+        <IconTooltip label={dead ? 'remove dead tab' : 'remove'}><button className={`px-1 text-sm active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded ${dead ? 'text-red-500 font-bold' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-red-500'}`} onClick={(e) => { e.stopPropagation(); onRemove(); }}>×</button></IconTooltip>
       </div>
       {hasFiles && gitInfo?.files && (
         <div className="ml-6 flex flex-col gap-0.5">

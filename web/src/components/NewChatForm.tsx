@@ -54,7 +54,7 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
   };
 
   if (!open) {
-    return <IconTooltip label="new chat"><button onClick={() => setOpen(true)} className="text-xs text-muted-foreground hover:text-foreground px-2 py-0.5 active:scale-95 transition-all duration-150 ease-out">＋ new</button></IconTooltip>;
+    return <IconTooltip label="new chat"><button onClick={() => setOpen(true)} className="text-xs text-muted-foreground hover:text-foreground px-2 py-0.5 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded">＋ new</button></IconTooltip>;
   }
 
   return (
