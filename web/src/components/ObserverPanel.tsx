@@ -4,6 +4,15 @@ import type { ChatContextMeta, ObserveMsg } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Textarea } from '@/components/ui/textarea';
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { EmptyState } from '@/components/EmptyState';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 
@@ -29,6 +38,12 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [loadingTimeout, setLoadingTimeout] = useState(false);
   const [chatContext, setChatContext] = useState<ChatContextMeta | null>(null);
+  // Styled replacement for the native directive-edit prompt. The
+  // value/requestId persist while `open` toggles so the textarea doesn't flash
+  // empty during the dialog's close animation. Cancel (close) must NOT call
+  // `decide`; only the submit button does — matching the old semantics where
+  // OK-with-empty sent `decide(..., true, '')`.
+  const [editState, setEditState] = useState<{ open: boolean; requestId: string; value: string }>({ open: false, requestId: '', value: '' });
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -216,7 +231,7 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
                 ) : (
                   <div className="flex gap-1.5 mt-2">
                     <Button size="sm" className="h-7" onClick={() => decide(it.requestId, true)}>approve &amp; send</Button>
-                    <Button size="sm" variant="outline" className="h-7" onClick={() => { const v = prompt('edit directive:', it.directive); if (v != null) decide(it.requestId, true, v); }}>edit</Button>
+                    <Button size="sm" variant="outline" className="h-7" onClick={() => setEditState({ open: true, requestId: it.requestId, value: it.directive })}>edit</Button>
                     <Button size="sm" variant="ghost" className="h-7" onClick={() => decide(it.requestId, false)}>decline</Button>
                   </div>
                 )}
@@ -271,6 +286,34 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
           }}
         >send</Button>
       </div>
+      <Dialog open={editState.open} onOpenChange={(o) => setEditState((s) => ({ ...s, open: o }))}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit directive</DialogTitle>
+            <DialogDescription>Edit the proposed directive before approving and sending.</DialogDescription>
+          </DialogHeader>
+          <Textarea
+            value={editState.value}
+            onChange={(e) => setEditState((s) => ({ ...s, value: e.target.value }))}
+            rows={6}
+            className="resize-y"
+            autoFocus
+          />
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline">Cancel</Button>
+            </DialogClose>
+            <Button
+              onClick={() => {
+                decide(editState.requestId, true, editState.value);
+                setEditState((s) => ({ ...s, open: false }));
+              }}
+            >
+              Approve &amp; send
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

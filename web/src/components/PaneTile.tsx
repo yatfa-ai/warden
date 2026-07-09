@@ -5,6 +5,7 @@ import { SearchAddon } from '@xterm/addon-search';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { streamApi } from '@/lib/stream';
 import type { Chat } from '@/lib/types';
+import { toast } from 'sonner';
 
 interface Props {
   id: string;
@@ -170,7 +171,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       URL.revokeObjectURL(url);
     } catch (err) {
       console.error('Download failed:', err);
-      alert('Failed to download pane content');
+      toast.error('Failed to download pane content');
     } finally {
       setDownloading(false);
     }

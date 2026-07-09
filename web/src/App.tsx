@@ -10,6 +10,7 @@ import { ObserverTabs } from '@/components/ObserverTabs';
 import { SettingsDialog } from '@/components/SettingsDialog';
 import { GlobalSearchDialog } from '@/components/GlobalSearchDialog';
 import { HealthDashboard } from '@/components/HealthDashboard';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { toast } from 'sonner';
 
@@ -256,8 +257,17 @@ function App() {
     }
   }, [prefs.notifyChatOps]);
 
-  const killChat = useCallback(async (id: string) => {
-    if (!window.confirm('kill this chat and forget it?')) return;
+  // Kill-chat confirmation. The native `window.confirm` guard is replaced by a
+  // controlled ConfirmDialog. `requestKill` opens the dialog and returns a
+  // promise that resolves only once the flow finishes (confirm+fetch OR
+  // cancel). ChatSidebar's `handleKill` wraps `await onKill(id)` in a
+  // `killingChatId` loading/disabled state — keeping that promise pending
+  // across the dialog and the fetch preserves the spinner + double-click guard
+  // exactly as the old blocking confirm did.
+  const [killTarget, setKillTarget] = useState<string | null>(null);
+  const killResolveRef = useRef<(() => void) | null>(null);
+
+  const performKill = useCallback(async (id: string) => {
     try {
       const r = await fetch('/api/kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) });
       if (!r.ok) {
@@ -271,6 +281,28 @@ function App() {
       if (prefs.notifyChatOps) toast.error(`Failed to kill chat: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, [refresh, removeActive, prefs.notifyChatOps]);
+
+  const requestKill = useCallback((id: string) => {
+    setKillTarget(id);
+    return new Promise<void>((resolve) => { killResolveRef.current = resolve; });
+  }, []);
+
+  const confirmKill = useCallback(() => {
+    const id = killTarget;
+    setKillTarget(null);
+    if (id) {
+      void performKill(id).finally(() => {
+        killResolveRef.current?.();
+        killResolveRef.current = null;
+      });
+    }
+  }, [killTarget, performKill]);
+
+  const cancelKill = useCallback(() => {
+    setKillTarget(null);
+    killResolveRef.current?.();
+    killResolveRef.current = null;
+  }, []);
 
   const resumeSession = useCallback(async (id: string, description: string, cwd: string, host: string) => {
     try {
@@ -451,7 +483,7 @@ function App() {
               onReorder={reorderTabs}
               onHideTab={hideTab}
               onUnhideTab={unhideTab}
-              onKill={killChat}
+              onKill={requestKill}
               onRename={renameChat}
               onResume={resumeSession}
               onRefresh={refresh}
@@ -513,6 +545,16 @@ function App() {
         openPanes={openPanes}
         onFocusPane={handleFocusPane}
         onJumpToMatch={handleJumpToMatch}
+      />
+      <ConfirmDialog
+        open={killTarget !== null}
+        onOpenChange={(o) => { if (!o) cancelKill(); }}
+        title="Kill chat?"
+        description="kill this chat and forget it?"
+        confirmLabel="Kill"
+        cancelLabel="Cancel"
+        destructive
+        onConfirm={confirmKill}
       />
     </div>
   );

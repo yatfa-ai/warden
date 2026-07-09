@@ -14,6 +14,7 @@ import { Switch } from '@/components/ui/switch';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
 import { type Theme } from '@/lib/theme';
+import { toast } from 'sonner';
 
 interface ConfigData {
   hosts: string[];
@@ -98,7 +99,7 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
         })
         .catch((err) => {
           console.error('Failed to load config:', err);
-          alert('Failed to load configuration');
+          toast.error('Failed to load configuration');
         })
         .finally(() => setLoading(false));
     }
@@ -130,7 +131,7 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
       onClose();
     } catch (err) {
       console.error('Failed to save config:', err);
-      alert(err instanceof Error ? err.message : 'Failed to save configuration');
+      toast.error(err instanceof Error ? err.message : 'Failed to save configuration');
     } finally {
       setSaving(false);
     }
