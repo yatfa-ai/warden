@@ -30,11 +30,13 @@ interface Props {
   onOpenChat: (id: string) => void;
   onForceKill: (id: string) => void;
   externalSearchQuery?: { paneId: string; query: string } | null;
+  onToggleSidebar?: () => void;
+  onToggleObserver?: () => void;
 }
 
 function colsFor(n: number) { return n <= 1 ? 1 : Math.ceil(Math.sqrt(n)); }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onOpenChat, onForceKill, externalSearchQuery }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onOpenChat, onForceKill, externalSearchQuery, onToggleSidebar, onToggleObserver }: Props) {
   const [splitOpen, setSplitOpen] = useState(false);
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
@@ -80,26 +82,73 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
     setFilePromptOpen(true); // Open the path-entry Dialog
   };
 
-  // keyboard shortcuts: Alt+←/→ switch panes, Ctrl+W close
+  // keyboard shortcuts: pane navigation, actions, and panel toggles
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.altKey && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')) {
-        if (!tiles.length) return;
+      // Panel toggles first — they don't depend on tiles, so they must run before
+      // the zero-panes guard below. PaneGrid is always mounted (even with 0 open
+      // panes), and these shortcuts are advertised in PRODUCT.md unconditionally.
+      if (e.altKey && e.code === 'KeyS') {
         e.preventDefault();
-        const ids = tiles.map((t) => t.id);
-        const idx = focused ? ids.indexOf(focused) : -1;
+        onToggleSidebar?.();
+      }
+      if (e.altKey && e.code === 'KeyO') {
+        e.preventDefault();
+        onToggleObserver?.();
+      }
+
+      if (!tiles.length) return;
+      const ids = tiles.map((t) => t.id);
+      const idx = focused ? ids.indexOf(focused) : -1;
+
+      // Pane navigation: Alt+←/→ or Ctrl+Tab/Shift+Tab
+      if (e.altKey && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')) {
+        e.preventDefault();
         const dir = e.code === 'ArrowRight' ? 1 : -1;
         const next = ids[(idx + dir + ids.length) % ids.length];
         if (next) onFocus(next);
       }
+
+      // Pane navigation: Ctrl+Tab/Shift+Tab cycle forward/backward
+      if (e.ctrlKey && e.code === 'Tab' && !e.shiftKey) {
+        e.preventDefault();
+        const next = ids[(idx + 1) % ids.length];
+        if (next) onFocus(next);
+      }
+      if (e.ctrlKey && e.code === 'Tab' && e.shiftKey) {
+        e.preventDefault();
+        const next = ids[(idx - 1 + ids.length) % ids.length];
+        if (next) onFocus(next);
+      }
+
+      // Direct pane jumping: Alt+1-9 for indexed, Alt+0 for last
+      if (e.altKey && e.code >= 'Digit1' && e.code <= 'Digit9') {
+        e.preventDefault();
+        const num = parseInt(e.code.slice(5), 10); // Extract number from 'DigitN'
+        if (num <= ids.length) onFocus(ids[num - 1]);
+      }
+      if (e.altKey && e.code === 'Digit0') {
+        e.preventDefault();
+        onFocus(ids[ids.length - 1]); // Jump to last pane
+      }
+
+      // Pane actions: Ctrl+W close, Alt+Enter maximize, Alt+Escape restore
       if (e.ctrlKey && e.code === 'KeyW' && focused) {
         e.preventDefault();
         onClose(focused);
       }
+      if (e.altKey && e.code === 'Enter' && focused) {
+        e.preventDefault();
+        onToggleMax(focused);
+      }
+      if (e.altKey && e.code === 'Escape') {
+        e.preventDefault();
+        if (maximized) onToggleMax(maximized); // Exit maximize mode
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [tiles, focused, onFocus, onClose]);
+  }, [tiles, focused, maximized, onFocus, onClose, onToggleMax, onToggleSidebar, onToggleObserver]);
 
   // Focus the path input when the entry Dialog opens — React-controlled via ref,
   // not a DOM query (WARDEN-68 Rule 4). Radix's own open-auto-focus is disabled

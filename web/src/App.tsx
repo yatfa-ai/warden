@@ -246,6 +246,11 @@ function App() {
     setHiddenTabs((p) => p.filter((x) => x !== id));
   }, []);
   const toggleMax = useCallback((id: string) => setMaximized((m) => (m === id ? null : id)), []);
+  // Stable toggles for keyboard shortcuts: useCallback with functional updates gives
+  // them empty deps and a stable identity, so PaneGrid's keydown effect doesn't
+  // tear down/re-subscribe on every App render (matching every other PaneGrid handler).
+  const toggleSidebar = useCallback(() => setSidebarCollapsed((c) => !c), []);
+  const toggleObserver = useCallback(() => setObserverCollapsed((c) => !c), []);
   const clearNew = useCallback((id: string) => setNewActivity((prev) => { if (!prev.has(id)) return prev; const n = new Set(prev); n.delete(id); return n; }), []);
 
   // Force-kill confirmation. The ⏹ force-kill button sits directly beside
@@ -552,6 +557,8 @@ function App() {
             onOpenChat={openChat}
             onForceKill={forceKill}
             externalSearchQuery={externalSearchQuery}
+            onToggleSidebar={toggleSidebar}
+            onToggleObserver={toggleObserver}
           />
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"
