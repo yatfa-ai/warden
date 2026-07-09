@@ -14,6 +14,23 @@ import type { Chat, Collection } from '@/lib/types';
 
 export interface ClaudeSession { id: string; cwd: string; summary: string; mtime: number }
 
+export interface GitFile { path: string; status: string }
+
+/** A single changed-file row: status indicator (M/A/D/??) + truncated path. */
+function GitChangedFile({ file }: { file: GitFile }) {
+  const color =
+    file.status === 'M' ? 'text-yellow-400' :
+    file.status === 'A' ? 'text-green-400' :
+    file.status === 'D' ? 'text-red-400' :
+    'text-gray-400';
+  return (
+    <div className="flex items-center gap-1 text-[9px] text-muted-foreground">
+      <span className={color}>{file.status}</span>
+      <span className="truncate">{file.path}</span>
+    </div>
+  );
+}
+
 interface Props {
   chats: Chat[];
   sshHosts: string[];
@@ -103,7 +120,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [loadingHost, setLoadingHost] = useState<string | null>(null);
   const [allSessions, setAllSessions] = useState<(ClaudeSession & { host: string })[]>([]);
   const [loadingAllSessions, setLoadingAllSessions] = useState(false);
-  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string; files?: Array<{ path: string; status: string }> }>>({});
+  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string; files?: GitFile[] }>>({});
   const { prefs } = useNotificationPrefs();
 
   // Native context menu listener — only fires for tab rows, leaves everything else (xterm/tmux) alone.
@@ -568,15 +585,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                 {hasFiles && gitInfo.files && (
                   <div className="ml-6 flex flex-col gap-0.5">
                     {gitInfo.files.map((file, i) => (
-                      <div key={i} className="flex items-center gap-1 text-[9px] text-muted-foreground">
-                        <span className={
-                          file.status === 'M' ? 'text-yellow-400' :
-                          file.status === 'A' ? 'text-green-400' :
-                          file.status === 'D' ? 'text-red-400' :
-                          'text-gray-400'
-                        }>{file.status}</span>
-                        <span className="truncate">{file.path}</span>
-                      </div>
+                      <GitChangedFile key={file.path + '-' + i} file={file} />
                     ))}
                   </div>
                 )}
@@ -737,7 +746,7 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
   c: Chat; open: boolean; onOpen: () => void; onKill: () => void;
   onRename: (session: string, kind: string, name: string) => void;
   onHide?: () => void; onUnhide?: () => void; dim?: boolean;
-  gitInfo?: { branch: string | null; clean: boolean | null; files?: Array<{ path: string; status: string }> };
+  gitInfo?: { branch: string | null; clean: boolean | null; files?: GitFile[] };
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
   killingChatId?: string | null; renamingChatId?: string | null;
   isPinned?: boolean; onTogglePin?: () => void;
@@ -791,15 +800,7 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
           {gitInfo?.clean === false && gitInfo.files && gitInfo.files.length > 0 && (
             <div className="ml-1 mt-0.5 flex flex-col gap-0.5">
               {gitInfo.files.map((file, i) => (
-                <div key={i} className="flex items-center gap-1 text-[9px] text-muted-foreground">
-                  <span className={
-                    file.status === 'M' ? 'text-yellow-400' :
-                    file.status === 'A' ? 'text-green-400' :
-                    file.status === 'D' ? 'text-red-400' :
-                    'text-gray-400'
-                  }>{file.status}</span>
-                  <span className="truncate">{file.path}</span>
-                </div>
+                <GitChangedFile key={file.path + '-' + i} file={file} />
               ))}
             </div>
           )}
