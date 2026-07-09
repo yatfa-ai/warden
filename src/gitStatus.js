@@ -44,3 +44,38 @@ export function parseGitStatusPorcelain(output) {
     })
     .filter((f) => f.path.length > 0);
 }
+
+/**
+ * Parse `git rev-list --left-right --count @{u}...HEAD` output into
+ * `{ ahead, behind }`.
+ *
+ * For the symmetric difference `@{u}...HEAD` (upstream ... HEAD), git prints
+ * two tab-separated counts:
+ *
+ *   `<behind>\t<ahead>`
+ *
+ * The LEFT count is commits reachable from `@{u}` but not `HEAD` — commits the
+ * upstream has that we don't (= behind / remote is ahead of us). The RIGHT
+ * count is commits reachable from `HEAD` but not `@{u}` — local commits not yet
+ * pushed (= ahead / unpushed). So `"0\t3"` means "0 behind, 3 ahead" (3
+ * unpushed commits), and `"2\t0"` means "2 behind, 0 ahead".
+ *
+ * When there is no upstream (detached HEAD, an untracked branch, or a non-git
+ * cwd) git exits non-zero with empty stdout. We surface that — and any other
+ * malformed/garbage output — as `{ ahead: null, behind: null }` rather than
+ * throwing, mirroring `parseGitStatusPorcelain`'s tolerance of missing/empty
+ * input (see WARDEN-153).
+ *
+ * @param {string|Buffer|undefined} output - Raw stdout from the rev-list command.
+ * @returns {{ ahead: number | null, behind: number | null }}
+ */
+export function parseAheadBehind(output) {
+  const raw = (output ?? '').toString().trim();
+  if (!raw) return { ahead: null, behind: null };
+  const parts = raw.split('\t');
+  if (parts.length !== 2) return { ahead: null, behind: null };
+  const behind = parseInt(parts[0], 10);
+  const ahead = parseInt(parts[1], 10);
+  if (Number.isNaN(behind) || Number.isNaN(ahead)) return { ahead: null, behind: null };
+  return { ahead, behind };
+}

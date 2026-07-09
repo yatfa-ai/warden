@@ -21,7 +21,7 @@ import { listSessions, createSession, renameSession, deleteSession } from './ses
 import { appendEvent, rotateEvents, readEvents, getStatsSince } from './activity.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { checkHost } from './hostStatus.js';
-import { parseGitStatusPorcelain } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind } from './gitStatus.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = load();
@@ -541,11 +541,13 @@ app.get('/api/git-status', async (req, res) => {
 
   try {
     const cwd = chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
-    if (!cwd) return res.json({ branch: null, clean: null, cwd: '', error: 'no cwd' });
+    if (!cwd) return res.json({ branch: null, clean: null, cwd: '', ahead: null, behind: null, files: null, error: 'no cwd' });
 
     let branch = '';
     let clean = true;
     let files = [];
+    let ahead = null;
+    let behind = null;
 
     if (chat.host === LOCAL) {
       // Local execution: use spawnSync directly
@@ -559,10 +561,20 @@ app.get('/api/git-status', async (req, res) => {
       // whole or the first file's path is corrupted. See parseGitStatusPorcelain.
       files = parseGitStatusPorcelain(statusRaw);
       clean = files.length === 0;
+
+      // ahead/behind upstream: @{u}...HEAD symmetric diff. Non-zero exit (no
+      // upstream, detached HEAD, non-git cwd) → empty stdout → nulls. Mirrors
+      // the branch call's spawnSync shape. See parseAheadBehind.
+      const abResult = runLocalGit(['rev-list', '--left-right', '--count', '@{u}...HEAD'], cwd);
+      ({ ahead, behind } = parseAheadBehind(abResult.stdout?.toString() || ''));
     } else {
       // Remote execution: use SSH
       const gitBranchCmd = `cd ${shellQuote(cwd)} && git rev-parse --abbrev-ref HEAD 2>/dev/null`;
       const gitStatusCmd = `cd ${shellQuote(cwd)} && git status --porcelain 2>/dev/null`;
+      // The @{u}...HEAD rev spec is a constant, but we shellQuote it anyway:
+      // '{' / '}' risk brace expansion in some shells, and this is consistent
+      // with how git-log quotes its --pretty constant (WARDEN-122 quoting lesson).
+      const gitAheadBehindCmd = `cd ${shellQuote(cwd)} && git rev-list --left-right --count ${shellQuote('@{u}...HEAD')} 2>/dev/null`;
 
       const r1 = await run(chat.host, gitBranchCmd, { timeout: 8000 });
       branch = r1.ok ? r1.stdout.trim() : '';
@@ -574,17 +586,22 @@ app.get('/api/git-status', async (req, res) => {
       // whole or the first file's path is corrupted. See parseGitStatusPorcelain.
       files = parseGitStatusPorcelain(statusRaw);
       clean = files.length === 0;
+
+      const r3 = await run(chat.host, gitAheadBehindCmd, { timeout: 8000 });
+      ({ ahead, behind } = parseAheadBehind(r3.ok ? (r3.stdout || '') : ''));
     }
 
     res.json({
       branch: branch || null,
       clean: branch ? clean : null,
       cwd,
+      ahead: branch ? ahead : null,
+      behind: branch ? behind : null,
       files: branch ? files : null,
       error: null,
     });
   } catch (e) {
-    res.json({ branch: null, clean: null, cwd: chat.cwd || '', files: null, error: e.message });
+    res.json({ branch: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, files: null, error: e.message });
   }
 });
 

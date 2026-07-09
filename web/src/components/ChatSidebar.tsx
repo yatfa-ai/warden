@@ -228,7 +228,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [allSessions, setAllSessions] = useState<(ClaudeSession & { host: string })[]>([]);
   const [loadingAllSessions, setLoadingAllSessions] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
-  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string; files?: GitFile[] }>>({});
+  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string; files?: GitFile[]; ahead?: number | null; behind?: number | null }>>({});
   // recent commit history (git log) per chatId — cached so re-expanding the badge is instant
   const [gitLog, setGitLog] = useState<Record<string, GitCommit[]>>({});
   const [gitLogLoading, setGitLogLoading] = useState<Record<string, boolean>>({});
@@ -280,7 +280,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       const r = await fetch(`/api/git-status?id=${encodeURIComponent(chatId)}`);
       const j = await r.json();
       if (j.branch) {
-        setGitStatus((p) => ({ ...p, [chatId]: { branch: j.branch, clean: j.clean, cwd: j.cwd, files: j.files } }));
+        setGitStatus((p) => ({ ...p, [chatId]: { branch: j.branch, clean: j.clean, cwd: j.cwd, files: j.files, ahead: j.ahead, behind: j.behind } }));
       }
     } catch (error) {
       // Git status is non-critical, so just log it without showing a toast
@@ -952,14 +952,22 @@ function CtxItem({ label, onClick, danger, isLoading }: { label: string; onClick
 // to document.body via Radix Popover so it isn't clipped by the `truncate` name span
 // this badge sits inside (in ChatRow). stopPropagation on clicks keeps it from also
 // opening the chat pane (mirrors the other inline buttons in these rows).
-function GitBranchBadge({ branch, clean, commits, loading, onFetch, className }: {
+function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, className }: {
   branch: string;
   clean: boolean | null;
   commits?: GitCommit[];
   loading?: boolean;
   onFetch?: () => void;
+  ahead?: number | null;
+  behind?: number | null;
   className?: string;
 }) {
+  const aheadCount = typeof ahead === 'number' ? ahead : 0;
+  const behindCount = typeof behind === 'number' ? behind : 0;
+  const titleParts = [branch];
+  if (clean === false) titleParts.push('uncommitted changes');
+  if (aheadCount > 0) titleParts.push(`${aheadCount} unpushed`);
+  if (behindCount > 0) titleParts.push(`${behindCount} behind remote`);
   return (
     <RadixPopover.Root onOpenChange={(open) => { if (open && commits === undefined && !loading) onFetch?.(); }}>
       <RadixPopover.Trigger asChild>
@@ -967,10 +975,12 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, className }:
           type="button"
           onClick={(e) => e.stopPropagation()}
           className={cn('inline-flex items-center gap-0.5 text-[10px] text-cyan-400 hover:text-cyan-300 cursor-pointer', className)}
-          title={`${branch}${clean === false ? ' (uncommitted changes)' : ''} — click for recent commits`}
+          title={`${titleParts.join(' · ')} — click for recent commits`}
         >
           {branch}
           {clean === false && <span className="text-yellow-400">±</span>}
+          {aheadCount > 0 && <span className="text-amber-400">↑{aheadCount}</span>}
+          {behindCount > 0 && <span className="text-blue-400">↓{behindCount}</span>}
         </button>
       </RadixPopover.Trigger>
       <RadixPopover.Portal>
@@ -981,7 +991,10 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, className }:
           className="z-50 min-w-64 max-w-80 rounded-md border border-border bg-popover p-1.5 text-popover-foreground shadow-lg outline-none data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0"
         >
           <div className="mb-1 flex items-center justify-between gap-2 px-0.5">
-            <span className="truncate text-[10px] font-medium text-muted-foreground">recent commits · {branch}</span>
+            <span className="truncate text-[10px] font-medium text-muted-foreground">
+              recent commits · {branch}
+              {aheadCount > 0 && <span className="text-amber-400"> · ↑ {aheadCount} unpushed</span>}
+            </span>
             <IconTooltip label="refresh" disabled={loading}>
               <button
                 type="button"
@@ -1020,7 +1033,7 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
   c: Chat; open: boolean; onOpen: () => void; onKill: () => void;
   onRename: (session: string, kind: string, name: string) => void;
   onHide?: () => void; onUnhide?: () => void; dim?: boolean;
-  gitInfo?: { branch: string | null; clean: boolean | null; files?: GitFile[] };
+  gitInfo?: { branch: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null };
   gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
   killingChatId?: string | null; renamingChatId?: string | null;
@@ -1071,6 +1084,8 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
                   commits={gitCommits}
                   loading={gitLogLoading}
                   onFetch={onFetchGitLog}
+                  ahead={gitInfo.ahead}
+                  behind={gitInfo.behind}
                   className="ml-1"
                 />
               )}
@@ -1133,7 +1148,7 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChat
   onRename: (session: string, kind: string, name: string) => void;
   renamingChatId?: string | null;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
-  gitInfo?: { branch: string | null; clean: boolean | null; files?: GitFile[] };
+  gitInfo?: { branch: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null };
   gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
   canDrag: boolean;
   originalIdx: number;
@@ -1187,7 +1202,7 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChat
         {!dead && !editing && showHostTags !== false && hostTag && <span className="text-[10px] text-muted-foreground">{hostTag}</span>}
         {!dead && !editing && showProjectBadges && c?.project && <span className="text-[10px] text-muted-foreground">{c.project}</span>}
         {!dead && !editing && gitInfo?.branch && (
-          <GitBranchBadge branch={gitInfo.branch} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} />
+          <GitBranchBadge branch={gitInfo.branch} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} ahead={gitInfo.ahead} behind={gitInfo.behind} />
         )}
         {!editing && canRename && (
           <IconTooltip label="rename"><Button variant="ghost" size="xs" className="px-1 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); startEdit(); }} disabled={isRenaming} aria-label="rename">{isRenaming ? <Skeleton className="h-3 w-3" /> : '✎'}</Button></IconTooltip>
