@@ -1,6 +1,17 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { PaneTile } from './PaneTile';
 import { FileViewer } from './FileViewer';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+  DialogClose,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
 import type { Chat } from '@/lib/types';
 
 export interface OpenTile { id: string }
@@ -29,6 +40,8 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
   const [filePath, setFilePath] = useState('');
   const [fileInput, setFileInput] = useState('');
   const [fileInputError, setFileInputError] = useState('');
+  const [filePromptOpen, setFilePromptOpen] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const nameOf = (id: string) => chats.find((c) => (c.key || c.id) === id)?.name || id;
 
   const focusedChat = focused ? chats.find((c) => (c.key || c.id) === focused) : null;
@@ -52,19 +65,19 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
     setFileInputError('');
     setFilePath(trimmedInput);
     setFileOpen(true);
+    setFilePromptOpen(false); // Close the path-entry Dialog
     setFileInput(''); // Clear file input to prevent both dialogs from showing
   };
 
   const handleFilePrompt = () => {
     if (!focusedChat) return;
-    // Auto-fill with common files if cwd exists
+    // Auto-fill with the chat's working directory if known
     const cwd = focusedChat.cwd || '.';
     setFileInput(`${cwd}/`);
     setFileInputError(''); // Clear any previous error
     setFileOpen(false);
     setSplitOpen(false); // Close split menu if open
-    // Focus on the file input (will be rendered in the dialog)
-    (document.querySelector('[data-file-input]') as HTMLInputElement)?.focus();
+    setFilePromptOpen(true); // Open the path-entry Dialog
   };
 
   // keyboard shortcuts: Alt+←/→ switch panes, Ctrl+W close
@@ -88,6 +101,13 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
     return () => window.removeEventListener('keydown', handler);
   }, [tiles, focused, onFocus, onClose]);
 
+  // Focus the path input when the entry Dialog opens — React-controlled via ref,
+  // not a DOM query (WARDEN-68 Rule 4). Radix's own open-auto-focus is disabled
+  // (see onOpenAutoFocus on DialogContent) so it doesn't race this.
+  useEffect(() => {
+    if (filePromptOpen) fileInputRef.current?.focus();
+  }, [filePromptOpen]);
+
   const visible = maximized ? tiles.filter((t) => t.id === maximized) : tiles;
   const n = visible.length;
   const cols = colsFor(n);
@@ -99,9 +119,9 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
         <span className="truncate">{focused ? nameOf(focused) : 'open a chat →'}</span>
         <span className="flex-1" />
         {focusedChat && (
-          <button onClick={handleFilePrompt} className="text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded hover:bg-accent/50 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background" title="open file from chat directory">📄 file</button>
+          <Button variant="ghost" size="xs" onClick={handleFilePrompt} title="open file from chat directory">📄 file</Button>
         )}
-        <button onClick={() => setSplitOpen(!splitOpen)} className="text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded hover:bg-accent/50 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background" title="split — open another chat as a pane">＋ split</button>
+        <Button variant="ghost" size="xs" onClick={() => setSplitOpen(!splitOpen)} title="split — open another chat as a pane">＋ split</Button>
         {splitOpen && (
           <>
             <div className="fixed inset-0 z-40" onClick={() => setSplitOpen(false)} />
@@ -155,32 +175,40 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
         />
       )}
 
-      {/* File Path Input Dialog */}
-      {fileInput && !fileOpen && focusedChat && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/10" onClick={() => setFileInput('')}>
-          <div className="bg-popover border rounded-lg shadow-lg p-4 w-96" onClick={(e) => e.stopPropagation()}>
-            <div className="text-sm font-medium mb-2">Open file from chat directory</div>
-            <div className="text-xs text-muted-foreground mb-3">Working directory: {focusedChat.cwd || '.'}</div>
-            <input
-              data-file-input
-              type="text"
-              value={fileInput}
-              onChange={(e) => { setFileInput(e.target.value); setFileInputError(''); }}
-              onKeyDown={(e) => { if (e.key === 'Enter') handleOpenFile(); if (e.key === 'Escape') setFileInput(''); }}
-              placeholder="relative/path/to/file.txt"
-              className="w-full px-3 py-2 text-sm bg-muted border rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
-              autoFocus
-            />
-            {fileInputError && (
-              <div className="text-xs text-red-400 mt-1">{fileInputError}</div>
-            )}
-            <div className="flex gap-2 mt-3 justify-end">
-              <button onClick={() => setFileInput('')} className="px-3 py-1.5 text-sm rounded-md hover:bg-accent">Cancel</button>
-              <button onClick={handleOpenFile} className="px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90">Open</button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* File Path Entry Dialog — shadcn Dialog + Input + Button (WARDEN-68) */}
+      <Dialog
+        open={filePromptOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            setFilePromptOpen(false);
+            setFileInput('');
+            setFileInputError('');
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md" onOpenAutoFocus={(e) => e.preventDefault()}>
+          <DialogHeader>
+            <DialogTitle>Open file from chat directory</DialogTitle>
+            <DialogDescription>Working directory: {focusedChat?.cwd || '.'}</DialogDescription>
+          </DialogHeader>
+          <Input
+            ref={fileInputRef}
+            value={fileInput}
+            onChange={(e) => { setFileInput(e.target.value); setFileInputError(''); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleOpenFile(); }}
+            placeholder="relative/path/to/file.txt"
+          />
+          {fileInputError && (
+            <p className="text-xs text-destructive">{fileInputError}</p>
+          )}
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline">Cancel</Button>
+            </DialogClose>
+            <Button onClick={handleOpenFile}>Open</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

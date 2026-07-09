@@ -110,6 +110,21 @@ describe('buildReadFileScript (remote SSH script)', () => {
     assert.match(r.stdout, /ERROR path must be within working directory/);
   });
 
+  it('blocks prefix-sibling traversal (regression: cwd glob had no separator)', () => {
+    // Regression for a security hole the prior review caught: the cwd-containment
+    // `case` glob was "$RESOLVED_CWD"* with NO path separator, so it matched any
+    // path whose string STARTS WITH the cwd — including a sibling whose name
+    // merely extends the cwd name. cwd = .../<base>; create .../<base>-secret.txt
+    // (a file OUTSIDE cwd) and request it via ../<base>-secret.txt. The buggy
+    // glob read it (ok:true); the fixed "$RESOLVED_CWD"/* glob must reject it.
+    const base = path.basename(tmp);
+    const sibling = `${tmp}-secret.txt`;
+    fs.writeFileSync(sibling, 'TOPSECRET\n');
+    const r = runScript(tmp, `../${base}-secret.txt`);
+    assert.equal(r.ok, false, 'sibling extending the cwd name must be rejected');
+    assert.match(r.stdout, /ERROR path must be within working directory/);
+  });
+
   it('rejects a directory', () => {
     const r = runScript(tmp, 'sub');
     assert.equal(r.ok, false);
