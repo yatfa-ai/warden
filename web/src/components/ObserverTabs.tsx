@@ -3,6 +3,7 @@ import { toast } from 'sonner';
 import { ObserverPanel } from './ObserverPanel';
 import { ActivityTimeline } from './ActivityTimeline';
 import { Button } from '@/components/ui/button';
+import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { EmptyState } from './EmptyState';
 import { loadObs, saveObs } from '@/lib/storage';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
@@ -171,15 +172,16 @@ export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onRe
         </div>
         {viewMode === 'sessions' && (
           <div className="flex items-center gap-0.5">
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-7 px-2 text-sm shrink-0 disabled:opacity-40"
-              onClick={() => createNew(focusedChat ?? null)}
-              disabled={!focusedChat}
-              title={focusedChat ? `observe ${focusedChat.name || focusedChat.key || focusedChat.id} (binds this session to the focused chat)` : 'focus a chat pane, then click to observe it'}
-            >👁</Button>
-            <Button size="sm" variant="ghost" className="h-7 px-2 text-base shrink-0" onClick={() => createNew(null)} title="new observer session">+</Button>
+            <IconTooltip label={focusedChat ? `observe ${focusedChat.name || focusedChat.key || focusedChat.id} (binds this session to the focused chat)` : 'focus a chat pane, then click to observe it'} disabled={!focusedChat}>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 px-2 text-sm shrink-0 disabled:opacity-40"
+                onClick={() => createNew(focusedChat ?? null)}
+                disabled={!focusedChat}
+              >👁</Button>
+            </IconTooltip>
+            <IconTooltip label="new observer session"><Button size="sm" variant="ghost" className="h-7 px-2 text-base shrink-0" onClick={() => createNew(null)}>+</Button></IconTooltip>
           </div>
         )}
       </div>
