@@ -342,8 +342,12 @@ export class Observer {
     if (result2.chat) return result2.chat;
     if (result2.error) return { error: result2.error };
 
-    // Should not reach here, but just in case
-    return { error: `no chat matches "${id}". try one of: ${this.lastChats.map((c) => c.container).join(', ')}` };
+    // Should not reach here, but just in case. Uses c.id (always present and
+    // typeable for every chat kind) rather than c.container, which is null for
+    // manual/tmux chats and would render as an empty/dropped entry in the list
+    // (Array.join converts null to ""), so the manual chat vanishes from the
+    // suggestion instead of appearing as a usable identifier.
+    return { error: `no chat matches "${id}". try one of: ${this.lastChats.map((c) => c.id).join(', ')}` };
   }
 
   async _execTool(name, input) {

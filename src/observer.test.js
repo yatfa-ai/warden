@@ -312,6 +312,59 @@ describe('Observer _execTool suggest_next_actions dispatch', () => {
   });
 });
 
+describe('Observer _resolve (no-match suggestion fallback)', () => {
+  // WARDEN-141: when neither cache nor refresh resolves an id, _resolve builds a
+  // "no chat matches" error suggesting available chats. The suggestion MUST use
+  // c.id (always present and typeable) — not c.container, which is null for
+  // manual/tmux chats. Array.join turns that null into "" (NOT the literal
+  // "null"), so buggy code silently drops the manual chat from the list, leaving
+  // an empty/degenerate slot. Asserting the manual chat's id appears is what
+  // actually fails on the buggy code; a bare !includes('null') would not.
+
+  // Builds an Observer whose cache and refresh both fail to match `id`, forcing
+  // _resolve to the fallback that constructs the suggestion message.
+  function observerThatCannotResolve(id, chats) {
+    const obs = new Observer(cfg, {});
+    obs.lastChats = chats;
+    obs._refreshChats = async () => { obs.lastChats = chats; return chats; };
+    return obs;
+  }
+
+  it('lists every chat by id, including manual/tmux chats whose container is null', async () => {
+    const chats = [yatfaChat(), tmuxChat()];
+    const obs = observerThatCannotResolve('definitely-not-a-real-chat', chats);
+
+    const result = await obs._resolve('definitely-not-a-real-chat');
+
+    assert.ok(result.error, 'should return an error when nothing matches');
+    assert.ok(result.error.includes('(local):manual-session'),
+      'the manual/tmux chat (container null) must appear by its id — buggy code dropped it to an empty entry');
+    assert.ok(result.error.includes('host1:myproject-worker'),
+      'the yatfa chat must appear by its id');
+    assert.ok(!result.error.includes('null'),
+      'no literal "null" should appear in the suggestion list');
+  });
+
+  it('emits no empty/degenerate suggestion slots when a manual chat is interleaved', async () => {
+    // Mirrors the reported scenario: a manual chat sandwiched between yatfa chats.
+    const planner = yatfaChat({ id: 'host1:yatfa-planner-1', key: 'yatfa-planner-1', container: 'yatfa-planner-1', role: 'planner' });
+    const manual = tmuxChat();
+    const worker = yatfaChat({ id: 'host1:yatfa-worker-2', key: 'yatfa-worker-2', container: 'yatfa-worker-2', role: 'worker' });
+    const chats = [planner, manual, worker];
+    const obs = observerThatCannotResolve('foo', chats);
+
+    const result = await obs._resolve('foo');
+
+    // Pull the suggestion list out of "try one of: a, b, c" and check each slot.
+    const list = result.error.split('try one of: ')[1];
+    const entries = list.split(', ');
+    assert.ok(!entries.includes(''),
+      'no empty suggestion slots — buggy code rendered the null container as ""');
+    assert.ok(entries.includes('(local):manual-session'),
+      'the manual chat appears as a valid, typeable id');
+  });
+});
+
 describe('suggestNextActions (pure classifier)', () => {
   // Run classification for a single open chat with the given pane content.
   async function classify(pane, chatOverrides = {}) {
