@@ -21,6 +21,7 @@ import { listSessions, createSession, renameSession, deleteSession } from './ses
 import { appendEvent, rotateEvents, readEvents, getStatsSince } from './activity.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { checkHost } from './hostStatus.js';
+import { parseGitStatusPorcelain } from './gitStatus.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = load();
@@ -532,6 +533,7 @@ app.get('/api/git-status', async (req, res) => {
 
     let branch = '';
     let clean = true;
+    let files = [];
 
     if (chat.host === LOCAL) {
       // Local execution: use spawnSync directly
@@ -545,7 +547,12 @@ app.get('/api/git-status', async (req, res) => {
         cwd,
         stdio: ['ignore', 'pipe', 'inherit'],
       });
-      clean = statusResult.stdout?.toString().trim() === '' || !statusResult.stdout;
+      const statusRaw = statusResult.stdout?.toString() || '';
+      // NOTE: parse the raw bytes — git status codes can start with a leading
+      // space (" M" = unstaged mod), so the output must NOT be trimmed as a
+      // whole or the first file's path is corrupted. See parseGitStatusPorcelain.
+      files = parseGitStatusPorcelain(statusRaw);
+      clean = files.length === 0;
     } else {
       // Remote execution: use SSH
       const gitBranchCmd = `cd ${shellQuote(cwd)} && git rev-parse --abbrev-ref HEAD 2>/dev/null`;
@@ -555,17 +562,23 @@ app.get('/api/git-status', async (req, res) => {
       branch = r1.ok ? r1.stdout.trim() : '';
 
       const r2 = await run(chat.host, gitStatusCmd, { timeout: 8000 });
-      clean = r2.ok ? r2.stdout.trim() === '' : true;
+      const statusRaw = r2.ok ? (r2.stdout || '') : '';
+      // NOTE: parse the raw bytes — git status codes can start with a leading
+      // space (" M" = unstaged mod), so the output must NOT be trimmed as a
+      // whole or the first file's path is corrupted. See parseGitStatusPorcelain.
+      files = parseGitStatusPorcelain(statusRaw);
+      clean = files.length === 0;
     }
 
     res.json({
       branch: branch || null,
       clean: branch ? clean : null,
       cwd,
+      files: branch ? files : null,
       error: null,
     });
   } catch (e) {
-    res.json({ branch: null, clean: null, cwd: chat.cwd || '', error: e.message });
+    res.json({ branch: null, clean: null, cwd: chat.cwd || '', files: null, error: e.message });
   }
 });
 
