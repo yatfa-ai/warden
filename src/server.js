@@ -868,6 +868,141 @@ app.post('/api/read-file', async (req, res) => {
   }
 });
 
+// ---- Workspace content search (grep) — WARDEN-145 ---------------------------
+// Completes the locate→read loop WARDEN-39 (file reading) started: lets a human
+// find a file by CONTENT (function name, error string, …) and open it in the
+// FileViewer, instead of having to know the exact path by hand. Mirrors the
+// read-file/git-status patterns: chat-scoped, cwd-contained, local spawnSync vs
+// remote `run(host, script)` split. The `query` is user input that runs in a
+// remote shell, so it carries the same injection surface read-file guards
+// against — it is shellQuoted and preceded by `--`, output is bounded, and
+// binaries are skipped (-I).
+const SEARCH_MAX_RESULTS = 30;
+const SEARCH_MAX_LINE_LEN = 300;
+
+// Parse one `<path>:<line>:<text>` line as emitted by `git grep -n` / `rg -n` /
+// `grep -rn`. The line number is the FIRST ':digits:' after the path (non-greedy
+// match), so a text body containing its own ':123:' isn't misread as the line.
+export function parseSearchLine(raw) {
+  const m = raw.match(/^(.*?):(\d+):(.*)$/);
+  if (!m) return null;
+  return { file: m[1], line: parseInt(m[2], 10), text: m[3] };
+}
+
+// Parse raw search stdout into capped, truncated { file, line, text } rows.
+// Stops at maxResults so a huge match set (e.g. searching "import") is never
+// fully parsed — bounded work, bounded response.
+export function parseSearchOutput(raw, maxResults = SEARCH_MAX_RESULTS, maxLineLen = SEARCH_MAX_LINE_LEN) {
+  const results = [];
+  for (const line of String(raw).split('\n')) {
+    if (!line) continue;
+    const parsed = parseSearchLine(line);
+    if (!parsed) continue;
+    if (parsed.text.length > maxLineLen) parsed.text = parsed.text.slice(0, maxLineLen);
+    results.push(parsed);
+    if (results.length >= maxResults) break;
+  }
+  return results;
+}
+
+// Build the remote (SSH) shell script that searches tracked files under `cwd`
+// for `query`. Extracted + exported so the containment/quoting can be unit-
+// tested, exactly like buildReadFileScript. `query` is user input interpolated
+// into a remote shell, so it MUST be shellQuoted (single-quoted POSIX token)
+// and preceded by `--` (option-injection stop). Other guards baked into the
+// script (all reviewed against the remote execution environment):
+//   set +o pipefail  — a user's ~/.bash_profile may set pipefail; under it
+//     `git grep | head` exits 141 (SIGPIPE) once head closes the pipe after 30
+//     lines, which `run()` reads as failure and silently drops all 30 results.
+//   -F / --fixed-strings — treat the query as a LITERAL substring. The use case
+//     is "find this error string / function name", not a regex; -F also stops
+//     `.` matching every line (a DoS amplifier) and avoids invalid-regex→empty.
+//   command -v rg — fall back to grep only when rg is ABSENT, not on rg's
+//     exit-1-no-match (else grep needlessly re-walks the tree on every miss).
+//   cut -c1-1000 — bound each line's transfer over SSH (a committed minified
+//     bundle is one multi-MB line) before head bounds the line COUNT.
+// `git grep -n -I` searches only tracked files (skips node_modules/dist/.git)
+// and skips binaries (-I). git rev-parse gates the rg/grep fallback to non-repos.
+export function buildSearchScript(cwd, query) {
+  const q = shellQuote(query);
+  return `cd ${shellQuote(cwd)} 2>/dev/null || exit 0; set +o pipefail; if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git grep -n -I -F -- ${q}; elif command -v rg >/dev/null 2>&1; then rg --line-number --no-heading -F -- ${q} .; else grep -rnI -F -- ${q} .; fi | cut -c1-1000 | head -n 30`;
+}
+
+// spawnSync wrapper for the local search tools: BOUNDED (4MB maxBuffer + 10s
+// timeout, mirroring the remote ceiling) and with stderr CAPTURED (not
+// inherited), so git's "fatal: not a git repository" / regex diagnostics don't
+// spam the server console on every search. Distinct from runLocalGit (shared by
+// git-status/log), which inherits stderr and uses the default ~1MB maxBuffer —
+// that default silently truncates large searches via ENOBUFS (status=null,
+// masked as success), so search needs its own bounded runner.
+function runLocalSearch(bin, args, cwd) {
+  return spawnSync(bin, args, {
+    cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: 10000,
+  });
+}
+
+// Local raw search stdout for `query` under `cwd`: the spawnSync twin of the
+// remote buildSearchScript. Prefers `git grep` (tracked files only, -F literal);
+// falls back to rg (presence-gated) then plain grep only when cwd is not a git
+// worktree. Returns '' for no matches / overflow / timeout (never throws —
+// matches git-status/git-log). All tools run with `{cwd}` so results are scoped.
+function searchLocalRaw(cwd, query) {
+  const gitCheck = runLocalSearch('git', ['rev-parse', '--is-inside-work-tree'], cwd);
+  const insideRepo = gitCheck.status === 0 && (gitCheck.stdout?.trim() === 'true');
+  if (insideRepo) {
+    const r = runLocalSearch('git', ['grep', '-n', '-I', '-F', '--', query], cwd);
+    if (r.error) return ''; // ENOBUFS (overflow) or timeout → bounded; treat as no results
+    // status 1 = no matches in a valid repo (not an error); 0 = matches.
+    return r.status === 1 ? '' : (r.stdout || '');
+  }
+  // Not a git repo → ripgrep (fast, respects .gitignore) then plain grep. -F = literal.
+  const rg = runLocalSearch('rg', ['--line-number', '--no-heading', '-F', '--', query, '.'], cwd);
+  if (rg.error?.code !== 'ENOENT') return rg.stdout || ''; // rg present (ran/overflowed); grep only if rg absent
+  const gr = runLocalSearch('grep', ['-rn', '-I', '-F', '--', query, '.'], cwd);
+  if (gr.error) return '';
+  return gr.status === 1 ? '' : (gr.stdout || ''); // grep: 1 = no match
+}
+
+// POST /api/search-files — content-search a chat's working directory (grep).
+// Body: { id: string, query: string }
+// Response: { results: [{ file, line, text }], query, error?: string }
+// Local chats run git/rg/grep via spawnSync; remote chats run buildSearchScript
+// over SSH. Mirrors /api/git-status's resolve → cwd guard → local/remote split.
+app.post('/api/search-files', async (req, res) => {
+  const r = await resolve(String(req.body?.id || ''));
+  if (r.error) return res.status(404).json(r);
+
+  const query = String(req.body?.query || '').trim();
+  if (!query) return res.status(400).json({ error: 'query is required' });
+
+  const chat = r.chat;
+  const cwd = chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
+  if (!cwd) return res.json({ results: [], query, error: 'no cwd' });
+
+  try {
+    let raw = '';
+    let error = null;
+    if (chat.host === LOCAL) {
+      raw = searchLocalRaw(cwd, query);
+    } else {
+      const script = buildSearchScript(cwd, query);
+      const result = await run(chat.host, script, { timeout: 10000 });
+      // A failed remote run (host down / SSH auth / timeout) must NOT masquerade
+      // as "no matches" — surface it so the dialog can show a real error.
+      // result.stdout is still parsed when present (head/cut already bounded it).
+      if (!result.ok) error = 'search failed';
+      raw = result.stdout || '';
+    }
+    if (error) res.json({ results: [], query, error });
+    else res.json({ results: parseSearchOutput(raw), query });
+  } catch (e) {
+    // Generic message — don't leak internals (e.g. a HostConnectionError embedding
+    // the remote hostname) to the browser. Mirrors read-file's 'read failed'.
+    res.json({ results: [], query, error: 'search failed' });
+  }
+});
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
