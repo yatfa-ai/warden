@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { PaneTile } from './PaneTile';
 import { FileViewer } from './FileViewer';
+import { WorkspaceSearchDialog } from './WorkspaceSearchDialog';
 import {
   Dialog,
   DialogContent,
@@ -46,6 +47,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
   const [fileInput, setFileInput] = useState('');
   const [fileInputError, setFileInputError] = useState('');
   const [filePromptOpen, setFilePromptOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const nameOf = (id: string) => chats.find((c) => (c.key || c.id) === id)?.name || id;
 
@@ -171,7 +173,10 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
         <span className="truncate">{focused ? nameOf(focused) : 'open a chat →'}</span>
         <span className="flex-1" />
         {focusedChat && (
-          <IconTooltip label="open file from chat directory"><Button variant="ghost" size="xs" onClick={handleFilePrompt}>📄 file</Button></IconTooltip>
+          <>
+            <IconTooltip label="search workspace files by content"><Button variant="ghost" size="xs" onClick={() => setSearchOpen(true)}>🔍 search</Button></IconTooltip>
+            <IconTooltip label="open file from chat directory"><Button variant="ghost" size="xs" onClick={handleFilePrompt}>📄 file</Button></IconTooltip>
+          </>
         )}
         <IconTooltip label="split — open another chat as a pane"><Button variant="ghost" size="xs" onClick={() => setSplitOpen(!splitOpen)}>＋ split</Button></IconTooltip>
         {splitOpen && (
@@ -225,6 +230,18 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
             setFileOpen(open);
             if (!open) setFilePath(''); // Clear file path when dialog closes
           }}
+        />
+      )}
+
+      {/* Workspace content-search Dialog (WARDEN-145): locate a file by content,
+          then hand its path to the FileViewer above to open. */}
+      {focusedChat && (
+        <WorkspaceSearchDialog
+          chatId={focusedChat.id}
+          cwd={focusedChat.cwd}
+          open={searchOpen}
+          onOpenChange={setSearchOpen}
+          onSelectFile={(file) => { setFilePath(file); setFileOpen(true); }}
         />
       )}
 
