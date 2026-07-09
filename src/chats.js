@@ -25,6 +25,19 @@ function parseContainerName(name) {
   return { project: name.slice(0, idx), role: name.slice(idx + 1) };
 }
 
+// Pin-first ordering shared by every discovery sort. Returns <0 if `a` is pinned
+// and `b` is not, >0 if `b` is pinned and `a` is not, 0 if they tie on pinned
+// status — in which case the caller applies its own (active/name) tiebreaker.
+//
+// Pin membership is matched on the host-prefixed chat `id` (e.g. "(local):agent"),
+// NOT the bare `key`/session name: bare names collide across hosts. This is the
+// contract the frontend PUT /api/pins must honor.
+export function comparePinned(a, b, pins) {
+  const pa = pins.has(a.id) ? 0 : 1;
+  const pb = pins.has(b.id) ? 0 : 1;
+  return pa - pb;
+}
+
 export async function discover(host, cfg) {
   const timeout = (cfg.connectTimeout ?? 10) * 1000 + 25000;
   const res = await runWithPool(host, DISCOVER_SCRIPT, { timeout }, cfg);
@@ -186,9 +199,8 @@ export async function discoverAll(hosts, cfg) {
 
   const pins = new Set(cfg.pins || []);
   all.sort((a, b) => {
-    const pa = pins.has(a.id) ? 0 : 1;
-    const pb = pins.has(b.id) ? 0 : 1;
-    if (pa !== pb) return pa - pb;
+    const pc = comparePinned(a, b, pins);
+    if (pc !== 0) return pc;
     return (b.active - a.active) || a.id.localeCompare(b.id);
   });
   return { chats: all, errors };
@@ -216,9 +228,8 @@ export function catalogChats(cfg) {
   const pins = new Set(cfg.pins || []);
   const chats = loadCatalog().map((e) => toCatalogChat(e.host || LOCAL, e, null, null));
   chats.sort((a, b) => {
-    const pa = pins.has(a.id) ? 0 : 1;
-    const pb = pins.has(b.id) ? 0 : 1;
-    if (pa !== pb) return pa - pb;
+    const pc = comparePinned(a, b, pins);
+    if (pc !== 0) return pc;
     return a.id.localeCompare(b.id);
   });
   return { chats, errors: [] };
@@ -257,9 +268,8 @@ export async function discoverHost(host, cfg) {
   }
 
   chats.sort((a, b) => {
-    const pa = pins.has(a.id) ? 0 : 1;
-    const pb = pins.has(b.id) ? 0 : 1;
-    if (pa !== pb) return pa - pb;
+    const pc = comparePinned(a, b, pins);
+    if (pc !== 0) return pc;
     const aa = a.active ? 1 : 0, ab = b.active ? 1 : 0;
     if (aa !== ab) return ab - aa;
     return a.id.localeCompare(b.id);

@@ -1,6 +1,6 @@
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert';
-import { resolveChat, resolveChatWithRefresh } from './chats.js';
+import { resolveChat, resolveChatWithRefresh, comparePinned } from './chats.js';
 
 describe('resolveChat', () => {
   const mockChats = [
@@ -275,5 +275,59 @@ describe('resolveChatWithRefresh', () => {
       assert.strictEqual(result.chat.id, 'host:myproject');
       assert.strictEqual(result.chat.key, 'myproject');
     });
+  });
+});
+
+describe('comparePinned (pin-first sort)', () => {
+  // Two chats: `aaa` sorts before `zzz` by name. `key` is the bare session name;
+  // `id` is the host-prefixed contract that the backend sort + config use.
+  const aaa = { id: '(local):aaa-agent', key: 'aaa-agent', active: false };
+  const zzz = { id: '(local):zzz-agent', key: 'zzz-agent', active: false };
+  // Mirrors the catalogChats() comparator: pin-first, then id localeCompare.
+  const sortById = (chats, pinSet) =>
+    [...chats].sort((a, b) => comparePinned(a, b, pinSet) || a.id.localeCompare(b.id));
+
+  it('sorts a pinned id above a non-pinned one regardless of name', () => {
+    // zzz sorts last by name; pinning its id surfaces it to the top.
+    const pins = new Set(['(local):zzz-agent']);
+    const sorted = sortById([aaa, zzz], pins);
+    assert.strictEqual(sorted[0].id, '(local):zzz-agent');
+    assert.strictEqual(sorted[1].id, '(local):aaa-agent');
+  });
+
+  it('returns 0 when neither chat is pinned', () => {
+    assert.strictEqual(comparePinned(aaa, zzz, new Set()), 0);
+  });
+
+  it('returns 0 when both chats are pinned', () => {
+    assert.strictEqual(
+      comparePinned(aaa, zzz, new Set(['(local):aaa-agent', '(local):zzz-agent'])),
+      0,
+    );
+  });
+
+  it('returns negative when only the first chat is pinned', () => {
+    assert.ok(comparePinned(aaa, zzz, new Set(['(local):aaa-agent'])) < 0);
+  });
+
+  it('does NOT match on the bare key/session name (host-prefixed id is the contract)', () => {
+    // Regression: the frontend previously saved the bare `c.key` ("zzz-agent")
+    // instead of the host-prefixed `c.id`. The backend ignores bare names, so a
+    // bare-key pin must NOT surface zzz above aaa. This case would have stayed
+    // green while the feature was silently broken, so it pins the seam down.
+    const bareKeyPins = new Set(['zzz-agent']);
+    assert.strictEqual(comparePinned(aaa, zzz, bareKeyPins), 0);
+    const sorted = sortById([aaa, zzz], bareKeyPins);
+    assert.strictEqual(sorted[0].id, '(local):aaa-agent', 'bare key pin must not reorder');
+  });
+
+  it('does not collide bare session names across hosts', () => {
+    // Two hosts each run a session named "agent". A bare-key pin would match
+    // both; the id contract matches exactly one (host-prefixed).
+    const localAgent = { id: '(local):agent', key: 'agent', active: false };
+    const remoteAgent = { id: 'remote:agent', key: 'agent', active: false };
+    const pins = new Set(['remote:agent']);
+    assert.ok(comparePinned(localAgent, remoteAgent, pins) > 0, 'remote pinned sorts first');
+    assert.ok(comparePinned(remoteAgent, localAgent, pins) < 0);
   });
 });

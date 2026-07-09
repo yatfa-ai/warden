@@ -352,7 +352,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             {(visibleActive.length > 0 || idle.length > 0 || hiddenActive.length > 0) && (
               <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">● matching agents</div>
             )}
-            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onHide={() => onHideTab(c.key || c.id)} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.key || c.id)} onTogglePin={() => togglePin(c.key || c.id)} />)}
+            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onHide={() => onHideTab(c.key || c.id)} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
             {hiddenActive.length > 0 && (
               <>
                 <button onClick={() => setHiddenExpanded(!hiddenExpanded)} className="flex items-center gap-1 px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60 hover:text-foreground w-full active:bg-accent/80 transition-colors">
@@ -360,14 +360,14 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                   <span>hidden ({hiddenActive.length})</span>
                 </button>
                 {hiddenExpanded && hiddenActive.map((c) => (
-                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onUnhide={() => onUnhideTab(c.key || c.id)} dim showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.key || c.id)} onTogglePin={() => togglePin(c.key || c.id)} />
+                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onUnhide={() => onUnhideTab(c.key || c.id)} dim showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />
                 ))}
               </>
             )}
             {idle.length > 0 && (
               <>
                 <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">idle</div>
-                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} dim showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.key || c.id)} onTogglePin={() => togglePin(c.key || c.id)} />)}
+                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} dim showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
               </>
             )}
             {agents.length === 0 && (
@@ -405,7 +405,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             {(visibleActive.length > 0 || idle.length > 0 || hiddenActive.length > 0) && (
               <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">● live (tmux)</div>
             )}
-            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onHide={() => onHideTab(c.key || c.id)} gitInfo={gitStatus[c.key || c.id]} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.key || c.id)} onTogglePin={() => togglePin(c.key || c.id)} />)}
+            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onHide={() => onHideTab(c.key || c.id)} gitInfo={gitStatus[c.key || c.id]} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
             {hiddenActive.length > 0 && (
               <>
                 <button onClick={() => setHiddenExpanded(!hiddenExpanded)} className="flex items-center gap-1 px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60 hover:text-foreground w-full active:bg-accent/80 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded">
@@ -413,14 +413,14 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                   <span>hidden ({hiddenActive.length})</span>
                 </button>
                 {hiddenExpanded && hiddenActive.map((c) => (
-                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onUnhide={() => onUnhideTab(c.key || c.id)} dim gitInfo={gitStatus[c.key || c.id]} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.key || c.id)} onTogglePin={() => togglePin(c.key || c.id)} />
+                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onUnhide={() => onUnhideTab(c.key || c.id)} dim gitInfo={gitStatus[c.key || c.id]} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />
                 ))}
               </>
             )}
             {idle.length > 0 && (
               <>
                 <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">idle</div>
-                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} dim gitInfo={gitStatus[c.key || c.id]} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.key || c.id)} onTogglePin={() => togglePin(c.key || c.id)} />)}
+                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} dim gitInfo={gitStatus[c.key || c.id]} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
               </>
             )}
             <div className="mt-3 mb-1 border-t border-border/50" />
@@ -772,9 +772,17 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
           )}
         </span>
       )}
+      {!editing && onTogglePin && (
+        <button
+          className={`px-0.5 ${isPinned ? 'text-yellow-500' : 'text-muted-foreground hover:text-foreground'} ${isUser ? 'opacity-0 group-hover:opacity-100' : ''} active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded`}
+          title={isPinned ? 'unpin' : 'pin'}
+          onClick={(e) => { e.stopPropagation(); onTogglePin(); }}
+        >
+          📌
+        </button>
+      )}
       {isUser && !editing && (
         <>
-          {onTogglePin && <button className={`px-0.5 ${isPinned ? 'text-yellow-500' : 'text-muted-foreground hover:text-foreground'} opacity-0 group-hover:opacity-100 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded`} title={isPinned ? 'unpin' : 'pin'} onClick={(e) => { e.stopPropagation(); onTogglePin(); }}>📌</button>}
           {onHide && <button className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground px-0.5 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded" title="hide" onClick={(e) => { e.stopPropagation(); onHide(); }}>▾</button>}
           {onUnhide && <button className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground px-0.5 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded" title="unhide" onClick={(e) => { e.stopPropagation(); onUnhide(); }}>▴</button>}
           <button
