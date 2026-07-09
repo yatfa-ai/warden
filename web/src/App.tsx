@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
-import { loadUi, saveUi } from '@/lib/storage';
+import { loadUi, saveUi, persistUiState, initialWorkspace, type RestoreOnStartup } from '@/lib/storage';
 import { applyTheme, listenSystemThemeChange, type Theme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
 import type { Chat } from '@/lib/types';
@@ -27,11 +27,22 @@ function App() {
   const [sshHosts, setSshHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(null);
-  const [activeTabs, setActiveTabs] = useState<string[]>(() => loadUi().activeTabs);
-  const [hiddenTabs, setHiddenTabs] = useState<string[]>(() => loadUi().hiddenTabs);
-  const [openPanes, setOpenPanes] = useState<string[]>(() => loadUi().openPanes);
-  const [focused, setFocused] = useState<string | null>(() => loadUi().focused);
-  const [paneHost, setPaneHost] = useState<Record<string, string>>(() => loadUi().paneHost ?? {});
+  // Read persisted UI state ONCE on mount (lazy initializer runs only the first
+  // render) and reuse it for every useState seed below — consolidates the prior
+  // per-state loadUi() calls into a single read.
+  const [uiState] = useState(() => loadUi());
+  // Stable for the session: true when THIS launch started in "Start empty" mode.
+  // The live workspace is then a gated clean slate, not a legitimate workspace to
+  // persist — so for the whole session persistUiState carries the on-disk workspace
+  // forward (even after flipping back to "Reopen previous"), never the live arrays.
+  const startedEmpty = uiState.restoreOnStartup === 'empty';
+  const [restoreOnStartup, setRestoreOnStartup] = useState<RestoreOnStartup>(() => uiState.restoreOnStartup ?? 'previous');
+  const initWs = initialWorkspace(uiState, uiState.restoreOnStartup ?? 'previous');
+  const [activeTabs, setActiveTabs] = useState<string[]>(() => initWs.activeTabs);
+  const [hiddenTabs, setHiddenTabs] = useState<string[]>(() => initWs.hiddenTabs);
+  const [openPanes, setOpenPanes] = useState<string[]>(() => initWs.openPanes);
+  const [focused, setFocused] = useState<string | null>(() => initWs.focused);
+  const [paneHost, setPaneHost] = useState<Record<string, string>>(() => initWs.paneHost);
   const chatsRef = useRef(chats);
   useEffect(() => { chatsRef.current = chats; }, [chats]);
   // Hosts the user has engaged with (sidebar host-click / observer reconnect / resume). In
@@ -40,8 +51,8 @@ function App() {
   // disk-only (active=null), so this set is what bounds the live-refresh SSH cost to visited
   // hosts rather than the whole fleet.
   const discoveredHostsRef = useRef<Set<string>>(new Set());
-  const [sidebarWidth, setSidebarWidth] = useState(() => loadUi().sidebarWidth ?? 220);
-  const [observerWidth, setObserverWidth] = useState(() => loadUi().observerWidth ?? 380);
+  const [sidebarWidth, setSidebarWidth] = useState(() => uiState.sidebarWidth ?? 220);
+  const [observerWidth, setObserverWidth] = useState(() => uiState.observerWidth ?? 380);
   const [maximized, setMaximized] = useState<string | null>(null);
   const [newActivity, setNewActivity] = useState<Set<string>>(new Set());
   const [streamConn, setStreamConn] = useState(false);
@@ -53,7 +64,6 @@ function App() {
   const focusedRef = useRef(focused);
   focusedRef.current = focused;
 
-  const uiState = loadUi();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(uiState.sidebarCollapsed);
   const [observerCollapsed, setObserverCollapsed] = useState(uiState.observerCollapsed);
   const [healthCollapsed, setHealthCollapsed] = useState(uiState.healthCollapsed ?? true);
@@ -142,7 +152,14 @@ function App() {
     applyDensity(density);
   }, [density]);
 
-  useEffect(() => { saveUi({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, theme, density, paneHost }); }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, theme, density, paneHost]);
+  // Persist live UI state, honoring the "Restore workspace on startup" pref.
+  // persistUiState carries the on-disk workspace forward (instead of the live
+  // arrays) whenever the pref is 'empty' OR this launch started empty — otherwise
+  // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
+  // overwrite and destroy the last saved workspace.
+  useEffect(() => {
+    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, theme, density, paneHost }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, theme, density, paneHost, restoreOnStartup, startedEmpty]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -696,6 +713,8 @@ function App() {
         setTheme={setTheme}
         density={density}
         setDensity={setDensity}
+        restoreOnStartup={restoreOnStartup}
+        setRestoreOnStartup={setRestoreOnStartup}
         terminalFontSize={terminalFontSize}
         setTerminalFontSize={setTerminalFontSize}
       />
