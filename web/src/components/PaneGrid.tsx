@@ -85,6 +85,18 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
   // keyboard shortcuts: pane navigation, actions, and panel toggles
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // Panel toggles first — they don't depend on tiles, so they must run before
+      // the zero-panes guard below. PaneGrid is always mounted (even with 0 open
+      // panes), and these shortcuts are advertised in PRODUCT.md unconditionally.
+      if (e.altKey && e.code === 'KeyS') {
+        e.preventDefault();
+        onToggleSidebar?.();
+      }
+      if (e.altKey && e.code === 'KeyO') {
+        e.preventDefault();
+        onToggleObserver?.();
+      }
+
       if (!tiles.length) return;
       const ids = tiles.map((t) => t.id);
       const idx = focused ? ids.indexOf(focused) : -1;
@@ -132,16 +144,6 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
       if (e.altKey && e.code === 'Escape') {
         e.preventDefault();
         if (maximized) onToggleMax(maximized); // Exit maximize mode
-      }
-
-      // Panel toggles: Alt+S for sidebar, Alt+O for observer
-      if (e.altKey && e.code === 'KeyS') {
-        e.preventDefault();
-        onToggleSidebar?.();
-      }
-      if (e.altKey && e.code === 'KeyO') {
-        e.preventDefault();
-        onToggleObserver?.();
       }
     };
     window.addEventListener('keydown', handler);
