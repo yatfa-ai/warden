@@ -383,9 +383,15 @@ function App() {
         return;
       }
       removeActive(id);
+      // Drop the killed chat from `chats` synchronously so the catalog merge in
+      // refresh() can't re-append it: a discovered host's live-only entries are
+      // preserved by that merge, so without this the killed chat would briefly
+      // resurrect with its last-known status until discoverHost(host) resolves
+      // (1-3s for a remote host) — easily misread as "the kill failed".
+      setChats((prev) => prev.filter((c) => (c.key || c.id) !== id));
       refresh();
-      // The killed chat is gone from the catalog, but a discovered host's live-only entries
-      // are preserved by the merge above — re-discover so it disappears immediately.
+      // discoverHost re-pulls that host's live list, confirming the kill and
+      // refreshing the rest of the host's agents.
       if (host) void discoverHost(host);
       if (prefs.notifyChatOps) toast.success('Chat killed');
     } catch (error) {
@@ -438,6 +444,14 @@ function App() {
         if (prefs.notifyChatOps) toast.error(j.error || 'resume failed');
         return;
       }
+      // Drop any stale entry for this resumed chat before refresh() so the catalog
+      // merge can't carry forward its pre-resume status. Re-resuming the same Claude
+      // session reuses the `resume-<sid>` tmux session, so the existing live entry
+      // would otherwise briefly flash its old (e.g. idle) status until discoverHost
+      // re-marks it active. (j.chat's key/id — not the bare Claude session id passed
+      // in — is what matches a chat already in the list.)
+      const resumedId = j.chat.key || j.chat.id;
+      setChats((prev) => prev.filter((c) => (c.key || c.id) !== resumedId));
       await refresh();
       // Resuming activates the chat; re-discover the host so it shows green immediately
       // instead of waiting for the next auto-refresh tick.
