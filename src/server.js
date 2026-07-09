@@ -372,6 +372,18 @@ app.put('/api/config', (req, res) => {
   res.json({ ok: true });
 });
 
+// GET /api/pins — return the list of pinned chat ids
+app.get('/api/pins', (_req, res) => res.json({ pins: cfg.pins || [] }));
+
+// PUT /api/pins — update the pinned chat id list and persist
+app.put('/api/pins', (req, res) => {
+  const { pins } = req.body;
+  if (!Array.isArray(pins)) return res.status(400).json({ error: 'pins must be an array' });
+  cfg.pins = pins;
+  save(cfg);
+  res.json({ ok: true, pins });
+});
+
 app.get('/api/this-session', (_req, res) => res.json({
   sessionId: process.env.CLAUDE_CODE_SESSION_ID || null,
   claudePath: process.env.CLAUDE_CODE_EXECPATH || null,
