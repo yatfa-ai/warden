@@ -18,6 +18,7 @@ function App() {
   const [chats, setChats] = useState<Chat[]>([]);
   const [sshHosts, setSshHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(null);
   const [activeTabs, setActiveTabs] = useState<string[]>(() => loadUi().activeTabs);
   const [hiddenTabs, setHiddenTabs] = useState<string[]>(() => loadUi().hiddenTabs);
   const [openPanes, setOpenPanes] = useState<string[]>(() => loadUi().openPanes);
@@ -146,9 +147,32 @@ function App() {
     try {
       const cr = await fetch('/api/chats');
       setChats((await cr.json()).chats || []);
+      setLastRefreshAt(Date.now());
     } catch (e) { console.error(e); }
     setLoading(false);
   }, []);
+
+  // Auto-refresh the agent list so active/idle dots + last-activity stay live in
+  // the sidebar without a manual refresh. /api/chats already returns fully live
+  // data (server-side SSH discovery runs on every call), so a periodic client
+  // poll is all the liveness gap needs. Ticks are gated on Page Visibility so a
+  // backgrounded tab doesn't burn SSH every minute; on regaining focus we refresh
+  // immediately because state may be stale while the tab was hidden.
+  useEffect(() => {
+    const REFRESH_MS = 60_000;
+    const tick = () => {
+      if (document.visibilityState === 'visible') refresh();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') refresh();
+    };
+    const intervalId = window.setInterval(tick, REFRESH_MS);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [refresh]);
 
   // Refresh display customization settings from the backend (called on mount and
   // after Settings saves, so toggles take effect immediately without a reload).
@@ -489,6 +513,7 @@ function App() {
               onRefresh={refresh}
               onDiscoverHost={discoverHost}
               loading={loading}
+              lastRefreshAt={lastRefreshAt}
               showHostTags={displaySettings.showHostTags}
               showTypeBadges={displaySettings.showTypeBadges}
               showStatusIndicators={displaySettings.showStatusIndicators}
