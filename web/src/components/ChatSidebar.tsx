@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { createPortal } from 'react-dom';
 import { Popover as RadixPopover } from 'radix-ui';
 import { toast } from 'sonner';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -12,6 +11,7 @@ import { EmptyState } from '@/components/EmptyState';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { SlidersHorizontal } from 'lucide-react';
 import { NewChatForm } from './NewChatForm';
 import { CollectionsSection } from './CollectionsSection';
@@ -214,7 +214,6 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
-  const [ctx, setCtx] = useState<{ id: string; x: number; y: number; dead: boolean } | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [tabSearchQuery, setTabSearchQuery] = useState('');
@@ -235,20 +234,6 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const { prefs } = useNotificationPrefs();
   const [agentFilter, setAgentFilter] = useState<AgentFilter>('all');
   const [agentSort, setAgentSort] = useState<AgentSort>('manual');
-
-  // Native context menu listener — only fires for tab rows, leaves everything else (xterm/tmux) alone.
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      const tab = (e.target as HTMLElement).closest('[data-tab-id]');
-      if (!tab) return; // not a tab — let the default happen (xterm paste etc.)
-      e.preventDefault();
-      const id = tab.getAttribute('data-tab-id')!;
-      const c = findChat(chats, id);
-      setCtx({ id, x: e.clientX, y: e.clientY, dead: !c || c.active === false });
-    };
-    document.addEventListener('contextmenu', handler);
-    return () => document.removeEventListener('contextmenu', handler);
-  }, [chats]);
 
   // Extract project counts from active agents
   const projectCounts = chats.reduce((acc, c) => {
@@ -761,6 +746,9 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                 onRemove={() => onRemoveActive(id)}
                 onRename={(session, kind, name) => handleRename(session, kind, name)}
                 renamingChatId={renamingChatId}
+                onHide={() => onHideTab(id)}
+                onKill={() => handleKill(id)}
+                killingChatId={killingChatId}
                 canDrag={canDrag}
                 showHostTags={showHostTags}
                 showTypeBadges={showTypeBadges}
@@ -836,28 +824,6 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           })}
         </div>
       </ScrollArea>
-      {ctx && createPortal(
-        <>
-          <div style={{ position: 'fixed', inset: 0, zIndex: 9998 }} onClick={() => setCtx(null)} onContextMenu={(e) => { e.preventDefault(); setCtx(null); }} onKeyDown={(e) => { if (e.key === 'Escape') setCtx(null); }} tabIndex={0} />
-          <div style={{
-            position: 'fixed',
-            left: Math.min(ctx.x, window.innerWidth - 180),
-            top: Math.min(ctx.y, window.innerHeight - 160),
-            zIndex: 9999,
-            minWidth: '10rem',
-            background: 'var(--popover, #1c232c)',
-            border: '1px solid var(--border, #2a313a)',
-            borderRadius: '6px',
-            boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
-            padding: '4px 0'
-          }}>
-            <CtxItem label="Open" onClick={() => { onOpenChat(ctx.id); setCtx(null); }} />
-            {!ctx.dead && <CtxItem label="Hide" onClick={() => { onHideTab(ctx.id); setCtx(null); }} />}
-            {!ctx.dead && <CtxItem label="Kill session" onClick={() => { handleKill(ctx.id); setCtx(null); }} isLoading={killingChatId === ctx.id} />}
-            <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
-            <CtxItem label="Remove tab" danger onClick={() => { onRemoveActive(ctx.id); setCtx(null); }} />
-          </div>
-        </>, document.body)}
       <CreateCollectionDialog
         open={createDialogOpen}
         onOpenChange={setCreateDialogOpen}
@@ -943,14 +909,6 @@ function AgentFilterSortControls({
         </div>
       </PopoverContent>
     </Popover>
-  );
-}
-
-function CtxItem({ label, onClick, danger, isLoading }: { label: string; onClick: () => void; danger?: boolean; isLoading?: boolean }) {
-  return (
-    <button onClick={onClick} disabled={isLoading} className={`flex w-full text-left px-3 py-1.5 hover:bg-accent active:bg-accent/80 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${danger ? 'text-red-500' : ''}`}>
-      {isLoading ? <Skeleton className="h-3 w-16" /> : label}
-    </button>
   );
 }
 
@@ -1152,7 +1110,7 @@ function hostTagOf(host: string) { return host === THIS_MACHINE ? 'local' : host
 // gating rename off double-click avoids the two-fires-before-dblclick open-then-edit jank);
 // yatfa agents are not renameable. Drag-reorder is preserved via the parent-owned
 // dragIdx/dragOverIdx pair.
-function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChatId, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, canDrag, originalIdx, dragIdx, dragOverIdx, setDragIdx, setDragOverIdx, onReorder }: {
+function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChatId, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, canDrag, originalIdx, dragIdx, dragOverIdx, setDragIdx, setDragOverIdx, onReorder, onHide, onKill, killingChatId }: {
   id: string;
   c?: Chat;
   isOpen: boolean;
@@ -1168,6 +1126,9 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChat
   dragIdx: number | null; dragOverIdx: number | null;
   setDragIdx: (n: number | null) => void; setDragOverIdx: (n: number | null) => void;
   onReorder: (from: number, to: number) => void;
+  onHide?: () => void;
+  onKill?: () => void;
+  killingChatId?: string | null;
 }) {
   const type = c ? chatType(c) : '?';
   const hostTag = c ? hostTagOf(c.host) : '';
@@ -1175,6 +1136,7 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChat
   const canRename = !!c && c.kind === 'tmux';
   const chatKey = c?.key || c?.id || id;
   const isRenaming = renamingChatId === chatKey;
+  const isKilling = killingChatId === chatKey;
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(() => (c ? displayName(c) : id));
 
@@ -1188,8 +1150,9 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChat
   const hasFiles = !dead && gitInfo?.clean === false && gitInfo.files && gitInfo.files.length > 0;
 
   return (
-    <div
-      data-tab-id={id}
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+      <div
       role="button"
       tabIndex={0}
       aria-label={`open tab ${c ? displayName(c) : id}`}
@@ -1233,6 +1196,19 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChat
         </div>
       )}
     </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={() => onOpen()}>Open</ContextMenuItem>
+        {!dead && onHide && <ContextMenuItem onSelect={() => onHide()}>Hide</ContextMenuItem>}
+        {!dead && onKill && (
+          <ContextMenuItem disabled={isKilling} onSelect={() => onKill()}>
+            {isKilling ? <Skeleton className="h-3 w-16" /> : 'Kill session'}
+          </ContextMenuItem>
+        )}
+        <ContextMenuSeparator />
+        <ContextMenuItem variant="destructive" onSelect={() => onRemove()}>Remove tab</ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
