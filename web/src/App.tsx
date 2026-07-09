@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { loadUi, saveUi } from '@/lib/storage';
 import { applyTheme, listenSystemThemeChange, type Theme } from '@/lib/theme';
+import { applyDensity, type Density } from '@/lib/density';
 import type { Chat } from '@/lib/types';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ChatSidebar } from '@/components/ChatSidebar';
@@ -43,6 +44,7 @@ function App() {
   const [observerCollapsed, setObserverCollapsed] = useState(uiState.observerCollapsed);
   const [healthCollapsed, setHealthCollapsed] = useState(uiState.healthCollapsed ?? true);
   const [theme, setTheme] = useState<Theme>(() => uiState.theme ?? 'system');
+  const [density, setDensity] = useState<Density>(() => uiState.density ?? 'comfortable');
   const { prefs, reload: reloadNotificationPrefs } = useNotificationPrefs();
 
   useEffect(() => {
@@ -126,7 +128,12 @@ function App() {
     }
   }, [theme]);
 
-  useEffect(() => { saveUi({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, theme, paneHost }); }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, theme, paneHost]);
+  // apply density on mount and when density changes (persisted via the saveUi effect below)
+  useEffect(() => {
+    applyDensity(density);
+  }, [density]);
+
+  useEffect(() => { saveUi({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, theme, density, paneHost }); }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, theme, density, paneHost]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -538,6 +545,8 @@ function App() {
         onConfigChange={handleConfigChange}
         theme={theme}
         setTheme={setTheme}
+        density={density}
+        setDensity={setDensity}
       />
       <GlobalSearchDialog
         open={showGlobalSearch}

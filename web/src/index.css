@@ -4,6 +4,7 @@
 @import "@fontsource-variable/geist";
 
 @custom-variant dark (&:is(.dark *));
+@custom-variant compact (&:is(.compact *));
 
 @theme inline {
     --font-heading: var(--font-sans);
