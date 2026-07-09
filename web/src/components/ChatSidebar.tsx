@@ -125,11 +125,48 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [loadingHost, setLoadingHost] = useState<string | null>(null);
   const [allSessions, setAllSessions] = useState<(ClaudeSession & { host: string })[]>([]);
   const [loadingAllSessions, setLoadingAllSessions] = useState(false);
+
+  // Search and filter state for unified sessions view
+  const [sessionSearchQuery, setSessionSearchQuery] = useState('');
+  const [dateRange, setDateRange] = useState<'all' | 'today' | 'yesterday' | 'week' | 'month'>('all');
   const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string; files?: GitFile[] }>>({});
   // recent commit history (git log) per chatId — cached so re-expanding the badge is instant
   const [gitLog, setGitLog] = useState<Record<string, GitCommit[]>>({});
   const [gitLogLoading, setGitLogLoading] = useState<Record<string, boolean>>({});
   const { prefs } = useNotificationPrefs();
+
+  // Filter sessions based on search query and date range (AND logic).
+  // Date ranges use calendar-day boundaries (since midnight), not rolling time windows.
+  const filteredSessions = (() => {
+    const now = new Date();
+    const todayStart = new Date(now);
+    todayStart.setHours(0, 0, 0, 0);
+
+    const yesterdayStart = new Date(todayStart);
+    yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+
+    const weekStart = new Date(todayStart);
+    weekStart.setDate(weekStart.getDate() - 7);
+
+    const monthStart = new Date(todayStart);
+    monthStart.setDate(monthStart.getDate() - 30);
+
+    const minTime = dateRange === 'today' ? todayStart.getTime() :
+                    dateRange === 'yesterday' ? yesterdayStart.getTime() :
+                    dateRange === 'week' ? weekStart.getTime() :
+                    dateRange === 'month' ? monthStart.getTime() :
+                    0;
+
+    const query = sessionSearchQuery.toLowerCase();
+    return allSessions.filter((s) => {
+      const matchesSearch = !query ||
+        (s.summary || '').toLowerCase().includes(query) ||
+        s.cwd.toLowerCase().includes(query) ||
+        s.id.toLowerCase().includes(query);
+      const matchesDate = s.mtime >= minTime;
+      return matchesSearch && matchesDate;
+    });
+  })();
 
   // Native context menu listener — only fires for tab rows, leaves everything else (xterm/tmux) alone.
   useEffect(() => {
@@ -717,8 +754,55 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                 <span className="text-[10px] text-muted-foreground">all hosts</span>
                 <button className="text-xs text-muted-foreground hover:text-foreground active:scale-95 transition-all duration-150 ease-out" onClick={() => fetchAllSessions()} disabled={loadingAllSessions}>{loadingAllSessions ? '…' : '↻'}</button>
               </div>
+              {/* Filter controls */}
+              <div className="flex flex-col gap-1.5 px-2 py-1">
+                <Input
+                  placeholder="Search sessions..."
+                  value={sessionSearchQuery}
+                  onChange={(e) => setSessionSearchQuery(e.target.value)}
+                  className="h-7 text-xs px-2"
+                />
+                <div className="flex items-center gap-1 flex-wrap">
+                  {([
+                    { key: 'all', label: 'All' },
+                    { key: 'today', label: 'Today' },
+                    { key: 'yesterday', label: 'Yesterday' },
+                    { key: 'week', label: 'Week' },
+                    { key: 'month', label: 'Month' },
+                  ] as const).map((range) => (
+                    <button
+                      key={range.key}
+                      onClick={() => setDateRange(range.key)}
+                      className={`text-[10px] px-2 py-1 rounded transition-colors ${
+                        dateRange === range.key
+                          ? 'bg-accent text-accent-foreground'
+                          : 'text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      {range.label}
+                    </button>
+                  ))}
+                  {(sessionSearchQuery || dateRange !== 'all') && (
+                    <button
+                      onClick={() => { setSessionSearchQuery(''); setDateRange('all'); }}
+                      className="text-[10px] px-2 py-1 text-red-400 hover:text-red-300 ml-auto"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Filtered sessions */}
               <div className="flex flex-col gap-0.5">
-                {allSessions.slice(0, 15).map((s) => {
+                {filteredSessions.length === 0 ? (
+                  <div className="text-xs text-muted-foreground p-3 text-center">
+                    {sessionSearchQuery || dateRange !== 'all'
+                      ? 'No sessions match your filters'
+                      : 'No sessions found'}
+                  </div>
+                ) : (
+                  filteredSessions.slice(0, 15).map((s) => {
                   const hostLabel = s.host === THIS_MACHINE ? 'local' : s.host;
                   return (
                     <button key={s.id} onClick={() => { onResume(s.id, s.summary, s.cwd, s.host); setView({ kind: 'root' }); }} className="flex flex-col gap-0.5 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 transition-colors" title={`resume ${s.id}\n${s.cwd}\n${hostLabel}`}>
@@ -726,7 +810,8 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                       <span className="text-[10px] text-muted-foreground truncate">{ago(s.mtime)} · {hostLabel} · {basename(s.cwd)}</span>
                     </button>
                   );
-                })}
+                  })
+                )}
               </div>
             </>
           )}
