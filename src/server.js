@@ -21,6 +21,7 @@ import { listSessions, createSession, renameSession, deleteSession } from './ses
 import { appendEvent, rotateEvents, readEvents, getStatsSince } from './activity.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { checkHost } from './hostStatus.js';
+import { parseGitStatusPorcelain } from './gitStatus.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = load();
@@ -546,22 +547,12 @@ app.get('/api/git-status', async (req, res) => {
         cwd,
         stdio: ['ignore', 'pipe', 'inherit'],
       });
-      const statusOutput = statusResult.stdout?.toString().trim() || '';
-      clean = statusOutput === '' || !statusResult.stdout;
-
-      // Parse git status output to extract file paths and status
-      if (statusOutput) {
-        files = statusOutput
-          .split('\n')
-          .filter((line) => line.trim())
-          .map((line) => {
-            // git status --porcelain format: XY PATH
-            // X = index status (position 0), Y = worktree status (position 1), PATH starts at position 3
-            const statusCode = line.substring(0, 2).trim();
-            const filePath = line.substring(3).trim();
-            return { path: filePath, status: statusCode || '??' };
-          });
-      }
+      const statusRaw = statusResult.stdout?.toString() || '';
+      // NOTE: parse the raw bytes — git status codes can start with a leading
+      // space (" M" = unstaged mod), so the output must NOT be trimmed as a
+      // whole or the first file's path is corrupted. See parseGitStatusPorcelain.
+      files = parseGitStatusPorcelain(statusRaw);
+      clean = files.length === 0;
     } else {
       // Remote execution: use SSH
       const gitBranchCmd = `cd ${shellQuote(cwd)} && git rev-parse --abbrev-ref HEAD 2>/dev/null`;
@@ -571,22 +562,12 @@ app.get('/api/git-status', async (req, res) => {
       branch = r1.ok ? r1.stdout.trim() : '';
 
       const r2 = await run(chat.host, gitStatusCmd, { timeout: 8000 });
-      const statusOutput = r2.ok ? r2.stdout.trim() : '';
-      clean = statusOutput === '' || !r2.ok;
-
-      // Parse git status output to extract file paths and status
-      if (statusOutput) {
-        files = statusOutput
-          .split('\n')
-          .filter((line) => line.trim())
-          .map((line) => {
-            // git status --porcelain format: XY PATH
-            // X = index status (position 0), Y = worktree status (position 1), PATH starts at position 3
-            const statusCode = line.substring(0, 2).trim();
-            const filePath = line.substring(3).trim();
-            return { path: filePath, status: statusCode || '??' };
-          });
-      }
+      const statusRaw = r2.ok ? (r2.stdout || '') : '';
+      // NOTE: parse the raw bytes — git status codes can start with a leading
+      // space (" M" = unstaged mod), so the output must NOT be trimmed as a
+      // whole or the first file's path is corrupted. See parseGitStatusPorcelain.
+      files = parseGitStatusPorcelain(statusRaw);
+      clean = files.length === 0;
     }
 
     res.json({
