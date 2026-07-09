@@ -1,0 +1,159 @@
+# Release Yatfa Warden. Triggered manually from the Actions UI ("Run workflow"
+# button) — no tags, no push triggers. Click -> bump patch version -> build
+# per-OS executables -> publish a GitHub Release with the artifacts.
+#
+# Mirrors yatfa's release strategy (one-click workflow_dispatch, patch bump by
+# scripts/bump-version.sh, github-actions[bot] commit). yatfa splits this into a
+# bump workflow + a separate dispatched build workflow because pushing with
+# GITHUB_TOKEN does not spawn push-triggered workflows; warden instead keeps
+# everything in one run so downstream build/release jobs are real job deps and
+# need no dispatch workaround. The prod deploy-mirror branch from yatfa is
+# dropped — warden ships from the vX.Y.Z tag, not a docker build on prod.
+#
+# Required repo secrets:
+#   none beyond the auto-provided GITHUB_TOKEN (builds are unsigned)
+#
+# NOTE: builds are currently unsigned (no code-signing certs / notarization
+# creds). macOS/Windows users will see an "unidentified developer" warning.
+name: Release (Bump Version & Publish Executables)
+
+on:
+  workflow_dispatch:        # one-click from Actions UI; no inputs needed
+
+permissions:
+  contents: write           # bump commit + vX.Y.Z tag + GitHub Release
+  actions: write
+
+jobs:
+  bump:
+    name: Bump version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0      # need full history for the rebase-and-push
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Configure Git
+        run: |
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version (commit + tag + push)
+        id: bump
+        run: ./scripts/bump-version.sh
+
+  build:
+    name: Build executables (${{ matrix.os }})
+    needs: bump
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false       # one OS failing shouldn't cancel the others
+      matrix:
+        include:
+          - os: macos-latest
+            artifact: build-mac
+          - os: windows-latest
+            artifact: build-win
+          - os: ubuntu-latest
+            artifact: build-linux
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump.outputs.tag }}   # exact bumped version
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies (root)
+        run: npm ci
+
+      - name: Install dependencies (web)
+        run: npm --prefix web ci
+
+      # `npm run dist` = build web (vite) + package with electron-builder.
+      # Produces installers in release/ (dmg / nsis exe / AppImage) plus the
+      # auto-update latest*.yml manifests.
+      - name: Build web + package executables
+        run: npm run dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            release/*.dmg
+            release/*.exe
+            release/*.exe.blockmap
+            release/*.dmg.blockmap
+            release/*.AppImage
+            release/latest*.yml
+          if-no-files-found: error   # fail loud if a platform produced nothing
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: [bump, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Stage distributables
+        run: |
+          mkdir -p staging
+          find artifacts -type f \( \
+            -name '*.dmg' -o -name '*.exe' -o -name '*.blockmap' \
+            -o -name '*.AppImage' -o -name 'latest*.yml' \) \
+            -exec cp {} staging/ \;
+          echo "Staged assets:"
+          ls -la staging
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.bump.outputs.tag }}
+        run: |
+          # Create the release if missing, otherwise upload over existing assets
+          # (makes the job safe to re-run after fixing a failed platform).
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists; uploading assets with --clobber"
+            gh release upload "$TAG" staging/* --clobber
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              staging/*
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Release ${{ needs.bump.outputs.tag }}"
+            echo ""
+            echo "Version: \`${{ needs.bump.outputs.version }}\`"
+            echo '```'
+            gh release view "${{ needs.bump.outputs.tag }}" --json assets --jq '.assets[] | "\(.name)\t\(.size) bytes"' 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
