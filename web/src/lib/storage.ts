@@ -20,6 +20,8 @@ export interface UiState {
   density?: 'comfortable' | 'compact';
   // pane id (chat key) -> host, so restored remote panes know which host to discover.
   paneHost?: Record<string, string>;
+  agentFilter?: 'all' | 'yatfa' | 'claude' | 'manual' | 'active' | 'hidden';
+  agentSort?: 'manual' | 'name' | 'host' | 'status' | 'activity';
 }
 
 export function loadUi(): UiState {
@@ -40,10 +42,12 @@ export function loadUi(): UiState {
         theme: v.theme ?? 'system',
         density: v.density === 'compact' ? 'compact' : 'comfortable',
         paneHost: (v.paneHost && typeof v.paneHost === 'object') ? v.paneHost : {},
+        agentFilter: v.agentFilter ?? 'all',
+        agentSort: v.agentSort ?? 'manual',
       };
     }
   } catch { /* ignore */ }
-  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14, theme: 'system', density: 'comfortable', paneHost: {} };
+  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14, theme: 'system', density: 'comfortable', paneHost: {}, agentFilter: 'all', agentSort: 'manual' };
 }
 
 export function saveUi(s: UiState) {

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { Popover } from 'radix-ui';
+import { Popover as RadixPopover } from 'radix-ui';
 import { toast } from 'sonner';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
@@ -9,12 +9,16 @@ import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState } from '@/components/EmptyState';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { SlidersHorizontal } from 'lucide-react';
 import { NewChatForm } from './NewChatForm';
 import { CollectionsSection } from './CollectionsSection';
 import { CreateCollectionDialog } from './CreateCollectionDialog';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { cn } from '@/lib/utils';
 import type { Chat, Collection } from '@/lib/types';
+import { loadUi, saveUi } from '@/lib/storage';
 
 // One row from /api/git-log (a parsed %h|%s|%an|%ar git log line).
 export type GitCommit = { hash: string; subject: string; author: string; date: string };
@@ -82,6 +86,66 @@ function chatType(c?: Chat): string {
   if (['bash', 'sh', 'zsh', 'fish', 'pwsh', 'powershell', 'cmd.exe'].includes(bin)) return 'shell';
   return bin || 'manual';
 }
+
+// Agent-list filter/sort controls (WARDEN-91). Shared across the root, host, and
+// collection views so the option lists and matching logic can never drift.
+export type AgentFilter = 'all' | 'yatfa' | 'claude' | 'manual' | 'active' | 'hidden';
+export type AgentSort = 'manual' | 'name' | 'host' | 'status' | 'activity';
+
+const FILTER_OPTIONS: { value: AgentFilter; label: string }[] = [
+  { value: 'all', label: 'All' },
+  { value: 'yatfa', label: 'Yatfa agents only' },
+  { value: 'claude', label: 'Claude sessions only' },
+  { value: 'manual', label: 'Manual/shell only' },
+  { value: 'active', label: 'Active only' },
+  { value: 'hidden', label: 'Hidden only' },
+];
+
+const SORT_OPTIONS: { value: AgentSort; label: string }[] = [
+  { value: 'manual', label: 'Manual order' },
+  { value: 'name', label: 'Name (A-Z)' },
+  { value: 'host', label: 'Host' },
+  { value: 'status', label: 'Status (active first)' },
+  { value: 'activity', label: 'Last activity' },
+];
+
+// Does `c` pass the active agent filter? Hidden membership matches on the
+// host-prefixed id (`key || id`) so it lines up with hideTab()/activeTabs.
+function matchesAgentFilter(c: Chat, filter: AgentFilter, hiddenTabs: string[]): boolean {
+  switch (filter) {
+    case 'yatfa': return chatType(c) === 'yatfa';
+    case 'claude': { const t = chatType(c); return t === 'claude' || t === 'resume'; }
+    case 'manual': { const t = chatType(c); return t === 'shell' || t === 'manual'; }
+    case 'active': return c.active === true;
+    case 'hidden': return hiddenTabs.includes(c.key || c.id);
+    case 'all':
+    default: return true;
+  }
+}
+
+// Comparator for non-manual sorts. `manual` is handled by the caller (it
+// preserves drag order and must not touch the array).
+function compareChats(a: Chat, b: Chat, sort: AgentSort): number {
+  switch (sort) {
+    case 'name': return (a.name || a.id).localeCompare(b.name || b.id);
+    case 'host': return (a.host || '').localeCompare(b.host || '');
+    case 'status': {
+      const sa = a.active === true ? 1 : 0;
+      const sb = b.active === true ? 1 : 0;
+      return sa !== sb ? sb - sa : a.id.localeCompare(b.id);
+    }
+    case 'activity': return (b.lastActivity || 0) - (a.lastActivity || 0);
+    case 'manual':
+    default: return 0;
+  }
+}
+
+// Sort a chat list by the selected criterion. Manual sort is a no-op that
+// returns the input unchanged so drag-to-reorder order is preserved.
+function sortChats(chats: Chat[], sort: AgentSort): Chat[] {
+  return sort === 'manual' ? chats : [...chats].sort((a, b) => compareChats(a, b, sort));
+}
+
 const TYPE_COLOR: Record<string, string> = {
   resume: 'text-cyan-400', claude: 'text-green-400', shell: 'text-yellow-400',
   yatfa: 'text-blue-400', manual: 'text-violet-400', '?': 'text-muted-foreground',
@@ -150,6 +214,8 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [gitLog, setGitLog] = useState<Record<string, GitCommit[]>>({});
   const [gitLogLoading, setGitLogLoading] = useState<Record<string, boolean>>({});
   const { prefs } = useNotificationPrefs();
+  const [agentFilter, setAgentFilter] = useState<AgentFilter>('all');
+  const [agentSort, setAgentSort] = useState<AgentSort>('manual');
 
   // Filter sessions based on search query and date range (AND logic).
   // Date ranges use calendar-day boundaries (since midnight), not rolling time windows.
@@ -362,6 +428,21 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     return () => clearInterval(interval);
   }, []);
 
+  // Load filter/sort from localStorage on mount
+  useEffect(() => {
+    const ui = loadUi();
+    if (ui.agentFilter) setAgentFilter(ui.agentFilter);
+    if (ui.agentSort) setAgentSort(ui.agentSort);
+  }, []);
+
+  // Save filter/sort to localStorage when changed
+  useEffect(() => {
+    const ui = loadUi();
+    ui.agentFilter = agentFilter;
+    ui.agentSort = agentSort;
+    saveUi(ui);
+  }, [agentFilter, agentSort]);
+
   // Fetch git status for active chats (lazy loading)
   useEffect(() => {
     activeTabs.forEach((id) => {
@@ -406,7 +487,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
 
   if (view.kind === 'collection') {
     const { collection: C } = view;
-    const agents = collections.length > 0
+    let agents = collections.length > 0
       ? chats.filter((chat) => {
           // Apply the same filtering logic as getAgentsInCollection
           if (!C.criteria) return true;
@@ -424,6 +505,9 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           return matches;
         })
       : [];
+
+    // Apply agent filter + sort to collection agents
+    agents = sortChats(agents.filter((c) => matchesAgentFilter(c, agentFilter, hiddenTabs)), agentSort);
 
     const active = agents.filter((c) => c.active);
     const idle = agents.filter((c) => !c.active);
@@ -482,8 +566,15 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   if (view.kind === 'host') {
     const H = view.host;
     const hostChats = chats.filter((c) => c.host === H && (!projectFilter || c.project === projectFilter));
-    const active = hostChats.filter((c) => c.active);
-    const idle = hostChats.filter((c) => !c.active);
+
+    // Apply agent filter + sort to host chats
+    const sortedHostChats = sortChats(
+      hostChats.filter((c) => matchesAgentFilter(c, agentFilter, hiddenTabs)),
+      agentSort,
+    );
+
+    const active = sortedHostChats.filter((c) => c.active);
+    const idle = sortedHostChats.filter((c) => !c.active);
     const visibleActive = active.filter((c) => !hiddenTabs.includes(c.key || c.id));
     const hiddenActive = active.filter((c) => hiddenTabs.includes(c.key || c.id));
     const info = hostSessions[H] || {};
@@ -494,6 +585,13 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
         <div className="flex items-center gap-2 compact:gap-1 px-2 py-2 compact:py-1.5 border-b shrink-0">
           <IconTooltip label="back"><button className="text-xs text-muted-foreground hover:text-foreground px-1 rounded active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => setView({ kind: 'root' })}>‹</button></IconTooltip>
           <span className="text-xs font-medium flex-1 truncate">{LABEL[H] || H}</span>
+          <AgentFilterSortControls
+            agentFilter={agentFilter}
+            agentSort={agentSort}
+            onFilterChange={setAgentFilter}
+            onSortChange={setAgentSort}
+            hideHostSort
+          />
           <IconTooltip label="rescan" disabled={loadingHost === H}><button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => fetchHostSessions(H)} disabled={loadingHost === H}>
             {loadingHost === H ? <Skeleton className="h-3 w-3" /> : '↻'}
           </button></IconTooltip>
@@ -568,8 +666,8 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                 </IconTooltip>
               );
             })}
-            {hostChats.length === 0 && sessions.length === 0 && loadingHost !== H && (
-              <EmptyState type="nothing-here" />
+            {sortedHostChats.length === 0 && sessions.length === 0 && loadingHost !== H && (
+              <EmptyState type="nothing-here" message={hostChats.length === 0 ? undefined : 'no agents match the current filter'} />
             )}
           </div>
         </ScrollArea>
@@ -585,8 +683,17 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     const name = (c.name || id).toLowerCase();
     const host = (c.host || '').toLowerCase();
     const type = chatType(c).toLowerCase();
-    return name.includes(query) || host.includes(query) || type.includes(query);
+    const matchesSearch = name.includes(query) || host.includes(query) || type.includes(query);
+    return matchesSearch && matchesAgentFilter(c, agentFilter, hiddenTabs);
   });
+
+  // Apply sorting — manual preserves the drag-to-reorder order.
+  const sortedTabs = agentSort === 'manual'
+    ? filteredTabs
+    : [...filteredTabs]
+        .map((id) => ({ id, c: findChat(chats, id)! }))
+        .sort((a, b) => compareChats(a.c, b.c, agentSort))
+        .map((x) => x.id);
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -598,7 +705,13 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           onChange={(e) => setTabSearchQuery(e.target.value)}
           className="h-6 text-[10px] px-2 flex-1 max-w-[120px]"
         />
-        <Badge variant="secondary" className="text-xs">{filteredTabs.length}</Badge>
+        <AgentFilterSortControls
+          agentFilter={agentFilter}
+          agentSort={agentSort}
+          onFilterChange={setAgentFilter}
+          onSortChange={setAgentSort}
+        />
+        <Badge variant="secondary" className="text-xs">{sortedTabs.length}</Badge>
         <UpdatedAgo at={lastRefreshAt} />
         <button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={onRefresh} disabled={loading} title="refresh">
           {loading ? <Skeleton className="h-3 w-3" /> : '↻'}
@@ -635,7 +748,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
               ))}
             </div>
           )}
-          {filteredTabs
+          {sortedTabs
             .filter((id) => {
               if (!projectFilter) return true;
               const c = findChat(chats, id);
@@ -652,16 +765,17 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             const hasFiles = !dead && gitInfo?.clean === false && gitInfo.files && gitInfo.files.length > 0;
             const gitCommits = gitLog[id];
             const gitLoading = gitLogLoading[id];
+            const canDrag = agentSort === 'manual'; // Only allow drag in manual mode
             return (
-              <div key={id} data-tab-id={id} draggable
-                onDragStart={() => setDragIdx(originalIdx)}
-                onDragOver={(e) => { e.preventDefault(); setDragOverIdx(originalIdx); }}
-                onDragEnd={() => { if (dragIdx !== null && dragOverIdx !== null && dragIdx !== dragOverIdx) onReorder(dragIdx, dragOverIdx); setDragIdx(null); setDragOverIdx(null); }}
-                onDrop={(e) => { e.preventDefault(); if (dragIdx !== null && originalIdx !== dragIdx) onReorder(dragIdx, originalIdx); setDragIdx(null); setDragOverIdx(null); }}
+              <div key={id} data-tab-id={id} draggable={canDrag}
+                onDragStart={canDrag ? () => setDragIdx(originalIdx) : undefined}
+                onDragOver={canDrag ? (e) => { e.preventDefault(); setDragOverIdx(originalIdx); } : undefined}
+                onDragEnd={canDrag ? () => { if (dragIdx !== null && dragOverIdx !== null && dragIdx !== dragOverIdx) onReorder(dragIdx, dragOverIdx); setDragIdx(null); setDragOverIdx(null); } : undefined}
+                onDrop={canDrag ? (e) => { e.preventDefault(); if (dragIdx !== null && originalIdx !== dragIdx) onReorder(dragIdx, originalIdx); setDragIdx(null); setDragOverIdx(null); } : undefined}
                 onClick={() => onOpenChat(id)}
-                className={`group flex flex-col gap-0.5 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent cursor-pointer transition-all duration-150 ease-out focus-within:ring-2 focus-within:ring-primary focus-within:ring-offset-2 focus-within:ring-offset-background ${dead ? 'opacity-50' : ''} ${dragOverIdx === originalIdx && dragIdx !== null ? 'border-t-2 border-primary' : ''}`}>
+                className={`group flex flex-col gap-0.5 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent ${canDrag ? 'cursor-pointer' : 'cursor-default'} transition-all duration-150 ease-out focus-within:ring-2 focus-within:ring-primary focus-within:ring-offset-2 focus-within:ring-offset-background ${dead ? 'opacity-50' : ''} ${dragOverIdx === originalIdx && dragIdx !== null ? 'border-t-2 border-primary' : ''}`}>
                 <div className="flex items-center gap-2">
-                  <span className="text-muted-foreground/40 cursor-grab active:cursor-grabbing select-none">⠿</span>
+                  <span className={`text-muted-foreground/40 ${canDrag ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'} select-none`}>⠿</span>
                   {showStatusIndicators !== false && <span className={`size-2 rounded-full shrink-0 ${dead ? 'bg-red-500' : isOpen ? 'bg-green-500' : 'bg-muted-foreground/40'}`} />}
                   <span className={`truncate flex-1 ${dead ? 'line-through text-muted-foreground' : ''}`}>{c?.name || id}</span>
                   {!dead && showTypeBadges !== false && <span className={`text-[10px] ${TYPE_COLOR[type] || ''}`}>{type}</span>}
@@ -688,8 +802,8 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
               </div>
             );
           })}
-          {filteredTabs.length === 0 && tabSearchQuery && (
-            <div className="text-xs text-muted-foreground p-3 text-center">no tabs match "{tabSearchQuery}"</div>
+          {sortedTabs.length === 0 && activeTabs.length > 0 && (
+            <div className="text-xs text-muted-foreground p-3 text-center">{tabSearchQuery ? `no tabs match "${tabSearchQuery}"` : 'no tabs match the current filter'}</div>
           )}
           {activeTabs.length === 0 && !loading && (
             <EmptyState type="no-tabs" />
@@ -897,6 +1011,71 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   );
 }
 
+// Filter + sort popover shared by the root and host view headers. Collapsing
+// both controls behind a single icon keeps the header from overflowing at the
+// default sidebar width (220px) — two inline selects did not fit.
+function AgentFilterSortControls({
+  agentFilter,
+  agentSort,
+  onFilterChange,
+  onSortChange,
+  hideHostSort = false,
+}: {
+  agentFilter: AgentFilter;
+  agentSort: AgentSort;
+  onFilterChange: (v: AgentFilter) => void;
+  onSortChange: (v: AgentSort) => void;
+  hideHostSort?: boolean;
+}) {
+  const active = agentFilter !== 'all' || agentSort !== 'manual';
+  const sortOptions = hideHostSort ? SORT_OPTIONS.filter((o) => o.value !== 'host') : SORT_OPTIONS;
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          title="filter & sort"
+          aria-label="filter & sort"
+          className={active ? 'text-primary' : 'text-muted-foreground'}
+        >
+          <SlidersHorizontal />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-56 p-3">
+        <div className="flex flex-col gap-3">
+          <label className="flex flex-col gap-1">
+            <span className="text-xs uppercase tracking-wider text-muted-foreground">filter</span>
+            <Select value={agentFilter} onValueChange={(v) => onFilterChange(v as AgentFilter)}>
+              <SelectTrigger className="h-7 w-full text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {FILTER_OPTIONS.map((o) => (
+                  <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs uppercase tracking-wider text-muted-foreground">sort</span>
+            <Select value={agentSort} onValueChange={(v) => onSortChange(v as AgentSort)}>
+              <SelectTrigger className="h-7 w-full text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {sortOptions.map((o) => (
+                  <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </label>
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function CtxItem({ label, onClick, danger, isLoading }: { label: string; onClick: () => void; danger?: boolean; isLoading?: boolean }) {
   return (
     <button onClick={onClick} disabled={isLoading} className={`flex w-full text-left px-3 py-1.5 hover:bg-accent active:bg-accent/80 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${danger ? 'text-red-500' : ''}`}>
@@ -920,8 +1099,8 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, className }:
   className?: string;
 }) {
   return (
-    <Popover.Root onOpenChange={(open) => { if (open && commits === undefined && !loading) onFetch?.(); }}>
-      <Popover.Trigger asChild>
+    <RadixPopover.Root onOpenChange={(open) => { if (open && commits === undefined && !loading) onFetch?.(); }}>
+      <RadixPopover.Trigger asChild>
         <button
           type="button"
           onClick={(e) => e.stopPropagation()}
@@ -931,9 +1110,9 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, className }:
           {branch}
           {clean === false && <span className="text-yellow-400">±</span>}
         </button>
-      </Popover.Trigger>
-      <Popover.Portal>
-        <Popover.Content
+      </RadixPopover.Trigger>
+      <RadixPopover.Portal>
+        <RadixPopover.Content
           sideOffset={4}
           align="start"
           onClick={(e) => e.stopPropagation()}
@@ -969,9 +1148,9 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, className }:
           ) : (
             <div className="px-1 py-1 text-[10px] text-muted-foreground">no commits</div>
           )}
-        </Popover.Content>
-      </Popover.Portal>
-    </Popover.Root>
+        </RadixPopover.Content>
+      </RadixPopover.Portal>
+    </RadixPopover.Root>
   );
 }
 

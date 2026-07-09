@@ -27,6 +27,7 @@
     "dev:test": "node scripts/dev.mjs test"
   },
   "dependencies": {
+    "@radix-ui/react-select": "^2.3.3",
     "express": "^5.2.1",
     "node-pty": "^1.1.0",
     "ws": "^8.21.0"
@@ -51,16 +52,22 @@
       "output": "release"
     },
     "win": {
-      "target": ["nsis"],
+      "target": [
+        "nsis"
+      ],
       "icon": "build/icon.png",
       "artifactName": "yatfa-warden-setup-${version}.${ext}"
     },
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "artifactName": "yatfa-warden-${version}.${ext}"
     },
     "linux": {
-      "target": ["AppImage"],
+      "target": [
+        "AppImage"
+      ],
       "artifactName": "yatfa-warden-${version}.${ext}"
     }
   }
