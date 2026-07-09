@@ -112,6 +112,14 @@ jobs:
     needs: [bump, build]
     runs-on: ubuntu-latest
     steps:
+      # gh release create/view shell out to git to resolve the repo, so the
+      # job needs a checkout (shallow, at the release tag is enough).
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump.outputs.tag }}
+          fetch-depth: 1
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
