@@ -55,6 +55,19 @@ function App() {
     streamApi.connect();
     refresh();
 
+    // Load display settings on mount
+    fetch('/api/config')
+      .then((r) => r.json())
+      .then((cfg) => {
+        setDisplaySettings({
+          showHostTags: cfg.showHostTags ?? true,
+          showTypeBadges: cfg.showTypeBadges ?? true,
+          showStatusIndicators: cfg.showStatusIndicators ?? true,
+          showProjectBadges: cfg.showProjectBadges ?? false,
+        });
+      })
+      .catch((err) => console.error('Failed to load display settings:', err));
+
     // Check for activity since last close
     const checkActivitySinceClose = async () => {
       const lastCloseStr = localStorage.getItem('warden:lastClose');
@@ -136,13 +149,30 @@ function App() {
     setLoading(false);
   }, []);
 
-  // Called after Settings saves: reload chats/ssh-hosts AND refresh notification
-  // prefs everywhere (the shared hook broadcasts to all subscribers) so toggles
-  // take effect immediately without a page reload.
+  // Refresh display customization settings from the backend (called on mount and
+  // after Settings saves, so toggles take effect immediately without a reload).
+  const refreshDisplaySettings = useCallback(async () => {
+    try {
+      const cfg = await fetch('/api/config').then((r) => r.json());
+      setDisplaySettings({
+        showHostTags: cfg.showHostTags ?? true,
+        showTypeBadges: cfg.showTypeBadges ?? true,
+        showStatusIndicators: cfg.showStatusIndicators ?? true,
+        showProjectBadges: cfg.showProjectBadges ?? false,
+      });
+    } catch (e) {
+      console.error('Failed to refresh display settings:', e);
+    }
+  }, []);
+
+  // Called after Settings saves: reload chats/ssh-hosts, refresh notification prefs
+  // everywhere (the shared hook broadcasts to all subscribers), and refresh display
+  // settings — so all toggles take effect immediately without a page reload.
   const handleConfigChange = useCallback(() => {
     refresh();
     reloadNotificationPrefs();
-  }, [refresh, reloadNotificationPrefs]);
+    refreshDisplaySettings();
+  }, [refresh, reloadNotificationPrefs, refreshDisplaySettings]);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
   // its entries in the chats list so dots update to green/red.
@@ -281,6 +311,13 @@ function App() {
   const tiles = openPanes.map((id) => ({ id }));
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Display customization settings
+  const [displaySettings, setDisplaySettings] = useState({
+    showHostTags: true,
+    showTypeBadges: true,
+    showStatusIndicators: true,
+    showProjectBadges: false,
+  });
   // Resize drag state
   const [isResizingSidebar, setIsResizingSidebar] = useState(false);
   const [isResizingObserver, setIsResizingObserver] = useState(false);
@@ -406,6 +443,10 @@ function App() {
               onRefresh={refresh}
               onDiscoverHost={discoverHost}
               loading={loading}
+              showHostTags={displaySettings.showHostTags}
+              showTypeBadges={displaySettings.showTypeBadges}
+              showStatusIndicators={displaySettings.showStatusIndicators}
+              showProjectBadges={displaySettings.showProjectBadges}
             />
           </ErrorBoundary>
         </section>

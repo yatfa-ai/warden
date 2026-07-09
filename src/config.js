@@ -14,6 +14,7 @@ const DEFAULTS = {
   connectTimeout: 10,
   pollIntervalMs: 1500,
   pins: [],             // chat ids to surface first in listings / UI
+  // Observer settings
   observerConfirmMode: 'always',  // 'always' | 'auto-safe' - whether to auto-approve read-only directives
   observerAutoStart: false,       // boolean - whether to auto-start observer on first connection
   observerSessionTimeout: 30,     // minutes - auto-stop observer after inactivity, null to disable
@@ -21,6 +22,11 @@ const DEFAULTS = {
   notifyErrors: true,            // error toasts
   notifySuccess: true,           // success toasts
   notifyObserver: true,          // observer events (timeout, gate prompts)
+  // Display customization
+  showHostTags: true,        // Show host badges (local/hostname)
+  showTypeBadges: true,      // Show type labels (shell/claude/yatfa)
+  showStatusIndicators: true, // Show status dots (active/idle/dead)
+  showProjectBadges: false,   // Show project name badges
 };
 
 export function load() {
