@@ -201,6 +201,18 @@ function App() {
     openChat(id);
   }, [openChat]);
 
+  // Seamless cross-host resume: when an observer session bound to an agent is
+  // opened, reconnect to that agent's chat. We prime the pane's host hint and
+  // (for remote hosts) discover the host so the pane can attach, then open the
+  // chat — so the user never has to manually navigate to the right host.
+  const handleReconnectChat = useCallback((chatKey: string, host?: string | null) => {
+    if (host && host !== '(local)') {
+      setPaneHost((p) => (p[chatKey] === host ? p : { ...p, [chatKey]: host }));
+      void discoverHost(host);
+    }
+    openChat(chatKey);
+  }, [openChat, discoverHost]);
+
   // close pane: pane gone, tab stays
   const closePane = useCallback((id: string) => {
     setOpenPanes((p) => p.filter((x) => x !== id));
@@ -309,6 +321,8 @@ function App() {
   }, []);
   const openPaneSet = new Set(openPanes);
   const tiles = openPanes.map((id) => ({ id }));
+  // The chat the observer should bind to when "observe focused" is clicked.
+  const focusedChat = chats.find((c) => (c.key || c.id) === focused) || null;
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Display customization settings
@@ -475,7 +489,7 @@ function App() {
             title="Drag to resize observer panel"
           />
           <ErrorBoundary>
-            <ObserverTabs externalViewMode={externalViewMode} onFocusAgent={handleFocusAgent} />
+            <ObserverTabs externalViewMode={externalViewMode} onFocusAgent={handleFocusAgent} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} />
           </ErrorBoundary>
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden"
