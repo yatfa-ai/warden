@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
+import { postJson } from '@/lib/api';
 import { loadUi, saveUi } from '@/lib/storage';
 import { applyTheme, listenSystemThemeChange, type Theme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
@@ -344,16 +345,14 @@ function App() {
   const [forceKillTarget, setForceKillTarget] = useState<string | null>(null);
 
   const performForceKill = useCallback(async (id: string) => {
-    try {
-      const r = await fetch('/api/session-kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) });
-      if (!r.ok) {
-        if (prefs.notifyChatOps) toast.error('Failed to force-kill session');
-        return;
-      }
-      if (prefs.notifyChatOps) toast.success('Session force-killed');
-    } catch (error) {
-      if (prefs.notifyChatOps) toast.error(`Failed to force-kill: ${error instanceof Error ? error.message : String(error)}`);
+    const { ok, error, res } = await postJson('/api/session-kill', { id });
+    if (!ok) {
+      // Match the prior split: a generic toast on a server error, the reason
+      // appended on a network failure.
+      if (prefs.notifyChatOps) toast.error(res ? 'Failed to force-kill session' : `Failed to force-kill: ${error || ''}`);
+      return;
     }
+    if (prefs.notifyChatOps) toast.success('Session force-killed');
   }, [prefs.notifyChatOps]);
 
   const forceKill = useCallback((id: string) => {
@@ -384,9 +383,10 @@ function App() {
   const performKill = useCallback(async (id: string) => {
     const host = chatsRef.current.find((x) => (x.key || x.id) === id)?.host;
     try {
-      const r = await fetch('/api/kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) });
-      if (!r.ok) {
-        if (prefs.notifyChatOps) toast.error('Failed to kill chat');
+      const { ok, error, res } = await postJson('/api/kill', { id });
+      if (!ok) {
+        // Generic toast on a server error, reason appended on a network failure.
+        if (prefs.notifyChatOps) toast.error(res ? 'Failed to kill chat' : `Failed to kill chat: ${error || ''}`);
         return;
       }
       removeActive(id);
@@ -445,25 +445,25 @@ function App() {
 
   const resumeSession = useCallback(async (id: string, description: string, cwd: string, host: string) => {
     try {
-      const r = await fetch('/api/resume', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, cwd, host, name: description || undefined }) });
-      const j = await r.json();
-      if (!r.ok) {
-        if (prefs.notifyChatOps) toast.error(j.error || 'resume failed');
+      const result = await postJson<{ chat: { key: string; id: string } }>('/api/resume', { id, cwd, host, name: description || undefined });
+      if (!result.ok) {
+        if (prefs.notifyChatOps) toast.error(result.error || 'resume failed');
         return;
       }
+      const chat = result.data!.chat;
       // Drop any stale entry for this resumed chat before refresh() so the catalog
       // merge can't carry forward its pre-resume status. Re-resuming the same Claude
       // session reuses the `resume-<sid>` tmux session, so the existing live entry
       // would otherwise briefly flash its old (e.g. idle) status until discoverHost
-      // re-marks it active. (j.chat's key/id — not the bare Claude session id passed
+      // re-marks it active. (chat's key/id — not the bare Claude session id passed
       // in — is what matches a chat already in the list.)
-      const resumedId = j.chat.key || j.chat.id;
+      const resumedId = chat.key || chat.id;
       setChats((prev) => prev.filter((c) => (c.key || c.id) !== resumedId));
       await refresh();
       // Resuming activates the chat; re-discover the host so it shows green immediately
       // instead of waiting for the next auto-refresh tick.
       if (host) void discoverHost(host);
-      openChat(j.chat.key);
+      openChat(chat.key);
       if (prefs.notifyChatOps) toast.success('Session resumed');
     } catch (e) {
       if (prefs.notifyChatOps) toast.error(e instanceof Error ? e.message : String(e));
@@ -472,9 +472,10 @@ function App() {
 
   const renameChat = useCallback(async (session: string, kind: string, name: string) => {
     try {
-      const r = await fetch('/api/rename', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session, kind, name }) });
-      if (!r.ok) {
-        if (prefs.notifyChatOps) toast.error('Failed to rename chat');
+      const { ok, error, res } = await postJson('/api/rename', { session, kind, name });
+      if (!ok) {
+        // Generic toast on a server error, reason appended on a network failure.
+        if (prefs.notifyChatOps) toast.error(res ? 'Failed to rename chat' : `Failed to rename: ${error || ''}`);
         return;
       }
       refresh();

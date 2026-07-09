@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Input } from '@/components/ui/input';
+import { postJson } from '@/lib/api';
 import type { Chat } from '@/lib/types';
 
 const THIS_MACHINE = '(local)';
@@ -42,14 +43,12 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
     setBusy(true);
     try {
       const sess = session.trim() || `chat-${Math.random().toString(36).slice(2, 8)}`;
-      const r = await fetch('/api/spawn', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ host, session: sess, cwd: cwd.trim(), cmd: cmd.trim() }),
+      const result = await postJson<{ chat: Chat }>('/api/spawn', {
+        host, session: sess, cwd: cwd.trim(), cmd: cmd.trim(),
       });
-      const j = await r.json();
-      if (!r.ok) { setErr(j.error || 'spawn failed'); setBusy(false); return; }
+      if (!result.ok) { setErr(result.error || 'spawn failed'); setBusy(false); return; }
       setOpen(false); setSession(''); setCwd('');
-      onSpawned(j.chat);
+      onSpawned(result.data!.chat);
     } catch (e: unknown) { setErr(e instanceof Error ? e.message : String(e)); }
     setBusy(false);
   };
