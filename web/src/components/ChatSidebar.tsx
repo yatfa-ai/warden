@@ -313,7 +313,9 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
         const r = await fetch('/api/pins');
         const j = await r.json();
         setPinnedChatIds(new Set(j.pins || []));
-      } catch { /* noop */ }
+      } catch (error) {
+        console.error('[pins] Failed:', error);
+      }
     };
     fetchPins();
   }, []);
@@ -335,7 +337,9 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       if (r.ok) {
         setPinnedChatIds(newPins);
       }
-    } catch { /* noop */ }
+    } catch (error) {
+      console.error('[pins-save] Failed:', error);
+    }
   };
 
   const fetchAllSessions = async () => {
@@ -344,7 +348,9 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       const r = await fetch('/api/claude-sessions-all');
       const j = await r.json();
       setAllSessions(j.sessions || []);
-    } catch { /* noop */ }
+    } catch (error) {
+      console.error('[claude-sessions-all] Failed:', error);
+    }
     setLoadingAllSessions(false);
   };
   const enterHost = (host: string) => {
