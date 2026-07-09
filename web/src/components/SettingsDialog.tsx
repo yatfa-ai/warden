@@ -14,6 +14,7 @@ import { Switch } from '@/components/ui/switch';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
 import { type Theme } from '@/lib/theme';
+import { type Density } from '@/lib/density';
 import { toast } from 'sonner';
 
 interface ConfigData {
@@ -24,6 +25,7 @@ interface ConfigData {
   observerConfirmMode: 'always' | 'auto-safe';
   observerAutoStart: boolean;
   observerSessionTimeout: number | null;
+  confirmDestructiveActions: boolean;
   notifyChatOps: boolean;
   notifyErrors: boolean;
   notifySuccess: boolean;
@@ -41,9 +43,14 @@ interface Props {
   onConfigChange: () => void;
   theme: Theme;
   setTheme: (theme: Theme) => void;
+  // Density is a pure client-side localStorage pref (NOT backend config): it
+  // applies instantly via the prop callback and is persisted by App's saveUi
+  // effect. It must never be added to the `config` state / PUT /api/config body.
+  density: Density;
+  setDensity: (density: Density) => void;
 }
 
-export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme }: Props) {
+export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme, density, setDensity }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -52,6 +59,7 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
     observerConfirmMode: 'always',
     observerAutoStart: false,
     observerSessionTimeout: 30,
+    confirmDestructiveActions: true,
     notifyChatOps: true,
     notifyErrors: true,
     notifySuccess: true,
@@ -85,6 +93,7 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
               : 'always',
             observerAutoStart: configData.observerAutoStart || false,
             observerSessionTimeout: configData.observerSessionTimeout ?? 30,
+            confirmDestructiveActions: configData.confirmDestructiveActions ?? true,
             notifyChatOps: configData.notifyChatOps ?? true,
             notifyErrors: configData.notifyErrors ?? true,
             notifySuccess: configData.notifySuccess ?? true,
@@ -302,6 +311,29 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
               </div>
             </div>
 
+            {/* Safety Section — destructive-action confirmation preference */}
+            <div className="flex flex-col gap-3 pt-2 border-t">
+              <div className="text-sm font-medium text-foreground">Safety</div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="confirmDestructiveActions"
+                    checked={config.confirmDestructiveActions}
+                    onCheckedChange={(checked) =>
+                      setConfig({ ...config, confirmDestructiveActions: checked === true })
+                    }
+                  />
+                  <Label htmlFor="confirmDestructiveActions" className="cursor-pointer">
+                    Confirm before destructive actions (force-kill, kill chat)
+                  </Label>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  When on, force-killing a session and killing a chat ask for confirmation. Turn off for less friction.
+                </p>
+              </div>
+            </div>
+
             {/* Display Customization Section */}
             <div className="flex flex-col gap-3 pt-2 border-t">
               <div className="text-sm font-medium text-foreground">Display</div>
@@ -355,9 +387,9 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
               </div>
             </div>
 
-            {/* Theme Preferences Section */}
+            {/* Appearance Section — client-side look preferences (color scheme + density) */}
             <div className="flex flex-col gap-3 pt-2 border-t">
-              <div className="text-sm font-medium text-foreground">Theme</div>
+              <div className="text-sm font-medium text-foreground">Appearance</div>
 
               <div className="flex flex-col gap-2">
                 <Label htmlFor="theme">Color Scheme</Label>
@@ -373,6 +405,22 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
                 </select>
                 <p className="text-xs text-muted-foreground">
                   Choose how Warden appears. "System" automatically switches between light and dark based on your OS settings.
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="density">Density</Label>
+                <select
+                  id="density"
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  value={density}
+                  onChange={(e) => setDensity(e.target.value as Density)}
+                >
+                  <option value="comfortable">Comfortable (default)</option>
+                  <option value="compact">Compact</option>
+                </select>
+                <p className="text-xs text-muted-foreground">
+                  "Compact" tightens row and header spacing so more agents fit on screen. Applies instantly and is remembered across reloads.
                 </p>
               </div>
             </div>

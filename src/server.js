@@ -330,6 +330,7 @@ app.get('/api/config', (_req, res) => res.json({
   observerConfirmMode: cfg.observerConfirmMode,
   observerAutoStart: cfg.observerAutoStart,
   observerSessionTimeout: cfg.observerSessionTimeout,
+  confirmDestructiveActions: cfg.confirmDestructiveActions,
   notifyChatOps: cfg.notifyChatOps,
   notifyErrors: cfg.notifyErrors,
   notifySuccess: cfg.notifySuccess,
@@ -345,6 +346,7 @@ app.get('/api/config', (_req, res) => res.json({
 app.put('/api/config', (req, res) => {
   const { hosts, pollIntervalMs, tmuxSession, connectTimeout,
           observerConfirmMode, observerAutoStart, observerSessionTimeout,
+          confirmDestructiveActions,
           notifyChatOps, notifyErrors, notifySuccess, notifyObserver,
           showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges } = req.body;
   if (hosts && Array.isArray(hosts)) cfg.hosts = hosts;
@@ -358,6 +360,8 @@ app.put('/api/config', (req, res) => {
       (typeof observerSessionTimeout === 'number' &&
        Number.isFinite(observerSessionTimeout) &&
        observerSessionTimeout > 0)) cfg.observerSessionTimeout = observerSessionTimeout;
+  // Safety preference: confirm before destructive actions (force-kill, kill chat)
+  if (typeof confirmDestructiveActions === 'boolean') cfg.confirmDestructiveActions = confirmDestructiveActions;
   // Notification preferences (toast categories). Only accept booleans so a
   // malformed body can't blank out a preference.
   if (typeof notifyChatOps === 'boolean') cfg.notifyChatOps = notifyChatOps;
@@ -522,6 +526,14 @@ app.get('/api/claude-sessions-all', async (_req, res) => {
   res.json({ sessions: all.slice(0, 40) });
 });
 
+// Run git locally: captured stdout, inherited stderr, in a HIDDEN window. Centralizing
+// the spawn options (esp. windowsHide) keeps local git calls from flashing a visible
+// console window when warden runs as a packaged/detached app. Used by /api/git-status
+// and /api/git-log. Remote chats go through run() (ssh.js), which already hides.
+function runLocalGit(args, cwd) {
+  return spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true });
+}
+
 app.get('/api/git-status', async (req, res) => {
   const chatId = String(req.query.id || '');
   const { chat, error } = await resolve(chatId);
@@ -537,16 +549,10 @@ app.get('/api/git-status', async (req, res) => {
 
     if (chat.host === LOCAL) {
       // Local execution: use spawnSync directly
-      const branchResult = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-        cwd,
-        stdio: ['ignore', 'pipe', 'inherit'],
-      });
+      const branchResult = runLocalGit(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
       branch = branchResult.stdout?.toString().trim() || '';
 
-      const statusResult = spawnSync('git', ['status', '--porcelain'], {
-        cwd,
-        stdio: ['ignore', 'pipe', 'inherit'],
-      });
+      const statusResult = runLocalGit(['status', '--porcelain'], cwd);
       const statusRaw = statusResult.stdout?.toString() || '';
       // NOTE: parse the raw bytes — git status codes can start with a leading
       // space (" M" = unstaged mod), so the output must NOT be trimmed as a
@@ -619,10 +625,7 @@ app.get('/api/git-log', async (req, res) => {
     let raw = '';
     if (chat.host === LOCAL) {
       // Local execution: use spawnSync directly
-      const r = spawnSync('git', ['log', `-${limit}`, `--pretty=format:${pretty}`], {
-        cwd,
-        stdio: ['ignore', 'pipe', 'inherit'],
-      });
+      const r = runLocalGit(['log', `-${limit}`, `--pretty=format:${pretty}`], cwd);
       raw = r.stdout?.toString().trim() || '';
     } else {
       // Remote execution: SSH. shellQuote the pretty format so the '|' separators aren't

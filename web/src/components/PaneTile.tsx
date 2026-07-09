@@ -188,7 +188,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       className={`flex flex-col h-full w-full min-h-0 rounded-lg overflow-hidden border bg-black transition-all duration-200 ease-in-out ${focused ? 'border-primary shadow-lg shadow-primary/20' : 'border-border'}`}>
       {/* header toolbar */}
       <div onDoubleClick={(e) => { stop(e); onToggleMax(); }}
-        className="flex items-center gap-1 px-2 py-1 bg-muted text-xs shrink-0 select-none">
+        className="flex items-center gap-1 px-2 py-1 compact:py-0.5 bg-muted text-xs shrink-0 select-none">
         <span className={`size-2 rounded-full shrink-0 ${connected ? 'bg-green-500' : errored ? 'bg-red-500' : 'bg-yellow-500/80 animate-pulse'}`} />
         <span className="truncate flex-1 font-medium">{label || id}</span>
         {hasNew && <span className="text-[9px] text-cyan-400 bg-cyan-500/10 px-1 rounded animate-pulse">new</span>}
@@ -205,7 +205,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       </div>
       {/* search bar */}
       {showSearch && (
-        <div className="flex items-center gap-1 px-2 py-1 bg-muted/80 border-b border-border/30 shrink-0">
+        <div className="flex items-center gap-1 px-2 py-1 compact:py-0.5 bg-muted/80 border-b border-border/30 shrink-0">
           <input autoFocus value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') doSearch('next'); if (e.key === 'Escape') setShowSearch(false); }}
             placeholder="search…" className="flex-1 bg-background border rounded px-1.5 py-0.5 text-[11px]" />
           <Btn title="prev" onClick={() => doSearch('prev')}>↑</Btn>

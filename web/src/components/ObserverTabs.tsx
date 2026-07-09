@@ -154,7 +154,7 @@ export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onRe
 
   return (
     <div className="flex flex-col h-full min-h-0">
-      <div className="flex items-center justify-between px-2 py-1.5 border-b shrink-0">
+      <div className="flex items-center justify-between px-2 py-1.5 compact:py-1 border-b shrink-0">
         <div className="flex items-center gap-1">
           <button
             onClick={() => setViewMode('sessions')}
@@ -197,7 +197,7 @@ export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onRe
               <EmptyState type="no-data" message={loadingTimeout ? 'Loading sessions (taking longer than expected)...' : 'Loading sessions...'} />
             </div>
           )}
-          <div className="flex items-center gap-1 px-2 py-1.5 border-b shrink-0 overflow-x-auto">
+          <div className="flex items-center gap-1 px-2 py-1.5 compact:py-1 border-b shrink-0 overflow-x-auto">
             {openIds.map((id) => {
               const session = sessions.find((s) => s.id === id);
               const hostLbl = hostLabel(id);

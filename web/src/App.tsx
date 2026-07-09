@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { loadUi, saveUi } from '@/lib/storage';
 import { applyTheme, listenSystemThemeChange, type Theme } from '@/lib/theme';
+import { applyDensity, type Density } from '@/lib/density';
 import type { Chat } from '@/lib/types';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ChatSidebar } from '@/components/ChatSidebar';
@@ -55,7 +56,14 @@ function App() {
   const [observerCollapsed, setObserverCollapsed] = useState(uiState.observerCollapsed);
   const [healthCollapsed, setHealthCollapsed] = useState(uiState.healthCollapsed ?? true);
   const [theme, setTheme] = useState<Theme>(() => uiState.theme ?? 'system');
+  const [density, setDensity] = useState<Density>(() => uiState.density ?? 'comfortable');
   const { prefs, reload: reloadNotificationPrefs } = useNotificationPrefs();
+  // "Confirm before destructive actions" preference (default on). Gates both
+  // destructive kill paths — force-kill (tmux session) and kill chat. Loaded
+  // from /api/config on mount and refreshed after Settings saves. Declared up
+  // here because the forceKill/requestKill callbacks below read it eagerly via
+  // their dependency arrays.
+  const [confirmDestructiveActions, setConfirmDestructiveActions] = useState(true);
 
   useEffect(() => {
     streamApi.onOpen = () => setStreamConn(true);
@@ -67,19 +75,7 @@ function App() {
     };
     streamApi.connect();
     refresh();
-
-    // Load display settings on mount
-    fetch('/api/config')
-      .then((r) => r.json())
-      .then((cfg) => {
-        setDisplaySettings({
-          showHostTags: cfg.showHostTags ?? true,
-          showTypeBadges: cfg.showTypeBadges ?? true,
-          showStatusIndicators: cfg.showStatusIndicators ?? true,
-          showProjectBadges: cfg.showProjectBadges ?? false,
-        });
-      })
-      .catch((err) => console.error('Failed to load display settings:', err));
+    refreshConfigPrefs();
 
     // Check for activity since last close
     const checkActivitySinceClose = async () => {
@@ -138,7 +134,12 @@ function App() {
     }
   }, [theme]);
 
-  useEffect(() => { saveUi({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, theme, paneHost }); }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, theme, paneHost]);
+  // apply density on mount and when density changes (persisted via the saveUi effect below)
+  useEffect(() => {
+    applyDensity(density);
+  }, [density]);
+
+  useEffect(() => { saveUi({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, theme, density, paneHost }); }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, theme, density, paneHost]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -185,9 +186,10 @@ function App() {
 
   const refresh = useCallback(async () => { await applyCatalog(false); }, [applyCatalog]);
 
-  // Refresh display customization settings from the backend (called on mount and
-  // after Settings saves, so toggles take effect immediately without a reload).
-  const refreshDisplaySettings = useCallback(async () => {
+  // Refresh backend-backed preferences from /api/config (display customization
+  // + the "Confirm before destructive actions" safety toggle). Called on mount
+  // and after Settings saves, so toggles take effect immediately without a reload.
+  const refreshConfigPrefs = useCallback(async () => {
     try {
       const cfg = await fetch('/api/config').then((r) => r.json());
       setDisplaySettings({
@@ -196,19 +198,20 @@ function App() {
         showStatusIndicators: cfg.showStatusIndicators ?? true,
         showProjectBadges: cfg.showProjectBadges ?? false,
       });
+      setConfirmDestructiveActions(cfg.confirmDestructiveActions ?? true);
     } catch (e) {
-      console.error('Failed to refresh display settings:', e);
+      console.error('Failed to refresh config preferences:', e);
     }
   }, []);
 
   // Called after Settings saves: reload chats/ssh-hosts, refresh notification prefs
-  // everywhere (the shared hook broadcasts to all subscribers), and refresh display
-  // settings — so all toggles take effect immediately without a page reload.
+  // everywhere (the shared hook broadcasts to all subscribers), and refresh config
+  // preferences — so all toggles take effect immediately without a page reload.
   const handleConfigChange = useCallback(() => {
     refresh();
     reloadNotificationPrefs();
-    refreshDisplaySettings();
-  }, [refresh, reloadNotificationPrefs, refreshDisplaySettings]);
+    refreshConfigPrefs();
+  }, [refresh, reloadNotificationPrefs, refreshConfigPrefs]);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
   // its entries in the chats list so dots update to green/red.
@@ -325,7 +328,15 @@ function App() {
   }, []);
   const toggleMax = useCallback((id: string) => setMaximized((m) => (m === id ? null : id)), []);
   const clearNew = useCallback((id: string) => setNewActivity((prev) => { if (!prev.has(id)) return prev; const n = new Set(prev); n.delete(id); return n; }), []);
-  const forceKill = useCallback(async (id: string) => {
+
+  // Force-kill confirmation. The ⏹ force-kill button sits directly beside
+  // clear/download/close in the pane toolbar — a single misclick otherwise
+  // kills a possibly-running agent's tmux session with no guard. When "Confirm
+  // before destructive actions" is on (default), open a ConfirmDialog first;
+  // when off (power-user opt-out), kill immediately with no friction.
+  const [forceKillTarget, setForceKillTarget] = useState<string | null>(null);
+
+  const performForceKill = useCallback(async (id: string) => {
     try {
       const r = await fetch('/api/session-kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) });
       if (!r.ok) {
@@ -337,6 +348,21 @@ function App() {
       if (prefs.notifyChatOps) toast.error(`Failed to force-kill: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, [prefs.notifyChatOps]);
+
+  const forceKill = useCallback((id: string) => {
+    if (confirmDestructiveActions) setForceKillTarget(id);
+    else void performForceKill(id);
+  }, [confirmDestructiveActions, performForceKill]);
+
+  const confirmForceKill = useCallback(() => {
+    const id = forceKillTarget;
+    setForceKillTarget(null);
+    if (id) void performForceKill(id);
+  }, [forceKillTarget, performForceKill]);
+
+  const cancelForceKill = useCallback(() => {
+    setForceKillTarget(null);
+  }, []);
 
   // Kill-chat confirmation. The native `window.confirm` guard is replaced by a
   // controlled ConfirmDialog. `requestKill` opens the dialog and returns a
@@ -368,9 +394,24 @@ function App() {
   }, [refresh, discoverHost, removeActive, prefs.notifyChatOps]);
 
   const requestKill = useCallback((id: string) => {
-    setKillTarget(id);
-    return new Promise<void>((resolve) => { killResolveRef.current = resolve; });
-  }, []);
+    // Returns a promise that resolves when the kill flow finishes (confirm+fetch,
+    // direct fetch, OR cancel). ChatSidebar awaits this to drive its spinner /
+    // disabled state, so it must stay pending across both branches below — that
+    // is what preserves the loading state exactly as the old blocking confirm did.
+    return new Promise<void>((resolve) => {
+      killResolveRef.current = resolve;
+      if (confirmDestructiveActions) {
+        setKillTarget(id); // opens the ConfirmDialog; confirmKill/cancelKill resolve
+      } else {
+        // preference off: honor the opt-out — skip the confirm, kill immediately,
+        // then resolve so the sidebar's spinner clears.
+        void performKill(id).finally(() => {
+          killResolveRef.current?.();
+          killResolveRef.current = null;
+        });
+      }
+    });
+  }, [confirmDestructiveActions, performKill]);
 
   const confirmKill = useCallback(() => {
     const id = killTarget;
@@ -627,6 +668,8 @@ function App() {
         onConfigChange={handleConfigChange}
         theme={theme}
         setTheme={setTheme}
+        density={density}
+        setDensity={setDensity}
       />
       <GlobalSearchDialog
         open={showGlobalSearch}
@@ -644,6 +687,16 @@ function App() {
         cancelLabel="Cancel"
         destructive
         onConfirm={confirmKill}
+      />
+      <ConfirmDialog
+        open={forceKillTarget !== null}
+        onOpenChange={(o) => { if (!o) cancelForceKill(); }}
+        title="Force-kill session?"
+        description="Force-kill this session? This kills the tmux session for a possibly-running agent and cannot be undone."
+        confirmLabel="Force-kill"
+        cancelLabel="Cancel"
+        destructive
+        onConfirm={confirmForceKill}
       />
     </div>
   );
