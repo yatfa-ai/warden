@@ -11,6 +11,11 @@ import { complete } from './llm.js';
 import { getSession, saveMessages, appendTranscript } from './sessions.js';
 
 const DIRECTIVES_LOG = path.join(os.homedir(), '.yatfa-warden', 'directives.md');
+// Warden data dir — the ONLY root write_file may write under (user decision:
+// writes confined to the data dir). Matches the directives.md/activity.js
+// precedent. Evaluated at module load like DIRECTIVES_LOG; the pure write core
+// below takes its data dir as a parameter for HOME-independent tests.
+const DATA_DIR = path.join(os.homedir(), '.yatfa-warden');
 
 const SYSTEM = `You are Yatfa Warden — an observer and orchestrator for several yatfa software agents. Each agent runs as a "chat" in a remote tmux session (a planner / worker / reviewer / researcher). You watch them and help the human direct them.
 
@@ -21,6 +26,7 @@ You operate ONLY through these tools:
 - summarize_chats({per_agent_lines?}): structured, size-bounded summary of every open chat — one entry per pane with role, state (active/idle/stuck/erroring/blocked/waiting), last action, errors, current step, and goal. Failed captures are flagged per-entry, never omitted. Use this when the user asks "what's happening", "what are they working on", or you need a complete picture to advise well.
 - analyze_agents(): detect patterns across all open tabs. Returns structured insights about which agents are stuck, erroring, idle, or need coordination. Use this to answer "what needs attention?" or diagnose workflow issues.
 - suggest_next_actions(): analyze all open agent tabs and suggest prioritized, concrete next actions for the human. Classifies agent states (stuck, erroring, waiting, blocked, idle, active) and identifies urgent issues requiring immediate attention. Returns sorted suggestions with urgency levels.
+- write_file({path, content, append?}): save TEXT to a file under the warden data dir (~/.yatfa-warden/), e.g. reports/summary.md or snapshots/agent-X.md. Use this to persist observations, findings, snapshots, or reports worth keeping between turns — it is your only durable output channel besides send_directive (which only talks to agents). path is relative to the data dir; set append: true to add to a file instead of overwriting. Writes are confined to the data dir.
 
 Your job:
 1. Watch — read the chats the user cares about; keep an accurate, current picture of each agent's work.
@@ -99,6 +105,19 @@ export const TOOLS = [
     description: 'Analyze all open agent tabs and suggest prioritized, concrete next actions for the human. Classifies agent states (stuck, erroring, waiting, blocked, idle, active) and identifies urgent issues requiring immediate attention. Returns sorted suggestions with urgency levels.',
     input_schema: { type: 'object', properties: {}, required: [] },
   },
+  {
+    name: 'write_file',
+    description: 'Persist TEXT to a file under the warden data dir (~/.yatfa-warden/), e.g. reports/summary.md or snapshots/agent-X.md. This is your durable persistence channel for observations, findings, snapshots, and reports (besides send_directive, which only talks to agents). path is relative to the data dir (e.g. "reports/foo.md"); content is the text to write. Set append: true to add to an existing file instead of overwriting it. Writes are confined to the data dir — ../ traversal, absolute paths, and symlinks pointing outside it are rejected.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Destination path relative to the warden data dir, e.g. "reports/2026-07-09.md".' },
+        content: { type: 'string', description: 'Text content to write.' },
+        append: { type: 'boolean', description: 'If true, append to the file (creating it if needed) instead of overwriting. Default false (overwrite).' },
+      },
+      required: ['path', 'content'],
+    },
+  },
 ];
 
 function logDirective(chat, text) {
@@ -107,6 +126,122 @@ function logDirective(chat, text) {
   const ts = new Date().toISOString();
   const entry = `${header}\n## ${ts} → ${chat.container}@${chat.host} (${chat.role || 'agent'})\n\n${text}\n`;
   fs.appendFileSync(DIRECTIVES_LOG, entry);
+}
+
+// Resolve `absTarget` (an absolute path built lexically under the data dir) to
+// its real on-disk location, following ALL symlinks, and confirm the final
+// resolved path stays within `dataDirReal`. This is the WARDEN-96 check applied
+// to WRITES, where the target file (or some ancestors) may not exist yet.
+//
+// `realpathSync.native` alone is insufficient for writes: it throws ENOENT when
+// the final path (or a symlink's target) does not exist yet, and a naive fallback
+// to `path.resolve` would miss a symlink whose TARGET is missing — i.e. a link
+// inside the data dir that points outside, where a write would CREATE the
+// outside file. So when realpath fails we lstat the component: if it is itself a
+// symlink we follow its target (readlink) and re-check, otherwise we peel it
+// into the not-yet-existing tail. The deepest existing ancestor is real-pathed
+// and bounds-checked, then the non-existent tail (which can hold no symlinks) is
+// re-appended lexically. `path.resolve` is therefore only ever applied to a tail
+// of components that do not yet exist — never to a live symlink.
+function resolveWithinDataDir(dataDirReal, absTarget) {
+  let existing = absTarget;
+  let missing = '';
+  const MAX_ITERS = 40; // SYMLOOP_MAX-style guard against symlink cycles
+  for (let i = 0; i < MAX_ITERS; i++) {
+    let real;
+    try {
+      real = fs.realpathSync.native(existing);
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw e; // EACCES/EIO/… — surface, never swallow (WARDEN-89)
+      // realpath failed: `existing` (or a symlink target along it) is missing.
+      let st = null;
+      try { st = fs.lstatSync(existing, { throwIfNoEntry: false }); } catch { st = null; }
+      if (st && st.isSymbolicLink()) {
+        // `existing` is a symlink whose target can't be fully resolved (dangling
+        // or points through a missing node). Follow it explicitly so a write
+        // can't create a file at an out-of-bounds target. Relative link targets
+        // resolve against the link's own directory.
+        const target = fs.readlinkSync(existing);
+        existing = path.resolve(path.dirname(existing), target);
+        continue; // re-evaluate the link target (may itself be missing/escaped)
+      }
+      // Genuinely missing (not a symlink) — peel it into the not-yet-existing
+      // tail and retry its parent. (dataDirReal itself always exists.)
+      const parent = path.dirname(existing);
+      if (parent === existing) {
+        // Walked off the FS root without an in-bounds existing ancestor.
+        throw new Error('path is outside the warden data directory');
+      }
+      missing = missing ? path.join(path.basename(existing), missing) : path.basename(existing);
+      existing = parent;
+      continue;
+    }
+    // Re-attach the not-yet-existing tail to the real (in-bounds) ancestor. The
+    // tail cannot contain a `..` (absTarget was normalized by path.resolve) nor a
+    // symlink (its components do not exist on disk yet), so the result is safe.
+    const fullReal = missing ? path.join(real, missing) : real;
+    if (fullReal !== dataDirReal && !fullReal.startsWith(dataDirReal + path.sep)) {
+      throw new Error('path escapes the warden data directory (symlink)');
+    }
+    return fullReal;
+  }
+  throw new Error('path resolves through too many symlinks (possible cycle)');
+}
+
+// Pure, dependency-injected core of the write_file tool. Writes TEXT content to
+// a file under `dataDir` (~/.yatfa-warden/, e.g. reports/foo.md), optionally
+// appending instead of overwriting — matching the logDirective/activity.js
+// append-to-the-data-dir precedent. `dataDir` is passed in (not read from
+// os.homedir() inside) so this is unit-testable with a throwaway dir, free of
+// the HOME-freezes-at-first-import caveat (WARDEN-130) and needing no SSH/tmux.
+//
+// Security (WARDEN-96, mandatory for this tool): the path is resolved with
+// fs.realpathSync.native() and confirmed in-bounds under the data dir AFTER
+// symlink resolution. `../` traversal, absolute paths, prefix-sibling tricks,
+// and symlinks that escape the data dir are all rejected. Content is coerced to
+// a UTF-8 string — binary writes are out of scope here (follow WARDEN-97 if
+// that is ever added).
+//
+// Returns { ok, path, bytes, appended } on success; throws on any violation or
+// I/O failure so _execTool can surface it as { error } (WARDEN-89: never a
+// silent write failure).
+export function writeReportFile(dataDir, relPath, content, opts = {}) {
+  if (typeof dataDir !== 'string' || dataDir.length === 0) {
+    throw new Error('dataDir is required');
+  }
+  const p = typeof relPath === 'string' ? relPath.trim() : '';
+  if (!p) throw new Error('path is required');
+  if (path.isAbsolute(p)) {
+    throw new Error('path must be relative to the warden data directory');
+  }
+
+  const text = typeof content === 'string' ? content : String(content ?? '');
+
+  const dataDirReal = fs.realpathSync.native(dataDir); // caller ensures it exists
+  const absTarget = path.resolve(dataDirReal, p);
+
+  // Lexical containment — rejects ../ traversal and prefix-sibling escapes.
+  if (absTarget !== dataDirReal && !absTarget.startsWith(dataDirReal + path.sep)) {
+    throw new Error('path is outside the warden data directory');
+  }
+
+  // Symlink-aware containment — rejects in-bounds-looking symlinks pointing out.
+  const fullReal = resolveWithinDataDir(dataDirReal, absTarget);
+
+  fs.mkdirSync(path.dirname(fullReal), { recursive: true });
+  const append = opts && opts.append === true;
+  if (append) {
+    fs.appendFileSync(fullReal, text, 'utf8');
+  } else {
+    fs.writeFileSync(fullReal, text, 'utf8');
+  }
+  const bytes = fs.statSync(fullReal).size;
+  return {
+    ok: true,
+    path: path.relative(dataDirReal, fullReal) || path.basename(fullReal),
+    bytes,
+    appended: append,
+  };
 }
 
 // Strip ANSI escape sequences (tmux `capture-pane -e` keeps them) and stray
@@ -576,6 +711,17 @@ export class Observer {
     if (name === 'suggest_next_actions') {
       return suggestNextActions(this.effectiveOpenTabs(), this.lastChats, capturePanes, this.cfg);
     }
+    if (name === 'write_file') {
+      // Writes confined to the warden data dir only. Ensure it exists (first run),
+      // then delegate to the pure core; any violation / I/O error is surfaced as
+      // { error } so a write never fails silently (WARDEN-89).
+      try {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+        return writeReportFile(DATA_DIR, input.path, input.content, input);
+      } catch (e) {
+        return { error: e.message };
+      }
+    }
     return { error: `unknown tool ${name}` };
   }
 
@@ -613,4 +759,4 @@ export class Observer {
   }
 }
 
-export { DIRECTIVES_LOG };
+export { DIRECTIVES_LOG, DATA_DIR };
