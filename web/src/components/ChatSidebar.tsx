@@ -26,6 +26,10 @@ export type GitCommit = { hash: string; subject: string; author: string; date: s
 
 export interface ClaudeSession { id: string; cwd: string; summary: string; mtime: number }
 
+// One row from /api/claude-sessions-search (a session whose conversation body
+// matched the query, across hosts — incl. sessions outside the top-40 list).
+export interface SessionSearchResult { host: string; sessionId: string; cwd: string; summary: string; snippet: string; mtime: number }
+
 export interface GitFile { path: string; status: string }
 
 /** A single changed-file row: status indicator (M/A/D/??) + truncated path. */
@@ -1251,6 +1255,7 @@ interface DiscoverItem {
   time: number;          // recency, for sorting (0 = unknown)
   openId?: string;       // live: chat key/id to openChat
   resume?: { id: string; description: string; cwd: string; host: string }; // history: resume params
+  snippet?: string;      // content-match snippet (full-content search only)
 }
 
 function DiscoverItemRow({ it, resumingId, onOpen, onResume }: { it: DiscoverItem; resumingId: string | null; onOpen: () => void; onResume: () => void; }) {
@@ -1269,7 +1274,10 @@ function DiscoverItemRow({ it, resumingId, onOpen, onResume }: { it: DiscoverIte
   return (
     <div className="group flex items-center gap-2 px-2 py-1.5 rounded-md text-xs hover:bg-accent transition-colors">
       <span className="size-2 rounded-full shrink-0 bg-cyan-500/50" />
-      <Button variant="ghost" onClick={onResume} disabled={isLoading} className="flex-1 h-auto justify-start px-1 py-0 truncate text-xs font-normal">{it.label}</Button>
+      <div className="flex-1 min-w-0">
+        <Button variant="ghost" onClick={onResume} disabled={isLoading} className="h-auto w-full justify-start px-1 py-0 truncate text-xs font-normal">{it.label}</Button>
+        {it.snippet ? <div className="px-1 truncate text-[10px] text-muted-foreground/80 italic" title={it.snippet}>{it.snippet}</div> : null}
+      </div>
       {it.time ? <span className="text-[10px] text-muted-foreground shrink-0">{ago(it.time)}</span> : null}
       <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span>
       <IconTooltip label="bump to live (resume)" disabled={isLoading}>
@@ -1300,6 +1308,8 @@ function OpenChatBrowser({ open, onOpenChange, hosts, chats, allSessions, loadin
   const [selected, setSelected] = useState<string[] | undefined>(undefined);
   const [query, setQuery] = useState('');
   const [resumingId, setResumingId] = useState<string | null>(null);
+  const [contentResults, setContentResults] = useState<SessionSearchResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
 
   // Load persisted host selection once.
   useEffect(() => { setSelected(loadDiscoverHosts()); }, []);
@@ -1325,6 +1335,34 @@ function OpenChatBrowser({ open, onOpenChange, hosts, chats, allSessions, loadin
     effective.forEach((h) => { if (h !== THIS_MACHINE) onDiscoverHost(h); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  // Full-content session search (WARDEN-161). When the query is non-empty, debounce
+  // and hit /api/claude-sessions-search so matches INSIDE a session's body — not just
+  // its summary — surface, including sessions outside the top-40 list. Empty query
+  // clears results so the instant top-40 list is preserved (no regression).
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) { setContentResults([]); setSearchLoading(false); return; }
+    setSearchLoading(true);
+    // Clear the previous query's results immediately so stale matches (and their
+    // snippets) are never rendered under the new query while the debounce waits.
+    setContentResults([]);
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const r = await fetch(`/api/claude-sessions-search?q=${encodeURIComponent(q)}`);
+        if (!r.ok) throw new Error(`session search HTTP ${r.status}`);
+        const j = await r.json();
+        if (!cancelled) setContentResults(Array.isArray(j.results) ? j.results : []);
+      } catch (error) {
+        console.error('[claude-sessions-search] Failed:', error);
+        if (!cancelled) setContentResults([]);
+      } finally {
+        if (!cancelled) setSearchLoading(false);
+      }
+    }, 300);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [query]);
 
   const toggleHost = (h: string) => {
     setSelected((prev) => {
@@ -1353,24 +1391,37 @@ function OpenChatBrowser({ open, onOpenChange, hosts, chats, allSessions, loadin
         time: c.lastActivity || 0, openId: key,
       });
     }
-    for (const s of allSessions) {
+    // History source: full-content search results when a query is present
+    // (reaches sessions OUTSIDE the top-40 by what was discussed), else the
+    // instant top-40 list. Either way, dedupe against live resume sessions.
+    const q = query.trim();
+    const history: { id: string; host: string; cwd: string; summary: string; mtime: number; snippet?: string }[] = q
+      ? contentResults.map((r) => ({ id: r.sessionId, host: r.host, cwd: r.cwd, summary: r.summary, mtime: r.mtime, snippet: r.snippet }))
+      : allSessions.map((s) => ({ id: s.id, host: s.host, cwd: s.cwd, summary: s.summary, mtime: s.mtime }));
+    for (const s of history) {
       if (!sel.has(s.host)) continue;
       if (liveResumeSid8.has(s.id.slice(0, 8))) continue; // already shown as live
       out.push({
         id: 'hist:' + s.host + ':' + s.id, kind: 'history',
         label: s.summary || `${basename(s.cwd) || 'session'} · ${hostTagOf(s.host)}`,
         hostTag: hostTagOf(s.host), sub: `${hostTagOf(s.host)} · ${basename(s.cwd)}`,
-        time: s.mtime, resume: { id: s.id, description: s.summary, cwd: s.cwd, host: s.host },
+        time: s.mtime, snippet: s.snippet,
+        resume: { id: s.id, description: s.summary, cwd: s.cwd, host: s.host },
       });
     }
     out.sort((a, b) => b.time - a.time);
     return out;
-  }, [effective, chats, allSessions]);
+  }, [effective, chats, allSessions, contentResults, query]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return items;
-    return items.filter((it) => it.label.toLowerCase().includes(q) || it.sub.toLowerCase().includes(q));
+    // History rows already matched via full-content search; only live rows get
+    // the metadata filter so a running session is still findable by name/host.
+    return items.filter((it) => {
+      if (it.kind === 'history') return true;
+      return it.label.toLowerCase().includes(q) || it.sub.toLowerCase().includes(q);
+    });
   }, [items, query]);
 
   const handleResume = async (it: DiscoverItem) => {
@@ -1386,7 +1437,7 @@ function OpenChatBrowser({ open, onOpenChange, hosts, chats, allSessions, loadin
         <DialogHeader>
           <DialogTitle>Open chat</DialogTitle>
           <DialogDescription>
-            One merged list across your hosts — live tmux sessions and Claude history. Click a live session to open it, or resume a history session into a live tmux.
+            One merged list across your hosts — live tmux sessions and Claude history. Search finds sessions by what was discussed in them, not just their title — across every host.
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3">
@@ -1407,9 +1458,11 @@ function OpenChatBrowser({ open, onOpenChange, hosts, chats, allSessions, loadin
             <div className="flex flex-col gap-0.5 pr-1">
               {loadingAllSessions && items.length === 0 ? (
                 [1, 2, 3, 4].map((i) => <SessionRowSkeleton key={i} />)
+              ) : searchLoading && filtered.length === 0 ? (
+                [1, 2, 3].map((i) => <SessionRowSkeleton key={i} />)
               ) : filtered.length === 0 ? (
                 <div className="text-xs text-muted-foreground p-4 text-center">
-                  {query ? 'No matches' : effective.length === 0 ? 'Select at least one host' : 'Nothing runnable on the selected hosts yet'}
+                  {query ? 'No matches across selected hosts' : effective.length === 0 ? 'Select at least one host' : 'Nothing runnable on the selected hosts yet'}
                 </div>
               ) : (
                 filtered.map((it) => (
@@ -1421,6 +1474,11 @@ function OpenChatBrowser({ open, onOpenChange, hosts, chats, allSessions, loadin
                     onResume={() => handleResume(it)}
                   />
                 ))
+              )}
+              {searchLoading && filtered.length > 0 && (
+                <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-muted-foreground">
+                  <Skeleton className="size-2 rounded-full" /> searching session content…
+                </div>
               )}
             </div>
           </ScrollArea>
