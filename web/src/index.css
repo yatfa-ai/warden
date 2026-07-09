@@ -128,4 +128,58 @@
   html {
     @apply font-sans;
     }
+
+  /*
+   * Global themed scrollbars.
+   *
+   * Every native-overflow region (activity feed, search results, command-palette
+   * dropdown, textareas, tab rows, …) inherits this thin, rounded, themed
+   * scrollbar so the whole app converges on ONE look alongside the shadcn
+   * ScrollArea, whose thumb is `bg-border` (see components/ui/scroll-area.tsx).
+   * The thumb uses var(--border) for that exact reason. Token-driven, so it
+   * adapts to both light and dark themes automatically.
+   *
+   * xterm owns its terminal scroll chrome (`.xterm-viewport` + its overlay
+   * scrollbar), so the rules are scoped with `:not(.xterm):not(.xterm *)` to
+   * guarantee they never leak into a terminal pane — keeping its scrolling and
+   * layout intact.
+   */
+  *:not(.xterm):not(.xterm *) {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  *:not(.xterm):not(.xterm *)::-webkit-scrollbar {
+    width: 0.5rem;   /* ~8px, matches the w-2 feel of the ScrollArea track */
+    height: 0.5rem;  /* horizontal variant (e.g. observer tab row) */
+  }
+  *:not(.xterm):not(.xterm *)::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *:not(.xterm):not(.xterm *)::-webkit-scrollbar-thumb {
+    background-color: var(--border);
+    border-radius: 9999px;
+  }
+  *:not(.xterm):not(.xterm *)::-webkit-scrollbar-thumb:hover {
+    background-color: var(--muted-foreground);
+  }
+  *:not(.xterm):not(.xterm *)::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  /*
+   * Themed text selection.
+   *
+   * Replaces the OS-default (often jarring blue) highlight with monochrome theme
+   * tokens. This theme has no brand hue, so accent tokens give a deliberate
+   * dark/near-black highlight in dark mode that also adapts cleanly to light.
+   * (xterm disables user-select on the terminal, so it is unaffected.)
+   */
+  ::selection {
+    background-color: var(--accent);
+    color: var(--accent-foreground);
+  }
+  ::-moz-selection {
+    background-color: var(--accent);
+    color: var(--accent-foreground);
+  }
 }
