@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { EmptyState } from './EmptyState';
 import { loadObs, saveObs } from '@/lib/storage';
+import { postJson } from '@/lib/api';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import type { Chat, SessionMeta } from '@/lib/types';
 
@@ -82,11 +83,11 @@ export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onRe
         body.role = chat.role ?? null;
         body.chatKey = chat.key || chat.id || null;
       }
-      const r = await fetch('/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      const r = await postJson<SessionMeta>('/api/sessions', body);
       if (!r.ok) {
-        throw new Error(`HTTP ${r.status}: Failed to create session`);
+        throw new Error(r.res ? `HTTP ${r.res.status}: Failed to create session` : (r.error || 'Failed to create session'));
       }
-      const s: SessionMeta = await r.json();
+      const s: SessionMeta = r.data!;
       setSessions((p) => [s, ...p]);
       setOpenIds((p) => (p.includes(s.id) ? p : [...p, s.id]));
       setActiveId(s.id);
@@ -107,8 +108,8 @@ export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onRe
       let open = stored.openIds.filter((id) => list.some((s) => s.id === id));
       let active = stored.activeId && open.includes(stored.activeId) ? stored.activeId : (open[0] || null);
       if (list.length === 0) {
-        const r = await fetch('/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: null }) });
-        const s: SessionMeta = await r.json();
+        const r = await postJson<SessionMeta>('/api/sessions', { name: null });
+        const s: SessionMeta = r.data!;
         setSessions([s]); open = [s.id]; active = s.id;
       } else if (open.length === 0) {
         open = [list[0].id]; active = list[0].id;

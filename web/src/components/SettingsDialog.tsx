@@ -15,6 +15,7 @@ import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
 import { type Theme } from '@/lib/theme';
 import { type Density } from '@/lib/density';
+import { putJson } from '@/lib/api';
 import { toast } from 'sonner';
 
 interface ConfigData {
@@ -129,14 +130,9 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme,
   const handleSave = async () => {
     setSaving(true);
     try {
-      const res = await fetch('/api/config', {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(config),
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || 'Failed to save configuration');
+      const { ok, error } = await putJson('/api/config', config);
+      if (!ok) {
+        throw new Error(error || 'Failed to save configuration');
       }
       onConfigChange();
       onClose();
