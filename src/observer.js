@@ -18,7 +18,7 @@ You operate ONLY through these tools:
 - list_chats(): discover every agent chat + whether it is active (running its TUI) or idle.
 - read_chat({id, lines}): read an agent's current terminal pane. ALWAYS read before you advise on a specific agent — never assume.
 - send_directive({id, directive}): propose a message to an agent. The user MUST approve every send; you propose and wait for the gate.
-- summarize_chats(): read all open tabs in one efficient batch. Use this when the user asks "what's happening", "what are they working on", or you need a complete picture to advise well. Returns pane content + metadata for every open chat.
+- summarize_chats({per_agent_lines?}): structured, size-bounded summary of every open chat — one entry per pane with role, state (active/idle/stuck/erroring/blocked/waiting), last action, errors, current step, and goal. Failed captures are flagged per-entry, never omitted. Use this when the user asks "what's happening", "what are they working on", or you need a complete picture to advise well.
 - analyze_agents(): detect patterns across all open tabs. Returns structured insights about which agents are stuck, erroring, idle, or need coordination. Use this to answer "what needs attention?" or diagnose workflow issues.
 - suggest_next_actions(): analyze all open agent tabs and suggest prioritized, concrete next actions for the human. Classifies agent states (stuck, erroring, waiting, blocked, idle, active) and identifies urgent issues requiring immediate attention. Returns sorted suggestions with urgency levels.
 
@@ -38,11 +38,11 @@ Rules:
 - If you're unsure which agent or what exactly to send, ask the user.
 - Keep your own replies to the user concise.
 
-When using summarize_chats, synthesize insights not raw dumps:
-- What each agent is actively working on (goal, progress, current step)
-- Actionable states: stuck agents (repeating output, errors), idle agents (waiting for input), completed tasks
-- Coordination needs: which agents depend on others, workflow bottlenecks
-- Human attention needed: decisions, approvals, failures, unexpected states
+When using summarize_chats, the tool returns STRUCTURED per-agent state (not raw terminal dumps) — synthesize your advice from those fields:
+- Each entry has role, state, lastAction, errors, currentStep, goal, and a bounded excerpt.
+- Triage by state: erroring/stuck agents need attention first; blocked agents depend on others; waiting agents need your input; idle agents may be done or stalled.
+- captureError: true means that pane could not be captured (host unreachable). The entry is still present — flag it to the user; do NOT assume the agent is idle.
+- Be concrete: name the agents, cite the errors/currentStep you read, and recommend the next action.
 
 When using analyze_agents, prioritize:
 1. Stuck agents (repeating output) — need human intervention or restart
@@ -80,8 +80,14 @@ export const TOOLS = [
   },
   {
     name: 'summarize_chats',
-    description: 'Read all open tabs at once and synthesize what each agent is working on. Returns pane captures and metadata for every open chat. Use this to get a complete picture of current agent activity before advising the user.',
-    input_schema: { type: 'object', properties: {}, required: [] },
+    description: 'Read all open tabs at once and return a structured, size-bounded summary of what each agent is doing. Returns one entry per open chat with role, state (active/idle/stuck/erroring/blocked/waiting), last action, errors, current step, and goal. Capture failures are flagged per-entry, not omitted. Pass per_agent_lines to bound how much recent pane output each entry carries (default 15).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        per_agent_lines: { type: 'number', description: 'Max recent pane lines to include per agent (default 15). Lower = more concise summary; higher = more context.' },
+      },
+      required: [],
+    },
   },
   {
     name: 'analyze_agents',
@@ -103,10 +109,86 @@ function logDirective(chat, text) {
   fs.appendFileSync(DIRECTIVES_LOG, entry);
 }
 
+// Strip ANSI escape sequences (tmux `capture-pane -e` keeps them) and stray
+// carriage returns so classification reads clean text, not color/cursor noise.
+// Handles CSI (SGR colors, cursor moves), OSC (titles), and lone escape bytes.
+function stripAnsi(s) {
+  return String(s)
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC sequences (title etc.)
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')          // CSI sequences (colors, cursor)
+    .replace(/\x1b[@-Z\\-_]/g, '')                       // other single-char escape sequences
+    .replace(/\r/g, '');
+}
+
+// Classification regexes — reused/extended from analyze_agents & suggest_next_actions
+// (WARDEN-74: regex over LLM). BLOCKED is coordination/dependency language only; the
+// bare "waiting for" fragment is intentionally NOT matched, so human-input panes reach
+// the WAITING branch (waiting = human input, blocked = other agents/deps).
+const SUMM_ERROR_RE = /error|failed|exception|traceback|panic|fatal/i;
+const SUMM_WAITING_RE = /please|respond|continue\?|input|press enter|waiting for user/i;
+const SUMM_BLOCKED_RE = /blocked by|blocked on|depends on|waiting for (?:the |an |a )?(?:agent|worker|planner|reviewer|researcher|dependency|approval)/i;
+const SUMM_ACTIVE_RE = /running|processing|building|installing|downloading|executing|working on|implement/i;
+const SUMM_TICKET_RE = /\b([A-Z][A-Z0-9]{1,}-\d+|#\d{2,})\b/;
+
+// Classify CLEANED pane text into the structured per-agent fields summarize_chats
+// promises per entry (WARDEN-165 criterion #2): state, errors, lastAction,
+// currentStep, goal. All inference is regex-based — no LLM call.
+function classifyPane(clean, c) {
+  const allLines = clean.split('\n');
+  const nonEmpty = allLines.map(l => l.trimEnd()).filter(l => l.trim().length > 0);
+
+  // Stuck: the last 3 lines repeat the previous 3 (repeating-output loop).
+  const last3 = allLines.slice(-3).join('\n');
+  const prev3 = allLines.slice(-6, -3).join('\n');
+  const stuck = last3.length > 50 && last3 === prev3;
+
+  const errors = nonEmpty
+    .filter(l => SUMM_ERROR_RE.test(l))
+    .slice(-3)
+    .map(l => l.trim().slice(0, 200));
+
+  const lastAction = nonEmpty.length ? nonEmpty[nonEmpty.length - 1].trim().slice(0, 200) : null;
+
+  // Order mirrors suggest_next_actions: erroring > stuck > blocked > waiting > active.
+  let state;
+  if (SUMM_ERROR_RE.test(clean)) state = 'erroring';
+  else if (stuck) state = 'stuck';
+  else if (SUMM_BLOCKED_RE.test(clean)) state = 'blocked';
+  else if (SUMM_WAITING_RE.test(clean)) state = 'waiting';
+  else if (SUMM_ACTIVE_RE.test(clean) && c.active) state = 'active';
+  else state = 'idle';
+
+  const stepMatch = clean.match(/\b(?:running|building|installing|testing|compiling|deploying|starting|executing|processing|analyzing|reviewing|implementing|fixing|refactoring)\b[^\n]{0,80}/i);
+  const currentStep = stepMatch ? stepMatch[0].trim().slice(0, 160) : lastAction;
+
+  return {
+    state,
+    errors,
+    lastAction,
+    currentStep,
+    goal: inferGoal(clean, c),
+  };
+}
+
+// Best-effort goal inference from pane content (regex only). Returns null only if
+// nothing at all can be inferred — otherwise prefers an explicit ticket reference,
+// then an action phrase, then a role/project fallback.
+function inferGoal(clean, c) {
+  const ticket = clean.match(SUMM_TICKET_RE);
+  if (ticket) return ticket[1];
+  const action = clean.match(/\b(?:working on|implementing|fixing|building|refactoring|reviewing|investigating)\b[^\n]{0,80}/i);
+  if (action) return action[0].trim().slice(0, 120);
+  if (c && c.role && c.project) return `${c.role} on ${c.project}`;
+  if (c && c.role) return c.role;
+  return null;
+}
+
 // Pure, dependency-injected core of the summarize_chats tool. capturePanes is passed
 // in so this logic is unit-testable without SSH/tmux (mock.module is unavailable on
-// the project's Node version). Behavior is identical to the inlined tool handler.
-export async function summarizeOpenChats(openTabs, lastChats, capturePanes, cfg) {
+// the project's Node version). Returns a STRUCTURED per-agent summary (not raw ANSI):
+// one entry per open pane, with capture failures flagged per-entry rather than
+// silently dropped. `opts.per_agent_lines` (default 15) bounds each entry's excerpt.
+export async function summarizeOpenChats(openTabs, lastChats, capturePanes, cfg, opts = {}) {
   const open = new Set(openTabs || []);
   if (open.size === 0) return { error: 'no tabs are open. open some agent panes first.' };
 
@@ -119,21 +201,63 @@ export async function summarizeOpenChats(openTabs, lastChats, capturePanes, cfg)
     return { error: 'open tabs do not match any discovered chats. try refreshing with list_chats.' };
   }
 
+  const perAgentLines = Math.max(1, Number.isFinite(opts.per_agent_lines) ? opts.per_agent_lines : 15);
+
   try {
     const panes = await capturePanes(openChats, cfg);
 
-    // Return structured result with metadata + panes
-    return {
-      chats: openChats.map(c => ({
+    const chats = openChats.map(c => {
+      const base = {
         id: c.container || c.session,
         host: c.host,
         project: c.project,
         role: c.role,
         active: c.active,
-        status: c.status,
-        pane: panes[c.key] || '(no pane content)',
-      })),
-      count: openChats.length,
+      };
+
+      // A capture that succeeded always sets panes[c.key] (even to '' for an empty
+      // pane). A MISSING key means capturePanes silently dropped this chat — the
+      // WARDEN-165 "1 of 6" root cause: capturePanes does `if (!res.ok) return;` per
+      // host, so every pane on a host whose SSH fails vanishes. Surface it as a
+      // flagged failure instead of omitting the entry (failures reported, not dropped).
+      if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
+        return {
+          ...base,
+          state: 'capture_failed',
+          captureError: true,
+          error: `failed to capture pane on ${c.host} (host unreachable or tmux capture error)`,
+          errors: [],
+          lastAction: null,
+          currentStep: null,
+          goal: inferGoal('', c),
+          excerpt: null,
+        };
+      }
+
+      const clean = stripAnsi(panes[c.key] || '');
+      const excerpt = clean.split('\n').slice(-perAgentLines).join('\n').trim();
+      return {
+        ...base,
+        ...classifyPane(clean, c),
+        captureError: false,
+        excerpt,
+      };
+    });
+
+    const countBy = (pred) => chats.filter(pred).length;
+    return {
+      chats,
+      count: chats.length,
+      summary: {
+        total: chats.length,
+        active: countBy(e => e.state === 'active'),
+        idle: countBy(e => e.state === 'idle'),
+        stuck: countBy(e => e.state === 'stuck'),
+        erroring: countBy(e => e.state === 'erroring'),
+        blocked: countBy(e => e.state === 'blocked'),
+        waiting: countBy(e => e.state === 'waiting'),
+        captureFailed: countBy(e => e.captureError),
+      },
     };
   } catch (e) {
     return { error: e.message };
@@ -382,7 +506,7 @@ export class Observer {
       } catch (e) { return { error: e.message }; }
     }
     if (name === 'summarize_chats') {
-      return summarizeOpenChats(this.effectiveOpenTabs(), this.lastChats, capturePanes, this.cfg);
+      return summarizeOpenChats(this.effectiveOpenTabs(), this.lastChats, capturePanes, this.cfg, input);
     }
     if (name === 'analyze_agents') {
       const open = new Set(this.effectiveOpenTabs());
