@@ -94,11 +94,18 @@ export interface Collection {
 
 export interface ActivityEvent {
   timestamp: string;
-  type: 'directive_proposed' | 'attached' | 'ended' | 'error' | 'snapshot';
+  type:
+    | 'directive_proposed' | 'attached' | 'ended' | 'error' | 'snapshot'
+    // Cross-host lifecycle transitions (server-side periodic poll; see src/lifecycle.js).
+    // `active` reflects the `agent` tmux session being alive, not output recency.
+    | 'agent_started' | 'agent_ended'           // container appeared / disappeared
+    | 'agent_session_up' | 'agent_session_down' // tmux session came alive / stopped
+    | 'host_error' | 'host_ok';                 // host discovery failed / recovered
   id?: string;
   container?: string;
   host?: string;
   role?: string;
+  project?: string;
   directive?: string;
   error?: string;
   code?: number;

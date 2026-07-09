@@ -110,6 +110,12 @@ export function ActivityTimeline() {
       ended: 'text-orange-500',
       error: 'text-red-500',
       snapshot: 'text-purple-500',
+      agent_started: 'text-emerald-500',
+      agent_ended: 'text-orange-500',
+      agent_session_up: 'text-green-500',
+      agent_session_down: 'text-amber-500',
+      host_error: 'text-red-500',
+      host_ok: 'text-sky-500',
     };
 
     const icons = {
@@ -118,6 +124,12 @@ export function ActivityTimeline() {
       ended: '🔌',
       error: '⚠️',
       snapshot: '📸',
+      agent_started: '🟢',
+      agent_ended: '🔴',
+      agent_session_up: '▶️',
+      agent_session_down: '⏹️',
+      host_error: '🚫',
+      host_ok: '✅',
     };
 
     const renderDetails = () => {
@@ -160,6 +172,21 @@ export function ActivityTimeline() {
               <span className="text-muted-foreground mx-1">pane updated</span>
             </div>
           );
+        case 'agent_started':
+        case 'agent_ended':
+        case 'agent_session_up':
+        case 'agent_session_down':
+          return (
+            <div className="text-sm flex items-center gap-1 flex-wrap">
+              <span className="font-medium">{event.role || 'agent'}</span>
+              {event.container && <span className="font-mono text-xs bg-muted px-1 rounded">{event.container}</span>}
+              {event.project && <span className="text-muted-foreground text-xs">({event.project})</span>}
+            </div>
+          );
+        case 'host_error':
+          return <div className="text-sm text-red-600">host unreachable</div>;
+        case 'host_ok':
+          return <div className="text-sm text-muted-foreground">host reachable</div>;
         default:
           return null;
       }
