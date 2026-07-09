@@ -43,7 +43,7 @@ export function CollectionsSection({ chats, onEnterCollection, onCreateCollectio
       <div className="flex items-center gap-2 px-2 py-2">
         <span className="text-xs text-muted-foreground flex-1">collections</span>
         <Badge variant="secondary" className="text-xs">{collections.length}</Badge>
-        <IconTooltip label="refresh"><button className="text-xs text-muted-foreground hover:text-foreground active:scale-95 transition-all duration-150 ease-out" onClick={fetchCollections} disabled={loading}>{loading ? '…' : '↻'}</button></IconTooltip>
+        <IconTooltip label="refresh" disabled={loading}><button className="text-xs text-muted-foreground hover:text-foreground active:scale-95 transition-all duration-150 ease-out" onClick={fetchCollections} disabled={loading}>{loading ? '…' : '↻'}</button></IconTooltip>
         <Button size="sm" variant="ghost" className="h-5 text-xs px-2" onClick={onCreateCollection}>+</Button>
       </div>
       {collections.length > 0 ? (

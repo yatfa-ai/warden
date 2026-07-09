@@ -8,6 +8,16 @@ interface IconTooltipProps {
   /** The interactive control (button, etc.) whose purpose the tooltip telegraphs. */
   children: ReactNode
   side?: "top" | "bottom" | "left" | "right"
+  /**
+   * Pass the control's own disabled state. Radix sets `aria-describedby` on the
+   * trigger element (the `asChild` target). When `disabled` is false/omitted we
+   * hand `children` straight to `asChild` so that attribute — and thus the
+   * accessible description — lands on the real focusable control. Only the
+   * disabled case needs the wrapping span: a disabled `<button>` drops pointer
+   * events, so the span keeps receiving them and the tooltip still opens on
+   * hover. Keyboard focus on the inner control bubbles up either way.
+   */
+  disabled?: boolean
 }
 
 /**
@@ -15,16 +25,15 @@ interface IconTooltipProps {
  * Tooltip so its meaning is shown through one app-consistent channel instead of
  * raw browser `title=` chrome.
  *
- * The trigger wraps `children` in a span — the Radix pattern for tooltips that
- * must also open on *disabled* controls (a disabled <button> drops pointer
- * events, but the wrapping span keeps receiving them). Keyboard focus on the
- * inner control bubbles up, so the tooltip still opens for keyboard users.
+ * The trigger is the control itself (via `asChild`) for every enabled control,
+ * preserving its keyboard/focus semantics and accessible description. Only
+ * disabled controls are wrapped in a span — see `disabled`.
  */
-export function IconTooltip({ label, children, side = "top" }: IconTooltipProps) {
+export function IconTooltip({ label, children, side = "top", disabled }: IconTooltipProps) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="inline-flex">{children}</span>
+        {disabled ? <span className="inline-flex">{children}</span> : children}
       </TooltipTrigger>
       <TooltipContent side={side}>{label}</TooltipContent>
     </Tooltip>

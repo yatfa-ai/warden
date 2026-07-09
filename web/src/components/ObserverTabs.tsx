@@ -172,7 +172,7 @@ export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onRe
         </div>
         {viewMode === 'sessions' && (
           <div className="flex items-center gap-0.5">
-            <IconTooltip label={focusedChat ? `observe ${focusedChat.name || focusedChat.key || focusedChat.id} (binds this session to the focused chat)` : 'focus a chat pane, then click to observe it'}>
+            <IconTooltip label={focusedChat ? `observe ${focusedChat.name || focusedChat.key || focusedChat.id} (binds this session to the focused chat)` : 'focus a chat pane, then click to observe it'} disabled={!focusedChat}>
               <Button
                 size="sm"
                 variant="ghost"

@@ -480,7 +480,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
         <div className="flex items-center gap-2 compact:gap-1 px-2 py-2 compact:py-1.5 border-b shrink-0">
           <IconTooltip label="back"><button className="text-xs text-muted-foreground hover:text-foreground px-1 rounded active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => setView({ kind: 'root' })}>‹</button></IconTooltip>
           <span className="text-xs font-medium flex-1 truncate">{LABEL[H] || H}</span>
-          <IconTooltip label="rescan"><button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => fetchHostSessions(H)} disabled={loadingHost === H}>
+          <IconTooltip label="rescan" disabled={loadingHost === H}><button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => fetchHostSessions(H)} disabled={loadingHost === H}>
             {loadingHost === H ? <Skeleton className="h-3 w-3" /> : '↻'}
           </button></IconTooltip>
         </div>
@@ -526,6 +526,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
               return (
                 <IconTooltip
                   key={s.id}
+                  disabled={isLoading}
                   label={
                     <span className="flex flex-col text-left gap-0.5">
                       <span>resume <span className="font-mono">{s.id}</span></span>
@@ -533,23 +534,23 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                     </span>
                   }
                 >
-                <button
-                  onClick={() => { handleResume(s.id, s.summary, s.cwd, H); setView({ kind: 'root' }); }}
-                  disabled={isLoading}
-                  className="flex flex-col gap-0.5 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-                >
-                  <span className="truncate">
-                    {isLoading ? (
-                      <Skeleton className="h-3 w-3/4 inline-block" />
-                    ) : (
-                      s.summary || <span className="text-muted-foreground">(no summary)</span>
-                    )}
-                    {running && <span className="ml-1 text-green-400">● live</span>}
-                  </span>
-                  <span className="text-[10px] text-muted-foreground truncate">
-                    {isLoading ? <Skeleton className="h-2.5 w-1/2 inline-block" /> : `${ago(s.mtime)} · ${basename(s.cwd)}`}
-                  </span>
-                </button>
+                  <button
+                    onClick={() => { handleResume(s.id, s.summary, s.cwd, H); setView({ kind: 'root' }); }}
+                    disabled={isLoading}
+                    className="flex flex-col gap-0.5 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                  >
+                    <span className="truncate">
+                      {isLoading ? (
+                        <Skeleton className="h-3 w-3/4 inline-block" />
+                      ) : (
+                        s.summary || <span className="text-muted-foreground">(no summary)</span>
+                      )}
+                      {running && <span className="ml-1 text-green-400">● live</span>}
+                    </span>
+                    <span className="text-[10px] text-muted-foreground truncate">
+                      {isLoading ? <Skeleton className="h-2.5 w-1/2 inline-block" /> : `${ago(s.mtime)} · ${basename(s.cwd)}`}
+                    </span>
+                  </button>
                 </IconTooltip>
               );
             })}
@@ -714,15 +715,15 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                           </span>
                         }
                       >
-                      <button
-                        onClick={() => onOpenChat(c.key || c.id)}
-                        className="flex items-center gap-2 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 cursor-pointer transition-colors"
-                      >
-                        <span className="truncate flex-1">{c.key || c.id}</span>
-                        {showTypeBadges !== false && <span className={`text-[10px] ${TYPE_COLOR[type] || ''}`}>{type}</span>}
-                        {showProjectBadges && c.project && <span className="text-[10px] text-muted-foreground">{c.project}</span>}
-                        {showHostTags !== false && <span className="text-[10px] text-muted-foreground">{hostLabel}</span>}
-                      </button>
+                        <button
+                          onClick={() => onOpenChat(c.key || c.id)}
+                          className="flex items-center gap-2 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 cursor-pointer transition-colors"
+                        >
+                          <span className="truncate flex-1">{c.key || c.id}</span>
+                          {showTypeBadges !== false && <span className={`text-[10px] ${TYPE_COLOR[type] || ''}`}>{type}</span>}
+                          {showProjectBadges && c.project && <span className="text-[10px] text-muted-foreground">{c.project}</span>}
+                          {showHostTags !== false && <span className="text-[10px] text-muted-foreground">{hostLabel}</span>}
+                        </button>
                       </IconTooltip>
                     );
                   })}
@@ -836,10 +837,10 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                           </span>
                         }
                       >
-                      <button onClick={() => { onResume(s.id, s.summary, s.cwd, s.host); setView({ kind: 'root' }); }} className="flex flex-col gap-0.5 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 transition-colors">
-                        <span className="truncate">{s.summary || <span className="text-muted-foreground">(no summary)</span>}</span>
-                        <span className="text-[10px] text-muted-foreground truncate">{ago(s.mtime)} · {hostLabel} · {basename(s.cwd)}</span>
-                      </button>
+                        <button onClick={() => { onResume(s.id, s.summary, s.cwd, s.host); setView({ kind: 'root' }); }} className="flex flex-col gap-0.5 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 transition-colors">
+                          <span className="truncate">{s.summary || <span className="text-muted-foreground">(no summary)</span>}</span>
+                          <span className="text-[10px] text-muted-foreground truncate">{ago(s.mtime)} · {hostLabel} · {basename(s.cwd)}</span>
+                        </button>
                       </IconTooltip>
                     );
                   })
@@ -925,13 +926,13 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, className }:
         >
           <div className="mb-1 flex items-center justify-between gap-2 px-0.5">
             <span className="truncate text-[10px] font-medium text-muted-foreground">recent commits · {branch}</span>
-            <IconTooltip label="refresh">
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); onFetch?.(); }}
-              className="shrink-0 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-50"
-              disabled={loading}
-            >↻</button>
+            <IconTooltip label="refresh" disabled={loading}>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onFetch?.(); }}
+                className="shrink-0 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+                disabled={loading}
+              >↻</button>
             </IconTooltip>
           </div>
           {loading && (!commits || commits.length === 0) ? (
@@ -1030,26 +1031,26 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
       )}
       {!editing && onTogglePin && (
         <IconTooltip label={isPinned ? 'unpin' : 'pin'}>
-        <button
-          className={`px-0.5 ${isPinned ? 'text-yellow-500' : 'text-muted-foreground hover:text-foreground'} ${isUser ? 'opacity-0 group-hover:opacity-100' : ''} active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded`}
-          onClick={(e) => { e.stopPropagation(); onTogglePin(); }}
-        >
-          📌
-        </button>
+          <button
+            className={`px-0.5 ${isPinned ? 'text-yellow-500' : 'text-muted-foreground hover:text-foreground'} ${isUser ? 'opacity-0 group-hover:opacity-100' : ''} active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded`}
+            onClick={(e) => { e.stopPropagation(); onTogglePin(); }}
+          >
+            📌
+          </button>
         </IconTooltip>
       )}
       {isUser && !editing && (
         <>
           {onHide && <IconTooltip label="hide"><button className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground px-0.5 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded" onClick={(e) => { e.stopPropagation(); onHide(); }}>▾</button></IconTooltip>}
           {onUnhide && <IconTooltip label="unhide"><button className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground px-0.5 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded" onClick={(e) => { e.stopPropagation(); onUnhide(); }}>▴</button></IconTooltip>}
-          <IconTooltip label="kill + forget">
-          <button
-            className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500 px-0.5 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded"
-            onClick={(e) => { e.stopPropagation(); onKill(); }}
-            disabled={isKilling || isRenaming}
-          >
-            {isKilling ? <Skeleton className="h-3 w-3" /> : '×'}
-          </button>
+          <IconTooltip label="kill + forget" disabled={isKilling || isRenaming}>
+            <button
+              className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500 px-0.5 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded"
+              onClick={(e) => { e.stopPropagation(); onKill(); }}
+              disabled={isKilling || isRenaming}
+            >
+              {isKilling ? <Skeleton className="h-3 w-3" /> : '×'}
+            </button>
           </IconTooltip>
         </>
       )}

@@ -180,7 +180,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
 
   const stop = (e: React.MouseEvent) => e.stopPropagation();
   const Btn = ({ children, onClick, title, active, disabled }: { children: React.ReactNode; onClick: () => void; title: string; active?: boolean; disabled?: boolean }) => (
-    <IconTooltip label={title} side="bottom">
+    <IconTooltip label={title} side="bottom" disabled={disabled}>
       <button onClick={(e) => { if (!disabled) { stop(e); onClick(); } }} disabled={disabled}
         className={`px-1 py-0.5 text-[10px] rounded active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${disabled ? 'text-muted-foreground opacity-30 cursor-not-allowed' : (active ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent/50')}`}>{children}</button>
     </IconTooltip>
