@@ -1,5 +1,17 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { PaneTile } from './PaneTile';
+import { FileViewer } from './FileViewer';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+  DialogClose,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
 import type { Chat } from '@/lib/types';
 
 export interface OpenTile { id: string }
@@ -24,7 +36,49 @@ function colsFor(n: number) { return n <= 1 ? 1 : Math.ceil(Math.sqrt(n)); }
 
 export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onOpenChat, onForceKill, externalSearchQuery }: Props) {
   const [splitOpen, setSplitOpen] = useState(false);
+  const [fileOpen, setFileOpen] = useState(false);
+  const [filePath, setFilePath] = useState('');
+  const [fileInput, setFileInput] = useState('');
+  const [fileInputError, setFileInputError] = useState('');
+  const [filePromptOpen, setFilePromptOpen] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const nameOf = (id: string) => chats.find((c) => (c.key || c.id) === id)?.name || id;
+
+  const focusedChat = focused ? chats.find((c) => (c.key || c.id) === focused) : null;
+
+  const handleOpenFile = () => {
+    if (!focusedChat) return;
+
+    const trimmedInput = fileInput.trim();
+    if (!trimmedInput) {
+      setFileInputError('Please enter a file path');
+      return;
+    }
+
+    // Check for obvious path traversal attempts
+    if (trimmedInput.includes('..') || trimmedInput.includes('~')) {
+      setFileInputError('Path traversal not allowed');
+      return;
+    }
+
+    // Clear error and open the file
+    setFileInputError('');
+    setFilePath(trimmedInput);
+    setFileOpen(true);
+    setFilePromptOpen(false); // Close the path-entry Dialog
+    setFileInput(''); // Clear file input to prevent both dialogs from showing
+  };
+
+  const handleFilePrompt = () => {
+    if (!focusedChat) return;
+    // Auto-fill with the chat's working directory if known
+    const cwd = focusedChat.cwd || '.';
+    setFileInput(`${cwd}/`);
+    setFileInputError(''); // Clear any previous error
+    setFileOpen(false);
+    setSplitOpen(false); // Close split menu if open
+    setFilePromptOpen(true); // Open the path-entry Dialog
+  };
 
   // keyboard shortcuts: Alt+←/→ switch panes, Ctrl+W close
   useEffect(() => {
@@ -47,6 +101,13 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
     return () => window.removeEventListener('keydown', handler);
   }, [tiles, focused, onFocus, onClose]);
 
+  // Focus the path input when the entry Dialog opens — React-controlled via ref,
+  // not a DOM query (WARDEN-68 Rule 4). Radix's own open-auto-focus is disabled
+  // (see onOpenAutoFocus on DialogContent) so it doesn't race this.
+  useEffect(() => {
+    if (filePromptOpen) fileInputRef.current?.focus();
+  }, [filePromptOpen]);
+
   const visible = maximized ? tiles.filter((t) => t.id === maximized) : tiles;
   const n = visible.length;
   const cols = colsFor(n);
@@ -57,7 +118,10 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
       <div className="flex items-center px-3 py-2 border-b text-xs text-muted-foreground gap-2 shrink-0 relative">
         <span className="truncate">{focused ? nameOf(focused) : 'open a chat →'}</span>
         <span className="flex-1" />
-        <button onClick={() => setSplitOpen(!splitOpen)} className="text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded hover:bg-accent/50 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background" title="split — open another chat as a pane">＋ split</button>
+        {focusedChat && (
+          <Button variant="ghost" size="xs" onClick={handleFilePrompt} title="open file from chat directory">📄 file</Button>
+        )}
+        <Button variant="ghost" size="xs" onClick={() => setSplitOpen(!splitOpen)} title="split — open another chat as a pane">＋ split</Button>
         {splitOpen && (
           <>
             <div className="fixed inset-0 z-40" onClick={() => setSplitOpen(false)} />
@@ -97,6 +161,54 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
           </div>
         )}
       </div>
+
+      {/* File Viewer Dialog */}
+      {focusedChat && filePath && (
+        <FileViewer
+          chatId={focusedChat.id}
+          filePath={filePath}
+          open={fileOpen}
+          onOpenChange={(open) => {
+            setFileOpen(open);
+            if (!open) setFilePath(''); // Clear file path when dialog closes
+          }}
+        />
+      )}
+
+      {/* File Path Entry Dialog — shadcn Dialog + Input + Button (WARDEN-68) */}
+      <Dialog
+        open={filePromptOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            setFilePromptOpen(false);
+            setFileInput('');
+            setFileInputError('');
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md" onOpenAutoFocus={(e) => e.preventDefault()}>
+          <DialogHeader>
+            <DialogTitle>Open file from chat directory</DialogTitle>
+            <DialogDescription>Working directory: {focusedChat?.cwd || '.'}</DialogDescription>
+          </DialogHeader>
+          <Input
+            ref={fileInputRef}
+            value={fileInput}
+            onChange={(e) => { setFileInput(e.target.value); setFileInputError(''); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleOpenFile(); }}
+            placeholder="relative/path/to/file.txt"
+          />
+          {fileInputError && (
+            <p className="text-xs text-destructive">{fileInputError}</p>
+          )}
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline">Cancel</Button>
+            </DialogClose>
+            <Button onClick={handleOpenFile}>Open</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

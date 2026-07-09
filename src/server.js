@@ -663,6 +663,123 @@ app.post('/api/session-kill', async (req, res) => {
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Helper function to detect binary files by extension
+export function isBinaryFile(filePath) {
+  const binaryExtensions = [
+    '.png', '.jpg', '.jpeg', '.gif', '.ico', '.bmp', '.webp', '.svg', // images
+    '.pdf', '.ps', '.eps', '.ai', '.sketch', // documents
+    '.zip', '.tar', '.gz', '.bz2', '.xz', '.7z', '.rar', // archives
+    '.exe', '.dll', '.so', '.dylib', '.app', '.bin', '.rom', // executables
+    '.mp3', '.mp4', '.avi', '.mov', '.wav', '.flac', '.ogg', '.webm', // media
+    '.ttf', '.otf', '.woff', '.woff2', '.eot', // fonts
+    '.class', '.jar', '.war', '.ear', // Java
+    '.obj', '.o', '.a', '.lib', // compiled code
+    '.pdb', '.min', '.map', // debug/map files
+  ];
+  const ext = path.extname(filePath).toLowerCase();
+  return binaryExtensions.includes(ext);
+}
+
+// Build the remote (SSH) shell script that safely reads a file under `cwd`.
+// Extracted so it can be unit-tested — this template has been fragile (a bash
+// `${...}` parameter expansion collides with JS template-literal interpolation,
+// and the already-quoted shellQuote() output must NOT be wrapped in double quotes
+// or the literal single-quotes end up inside the variable value). `shellQuote`
+// produces a single-quoted POSIX token, so we splice it in bare.
+export function buildReadFileScript(cwd, filePath) {
+  // NOTE: `\${RESOLVED##*.}` is an *escaped* JS template expression on purpose —
+  // it emits the literal bash `${RESOLVED##*.}` parameter expansion (strip to the
+  // file extension) into the script. Do not "fix" it to `${...}`.
+  // The binary extensions are inlined directly in the `case` pattern (not read
+  // from a variable): bash tokenizes case-pattern `|` alternation at parse time,
+  // before expansion, so `case "$EXT" in $BINARY)` would match the literal string
+  // "png|jpg|...", never any extension.
+  // The cwd-containment `case` pattern MUST include the path separator
+  // ("$RESOLVED_CWD"/*|"$RESOLVED_CWD"): without the separator, "$RESOLVED_CWD"*
+  // is a pure prefix match that also accepts a sibling whose name merely extends
+  // the cwd (e.g. /x/proj-secret.txt when cwd is /x/proj) — a path-traversal hole.
+  // See the prefix-sibling regression test in src/read-file.test.js.
+  return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; RESOLVED_CWD="$(realpath -e "$CWD" 2>/dev/null)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -e "$FILE" 2>/dev/null)" || { echo "ERROR file not found"; exit 1; }; case "$RESOLVED" in "$RESOLVED_CWD"/*|"$RESOLVED_CWD") ;; *) echo "ERROR path must be within working directory"; exit 1 ;; esac; [ -d "$RESOLVED" ] && { echo "ERROR path is a directory"; exit 1; }; [ -f "$RESOLVED" ] || { echo "ERROR not a file"; exit 1; }; SIZE=$(stat -c %s "$RESOLVED" 2>/dev/null || stat -f %z "$RESOLVED" 2>/dev/null); [ -n "$SIZE" ] && [ "$SIZE" -gt 1048576 ] && { echo "ERROR file too large"; exit 1; }; EXT="\${RESOLVED##*.}"; case "$EXT" in png|jpg|jpeg|gif|ico|bmp|webp|svg|pdf|ps|eps|ai|sketch|zip|tar|gz|bz2|xz|7z|rar|exe|dll|so|dylib|app|bin|rom|mp3|mp4|avi|mov|wav|flac|ogg|webm|ttf|otf|woff|woff2|eot|class|jar|war|ear|obj|o|a|lib|pdb|min|map) echo "ERROR cannot read binary files"; exit 1 ;; esac; cat "$RESOLVED"`;
+}
+
+// POST /api/read-file — read a file from a chat's working directory.
+// Body: { id: string, path: string }
+// Response: { content: string, path: string, error?: string }
+app.post('/api/read-file', async (req, res) => {
+  const r = await resolve(String(req.body?.id || ''));
+  if (r.error) return res.status(404).json(r);
+
+  const filePath = String(req.body?.path || '').trim();
+  if (!filePath) return res.status(400).json({ error: 'path is required' });
+
+  const chat = r.chat;
+  const cwd = chat.cwd || '.';
+
+  // Security: resolve the path and verify it's within the chat's working directory
+  // For local hosts, use fs.realpathSync.native to resolve symlinks; for remote, we'll validate on the remote side
+  if (chat.host === LOCAL) {
+    let resolvedPath;
+    let resolvedCwd;
+    try {
+      // Resolve both paths to their final targets after following all symlinks
+      resolvedCwd = fs.realpathSync.native(cwd);
+      resolvedPath = fs.realpathSync.native(path.join(cwd, filePath));
+    } catch (e) {
+      if (e.code === 'ENOENT') return res.status(404).json({ error: 'file not found' });
+      return res.status(400).json({ error: 'invalid path' });
+    }
+
+    // Check if the resolved path starts with the resolved cwd (prevent path traversal and symlink escapes)
+    if (!resolvedPath.startsWith(resolvedCwd + path.sep) && resolvedPath !== resolvedCwd) {
+      return res.status(403).json({ error: 'path must be within working directory' });
+    }
+
+    try {
+      // Check file size (limit to 1MB to prevent server issues)
+      const stats = fs.statSync(resolvedPath);
+      if (stats.size > 1024 * 1024) {
+        return res.status(413).json({ error: 'file too large (max 1MB)' });
+      }
+
+      // Check for binary files by extension
+      if (isBinaryFile(resolvedPath)) {
+        return res.status(400).json({ error: 'cannot read binary files' });
+      }
+
+      // Read file content
+      const content = fs.readFileSync(resolvedPath, 'utf8');
+      return res.json({ content, path: filePath });
+    } catch (e) {
+      if (e.code === 'ENOENT') return res.status(404).json({ error: 'file not found' });
+      if (e.code === 'EISDIR') return res.status(400).json({ error: 'path is a directory' });
+      return res.status(500).json({ error: 'read failed' });
+    }
+  } else {
+    // Remote host: use SSH to read the file
+    // Build a safe command that reads the file and validates the path
+    // Security: use realpath -e to resolve symlinks and validate the final target
+    // Also check for binary files by extension
+    const script = buildReadFileScript(cwd, filePath);
+
+    const result = await run(chat.host, script, { timeout: 10000 });
+    if (!result.ok) {
+      // The remote script writes its diagnostics ("ERROR ...") via `echo` on stdout;
+      // pool/ssh failures land on stderr. Check both so specific errors map correctly.
+      const out = `${result.stdout || ''}${result.stderr || ''}`;
+      if (out.includes('ERROR invalid path')) return res.status(400).json({ error: 'invalid path' });
+      if (out.includes('ERROR file not found')) return res.status(404).json({ error: 'file not found' });
+      if (out.includes('ERROR path must be within working directory')) return res.status(403).json({ error: 'path must be within working directory' });
+      if (out.includes('ERROR path is a directory')) return res.status(400).json({ error: 'path is a directory' });
+      if (out.includes('ERROR not a file')) return res.status(400).json({ error: 'not a file' });
+      if (out.includes('ERROR file too large')) return res.status(413).json({ error: 'file too large (max 1MB)' });
+      if (out.includes('ERROR cannot read binary files')) return res.status(400).json({ error: 'cannot read binary files' });
+      return res.status(500).json({ error: 'read failed' });
+    }
+
+    return res.json({ content: result.stdout, path: filePath });
+  }
+});
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
