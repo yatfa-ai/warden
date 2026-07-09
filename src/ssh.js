@@ -364,17 +364,30 @@ export function run(host, cmd, opts = {}, cfg = {}) {
 //
 // The distinction that matters:
 //   - transport failure: the command provably did NOT run on the remote host —
-//     SSH bailed before/while establishing the channel (wedged ControlMaster,
-//     half-open TCP, idle/reaped socket, network blip). Safe to retry.
+//     SSH bailed at *connection / channel-establishment* time, before any
+//     command could be delivered (wedged ControlMaster, half-open TCP at
+//     connect, idle/reaped socket, DNS/refused/timed-out at connect). Safe to
+//     retry, because no side effect could have been committed.
 //   - command result: the command ran on the remote host and returned its own
 //     exit code (including non-zero, e.g. `tmux has-session` reporting an absent
 //     session). NEVER retried — otherwise side-effecting commands like
 //     `tmux send-keys` could double-execute.
 //
+// CRITICAL — connection-establishment ONLY, never mid-stream:
+// We classify ONLY connection/channel-establishment signals as transport.
+// Mid-stream break signals ("connection closed", "connection reset",
+// "broken pipe") are deliberately NOT retried: they are ambiguous. The same
+// stderr is produced whether the channel died (a) at session-request — before
+// the command ran (safe to retry) — or (b) AFTER a side-effecting command such
+// as `send-keys` already ran, but before ssh returned the exit status (retrying
+// would deliver the keys a SECOND time). stderr alone cannot tell the two apart,
+// so we never retry these — the safe default. This still heals the documented
+// root cause (`Control socket connect failed`).
+//
 // Heuristic: a transport failure leaves no usable command output on stdout. If
 // there is meaningful stdout, the command ran, so we never retry regardless of
-// how transport-y the stderr looks. With no stdout, we then look for SSH-layer
-// signals in stderr/code.
+// how transport-y the stderr looks. With no stdout, we then look for
+// connection-establishment signals in stderr/code.
 export function isTransportFailure(result) {
   if (!result || result.ok) return false;
 
@@ -392,15 +405,17 @@ export function isTransportFailure(result) {
   // by a signal is forwarded by ssh as 128+signal, e.g. 137, not -1.)
   if (result.code === -1) return true;
 
-  // SSH-layer error phrases (case-insensitive). These appear when SSH fails to
-  // establish/maintain the channel, not when the remote command runs.
+  // Connection-establishment error phrases (case-insensitive). These appear when
+  // SSH fails to establish the channel — at connect/session-request time, BEFORE
+  // any command runs — so retrying cannot double-execute a side effect.
+  // NOTE: mid-stream signals ("connection closed", "connection reset",
+  // "broken pipe") are deliberately omitted — see the comment above the
+  // function: they can also surface AFTER a command already ran, so they are
+  // not safe to retry. "killed by signal" is omitted too: a remote command can
+  // log "killed by signal 15" with empty stdout, which would be misclassified.
   const TRANSPORT_PHRASES = [
-    'control socket',          // "Control socket connect(...): ..." / "... connect failed"
-    'connection closed',       // "Connection closed by remote host" / "Connection closed by X port Y"
-    'connection reset',        // "Connection reset by peer"
-    'broken pipe',             // "Write failed: Broken pipe"
-    'connection timed out',    // "Connection timed out"
-    'killed by signal',        // ssh mux / signal-killed messaging
+    'control socket',          // "Control socket connect(...): ..." / "... connect failed" (wedged/absent master)
+    'connection timed out',    // "Connection timed out" at connect time (also matched by the ssh: rule below)
   ];
   if (TRANSPORT_PHRASES.some((p) => stderrLower.includes(p))) return true;
 
@@ -422,8 +437,11 @@ export function isTransportFailure(result) {
 // failure, evict the suspect connection (so the next call rebuilds the socket
 // immediately instead of waiting out the ~90s keepalive window) and retry the
 // command ONCE on a fresh connection. Retries are strictly transport-conditioned
-// via isTransportFailure — a genuine command non-zero exit is never retried, so
-// side-effecting commands like `tmux send-keys` cannot be double-executed.
+// via isTransportFailure — and `isTransportFailure` matches only
+// channel-establishment failures (the command provably never ran), so a genuine
+// command non-zero exit — or an ambiguous mid-stream break after the command ran
+// — is never retried. Side-effecting commands like `tmux send-keys` therefore
+// cannot be double-executed.
 //
 // `deps` is an optional test seam (production callers omit it): inject
 // `run` / `getConnection` / `markConnectionUnhealthy` to drive the retry

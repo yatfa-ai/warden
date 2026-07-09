@@ -32,15 +32,11 @@ function sequencer(results) {
 describe('isTransportFailure (classifier)', () => {
   describe('transport failures → true (safe to retry)', () => {
     const cases = [
-      ['Control socket connect failed', { ok: false, code: 255, stdout: '', stderr: 'Control socket connect(/tmp/ssh-ctrl-x): No such file or directory\n' }],
-      ['Connection closed by remote host', { ok: false, code: 255, stdout: '', stderr: 'Connection closed by 10.0.0.5 port 22\n' }],
-      ['Connection reset by peer', { ok: false, code: 255, stdout: '', stderr: 'Connection reset by 1.2.3.4 port 22\n' }],
-      ['Broken pipe', { ok: false, code: 255, stdout: '', stderr: 'client_loop: send disconnect: Broken pipe\n' }],
-      ['Connection timed out', { ok: false, code: 255, stdout: '', stderr: 'ssh: connect to host 10.0.0.5 port 22: Connection timed out\n' }],
-      ['ssh: connection refused', { ok: false, code: 255, stdout: '', stderr: 'ssh: connect to host 10.0.0.5 port 22: Connection refused\n' }],
-      ['ssh: could not resolve hostname', { ok: false, code: 255, stdout: '', stderr: 'ssh: Could not resolve hostname foo: Name or service not known\n' }],
-      ['ssh: no route to host', { ok: false, code: 255, stdout: '', stderr: 'ssh: connect to host foo port 22: No route to host\n' }],
-      ['killed by signal', { ok: false, code: 255, stdout: '', stderr: 'killed by signal 15\n' }],
+      ['Control socket connect failed (wedged/absent master)', { ok: false, code: 255, stdout: '', stderr: 'Control socket connect(/tmp/ssh-ctrl-x): No such file or directory\n' }],
+      ['Connection timed out (connect-time)', { ok: false, code: 255, stdout: '', stderr: 'ssh: connect to host 10.0.0.5 port 22: Connection timed out\n' }],
+      ['ssh: connection refused (connect-time)', { ok: false, code: 255, stdout: '', stderr: 'ssh: connect to host 10.0.0.5 port 22: Connection refused\n' }],
+      ['ssh: could not resolve hostname (connect-time)', { ok: false, code: 255, stdout: '', stderr: 'ssh: Could not resolve hostname foo: Name or service not known\n' }],
+      ['ssh: no route to host (connect-time)', { ok: false, code: 255, stdout: '', stderr: 'ssh: connect to host foo port 22: No route to host\n' }],
       ['timeout SIGKILL (code -1, no output)', { ok: false, code: -1, stdout: '', stderr: '' }],
       ['spawn error (code -1)', { ok: false, code: -1, stdout: '', stderr: 'Error: spawn ssh ENOENT' }],
       ['whitespace-only stdout still transport', { ok: false, code: -1, stdout: '   \n\t', stderr: '' }],
@@ -60,6 +56,15 @@ describe('isTransportFailure (classifier)', () => {
       ['host key verification failure', { ok: false, code: 255, stdout: '', stderr: 'Host key verification failed.\n' }],
       ['command non-zero WITH stdout (provably ran)', { ok: false, code: 1, stdout: 'partial output\n', stderr: 'grep wrote nothing\n' }],
       ['remote command killed by signal (128+sig, not -1)', { ok: false, code: 137, stdout: '', stderr: 'Terminated\n' }],
+      // Mid-stream transport signals: deliberately NOT classified as transport.
+      // They are ambiguous — the same stderr can mean the channel died BEFORE the
+      // command ran (safe to retry) OR AFTER a side-effecting command already ran
+      // (retrying would double-execute, e.g. send-keys). The safe default is to
+      // never retry. See the isTransportFailure doc comment.
+      ['mid-stream: Connection closed (ambiguous, never retried)', { ok: false, code: 255, stdout: '', stderr: 'Connection closed by 10.0.0.5 port 22\n' }],
+      ['mid-stream: Connection reset (ambiguous, never retried)', { ok: false, code: 255, stdout: '', stderr: 'Connection reset by 1.2.3.4 port 22\n' }],
+      ['mid-stream: Broken pipe (ambiguous, never retried)', { ok: false, code: 255, stdout: '', stderr: 'client_loop: send disconnect: Broken pipe\n' }],
+      ['remote "killed by signal" log (loose substring, never retried)', { ok: false, code: 255, stdout: '', stderr: 'killed by signal 15\n' }],
       ['successful result', { ok: true, code: 0, stdout: 'OK\n', stderr: '' }],
     ];
     for (const [name, result] of cases) {
@@ -117,7 +122,7 @@ describe('runWithPool (self-healing retry + eviction)', () => {
 
     it('falls back to a direct run if the fresh connection cannot be established', async () => {
       const runMock = sequencer([
-        { ok: false, code: 255, stdout: '', stderr: 'Connection reset by peer\n' }, // pooled: transport
+        { ok: false, code: 255, stdout: '', stderr: 'Control socket connect(/tmp/sock): No such file or directory\n' }, // pooled: channel-establishment transport
         { ok: false, code: 255, stdout: '', stderr: 'direct ssh: host down\n' },    // fallback direct run
       ]);
       const getConn = sequencer([
@@ -180,6 +185,36 @@ describe('runWithPool (self-healing retry + eviction)', () => {
 
       assert.strictEqual(runMock.mock.callCount(), 1, 'auth failure is not transport — no retry');
       assert.strictEqual(markUnhealthy.mock.callCount(), 0);
+    });
+
+    it('does NOT retry a no-stdout side-effect after a mid-stream break (the real double-exec surface)', async () => {
+      // This is the actual failure mode the safety invariant must hold against: a
+      // side-effecting command (send-keys) already ran on the remote, but the
+      // channel broke mid-stream before ssh returned the exit status. The result
+      // is a no-stdout, transport-y error. Retrying would deliver the keys AGAIN.
+      // Under the narrowed classifier these mid-stream signals are NOT transport,
+      // so the command must be invoked exactly once. (The has-session test above
+      // is a command-non-zero-exit proxy; this drives the genuine double-exec
+      // surface the reviewer flagged.)
+      const midStreamStderrs = [
+        'client_loop: send disconnect: Broken pipe\n',
+        'Connection closed by 10.0.0.5 port 22\n',
+        'Connection reset by 1.2.3.4 port 22\n',
+      ];
+      for (const stderr of midStreamStderrs) {
+        const runMock = sequencer([{ ok: false, code: 255, stdout: '', stderr }]);
+        const getConn = mock.fn(async () => ({ socketPath: '/tmp/sock' }));
+        const markUnhealthy = mock.fn(() => {});
+
+        const result = await runWithPool('remote-SE', "tmux send-keys -t agent 'do thing' Enter", {}, {},
+          { run: runMock, getConnection: getConn, markConnectionUnhealthy: markUnhealthy });
+
+        assert.strictEqual(runMock.mock.callCount(), 1,
+          `send-keys must NOT be retried on a mid-stream break (${JSON.stringify(stderr)}) — that is the double-exec surface`);
+        assert.strictEqual(markUnhealthy.mock.callCount(), 0, 'no eviction for a non-transport result');
+        assert.strictEqual(getConn.mock.callCount(), 1, 'no fresh connection attempted');
+        assert.strictEqual(result.ok, false);
+      }
     });
   });
 
