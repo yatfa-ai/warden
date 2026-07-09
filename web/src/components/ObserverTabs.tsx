@@ -109,7 +109,13 @@ export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onRe
       let active = stored.activeId && open.includes(stored.activeId) ? stored.activeId : (open[0] || null);
       if (list.length === 0) {
         const r = await postJson<SessionMeta>('/api/sessions', { name: null });
-        const s: SessionMeta = r.data!;
+        if (!r.ok || !r.data) {
+          // boot can't proceed without a session; surface the failure rather
+          // than crash reading s.id off an undefined body
+          console.error('boot session create failed:', r.error || `HTTP ${r.res?.status}`);
+          return;
+        }
+        const s: SessionMeta = r.data;
         setSessions([s]); open = [s.id]; active = s.id;
       } else if (open.length === 0) {
         open = [list[0].id]; active = list[0].id;
