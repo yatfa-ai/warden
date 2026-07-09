@@ -514,7 +514,7 @@ export async function readChats(ids, openOnly, openTabs, lastChats, capturePanes
 
     const skipped = overflow.map((c) => ({
       ...base(c), ok: false, skipped: true,
-      error: `omitted: max pane cap (${maxPanes}) reached — narrow your ids or raise max_panes.`,
+      error: `omitted: max pane cap (${maxPanes}) reached — narrow your ids or use open_only.`,
     }));
 
     const entries = [...read, ...skipped];
