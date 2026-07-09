@@ -20,6 +20,7 @@ You operate ONLY through these tools:
 - send_directive({id, directive}): propose a message to an agent. The user MUST approve every send; you propose and wait for the gate.
 - summarize_chats(): read all open tabs in one efficient batch. Use this when the user asks "what's happening", "what are they working on", or you need a complete picture to advise well. Returns pane content + metadata for every open chat.
 - analyze_agents(): detect patterns across all open tabs. Returns structured insights about which agents are stuck, erroring, idle, or need coordination. Use this to answer "what needs attention?" or diagnose workflow issues.
+- suggest_next_actions(): analyze all open agent tabs and suggest prioritized, concrete next actions for the human. Classifies agent states (stuck, erroring, waiting, blocked, idle, active) and identifies urgent issues requiring immediate attention. Returns sorted suggestions with urgency levels.
 
 Your job:
 1. Watch — read the chats the user cares about; keep an accurate, current picture of each agent's work.
@@ -87,6 +88,11 @@ export const TOOLS = [
     description: 'Analyze all open agent tabs for actionable patterns and states. Returns structured insights about stuck agents, errors, idle agents, and coordination needs. Use this when the user asks "what needs attention", "is anyone stuck", or you need to diagnose issues.',
     input_schema: { type: 'object', properties: {}, required: [] },
   },
+  {
+    name: 'suggest_next_actions',
+    description: 'Analyze all open agent tabs and suggest prioritized, concrete next actions for the human. Classifies agent states (stuck, erroring, waiting, blocked, idle, active) and identifies urgent issues requiring immediate attention. Returns sorted suggestions with urgency levels.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
 ];
 
 function logDirective(chat, text) {
@@ -128,6 +134,119 @@ export async function summarizeOpenChats(openTabs, lastChats, capturePanes, cfg)
         pane: panes[c.key] || '(no pane content)',
       })),
       count: openChats.length,
+    };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+// Pure, dependency-injected core of the suggest_next_actions tool. capturePanes is
+// passed in so the classification logic is unit-testable without SSH/tmux
+// (mock.module is unavailable on the project's Node version). Behavior is identical
+// to the inlined tool handler.
+export async function suggestNextActions(openTabs, lastChats, capturePanes, cfg) {
+  const open = new Set(openTabs || []);
+  if (open.size === 0) return { error: 'no tabs are open. open some agent panes first.' };
+
+  // Filter to only open tabs
+  const openChats = lastChats.filter(c =>
+    open.has(c.container || c.session) || open.has(c.key)
+  );
+
+  if (openChats.length === 0) {
+    return { error: 'open tabs do not match any discovered chats. try refreshing with list_chats.' };
+  }
+
+  try {
+    const panes = await capturePanes(openChats, cfg);
+
+    // Classification patterns (regex-based, no LLM calls).
+    // NOTE: BLOCKED_RE is scoped to coordination/dependency language (other agents,
+    // external dependencies) — it deliberately does NOT match the bare fragment
+    // "waiting for", which would otherwise swallow "waiting for user" (a human-input
+    // signal classified as 'waiting' below). The two states stay distinct, matching
+    // the ticket spec: waiting = human input, blocked = other agents/dependencies.
+    const ERROR_RE = /error|failed|exception|traceback|panic/i;
+    const WAITING_RE = /please|respond|continue\?|input|press enter|waiting for user/i;
+    const BLOCKED_RE = /blocked by|blocked on|depends on|waiting for (?:the |an |a )?(?:agent|worker|planner|reviewer|researcher|dependency|approval from)/i;
+    const ACTIVE_RE = /running|processing|building|installing|downloading|executing|working on|implement/i;
+
+    const suggestions = [];
+
+    for (const c of openChats) {
+      const pane = panes[c.key] || '';
+      const agentId = c.container || c.session;
+      const role = c.role || 'agent';
+      const project = c.project || 'unknown';
+
+      let state = 'idle';
+      let urgency = 'informational';
+      let action = 'No action needed - agent is idle.';
+
+      // Detect repeating output (stuck agent) using line-by-line comparison
+      const lines = pane.split('\n');
+      const last3 = lines.slice(-3).join('\n');
+      const prev3 = lines.slice(-6, -3).join('\n');
+      const stuck = last3 === prev3 && last3.length > 50;
+
+      // Classify agent state using regex patterns. BLOCKED is checked before WAITING:
+      // because BLOCKED_RE is scoped to coordination signals, no human-input pane can
+      // match it, so genuine waiting input always reaches the WAITING branch.
+      if (ERROR_RE.test(pane)) {
+        state = 'erroring';
+        urgency = 'urgent';
+        action = `Agent encountered an error. Review the pane content and investigate the failure. Consider sending a directive to retry or fix the issue.`;
+      } else if (stuck) {
+        state = 'stuck';
+        urgency = 'urgent';
+        action = `Agent appears stuck (repeating output detected). Interrupt and redirect with a new directive, or terminate if needed.`;
+      } else if (BLOCKED_RE.test(pane)) {
+        state = 'blocked';
+        urgency = 'important';
+        action = `Agent is blocked on a dependency. Check what it's waiting for and unblock it, or redirect to other work.`;
+      } else if (WAITING_RE.test(pane)) {
+        state = 'waiting';
+        urgency = 'important';
+        action = `Agent is waiting for input. Respond to its request or provide the needed information.`;
+      } else if (ACTIVE_RE.test(pane) && c.active) {
+        state = 'active';
+        urgency = 'informational';
+        action = `Agent is actively working. No immediate action needed, but monitor for completion or issues.`;
+      } else if (pane.trim().length > 100) {
+        state = 'idle';
+        urgency = 'informational';
+        action = `Agent has output but appears inactive. Check if it completed its task or needs direction.`;
+      } else {
+        state = 'idle';
+        urgency = 'informational';
+        action = `Agent is idle with minimal output. Consider assigning work or checking if it needs direction.`;
+      }
+
+      suggestions.push({
+        agentId: agentId,
+        agentName: agentId,
+        role,
+        project,
+        host: c.host,
+        state,
+        urgency,
+        action,
+        pane_excerpt: pane.slice(-200).trim(), // Last 200 chars for context
+      });
+    }
+
+    // Sort by urgency: urgent > important > informational
+    const urgencyOrder = { urgent: 0, important: 1, informational: 2 };
+    suggestions.sort((a, b) => urgencyOrder[a.urgency] - urgencyOrder[b.urgency]);
+
+    return {
+      suggestions,
+      summary: {
+        total: suggestions.length,
+        urgent: suggestions.filter(s => s.urgency === 'urgent').length,
+        important: suggestions.filter(s => s.urgency === 'important').length,
+        informational: suggestions.filter(s => s.urgency === 'informational').length,
+      },
     };
   } catch (e) {
     return { error: e.message };
@@ -232,6 +351,7 @@ export class Observer {
       const open = new Set(this.openTabs || []);
       if (open.size === 0) return { error: 'no tabs are open. open some agent panes first.' };
 
+      // Filter to only open tabs
       const openChats = this.lastChats.filter(c =>
         open.has(c.container || c.session) || open.has(c.key)
       );
@@ -291,6 +411,9 @@ export class Observer {
       } catch (e) {
         return { error: e.message };
       }
+    }
+    if (name === 'suggest_next_actions') {
+      return suggestNextActions(this.openTabs, this.lastChats, capturePanes, this.cfg);
     }
     return { error: `unknown tool ${name}` };
   }

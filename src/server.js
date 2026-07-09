@@ -20,6 +20,7 @@ import { hasCredentials, resolveModel } from './llm.js';
 import { listSessions, createSession, renameSession, deleteSession } from './sessions.js';
 import { appendEvent, rotateEvents, readEvents, getStatsSince } from './activity.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
+import { checkHost } from './hostStatus.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = load();
@@ -230,6 +231,15 @@ app.get('/api/hosts/health', async (req, res) => {
   res.json({ hosts: healthChecks, timestamp: Date.now() });
 });
 
+// Host connectivity status endpoint for sidebar indicators
+app.get('/api/hosts/status', async (_req, res) => {
+  const hosts = [LOCAL, ...cfg.hosts];
+  const results = await Promise.all(
+    hosts.map((host) => checkHost(host, validateHost, cfg))
+  );
+  res.json({ hosts: results });
+});
+
 // ---- Collections API ----
 // GET /api/collections - List all collections
 app.get('/api/collections', (_req, res) => {
@@ -315,11 +325,15 @@ app.get('/api/config', (_req, res) => res.json({
   observerConfirmMode: cfg.observerConfirmMode,
   observerAutoStart: cfg.observerAutoStart,
   observerSessionTimeout: cfg.observerSessionTimeout,
+  notifyChatOps: cfg.notifyChatOps,
+  notifyErrors: cfg.notifyErrors,
+  notifySuccess: cfg.notifySuccess,
+  notifyObserver: cfg.notifyObserver,
 }));
 
 // PUT /api/config — update configuration and persist
 app.put('/api/config', (req, res) => {
-  const { hosts, pollIntervalMs, tmuxSession, connectTimeout, observerConfirmMode, observerAutoStart, observerSessionTimeout } = req.body;
+  const { hosts, pollIntervalMs, tmuxSession, connectTimeout, observerConfirmMode, observerAutoStart, observerSessionTimeout, notifyChatOps, notifyErrors, notifySuccess, notifyObserver } = req.body;
   if (hosts && Array.isArray(hosts)) cfg.hosts = hosts;
   if (typeof pollIntervalMs === 'number') cfg.pollIntervalMs = pollIntervalMs;
   if (typeof tmuxSession === 'string') cfg.tmuxSession = tmuxSession;
@@ -330,6 +344,12 @@ app.put('/api/config', (req, res) => {
       (typeof observerSessionTimeout === 'number' &&
        Number.isFinite(observerSessionTimeout) &&
        observerSessionTimeout > 0)) cfg.observerSessionTimeout = observerSessionTimeout;
+  // Notification preferences (toast categories). Only accept booleans so a
+  // malformed body can't blank out a preference.
+  if (typeof notifyChatOps === 'boolean') cfg.notifyChatOps = notifyChatOps;
+  if (typeof notifyErrors === 'boolean') cfg.notifyErrors = notifyErrors;
+  if (typeof notifySuccess === 'boolean') cfg.notifySuccess = notifySuccess;
+  if (typeof notifyObserver === 'boolean') cfg.notifyObserver = notifyObserver;
   save(cfg); // persist to ~/.yatfa-warden/config.json
   res.json({ ok: true });
 });
@@ -760,18 +780,28 @@ wss.on('connection', (ws, req) => {
     sid,
     onTool: (name, input) => send({ type: 'tool', name, input: { ...input, id: input?.id } }),
     onToolResult: (name, result) => {
-      if (name === 'suggest_next_actions' && result.suggestions) {
-        for (const suggestion of result.suggestions) {
-          send({
-            type: 'suggestion_card',
-            agentId: suggestion.agentId,
-            agentName: suggestion.agentName,
-            role: suggestion.role,
-            urgency: suggestion.urgency,
-            state: suggestion.state,
-            action: suggestion.action
-          });
+      try {
+        if (name === 'suggest_next_actions' && result?.suggestions && Array.isArray(result.suggestions)) {
+          for (const suggestion of result.suggestions) {
+            // Validate required fields before sending
+            if (suggestion && typeof suggestion === 'object' &&
+                suggestion.agentId && suggestion.agentName &&
+                suggestion.urgency && suggestion.state && suggestion.action) {
+              send({
+                type: 'suggestion_card',
+                agentId: String(suggestion.agentId),
+                agentName: String(suggestion.agentName),
+                role: String(suggestion.role || 'agent'),
+                urgency: String(suggestion.urgency),
+                state: String(suggestion.state),
+                action: String(suggestion.action)
+              });
+            }
+          }
         }
+      } catch (e) {
+        // Log error but don't crash the server
+        console.error('Error handling tool result:', e);
       }
     },
     onText: (text) => send({ type: 'assistant', text }),
@@ -900,6 +930,11 @@ streamWss.on('connection', (ws) => {
 
 // Rotate old activity events on startup
 try { rotateEvents(); } catch { /* ignore */ }
+
+// Exported for HTTP-level integration tests (see src/server-hosts-status.test.js).
+// Not used by the running server — startServer() below drives the module-level
+// `server` directly.
+export { app };
 
 export function startServer(port = 7421, host = '127.0.0.1') {
   server.on('error', (e) => {
