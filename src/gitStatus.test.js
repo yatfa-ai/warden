@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { parseGitStatusPorcelain } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind } from './gitStatus.js';
 
 describe('parseGitStatusPorcelain', () => {
   it('parses the most common case: unstaged modification as the FIRST file', () => {
@@ -87,5 +87,69 @@ describe('parseGitStatusPorcelain', () => {
       parseGitStatusPorcelain(out).map((f) => f.path),
       ['z.txt', 'a.txt', 'm.txt'],
     );
+  });
+});
+
+describe('parseAheadBehind', () => {
+  // `git rev-list --left-right --count @{u}...HEAD` prints `<behind>\t<ahead>`:
+  // left = commits on upstream not in HEAD (behind), right = commits in HEAD not
+  // on upstream (ahead / unpushed). See WARDEN-153.
+
+  it('parses a normal "behind\tahead" line', () => {
+    // 2 behind (remote has 2 we lack), 5 ahead (5 unpushed) — a diverged branch.
+    assert.deepEqual(parseAheadBehind('2\t5\n'), { ahead: 5, behind: 2 });
+  });
+
+  it('parses an up-to-date branch as zero/zero', () => {
+    assert.deepEqual(parseAheadBehind('0\t0\n'), { ahead: 0, behind: 0 });
+  });
+
+  it('parses ahead-only (unpushed commits)', () => {
+    // 3 local commits not yet on the remote, nothing to pull.
+    assert.deepEqual(parseAheadBehind('0\t3\n'), { ahead: 3, behind: 0 });
+  });
+
+  it('parses behind-only (remote has new commits)', () => {
+    // Remote moved 4 commits ahead of us, nothing local to push.
+    assert.deepEqual(parseAheadBehind('4\t0\n'), { ahead: 0, behind: 4 });
+  });
+
+  it('treats empty output (no upstream / non-git cwd) as null', () => {
+    // git exits non-zero with empty stdout when there's no @{u}.
+    assert.deepEqual(parseAheadBehind(''), { ahead: null, behind: null });
+  });
+
+  it('handles undefined / null input without throwing', () => {
+    assert.deepEqual(parseAheadBehind(undefined), { ahead: null, behind: null });
+    assert.deepEqual(parseAheadBehind(null), { ahead: null, behind: null });
+  });
+
+  it('accepts a Buffer input', () => {
+    assert.deepEqual(parseAheadBehind(Buffer.from('0\t2\n')), { ahead: 2, behind: 0 });
+  });
+
+  it('returns null for malformed single-token output', () => {
+    assert.deepEqual(parseAheadBehind('not-a-count'), { ahead: null, behind: null });
+  });
+
+  it('returns null for non-numeric counts', () => {
+    assert.deepEqual(parseAheadBehind('a\tb'), { ahead: null, behind: null });
+  });
+
+  it('returns null when only one side is numeric', () => {
+    assert.deepEqual(parseAheadBehind('2\t'), { ahead: null, behind: null });
+    assert.deepEqual(parseAheadBehind('\t3'), { ahead: null, behind: null });
+  });
+
+  it('returns null for output with too many fields', () => {
+    assert.deepEqual(parseAheadBehind('1\t2\t3'), { ahead: null, behind: null });
+  });
+
+  it('tolerates CRLF line endings (e.g. over SSH)', () => {
+    assert.deepEqual(parseAheadBehind('2\t5\r\n'), { ahead: 5, behind: 2 });
+  });
+
+  it('tolerates leading/trailing whitespace', () => {
+    assert.deepEqual(parseAheadBehind('  2\t5  '), { ahead: 5, behind: 2 });
   });
 });
