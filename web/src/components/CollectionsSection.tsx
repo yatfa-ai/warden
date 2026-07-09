@@ -42,7 +42,7 @@ export function CollectionsSection({ chats, onEnterCollection, onCreateCollectio
       <div className="flex items-center gap-2 px-2 py-2">
         <span className="text-xs text-muted-foreground flex-1">collections</span>
         <Badge variant="secondary" className="text-xs">{collections.length}</Badge>
-        <button className="text-xs text-muted-foreground hover:text-foreground" onClick={fetchCollections} disabled={loading} title="refresh">{loading ? '…' : '↻'}</button>
+        <button className="text-xs text-muted-foreground hover:text-foreground active:scale-95 transition-all duration-150 ease-out" onClick={fetchCollections} disabled={loading} title="refresh">{loading ? '…' : '↻'}</button>
         <Button size="sm" variant="ghost" className="h-5 text-xs px-2" onClick={onCreateCollection}>+</Button>
       </div>
       {collections.length > 0 ? (
@@ -74,7 +74,7 @@ function CollectionCard({ collection, agentCount, onClick }: { collection: Colle
   return (
     <button
       onClick={onClick}
-      className="flex flex-col gap-0.5 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent w-full group"
+      className="flex flex-col gap-0.5 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 w-full group transition-colors"
     >
       <div className="flex items-center gap-2">
         <span

@@ -121,13 +121,13 @@ export function ObserverTabs({ externalViewMode, onFocusAgent }: Props = {}) {
         <div className="flex items-center gap-1">
           <button
             onClick={() => setViewMode('sessions')}
-            className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap shrink-0 ${viewMode === 'sessions' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50'}`}
+            className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap shrink-0 transition-all duration-150 ease-out active:scale-95 ${viewMode === 'sessions' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50'}`}
           >
             Sessions
           </button>
           <button
             onClick={() => setViewMode('activity')}
-            className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap shrink-0 ${viewMode === 'activity' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50'}`}
+            className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap shrink-0 transition-all duration-150 ease-out active:scale-95 ${viewMode === 'activity' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50'}`}
           >
             Activity
           </button>
@@ -155,7 +155,7 @@ export function ObserverTabs({ externalViewMode, onFocusAgent }: Props = {}) {
               <button
                 key={id}
                 onClick={() => setActiveId(id)}
-                className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap shrink-0 ${activeId === id ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50'}`}
+                className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap shrink-0 transition-all duration-150 ease-out active:scale-95 ${activeId === id ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50'}`}
               >
                 {nameOf(id)}
                 <span

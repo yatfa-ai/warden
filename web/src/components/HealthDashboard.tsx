@@ -76,10 +76,10 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
       {/* Header */}
       <div className="flex items-center gap-2 px-3 py-2 border-b shrink-0">
         <span className="font-semibold tracking-wide text-sm">Fleet Health</span>
-        <button className="text-xs text-muted-foreground hover:text-foreground ml-auto" onClick={fetchHealth} disabled={loading}>
+        <button className="text-xs text-muted-foreground hover:text-foreground ml-auto active:scale-95 transition-all duration-150 ease-out" onClick={fetchHealth} disabled={loading}>
           {loading ? '…' : '↻'}
         </button>
-        <button className="text-xs text-muted-foreground hover:text-foreground" onClick={onClose}>
+        <button className="text-xs text-muted-foreground hover:text-foreground active:scale-95 transition-all duration-150 ease-out" onClick={onClose}>
           ×
         </button>
       </div>
@@ -137,7 +137,7 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
                       <button
                         key={agent.id}
                         onClick={() => onOpenChat(agent.id)}
-                        className="flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent transition-colors"
+                        className="flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 transition-colors"
                       >
                         {/* Status Indicator */}
                         <span className={`size-2 rounded-full shrink-0 ${getHealthBgColor(normalizeHealthState(agent.healthState))}`} />
