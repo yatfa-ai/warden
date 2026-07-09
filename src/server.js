@@ -582,6 +582,63 @@ app.get('/api/git-status', async (req, res) => {
   }
 });
 
+// Parse one `--pretty=format:%h|%s|%an|%ar` line into { hash, subject, author, date }.
+// The hash is the first field (never contains '|') and the relative date is the last
+// (also never contains '|'); the subject sits between them and MAY contain '|' (a commit
+// message like "merge a | b"). So we peel the hash off the front and the date off the back,
+// then split the middle on its LAST '|' (author is assumed pipe-free). Exported for tests.
+export function parseGitLogLine(line) {
+  const firstPipe = line.indexOf('|');
+  if (firstPipe === -1) return { hash: line, subject: '', author: '', date: '' };
+  const hash = line.slice(0, firstPipe);
+  const tail = line.slice(firstPipe + 1);
+  const lastPipe = tail.lastIndexOf('|');
+  if (lastPipe === -1) return { hash, subject: tail, author: '', date: '' };
+  const date = tail.slice(lastPipe + 1);
+  const mid = tail.slice(0, lastPipe);
+  const midPipe = mid.lastIndexOf('|');
+  if (midPipe === -1) return { hash, subject: mid, author: '', date };
+  return { hash, subject: mid.slice(0, midPipe), author: mid.slice(midPipe + 1), date };
+}
+
+// Recent commit history (git log) for a chat's repo. Mirrors /api/git-status: local chats
+// run git via spawnSync, remote chats run over SSH with shellQuote(cwd). A non-git or no-cwd
+// repo yields an empty list (never a 500). limit is clamped to [1, 50].
+app.get('/api/git-log', async (req, res) => {
+  const chatId = String(req.query.id || '');
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit || '5'), 10) || 5, 1), 50);
+  const { chat, error } = await resolve(chatId);
+  if (error) return res.status(404).json({ error });
+
+  try {
+    const cwd = chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
+    if (!cwd) return res.json({ commits: [], error: 'no cwd' });
+
+    // short hash | subject | author | relative date
+    const pretty = '%h|%s|%an|%ar';
+    let raw = '';
+    if (chat.host === LOCAL) {
+      // Local execution: use spawnSync directly
+      const r = spawnSync('git', ['log', `-${limit}`, `--pretty=format:${pretty}`], {
+        cwd,
+        stdio: ['ignore', 'pipe', 'inherit'],
+      });
+      raw = r.stdout?.toString().trim() || '';
+    } else {
+      // Remote execution: SSH. shellQuote the pretty format so the '|' separators aren't
+      // interpreted as shell pipes.
+      const cmd = `cd ${shellQuote(cwd)} && git log -${limit} --pretty=format:${shellQuote(pretty)} 2>/dev/null`;
+      const rr = await run(chat.host, cmd, { timeout: 8000 });
+      raw = rr.ok ? rr.stdout.trim() : '';
+    }
+
+    const commits = raw ? raw.split('\n').map(parseGitLogLine) : [];
+    res.json({ commits, error: null });
+  } catch (e) {
+    res.json({ commits: [], error: e.message });
+  }
+});
+
 // If cmd invokes bare `claude`, replace it with the full path found on the host —
 // claude is often in a .zshrc-only PATH that tmux's shell (bash) can't see.
 async function resolveClaudeCmd(host, cmd) {

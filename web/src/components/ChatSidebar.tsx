@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { Popover } from 'radix-ui';
 import { toast } from 'sonner';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
@@ -10,7 +11,11 @@ import { NewChatForm } from './NewChatForm';
 import { CollectionsSection } from './CollectionsSection';
 import { CreateCollectionDialog } from './CreateCollectionDialog';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
+import { cn } from '@/lib/utils';
 import type { Chat, Collection } from '@/lib/types';
+
+// One row from /api/git-log (a parsed %h|%s|%an|%ar git log line).
+export type GitCommit = { hash: string; subject: string; author: string; date: string };
 
 export interface ClaudeSession { id: string; cwd: string; summary: string; mtime: number }
 
@@ -121,6 +126,9 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [allSessions, setAllSessions] = useState<(ClaudeSession & { host: string })[]>([]);
   const [loadingAllSessions, setLoadingAllSessions] = useState(false);
   const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string; files?: GitFile[] }>>({});
+  // recent commit history (git log) per chatId — cached so re-expanding the badge is instant
+  const [gitLog, setGitLog] = useState<Record<string, GitCommit[]>>({});
+  const [gitLogLoading, setGitLogLoading] = useState<Record<string, boolean>>({});
   const { prefs } = useNotificationPrefs();
 
   // Native context menu listener — only fires for tab rows, leaves everything else (xterm/tmux) alone.
@@ -172,6 +180,23 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     } catch (error) {
       // Git status is non-critical, so just log it without showing a toast
       console.error('Failed to fetch git status:', error);
+    }
+  }, []);
+
+  // Fetch recent commits for a chat. Results (even an empty list) are cached per chatId
+  // so re-expanding the badge doesn't refetch; the badge's refresh affordance re-runs this.
+  const fetchGitLog = useCallback(async (chatId: string) => {
+    setGitLogLoading((p) => ({ ...p, [chatId]: true }));
+    try {
+      const r = await fetch(`/api/git-log?id=${encodeURIComponent(chatId)}&limit=5`);
+      const j = await r.json();
+      setGitLog((p) => ({ ...p, [chatId]: Array.isArray(j.commits) ? j.commits : [] }));
+    } catch (error) {
+      // Non-critical: cache an empty list so a transient failure doesn't loop on re-expand.
+      console.error('Failed to fetch git log:', error);
+      setGitLog((p) => ({ ...p, [chatId]: [] }));
+    } finally {
+      setGitLogLoading((p) => ({ ...p, [chatId]: false }));
     }
   }, []);
 
@@ -422,7 +447,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             {(visibleActive.length > 0 || idle.length > 0 || hiddenActive.length > 0) && (
               <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">● live (tmux)</div>
             )}
-            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onHide={() => onHideTab(c.key || c.id)} gitInfo={gitStatus[c.key || c.id]} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
+            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onHide={() => onHideTab(c.key || c.id)} gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
             {hiddenActive.length > 0 && (
               <>
                 <button onClick={() => setHiddenExpanded(!hiddenExpanded)} className="flex items-center gap-1 px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60 hover:text-foreground w-full active:bg-accent/80 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded">
@@ -430,14 +455,14 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                   <span>hidden ({hiddenActive.length})</span>
                 </button>
                 {hiddenExpanded && hiddenActive.map((c) => (
-                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onUnhide={() => onUnhideTab(c.key || c.id)} dim gitInfo={gitStatus[c.key || c.id]} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />
+                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onUnhide={() => onUnhideTab(c.key || c.id)} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />
                 ))}
               </>
             )}
             {idle.length > 0 && (
               <>
                 <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">idle</div>
-                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} dim gitInfo={gitStatus[c.key || c.id]} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
+                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
               </>
             )}
             <div className="mt-3 mb-1 border-t border-border/50" />
@@ -559,6 +584,8 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             const originalIdx = activeTabs.indexOf(id);
             const gitInfo = gitStatus[id];
             const hasFiles = !dead && gitInfo?.clean === false && gitInfo.files && gitInfo.files.length > 0;
+            const gitCommits = gitLog[id];
+            const gitLoading = gitLogLoading[id];
             return (
               <div key={id} data-tab-id={id} draggable
                 onDragStart={() => setDragIdx(originalIdx)}
@@ -575,10 +602,13 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                   {!dead && showHostTags !== false && hostTag && <span className="text-[10px] text-muted-foreground">{hostTag}</span>}
                   {!dead && showProjectBadges && c?.project && <span className="text-[10px] text-muted-foreground">{c.project}</span>}
                   {!dead && gitInfo?.branch && (
-                    <>
-                      <span className="text-[10px] text-cyan-400">{gitInfo.branch}</span>
-                      {gitInfo.clean === false && <span className="text-[10px] text-yellow-400">±</span>}
-                    </>
+                    <GitBranchBadge
+                      branch={gitInfo.branch}
+                      clean={gitInfo.clean}
+                      commits={gitCommits}
+                      loading={gitLoading}
+                      onFetch={() => fetchGitLog(id)}
+                    />
                   )}
                   <button className={`px-1 text-sm active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded ${dead ? 'text-red-500 font-bold' : 'opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500'}`} title={dead ? 'remove dead tab' : 'remove'} onClick={(e) => { e.stopPropagation(); onRemoveActive(id); }}>×</button>
                 </div>
@@ -742,11 +772,81 @@ function CtxItem({ label, onClick, danger, isLoading }: { label: string; onClick
   );
 }
 
-function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, gitInfo, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, killingChatId, renamingChatId, isPinned, onTogglePin }: {
+// The cyan branch badge (+ yellow ±). Made interactive: click opens a popover showing
+// the last few commits (git log) for the chat's repo. Commits are lazily fetched on
+// first open and cached by chatId; the ↻ affordance re-fetches. The popover is portaled
+// to document.body via Radix Popover so it isn't clipped by the `truncate` name span
+// this badge sits inside (in ChatRow). stopPropagation on clicks keeps it from also
+// opening the chat pane (mirrors the other inline buttons in these rows).
+function GitBranchBadge({ branch, clean, commits, loading, onFetch, className }: {
+  branch: string;
+  clean: boolean | null;
+  commits?: GitCommit[];
+  loading?: boolean;
+  onFetch?: () => void;
+  className?: string;
+}) {
+  return (
+    <Popover.Root onOpenChange={(open) => { if (open && commits === undefined && !loading) onFetch?.(); }}>
+      <Popover.Trigger asChild>
+        <button
+          type="button"
+          onClick={(e) => e.stopPropagation()}
+          className={cn('inline-flex items-center gap-0.5 text-[10px] text-cyan-400 hover:text-cyan-300 cursor-pointer', className)}
+          title={`${branch}${clean === false ? ' (uncommitted changes)' : ''} — click for recent commits`}
+        >
+          {branch}
+          {clean === false && <span className="text-yellow-400">±</span>}
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          sideOffset={4}
+          align="start"
+          onClick={(e) => e.stopPropagation()}
+          className="z-50 min-w-64 max-w-80 rounded-md border border-border bg-popover p-1.5 text-popover-foreground shadow-lg outline-none data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0"
+        >
+          <div className="mb-1 flex items-center justify-between gap-2 px-0.5">
+            <span className="truncate text-[10px] font-medium text-muted-foreground">recent commits · {branch}</span>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onFetch?.(); }}
+              className="shrink-0 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+              title="refresh"
+              disabled={loading}
+            >↻</button>
+          </div>
+          {loading && (!commits || commits.length === 0) ? (
+            <div className="flex items-center gap-1.5 px-1 py-1">
+              <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">loading…</span>
+            </div>
+          ) : commits && commits.length > 0 ? (
+            <ul className="max-h-56 overflow-auto">
+              {commits.map((cm) => (
+                <li key={cm.hash} className="flex gap-1.5 rounded px-1 py-0.5 hover:bg-accent">
+                  <span className="shrink-0 font-mono text-[10px] text-cyan-400/80">{cm.hash}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[10px] text-foreground" title={cm.subject}>{cm.subject}</span>
+                    <span className="block text-[10px] text-muted-foreground">{cm.date}{cm.author ? ` · ${cm.author}` : ''}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="px-1 py-1 text-[10px] text-muted-foreground">no commits</div>
+          )}
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
+  );
+}
+
+function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, killingChatId, renamingChatId, isPinned, onTogglePin }: {
   c: Chat; open: boolean; onOpen: () => void; onKill: () => void;
   onRename: (session: string, kind: string, name: string) => void;
   onHide?: () => void; onUnhide?: () => void; dim?: boolean;
   gitInfo?: { branch: string | null; clean: boolean | null; files?: GitFile[] };
+  gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
   killingChatId?: string | null; renamingChatId?: string | null;
   isPinned?: boolean; onTogglePin?: () => void;
@@ -790,10 +890,14 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
               {showProjectBadges && c.project && <span className="ml-1 text-[10px] text-muted-foreground">{c.project}</span>}
               {isUser && showHostTags !== false && hostTag && <span className="ml-1 text-[10px] text-muted-foreground">{hostTag}</span>}
               {gitInfo?.branch && (
-                <>
-                  <span className="ml-1 text-[10px] text-cyan-400">{gitInfo.branch}</span>
-                  {gitInfo.clean === false && <span className="ml-0.5 text-[10px] text-yellow-400">±</span>}
-                </>
+                <GitBranchBadge
+                  branch={gitInfo.branch}
+                  clean={gitInfo.clean}
+                  commits={gitCommits}
+                  loading={gitLogLoading}
+                  onFetch={onFetchGitLog}
+                  className="ml-1"
+                />
               )}
             </>
           )}
