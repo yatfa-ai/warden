@@ -140,6 +140,119 @@ export async function summarizeOpenChats(openTabs, lastChats, capturePanes, cfg)
   }
 }
 
+// Pure, dependency-injected core of the suggest_next_actions tool. capturePanes is
+// passed in so the classification logic is unit-testable without SSH/tmux
+// (mock.module is unavailable on the project's Node version). Behavior is identical
+// to the inlined tool handler.
+export async function suggestNextActions(openTabs, lastChats, capturePanes, cfg) {
+  const open = new Set(openTabs || []);
+  if (open.size === 0) return { error: 'no tabs are open. open some agent panes first.' };
+
+  // Filter to only open tabs
+  const openChats = lastChats.filter(c =>
+    open.has(c.container || c.session) || open.has(c.key)
+  );
+
+  if (openChats.length === 0) {
+    return { error: 'open tabs do not match any discovered chats. try refreshing with list_chats.' };
+  }
+
+  try {
+    const panes = await capturePanes(openChats, cfg);
+
+    // Classification patterns (regex-based, no LLM calls).
+    // NOTE: BLOCKED_RE is scoped to coordination/dependency language (other agents,
+    // external dependencies) — it deliberately does NOT match the bare fragment
+    // "waiting for", which would otherwise swallow "waiting for user" (a human-input
+    // signal classified as 'waiting' below). The two states stay distinct, matching
+    // the ticket spec: waiting = human input, blocked = other agents/dependencies.
+    const ERROR_RE = /error|failed|exception|traceback|panic/i;
+    const WAITING_RE = /please|respond|continue\?|input|press enter|waiting for user/i;
+    const BLOCKED_RE = /blocked by|blocked on|depends on|waiting for (?:the |an |a )?(?:agent|worker|planner|reviewer|researcher|dependency|approval from)/i;
+    const ACTIVE_RE = /running|processing|building|installing|downloading|executing|working on|implement/i;
+
+    const suggestions = [];
+
+    for (const c of openChats) {
+      const pane = panes[c.key] || '';
+      const agentId = c.container || c.session;
+      const role = c.role || 'agent';
+      const project = c.project || 'unknown';
+
+      let state = 'idle';
+      let urgency = 'informational';
+      let action = 'No action needed - agent is idle.';
+
+      // Detect repeating output (stuck agent) using line-by-line comparison
+      const lines = pane.split('\n');
+      const last3 = lines.slice(-3).join('\n');
+      const prev3 = lines.slice(-6, -3).join('\n');
+      const stuck = last3 === prev3 && last3.length > 50;
+
+      // Classify agent state using regex patterns. BLOCKED is checked before WAITING:
+      // because BLOCKED_RE is scoped to coordination signals, no human-input pane can
+      // match it, so genuine waiting input always reaches the WAITING branch.
+      if (ERROR_RE.test(pane)) {
+        state = 'erroring';
+        urgency = 'urgent';
+        action = `Agent encountered an error. Review the pane content and investigate the failure. Consider sending a directive to retry or fix the issue.`;
+      } else if (stuck) {
+        state = 'stuck';
+        urgency = 'urgent';
+        action = `Agent appears stuck (repeating output detected). Interrupt and redirect with a new directive, or terminate if needed.`;
+      } else if (BLOCKED_RE.test(pane)) {
+        state = 'blocked';
+        urgency = 'important';
+        action = `Agent is blocked on a dependency. Check what it's waiting for and unblock it, or redirect to other work.`;
+      } else if (WAITING_RE.test(pane)) {
+        state = 'waiting';
+        urgency = 'important';
+        action = `Agent is waiting for input. Respond to its request or provide the needed information.`;
+      } else if (ACTIVE_RE.test(pane) && c.active) {
+        state = 'active';
+        urgency = 'informational';
+        action = `Agent is actively working. No immediate action needed, but monitor for completion or issues.`;
+      } else if (pane.trim().length > 100) {
+        state = 'idle';
+        urgency = 'informational';
+        action = `Agent has output but appears inactive. Check if it completed its task or needs direction.`;
+      } else {
+        state = 'idle';
+        urgency = 'informational';
+        action = `Agent is idle with minimal output. Consider assigning work or checking if it needs direction.`;
+      }
+
+      suggestions.push({
+        agentId: agentId,
+        agentName: agentId,
+        role,
+        project,
+        host: c.host,
+        state,
+        urgency,
+        action,
+        pane_excerpt: pane.slice(-200).trim(), // Last 200 chars for context
+      });
+    }
+
+    // Sort by urgency: urgent > important > informational
+    const urgencyOrder = { urgent: 0, important: 1, informational: 2 };
+    suggestions.sort((a, b) => urgencyOrder[a.urgency] - urgencyOrder[b.urgency]);
+
+    return {
+      suggestions,
+      summary: {
+        total: suggestions.length,
+        urgent: suggestions.filter(s => s.urgency === 'urgent').length,
+        important: suggestions.filter(s => s.urgency === 'important').length,
+        informational: suggestions.filter(s => s.urgency === 'informational').length,
+      },
+    };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
 export class Observer {
   constructor(cfg, { sid, gate, onTool, onToolResult, onText } = {}) {
     this.cfg = cfg;
@@ -300,105 +413,7 @@ export class Observer {
       }
     }
     if (name === 'suggest_next_actions') {
-      const open = new Set(this.openTabs || []);
-      if (open.size === 0) return { error: 'no tabs are open. open some agent panes first.' };
-
-      // Filter to only open tabs
-      const openChats = this.lastChats.filter(c =>
-        open.has(c.container || c.session) || open.has(c.key)
-      );
-
-      if (openChats.length === 0) {
-        return { error: 'open tabs do not match any discovered chats. try refreshing with list_chats.' };
-      }
-
-      try {
-        const panes = await capturePanes(openChats);
-
-        // Classification patterns (regex-based, no LLM calls)
-        const ERROR_RE = /error|failed|exception|traceback|panic/i;
-        const WAITING_RE = /please|respond|continue\?|input|press enter|waiting for user/i;
-        const BLOCKED_RE = /waiting for|blocked by|depends on|blocked on/i;
-        const ACTIVE_RE = /running|processing|building|installing|downloading|executing|working on|implement/i;
-
-        const suggestions = [];
-
-        for (const c of openChats) {
-          const pane = panes[c.key] || '';
-          const agentId = c.container || c.session;
-          const role = c.role || 'agent';
-          const project = c.project || 'unknown';
-
-          let state = 'idle';
-          let urgency = 'informational';
-          let action = 'No action needed - agent is idle.';
-
-          // Detect repeating output (stuck agent) using line-by-line comparison
-          const lines = pane.split('\n');
-          const last3 = lines.slice(-3).join('\n');
-          const prev3 = lines.slice(-6, -3).join('\n');
-          const stuck = last3 === prev3 && last3.length > 50;
-
-          // Classify agent state using regex patterns
-          if (ERROR_RE.test(pane)) {
-            state = 'erroring';
-            urgency = 'urgent';
-            action = `Agent encountered an error. Review the pane content and investigate the failure. Consider sending a directive to retry or fix the issue.`;
-          } else if (stuck) {
-            state = 'stuck';
-            urgency = 'urgent';
-            action = `Agent appears stuck (repeating output detected). Interrupt and redirect with a new directive, or terminate if needed.`;
-          } else if (BLOCKED_RE.test(pane)) {
-            state = 'blocked';
-            urgency = 'important';
-            action = `Agent is blocked on a dependency. Check what it's waiting for and unblock it, or redirect to other work.`;
-          } else if (WAITING_RE.test(pane)) {
-            state = 'waiting';
-            urgency = 'important';
-            action = `Agent is waiting for input. Respond to its request or provide the needed information.`;
-          } else if (ACTIVE_RE.test(pane) && c.active) {
-            state = 'active';
-            urgency = 'informational';
-            action = `Agent is actively working. No immediate action needed, but monitor for completion or issues.`;
-          } else if (pane.trim().length > 100) {
-            state = 'idle';
-            urgency = 'informational';
-            action = `Agent has output but appears inactive. Check if it completed its task or needs direction.`;
-          } else {
-            state = 'idle';
-            urgency = 'informational';
-            action = `Agent is idle with minimal output. Consider assigning work or checking if it needs direction.`;
-          }
-
-          suggestions.push({
-            agentId: agentId,
-            agentName: agentId,
-            role,
-            project,
-            host: c.host,
-            state,
-            urgency,
-            action,
-            pane_excerpt: pane.slice(-200).trim(), // Last 200 chars for context
-          });
-        }
-
-        // Sort by urgency: urgent > important > informational
-        const urgencyOrder = { urgent: 0, important: 1, informational: 2 };
-        suggestions.sort((a, b) => urgencyOrder[a.urgency] - urgencyOrder[b.urgency]);
-
-        return {
-          suggestions,
-          summary: {
-            total: suggestions.length,
-            urgent: suggestions.filter(s => s.urgency === 'urgent').length,
-            important: suggestions.filter(s => s.urgency === 'important').length,
-            informational: suggestions.filter(s => s.urgency === 'informational').length,
-          },
-        };
-      } catch (e) {
-        return { error: e.message };
-      }
+      return suggestNextActions(this.openTabs, this.lastChats, capturePanes, this.cfg);
     }
     return { error: `unknown tool ${name}` };
   }
