@@ -61,7 +61,7 @@ const EDGE = findBrowser();
 
     // observer tabs: a session is auto-created on boot; panel + "+" should render
     const obs = await page.evaluate(() => ({
-      input: !!document.querySelector('input[placeholder="ask the observer…"]'),
+      input: !!document.querySelector('textarea[data-observer-composer]'),
       newBtn: [...document.querySelectorAll('button')].some((b) => b.title === 'new observer session'),
     }));
     console.log('observer:', JSON.stringify(obs));
