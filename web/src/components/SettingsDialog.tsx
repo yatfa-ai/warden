@@ -12,6 +12,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Badge } from '@/components/ui/badge';
+import { Checkbox } from '@/components/ui/checkbox';
 import { type Theme } from '@/lib/theme';
 
 interface ConfigData {
@@ -26,6 +27,11 @@ interface ConfigData {
   notifyErrors: boolean;
   notifySuccess: boolean;
   notifyObserver: boolean;
+  // Display customization
+  showHostTags?: boolean;
+  showTypeBadges?: boolean;
+  showStatusIndicators?: boolean;
+  showProjectBadges?: boolean;
 }
 
 interface Props {
@@ -49,6 +55,11 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
     notifyErrors: true,
     notifySuccess: true,
     notifyObserver: true,
+    // Display customization
+    showHostTags: true,
+    showTypeBadges: true,
+    showStatusIndicators: true,
+    showProjectBadges: false,
   });
   const [availableHosts, setAvailableHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -77,6 +88,11 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
             notifyErrors: configData.notifyErrors ?? true,
             notifySuccess: configData.notifySuccess ?? true,
             notifyObserver: configData.notifyObserver ?? true,
+            // Display customization
+            showHostTags: configData.showHostTags ?? true,
+            showTypeBadges: configData.showTypeBadges ?? true,
+            showStatusIndicators: configData.showStatusIndicators ?? true,
+            showProjectBadges: configData.showProjectBadges ?? false,
           });
           setAvailableHosts(hostsData.hosts || []);
         })
@@ -282,6 +298,59 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme 
                 <p className="text-xs text-muted-foreground">
                   Automatically stop Observer after N minutes of inactivity. Leave empty to disable.
                 </p>
+              </div>
+            </div>
+
+            {/* Display Customization Section */}
+            <div className="flex flex-col gap-3 pt-2 border-t">
+              <div className="text-sm font-medium text-foreground">Display</div>
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="showHostTags"
+                  checked={config.showHostTags ?? true}
+                  onCheckedChange={(checked) =>
+                    setConfig({ ...config, showHostTags: checked === true })
+                  }
+                />
+                <Label htmlFor="showHostTags" className="cursor-pointer">
+                  Show host tags (local/hostname badges)
+                </Label>
+              </div>
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="showTypeBadges"
+                  checked={config.showTypeBadges ?? true}
+                  onCheckedChange={(checked) =>
+                    setConfig({ ...config, showTypeBadges: checked === true })
+                  }
+                />
+                <Label htmlFor="showTypeBadges" className="cursor-pointer">
+                  Show type badges (shell/claude/yatfa labels)
+                </Label>
+              </div>
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="showStatusIndicators"
+                  checked={config.showStatusIndicators ?? true}
+                  onCheckedChange={(checked) =>
+                    setConfig({ ...config, showStatusIndicators: checked === true })
+                  }
+                />
+                <Label htmlFor="showStatusIndicators" className="cursor-pointer">
+                  Show status indicators (active/idle/dead dots)
+                </Label>
+              </div>
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="showProjectBadges"
+                  checked={config.showProjectBadges ?? false}
+                  onCheckedChange={(checked) =>
+                    setConfig({ ...config, showProjectBadges: checked === true })
+                  }
+                />
+                <Label htmlFor="showProjectBadges" className="cursor-pointer">
+                  Show project badges
+                </Label>
               </div>
             </div>
 
