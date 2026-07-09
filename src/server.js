@@ -668,18 +668,28 @@ wss.on('connection', (ws, req) => {
     sid,
     onTool: (name, input) => send({ type: 'tool', name, input: { ...input, id: input?.id } }),
     onToolResult: (name, result) => {
-      if (name === 'suggest_next_actions' && result.suggestions) {
-        for (const suggestion of result.suggestions) {
-          send({
-            type: 'suggestion_card',
-            agentId: suggestion.agentId,
-            agentName: suggestion.agentName,
-            role: suggestion.role,
-            urgency: suggestion.urgency,
-            state: suggestion.state,
-            action: suggestion.action
-          });
+      try {
+        if (name === 'suggest_next_actions' && result?.suggestions && Array.isArray(result.suggestions)) {
+          for (const suggestion of result.suggestions) {
+            // Validate required fields before sending
+            if (suggestion && typeof suggestion === 'object' &&
+                suggestion.agentId && suggestion.agentName &&
+                suggestion.urgency && suggestion.state && suggestion.action) {
+              send({
+                type: 'suggestion_card',
+                agentId: String(suggestion.agentId),
+                agentName: String(suggestion.agentName),
+                role: String(suggestion.role || 'agent'),
+                urgency: String(suggestion.urgency),
+                state: String(suggestion.state),
+                action: String(suggestion.action)
+              });
+            }
+          }
         }
+      } catch (e) {
+        // Log error but don't crash the server
+        console.error('Error handling tool result:', e);
       }
     },
     onText: (text) => send({ type: 'assistant', text }),
