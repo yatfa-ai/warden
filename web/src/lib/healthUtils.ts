@@ -65,16 +65,18 @@ export function formatHealthState(state: HealthStateValue): string {
 }
 
 /**
- * Get health state icon/indicator
+ * Get health state icon/indicator — a non-color cue used alongside color so
+ * state survives grayscale / color-vision deficiency (WCAG 1.4.1).
+ * Each glyph is distinct (healthy `✓` vs critical `✕`, unlike the old `●`/`●`).
  */
 export function getHealthIcon(state: HealthStateValue): string {
   switch (state) {
     case HealthState.HEALTHY:
-      return '●';
+      return '✓';
     case HealthState.WARNING:
       return '◐';
     case HealthState.CRITICAL:
-      return '●';
+      return '✕';
     case HealthState.IDLE:
       return '○';
     default:

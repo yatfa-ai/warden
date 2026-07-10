@@ -12,6 +12,7 @@ import { ObserverTabs } from '@/components/ObserverTabs';
 import { SettingsDialog } from '@/components/SettingsDialog';
 import { GlobalSearchDialog } from '@/components/GlobalSearchDialog';
 import { HealthDashboard } from '@/components/HealthDashboard';
+import { StatusDot } from '@/components/StatusDot';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
@@ -624,7 +625,12 @@ function App() {
         <span className="font-semibold tracking-wide">Yatfa Warden</span>
         <span className="text-xs text-muted-foreground">{activeTabs.length} active · {openPanes.length} open</span>
         <span className="flex-1" />
-        <span className={`size-2 rounded-full transition-colors duration-300 ease-in-out ${streamConn ? 'bg-green-500' : 'bg-red-500'}`} title={streamConn ? 'connected' : 'disconnected'} />
+        <StatusDot
+          tone={streamConn ? 'green' : 'red'}
+          variant={streamConn ? 'solid' : 'ring'}
+          label={streamConn ? 'Connected' : 'Disconnected'}
+          className="transition-colors duration-300 ease-in-out"
+        />
         <IconTooltip label="global search (Ctrl+Shift+F)" side="bottom"><button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⌕</button></IconTooltip>
         <IconTooltip label="toggle health panel" side="bottom"><button onClick={() => setHealthCollapsed(!healthCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{healthCollapsed ? '◂' : '▸'} Health</button></IconTooltip>
         <IconTooltip label="toggle observer" side="bottom"><button onClick={() => setObserverCollapsed(!observerCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>

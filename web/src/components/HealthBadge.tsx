@@ -29,7 +29,13 @@ export function HealthBadge({ state, showLabel = true, size = 'md', className = 
   return (
     <Badge className={`${sizeClasses[size]} ${className}`} variant="outline">
       <span className={`inline-flex items-center gap-1.5`}>
-        <span className={`${dotSizes[size]} rounded-full ${bgColor}`} aria-hidden="true" />
+        <span
+          className={`${dotSizes[size]} rounded-full ${bgColor}`}
+          role={showLabel ? undefined : 'img'}
+          aria-label={showLabel ? undefined : label}
+          aria-hidden={showLabel ? true : undefined}
+          title={showLabel ? undefined : label}
+        />
         {showLabel && (
           <span className={textColor}>
             {label}

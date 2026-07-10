@@ -32,6 +32,7 @@ import {
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { useStickToBottom } from '@/lib/useStickToBottom';
 import { ObserverMarkdown } from '@/components/ObserverMarkdown';
+import { StatusDot } from '@/components/StatusDot';
 
 // One entry in the conversation timeline. Observer text is streamed: an observer
 // item is created `streaming` while the assistant is emitting, then finalized on
@@ -400,8 +401,10 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
     <div className="flex h-full min-h-0 flex-col">
       {/* Status / context bar */}
       <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2 text-xs text-muted-foreground">
-        <span
-          className={`size-2 shrink-0 rounded-full ${conn ? 'bg-green-500' : 'bg-red-500'}`}
+        <StatusDot
+          tone={conn ? 'green' : 'red'}
+          variant={conn ? 'solid' : 'ring'}
+          label={conn ? 'Connected' : (connectionError || 'Reconnecting')}
           title={conn ? 'connected' : connectionError || 'reconnecting…'}
         />
         {chatContext?.chatKey ? (
