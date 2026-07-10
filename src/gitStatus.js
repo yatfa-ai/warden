@@ -28,9 +28,37 @@
  * becomes "EADME.md"). This function splits into lines first and preserves each
  * line's leading whitespace.
  *
+ * Each file is also tagged `conflict: boolean` via `isConflictStatus` so a
+ * conflicted path (UU/AA/…) can be rendered distinctly instead of falling
+ * through to the generic-gray row. The field is additive — existing consumers
+ * that destructure `{ path, status }` ignore it.
+ *
  * @param {string|Buffer|undefined} output - Raw stdout from `git status --porcelain`.
- * @returns {Array<{path: string, status: string}>} Changed files, or `[]` when clean.
+ * @returns {Array<{path: string, status: string, conflict: boolean}>} Changed files, or `[]` when clean.
  */
+// The unmerged (conflict) XY codes from `git status --porcelain` v1. For an
+// unmerged path git sets BOTH columns — at least one 'U' (unmerged), or the
+// both-added/both-deleted forms DD/AA. A repo mid-merge/cherry-pick/rebase
+// emits exactly these for the paths it could not resolve automatically.
+const UNMERGED_STATUS_CODES = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU']);
+
+/**
+ * Returns true if a porcelain XY status code marks an unmerged/conflicted path.
+ *
+ * The unmerged codes are `DD AU UD UA DU AA UU` — git writes one of these in
+ * BOTH the index (X) and worktree (Y) columns when a path could not be merged
+ * automatically (merge/cherry-pick/rebase conflict). Ordinary single-column
+ * codes (`M`/`A`/`D`, with the other column a space) and `??` (untracked) are
+ * never conflicts. Extracted as its own pure helper so conflict detection is
+ * unit-testable in isolation, mirroring `parseGitStatusPorcelain`.
+ *
+ * @param {string|Buffer|undefined} xy - The raw two-char XY status code (e.g. "UU", "M", "??").
+ * @returns {boolean}
+ */
+export function isConflictStatus(xy) {
+  return UNMERGED_STATUS_CODES.has((xy ?? '').toString().trim());
+}
+
 export function parseGitStatusPorcelain(output) {
   const raw = (output ?? '').toString();
   return raw
@@ -40,7 +68,7 @@ export function parseGitStatusPorcelain(output) {
     .map((line) => {
       const statusCode = line.substring(0, 2).trim();
       const filePath = line.substring(3).trim();
-      return { path: filePath, status: statusCode || '??' };
+      return { path: filePath, status: statusCode || '??', conflict: isConflictStatus(statusCode) };
     })
     .filter((f) => f.path.length > 0);
 }

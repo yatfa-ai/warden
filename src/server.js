@@ -785,13 +785,14 @@ app.get('/api/git-status', async (req, res) => {
 
   try {
     const cwd = chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
-    if (!cwd) return res.json({ branch: null, clean: null, cwd: '', ahead: null, behind: null, files: null, error: 'no cwd' });
+    if (!cwd) return res.json({ branch: null, clean: null, cwd: '', ahead: null, behind: null, inProgress: { operation: null }, files: null, error: 'no cwd' });
 
     let branch = '';
     let clean = true;
     let files = [];
     let ahead = null;
     let behind = null;
+    let inProgressOp = null;
 
     if (chat.host === LOCAL) {
       // Local execution: use spawnSync directly
@@ -811,6 +812,23 @@ app.get('/api/git-status', async (req, res) => {
       // the branch call's spawnSync shape. See parseAheadBehind.
       const abResult = runLocalGit(['rev-list', '--left-right', '--count', '@{u}...HEAD'], cwd);
       ({ ahead, behind } = parseAheadBehind(abResult.stdout?.toString() || ''));
+
+      // Detect an in-progress operation (merge/cherry-pick/revert/rebase/bisect)
+      // by stat'ing the well-known state files git writes under the git dir. A
+      // repo can only be in ONE such state, so first match wins. Resolved via
+      // `git rev-parse --git-dir` (relative like ".git" → resolved against cwd)
+      // mirroring the branch call; a non-git/no-cwd cwd → empty git dir → no
+      // markers → null (graceful, never a 500). Display only (WARDEN-28).
+      const gitDirResult = runLocalGit(['rev-parse', '--git-dir'], cwd);
+      const gitDir = gitDirResult.stdout?.toString().trim() || '';
+      if (gitDir) {
+        const gd = path.resolve(cwd, gitDir);
+        if (fs.existsSync(path.join(gd, 'MERGE_HEAD'))) inProgressOp = 'merge';
+        else if (fs.existsSync(path.join(gd, 'CHERRY_PICK_HEAD'))) inProgressOp = 'cherry-pick';
+        else if (fs.existsSync(path.join(gd, 'REVERT_HEAD'))) inProgressOp = 'revert';
+        else if (fs.existsSync(path.join(gd, 'rebase-merge')) || fs.existsSync(path.join(gd, 'rebase-apply'))) inProgressOp = 'rebase';
+        else if (fs.existsSync(path.join(gd, 'BISECT_LOG'))) inProgressOp = 'bisect';
+      }
     } else {
       // Remote execution: use SSH
       const gitBranchCmd = `cd ${shellQuote(cwd)} && git rev-parse --abbrev-ref HEAD 2>/dev/null`;
@@ -833,6 +851,28 @@ app.get('/api/git-status', async (req, res) => {
 
       const r3 = await run(chat.host, gitAheadBehindCmd, { timeout: 8000 });
       ({ ahead, behind } = parseAheadBehind(r3.ok ? (r3.stdout || '') : ''));
+
+      // Detect an in-progress operation remotely with ONE combined `test` over
+      // the resolved git dir — same markers/order as the local branch (first
+      // match wins; a repo can only be in one state). `2>/dev/null` on the
+      // rev-parse swallows the non-git/detached case so a clean or non-git repo
+      // emits nothing → operation: null. Mirrors the r1/r2/r3 run()+shellQuote
+      // split. Display only (WARDEN-28).
+      const gitInProgCmd =
+        `cd ${shellQuote(cwd)} && gd=$(git rev-parse --git-dir 2>/dev/null) && ` +
+        `{ [ -f "$gd/MERGE_HEAD" ] && echo merge; ` +
+        `[ -f "$gd/CHERRY_PICK_HEAD" ] && echo cherry-pick; ` +
+        `[ -f "$gd/REVERT_HEAD" ] && echo revert; ` +
+        `[ -d "$gd/rebase-merge" ] && echo rebase; ` +
+        `[ -d "$gd/rebase-apply" ] && echo rebase; ` +
+        `[ -f "$gd/BISECT_LOG" ] && echo bisect; }`;
+      const r4 = await run(chat.host, gitInProgCmd, { timeout: 8000 });
+      // The `{ ... }` group's exit status is that of its LAST test, which is
+      // non-zero whenever BISECT_LOG is absent — true even mid-merge (only
+      // MERGE_HEAD matches). So r4.ok is UNRELIABLE here: parse stdout instead.
+      // The group emits one op per matching marker; take the first (priority order).
+      const first = (r4.stdout || '').split('\n').map((l) => l.trim()).find(Boolean);
+      if (first) inProgressOp = first;
     }
 
     res.json({
@@ -841,11 +881,12 @@ app.get('/api/git-status', async (req, res) => {
       cwd,
       ahead: branch ? ahead : null,
       behind: branch ? behind : null,
+      inProgress: { operation: branch ? inProgressOp : null },
       files: branch ? files : null,
       error: null,
     });
   } catch (e) {
-    res.json({ branch: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, files: null, error: e.message });
+    res.json({ branch: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, inProgress: { operation: null }, files: null, error: e.message });
   }
 });
 
