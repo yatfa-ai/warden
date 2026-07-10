@@ -1239,6 +1239,125 @@ app.get('/api/git-stash', async (req, res) => {
   }
 });
 
+// ---- Per-line git blame / annotate (WARDEN-206) -----------------------------
+// Read-only provenance for the file a human is viewing in FileViewer: which
+// commit / author / date last touched each line. Strictly observational — `git
+// blame` only, no checkout or any mutating op (the WARDEN-199 line the roadmap
+// stays on the read-only side of). Mirrors /api/git-show's resolve → cwd guard →
+// isSafeRelativePath → local spawnSync vs remote run() → capDiff → never-500
+// shape. A non-git / no-cwd / binary / unblamable file yields an empty list.
+
+// `summary` is truncated per line so a giant commit message can't dominate the
+// payload. Mirrors the compactness discipline of parseGitLogLine / parseGitShowNameStatus.
+const GIT_BLAME_SUMMARY_MAX = 80;
+
+// Parse `git blame --line-porcelain -- <file>` output into compact per-line
+// provenance: [{ line, hash, author, date, summary }]. `--line-porcelain` emits a
+// FULL header block for every line (unlike `--porcelain`, which may group lines),
+// so each record is: a header line `<hash> <sourceline> <resultline> [<group>]`,
+// detail lines (`author`/`author-mail`/`author-time`/`summary`/…), then the file
+// content on a TAB-prefixed line that terminates the record. We track the in-flight
+// record and emit it when we hit that TAB line. `date` is author-time (epoch sec)
+// rendered to ISO 8601 — a PURE function of the input (so the parser is unit-
+// testable with a fixed epoch) and the frontend formats it relative for display.
+// `summary` is truncated to GIT_BLAME_SUMMARY_MAX. Exported for unit tests.
+// See WARDEN-206.
+export function parseGitBlame(output) {
+  const raw = (output ?? '').toString();
+  if (!raw) return [];
+  // Tolerate CRLF (remote blame can arrive over an SSH pty with \r\n line ends),
+  // mirroring parseGitShowNameStatus's CRLF tolerance.
+  const lines = raw.split('\n').map((l) => l.replace(/\r$/, ''));
+  const out = [];
+  let cur = null;
+  for (const ln of lines) {
+    // A TAB-prefixed line is the file content for the current record → finalize it.
+    if (ln.charCodeAt(0) === 0x09) {
+      if (cur) out.push(cur);
+      cur = null;
+      continue;
+    }
+    // Record header: <hash> <sourceline> <resultline> [<group-size>]. resultline
+    // (m[3]) is the line number in HEAD — exactly what FileViewer renders.
+    const m = ln.match(/^([0-9a-f]{4,40})\s+(\d+)\s+(\d+)/);
+    if (m) {
+      cur = { line: parseInt(m[3], 10), hash: m[1], author: '', authorTime: null, summary: '' };
+    } else if (cur) {
+      // `author ` does not match `author-mail ` (7th char is '-' vs ' '), so the
+      // mail line is naturally skipped — we skim it but don't emit it (compact shape).
+      if (ln.startsWith('author ')) {
+        cur.author = ln.slice(7);
+      } else if (ln.startsWith('author-time ')) {
+        const n = parseInt(ln.slice(12).trim(), 10);
+        cur.authorTime = Number.isFinite(n) ? n : null;
+      } else if (ln.startsWith('summary ')) {
+        cur.summary = ln.slice(8);
+      }
+    }
+  }
+  return out.map((r) => ({
+    line: r.line,
+    hash: r.hash,
+    author: r.author,
+    date: Number.isFinite(r.authorTime) ? new Date(r.authorTime * 1000).toISOString() : '',
+    summary: r.summary.length > GIT_BLAME_SUMMARY_MAX
+      ? `${r.summary.slice(0, GIT_BLAME_SUMMARY_MAX - 1)}…`
+      : r.summary,
+  }));
+}
+
+// Build the remote (SSH) shell command that blames one file under `cwd`. Extracted
+// (and exported) so the fragile shell template is unit-tested directly, the same way
+// buildGitDiffScript / buildReadFileScript are. shellQuote yields a single-quoted
+// POSIX token spliced in bare — same WARDEN-122 quoting discipline as git-log/show —
+// and the `--` stops option parsing so a path named like a flag can't inject options.
+// Mirrors /api/git-show's remote command shape.
+export function buildGitBlameScript(cwd, filePath) {
+  return `cd ${shellQuote(cwd)} && git blame --line-porcelain -- ${shellQuote(filePath)} 2>/dev/null`;
+}
+
+//   GET /api/git-blame?id=<chatId>&path=<file> → { lines: [{line,hash,author,date,summary}], error }
+//
+// `path` is a git pathspec and gets the isSafeRelativePath containment check (bad
+// path → empty, never 500), mirroring /api/git-show's per-file guard. Output is
+// capped via capDiff/GIT_DIFF_MAX_BYTES before parsing (blame on a large file can
+// be big) — a truncation that may drop the final partial record, never a 500.
+app.get('/api/git-blame', async (req, res) => {
+  const chatId = String(req.query.id || '');
+  const filePath = String(req.query.path || '').trim();
+  const { chat, error } = await resolve(chatId);
+  if (error) return res.status(404).json({ error });
+
+  // Empty path → nothing to blame (not an error). Unsafe path → empty + 'invalid path'
+  // (mirrors git-show: never a 500).
+  if (!filePath) return res.json({ lines: [], error: null });
+  if (!isSafeRelativePath(filePath)) return res.json({ lines: [], error: 'invalid path' });
+
+  try {
+    const cwd = chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
+    if (!cwd) return res.json({ lines: [], error: 'no cwd' });
+
+    let raw = '';
+    if (chat.host === LOCAL) {
+      // Local execution: use spawnSync directly. `--line-porcelain` for the stable,
+      // machine-parseable per-line header block the parser above consumes.
+      const r = runLocalGit(['blame', '--line-porcelain', '--', filePath], cwd);
+      raw = capDiff(r.stdout?.toString() || '');
+    } else {
+      // Remote execution: SSH. The `2>/dev/null` swallows git's "no such file" /
+      // "not a git repo" noise so a non-git cwd reads as empty, not an error.
+      const cmd = buildGitBlameScript(cwd, filePath);
+      const rr = await run(chat.host, cmd, { timeout: 8000 });
+      raw = capDiff(rr.ok ? (rr.stdout || '') : '');
+    }
+
+    const lines = parseGitBlame(raw);
+    res.json({ lines, error: null });
+  } catch (e) {
+    res.json({ lines: [], error: e.message });
+  }
+});
+
 // If cmd invokes bare `claude`, replace it with the full path found on the host —
 // claude is often in a .zshrc-only PATH that tmux's shell (bash) can't see.
 async function resolveClaudeCmd(host, cmd) {

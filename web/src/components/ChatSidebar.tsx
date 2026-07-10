@@ -17,9 +17,9 @@ import { NewChatForm } from './NewChatForm';
 import { CollectionsSection } from './CollectionsSection';
 import { CreateCollectionDialog } from './CreateCollectionDialog';
 import { DiffViewer } from './DiffViewer';
+import { DiffBlock } from './DiffBlock';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { cn } from '@/lib/utils';
-import { classifyDiffLine, DIFF_LINE_CLASS } from '@/lib/diff';
 import { summarizeProjectGitState } from '@/lib/gitStateSummary';
 import type { Chat, Collection } from '@/lib/types';
 import { loadUi, saveUi } from '@/lib/storage';
@@ -1071,19 +1071,6 @@ function AgentFilterSortControls({
 // to document.body via Radix Popover so it isn't clipped by the `truncate` name span
 // this badge sits inside (in ChatRow). stopPropagation on clicks keeps it from also
 // opening the chat pane (mirrors the other inline buttons in these rows).
-/** Render a committed diff as a scrollable, colorized monospace block, reusing the
- *  shared line classifier + palette (classifyDiffLine / DIFF_LINE_CLASS in
- *  @/lib/diff) so a commit's file diff renders identically to the modal working-tree
- *  DiffViewer (WARDEN-151) — same green/red/muted coloring, no second classifier. */
-function DiffBlock({ diff }: { diff: string }) {
-  return (
-    <pre className="mt-0.5 max-h-64 overflow-auto rounded bg-muted/40 p-1 font-mono text-[10px] leading-tight whitespace-pre">
-      {diff.split('\n').map((ln, i) => (
-        <div key={i} className={DIFF_LINE_CLASS[classifyDiffLine(ln)]}>{ln || ' '}</div>
-      ))}
-    </pre>
-  );
-}
 
 /** One touched-file row inside an expanded commit. Click to fetch and reveal the
  *  committed diff for that file (`git show --format= <hash> -- <path>`). Owns its
