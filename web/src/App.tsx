@@ -573,7 +573,7 @@ function App() {
     }
   }, [refresh, discoverHost, openChat, prefs.notifyChatOps]);
 
-  const renameChat = useCallback(async (session: string, kind: string, name: string) => {
+  const renameChat = useCallback(async (session: string, kind: string, name: string, host?: string) => {
     const prevName = chatsRef.current.find((c) => (c.key || c.id) === session)?.name;
     // OPTIMISTIC: reflect the new name in the same frame as the commit, before
     // the cross-host round-trip to /api/rename resolves. Guard it so a
@@ -589,7 +589,10 @@ function App() {
     };
 
     try {
-      const { ok, error, res } = await postJson('/api/rename', { session, kind, name });
+      // `host` scopes the rename to a host+session composite — the same session
+      // name can exist on multiple hosts, so without it the server could rename
+      // the wrong host's entry.
+      const { ok, error, res } = await postJson('/api/rename', { session, kind, name, host });
       if (!ok) {
         // ROLLBACK: the server rejected the rename.
         rollback();

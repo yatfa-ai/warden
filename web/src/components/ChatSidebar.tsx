@@ -101,7 +101,7 @@ interface Props {
   onHideTab: (id: string) => void;
   onUnhideTab: (id: string) => void;
   onKill: (id: string) => void;
-  onRename: (session: string, kind: string, name: string) => void;
+  onRename: (session: string, kind: string, name: string, host?: string) => void;
   onResume: (id: string, description: string, cwd: string, host: string) => void;
   onRefresh: () => void;
   onDiscoverHost: (host: string) => void;
@@ -1342,7 +1342,7 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
 
 function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hostStatus, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, onOpenDiff, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, isPinned, onTogglePin }: {
   c: Chat; open: boolean; onOpen: () => void; onKill: () => void;
-  onRename: (session: string, kind: string, name: string) => void;
+  onRename: (session: string, kind: string, name: string, host?: string) => void;
   onHide?: () => void; onUnhide?: () => void; dim?: boolean;
   // WARDEN-198: per-host reachability from the 30s /api/hosts/status poll.
   // 'offline' → the row renders a distinct "unreachable" state.
@@ -1368,7 +1368,7 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hos
     const v = val.trim();
     if (v && v !== (c.name || c.key)) {
       setEditing(false);
-      onRename(c.key || c.id, c.kind || 'tmux', v);
+      onRename(c.key || c.id, c.kind || 'tmux', v, c.host);
     } else {
       setEditing(false);
     }
@@ -1488,7 +1488,7 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showHostTags
   isOpen: boolean;
   onOpen: () => void;
   onRemove: () => void;
-  onRename: (session: string, kind: string, name: string) => void;
+  onRename: (session: string, kind: string, name: string, host?: string) => void;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
   gitInfo?: { branch: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; inProgress?: { operation: string | null }; stashCount?: number | null };
   gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
@@ -1512,7 +1512,7 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showHostTags
   const commit = () => {
     const v = val.trim();
     setEditing(false);
-    if (c && v && v !== displayName(c)) onRename(c.key || c.id, c.kind || 'tmux', v);
+    if (c && v && v !== displayName(c)) onRename(c.key || c.id, c.kind || 'tmux', v, c.host);
   };
 
   const hasFiles = !dead && gitInfo?.clean === false && gitInfo.files && gitInfo.files.length > 0;

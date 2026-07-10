@@ -10,7 +10,7 @@ import { spawnSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer } from 'ws';
-import { load, save, loadCatalog, saveCatalog, allSshHosts } from './config.js';
+import { load, save, loadCatalog, saveCatalog, allSshHosts, sameCatalogEntry } from './config.js';
 import * as collections from './collections.js';
 import { capturePanes, resolveChatWithRefresh, catalogChats, discoverHost } from './chats.js';
 import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream } from './tmux.js';
@@ -1250,10 +1250,13 @@ async function resolveClaudeCmd(host, cmd) {
 
 app.post('/api/rename', (req, res) => {
   const session = String(req.body?.session || '');
+  const host = String(req.body?.host || LOCAL).trim() || LOCAL;
   const name = String(req.body?.name || '').trim().slice(0, 60);
   if (!session || !name) return res.status(400).json({ error: 'session and name required' });
   const catalog = loadCatalog();
-  const entry = catalog.find((c) => c.session === session);
+  // Composite identity: a session name can repeat across hosts, so scope the find
+  // to host+session (host defaults to local for callers that don't send it).
+  const entry = catalog.find((c) => sameCatalogEntry(c, host, session));
   if (!entry) return res.status(404).json({ error: 'not a renameable chat' });
   entry.name = name;
   saveCatalog(catalog);
@@ -1287,7 +1290,9 @@ app.post('/api/spawn', async (req, res) => {
   if (!session) return res.status(400).json({ error: 'session name is required' });
   if (!NAME_RE.test(session)) return res.status(400).json({ error: 'invalid session name (letters/digits/_-.)' });
   const catalog = loadCatalog();
-  if (catalog.some((c) => c.session === session)) return res.status(409).json({ error: `"${session}" already exists` });
+  // Composite identity: the same session name may exist on a DIFFERENT host (each
+  // host's tmux server is independent), so only a same-host collision blocks spawn.
+  if (catalog.some((c) => sameCatalogEntry(c, host, session))) return res.status(409).json({ error: `"${session}" already exists` });
   const r = await buildAndSpawn({ host, session, name: req.body?.name || session, cwd, cmd });
   if (r.error) return res.status(r.status).json({ error: r.error });
   saveCatalog([...catalog, { kind: 'tmux', host, session, name: r.chat.name, cwd, cmd }]);
@@ -1320,7 +1325,9 @@ app.post('/api/resume', async (req, res) => {
       return res.status(500).json({ error: `\`claude\` failed to start on ${host} — tmux session died immediately. Is \`claude\` installed and on PATH there?` });
     }
   }
-  const catalog = loadCatalog().filter((c) => c.session !== session);
+  // Composite identity: only replace THIS host's same-named resume entry; a
+  // different host may legitimately carry the same resume-<sid> session name.
+  const catalog = loadCatalog().filter((c) => !sameCatalogEntry(c, host, session));
   saveCatalog([...catalog, { kind: 'tmux', host, session, name, cwd, cmd: chat.cmd }]);
   res.json({ ok: true, chat: out });
 });
@@ -1332,8 +1339,10 @@ app.post('/api/kill', async (req, res) => {
   // Kill the tmux session for ANY chat type (yatfa or spawned). For yatfa this
   // kills the agent's tmux session inside the container (container keeps running).
   try { await killTmux(chat, cfg); } catch { /* noop */ }
-  // Remove from catalog (spawned chats only; yatfa are auto-discovered)
-  if (chat.kind === 'tmux') saveCatalog(loadCatalog().filter((c) => c.session !== chat.session));
+  // Remove from catalog (spawned chats only; yatfa are auto-discovered).
+  // Composite identity: only drop the killed chat's own host+session entry — a
+  // different host may carry the same session name and must be left intact.
+  if (chat.kind === 'tmux') saveCatalog(loadCatalog().filter((c) => !sameCatalogEntry(c, chat.host, chat.session)));
   res.json({ ok: true });
 });
 
