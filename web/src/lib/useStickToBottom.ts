@@ -71,7 +71,13 @@ export function useStickToBottom() {
   const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
     const el = viewportRef.current;
     if (!el) return;
-    el.scrollTo({ top: el.scrollHeight, behavior });
+    // Respect prefers-reduced-motion (WCAG 2.3.3). The global CSS reset sets
+    // `scroll-behavior: auto !important`, but per CSSOM View that only supplies
+    // the behaviour when the option is omitted/'auto' — an explicit JS
+    // `behavior: 'smooth'` is honoured as-is and is NOT overridden by CSS. So we
+    // guard it here too, snapping under reduce-motion on every browser.
+    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    el.scrollTo({ top: el.scrollHeight, behavior: prefersReducedMotion ? 'auto' : behavior });
     setAtBottom(true);
   }, []);
 
