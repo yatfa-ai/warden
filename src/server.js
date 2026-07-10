@@ -1515,6 +1515,56 @@ export function buildReadFileScript(cwd, filePath) {
   return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; RESOLVED_CWD="$(realpath -e "$CWD" 2>/dev/null)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -e "$FILE" 2>/dev/null)" || { echo "ERROR file not found"; exit 1; }; case "$RESOLVED" in "$RESOLVED_CWD"/*|"$RESOLVED_CWD") ;; *) echo "ERROR path must be within working directory"; exit 1 ;; esac; [ -d "$RESOLVED" ] && { echo "ERROR path is a directory"; exit 1; }; [ -f "$RESOLVED" ] || { echo "ERROR not a file"; exit 1; }; SIZE=$(stat -c %s "$RESOLVED" 2>/dev/null || stat -f %z "$RESOLVED" 2>/dev/null); [ -n "$SIZE" ] && [ "$SIZE" -gt 1048576 ] && { echo "ERROR file too large"; exit 1; }; EXT="\${RESOLVED##*.}"; case "$EXT" in png|jpg|jpeg|gif|ico|bmp|webp|svg|pdf|ps|eps|ai|sketch|zip|tar|gz|bz2|xz|7z|rar|exe|dll|so|dylib|app|bin|rom|mp3|mp4|avi|mov|wav|flac|ogg|webm|ttf|otf|woff|woff2|eot|class|jar|war|ear|obj|o|a|lib|pdb|min|map) echo "ERROR cannot read binary files"; exit 1 ;; esac; cat "$RESOLVED"`;
 }
 
+// Build the remote (SSH) shell script that checks a path under `cwd` resolves to
+// a real file — WITHOUT reading or transferring any content. The lightweight twin
+// of buildReadFileScript: it runs the SAME realpath + cwd-containment + is-file
+// guards (same `realpath -e`, same separator-bearing containment `case` glob that
+// blocks the prefix-sibling traversal hole), then stops — no size/binary/cat. Used
+// by /api/file-exists so the terminal linkifier (WARDEN-227) can confirm a
+// candidate is a real file cheaply; it runs per visible terminal candidate, so it
+// must not move file bytes. Exported for unit testing, parallel to buildReadFileScript.
+export function buildFileExistsScript(cwd, filePath) {
+  return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; RESOLVED_CWD="$(realpath -e "$CWD" 2>/dev/null)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -e "$FILE" 2>/dev/null)" || { echo "ERROR file not found"; exit 1; }; case "$RESOLVED" in "$RESOLVED_CWD"/*|"$RESOLVED_CWD") ;; *) echo "ERROR path must be within working directory"; exit 1 ;; esac; [ -d "$RESOLVED" ] && { echo "ERROR path is a directory"; exit 1; }; [ -f "$RESOLVED" ] || { echo "ERROR not a file"; exit 1; }; echo EXISTS`;
+}
+
+// Is a resolved absolute path contained within a resolved cwd? The separator
+// (resolvedCwd + path.sep) is REQUIRED: without it a pure prefix match also
+// accepts a sibling whose name merely extends the cwd (e.g. /x/proj-secret.txt
+// under cwd /x/proj) — a path-traversal hole. This is the local twin of the
+// separator-bearing `case` glob in buildReadFileScript/buildFileExistsScript.
+// Factored out of /api/read-file so the existence probe shares the exact same rule.
+function isWithinCwd(resolvedPath, resolvedCwd) {
+  return resolvedPath === resolvedCwd || resolvedPath.startsWith(resolvedCwd + path.sep);
+}
+
+// Shared LOCAL resolution for a chat file: realpath (follow symlinks) both cwd and
+// the file, verify cwd-containment, and confirm it is a regular file. Used by both
+// /api/read-file (which then layers on the 1MB/binary/read guards) and the
+// lightweight /api/file-exists probe, so the resolution behavior — and the cwd
+// containment guard — stay identical between the two endpoints. Returns
+// { ok: true, resolvedPath } or { ok: false, status, error }.
+export function resolveLocalFile(cwd, filePath) {
+  let resolvedCwd, resolvedPath;
+  try {
+    resolvedCwd = fs.realpathSync.native(cwd);
+    resolvedPath = fs.realpathSync.native(path.join(cwd, filePath));
+  } catch (e) {
+    if (e.code === 'ENOENT') return { ok: false, status: 404, error: 'file not found' };
+    return { ok: false, status: 400, error: 'invalid path' };
+  }
+  if (!isWithinCwd(resolvedPath, resolvedCwd)) {
+    return { ok: false, status: 403, error: 'path must be within working directory' };
+  }
+  try {
+    const stats = fs.statSync(resolvedPath);
+    if (stats.isDirectory()) return { ok: false, status: 400, error: 'path is a directory' };
+  } catch (e) {
+    if (e.code === 'ENOENT') return { ok: false, status: 404, error: 'file not found' };
+    return { ok: false, status: 500, error: 'read failed' };
+  }
+  return { ok: true, resolvedPath };
+}
+
 // POST /api/read-file — read a file from a chat's working directory.
 // Body: { id: string, path: string }
 // Response: { content: string, path: string, error?: string }
@@ -1528,39 +1578,28 @@ app.post('/api/read-file', async (req, res) => {
   const chat = r.chat;
   const cwd = chat.cwd || '.';
 
-  // Security: resolve the path and verify it's within the chat's working directory
-  // For local hosts, use fs.realpathSync.native to resolve symlinks; for remote, we'll validate on the remote side
+  // Security: resolve the path and verify it's within the chat's working directory.
+  // The shared resolution (realpath + cwd-containment + is-file) lives in
+  // resolveLocalFile so /api/file-exists enforces the identical rule; read-file
+  // then layers the 1MB/binary/read guards on top of the resolved path.
   if (chat.host === LOCAL) {
-    let resolvedPath;
-    let resolvedCwd;
-    try {
-      // Resolve both paths to their final targets after following all symlinks
-      resolvedCwd = fs.realpathSync.native(cwd);
-      resolvedPath = fs.realpathSync.native(path.join(cwd, filePath));
-    } catch (e) {
-      if (e.code === 'ENOENT') return res.status(404).json({ error: 'file not found' });
-      return res.status(400).json({ error: 'invalid path' });
-    }
-
-    // Check if the resolved path starts with the resolved cwd (prevent path traversal and symlink escapes)
-    if (!resolvedPath.startsWith(resolvedCwd + path.sep) && resolvedPath !== resolvedCwd) {
-      return res.status(403).json({ error: 'path must be within working directory' });
-    }
+    const resolved = resolveLocalFile(cwd, filePath);
+    if (!resolved.ok) return res.status(resolved.status).json({ error: resolved.error });
 
     try {
       // Check file size (limit to 1MB to prevent server issues)
-      const stats = fs.statSync(resolvedPath);
+      const stats = fs.statSync(resolved.resolvedPath);
       if (stats.size > 1024 * 1024) {
         return res.status(413).json({ error: 'file too large (max 1MB)' });
       }
 
       // Check for binary files by extension
-      if (isBinaryFile(resolvedPath)) {
+      if (isBinaryFile(resolved.resolvedPath)) {
         return res.status(400).json({ error: 'cannot read binary files' });
       }
 
       // Read file content
-      const content = fs.readFileSync(resolvedPath, 'utf8');
+      const content = fs.readFileSync(resolved.resolvedPath, 'utf8');
       return res.json({ content, path: filePath });
     } catch (e) {
       if (e.code === 'ENOENT') return res.status(404).json({ error: 'file not found' });
@@ -1591,6 +1630,35 @@ app.post('/api/read-file', async (req, res) => {
 
     return res.json({ content: result.stdout, path: filePath });
   }
+});
+
+// POST /api/file-exists — lightweight existence probe for the in-terminal file
+// linkifier (WARDEN-227). Body: { id, path }. Confirms `path` resolves to a real
+// file within the chat's cwd WITHOUT reading or transferring content, so it is
+// cheap enough to run per visible terminal candidate. Reuses the SAME resolution
+// discipline as /api/read-file (realpath + cwd-containment + is-file): local chats
+// go through the shared resolveLocalFile, remote chats run buildFileExistsScript
+// over SSH. Response: { exists: boolean } — any resolution failure (missing, outside
+// cwd, directory, ssh error) collapses to exists:false because the linkifier only
+// needs yes/no. Security: never weakens the cwd-containment guard.
+app.post('/api/file-exists', async (req, res) => {
+  const r = await resolve(String(req.body?.id || ''));
+  if (r.error) return res.json({ exists: false });
+
+  const filePath = String(req.body?.path || '').trim();
+  if (!filePath) return res.json({ exists: false });
+
+  const chat = r.chat;
+  const cwd = chat.cwd || '.';
+
+  if (chat.host === LOCAL) {
+    return res.json({ exists: resolveLocalFile(cwd, filePath).ok });
+  }
+
+  // Remote: run the existence script; success + the EXISTS marker ⇒ real file.
+  const result = await run(chat.host, buildFileExistsScript(cwd, filePath), { timeout: 8000 });
+  const out = `${result.stdout || ''}${result.stderr || ''}`;
+  return res.json({ exists: result.ok && out.includes('EXISTS') });
 });
 
 // ---- Workspace content search (grep) — WARDEN-145 ---------------------------

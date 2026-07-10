@@ -5,9 +5,11 @@ import { SearchAddon } from '@xterm/addon-search';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { streamApi } from '@/lib/stream';
 import type { Chat } from '@/lib/types';
+import { findPathCandidates } from '@/lib/path-links';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { StatusDot } from '@/components/StatusDot';
+import { FileViewer } from './FileViewer';
 import { toast } from 'sonner';
 
 // Two explicit xterm theme objects with hex values derived from the app's design
@@ -29,6 +31,9 @@ const TERMINAL_THEMES: Record<'light' | 'dark', ITheme> = {
 // background above so the px-1/py-0.5 padding gap around the terminal never shows
 // a different color.
 const TERMINAL_BG_CLASS: Record<'light' | 'dark', string> = { light: 'bg-white', dark: 'bg-black' };
+
+// The open-on-click modifier matches VSCode: Cmd on macOS, Ctrl everywhere else.
+const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPod|Pad/i.test(navigator.platform || navigator.userAgent || '');
 
 interface Props {
   id: string;
@@ -64,6 +69,20 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const [connected, setConnected] = useState(false);
   const [errored, setErrored] = useState(false);
   const [downloading, setDownloading] = useState(false);
+
+  // WARDEN-227: in-terminal clickable file paths.
+  // Existence is probed once per resolved path (cached) so scrolling back over the
+  // same output never re-probes. Per-pane so each pane resolves against its OWN
+  // chat's cwd (the `id` resolves to this pane's chat on the backend).
+  const existsCacheRef = useRef<Map<string, boolean>>(new Map());
+  const existsPendingRef = useRef<Map<string, Promise<boolean>>>(new Map());
+  const tooltipElRef = useRef<HTMLDivElement | null>(null);
+  const hoveredPathRef = useRef<string | null>(null);
+  // Per-pane FileViewer bound to THIS pane's chat — a Ctrl/Cmd+clicked path opens
+  // here, never assuming the focused pane (AC: correct id/cwd per pane).
+  const [viewerOpen, setViewerOpen] = useState(false);
+  const [viewerPath, setViewerPath] = useState('');
+  const [viewerLine, setViewerLine] = useState<number | undefined>(undefined);
 
   // Defensive clamp: the global font size can briefly fall outside 8–24 while a
   // user types into the Settings field (coerced on blur). xterm must never receive
@@ -125,11 +144,136 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       }
       return true;
     });
+
+    // --- WARDEN-227: Ctrl/Cmd-clickable file paths in the live terminal --------
+    // Reset the per-chat existence cache for this term instance — a different `id`
+    // means a different cwd, so prior results must not carry over.
+    existsCacheRef.current.clear();
+    existsPendingRef.current.clear();
+
+    // Confirm a candidate path resolves to a real file under THIS pane's chat cwd
+    // (id resolves to this pane's chat on the backend). Cached per path so the same
+    // output never re-probes as you scroll; in-flight probes are deduped.
+    const checkExists = (path: string): Promise<boolean> => {
+      const cache = existsCacheRef.current;
+      const pending = existsPendingRef.current;
+      if (cache.has(path)) return Promise.resolve(cache.get(path) === true);
+      if (pending.has(path)) return pending.get(path)!;
+      const p = (async () => {
+        try {
+          const res = await fetch('/api/file-exists', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, path }),
+          });
+          if (!res.ok) { cache.set(path, false); return false; }
+          const data = await res.json();
+          const ok = !!data.exists;
+          cache.set(path, ok);
+          return ok;
+        } catch {
+          cache.set(path, false);
+          return false;
+        }
+      })();
+      pending.set(path, p);
+      p.finally(() => pending.delete(path));
+      return p;
+    };
+
+    const showTooltip = (event: MouseEvent) => {
+      let el = tooltipElRef.current;
+      if (!el) {
+        el = document.createElement('div');
+        // pointer-events-none so the cursor passes straight through to xterm —
+        // the link's hover/leave then fire normally instead of flickering on/off
+        // as the cursor crosses the tooltip.
+        el.className = 'fixed z-[9999] pointer-events-none px-2 py-1 rounded-md border bg-popover text-popover-foreground text-[11px] shadow-md';
+        el.textContent = isMac ? '⌘+Click to open file' : 'Ctrl+Click to open file';
+        tooltipElRef.current = el;
+      }
+      el.style.left = `${event.clientX + 12}px`;
+      el.style.top = `${event.clientY + 12}px`;
+      if (!el.isConnected) document.body.appendChild(el);
+    };
+    const hideTooltip = () => {
+      const el = tooltipElRef.current;
+      if (el && el.isConnected) el.remove();
+    };
+
+    // xterm calls provideLinks only for visible viewport lines (lazy), so existence
+    // probes are inherently limited to what's on screen. Each candidate starts with
+    // NO decorations and the (mutable, tracked) decorations object flips to
+    // underline+pointer once the async check confirms a real file — non-blocking.
+    const linkProvider = term.registerLinkProvider({
+      provideLinks(bufferLineNumber: number, callback) {
+        // bufferLineNumber is 1-based (matches the range `y`); buffer line indexing
+        // is 0-based, so fetch line (bufferLineNumber - 1). (Mirrors xterm's own
+        // WebLinks addon: lines.get(e - 1).)
+        const lineObj = term.buffer.active.getLine(bufferLineNumber - 1);
+        if (!lineObj) { callback(undefined); return; }
+        const text = lineObj.translateToString(true);
+        const candidates = findPathCandidates(text);
+        if (!candidates.length) { callback(undefined); return; }
+        const links = candidates.map((c) => {
+          const decorations = { underline: false, pointerCursor: false };
+          const cached = existsCacheRef.current.get(c.path);
+          if (cached === true) { decorations.underline = true; decorations.pointerCursor = true; }
+          else if (cached === undefined) {
+            // Probe; flip the tracked decorations on success. If the link was
+            // disposed first (scrolled away) the mutation is a harmless no-op and
+            // the cache is now warm for when it scrolls back into view.
+            checkExists(c.path).then((ok) => {
+              if (ok) { decorations.underline = true; decorations.pointerCursor = true; }
+            });
+          }
+          return {
+            range: {
+              start: { x: c.start + 1, y: bufferLineNumber },
+              end: { x: c.start + c.length, y: bufferLineNumber },
+            },
+            text: text.slice(c.start, c.start + c.length),
+            decorations,
+            activate(event: MouseEvent) {
+              // Only the modifier-click opens. A plain click is left to fall through
+              // to xterm's own handling (a click without a drag selects nothing).
+              if (!(event.metaKey || event.ctrlKey)) return;
+              checkExists(c.path).then((ok) => {
+                if (!ok) return;
+                setViewerPath(c.path);
+                setViewerLine(c.line);
+                setViewerOpen(true);
+              });
+            },
+            hover(event: MouseEvent) {
+              hoveredPathRef.current = c.path;
+              checkExists(c.path).then((ok) => {
+                // Only show the affordance+tooltip for confirmed files, and only if
+                // the cursor is still over this path (guard against a slow probe
+                // resolving after the cursor already left).
+                if (ok && hoveredPathRef.current === c.path) showTooltip(event);
+              });
+            },
+            leave() {
+              if (hoveredPathRef.current === c.path) hoveredPathRef.current = null;
+              hideTooltip();
+            },
+          };
+        });
+        callback(links);
+      },
+    });
+
     const doFit = () => { try { fit.fit(); } catch {} };
     const ro = new ResizeObserver(doFit);
     ro.observe(wrapRef.current!);
     const t = setTimeout(doFit, 50);
-    return () => { clearTimeout(t); ro.disconnect(); term.dispose(); termRef.current = null; };
+    return () => {
+      clearTimeout(t); ro.disconnect();
+      linkProvider.dispose(); hideTooltip();
+      if (tooltipElRef.current) tooltipElRef.current = null;
+      term.dispose(); termRef.current = null;
+    };
   }, [id]);
 
   useEffect(() => {
@@ -241,6 +385,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   );
 
   return (
+    <>
     <ContextMenu>
       <ContextMenuTrigger asChild>
     <div onClick={onFocus}
@@ -300,5 +445,18 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
         <ContextMenuItem variant="destructive" onSelect={() => onClose()}>Close</ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
+      {/* WARDEN-227: per-pane file viewer opened by Ctrl/Cmd+clicking a path in
+          this pane's own terminal. Bound to THIS pane's chat so the file resolves
+          against this pane's cwd, not necessarily the focused pane. */}
+      {chat && (
+        <FileViewer
+          chatId={chat.id}
+          filePath={viewerPath}
+          line={viewerLine}
+          open={viewerOpen}
+          onOpenChange={(o) => { setViewerOpen(o); if (!o) { setViewerPath(''); setViewerLine(undefined); } }}
+        />
+      )}
+    </>
   );
 }

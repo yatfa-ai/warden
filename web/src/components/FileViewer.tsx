@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -17,6 +17,9 @@ interface FileViewerProps {
   chatId: string;
   filePath: string;
   open: boolean;
+  /** Optional 1-based line to scroll to and visually highlight (WARDEN-227: when
+   *  opened by Ctrl/Cmd+clicking a `path:line` token in a live terminal pane). */
+  line?: number;
   onOpenChange: (open: boolean) => void;
 }
 
@@ -25,10 +28,12 @@ interface FileViewerProps {
 // passed whole to /api/git-show on click so the commit resolves unambiguously.
 type BlameLine = { line: number; hash: string; author: string; date: string; summary: string };
 
-export function FileViewer({ chatId, filePath, open, onOpenChange }: FileViewerProps) {
+export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileViewerProps) {
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // Ref on the highlighted line row so we can scroll it into view once content renders.
+  const highlightRef = useRef<HTMLDivElement>(null);
 
   // Annotate (git blame) state — separate from the file content fetch so toggling
   // annotate doesn't refetch the (already-shown) file. Blame is fetched ONCE when the
@@ -105,6 +110,21 @@ export function FileViewer({ chatId, filePath, open, onOpenChange }: FileViewerP
     return () => { cancelled = true; };
   }, [open, annotate, chatId, filePath]);
 
+  // When a target line is requested and the content has rendered, scroll that line
+  // to the center of the viewport so the user lands on the relevant location. rAF
+  // guarantees the per-line DOM is committed before we measure/scroll it. Re-runs
+  // if the same file is re-opened at a different line (content is reused; only the
+  // scroll target moves) — `line` is in the dep list for exactly that case.
+  useEffect(() => {
+    if (!open || typeof line !== 'number' || line < 1 || loading || error || content === null) return;
+    const id = requestAnimationFrame(() => {
+      highlightRef.current?.scrollIntoView({ block: 'center', behavior: 'auto' });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [open, line, loading, error, content]);
+
+  const hasLine = typeof line === 'number' && line > 0;
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-4xl max-h-[80vh]">
@@ -143,10 +163,26 @@ export function FileViewer({ chatId, filePath, open, onOpenChange }: FileViewerP
               </div>
             )}
 
-            {!loading && !error && content !== null && !annotate && (
+            {!loading && !error && content !== null && !annotate && !hasLine && (
               <pre className="text-sm font-mono whitespace-pre-wrap break-words">
                 {content}
               </pre>
+            )}
+
+            {!loading && !error && content !== null && !annotate && hasLine && (
+              <div className="text-sm font-mono">
+                {content.split('\n').map((text, i) => {
+                  const n = i + 1;
+                  const isTarget = n === line;
+                  return (
+                    <div key={n} ref={isTarget ? highlightRef : undefined}
+                      className={`flex ${isTarget ? 'bg-primary/20 ring-1 ring-inset ring-primary/40 rounded-sm' : ''}`}>
+                      <span className="select-none pr-3 text-right text-muted-foreground/40 min-w-[2.5rem]">{n}</span>
+                      <span className="whitespace-pre-wrap break-words flex-1">{text}</span>
+                    </div>
+                  );
+                })}
+              </div>
             )}
 
             {!loading && !error && content !== null && annotate && (
