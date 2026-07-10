@@ -1048,11 +1048,17 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
       className={`group flex items-center gap-2 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent cursor-pointer transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${open ? 'bg-accent' : ''} ${dim ? 'opacity-60' : ''}`}
     >
       {showStatusIndicators !== false && (
-        <StatusDot
-          tone={open || c.active ? 'green' : 'muted'}
-          variant={open ? 'solid' : 'ring'}
-          label={open ? 'Open' : c.active ? 'Active' : 'Idle'}
-        />
+        // Three grayscale-legible states via shape, not hue:
+        //   open   = solid filled circle (●)
+        //   active = half-filled glyph   (◐) — distinct from both open & idle
+        //   idle   = hollow ring         (○)
+        open ? (
+          <StatusDot tone="green" variant="solid" label="Open" />
+        ) : c.active ? (
+          <StatusDot tone="green" variant="glyph" glyph="◐" label="Active" />
+        ) : (
+          <StatusDot tone="muted" variant="ring" label="Idle" />
+        )
       )}
       {editing ? (
         <Input autoFocus value={val} onClick={(e) => e.stopPropagation()} onChange={(e) => setVal(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { setVal(c.name || c.key || c.id); setEditing(false); } }} className="h-5 text-[11px] px-1 flex-1" />

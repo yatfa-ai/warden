@@ -1,5 +1,5 @@
 import { Badge } from '@/components/ui/badge';
-import { getHealthColor, getHealthBgColor, formatHealthState } from '@/lib/healthUtils';
+import { getHealthColor, getHealthBgColor, getHealthIcon, formatHealthState } from '@/lib/healthUtils';
 import type { HealthStateValue } from '@/lib/healthUtils';
 
 interface HealthBadgeProps {
@@ -28,14 +28,24 @@ export function HealthBadge({ state, showLabel = true, size = 'md', className = 
 
   return (
     <Badge className={`${sizeClasses[size]} ${className}`} variant="outline">
-      <span className={`inline-flex items-center gap-1.5`}>
-        <span
-          className={`${dotSizes[size]} rounded-full ${bgColor}`}
-          role={showLabel ? undefined : 'img'}
-          aria-label={showLabel ? undefined : label}
-          aria-hidden={showLabel ? true : undefined}
-          title={showLabel ? undefined : label}
-        />
+      <span className="inline-flex items-center gap-1.5">
+        {showLabel ? (
+          // Labeled mode: the adjacent text label carries the accessible
+          // meaning, so the decorative dot may be hue-only (it is aria-hidden).
+          <span className={`${dotSizes[size]} rounded-full ${bgColor}`} aria-hidden="true" />
+        ) : (
+          // Dot-only mode: NEVER hue-only — render the distinct per-state glyph
+          // (✓ ◐ ✕ ○ ·) alongside color so the state survives grayscale / CVD
+          // (WCAG 1.4.1). Mirrors the HealthDot pattern in HealthDashboard.
+          <span
+            className={`text-[11px] leading-none font-bold select-none ${textColor}`}
+            role="img"
+            aria-label={label}
+            title={label}
+          >
+            {getHealthIcon(state)}
+          </span>
+        )}
         {showLabel && (
           <span className={textColor}>
             {label}

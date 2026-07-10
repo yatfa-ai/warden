@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { HealthBadge } from './HealthBadge';
 import type { HealthData } from '@/lib/types';
 import { HealthState, getHealthIcon, formatHealthState } from '@/lib/healthUtils';
 import type { HealthStateValue } from '@/lib/healthUtils';
@@ -199,11 +198,6 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
                           <span className="text-[10px] text-muted-foreground">
                             {ago(agent.lastActivity)} ago
                           </span>
-                        )}
-
-                        {/* Health Badge */}
-                        {agent.healthState && (
-                          <HealthBadge state={normalizeHealthState(agent.healthState)} showLabel={false} size="sm" />
                         )}
                       </button>
                     ))}
