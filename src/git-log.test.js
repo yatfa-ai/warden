@@ -42,7 +42,6 @@ const SUBJECTS = ['third commit', 'fix: handle the | pipe in subject', 'first co
 const BEHIND_SUBJECTS = ['base one', 'base two', 'incoming: add feature X', 'incoming: fix bug Y'];
 
 let parseGitLogLine;
-let buildGitLogCmd;
 let httpServer;
 let baseUrl;
 let originalHome;
@@ -119,7 +118,6 @@ before(async () => {
   // Import server.js ONCE — after HOME/config/catalog are in place.
   const server = await import('./server.js');
   parseGitLogLine = server.parseGitLogLine;
-  buildGitLogCmd = server.buildGitLogCmd;
   httpServer = server.app.listen(0, '127.0.0.1');
   await new Promise((resolve, reject) => {
     httpServer.once('listening', resolve);
@@ -289,32 +287,5 @@ describe('/api/git-log range=incoming (behind commits — WARDEN-225)', () => {
     const body = await res.json();
     assert.deepStrictEqual(body.commits, []);
     assert.strictEqual(body.error, null);
-  });
-});
-
-describe('buildGitLogCmd (remote SSH command — WARDEN-225)', () => {
-  it('splices the shellQuoted HEAD..@{u} range when incoming', () => {
-    const cmd = buildGitLogCmd('/repo', 50, true);
-    // The token is single-quoted (brace-expansion guard for '{'/'}'), spliced in
-    // bare with surrounding spaces — no double-wrap, no missing separator.
-    assert.ok(cmd.includes("git log -50 'HEAD..@{u}' "), `expected the quoted range spliced cleanly: ${cmd}`);
-  });
-
-  it('omits the range token entirely when not incoming (HEAD-reachable)', () => {
-    const cmd = buildGitLogCmd('/repo', 5, false);
-    assert.ok(!cmd.includes('@{u}'), `unexpected upstream token in HEAD-reachable cmd: ${cmd}`);
-    assert.match(cmd, /git log -5 /);
-  });
-
-  it('shellQuotes the pretty format so "|" is not read as a shell pipe', () => {
-    const cmd = buildGitLogCmd('/repo', 5, false);
-    // The whole %h|%s|%an|%ar format is single-quoted as one token, so the '|'
-    // separators are argument characters — not shell pipes.
-    assert.ok(cmd.includes("--pretty=format:'%h|%s|%an|%ar'"), `pretty format not single-quoted as one token: ${cmd}`);
-  });
-
-  it('shellQuotes a cwd containing spaces', () => {
-    const cmd = buildGitLogCmd('/a/b c', 5, false);
-    assert.ok(cmd.includes("'/a/b c'"), `cwd with a space must be single-quoted: ${cmd}`);
   });
 });

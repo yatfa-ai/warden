@@ -38,6 +38,7 @@ let mergeRepo;
 let nonGitDir;
 let detachedRepo;
 let detachedShortSha;
+let buildInProgressScript;
 
 function git(args, cwd) {
   const r = spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'inherit'] });
@@ -132,6 +133,7 @@ before(async () => {
 
   // Import server.js ONCE — after HOME/config/catalog/repos are in place.
   const server = await import('./server.js');
+  buildInProgressScript = server.buildInProgressScript;
   httpServer = server.app.listen(0, '127.0.0.1');
   await new Promise((resolve, reject) => {
     httpServer.once('listening', resolve);
@@ -247,5 +249,49 @@ describe('/api/git-status detached-HEAD detection (real Express app)', () => {
     assert.ok((body.files || []).some((f) => f.path === 'd.txt'), 'd.txt must surface as a changed file');
     // Restore so sibling tests aren't affected.
     git(['checkout', '-q', '--', 'd.txt'], detachedRepo);
+  });
+});
+
+// buildInProgressScript builds the shell `test` that detects an in-progress git
+// operation (WARDEN-235). It is the unit-testable seam for the marker detection
+// on transports whose git dir is off the host fs (yatfa containers, remote
+// hosts) — detectInProgress delivers it via runInContext. The exact marker set
+// + priority order + cwd quoting are what we lock here (a regression in any
+// silently flips an in-progress op to null).
+describe('buildInProgressScript', () => {
+  it('cd’s into the cwd and resolves the git dir before testing markers', () => {
+    const s = buildInProgressScript('/workspace');
+    assert.ok(s.startsWith("cd '/workspace'"), 'must cd into the cwd: ' + s);
+    assert.ok(s.includes('gd=$(git rev-parse --git-dir'), 'must resolve the git dir');
+  });
+
+  it('tests all five marker groups in priority order (merge > cherry-pick > revert > rebase > bisect)', () => {
+    const s = buildInProgressScript('/w');
+    const merge = s.indexOf('MERGE_HEAD');
+    const cherry = s.indexOf('CHERRY_PICK_HEAD');
+    const revert = s.indexOf('REVERT_HEAD');
+    const rebase = s.indexOf('rebase-merge');
+    const bisect = s.indexOf('BISECT_LOG');
+    assert.ok(merge > -1 && cherry > -1 && revert > -1 && rebase > -1 && bisect > -1, 'all markers present');
+    assert.ok(merge < cherry, 'merge must be tested before cherry-pick');
+    assert.ok(cherry < revert, 'cherry-pick before revert');
+    assert.ok(revert < rebase, 'revert before rebase');
+    assert.ok(rebase < bisect, 'rebase before bisect');
+  });
+
+  it('echoes the canonical operation names', () => {
+    const s = buildInProgressScript('/w');
+    for (const op of ['merge', 'cherry-pick', 'revert', 'rebase', 'bisect']) {
+      assert.ok(s.includes(`echo ${op}`), `must echo "${op}"`);
+    }
+  });
+
+  it('shellQuotes a cwd containing spaces/quotes (no shell injection)', () => {
+    // A cwd with a space and a single-quote must be single-quote-escaped, not
+    // spliced raw — otherwise the `cd` / `git rev-parse` would break or inject.
+    const s = buildInProgressScript("/path with space and a 'quote");
+    assert.ok(s.includes("'cd'") === false, 'raw unquoted tokens must not appear');
+    // shellQuote wraps in single quotes and escapes embedded quotes via '\''.
+    assert.ok(s.includes("'/path with space and a '\\''quote'"), 'cwd must be POSIX single-quoted: ' + s);
   });
 });

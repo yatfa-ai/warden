@@ -11,11 +11,32 @@ const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 const LOCAL = '(local)';
 
 // One SSH round-trip: list containers AND test each for the `agent` tmux session.
+// Emits a TSV row per container:  name \t status \t cwd \t active
+//
+// `cwd` is derived per-container INSIDE this same loop (no extra round-trip —
+// the loop already `docker exec`s each container for has-session). When the
+// `agent` session is live we capture the pane's current path (the dir the
+// agent's shell is actually in) via `tmux display-message -p '#{pane_current_path}'`;
+// otherwise (and as a fallback when display-message yields nothing) we read the
+// image's WorkingDir via `docker inspect`. Both resolve to an in-container path
+// the host can't reach directly — the git routes wrap git in `docker exec` for
+// these chats (WARDEN-235). `active` stays the LAST column so the existing
+// `parts.at(-1) === '1'` parse is unchanged; `cwd` is the second-to-last.
+//
+// `tr -d '\r'` on the pane path tolerates a CRLF that can sneak in over an SSH
+// pty; any residual whitespace is trimmed in JS.
 const DISCOVER_SCRIPT = `
 docker ps --format '{{.Names}}\\t{{.Status}}' 2>/dev/null | while IFS=$(printf '\\t') read -r name status; do
   [ -z "$name" ] && continue
-  if docker exec "$name" tmux has-session -t agent >/dev/null 2>&1; then a=1; else a=0; fi
-  printf '%s\\t%s\\t%s\\n' "$name" "$status" "$a"
+  cwd=''
+  if docker exec "$name" tmux has-session -t agent >/dev/null 2>&1; then
+    a=1
+    cwd=$(docker exec "$name" tmux display-message -p -t agent '#{pane_current_path}' 2>/dev/null | tr -d '\\r')
+  else
+    a=0
+  fi
+  [ -z "$cwd" ] && cwd=$(docker inspect "$name" --format '{{.Config.WorkingDir}}' 2>/dev/null | tr -d '\\r')
+  printf '%s\\t%s\\t%s\\t%s\\n' "$name" "$status" "$cwd" "$a"
 done
 `;
 
@@ -23,6 +44,26 @@ function parseContainerName(name) {
   const idx = name.lastIndexOf('-');
   if (idx < 0) return { project: name, role: '' };
   return { project: name.slice(0, idx), role: name.slice(idx + 1) };
+}
+
+// Parse one TSV row emitted by DISCOVER_SCRIPT into the fields discover() needs.
+// Row layout:  name \t status \t cwd \t active
+// `active` is the LAST column (parsing it last means reordering the middle never
+// shifts it); `cwd` is the second-to-last. Tolerates a legacy 3-column row (no
+// cwd) — cwd then reads ''. `status` is everything between `name` and `cwd`,
+// rejoined on `\t` in case docker's Status field ever contains a tab. Returns
+// null for a blank or too-short row. Pure (no docker, no ssh) so the 4-column
+// parse + cwd extraction are unit-testable in CI, which cannot run real
+// containers. See WARDEN-235.
+export function parseDiscoverRow(line) {
+  if (!line || !line.trim()) return null;
+  const parts = line.split('\t');
+  if (parts.length < 3) return null;
+  const name = parts[0];
+  const active = parts[parts.length - 1] === '1';
+  const cwd = parts.length >= 4 ? parts[parts.length - 2] : '';
+  const status = parts.slice(1, parts.length >= 4 ? -2 : -1).join('\t');
+  return { name, status, cwd, active };
 }
 
 // Pin-first ordering shared by every discovery sort. Returns <0 if `a` is pinned
@@ -48,20 +89,23 @@ export async function discover(host, cfg) {
   const chats = [];
   const activeAgents = [];
 
-  // First pass: parse all agents and collect active ones
+  // First pass: parse all agents and collect active ones (parseDiscoverRow
+  // handles the name \t status \t cwd \t active layout + legacy 3-column rows).
   for (const line of res.stdout.split('\n')) {
-    if (!line.trim()) continue;
-    const parts = line.split('\t');
-    if (parts.length < 3) continue;
-    const name = parts[0];
-    const status = parts.slice(1, -1).join('\t');
-    const active = parts[parts.length - 1] === '1';
+    const row = parseDiscoverRow(line);
+    if (!row) continue;
+    const { name, status, cwd, active } = row;
     const { project, role } = parseContainerName(name);
 
     const chat = {
       id: `${host}:${name}`, key: name, kind: 'yatfa',
       host, container: name, session,
       project, role, isAgent: ROLES.has(role), active, status,
+      // In-container working dir (pane path, else image WorkingDir — resolved in
+      // the discover script). Empty when neither could be derived → the git routes
+      // treat that as "no cwd" rather than falling back to Warden's own repo.
+      // See WARDEN-235.
+      cwd: cwd.trim() || undefined,
       lastActivity: null,
     };
 

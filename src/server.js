@@ -22,7 +22,7 @@ import { appendEvent, rotateEvents, readEvents, getStatsSince } from './activity
 import { buildSnapshot, diffLifecycles } from './lifecycle.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { checkHost } from './hostStatus.js';
-import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, isDetachedHead, normalizeHeadSha } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, isDetachedHead, normalizeHeadSha, buildDockerGitArgv } from './gitStatus.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = load();
@@ -959,160 +959,187 @@ function runLocalGit(args, cwd) {
   return spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true });
 }
 
+// Resolve the working directory for a chat's git operations (WARDEN-235).
+//
+// yatfa (container) chats carry an IN-CONTAINER path derived at discovery (the
+// agent tmux pane's cwd, else the image WorkingDir). It must NEVER fall back to
+// Warden's own process.cwd(): that path is the host's, not the container's, so a
+// LOCAL yatfa agent would silently surface WARDEN'S repo state — actively
+// misleading, the core bug this ticket fixes. When derivation failed we return ''
+// and the route's existing `!cwd` guard emits a graceful `error: 'no cwd'` (never
+// a 500), which is correct: better no badge than a wrong one.
+//
+// manual/tmux chats keep the original local fallback (their cwd is a real host
+// path, and LOCAL manual chats have always shown the host repo at process.cwd()).
+function gitCwd(chat) {
+  if (chat.container) return chat.cwd || '';
+  return chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
+}
+
+// Run `git <args>` for a chat, choosing the transport by kind/host (WARDEN-235).
+// Returns { ok, code, stdout, stderr } with STRING stdout/stderr so call sites
+// read `.stdout` directly (no `.toString()`). Mirrors runLocalGit's windowsHide
+// centralization while adding the docker-exec branch yatfa chats need — their cwd
+// is an in-container path the host (and a bare remote `cd`) cannot reach.
+//
+//   yatfa LOCAL   → docker exec <c> git -C <cwd> <args>   (argv, NO shell — safe)
+//   yatfa REMOTE  → ssh host 'docker exec <c> git -C <cwd> <args>'
+//   manual LOCAL  → spawnSync('git', args, {cwd})          (unchanged)
+//   manual REMOTE → ssh host 'cd <cwd> && git <args>'      (unchanged)
+//
+// `-C <cwd>` (not a shell `cd`) targets git at the in-container dir with zero
+// injection surface on the local branch (argv); the remote branch shellQuotes
+// cwd + each arg (the same WARDEN-122 discipline as git-log/show). `2>/dev/null`
+// on the remote branches swallows non-git / detached noise so a non-repo reads
+// as empty, mirroring runLocalGit's non-zero-exit tolerance.
+async function runGit(chat, args, cwd) {
+  if (chat.container) {
+    if (chat.host === LOCAL) {
+      const argv = buildDockerGitArgv(chat.container, cwd, args);
+      const r = spawnSync(argv[0], argv.slice(1), {
+        stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+        encoding: 'utf8', maxBuffer: 10 * 1024 * 1024,
+      });
+      return { ok: r.status === 0, code: r.status ?? -1, stdout: r.stdout || '', stderr: r.stderr || '' };
+    }
+    const a = args.map(shellQuote).join(' ');
+    return run(chat.host, `docker exec ${shellQuote(chat.container)} git -C ${shellQuote(cwd)} ${a} 2>/dev/null`, { timeout: 8000 });
+  }
+  if (chat.host === LOCAL) {
+    const r = runLocalGit(args, cwd);
+    return { ok: r.status === 0, code: r.status ?? -1, stdout: (r.stdout || '').toString(), stderr: (r.stderr || '').toString() };
+  }
+  const a = args.map(shellQuote).join(' ');
+  return run(chat.host, `cd ${shellQuote(cwd)} && git ${a} 2>/dev/null`, { timeout: 8000 });
+}
+
+// Deliver a SHELL SCRIPT to the chat's execution context (WARDEN-235). Used by
+// git operations that need in-context shell features the argv `runGit` path
+// can't express — chiefly the in-progress-operation marker `test` (MERGE_HEAD
+// etc.) and the realpath/cd containment guards, which must run where the git
+// dir actually lives (inside the container for yatfa, on the remote host for
+// manual-remote). Returns { ok, code, stdout, stderr }.
+//
+//   yatfa LOCAL   → docker exec <c> bash -lc <script>   (script's `cd <cwd>` is in-container)
+//   yatfa REMOTE  → ssh host 'docker exec <c> bash -lc <script>'
+//   manual REMOTE → ssh host '<script>'                 (run() already wraps bash -lc)
+//
+// Never called for manual-LOCAL: that path keeps the host-fs spawnSync/existsSync
+// implementation (the marker files and realpath are reachable on this machine).
+async function runInContext(chat, script, { timeout = 8000 } = {}) {
+  if (chat.container) {
+    if (chat.host === LOCAL) {
+      const r = spawnSync('docker', ['exec', chat.container, 'bash', '-lc', script], {
+        stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+        encoding: 'utf8', maxBuffer: 10 * 1024 * 1024,
+      });
+      return { ok: r.status === 0, code: r.status ?? -1, stdout: r.stdout || '', stderr: r.stderr || '' };
+    }
+    return run(chat.host, `docker exec ${shellQuote(chat.container)} bash -lc ${shellQuote(script)}`, { timeout });
+  }
+  return run(chat.host, script, { timeout });
+}
+
+// Build the shell script that detects an in-progress git operation under `cwd`
+// by testing the well-known marker files git writes under the git dir. Pure
+// (just builds a string) so it is unit-testable, mirroring buildGitDiffScript /
+// buildGitBlameScript. A repo can be in ONE state, so the test order is the
+// priority (first match wins). The `{ ... }` group's exit status is that of its
+// LAST test (non-zero when BISECT_LOG is absent, even mid-merge), so callers
+// parse STDOUT, not `.ok`. Delivered via runInContext (docker-exec for yatfa,
+// ssh for manual-remote); manual-LOCAL uses the host-fs path in detectInProgress
+// instead. The `2>/dev/null` on rev-parse swallows non-git/detached → empty →
+// operation null (graceful, never a 500). See WARDEN-235.
+export function buildInProgressScript(cwd) {
+  return `cd ${shellQuote(cwd)} && gd=$(git rev-parse --git-dir 2>/dev/null) && ` +
+    `{ [ -f "$gd/MERGE_HEAD" ] && echo merge; ` +
+    `[ -f "$gd/CHERRY_PICK_HEAD" ] && echo cherry-pick; ` +
+    `[ -f "$gd/REVERT_HEAD" ] && echo revert; ` +
+    `[ -d "$gd/rebase-merge" ] && echo rebase; ` +
+    `[ -d "$gd/rebase-apply" ] && echo rebase; ` +
+    `[ -f "$gd/BISECT_LOG" ] && echo bisect; }`;
+}
+
+// Detect an in-progress git operation (merge/cherry-pick/revert/rebase/bisect).
+// manual-LOCAL stats the marker files on the host fs (fast, no shell); every
+// other transport (yatfa local+remote, manual-remote) runs buildInProgressScript
+// in-context — the marker files live beyond the host fs (in-container or on the
+// remote host), so only a shell `test` delivered there can reach them. Returns
+// the operation name or null (graceful, never throws). Display only (WARDEN-28).
+async function detectInProgress(chat, cwd) {
+  if (!chat.container && chat.host === LOCAL) {
+    const gitDirResult = runLocalGit(['rev-parse', '--git-dir'], cwd);
+    const gitDir = gitDirResult.stdout?.toString().trim() || '';
+    if (!gitDir) return null;
+    const gd = path.resolve(cwd, gitDir);
+    if (fs.existsSync(path.join(gd, 'MERGE_HEAD'))) return 'merge';
+    if (fs.existsSync(path.join(gd, 'CHERRY_PICK_HEAD'))) return 'cherry-pick';
+    if (fs.existsSync(path.join(gd, 'REVERT_HEAD'))) return 'revert';
+    if (fs.existsSync(path.join(gd, 'rebase-merge')) || fs.existsSync(path.join(gd, 'rebase-apply'))) return 'rebase';
+    if (fs.existsSync(path.join(gd, 'BISECT_LOG'))) return 'bisect';
+    return null;
+  }
+  const r = await runInContext(chat, buildInProgressScript(cwd));
+  return (r.stdout || '').split('\n').map((l) => l.trim()).find(Boolean) || null;
+}
+
 app.get('/api/git-status', async (req, res) => {
   const chatId = String(req.query.id || '');
   const { chat, error } = await resolve(chatId);
   if (error) return res.status(404).json({ error });
 
   try {
-    const cwd = chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
+    const cwd = gitCwd(chat);
     if (!cwd) return res.json({ branch: null, detached: false, headSha: null, clean: null, cwd: '', ahead: null, behind: null, inProgress: { operation: null }, stashCount: null, files: null, error: 'no cwd' });
 
-    let branch = '';
-    let clean = true;
-    let files = [];
-    let ahead = null;
-    let behind = null;
-    let inProgressOp = null;
-    let stashCount = null;
-    let detached = false;
+    // branch / status / ahead-behind / detached / stash all run via runGit: argv
+    // (no shell) for the LOCAL transports, ssh for the remote ones — and for yatfa
+    // chats (container set) each call is wrapped in `docker exec … git -C <cwd>` so
+    // git runs INSIDE the container against the in-container path (WARDEN-235).
+    // The old per-transport if/else collapses into one runGit call per probe; the
+    // detached-HEAD detection (WARDEN-239) rides the same transport so it lights
+    // up for yatfa agents too.
+    const branchR = await runGit(chat, ['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
+    const branch = branchR.ok ? branchR.stdout.trim() : '';
+
+    const statusR = await runGit(chat, ['status', '--porcelain'], cwd);
+    // NOTE: parse the raw bytes — git status codes can start with a leading
+    // space (" M" = unstaged mod), so the output must NOT be trimmed as a
+    // whole or the first file's path is corrupted. See parseGitStatusPorcelain.
+    const files = parseGitStatusPorcelain(statusR.ok ? statusR.stdout : '');
+    const clean = files.length === 0;
+
+    // ahead/behind upstream: @{u}...HEAD symmetric diff. Non-zero exit (no
+    // upstream, detached HEAD, non-git cwd) → empty stdout → nulls. See parseAheadBehind.
+    const abR = await runGit(chat, ['rev-list', '--left-right', '--count', '@{u}...HEAD'], cwd);
+    const { ahead, behind } = parseAheadBehind(abR.ok ? abR.stdout : '');
+
+    // Detached-HEAD detection (WARDEN-239). `git symbolic-ref -q HEAD` exits
+    // non-zero iff HEAD is detached (it prints refs/heads/<name> + exit 0 when on
+    // a branch) — the canonical test, more reliable than `branch === 'HEAD'` (a
+    // branch could in principle be named "HEAD"). Run via runGit so it ALSO works
+    // inside a yatfa container (WARDEN-235). Guarded by `branch` (truthy ⟺ the
+    // rev-parse above succeeded ⟺ we're inside a real repo) so a NON-git cwd —
+    // where symbolic-ref also fails — is NOT misread as detached. The short SHA
+    // replaces the misleading literal "HEAD" label the badge would otherwise show;
+    // it's only fetched when detached to keep the normal branch path's command
+    // set unchanged.
+    const symRefResult = await runGit(chat, ['symbolic-ref', '-q', 'HEAD'], cwd);
+    const detached = isDetachedHead(symRefResult.code, !!branch);
     let headSha = null;
-
-    if (chat.host === LOCAL) {
-      // Local execution: use spawnSync directly
-      const branchResult = runLocalGit(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
-      branch = branchResult.stdout?.toString().trim() || '';
-
-      // Detached-HEAD detection (WARDEN-239). `git symbolic-ref -q HEAD` exits
-      // non-zero iff HEAD is detached (it prints refs/heads/<name> + exit 0 when
-      // on a branch) — the canonical test, more reliable than `branch === 'HEAD'`
-      // (a branch could in principle be named "HEAD"). Guarded by `branch`
-      // (truthy ⟺ the rev-parse above succeeded ⟺ we're inside a real repo) so a
-      // NON-git cwd — where symbolic-ref also fails — is NOT misread as detached.
-      // The short SHA replaces the misleading literal "HEAD" label the badge
-      // would otherwise show; it's only fetched when detached to keep the normal
-      // branch path's command set unchanged.
-      const symRefResult = runLocalGit(['symbolic-ref', '-q', 'HEAD'], cwd);
-      detached = isDetachedHead(symRefResult.status, !!branch);
-      if (detached) {
-        const shaResult = runLocalGit(['rev-parse', '--short', 'HEAD'], cwd);
-        headSha = normalizeHeadSha(shaResult.stdout, shaResult.status);
-      }
-
-      const statusResult = runLocalGit(['status', '--porcelain'], cwd);
-      const statusRaw = statusResult.stdout?.toString() || '';
-      // NOTE: parse the raw bytes — git status codes can start with a leading
-      // space (" M" = unstaged mod), so the output must NOT be trimmed as a
-      // whole or the first file's path is corrupted. See parseGitStatusPorcelain.
-      files = parseGitStatusPorcelain(statusRaw);
-      clean = files.length === 0;
-
-      // ahead/behind upstream: @{u}...HEAD symmetric diff. Non-zero exit (no
-      // upstream, detached HEAD, non-git cwd) → empty stdout → nulls. Mirrors
-      // the branch call's spawnSync shape. See parseAheadBehind.
-      const abResult = runLocalGit(['rev-list', '--left-right', '--count', '@{u}...HEAD'], cwd);
-      ({ ahead, behind } = parseAheadBehind(abResult.stdout?.toString() || ''));
-
-      // Detect an in-progress operation (merge/cherry-pick/revert/rebase/bisect)
-      // by stat'ing the well-known state files git writes under the git dir. A
-      // repo can only be in ONE such state, so first match wins. Resolved via
-      // `git rev-parse --git-dir` (relative like ".git" → resolved against cwd)
-      // mirroring the branch call; a non-git/no-cwd cwd → empty git dir → no
-      // markers → null (graceful, never a 500). Display only (WARDEN-28).
-      const gitDirResult = runLocalGit(['rev-parse', '--git-dir'], cwd);
-      const gitDir = gitDirResult.stdout?.toString().trim() || '';
-      if (gitDir) {
-        const gd = path.resolve(cwd, gitDir);
-        if (fs.existsSync(path.join(gd, 'MERGE_HEAD'))) inProgressOp = 'merge';
-        else if (fs.existsSync(path.join(gd, 'CHERRY_PICK_HEAD'))) inProgressOp = 'cherry-pick';
-        else if (fs.existsSync(path.join(gd, 'REVERT_HEAD'))) inProgressOp = 'revert';
-        else if (fs.existsSync(path.join(gd, 'rebase-merge')) || fs.existsSync(path.join(gd, 'rebase-apply'))) inProgressOp = 'rebase';
-        else if (fs.existsSync(path.join(gd, 'BISECT_LOG'))) inProgressOp = 'bisect';
-      }
-
-      // Shelved WIP: `git stash list` emits one line per stash, empty when none.
-      // --porcelain status never surfaces stashes, so a clean tree with parked
-      // work would otherwise read clean:true — count the list so the badge can
-      // show 🗄 N (WARDEN-211). Non-git/empty → parseStashCount nulls it.
-      const stashResult = runLocalGit(['stash', 'list'], cwd);
-      stashCount = parseStashCount(stashResult.stdout?.toString() || '');
-    } else {
-      // Remote execution: use SSH
-      // Fold detached-HEAD detection into the branch probe: after rev-parse
-      // prints the abbrev-ref, the chained group echoes 'branch' (symbolic-ref
-      // resolved HEAD) or 'detached' (it refused). The `{ …; }` is a bash
-      // command group (parsed under bash -lc), not brace expansion. On a non-git
-      // cwd rev-parse fails → the `&&` short-circuits → group never runs → empty
-      // stdout → branch='' (and the !!branch guard keeps it from reading
-      // detached). Mirrors the local symbolic-ref probe (WARDEN-239).
-      const gitBranchCmd =
-        `cd ${shellQuote(cwd)} && git rev-parse --abbrev-ref HEAD 2>/dev/null && ` +
-        `{ git symbolic-ref -q HEAD >/dev/null && echo branch || echo detached; }`;
-      const gitStatusCmd = `cd ${shellQuote(cwd)} && git status --porcelain 2>/dev/null`;
-      // The @{u}...HEAD rev spec is a constant, but we shellQuote it anyway:
-      // '{' / '}' risk brace expansion in some shells, and this is consistent
-      // with how git-log quotes its --pretty constant (WARDEN-122 quoting lesson).
-      const gitAheadBehindCmd = `cd ${shellQuote(cwd)} && git rev-list --left-right --count ${shellQuote('@{u}...HEAD')} 2>/dev/null`;
-
-      const r1 = await run(chat.host, gitBranchCmd, { timeout: 8000 });
-      const r1lines = (r1.ok ? (r1.stdout || '') : '')
-        .split('\n').map((l) => l.trim()).filter(Boolean);
-      branch = r1lines[0] || '';
-      // Line 2 is 'branch' | 'detached'. Route through isDetachedHead so the
-      // "only detached inside a real repo" guard (inGitRepo = !!branch) lives in
-      // one place shared with the local path; 'detached' maps to a non-zero
-      // exit, anything else to exit 0.
-      detached = isDetachedHead(r1lines[1] === 'detached' ? 1 : 0, !!branch);
-      // Short SHA for the detached badge — a separate SSH round-trip, so only
-      // fired when detached (nothing to show on a normal branch). run()'s .ok
-      // already encodes the exit-0 check, so normalizeHeadSha is called with just
-      // stdout (WARDEN-239).
-      if (detached) {
-        const gitShaCmd = `cd ${shellQuote(cwd)} && git rev-parse --short HEAD 2>/dev/null`;
-        const rSha = await run(chat.host, gitShaCmd, { timeout: 8000 });
-        headSha = rSha.ok ? normalizeHeadSha(rSha.stdout) : null;
-      }
-
-      const r2 = await run(chat.host, gitStatusCmd, { timeout: 8000 });
-      const statusRaw = r2.ok ? (r2.stdout || '') : '';
-      // NOTE: parse the raw bytes — git status codes can start with a leading
-      // space (" M" = unstaged mod), so the output must NOT be trimmed as a
-      // whole or the first file's path is corrupted. See parseGitStatusPorcelain.
-      files = parseGitStatusPorcelain(statusRaw);
-      clean = files.length === 0;
-
-      const r3 = await run(chat.host, gitAheadBehindCmd, { timeout: 8000 });
-      ({ ahead, behind } = parseAheadBehind(r3.ok ? (r3.stdout || '') : ''));
-
-      // Detect an in-progress operation remotely with ONE combined `test` over
-      // the resolved git dir — same markers/order as the local branch (first
-      // match wins; a repo can only be in one state). `2>/dev/null` on the
-      // rev-parse swallows the non-git/detached case so a clean or non-git repo
-      // emits nothing → operation: null. Mirrors the r1/r2/r3 run()+shellQuote
-      // split. Display only (WARDEN-28).
-      const gitInProgCmd =
-        `cd ${shellQuote(cwd)} && gd=$(git rev-parse --git-dir 2>/dev/null) && ` +
-        `{ [ -f "$gd/MERGE_HEAD" ] && echo merge; ` +
-        `[ -f "$gd/CHERRY_PICK_HEAD" ] && echo cherry-pick; ` +
-        `[ -f "$gd/REVERT_HEAD" ] && echo revert; ` +
-        `[ -d "$gd/rebase-merge" ] && echo rebase; ` +
-        `[ -d "$gd/rebase-apply" ] && echo rebase; ` +
-        `[ -f "$gd/BISECT_LOG" ] && echo bisect; }`;
-      const r4 = await run(chat.host, gitInProgCmd, { timeout: 8000 });
-      // The `{ ... }` group's exit status is that of its LAST test, which is
-      // non-zero whenever BISECT_LOG is absent — true even mid-merge (only
-      // MERGE_HEAD matches). So r4.ok is UNRELIABLE here: parse stdout instead.
-      // The group emits one op per matching marker; take the first (priority order).
-      const first = (r4.stdout || '').split('\n').map((l) => l.trim()).find(Boolean);
-      if (first) inProgressOp = first;
-
-      // Shelved WIP over SSH — same one-line-per-stash format as the local path.
-      // 2>/dev/null swallows the non-git case so an empty/erroring repo yields ''
-      // → parseStashCount null (WARDEN-211).
-      const gitStashCmd = `cd ${shellQuote(cwd)} && git stash list 2>/dev/null`;
-      const r5 = await run(chat.host, gitStashCmd, { timeout: 8000 });
-      stashCount = parseStashCount(r5.ok ? (r5.stdout || '') : '');
+    if (detached) {
+      const shaResult = await runGit(chat, ['rev-parse', '--short', 'HEAD'], cwd);
+      headSha = normalizeHeadSha(shaResult.stdout, shaResult.code);
     }
+
+    const inProgressOp = await detectInProgress(chat, cwd);
+
+    // Shelved WIP: `git stash list` emits one line per stash, empty when none.
+    // --porcelain status never surfaces stashes, so a clean tree with parked work
+    // would otherwise read clean:true — count the list so the badge can show 🗄️ N
+    // (WARDEN-211). Non-git/empty → parseStashCount nulls it.
+    const stashR = await runGit(chat, ['stash', 'list'], cwd);
+    const stashCount = parseStashCount(stashR.ok ? stashR.stdout : '');
 
     res.json({
       branch: branch || null,
@@ -1183,26 +1210,16 @@ export function parseGitShowNameStatus(output) {
 }
 
 // The `--pretty=format:` used by /api/git-log: short hash | subject | author |
-// relative date. Shared by the local (spawnSync) and remote (SSH) paths so the two
-// can't drift. The '|' separators are shellQuote'd on the remote path so they aren't
-// read as shell pipes (the WARDEN-122 quoting lesson).
+// relative date. Named (not inlined) so the field order is documented at a glance
+// and grep-able. The '|' separators are passed as ONE argv element to runGit (no
+// shell on the LOCAL branch) and shellQuote'd on the remote branch, so they're
+// argument characters — never read as shell pipes (the WARDEN-122 quoting lesson).
 const GIT_LOG_PRETTY = '%h|%s|%an|%ar';
 
-// Build the remote SSH command for /api/git-log. Exported so its shellQuoting — of
-// BOTH the pretty format and the HEAD..@{u} rev range — is unit-testable, mirroring
-// buildGitDiffScript. `incoming` splices in `HEAD..@{u}` (commits the upstream has
-// that HEAD doesn't); the token is shellQuote'd because its '{'/'}' risk brace
-// expansion in some shells — the same reason /api/git-status quotes '@{u}...HEAD'.
-// 2>/dev/null keeps the no-upstream case exit-clean with empty stdout so the route
-// returns { commits: [], error: null } (200, not a 500).
-export function buildGitLogCmd(cwd, limit, incoming) {
-  const range = incoming ? ` ${shellQuote('HEAD..@{u}')}` : '';
-  return `cd ${shellQuote(cwd)} && git log -${limit}${range} --pretty=format:${shellQuote(GIT_LOG_PRETTY)} 2>/dev/null`;
-}
-
-// Recent commit history (git log) for a chat's repo. Mirrors /api/git-status: local chats
-// run git via spawnSync, remote chats run over SSH with shellQuote(cwd). A non-git or no-cwd
-// repo yields an empty list (never a 500). limit is clamped to [1, 50].
+// Recent commit history (git log) for a chat's repo. All transports go through
+// runGit (WARDEN-235): manual-local spawnSync, manual-remote SSH, and yatfa
+// containers via `docker exec … git -C <cwd>`. A non-git or no-cwd repo yields an
+// empty list (never a 500). limit is clamped to [1, 50].
 app.get('/api/git-log', async (req, res) => {
   const chatId = String(req.query.id || '');
   const limit = Math.min(Math.max(parseInt(String(req.query.limit || '5'), 10) || 5, 1), 50);
@@ -1217,30 +1234,20 @@ app.get('/api/git-log', async (req, res) => {
   if (error) return res.status(404).json({ error });
 
   try {
-    const cwd = chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
+    const cwd = gitCwd(chat);
     if (!cwd) return res.json({ commits: [], error: 'no cwd' });
 
-    // short hash | subject | author | relative date
-    let raw = '';
-    if (chat.host === LOCAL) {
-      // Local execution: use spawnSync directly. With no rev range, `git log -N`
-      // lists HEAD-reachable commits (today's behavior). range=incoming swaps in
-      // `HEAD..@{u}` — commits the upstream has that HEAD doesn't. When there is
-      // no upstream (detached HEAD / untracked branch / non-git) git exits non-zero
-      // with empty stdout → raw stays '' → { commits: [], error: null } (200, not
-      // a 500), mirroring parseAheadBehind's null tolerance.
-      const args = ['log'];
-      if (incoming) args.push('HEAD..@{u}');
-      args.push(`-${limit}`, `--pretty=format:${GIT_LOG_PRETTY}`);
-      const r = runLocalGit(args, cwd);
-      raw = r.stdout?.toString().trim() || '';
-    } else {
-      // Remote execution: SSH. buildGitLogCmd shellQuotes the pretty format and the
-      // HEAD..@{u} range; 2>/dev/null swallows the no-upstream case so a detached-HEAD
-      // or untracked remote branch yields empty → 200, never a 500.
-      const rr = await run(chat.host, buildGitLogCmd(cwd, limit, incoming), { timeout: 8000 });
-      raw = rr.ok ? rr.stdout.trim() : '';
-    }
+    // short hash | subject | author | relative date (GIT_LOG_PRETTY). runGit passes
+    // --pretty as a single argv element (no shell on the LOCAL branch) so the '|'
+    // separators can't be read as pipes; the remote branch shellQuotes it (and the
+    // HEAD..@{u} range, brace-expansion-safe) for the same reason (WARDEN-122).
+    // yatfa chats run this inside the container (WARDEN-235). range=incoming splices
+    // in HEAD..@{u} — the behind commits (WARDEN-225); absent → HEAD-reachable log.
+    const args = ['log'];
+    if (incoming) args.push('HEAD..@{u}');
+    args.push(`-${limit}`, `--pretty=format:${GIT_LOG_PRETTY}`);
+    const r = await runGit(chat, args, cwd);
+    const raw = r.ok ? r.stdout.trim() : '';
 
     const commits = raw ? raw.split('\n').map(parseGitLogLine) : [];
     res.json({ commits, error: null });
@@ -1327,13 +1334,17 @@ export function getLocalGitDiff(cwd, filePath) {
   return { diff, untracked: false };
 }
 
-// Diff one file vs HEAD on a REMOTE host via SSH. Mirrors getLocalGitDiff's result
-// shape and untracked disambiguation, but the containment check lives inside
-// buildGitDiffScript's bash. The remote untracked check is a second `run` (only made
-// when the diff is empty) so the common case stays a single round-trip.
-async function getRemoteGitDiff(host, cwd, filePath) {
+// Diff one file vs HEAD on a host whose git dir is NOT on this machine's fs —
+// i.e. a yatfa container (local OR remote: the cwd is an in-container path) or a
+// manual-remote host. Mirrors getLocalGitDiff's result shape and untracked
+// disambiguation, but the containment check lives inside buildGitDiffScript's
+// bash, delivered via runInContext (docker-exec for yatfa, ssh for manual-remote)
+// so the `cd <cwd>` + `realpath` resolve where the repo actually is. The remote
+// untracked check is a second runInContext (only when the diff is empty) so the
+// common case stays a single round-trip. See WARDEN-235.
+async function getDeliveredGitDiff(chat, cwd, filePath) {
   const script = buildGitDiffScript(cwd, filePath);
-  const r = await run(host, script, { timeout: 8000 });
+  const r = await runInContext(chat, script);
   if (!r.ok) {
     const out = `${r.stdout || ''}${r.stderr || ''}`;
     if (out.includes('ERROR path must be within working directory')) {
@@ -1342,7 +1353,7 @@ async function getRemoteGitDiff(host, cwd, filePath) {
     if (out.includes('ERROR invalid path')) {
       return { error: 'invalid path', status: 400 };
     }
-    // git diff exits non-zero on a non-git cwd or SSH/pool failure — surface as an
+    // git diff exits non-zero on a non-git cwd or transport failure — surface as an
     // error string rather than a 500 (matches git-status/git-log's soft failure).
     return { error: 'diff failed' };
   }
@@ -1350,8 +1361,8 @@ async function getRemoteGitDiff(host, cwd, filePath) {
   let diff = capDiff(r.stdout || '');
 
   if (diff.length === 0) {
-    const trackedCmd = `cd ${shellQuote(cwd)} && git ls-files --error-unmatch -- ${shellQuote(filePath)} 2>/dev/null`;
-    const t = await run(host, trackedCmd, { timeout: 8000 });
+    const trackedScript = `cd ${shellQuote(cwd)} && git ls-files --error-unmatch -- ${shellQuote(filePath)} 2>/dev/null`;
+    const t = await runInContext(chat, trackedScript);
     if (!t.ok) return { diff: null, untracked: true };
   }
 
@@ -1368,12 +1379,16 @@ app.get('/api/git-diff', async (req, res) => {
   if (error) return res.status(404).json({ diff: null, untracked: false, path: filePath, error });
 
   try {
-    const cwd = chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
+    const cwd = gitCwd(chat);
     if (!cwd) return res.json({ diff: null, untracked: false, path: filePath, error: 'no cwd' });
 
-    const result = chat.host === LOCAL
+    // manual-LOCAL can stat the worktree on the host fs (getLocalGitDiff). Every
+    // other transport — yatfa container (the cwd is in-container) or manual-remote
+    // — runs the diff in-context via docker-exec/ssh (getDeliveredGitDiff), so the
+    // realpath containment + git diff resolve where the repo actually lives.
+    const result = (!chat.container && chat.host === LOCAL)
       ? getLocalGitDiff(cwd, filePath)
-      : await getRemoteGitDiff(chat.host, cwd, filePath);
+      : await getDeliveredGitDiff(chat, cwd, filePath);
 
     if (result.status) return res.status(result.status).json({ diff: null, untracked: false, path: filePath, error: result.error });
     if (result.error) return res.json({ diff: null, untracked: false, path: filePath, error: result.error });
@@ -1429,32 +1444,23 @@ app.get('/api/git-show', async (req, res) => {
   }
 
   try {
-    const cwd = chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
+    const cwd = gitCwd(chat);
     if (!cwd) return res.json({ files: [], diff: null, error: 'no cwd' });
 
+    // runGit collapses the local/remote branches and runs inside the container
+    // for yatfa chats (WARDEN-235). `hash` is already hex-validated above and the
+    // per-file `path` is a git pathspec (isSafeRelativePath), so both are safe as
+    // argv after `git -C <cwd>` / the shellQuoted remote form.
     let files = [];
     let diff = null;
-
-    if (chat.host === LOCAL) {
-      if (filePath) {
-        // --format= strips the commit header (author/date/message) so we get ONLY the
-        // file's patch — exactly what inspecting a single file should surface.
-        const r = runLocalGit(['show', '--format=', hash, '--', filePath], cwd);
-        diff = capDiff(r.stdout?.toString() || '');
-      } else {
-        const r = runLocalGit(['show', '--name-status', '--pretty=format:', hash], cwd);
-        files = parseGitShowNameStatus(r.stdout?.toString() || '');
-      }
+    if (filePath) {
+      // --format= strips the commit header (author/date/message) so we get ONLY the
+      // file's patch — exactly what inspecting a single file should surface.
+      const r = await runGit(chat, ['show', '--format=', hash, '--', filePath], cwd);
+      diff = capDiff(r.ok ? r.stdout : '');
     } else {
-      if (filePath) {
-        const cmd = `cd ${shellQuote(cwd)} && git show --format= ${shellQuote(hash)} -- ${shellQuote(filePath)} 2>/dev/null`;
-        const rr = await run(chat.host, cmd, { timeout: 8000 });
-        diff = capDiff(rr.ok ? (rr.stdout || '') : '');
-      } else {
-        const cmd = `cd ${shellQuote(cwd)} && git show --name-status --pretty=format: ${shellQuote(hash)} 2>/dev/null`;
-        const rr = await run(chat.host, cmd, { timeout: 8000 });
-        files = parseGitShowNameStatus(rr.ok ? (rr.stdout || '') : '');
-      }
+      const r = await runGit(chat, ['show', '--name-status', '--pretty=format:', hash], cwd);
+      files = parseGitShowNameStatus(r.ok ? r.stdout : '');
     }
 
     res.json({ files, diff, error: null });
@@ -1478,23 +1484,16 @@ app.get('/api/git-stash', async (req, res) => {
   if (error) return res.status(404).json({ error });
 
   try {
-    const cwd = chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
+    const cwd = gitCwd(chat);
     if (!cwd) return res.json({ stashes: [], error: 'no cwd' });
 
-    // reflog selector | subject | relative date  (subject may contain '|')
+    // reflog selector | subject | relative date  (subject may contain '|'). runGit
+    // passes --pretty as one argv element (no shell on LOCAL) so '|' isn't read as
+    // a pipe; the remote branch shellQuotes it (WARDEN-122). yatfa chats run this
+    // inside the container (WARDEN-235).
     const pretty = '%gd|%s|%cr';
-    let raw = '';
-    if (chat.host === LOCAL) {
-      // Local execution: use spawnSync directly
-      const r = runLocalGit(['stash', 'list', `--pretty=format:${pretty}`], cwd);
-      raw = r.stdout?.toString().trim() || '';
-    } else {
-      // Remote execution: SSH. shellQuote the pretty format so the '|' separators
-      // aren't interpreted as shell pipes (same WARDEN-122 quoting lesson as git-log).
-      const cmd = `cd ${shellQuote(cwd)} && git stash list --pretty=format:${shellQuote(pretty)} 2>/dev/null`;
-      const rr = await run(chat.host, cmd, { timeout: 8000 });
-      raw = rr.ok ? rr.stdout.trim() : '';
-    }
+    const r = await runGit(chat, ['stash', 'list', `--pretty=format:${pretty}`], cwd);
+    const raw = r.ok ? r.stdout.trim() : '';
 
     const stashes = raw ? parseStashList(raw) : [];
     res.json({ stashes, error: null });
@@ -1598,20 +1597,22 @@ app.get('/api/git-blame', async (req, res) => {
   if (!isSafeRelativePath(filePath)) return res.json({ lines: [], error: 'invalid path' });
 
   try {
-    const cwd = chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
+    const cwd = gitCwd(chat);
     if (!cwd) return res.json({ lines: [], error: 'no cwd' });
 
     let raw = '';
-    if (chat.host === LOCAL) {
-      // Local execution: use spawnSync directly. `--line-porcelain` for the stable,
+    if (!chat.container && chat.host === LOCAL) {
+      // manual-LOCAL: spawnSync on the host fs. `--line-porcelain` for the stable,
       // machine-parseable per-line header block the parser above consumes.
       const r = runLocalGit(['blame', '--line-porcelain', '--', filePath], cwd);
       raw = capDiff(r.stdout?.toString() || '');
     } else {
-      // Remote execution: SSH. The `2>/dev/null` swallows git's "no such file" /
-      // "not a git repo" noise so a non-git cwd reads as empty, not an error.
-      const cmd = buildGitBlameScript(cwd, filePath);
-      const rr = await run(chat.host, cmd, { timeout: 8000 });
+      // container (local+remote) or manual-remote: buildGitBlameScript delivered
+      // in-context via runInContext (docker-exec for yatfa, ssh for manual-remote)
+      // so the `cd <cwd>` + `git blame` run where the repo lives. The `2>/dev/null`
+      // in the script swallows git's "no such file" / "not a git repo" noise so a
+      // non-git cwd reads as empty, not an error. See WARDEN-235.
+      const rr = await runInContext(chat, buildGitBlameScript(cwd, filePath));
       raw = capDiff(rr.ok ? (rr.stdout || '') : '');
     }
 
@@ -2115,20 +2116,26 @@ app.post('/api/search-files', async (req, res) => {
   if (!query) return res.status(400).json({ error: 'query is required' });
 
   const chat = r.chat;
-  const cwd = chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
+  const cwd = gitCwd(chat);
   if (!cwd) return res.json({ results: [], query, error: 'no cwd' });
 
   try {
     let raw = '';
     let error = null;
-    if (chat.host === LOCAL) {
+    if (!chat.container && chat.host === LOCAL) {
+      // manual-LOCAL: stream git/rg/grep on the host fs, bounded at the source.
       raw = await searchLocalRaw(cwd, query);
     } else {
+      // container (local+remote) or manual-remote: buildSearchScript delivered
+      // in-context via runInContext (docker-exec for yatfa, ssh for manual-remote)
+      // so `cd <cwd>` + `git grep`/`rg`/`grep` run where the repo lives. The script
+      // already bounds output (`| cut | head`) so the in-context run is overflow-
+      // safe. See WARDEN-235.
       const script = buildSearchScript(cwd, query);
-      const result = await run(chat.host, script, { timeout: 10000 });
-      // A failed remote run (host down / SSH auth / timeout) must NOT masquerade
-      // as "no matches" — surface it so the dialog can show a real error.
-      // result.stdout is still parsed when present (head/cut already bounded it).
+      const result = await runInContext(chat, script, { timeout: 10000 });
+      // A failed run (container down / SSH auth / timeout) must NOT masquerade as
+      // "no matches" — surface it so the dialog can show a real error. result.stdout
+      // is still parsed when present (head/cut already bounded it).
       if (!result.ok) error = 'search failed';
       raw = result.stdout || '';
     }

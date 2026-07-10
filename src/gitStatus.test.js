@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, isConflictStatus, isDetachedHead, normalizeHeadSha } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, isConflictStatus, isDetachedHead, normalizeHeadSha, buildDockerGitArgv } from './gitStatus.js';
 
 describe('parseGitStatusPorcelain', () => {
   it('parses the most common case: unstaged modification as the FIRST file', () => {
@@ -415,5 +415,42 @@ describe('parseStashList', () => {
     assert.deepEqual(parseStashList('stash@{0}|WIP on main: msg|1 hour ago\r\n'), [
       { ref: 'stash@{0}', subject: 'WIP on main: msg', date: '1 hour ago' },
     ]);
+  });
+});
+
+// buildDockerGitArgv builds the local argv that runs `git -C <cwd> <args>` inside
+// a yatfa container via `docker exec` (WARDEN-235). It is the unit-testable seam
+// for the docker-exec transport — CI can't run real containers, so we lock the
+// argv shape here. runGit (server.js) spawns it verbatim, so the order/quoting
+// of this array is exactly what reaches `docker exec`.
+describe('buildDockerGitArgv', () => {
+  it('wraps git -C <cwd> <args> in docker exec <container>', () => {
+    // A typical git-status porcelain call: argv, no shell, args spliced verbatim.
+    assert.deepEqual(buildDockerGitArgv('yatfa-worker', '/workspace', ['status', '--porcelain']), [
+      'docker', 'exec', 'yatfa-worker', 'git', '-C', '/workspace', 'status', '--porcelain',
+    ]);
+  });
+
+  it('passes the in-container cwd via -C so the host never needs the path', () => {
+    const argv = buildDockerGitArgv('c', '/app', ['rev-parse', '--abbrev-ref', 'HEAD']);
+    assert.strictEqual(argv.indexOf('-C'), 4);          // -C right after `git`
+    assert.strictEqual(argv[argv.indexOf('-C') + 1], '/app'); // its value is cwd
+  });
+
+  it('splices gitArgs verbatim — a pathspec/--flag is one argv element, not shell-split', () => {
+    // `git diff HEAD -- src/server.js` → each token stays one element. No shell
+    // means a path named like a flag can't inject options (the `--` is preserved).
+    const argv = buildDockerGitArgv('c', '/w', ['diff', 'HEAD', '--', 'src/server.js']);
+    assert.deepEqual(argv, ['docker', 'exec', 'c', 'git', '-C', '/w', 'diff', 'HEAD', '--', 'src/server.js']);
+  });
+
+  it('handles an empty args list (bare `git -C <cwd>`)', () => {
+    assert.deepEqual(buildDockerGitArgv('c', '/w', []), ['docker', 'exec', 'c', 'git', '-C', '/w']);
+  });
+
+  it('does not mutate the input args array', () => {
+    const args = ['log', '-5'];
+    buildDockerGitArgv('c', '/w', args);
+    assert.deepEqual(args, ['log', '-5']); // caller's array unchanged
   });
 });
