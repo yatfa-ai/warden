@@ -858,6 +858,140 @@ app.get('/api/git-log', async (req, res) => {
   }
 });
 
+// ---- Per-file git diff (WARDEN-151) ----------------------------------------
+// The depth layer between WARDEN-107 (which files changed) and WARDEN-39 (read
+// the current file): show WHAT an agent changed in one file. Mirrors
+// /api/git-status + /api/read-file: chat-scoped, cwd-contained, local spawnSync
+// vs remote `run(host, script)`, with the same path-traversal discipline read-file
+// guards against. A diff target may be a DELETED file (status 'D') that no longer
+// exists on disk, so the containment check must tolerate a missing path — unlike
+// read-file's `realpath -e` (which requires existence).
+const GIT_DIFF_MAX_BYTES = 1024 * 1024; // mirrors read-file's 1MB size guard
+
+// Cap diff output to GIT_DIFF_MAX_BYTES. Goes through a Buffer so the truncation is
+// byte-accurate AND never splits a multi-byte UTF-8 sequence: toString('utf8') of a
+// buffer cut mid-sequence drops the incomplete tail (→ U+FFFD) rather than emitting a
+// lone surrogate that would corrupt the JSON response. Only the rare >1MB diff pays
+// the Buffer allocation. Exported so the no-lone-surrogate invariant has a test.
+export function capDiff(diff) {
+  if (Buffer.byteLength(diff) <= GIT_DIFF_MAX_BYTES) return diff;
+  return Buffer.from(diff, 'utf8').subarray(0, GIT_DIFF_MAX_BYTES).toString('utf8');
+}
+
+// Build the remote (SSH) shell script that diffs one file vs HEAD under `cwd`.
+// Extracted (and exported) so the fragile shell template is unit-tested directly,
+// the same way buildReadFileScript is. Containment uses `realpath -m` (NOT `-e`):
+// a deleted/untracked-not-yet-committed file has no realpath, so `-e` would wrongly
+// reject it; `-m` resolves `..` lexically without requiring existence, so the
+// cwd-containment `case` still catches `../etc/passwd` escapes. shellQuote yields a
+// single-quoted POSIX token spliced in bare — same WARDEN-122 quoting discipline as
+// read-file/git-log. The `--` before the path stops option parsing so a path named
+// like a flag can't inject options.
+export function buildGitDiffScript(cwd, filePath) {
+  return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; RESOLVED_CWD="$(cd "$CWD" && pwd -P)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -m -- "$FILE" 2>/dev/null)" || RESOLVED="$RESOLVED_CWD/$FILE"; case "$RESOLVED" in "$RESOLVED_CWD"/*|"$RESOLVED_CWD") ;; *) echo "ERROR path must be within working directory"; exit 1 ;; esac; git diff HEAD -- "$FILE" 2>/dev/null`;
+}
+
+// Is a cwd-relative `filePath` contained within `cwd`? Mirrors /api/read-file's guard,
+// but tolerates a missing target (a deleted file — status 'D' — has no realpath, yet
+// its deletion diff is valid). Lexical resolve catches `..` escapes even when the file
+// doesn't exist; realpath then hardens against symlink escapes when it does. Exported
+// so the local path has a direct unit test. Returns true if the path stays within cwd.
+export function isPathWithinCwd(cwd, filePath) {
+  const lexicalCwd = path.resolve(cwd);
+  const lexicalPath = path.resolve(cwd, filePath);
+  const lexicalWithin = lexicalPath === lexicalCwd || lexicalPath.startsWith(lexicalCwd + path.sep);
+  if (!lexicalWithin) return false;
+  try {
+    const realCwd = fs.realpathSync.native(cwd);
+    const realPath = fs.realpathSync.native(lexicalPath);
+    return realPath === realCwd || realPath.startsWith(realCwd + path.sep);
+  } catch {
+    // File doesn't exist (deleted, or untracked not yet created): lexical check passed.
+    return true;
+  }
+}
+
+// Diff one file vs HEAD on a LOCAL host. Returns { diff, untracked } or
+// { error, status }. An empty diff is ambiguous (clean tracked vs untracked '??'),
+// so it's disambiguated with `git ls-files --error-unmatch` (exits non-zero for a
+// path git doesn't track) — letting the UI say "untracked" instead of "no changes".
+// Output is capped at GIT_DIFF_MAX_BYTES to protect the server. Exported for tests.
+export function getLocalGitDiff(cwd, filePath) {
+  if (!isPathWithinCwd(cwd, filePath)) {
+    return { error: 'path must be within working directory', status: 403 };
+  }
+
+  const result = runLocalGit(['diff', 'HEAD', '--', filePath], cwd);
+  let diff = capDiff(result.stdout ? result.stdout.toString() : '');
+
+  if (diff.length === 0) {
+    // Empty diff is ambiguous: a clean tracked file vs an untracked ('??') file HEAD
+    // has no record of. `git ls-files --error-unmatch` exits non-zero for a path git
+    // doesn't track. (Containment above already guaranteed the path is within cwd, so
+    // a non-zero exit here means untracked, not "outside repo".)
+    const tracked = runLocalGit(['ls-files', '--error-unmatch', '--', filePath], cwd);
+    if (tracked.status !== 0) return { diff: null, untracked: true };
+  }
+
+  return { diff, untracked: false };
+}
+
+// Diff one file vs HEAD on a REMOTE host via SSH. Mirrors getLocalGitDiff's result
+// shape and untracked disambiguation, but the containment check lives inside
+// buildGitDiffScript's bash. The remote untracked check is a second `run` (only made
+// when the diff is empty) so the common case stays a single round-trip.
+async function getRemoteGitDiff(host, cwd, filePath) {
+  const script = buildGitDiffScript(cwd, filePath);
+  const r = await run(host, script, { timeout: 8000 });
+  if (!r.ok) {
+    const out = `${r.stdout || ''}${r.stderr || ''}`;
+    if (out.includes('ERROR path must be within working directory')) {
+      return { error: 'path must be within working directory', status: 403 };
+    }
+    if (out.includes('ERROR invalid path')) {
+      return { error: 'invalid path', status: 400 };
+    }
+    // git diff exits non-zero on a non-git cwd or SSH/pool failure — surface as an
+    // error string rather than a 500 (matches git-status/git-log's soft failure).
+    return { error: 'diff failed' };
+  }
+
+  let diff = capDiff(r.stdout || '');
+
+  if (diff.length === 0) {
+    const trackedCmd = `cd ${shellQuote(cwd)} && git ls-files --error-unmatch -- ${shellQuote(filePath)} 2>/dev/null`;
+    const t = await run(host, trackedCmd, { timeout: 8000 });
+    if (!t.ok) return { diff: null, untracked: true };
+  }
+
+  return { diff, untracked: false };
+}
+
+// GET /api/git-diff?id=<chatId>&path=<file> — unified diff of one file vs HEAD.
+// Response: { diff: string|null, untracked: boolean, path, error }
+app.get('/api/git-diff', async (req, res) => {
+  const filePath = String(req.query.path || '').trim();
+  if (!filePath) return res.status(400).json({ diff: null, untracked: false, path: '', error: 'path is required' });
+
+  const { chat, error } = await resolve(String(req.query.id || ''));
+  if (error) return res.status(404).json({ diff: null, untracked: false, path: filePath, error });
+
+  try {
+    const cwd = chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
+    if (!cwd) return res.json({ diff: null, untracked: false, path: filePath, error: 'no cwd' });
+
+    const result = chat.host === LOCAL
+      ? getLocalGitDiff(cwd, filePath)
+      : await getRemoteGitDiff(chat.host, cwd, filePath);
+
+    if (result.status) return res.status(result.status).json({ diff: null, untracked: false, path: filePath, error: result.error });
+    if (result.error) return res.json({ diff: null, untracked: false, path: filePath, error: result.error });
+    res.json({ diff: result.diff, untracked: !!result.untracked, path: filePath, error: null });
+  } catch (e) {
+    res.json({ diff: null, untracked: false, path: filePath, error: e.message });
+  }
+});
+
 // If cmd invokes bare `claude`, replace it with the full path found on the host —
 // claude is often in a .zshrc-only PATH that tmux's shell (bash) can't see.
 async function resolveClaudeCmd(host, cmd) {
