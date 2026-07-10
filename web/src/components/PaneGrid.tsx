@@ -39,11 +39,16 @@ interface Props {
   onFontSizeChange: (n: number) => void;
   scrollback: number;
   paneLayout: PaneLayout;
+  // Resolved terminal surface color (App resolves terminalColorScheme +
+  // effectiveTheme down to a concrete 'light' | 'dark' here). Pure pass-through
+  // to PaneTile — App owns the resolution so an OS theme flip can re-theme open
+  // panes live without PaneGrid knowing about the scheme pref.
+  terminalTheme: 'light' | 'dark';
 }
 
 function colsFor(n: number) { return n <= 1 ? 1 : Math.ceil(Math.sqrt(n)); }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onOpenChat, onForceKill, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, paneLayout }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onOpenChat, onForceKill, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, paneLayout, terminalTheme }: Props) {
   const [splitOpen, setSplitOpen] = useState(false);
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
@@ -233,6 +238,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     externalSearchQuery={externalSearchQuery?.paneId === t.id ? externalSearchQuery.query : undefined}
                     fontSize={fontSize} onFontSizeChange={onFontSizeChange}
                     scrollback={scrollback}
+                    terminalTheme={terminalTheme}
                   />
                 </div>
               );

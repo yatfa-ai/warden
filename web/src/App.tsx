@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
 import { loadUi, saveUi, persistUiState, initialWorkspace, type RestoreOnStartup, type PaneLayout } from '@/lib/storage';
-import { applyTheme, listenSystemThemeChange, type Theme } from '@/lib/theme';
+import { applyTheme, listenSystemThemeChange, getEffectiveTheme, resolveTerminalTheme, type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
 import type { Chat } from '@/lib/types';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
@@ -69,10 +69,24 @@ function App() {
   const [observerCollapsed, setObserverCollapsed] = useState(uiState.observerCollapsed);
   const [healthCollapsed, setHealthCollapsed] = useState(uiState.healthCollapsed ?? true);
   const [theme, setTheme] = useState<Theme>(() => uiState.theme ?? 'system');
+  // The OS-resolved effective theme (light/dark). The `theme` state variable
+  // stays 'system' on an OS flip, so chrome re-paints via a direct DOM class
+  // mutation in the [theme] effect — no React re-render. But the terminal
+  // surface re-themes imperatively inside PaneTile's effect, which only re-fires
+  // when this prop changes. Tracking effectiveTheme as React state and feeding it
+  // to resolveTerminalTheme is what makes "Match app theme" live-update on an OS
+  // flip (nuance #1): listenSystemThemeChange calls setEffectiveTheme, the prop
+  // propagates to PaneTile, and its [terminalTheme] effect re-paints open panes.
+  const [effectiveTheme, setEffectiveTheme] = useState<'light' | 'dark'>(() => getEffectiveTheme(uiState.theme ?? 'system'));
   const [density, setDensity] = useState<Density>(() => uiState.density ?? 'comfortable');
   const [paneLayout, setPaneLayout] = useState<PaneLayout>(() => uiState.paneLayout ?? 'auto');
   const [terminalFontSize, setTerminalFontSize] = useState(() => uiState.terminalFontSize ?? 14);
   const [terminalScrollback, setTerminalScrollback] = useState(() => uiState.terminalScrollback ?? 10000);
+  // Terminal color scheme: 'auto' follows the effective app theme (above);
+  // 'dark'/'light' force the terminal surface. Pure client-side pref (like
+  // terminalFontSize/scrollback): persisted by the saveUi effect below, never
+  // sent to the backend.
+  const [terminalColorScheme, setTerminalColorScheme] = useState<TerminalColorScheme>(() => uiState.terminalColorScheme ?? 'auto');
   // Default agent type + host pre-filled in the ＋ new chat form. Pure client-side
   // prefs (like density/terminalFontSize): persisted by the saveUi effect below,
   // never sent to the backend.
@@ -144,12 +158,20 @@ function App() {
   useEffect(() => {
     // Apply theme immediately
     applyTheme(theme);
+    // Keep the OS-resolved effective theme in sync so resolveTerminalTheme (and
+    // thus open terminal panes) follow a manual Color Scheme change live.
+    setEffectiveTheme(getEffectiveTheme(theme));
     saveUi({ ...loadUi(), theme });
 
-    // If system mode, listen for system theme changes
+    // If system mode, listen for system theme changes. The `theme` state stays
+    // 'system' here (chrome re-paints via applyTheme's direct DOM class toggle),
+    // but we ALSO push the resolved effective theme into React state so the
+    // terminal surface — which re-themes imperatively in PaneTile — live-updates
+    // on an OS flip (nuance #1).
     if (theme === 'system') {
-      const cleanup = listenSystemThemeChange(() => {
+      const cleanup = listenSystemThemeChange((t) => {
         applyTheme('system');
+        setEffectiveTheme(t);
       });
       return cleanup;
     }
@@ -166,8 +188,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalColorScheme, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalColorScheme, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost, restoreOnStartup, startedEmpty]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -530,6 +552,12 @@ function App() {
   }, []);
   const openPaneSet = new Set(openPanes);
   const tiles = openPanes.map((id) => ({ id }));
+  // Resolved terminal surface color. 'auto' defers to the OS-resolved effective
+  // theme; 'dark'/'light' force it. Recomputed every render so a manual Color
+  // Scheme change — and, critically, an OS theme flip while Color Scheme =
+  // "System" (which updates effectiveTheme via listenSystemThemeChange) — changes
+  // this prop and re-themes already-open panes live via PaneTile's effect.
+  const terminalTheme = resolveTerminalTheme(terminalColorScheme, effectiveTheme);
   // The chat the observer should bind to when "observe focused" is clicked.
   const focusedChat = chats.find((c) => (c.key || c.id) === focused) || null;
 
@@ -645,6 +673,8 @@ function App() {
           setTerminalFontSize={setTerminalFontSize}
           terminalScrollback={terminalScrollback}
           setTerminalScrollback={setTerminalScrollback}
+          terminalColorScheme={terminalColorScheme}
+          setTerminalColorScheme={setTerminalColorScheme}
           defaultNewChatPreset={defaultNewChatPreset}
           setDefaultNewChatPreset={setDefaultNewChatPreset}
           defaultNewChatHost={defaultNewChatHost}
@@ -725,6 +755,7 @@ function App() {
             onFontSizeChange={setTerminalFontSize}
             scrollback={terminalScrollback}
             paneLayout={paneLayout}
+            terminalTheme={terminalTheme}
           />
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"
