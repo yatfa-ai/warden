@@ -35,13 +35,22 @@ import { spawnSync } from 'node:child_process';
 // literal '|' in its subject to exercise the parser end-to-end over the wire.
 const SUBJECTS = ['third commit', 'fix: handle the | pipe in subject', 'first commit'];
 
+// Commits used to build the "behind" fixture (WARDEN-225): all four are committed,
+// ALL pushed to a bare origin (so @{u} sits at the tip), then HEAD is reset back
+// two. The two dropped commits are exactly what `git log HEAD..@{u}` must surface.
+// Oldest-first here; the expected endpoint order is newest-first (bottom→top).
+const BEHIND_SUBJECTS = ['base one', 'base two', 'incoming: add feature X', 'incoming: fix bug Y'];
+
 let parseGitLogLine;
+let buildGitLogCmd;
 let httpServer;
 let baseUrl;
 let originalHome;
 let tempHome;
 let gitRepo;
 let nonGitDir;
+let behindRepo;
+let bareOrigin;
 
 function git(args, cwd) {
   const r = spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'inherit'] });
@@ -74,19 +83,43 @@ before(async () => {
   nonGitDir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitlog-nongit-'));
   fs.writeFileSync(path.join(nonGitDir, 'readme.txt'), 'not a repo\n');
 
-  // Catalog with two LOCAL manual chats: one in the git repo, one in the non-git dir.
-  // Resolved by bare session id (no ':' prefix) → no host/tmux discovery runs.
+  // A repo whose upstream (@{u}) is AHEAD of HEAD — the "behind" case (WARDEN-225).
+  // Commit all four subjects, push them ALL to a bare origin (→ @{u} at the tip),
+  // then reset HEAD back two commits. HEAD is now behind @{u} by exactly the last
+  // two commits — those are what `git log HEAD..@{u}` must list.
+  behindRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitlog-behind-'));
+  git(['init', '-q'], behindRepo);
+  git(['config', 'user.email', 'test@example.com'], behindRepo);
+  git(['config', 'user.name', 'Tester'], behindRepo);
+  BEHIND_SUBJECTS.forEach((subject, i) => {
+    fs.writeFileSync(path.join(behindRepo, `b${i}.txt`), `${i}\n`);
+    git(['add', '.'], behindRepo);
+    git(['commit', '-q', '-m', subject], behindRepo);
+  });
+  bareOrigin = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitlog-bare-'));
+  git(['init', '--bare', '-q'], bareOrigin);
+  git(['remote', 'add', 'origin', bareOrigin], behindRepo);
+  // -u sets upstream tracking so @{u} resolves; pushing HEAD is branch-name
+  // agnostic (robust to a master/main default).
+  git(['push', '-u', 'origin', 'HEAD'], behindRepo);
+  // Drop the last two commits locally → HEAD is behind @{u} by exactly those two.
+  git(['reset', '--hard', 'HEAD~2'], behindRepo);
+
+  // Catalog with LOCAL manual chats: the git repo, the non-git dir, and the behind
+  // repo. Resolved by bare session id (no ':' prefix) → no host/tmux discovery runs.
   fs.writeFileSync(
     path.join(wardenDir, 'chats.json'),
     JSON.stringify([
       { host: '(local)', session: 'warden-gitlog', cwd: gitRepo, cmd: 'bash', name: 'warden-gitlog' },
       { host: '(local)', session: 'warden-nongit', cwd: nonGitDir, cmd: 'bash', name: 'warden-nongit' },
+      { host: '(local)', session: 'warden-behind', cwd: behindRepo, cmd: 'bash', name: 'warden-behind' },
     ]),
   );
 
   // Import server.js ONCE — after HOME/config/catalog are in place.
   const server = await import('./server.js');
   parseGitLogLine = server.parseGitLogLine;
+  buildGitLogCmd = server.buildGitLogCmd;
   httpServer = server.app.listen(0, '127.0.0.1');
   await new Promise((resolve, reject) => {
     httpServer.once('listening', resolve);
@@ -99,7 +132,7 @@ after(async () => {
   if (httpServer) await new Promise((r) => httpServer.close(r));
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  for (const d of [gitRepo, nonGitDir, tempHome]) {
+  for (const d of [gitRepo, nonGitDir, behindRepo, bareOrigin, tempHome]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 });
@@ -197,5 +230,91 @@ describe('/api/git-log HTTP endpoint (real Express app from server.js)', () => {
   it('returns 404 for an unknown chat id', async () => {
     const res = await fetch(`${baseUrl}/api/git-log?id=does-not-exist`);
     assert.strictEqual(res.status, 404);
+  });
+});
+
+describe('/api/git-log range=incoming (behind commits — WARDEN-225)', () => {
+  it('sanity: the behind fixture is actually 2 behind, 0 ahead', () => {
+    // Confirms the fixture is in the state the cases below assume: @{u} ahead of
+    // HEAD by exactly two. `rev-list --left-right --count @{u}...HEAD` → "behind\tahead".
+    const ab = git(['rev-list', '--left-right', '--count', '@{u}...HEAD'], behindRepo)
+      .stdout.toString().trim();
+    assert.strictEqual(ab, '2\t0', `expected "2\\t0" (behind=2, ahead=0), got "${ab}"`);
+  });
+
+  it('returns exactly the incoming commits (newest first) with range=incoming', async () => {
+    const res = await fetch(`${baseUrl}/api/git-log?id=warden-behind&range=incoming`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.error, null);
+    assert.ok(Array.isArray(body.commits));
+    assert.strictEqual(body.commits.length, 2);
+    // Newest first: the two commits @{u} has that HEAD doesn't.
+    assert.strictEqual(body.commits[0].subject, 'incoming: fix bug Y');
+    assert.strictEqual(body.commits[1].subject, 'incoming: add feature X');
+    for (const c of body.commits) {
+      assert.match(c.hash, /^[0-9a-f]{4,}$/);
+      assert.strictEqual(c.author, 'Tester');
+      assert.ok(typeof c.date === 'string' && c.date.length > 0, 'relative date must be non-empty');
+    }
+  });
+
+  it('without range=incoming, the same repo returns HEAD-reachable commits (unchanged)', async () => {
+    // Absent range keeps today's behavior: HEAD is at 'base two', so the two
+    // HEAD-reachable commits are base two + base one — NOT the incoming ones.
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-behind`)).json();
+    assert.strictEqual(body.commits.length, 2);
+    assert.strictEqual(body.commits[0].subject, 'base two');
+    assert.strictEqual(body.commits[1].subject, 'base one');
+  });
+
+  it('honors limit on the incoming range (returns only the N newest incoming)', async () => {
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-behind&range=incoming&limit=1`)).json();
+    assert.strictEqual(body.commits.length, 1);
+    assert.strictEqual(body.commits[0].subject, 'incoming: fix bug Y');
+  });
+
+  it('clamps an oversized limit to 50 on the incoming range (no error)', async () => {
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-behind&range=incoming&limit=999`)).json();
+    assert.strictEqual(body.commits.length, 2); // only 2 incoming exist
+    assert.strictEqual(body.error, null);
+  });
+
+  it('returns { commits: [], error: null } (200, not 500) when there is no upstream', async () => {
+    // gitRepo has commits but NO upstream configured → @{u} is unset → git exits
+    // non-zero with empty stdout → empty list. Mirrors parseAheadBehind's null
+    // tolerance; the badge must never see a 500 here.
+    const res = await fetch(`${baseUrl}/api/git-log?id=warden-gitlog&range=incoming`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.deepStrictEqual(body.commits, []);
+    assert.strictEqual(body.error, null);
+  });
+});
+
+describe('buildGitLogCmd (remote SSH command — WARDEN-225)', () => {
+  it('splices the shellQuoted HEAD..@{u} range when incoming', () => {
+    const cmd = buildGitLogCmd('/repo', 50, true);
+    // The token is single-quoted (brace-expansion guard for '{'/'}'), spliced in
+    // bare with surrounding spaces — no double-wrap, no missing separator.
+    assert.ok(cmd.includes("git log -50 'HEAD..@{u}' "), `expected the quoted range spliced cleanly: ${cmd}`);
+  });
+
+  it('omits the range token entirely when not incoming (HEAD-reachable)', () => {
+    const cmd = buildGitLogCmd('/repo', 5, false);
+    assert.ok(!cmd.includes('@{u}'), `unexpected upstream token in HEAD-reachable cmd: ${cmd}`);
+    assert.match(cmd, /git log -5 /);
+  });
+
+  it('shellQuotes the pretty format so "|" is not read as a shell pipe', () => {
+    const cmd = buildGitLogCmd('/repo', 5, false);
+    // The whole %h|%s|%an|%ar format is single-quoted as one token, so the '|'
+    // separators are argument characters — not shell pipes.
+    assert.ok(cmd.includes("--pretty=format:'%h|%s|%an|%ar'"), `pretty format not single-quoted as one token: ${cmd}`);
+  });
+
+  it('shellQuotes a cwd containing spaces', () => {
+    const cmd = buildGitLogCmd('/a/b c', 5, false);
+    assert.ok(cmd.includes("'/a/b c'"), `cwd with a space must be single-quoted: ${cmd}`);
   });
 });
