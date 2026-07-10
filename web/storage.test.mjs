@@ -33,7 +33,7 @@ const { code } = await transformWithOxc(src, storagePath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-storage-test-'));
 const tmpFile = join(tmpDir, 'storage.mjs');
 writeFileSync(tmpFile, code);
-const { loadUi, saveUi, persistUiState, initialWorkspace, validatePresetName, isReservedPresetName, PRESET_NAME_MAX } = await import(tmpFile);
+const { loadUi, saveUi, persistUiState, initialWorkspace, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, SIDEBAR_MIN, SIDEBAR_MAX, OBSERVER_MIN, OBSERVER_MAX, PANE_MIN, HEALTH_WIDTH } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -396,6 +396,77 @@ test('sanity: naively persisting the live empty arrays WOULD wipe it (guard agai
   // The naive (wrong) write the fix replaces:
   saveUi({ ...loadUi(), activeTabs: [], openPanes: [], focused: null });
   assert.deepEqual(loadUi().activeTabs, [], 'naive write wipes the workspace (this is what persistUiState prevents)');
+});
+
+// Middle pane width implied by a (window, sidebar, observer, health?) layout.
+const middle = (w, sb, ob, healthCollapsed = true) => w - sb - ob - (healthCollapsed ? 0 : HEALTH_WIDTH);
+
+console.log('\nlayout width clamps: no panel crushes below a usable floor (WARDEN-183)');
+test('constants define usable floors + caps + the middle-pane reserve', () => {
+  assert.equal(SIDEBAR_MIN, 180);
+  assert.equal(SIDEBAR_MAX, 400);
+  assert.equal(OBSERVER_MIN, 300);
+  assert.equal(OBSERVER_MAX, 600);
+  assert.equal(PANE_MIN, 320);
+  assert.equal(HEALTH_WIDTH, 320);
+});
+
+test('clampSidebarWidth applies the [min,max] band on a wide window', () => {
+  const ctx = { windowWidth: 1400, healthCollapsed: true };
+  assert.equal(clampSidebarWidth(10, 380, ctx), SIDEBAR_MIN, 'floors to SIDEBAR_MIN');
+  assert.equal(clampSidebarWidth(9999, 380, ctx), SIDEBAR_MAX, 'caps at SIDEBAR_MAX');
+  assert.equal(clampSidebarWidth(250, 380, ctx), 250, 'passes through in-range values');
+});
+
+test('clampSidebarWidth caps a wide drag so the middle pane keeps its floor', () => {
+  // 900px window (the Electron floor), observer already valid at 380. Dragging
+  // the sidebar all the way to its 400 cap would crush the middle; the clamp
+  // must stop it at the point the middle pane reserve (PANE_MIN) is preserved.
+  const ctx = { windowWidth: 900, healthCollapsed: true };
+  const sb = clampSidebarWidth(400, 380, ctx);
+  assert.equal(sb, 200, 'sidebar capped at 200, not 400');
+  assert.ok(middle(900, sb, 380) >= PANE_MIN, 'middle pane >= PANE_MIN after sidebar drag');
+});
+
+test('clampObserverWidth is symmetric — caps a wide drag to protect the middle', () => {
+  const ctx = { windowWidth: 900, healthCollapsed: true };
+  const ob = clampObserverWidth(600, 220, ctx);
+  assert.equal(ob, 360, 'observer capped at 360, not 600');
+  assert.ok(middle(900, 220, ob) >= PANE_MIN, 'middle pane >= PANE_MIN after observer drag');
+});
+
+test('clampLayoutWidths is a no-op when the window has room for everything', () => {
+  const r = clampLayoutWidths({ sidebar: 220, observer: 380 }, { windowWidth: 1400, healthCollapsed: true });
+  assert.deepEqual(r, { sidebar: 220, observer: 380 });
+  assert.ok(middle(1400, r.sidebar, r.observer) >= PANE_MIN);
+});
+
+test('clampLayoutWidths trims a stale both-max pair on load so the middle never collapses', () => {
+  // Persisted 400/600 (saved on a big window) loaded at the 900px floor: the
+  // pair must be trimmed so the middle pane keeps PANE_MIN.
+  const r = clampLayoutWidths({ sidebar: 400, observer: 600 }, { windowWidth: 900, healthCollapsed: true });
+  assert.ok(r.sidebar >= SIDEBAR_MIN && r.sidebar <= SIDEBAR_MAX, 'sidebar stays in band');
+  assert.ok(r.observer >= OBSERVER_MIN && r.observer <= OBSERVER_MAX, 'observer stays in band');
+  assert.equal(middle(900, r.sidebar, r.observer), PANE_MIN, 'middle pane exactly at the floor');
+  assert.equal(r.sidebar + r.observer, 580, 'pair sums to the shared space (900 - 320)');
+});
+
+test('clampLayoutWidths accounts for the expanded health panel', () => {
+  // Health expanded reserves HEALTH_WIDTH too, so the shared space shrinks and
+  // the pair is trimmed harder — but the middle pane still keeps its floor.
+  const r = clampLayoutWidths({ sidebar: 220, observer: 380 }, { windowWidth: 1200, healthCollapsed: false });
+  assert.ok(middle(1200, r.sidebar, r.observer, false) >= PANE_MIN, 'middle >= PANE_MIN with health open');
+  assert.ok(r.sidebar + r.observer <= 1200 - PANE_MIN - HEALTH_WIDTH, 'pair fits the health-aware shared space');
+});
+
+test('clampLayoutWidths preserves the floors at the 900px window with health collapsed', () => {
+  // The degenerate-but-reachable minimum: both panels at their defaults on the
+  // 900px floor. Neither should fall below its usable floor; the middle keeps
+  // its reserve. (180 + 300 + 320 = 800 fits in 900.)
+  const r = clampLayoutWidths({ sidebar: 220, observer: 380 }, { windowWidth: 900, healthCollapsed: true });
+  assert.ok(r.sidebar >= SIDEBAR_MIN, 'sidebar >= SIDEBAR_MIN');
+  assert.ok(r.observer >= OBSERVER_MIN, 'observer >= OBSERVER_MIN');
+  assert.ok(middle(900, r.sidebar, r.observer) >= PANE_MIN, 'middle pane >= PANE_MIN');
 });
 
 console.log(`\n✓ STORAGE TESTS PASS (${passed})`);

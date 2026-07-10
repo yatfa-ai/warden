@@ -513,7 +513,7 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
             placeholder={conn ? 'Ask the observer…  (Enter to send, Shift+Enter for newline)' : 'Connecting…'}
             rows={1}
             disabled={!conn}
-            className="min-h-9 max-h-40 resize-none border-0 bg-transparent p-0 shadow-none focus-visible:ring-0"
+            className="min-h-9 min-w-48 max-h-40 resize-none border-0 bg-transparent p-0 shadow-none focus-visible:ring-0"
           />
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1">

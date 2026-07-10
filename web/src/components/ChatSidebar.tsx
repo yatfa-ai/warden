@@ -859,14 +859,14 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
         .map((x) => x.id);
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="@container flex flex-col h-full min-h-0">
       <div className="flex items-center gap-2 compact:gap-1 px-3 py-2 compact:py-1.5 border-b shrink-0">
-        <span className="text-xs text-muted-foreground">active</span>
+        <span className="text-xs text-muted-foreground @max-[20rem]:hidden">active</span>
         <Input
           placeholder="filter..."
           value={tabSearchQuery}
           onChange={(e) => setTabSearchQuery(e.target.value)}
-          className="h-6 text-[10px] px-2 flex-1 max-w-[120px]"
+          className="h-6 text-[10px] px-2 flex-1 max-w-[120px] min-w-20"
         />
         <AgentFilterSortControls
           agentFilter={agentFilter}
@@ -874,8 +874,8 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           onFilterChange={setAgentFilter}
           onSortChange={setAgentSort}
         />
-        <Badge variant="secondary" className="text-xs">{sortedTabs.length}</Badge>
-        <UpdatedAgo at={lastRefreshAt} />
+        <Badge variant="secondary" className="text-xs @max-[18rem]:hidden">{sortedTabs.length}</Badge>
+        <span className="@max-[20rem]:hidden"><UpdatedAgo at={lastRefreshAt} /></span>
         <button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={onRefresh} disabled={loading} title="refresh">
           {loading ? <Skeleton className="h-3 w-3" /> : '↻'}
         </button>

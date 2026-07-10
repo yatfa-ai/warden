@@ -225,8 +225,8 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
         {n === 0 ? (
           <div className="text-xs text-muted-foreground p-8 text-center">click a chat to open a live pane</div>
         ) : (
-          <div data-pane-grid className="grid gap-2 compact:gap-1 h-full min-h-0 transition-all duration-200 ease-in-out"
-            style={{ gridTemplateColumns: `repeat(${maximized ? 1 : cols}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${maximized ? 1 : rows}, minmax(0, 1fr))` }}>
+          <div data-pane-grid className="grid gap-2 compact:gap-1 h-full min-h-0 overflow-x-auto transition-all duration-200 ease-in-out"
+            style={{ gridTemplateColumns: `repeat(${maximized ? 1 : cols}, minmax(9rem, 1fr))`, gridTemplateRows: `repeat(${maximized ? 1 : rows}, minmax(0, 1fr))` }}>
             {visible.map((t) => {
               const chat = chats.find((c) => (c.key || c.id) === t.id);
               return (
