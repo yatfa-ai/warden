@@ -33,7 +33,7 @@ const { code } = await transformWithOxc(src, storagePath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-storage-test-'));
 const tmpFile = join(tmpDir, 'storage.mjs');
 writeFileSync(tmpFile, code);
-const { loadUi, saveUi, persistUiState, initialWorkspace } = await import(tmpFile);
+const { loadUi, saveUi, persistUiState, initialWorkspace, validatePresetName, isReservedPresetName, PRESET_NAME_MAX } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -138,6 +138,19 @@ test('reserved built-in names (claude/shell) are rejected as custom presets', ()
   mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: 'claude', cmd: 'whatever' }, { name: 'shell', cmd: 'bash' }, { name: 'codex', cmd: 'codex' }] }));
   assert.deepEqual(loadUi().customPresets, [{ name: 'codex', cmd: 'codex' }]);
 });
+test('reserved built-in names are rejected CASE-INSENSITIVELY (no "Claude"/"Shell" near-collision)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: 'Claude', cmd: 'whatever' }, { name: 'SHELL', cmd: 'bash' }, { name: 'ShElL', cmd: 'zsh' }, { name: 'codex', cmd: 'codex' }] }));
+  // Every case variant of a built-in is dropped, matching the case-insensitive dedup.
+  assert.deepEqual(loadUi().customPresets, [{ name: 'codex', cmd: 'codex' }]);
+});
+test('the name length cap is exactly PRESET_NAME_MAX (boundary: N ok, N+1 dropped)', () => {
+  reset();
+  const exact = 'x'.repeat(PRESET_NAME_MAX);
+  const tooLong = 'x'.repeat(PRESET_NAME_MAX + 1);
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: exact, cmd: 'a' }, { name: tooLong, cmd: 'b' }] }));
+  assert.deepEqual(loadUi().customPresets, [{ name: exact, cmd: 'a' }]);
+});
 test('duplicate names are de-duplicated (case-insensitive, first wins)', () => {
   reset();
   mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: 'Codex', cmd: 'codex' }, { name: 'codex', cmd: 'codex2' }] }));
@@ -148,6 +161,50 @@ test('names over 32 chars are dropped', () => {
   const long = 'x'.repeat(33);
   mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: long, cmd: 'cmd' }, { name: 'ok', cmd: 'ok' }] }));
   assert.deepEqual(loadUi().customPresets, [{ name: 'ok', cmd: 'ok' }]);
+});
+
+console.log('\nvalidatePresetName / isReservedPresetName — the write-site contract (add/rename route through this)');
+test('isReservedPresetName matches built-ins case-insensitively', () => {
+  assert.equal(isReservedPresetName('claude'), true);
+  assert.equal(isReservedPresetName('SHELL'), true);
+  assert.equal(isReservedPresetName('ShElL'), true);
+  assert.equal(isReservedPresetName('codex'), false);
+  assert.equal(isReservedPresetName(''), false);
+});
+test('validatePresetName returns null for an acceptable name', () => {
+  assert.equal(validatePresetName('codex', [{ name: 'gemini', cmd: 'g' }]), null);
+});
+test('validatePresetName flags empty (after trim)', () => {
+  assert.equal(validatePresetName('', []), 'empty');
+  assert.equal(validatePresetName('   ', []), 'empty');
+});
+test('validatePresetName flags names longer than PRESET_NAME_MAX', () => {
+  // Regression for the blocking review issue: rename must not bypass the cap.
+  assert.equal(validatePresetName('x'.repeat(PRESET_NAME_MAX), []), null);
+  assert.equal(validatePresetName('x'.repeat(PRESET_NAME_MAX + 1), []), 'too-long');
+});
+test('validatePresetName flags reserved built-ins case-insensitively', () => {
+  assert.equal(validatePresetName('claude', []), 'reserved');
+  assert.equal(validatePresetName('Claude', []), 'reserved');
+  assert.equal(validatePresetName('SHELL', []), 'reserved');
+});
+test('validatePresetName flags duplicates case-insensitively', () => {
+  const existing = [{ name: 'codex', cmd: 'c' }];
+  assert.equal(validatePresetName('codex', existing), 'duplicate');
+  assert.equal(validatePresetName('CODEX', existing), 'duplicate');
+  assert.equal(validatePresetName('gemini', existing), null);
+});
+test('validatePresetName excludes `except` so a case-only rename is allowed', () => {
+  // Renaming codex -> Codex must NOT be flagged as its own duplicate.
+  const existing = [{ name: 'codex', cmd: 'c' }];
+  assert.equal(validatePresetName('Codex', existing, 'codex'), null);
+  // But a rename colliding with a DIFFERENT preset is still blocked.
+  const two = [{ name: 'codex', cmd: 'c' }, { name: 'gemini', cmd: 'g' }];
+  assert.equal(validatePresetName('gemini', two, 'codex'), 'duplicate');
+});
+test('validatePresetName trims before validating (matches load-time normalization)', () => {
+  assert.equal(validatePresetName('  codex  ', []), null);
+  assert.equal(validatePresetName('  codex  ', [{ name: 'codex', cmd: 'c' }]), 'duplicate');
 });
 
 console.log('\ndefaultNewChatPreset (widened) accepts a custom preset name and falls back on delete');

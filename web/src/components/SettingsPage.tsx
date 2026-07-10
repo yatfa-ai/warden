@@ -16,7 +16,7 @@ import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ArrowLeft, Trash2 } from 'lucide-react';
 import { type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { type Density } from '@/lib/density';
-import { type RestoreOnStartup, type PaneLayout, type CustomPreset, BUILTIN_PRESETS } from '@/lib/storage';
+import { type RestoreOnStartup, type PaneLayout, type CustomPreset, type PresetNameIssue, PRESET_NAME_MAX, validatePresetName } from '@/lib/storage';
 import { putJson } from '@/lib/api';
 import { toast } from 'sonner';
 
@@ -121,11 +121,15 @@ function PresetRow({
   onDelete: (name: string) => void;
 }) {
   const [nameDraft, setNameDraft] = useState(preset.name);
-  // Re-sync the draft if the preset's name changes from the outside (e.g. after
-  // a coordinated default rename or a load), so the input never drifts.
+  const [cmdDraft, setCmdDraft] = useState(preset.cmd);
+  // Re-sync the drafts if the preset changes from the outside (e.g. after a
+  // coordinated default rename or a load), so the inputs never drift.
   useEffect(() => {
     setNameDraft(preset.name);
   }, [preset.name]);
+  useEffect(() => {
+    setCmdDraft(preset.cmd);
+  }, [preset.cmd]);
 
   const commitName = () => {
     const trimmed = nameDraft.trim();
@@ -133,6 +137,19 @@ function PresetRow({
       if (!onRename(preset.name, trimmed)) setNameDraft(preset.name); // revert on rejection
     } else {
       setNameDraft(preset.name); // empty or unchanged → revert
+    }
+  };
+
+  // Commit the command on blur/Enter, mirroring commitName: free-edit while
+  // focused, but never persist an empty command — parseCustomPresets would drop
+  // the whole preset on next reload (silent data loss). Empty on commit reverts
+  // to the last saved value, so the field is editable but never goes dangling.
+  const commitCmd = () => {
+    const trimmed = cmdDraft.trim();
+    if (trimmed) {
+      onCmdChange(preset.name, trimmed);
+    } else {
+      setCmdDraft(preset.cmd); // empty → revert
     }
   };
 
@@ -150,6 +167,7 @@ function PresetRow({
           className="h-8 flex-1"
           placeholder="name"
           aria-label="Preset name"
+          maxLength={PRESET_NAME_MAX}
         />
         {isDefault && <Badge variant="secondary">default</Badge>}
         <Button
@@ -162,8 +180,13 @@ function PresetRow({
         </Button>
       </div>
       <Input
-        value={preset.cmd}
-        onChange={(e) => onCmdChange(preset.name, e.target.value)}
+        value={cmdDraft}
+        onChange={(e) => setCmdDraft(e.target.value)}
+        onBlur={commitCmd}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.currentTarget.blur();
+          if (e.key === 'Escape') setCmdDraft(preset.cmd);
+        }}
         className="h-8"
         placeholder="command"
         aria-label={`${preset.name} command`}
@@ -280,7 +303,16 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
   const [newPresetName, setNewPresetName] = useState('');
   const [newPresetCmd, setNewPresetCmd] = useState('');
 
-  const isReservedName = (name: string) => (BUILTIN_PRESETS as readonly string[]).includes(name);
+  // Human message for a non-null preset-name validation issue. The contract
+  // itself lives in storage.ts (validatePresetName); this just renders it.
+  const presetNameErrorMessage = (name: string, issue: PresetNameIssue): string => {
+    switch (issue) {
+      case 'empty': return 'Preset needs a name.';
+      case 'too-long': return `Preset name must be ${PRESET_NAME_MAX} characters or fewer.`;
+      case 'reserved': return `"${name}" is a reserved preset name (use the built-in claude/shell instead).`;
+      case 'duplicate': return `A preset named "${name}" already exists.`;
+    }
+  };
 
   const addPreset = () => {
     const name = newPresetName.trim();
@@ -289,12 +321,9 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
       toast.error('Preset needs both a name and a command.');
       return;
     }
-    if (isReservedName(name)) {
-      toast.error(`"${name}" is a reserved preset name (use the built-in instead).`);
-      return;
-    }
-    if (customPresets.some((p) => p.name.toLowerCase() === name.toLowerCase())) {
-      toast.error(`A preset named "${name}" already exists.`);
+    const issue = validatePresetName(name, customPresets);
+    if (issue) {
+      toast.error(presetNameErrorMessage(name, issue));
       return;
     }
     setCustomPresets([...customPresets, { name, cmd }]);
@@ -304,23 +333,29 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
 
   // Returns true on success (PresetRow reverts its draft on false). Coordinated
   // with the default so renaming the current default keeps it selected.
+  // Validates through the shared storage contract so a name the load-time
+  // sanitizer would drop (too long / reserved / duplicate) can never be persisted.
   const renamePreset = (oldName: string, newName: string): boolean => {
-    if (isReservedName(newName)) {
-      toast.error(`"${newName}" is a reserved preset name (use the built-in instead).`);
+    const issue = validatePresetName(newName, customPresets, oldName);
+    if (issue) {
+      // commitName already reverts an empty draft silently before calling us;
+      // only surface a toast for the rejectable issues.
+      if (issue !== 'empty') toast.error(presetNameErrorMessage(newName.trim(), issue));
       return false;
     }
-    // Exclude the preset being renamed so a case-only rename (codex → Codex) is allowed.
-    if (customPresets.some((p) => p.name !== oldName && p.name.toLowerCase() === newName.toLowerCase())) {
-      toast.error(`A preset named "${newName}" already exists.`);
-      return false;
-    }
-    setCustomPresets(customPresets.map((p) => (p.name === oldName ? { ...p, name: newName } : p)));
-    if (defaultNewChatPreset === oldName) setDefaultNewChatPreset(newName);
+    const name = newName.trim();
+    setCustomPresets(customPresets.map((p) => (p.name === oldName ? { ...p, name } : p)));
+    if (defaultNewChatPreset === oldName) setDefaultNewChatPreset(name);
     return true;
   };
 
   const updatePresetCmd = (name: string, cmd: string) => {
-    setCustomPresets(customPresets.map((p) => (p.name === name ? { ...p, cmd } : p)));
+    const trimmed = cmd.trim();
+    // Never persist an empty command — parseCustomPresets would drop the whole
+    // preset on next reload (silent data loss). PresetRow also reverts an empty
+    // draft on blur, but this guards the contract at the write site itself.
+    if (!trimmed) return;
+    setCustomPresets(customPresets.map((p) => (p.name === name ? { ...p, cmd: trimmed } : p)));
   };
 
   const deletePreset = (name: string) => {
@@ -780,7 +815,7 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                       className="h-8"
                       placeholder="name (e.g. codex)"
                       aria-label="New preset name"
-                      maxLength={32}
+                      maxLength={PRESET_NAME_MAX}
                     />
                     <Input
                       value={newPresetCmd}
