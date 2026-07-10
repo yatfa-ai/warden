@@ -113,6 +113,37 @@ test('both prefs survive an empty-mode mount (carried by the live spread, not th
   assert.equal(after.defaultNewChatHost, 'prod-box');
 });
 
+console.log('\npaneLayout round-trips through loadUi/saveUi');
+test('defaults to "auto" when nothing is stored', () => {
+  reset();
+  assert.equal(loadUi().paneLayout, 'auto');
+});
+test('"stacked" round-trips', () => {
+  reset();
+  saveUi({ ...loadUi(), paneLayout: 'stacked' });
+  assert.equal(loadUi().paneLayout, 'stacked');
+});
+test('"side-by-side" round-trips', () => {
+  reset();
+  saveUi({ ...loadUi(), paneLayout: 'side-by-side' });
+  assert.equal(loadUi().paneLayout, 'side-by-side');
+});
+test('"auto" round-trips', () => {
+  reset();
+  saveUi({ ...loadUi(), paneLayout: 'auto' });
+  assert.equal(loadUi().paneLayout, 'auto');
+});
+test('a stored invalid value coerces back to "auto" on load (defensive)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], paneLayout: 'diagonal' }));
+  assert.equal(loadUi().paneLayout, 'auto');
+});
+test('a missing field loads as "auto"', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  assert.equal(loadUi().paneLayout, 'auto');
+});
+
 console.log('\ninitialWorkspace gates the workspace on mount');
 test('"previous" restores the last-saved workspace', () => {
   const disk = { ...loadUi(), activeTabs: ['a', 'b'], hiddenTabs: ['h'], openPanes: ['a'], focused: 'a', paneHost: { a: 'host' } };

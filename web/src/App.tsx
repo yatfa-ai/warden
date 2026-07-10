@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
-import { loadUi, saveUi, persistUiState, initialWorkspace, type RestoreOnStartup } from '@/lib/storage';
+import { loadUi, saveUi, persistUiState, initialWorkspace, type RestoreOnStartup, type PaneLayout } from '@/lib/storage';
 import { applyTheme, listenSystemThemeChange, type Theme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
 import type { Chat } from '@/lib/types';
@@ -70,6 +70,7 @@ function App() {
   const [healthCollapsed, setHealthCollapsed] = useState(uiState.healthCollapsed ?? true);
   const [theme, setTheme] = useState<Theme>(() => uiState.theme ?? 'system');
   const [density, setDensity] = useState<Density>(() => uiState.density ?? 'comfortable');
+  const [paneLayout, setPaneLayout] = useState<PaneLayout>(() => uiState.paneLayout ?? 'auto');
   const [terminalFontSize, setTerminalFontSize] = useState(() => uiState.terminalFontSize ?? 14);
   const [terminalScrollback, setTerminalScrollback] = useState(() => uiState.terminalScrollback ?? 10000);
   // Default agent type + host pre-filled in the ＋ new chat form. Pure client-side
@@ -165,8 +166,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, theme, density, paneHost, defaultNewChatPreset, defaultNewChatHost }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, theme, density, paneHost, defaultNewChatPreset, defaultNewChatHost, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost, restoreOnStartup, startedEmpty]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -636,6 +637,8 @@ function App() {
           setTheme={setTheme}
           density={density}
           setDensity={setDensity}
+          paneLayout={paneLayout}
+          setPaneLayout={setPaneLayout}
           restoreOnStartup={restoreOnStartup}
           setRestoreOnStartup={setRestoreOnStartup}
           terminalFontSize={terminalFontSize}
@@ -721,6 +724,7 @@ function App() {
             fontSize={terminalFontSize}
             onFontSizeChange={setTerminalFontSize}
             scrollback={terminalScrollback}
+            paneLayout={paneLayout}
           />
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"

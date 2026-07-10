@@ -16,7 +16,7 @@ import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ArrowLeft } from 'lucide-react';
 import { type Theme } from '@/lib/theme';
 import { type Density } from '@/lib/density';
-import { type RestoreOnStartup } from '@/lib/storage';
+import { type RestoreOnStartup, type PaneLayout } from '@/lib/storage';
 import { putJson } from '@/lib/api';
 import { toast } from 'sonner';
 
@@ -52,6 +52,12 @@ interface Props {
   // effect. It must never be added to the `config` state / PUT /api/config body.
   density: Density;
   setDensity: (density: Density) => void;
+  // Pane layout is a pure client-side localStorage pref (NOT backend config):
+  // it applies instantly via the prop callback (PaneGrid recomputes cols/rows
+  // on render) and is persisted by App's saveUi effect. It must never be added
+  // to the `config` state / PUT /api/config body.
+  paneLayout: PaneLayout;
+  setPaneLayout: (layout: PaneLayout) => void;
   // "Restore workspace on startup" is likewise a pure client-side localStorage
   // pref: it gates App's workspace initializers and is persisted by App's saveUi
   // effect. It must never be added to the `config` state / PUT /api/config body.
@@ -84,7 +90,7 @@ function SettingsSection({ title, children }: { title: string; children: ReactNo
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -507,6 +513,23 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   </Select>
                   <p className="text-xs text-muted-foreground">
                     "Compact" tightens row and header spacing so more agents fit on screen. Applies instantly and is remembered across reloads.
+                  </p>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="paneLayout">Pane layout</Label>
+                  <Select value={paneLayout} onValueChange={(v) => setPaneLayout(v as PaneLayout)}>
+                    <SelectTrigger id="paneLayout" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="auto">Auto grid (default)</SelectItem>
+                      <SelectItem value="stacked">Stacked (single column)</SelectItem>
+                      <SelectItem value="side-by-side">Side-by-side (single row)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Controls how open agent panes are arranged. "Auto grid" splits them into a near-square grid, "Stacked" stacks them in one full-width column, and "Side-by-side" lays them out in a single row. Applies instantly and is remembered across reloads.
                   </p>
                 </div>
 

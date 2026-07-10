@@ -15,6 +15,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import type { Chat } from '@/lib/types';
+import type { PaneLayout } from '@/lib/storage';
 
 export interface OpenTile { id: string }
 
@@ -37,11 +38,12 @@ interface Props {
   fontSize: number;
   onFontSizeChange: (n: number) => void;
   scrollback: number;
+  paneLayout: PaneLayout;
 }
 
 function colsFor(n: number) { return n <= 1 ? 1 : Math.ceil(Math.sqrt(n)); }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onOpenChat, onForceKill, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onOpenChat, onForceKill, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, paneLayout }: Props) {
   const [splitOpen, setSplitOpen] = useState(false);
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
@@ -165,8 +167,25 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
 
   const visible = maximized ? tiles.filter((t) => t.id === maximized) : tiles;
   const n = visible.length;
-  const cols = colsFor(n);
-  const rows = n > 0 ? Math.ceil(n / cols) : 0;
+  // Pane layout preference controls cols/rows. 'auto' reproduces today's exact
+  // grid (cols = colsFor(n), rows = ceil(n/cols)); 'stacked' forces a single
+  // column (cols=1, rows=n); 'side-by-side' forces a single row (cols=n, rows=1).
+  // The n===0 case never renders the grid (the empty-state message is shown
+  // instead), and maximize already forces a 1×1 grid via the style below
+  // (visible is also filtered to the maximized tile), so both are unaffected
+  // regardless of layout.
+  let cols: number;
+  let rows: number;
+  if (paneLayout === 'stacked') {
+    cols = 1;
+    rows = n;
+  } else if (paneLayout === 'side-by-side') {
+    cols = n;
+    rows = n > 0 ? 1 : 0;
+  } else {
+    cols = colsFor(n);
+    rows = n > 0 ? Math.ceil(n / cols) : 0;
+  }
 
   return (
     <div className="flex flex-col h-full min-h-0">
