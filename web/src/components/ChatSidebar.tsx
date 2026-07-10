@@ -20,6 +20,7 @@ import { DiffViewer } from './DiffViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { cn } from '@/lib/utils';
 import { classifyDiffLine, DIFF_LINE_CLASS } from '@/lib/diff';
+import { summarizeProjectGitState } from '@/lib/gitStateSummary';
 import type { Chat, Collection } from '@/lib/types';
 import { loadUi, saveUi } from '@/lib/storage';
 import { StatusDot } from '@/components/StatusDot';
@@ -276,6 +277,20 @@ function SectionToggle({ expanded, onClick, label, title }: {
   );
 }
 
+// Compact uncommitted/unpushed WIP badges appended to the project filter chips
+// (WARDEN-201). Renders nothing for a clean, pushed project — so the chips stay
+// quiet unless an agent actually has uncommitted (yellow `±N`) or unpushed
+// (amber `↑N`) work. Reuses GitBranchBadge's exact glyph + color vocabulary so the
+// chip totals read as part of the same visual system as the per-row branch badge.
+function GitStateBadges({ dirty, unpushed }: { dirty: number; unpushed: number }) {
+  return (
+    <>
+      {dirty > 0 && <span className="ml-0.5 text-[10px] text-yellow-400">±{dirty}</span>}
+      {unpushed > 0 && <span className="ml-0.5 text-[10px] text-amber-400">↑{unpushed}</span>}
+    </>
+  );
+}
+
 export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
@@ -316,6 +331,15 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     }
     return acc;
   }, {} as Record<string, number>);
+
+  // Per-project + global uncommitted (dirty) / unpushed WIP counts for the project
+  // filter chips (WARDEN-201). Reuses the cached gitStatus map (populated per open
+  // tab) — no new fetch. A still-loading or non-git agent counts as neither, so the
+  // chips only flag agents whose repo state is actually known to be dirty/unpushed.
+  const gitStateSummary = useMemo(
+    () => summarizeProjectGitState(chats, gitStatus),
+    [chats, gitStatus],
+  );
 
   const [hostStatuses, setHostStatuses] = useState<Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }>>({});
 
@@ -868,6 +892,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                 className={`text-xs px-2 py-1 rounded transition-all duration-150 ease-out active:scale-95 ${!projectFilter ? 'bg-accent' : 'hover:bg-accent/50'}`}
               >
                 All Projects ({chats.filter(c => c.active).length})
+                <GitStateBadges dirty={gitStateSummary.total.dirty} unpushed={gitStateSummary.total.unpushed} />
               </button>
               {Object.entries(projectCounts).map(([project, count]) => (
                 <button
@@ -876,6 +901,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                   className={`text-xs px-2 py-1 rounded transition-all duration-150 ease-out active:scale-95 ${projectFilter === project ? 'bg-accent' : 'hover:bg-accent/50'}`}
                 >
                   {project} ({count})
+                  <GitStateBadges dirty={gitStateSummary.perProject[project]?.dirty ?? 0} unpushed={gitStateSummary.perProject[project]?.unpushed ?? 0} />
                 </button>
               ))}
             </div>
