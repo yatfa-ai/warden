@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { parseGitStatusPorcelain, parseAheadBehind } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, isConflictStatus } from './gitStatus.js';
 
 describe('parseGitStatusPorcelain', () => {
   it('parses the most common case: unstaged modification as the FIRST file', () => {
@@ -9,9 +9,9 @@ describe('parseGitStatusPorcelain', () => {
     // the first line loses its leading space and the path is truncated.
     const out = ' M README.md\n M src/server.js\n?? test-qa-file.txt\n';
     assert.deepEqual(parseGitStatusPorcelain(out), [
-      { path: 'README.md', status: 'M' },
-      { path: 'src/server.js', status: 'M' },
-      { path: 'test-qa-file.txt', status: '??' },
+      { path: 'README.md', status: 'M', conflict: false },
+      { path: 'src/server.js', status: 'M', conflict: false },
+      { path: 'test-qa-file.txt', status: '??', conflict: false },
     ]);
   });
 
@@ -24,41 +24,41 @@ describe('parseGitStatusPorcelain', () => {
 
   it('parses staged-only changes (X set, Y blank)', () => {
     assert.deepEqual(parseGitStatusPorcelain('M  staged.js\nA  added.js\n'), [
-      { path: 'staged.js', status: 'M' },
-      { path: 'added.js', status: 'A' },
+      { path: 'staged.js', status: 'M', conflict: false },
+      { path: 'added.js', status: 'A', conflict: false },
     ]);
   });
 
   it('parses deletion status', () => {
     assert.deepEqual(parseGitStatusPorcelain(' D gone.js\n'), [
-      { path: 'gone.js', status: 'D' },
+      { path: 'gone.js', status: 'D', conflict: false },
     ]);
   });
 
   it('parses untracked files', () => {
     assert.deepEqual(parseGitStatusPorcelain('?? new.txt\n'), [
-      { path: 'new.txt', status: '??' },
+      { path: 'new.txt', status: '??', conflict: false },
     ]);
   });
 
   it('parses mixed staged+worktree status (two-char code)', () => {
     // X='A' (staged add), Y='M' (further worktree mod) → "AM"
     assert.deepEqual(parseGitStatusPorcelain('AM wip.js\n'), [
-      { path: 'wip.js', status: 'AM' },
+      { path: 'wip.js', status: 'AM', conflict: false },
     ]);
   });
 
   it('preserves spaces inside file paths', () => {
     assert.deepEqual(parseGitStatusPorcelain(' M my cool file.txt\n'), [
-      { path: 'my cool file.txt', status: 'M' },
+      { path: 'my cool file.txt', status: 'M', conflict: false },
     ]);
   });
 
   it('tolerates CRLF line endings (e.g. over SSH)', () => {
     assert.deepEqual(parseGitStatusPorcelain(' M a.txt\r\n M b.txt\r\n?? c.txt\r\n'), [
-      { path: 'a.txt', status: 'M' },
-      { path: 'b.txt', status: 'M' },
-      { path: 'c.txt', status: '??' },
+      { path: 'a.txt', status: 'M', conflict: false },
+      { path: 'b.txt', status: 'M', conflict: false },
+      { path: 'c.txt', status: '??', conflict: false },
     ]);
   });
 
@@ -77,7 +77,7 @@ describe('parseGitStatusPorcelain', () => {
 
   it('accepts a Buffer input', () => {
     assert.deepEqual(parseGitStatusPorcelain(Buffer.from(' M buf.js\n')), [
-      { path: 'buf.js', status: 'M' },
+      { path: 'buf.js', status: 'M', conflict: false },
     ]);
   });
 
@@ -87,6 +87,85 @@ describe('parseGitStatusPorcelain', () => {
       parseGitStatusPorcelain(out).map((f) => f.path),
       ['z.txt', 'a.txt', 'm.txt'],
     );
+  });
+
+  it('tags a conflicted UU file with conflict: true', () => {
+    // "UU" = both sides modified (a merge/rebase conflict). Must NOT fall through
+    // to the generic-gray row — it is an unmerged path.
+    assert.deepEqual(parseGitStatusPorcelain('UU both.js\n'), [
+      { path: 'both.js', status: 'UU', conflict: true },
+    ]);
+  });
+
+  it('tags a both-added AA conflict with conflict: true', () => {
+    assert.deepEqual(parseGitStatusPorcelain('AA added-twice.js\n'), [
+      { path: 'added-twice.js', status: 'AA', conflict: true },
+    ]);
+  });
+
+  it('tags a both-deleted DD conflict with conflict: true', () => {
+    assert.deepEqual(parseGitStatusPorcelain('DD gone-both.js\n'), [
+      { path: 'gone-both.js', status: 'DD', conflict: true },
+    ]);
+  });
+
+  it('flags conflicts alongside ordinary changes in one pass', () => {
+    // A realistic mid-merge status: one cleanly-modified file + one conflicted
+    // file. Only the UU row is conflict:true.
+    const out = ' M README.md\nUU conflicted.js\n?? new.txt\n';
+    assert.deepEqual(parseGitStatusPorcelain(out), [
+      { path: 'README.md', status: 'M', conflict: false },
+      { path: 'conflicted.js', status: 'UU', conflict: true },
+      { path: 'new.txt', status: '??', conflict: false },
+    ]);
+  });
+});
+
+describe('isConflictStatus', () => {
+  // The seven porcelain v1 unmerged XY codes (WARDEN-186). Git writes one of
+  // these in BOTH columns when a path could not be merged automatically.
+
+  it('returns true for every unmerged code', () => {
+    for (const code of ['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU']) {
+      assert.equal(isConflictStatus(code), true, `${code} should be a conflict`);
+    }
+  });
+
+  it('returns false for ordinary single-column codes', () => {
+    for (const code of ['M', 'A', 'D']) {
+      assert.equal(isConflictStatus(code), false, `${code} should NOT be a conflict`);
+    }
+  });
+
+  it('returns false for untracked ??', () => {
+    assert.equal(isConflictStatus('??'), false);
+  });
+
+  it('returns false for a space / empty status', () => {
+    assert.equal(isConflictStatus(' '), false);
+    assert.equal(isConflictStatus(''), false);
+  });
+
+  it('returns false for mixed non-conflict two-char codes like AM', () => {
+    // AM = staged-add then worktree-modified — NOT unmerged.
+    assert.equal(isConflictStatus('AM'), false);
+    assert.equal(isConflictStatus('MM'), false);
+  });
+
+  it('tolerates leading space from the raw XY field (trim-safe)', () => {
+    // parseGitStatusPorcelain trims the XY substring before passing it here, but
+    // the helper must be defensive: a raw " U" must not be misread.
+    assert.equal(isConflictStatus(' UU'), true);
+    assert.equal(isConflictStatus(' M'), false);
+  });
+
+  it('handles undefined / null input without throwing', () => {
+    assert.equal(isConflictStatus(undefined), false);
+    assert.equal(isConflictStatus(null), false);
+  });
+
+  it('accepts a Buffer input', () => {
+    assert.equal(isConflictStatus(Buffer.from('UU')), true);
   });
 });
 

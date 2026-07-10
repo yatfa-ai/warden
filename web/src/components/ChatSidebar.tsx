@@ -33,7 +33,7 @@ export interface ClaudeSession { id: string; cwd: string; summary: string; mtime
 // matched the query, across hosts — incl. sessions outside the top-40 list).
 export interface SessionSearchResult { host: string; sessionId: string; cwd: string; summary: string; snippet: string; mtime: number }
 
-export interface GitFile { path: string; status: string }
+export interface GitFile { path: string; status: string; conflict?: boolean }
 
 /** A single changed-file row: status indicator (M/A/D/??) + truncated path.
  *  Interactive (a real <button>) only when `onOpen` is supplied — it opens the
@@ -42,16 +42,22 @@ export interface GitFile { path: string; status: string }
  *  this lets it be embedded inside ANOTHER interactive row (an expanded commit's
  *  touched-file list, where the whole row is the affordance) without nesting
  *  interactive elements or swallowing the parent's click — and avoids a <button>
- *  with no handler, which is poor a11y. */
+ *  with no handler, which is poor a11y. A conflicted file (`conflict: true`,
+ *  e.g. UU/AA) renders a distinct red `!`-prefixed token instead of the generic
+ *  gray row, so it reads as a conflict rather than noise (WARDEN-186). */
 function GitChangedFile({ file, onOpen }: { file: GitFile; onOpen?: (path: string) => void }) {
   const color =
+    file.conflict ? 'text-red-400' :
     file.status === 'M' ? 'text-yellow-400' :
     file.status === 'A' ? 'text-green-400' :
     file.status === 'D' ? 'text-red-400' :
     'text-gray-400';
+  // Prefix conflicted codes with `!` so a UU/AA row is unmistakable next to an
+  // ordinary ` M`/`A ` row — the bare code alone could read as a status letter.
+  const token = file.conflict ? `!${file.status}` : file.status;
   const content = (
     <>
-      <span className={color}>{file.status}</span>
+      <span className={color}>{token}</span>
       <span className="truncate">{file.path}</span>
     </>
   );
@@ -65,7 +71,7 @@ function GitChangedFile({ file, onOpen }: { file: GitFile; onOpen?: (path: strin
         // pane instead of the diff, because the row handler calls preventDefault() before
         // the button's activation click can fire.
         onKeyDown={(e) => e.stopPropagation()}
-        title={`view diff: ${file.path}`}
+        title={file.conflict ? `conflict ${file.status} · ${file.path}` : `view diff: ${file.path}`}
         className="flex items-center gap-1 w-full text-left rounded-sm text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
       >
         {content}
@@ -265,7 +271,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [hasMoreSessions, setHasMoreSessions] = useState(false);
   const [loadingMoreSessions, setLoadingMoreSessions] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
-  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string; files?: GitFile[]; ahead?: number | null; behind?: number | null }>>({});
+  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string; files?: GitFile[]; ahead?: number | null; behind?: number | null; inProgress?: { operation: string | null } }>>({});
   // recent commit history (git log) per chatId — cached so re-expanding the badge is instant
   const [gitLog, setGitLog] = useState<Record<string, GitCommit[]>>({});
   const [gitLogLoading, setGitLogLoading] = useState<Record<string, boolean>>({});
@@ -306,7 +312,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       const r = await fetch(`/api/git-status?id=${encodeURIComponent(chatId)}`);
       const j = await r.json();
       if (j.branch) {
-        setGitStatus((p) => ({ ...p, [chatId]: { branch: j.branch, clean: j.clean, cwd: j.cwd, files: j.files, ahead: j.ahead, behind: j.behind } }));
+        setGitStatus((p) => ({ ...p, [chatId]: { branch: j.branch, clean: j.clean, cwd: j.cwd, files: j.files, ahead: j.ahead, behind: j.behind, inProgress: j.inProgress } }));
       }
     } catch (error) {
       // Git status is non-critical, so just log it without showing a toast
@@ -1073,7 +1079,7 @@ function CommitFile({ chatId, hash, file }: { chatId: string; hash: string; file
   );
 }
 
-function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, className }: {
+function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, inProgress, className }: {
   branch: string;
   clean: boolean | null;
   commits?: GitCommit[];
@@ -1082,11 +1088,17 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
   ahead?: number | null;
   behind?: number | null;
   chatId: string;
+  inProgress?: { operation: string | null };
   className?: string;
 }) {
   const aheadCount = typeof ahead === 'number' ? ahead : 0;
   const behindCount = typeof behind === 'number' ? behind : 0;
+  // The operation an agent is blocked mid-way through (merge/rebase/cherry-pick/
+  // revert/bisect), or null when none is in progress. This is the highest-value
+  // signal in the badge: a blocked agent produces nothing until noticed (WARDEN-186).
+  const operation = inProgress?.operation || null;
   const titleParts = [branch];
+  if (operation) titleParts.push(`${operation} in progress`);
   if (clean === false) titleParts.push('uncommitted changes');
   if (aheadCount > 0) titleParts.push(`${aheadCount} unpushed`);
   if (behindCount > 0) titleParts.push(`${behindCount} behind remote`);
@@ -1130,6 +1142,7 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
           className={cn('inline-flex items-center gap-0.5 text-[10px] text-cyan-400 hover:text-cyan-300 cursor-pointer', className)}
           title={`${titleParts.join(' · ')} — click for recent commits`}
         >
+          {operation && <span className="text-red-400 font-medium" title={`${operation} in progress`}>⚠ {operation}</span>}
           {branch}
           {clean === false && <span className="text-yellow-400">±</span>}
           {aheadCount > 0 && <span className="text-amber-400">↑{aheadCount}</span>}
@@ -1213,7 +1226,7 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
   c: Chat; open: boolean; onOpen: () => void; onKill: () => void;
   onRename: (session: string, kind: string, name: string) => void;
   onHide?: () => void; onUnhide?: () => void; dim?: boolean;
-  gitInfo?: { branch: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null };
+  gitInfo?: { branch: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; inProgress?: { operation: string | null } };
   gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
   onOpenDiff?: (path: string) => void;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
@@ -1285,6 +1298,7 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
                   onFetch={onFetchGitLog}
                   ahead={gitInfo.ahead}
                   behind={gitInfo.behind}
+                  inProgress={gitInfo.inProgress}
                   className="ml-1"
                 />
               )}
@@ -1347,7 +1361,7 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChat
   onRename: (session: string, kind: string, name: string) => void;
   renamingChatId?: string | null;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
-  gitInfo?: { branch: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null };
+  gitInfo?: { branch: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; inProgress?: { operation: string | null } };
   gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
   onOpenDiff?: (path: string) => void;
   canDrag: boolean;
@@ -1418,7 +1432,7 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChat
         {!dead && !editing && showHostTags !== false && hostTag && <span className="text-[10px] text-muted-foreground">{hostTag}</span>}
         {!dead && !editing && showProjectBadges && c?.project && <span className="text-[10px] text-muted-foreground">{c.project}</span>}
         {!dead && !editing && gitInfo?.branch && (
-          <GitBranchBadge branch={gitInfo.branch} chatId={id} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} ahead={gitInfo.ahead} behind={gitInfo.behind} />
+          <GitBranchBadge branch={gitInfo.branch} chatId={id} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} ahead={gitInfo.ahead} behind={gitInfo.behind} inProgress={gitInfo.inProgress} />
         )}
         {!editing && canRename && (
           <IconTooltip label="rename"><Button variant="ghost" size="xs" className="px-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); startEdit(); }} disabled={isRenaming} aria-label="rename">{isRenaming ? <Skeleton className="h-3 w-3" /> : '✎'}</Button></IconTooltip>
