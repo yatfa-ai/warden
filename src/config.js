@@ -48,7 +48,29 @@ export function save(cfg) {
 }
 
 // Manual chat catalog — user-spawned chats (claude in a host tmux session).
-// Each entry: { host, session, cwd, cmd, name? }. `session` is unique per host.
+// Each entry: { host, session, cwd, cmd, name? }. `session` is unique per host,
+// NOT globally — the same session name may exist on different hosts (each host's
+// tmux server is independent), so identity is the host+session composite below.
+const LOCAL = '(local)';
+
+// Catalog identity is a host+session composite. Every site that matches, filters,
+// or de-dupes catalog entries must compare BOTH host and session: a bare session
+// match would either falsely collide (spawn 409) or silently delete the wrong
+// host's entry (kill/resume) once names may repeat across hosts. Legacy entries
+// written before host-scoping lack `host` — treat them as local.
+//
+// `catalogKey` is the single source of truth for that composite shape — the same
+// `${host}:${session}` form the runtime chat id uses (buildAndSpawn / resume in
+// server.js) — and `sameCatalogEntry` is just key equality, so catalog identity
+// and live chat identity can never drift apart.
+export function catalogKey(c) {
+  return `${c.host || LOCAL}:${c.session}`;
+}
+
+export function sameCatalogEntry(c, host, session) {
+  return catalogKey(c) === catalogKey({ host, session });
+}
+
 export function loadCatalog() {
   try {
     const v = JSON.parse(fs.readFileSync(catalogPath, 'utf8'));
