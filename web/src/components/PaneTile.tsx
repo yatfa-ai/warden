@@ -25,9 +25,10 @@ interface Props {
   externalSearchQuery?: string;  // external search trigger from global search
   fontSize: number;       // global, persisted terminal font size (UiState)
   onFontSizeChange: (n: number) => void;  // bump the shared global preference
+  scrollback: number;     // global, persisted terminal scrollback depth (UiState)
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -44,10 +45,15 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // (mount) and the live [fontSize] effect read this clamped value.
   const safeFontSize = Math.max(8, Math.min(24, Math.round(fontSize)));
 
+  // Defensive clamp mirroring safeFontSize: a value typed into Settings can
+  // briefly fall outside the 100–100000 bounds before the blur coercion runs.
+  // xterm must never receive an out-of-range scrollback, so bound it here too.
+  const safeScrollback = Math.max(100, Math.min(100000, Math.round(scrollback)));
+
   useEffect(() => {
     const term = new Terminal({
       fontFamily: '"Cascadia Code", "JetBrains Mono", "Fira Code", "Symbols Nerd Font", ui-monospace, Menlo, Consolas, monospace',
-      fontSize: safeFontSize, convertEol: false, scrollback: 10000, cursorBlink: true,
+      fontSize: safeFontSize, convertEol: false, scrollback: safeScrollback, cursorBlink: true,
       allowProposedApi: true,
     });
     const fit = new FitAddon();
@@ -120,8 +126,12 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // clear "new" badge on focus
   useEffect(() => { if (focused && hasNew) onClearNew(); }, [focused]);
 
-  // font size
-  useEffect(() => { if (termRef.current) { termRef.current.options.fontSize = safeFontSize; try { fitRef.current?.fit(); } catch {} } }, [safeFontSize]);
+  // font size — and best-effort live scrollback update. xterm v6 reliably honors
+  // a scrollback change on (re)construction but often ignores it on an already-
+  // buffered terminal; new panes always pick up the new value, existing open
+  // panes pick it up on reopen. Setting options.scrollback here is harmless and
+  // covers the cases where xterm does accept the live change.
+  useEffect(() => { if (termRef.current) { termRef.current.options.fontSize = safeFontSize; termRef.current.options.scrollback = safeScrollback; try { fitRef.current?.fit(); } catch {} } }, [safeFontSize, safeScrollback]);
 
   // external search trigger from global search
   useEffect(() => {

@@ -36,11 +36,12 @@ interface Props {
   onToggleObserver?: () => void;
   fontSize: number;
   onFontSizeChange: (n: number) => void;
+  scrollback: number;
 }
 
 function colsFor(n: number) { return n <= 1 ? 1 : Math.ceil(Math.sqrt(n)); }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onOpenChat, onForceKill, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onOpenChat, onForceKill, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback }: Props) {
   const [splitOpen, setSplitOpen] = useState(false);
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
@@ -212,6 +213,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     onKill={() => onForceKill(t.id)} chat={chat} host={paneHost[t.id]}
                     externalSearchQuery={externalSearchQuery?.paneId === t.id ? externalSearchQuery.query : undefined}
                     fontSize={fontSize} onFontSizeChange={onFontSizeChange}
+                    scrollback={scrollback}
                   />
                 </div>
               );

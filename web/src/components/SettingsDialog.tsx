@@ -57,9 +57,14 @@ interface Props {
   setRestoreOnStartup: (v: RestoreOnStartup) => void;
   terminalFontSize: number;
   setTerminalFontSize: (n: number) => void;
+  // Terminal scrollback is likewise a pure client-side localStorage pref: it
+  // sets the xterm scrollback buffer depth and is persisted by App's saveUi
+  // effect. It must never be added to the `config` state / PUT /api/config body.
+  terminalScrollback: number;
+  setTerminalScrollback: (n: number) => void;
 }
 
-export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme, density, setDensity, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize }: Props) {
+export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme, density, setDensity, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -412,6 +417,26 @@ export function SettingsDialog({ open, onClose, onConfigChange, theme, setTheme,
                 />
                 <p className="text-xs text-muted-foreground">
                   Applies to all terminal panes (8–24). Use the A− / A+ buttons on any pane to adjust the same value.
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="terminalScrollback">Terminal scrollback (lines)</Label>
+                <Input
+                  id="terminalScrollback"
+                  type="number"
+                  min="100"
+                  max="100000"
+                  step="100"
+                  value={terminalScrollback}
+                  onChange={(e) => setTerminalScrollback(parseInt(e.target.value, 10) || 10000)}
+                  onBlur={(e) => {
+                    const n = parseInt(e.target.value, 10);
+                    setTerminalScrollback(Number.isNaN(n) ? 10000 : Math.max(100, Math.min(100000, n)));
+                  }}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Maximum lines each terminal pane keeps in memory (100–100000). Applies to new panes; existing panes pick up the change when reopened. Default 10000.
                 </p>
               </div>
 
