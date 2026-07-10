@@ -23,6 +23,22 @@ import { toast } from 'sonner';
 // on-demand per lazy mode.
 const THIS_MACHINE = '(local)';
 
+// Apply in-flight optimistic mutations to a freshly-fetched/merged chat list so
+// a background catalog refresh (/api/chats) or live discovery (/api/discover)
+// can't resurrect a just-killed chat or revert a just-renamed name while that
+// op's server round-trip is still pending (the disk file hasn't updated yet).
+// A no-op when nothing is in flight. Pure/module-level so callers don't widen
+// their useCallback dependency arrays.
+function applyOptimisticGuard(list: Chat[], killed: Set<string>, renamed: Map<string, string>): Chat[] {
+  if (!killed.size && !renamed.size) return list;
+  return list
+    .filter((c) => !killed.has(c.key || c.id))
+    .map((c) => {
+      const pendingName = renamed.get(c.key || c.id);
+      return pendingName === undefined ? c : { ...c, name: pendingName };
+    });
+}
+
 function App() {
   const [chats, setChats] = useState<Chat[]>([]);
   const [sshHosts, setSshHosts] = useState<string[]>([]);
@@ -46,6 +62,20 @@ function App() {
   const [paneHost, setPaneHost] = useState<Record<string, string>>(() => initWs.paneHost);
   const chatsRef = useRef(chats);
   useEffect(() => { chatsRef.current = chats; }, [chats]);
+  // Mirrors of the active-tab/pane state, read synchronously inside optimistic
+  // callbacks (e.g. performKill's rollback) to capture a pre-mutation snapshot
+  // without widening those callbacks' dependency arrays.
+  const activeTabsRef = useRef(activeTabs); activeTabsRef.current = activeTabs;
+  const hiddenTabsRef = useRef(hiddenTabs); hiddenTabsRef.current = hiddenTabs;
+  const openPanesRef = useRef(openPanes); openPanesRef.current = openPanes;
+  // In-flight optimistic mutations. The catalog merge in applyCatalog() would
+  // otherwise re-introduce a just-killed chat or revert a just-renamed name from
+  // the on-disk catalog while that op's server round-trip is still pending (the
+  // disk file hasn't updated yet) — a flash-back. These let the merge defer to
+  // the local optimistic state during that window; cleared once the server
+  // confirms (or rolls back).
+  const killedChatIdsRef = useRef<Set<string>>(new Set());
+  const pendingRenamesRef = useRef<Map<string, string>>(new Map());
   // Hosts the user has engaged with (sidebar host-click / observer reconnect / resume). In
   // lazy mode only these get live SSH discovery; the auto-refresh re-discovers them so their
   // active/idle dot + last-activity advance without a manual click. /api/chats alone is
@@ -196,16 +226,24 @@ function App() {
       const diskChats: Chat[] = (await cr.json()).chats || [];
       setChats((prev) => {
         const discovered = discoveredHostsRef.current;
-        if (!discovered.size) return diskChats;
-        const liveById = new Map<string, Chat>();
-        for (const c of prev) if (discovered.has(c.host)) liveById.set(c.id, c);
-        const diskIds = new Set(diskChats.map((c) => c.id));
-        const merged = diskChats.map((c) => {
-          const live = liveById.get(c.id);
-          return live ? { ...c, active: live.active, lastActivity: live.lastActivity, status: live.status } : c;
-        });
-        const extraLive = [...liveById.values()].filter((c) => !diskIds.has(c.id));
-        return [...merged, ...extraLive];
+        let base: Chat[];
+        if (!discovered.size) {
+          base = diskChats;
+        } else {
+          const liveById = new Map<string, Chat>();
+          for (const c of prev) if (discovered.has(c.host)) liveById.set(c.id, c);
+          const diskIds = new Set(diskChats.map((c) => c.id));
+          const merged = diskChats.map((c) => {
+            const live = liveById.get(c.id);
+            return live ? { ...c, active: live.active, lastActivity: live.lastActivity, status: live.status } : c;
+          });
+          const extraLive = [...liveById.values()].filter((c) => !diskIds.has(c.id));
+          base = [...merged, ...extraLive];
+        }
+        // Respect in-flight optimistic mutations so a background catalog refresh
+        // can't resurrect a just-killed chat or revert a just-renamed one while
+        // its server round-trip is still pending (the disk file hasn't updated).
+        return applyOptimisticGuard(base, killedChatIdsRef.current, pendingRenamesRef.current);
       });
       setLastRefreshAt(Date.now());
     } catch (e) { console.error(e); }
@@ -250,7 +288,7 @@ function App() {
       const r = await fetch(`/api/discover?host=${encodeURIComponent(host)}`);
       const j = await r.json();
       if (Array.isArray(j.chats)) {
-        setChats((prev) => [...prev.filter((c) => c.host !== host), ...j.chats]);
+        setChats((prev) => applyOptimisticGuard([...prev.filter((c) => c.host !== host), ...j.chats] as Chat[], killedChatIdsRef.current, pendingRenamesRef.current));
       }
     } catch (e) { console.error('discoverHost failed:', e); }
   }, []);
@@ -396,77 +434,94 @@ function App() {
     setForceKillTarget(null);
   }, []);
 
-  // Kill-chat confirmation. The native `window.confirm` guard is replaced by a
-  // controlled ConfirmDialog. `requestKill` opens the dialog and returns a
-  // promise that resolves only once the flow finishes (confirm+fetch OR
-  // cancel). ChatSidebar's `handleKill` wraps `await onKill(id)` in a
-  // `killingChatId` loading/disabled state — keeping that promise pending
-  // across the dialog and the fetch preserves the spinner + double-click guard
-  // exactly as the old blocking confirm did.
+  // Kill-chat confirmation + optimistic UI. The native `window.confirm` guard is
+  // replaced by a controlled ConfirmDialog: `requestKill` opens it (or, when the
+  // "Confirm before destructive actions" preference is off, fires immediately).
+  // `performKill` is OPTIMISTIC — it removes the row from local state in the same
+  // frame as the click, before the cross-host SSH round-trip to /api/kill, and
+  // rolls the row back (chats entry + tab + pane) on failure. Because the row
+  // vanishes instantly there is no longer a blocking kill spinner, so requestKill
+  // no longer returns an awaitable promise.
   const [killTarget, setKillTarget] = useState<string | null>(null);
-  const killResolveRef = useRef<(() => void) | null>(null);
 
   const performKill = useCallback(async (id: string) => {
-    const host = chatsRef.current.find((x) => (x.key || x.id) === id)?.host;
+    const existing = chatsRef.current.find((x) => (x.key || x.id) === id);
+    const host = existing?.host;
+    // Snapshot the row's tab/pane occupancy (read from refs so this callback's
+    // deps stay stable) so a failed kill can restore the exact pre-click state.
+    const wasActive = activeTabsRef.current.includes(id);
+    const wasHidden = hiddenTabsRef.current.includes(id);
+    const wasPane = openPanesRef.current.includes(id);
+    const wasFocused = focusedRef.current === id;
+
+    // Restore the row to its pre-click occupancy. Idempotent (guards on
+    // presence) in case a concurrent refresh already re-added the entry.
+    const rollback = () => {
+      // Clear the optimistic guard first so a concurrent refresh stops hiding
+      // the row before we restore it.
+      killedChatIdsRef.current.delete(id);
+      if (existing) setChats((prev) => prev.some((c) => (c.key || c.id) === id) ? prev : [...prev, existing]);
+      if (wasActive) setActiveTabs((p) => p.includes(id) ? p : [...p, id]);
+      if (wasHidden) setHiddenTabs((p) => p.includes(id) ? p : [...p, id]);
+      if (wasPane) setOpenPanes((p) => p.includes(id) ? p : [...p, id]);
+      if (wasFocused) setFocused(id);
+    };
+
+    // OPTIMISTIC: mutate local state immediately — before the await — so the
+    // row disappears in the same frame as the click, not after the SSH
+    // round-trip (hundreds of ms to seconds on a remote host). Guard the id so
+    // a background catalog refresh can't resurrect it from disk mid-round-trip.
+    killedChatIdsRef.current.add(id);
+    removeActive(id);
+    // Also drop the killed chat from the `chats` list itself (removeActive only
+    // clears its tab/pane) so the row is gone from the sidebar's agent list in
+    // this same frame. The killedChatIds guard above keeps the catalog merge /
+    // live discovery from resurrecting it from disk while the round-trip is
+    // pending; once it resolves the server no longer lists it either.
+    setChats((prev) => prev.filter((c) => (c.key || c.id) !== id));
+
     try {
       const { ok, error, res } = await postJson('/api/kill', { id });
       if (!ok) {
+        // ROLLBACK: the server rejected the kill, so restore the row.
+        rollback();
         // Generic toast on a server error, reason appended on a network failure.
         if (prefs.notifyChatOps) toast.error(res ? 'Failed to kill chat' : `Failed to kill chat: ${error || ''}`);
         return;
       }
-      removeActive(id);
-      // Drop the killed chat from `chats` synchronously so the catalog merge in
-      // refresh() can't re-append it: a discovered host's live-only entries are
-      // preserved by that merge, so without this the killed chat would briefly
-      // resurrect with its last-known status until discoverHost(host) resolves
-      // (1-3s for a remote host) — easily misread as "the kill failed".
-      setChats((prev) => prev.filter((c) => (c.key || c.id) !== id));
+      // Success: the server confirmed the kill, so the disk catalog no longer
+      // lists this chat — drop the optimistic guard and reconcile local state
+      // with the server (the server remains the source of truth).
+      killedChatIdsRef.current.delete(id);
       refresh();
       // discoverHost re-pulls that host's live list, confirming the kill and
       // refreshing the rest of the host's agents.
       if (host) void discoverHost(host);
       if (prefs.notifyChatOps) toast.success('Chat killed');
     } catch (error) {
+      // ROLLBACK on a thrown error too (e.g. an unexpected exception).
+      rollback();
       if (prefs.notifyChatOps) toast.error(`Failed to kill chat: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, [refresh, discoverHost, removeActive, prefs.notifyChatOps]);
 
   const requestKill = useCallback((id: string) => {
-    // Returns a promise that resolves when the kill flow finishes (confirm+fetch,
-    // direct fetch, OR cancel). ChatSidebar awaits this to drive its spinner /
-    // disabled state, so it must stay pending across both branches below — that
-    // is what preserves the loading state exactly as the old blocking confirm did.
-    return new Promise<void>((resolve) => {
-      killResolveRef.current = resolve;
-      if (confirmDestructiveActions) {
-        setKillTarget(id); // opens the ConfirmDialog; confirmKill/cancelKill resolve
-      } else {
-        // preference off: honor the opt-out — skip the confirm, kill immediately,
-        // then resolve so the sidebar's spinner clears.
-        void performKill(id).finally(() => {
-          killResolveRef.current?.();
-          killResolveRef.current = null;
-        });
-      }
-    });
+    if (confirmDestructiveActions) {
+      setKillTarget(id); // opens the ConfirmDialog; confirmKill/cancelKill close it
+    } else {
+      // preference off: honor the opt-out — skip the confirm and kill immediately.
+      void performKill(id);
+    }
   }, [confirmDestructiveActions, performKill]);
 
   const confirmKill = useCallback(() => {
     const id = killTarget;
     setKillTarget(null);
-    if (id) {
-      void performKill(id).finally(() => {
-        killResolveRef.current?.();
-        killResolveRef.current = null;
-      });
-    }
+    if (id) void performKill(id);
   }, [killTarget, performKill]);
 
   const cancelKill = useCallback(() => {
     setKillTarget(null);
-    killResolveRef.current?.();
-    killResolveRef.current = null;
   }, []);
 
   const resumeSession = useCallback(async (id: string, description: string, cwd: string, host: string) => {
@@ -497,16 +552,36 @@ function App() {
   }, [refresh, discoverHost, openChat, prefs.notifyChatOps]);
 
   const renameChat = useCallback(async (session: string, kind: string, name: string) => {
+    const prevName = chatsRef.current.find((c) => (c.key || c.id) === session)?.name;
+    // OPTIMISTIC: reflect the new name in the same frame as the commit, before
+    // the cross-host round-trip to /api/rename resolves. Guard it so a
+    // background catalog refresh can't revert it from the on-disk (pre-rename)
+    // name mid-round-trip.
+    pendingRenamesRef.current.set(session, name);
+    setChats((prev) => prev.map((c) => (c.key || c.id) === session ? { ...c, name } : c));
+
+    // Stop guarding and restore the prior name (undefined → falls back to key/id).
+    const rollback = () => {
+      pendingRenamesRef.current.delete(session);
+      setChats((prev) => prev.map((c) => (c.key || c.id) === session ? { ...c, name: prevName } : c));
+    };
+
     try {
       const { ok, error, res } = await postJson('/api/rename', { session, kind, name });
       if (!ok) {
+        // ROLLBACK: the server rejected the rename.
+        rollback();
         // Generic toast on a server error, reason appended on a network failure.
         if (prefs.notifyChatOps) toast.error(res ? 'Failed to rename chat' : `Failed to rename: ${error || ''}`);
         return;
       }
+      // Success: the disk catalog now holds the new name — drop the guard.
+      pendingRenamesRef.current.delete(session);
       refresh();
       if (prefs.notifyChatOps) toast.success('Chat renamed');
     } catch (error) {
+      // ROLLBACK on a thrown error too.
+      rollback();
       if (prefs.notifyChatOps) toast.error(`Failed to rename: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, [refresh, prefs.notifyChatOps]);
