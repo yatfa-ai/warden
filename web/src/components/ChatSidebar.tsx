@@ -101,6 +101,7 @@ interface Props {
   showTypeBadges?: boolean;
   showStatusIndicators?: boolean;
   showProjectBadges?: boolean;
+  hideOfflineHosts?: boolean;
 }
 
 const THIS_MACHINE = '(local)';
@@ -243,9 +244,36 @@ function UpdatedAgo({ at }: { at?: number | null }) {
   return <span className="text-[10px] text-muted-foreground tabular-nums">{ago(at)} ago</span>;
 }
 
-export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges }: Props) {
+/**
+ * A small expand/collapse section header — "▾/▸ label (count)" — that toggles a
+ * collapsed summary group in the sidebar (hidden tabs, offline hosts).
+ * Built on shadcn <Button> per WARDEN-68 (Rule 1 + Rule 2): no raw <button>, and
+ * sizes come from the Tailwind scale (text-xs) rather than arbitrary literals.
+ */
+function SectionToggle({ expanded, onClick, label, title }: {
+  expanded: boolean;
+  onClick: () => void;
+  label: string;
+  title?: string;
+}) {
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      onClick={onClick}
+      title={title}
+      className="justify-start gap-1 w-full h-auto px-2 pt-2 pb-1 text-xs font-normal uppercase tracking-wider text-muted-foreground/60"
+    >
+      <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+      <span className="flex-1 truncate text-left">{label}</span>
+    </Button>
+  );
+}
+
+export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
+  const [offlineExpanded, setOfflineExpanded] = useState(false);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
@@ -501,6 +529,63 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const handleSpawned = (chat: Chat) => { onRefresh(); onOpenChat(chat.key || chat.id); setView({ kind: 'root' }); };
   const hosts = [THIS_MACHINE, ...sshHosts];
 
+  // "Hide offline hosts" display pref (WARDEN-164): when ON, SSH hosts whose last
+  // polled status is 'offline' collapse out of the live host list into an
+  // expandable "Offline (N)" summary row. THIS_MACHINE and online/unknown hosts
+  // are never hidden — only explicitly 'offline' ones. Derived on every render,
+  // so the 30s status poll drives it: a recovered host re-appears inline and a
+  // dropped one collapses away, with no extra wiring. When OFF (default),
+  // isOfflineHidden is always false → visibleHosts === filteredHosts, no summary.
+  const hideOffline = hideOfflineHosts === true;
+  const isOfflineHidden = (h: string) =>
+    hideOffline && h !== THIS_MACHINE && hostStatuses[h]?.status === 'offline';
+
+  // Hosts after the project filter (unchanged behavior) — the offline split is
+  // applied on top of this so filtering stays consistent.
+  const filteredHosts = hosts.filter((h) => {
+    if (!projectFilter) return true;
+    const n = chats.filter((c) => c.host === h && c.active && c.project === projectFilter).length;
+    return n > 0;
+  });
+  const offlineHosts = filteredHosts.filter(isOfflineHidden);
+  const visibleHosts = filteredHosts.filter((h) => !isOfflineHidden(h));
+
+  // Renders one host row. Shared by the live list and the expanded offline
+  // summary so the two stay identical — expanding the summary reveals the exact
+  // same rows (the WARDEN-178 colorblind-safe StatusDot, incl. offline=square,
+  // + retry/inspect still works via enterHost).
+  const renderHost = (h: string) => {
+    const n = chats.filter((c) => c.host === h && c.active && (!projectFilter || c.project === projectFilter)).length;
+    const hostStatus = hostStatuses[h];
+    return (
+      <button key={h} onClick={() => enterHost(h)} className="flex items-center gap-2 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 w-full transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background">
+        <StatusDot
+          tone={n ? 'green' : 'muted'}
+          variant={n ? 'solid' : 'ring'}
+          label={n ? `${n} active chat${n !== 1 ? 's' : ''}` : 'No active chats'}
+        />
+        <span className="flex-1 truncate">{LABEL[h] || h}</span>
+        {h === THIS_MACHINE && <span className="text-[10px] text-cyan-400">local</span>}
+        {h !== THIS_MACHINE && (
+          <StatusDot
+            tone={hostStatus?.status === 'online' ? 'green' : hostStatus?.status === 'offline' ? 'red' : 'gray'}
+            variant={hostStatus?.status === 'online' ? 'solid' : hostStatus?.status === 'offline' ? 'square' : 'ring'}
+            label={
+              hostStatus?.status === 'online'
+                ? `Online${hostStatus?.latency_ms ? ` (${hostStatus.latency_ms}ms)` : ''}`
+                : hostStatus?.status === 'offline' ? 'Offline' : 'Unknown'
+            }
+            title={hostStatus?.status === 'online' && hostStatus?.latency_ms ?
+              `${hostStatus.status} (${hostStatus.latency_ms}ms)` :
+              hostStatus?.status || 'unknown'}
+          />
+        )}
+        {n > 0 && <span className="text-[10px] text-muted-foreground">{n}</span>}
+        <span className="text-muted-foreground/60">›</span>
+      </button>
+    );
+  };
+
   // Wrapper functions for loading states
   const handleResume = async (id: string, description: string, cwd: string, host: string) => {
     if (resumingSessionId) return; // Prevent double-click
@@ -584,10 +669,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onHide={() => onHideTab(c.key || c.id)} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
             {hiddenActive.length > 0 && (
               <>
-                <button onClick={() => setHiddenExpanded(!hiddenExpanded)} className="flex items-center gap-1 px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60 hover:text-foreground w-full active:bg-accent/80 transition-colors">
-                  <span>{hiddenExpanded ? '▾' : '▸'}</span>
-                  <span>hidden ({hiddenActive.length})</span>
-                </button>
+                <SectionToggle expanded={hiddenExpanded} onClick={() => setHiddenExpanded(!hiddenExpanded)} label={`hidden (${hiddenActive.length})`} />
                 {hiddenExpanded && hiddenActive.map((c) => (
                   <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onUnhide={() => onUnhideTab(c.key || c.id)} dim showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />
                 ))}
@@ -651,10 +733,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onHide={() => onHideTab(c.key || c.id)} gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
             {hiddenActive.length > 0 && (
               <>
-                <button onClick={() => setHiddenExpanded(!hiddenExpanded)} className="flex items-center gap-1 px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60 hover:text-foreground w-full active:bg-accent/80 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded">
-                  <span>{hiddenExpanded ? '▾' : '▸'}</span>
-                  <span>hidden ({hiddenActive.length})</span>
-                </button>
+                <SectionToggle expanded={hiddenExpanded} onClick={() => setHiddenExpanded(!hiddenExpanded)} label={`hidden (${hiddenActive.length})`} />
                 {hiddenExpanded && hiddenActive.map((c) => (
                   <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onUnhide={() => onUnhideTab(c.key || c.id)} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />
                 ))}
@@ -863,43 +942,18 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             onEnterCollection={enterCollection}
             onCreateCollection={handleCreateCollection}
           />
-          {hosts
-            .filter((h) => {
-              if (!projectFilter) return true;
-              const n = chats.filter((c) => c.host === h && c.active && c.project === projectFilter).length;
-              return n > 0;
-            })
-            .map((h) => {
-              const n = chats.filter((c) => c.host === h && c.active && (!projectFilter || c.project === projectFilter)).length;
-              const hostStatus = hostStatuses[h];
-              return (
-              <button key={h} onClick={() => enterHost(h)} className="flex items-center gap-2 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 w-full transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background">
-                <StatusDot
-                  tone={n ? 'green' : 'muted'}
-                  variant={n ? 'solid' : 'ring'}
-                  label={n ? `${n} active chat${n !== 1 ? 's' : ''}` : 'No active chats'}
-                />
-                <span className="flex-1 truncate">{LABEL[h] || h}</span>
-                {h === THIS_MACHINE && <span className="text-[10px] text-cyan-400">local</span>}
-                {h !== THIS_MACHINE && (
-                  <StatusDot
-                    tone={hostStatus?.status === 'online' ? 'green' : hostStatus?.status === 'offline' ? 'red' : 'gray'}
-                    variant={hostStatus?.status === 'online' ? 'solid' : hostStatus?.status === 'offline' ? 'square' : 'ring'}
-                    label={
-                      hostStatus?.status === 'online'
-                        ? `Online${hostStatus?.latency_ms ? ` (${hostStatus.latency_ms}ms)` : ''}`
-                        : hostStatus?.status === 'offline' ? 'Offline' : 'Unknown'
-                    }
-                    title={hostStatus?.status === 'online' && hostStatus?.latency_ms ?
-                      `${hostStatus.status} (${hostStatus.latency_ms}ms)` :
-                      hostStatus?.status || 'unknown'}
-                  />
-                )}
-                {n > 0 && <span className="text-[10px] text-muted-foreground">{n}</span>}
-                <span className="text-muted-foreground/60">›</span>
-              </button>
-            );
-          })}
+          {visibleHosts.map(renderHost)}
+          {offlineHosts.length > 0 && (
+            <>
+              <SectionToggle
+                expanded={offlineExpanded}
+                onClick={() => setOfflineExpanded(!offlineExpanded)}
+                label={`Offline (${offlineHosts.length})`}
+                title="Offline hosts are collapsed — click to expand"
+              />
+              {offlineExpanded && offlineHosts.map(renderHost)}
+            </>
+          )}
         </div>
       </ScrollArea>
       <CreateCollectionDialog

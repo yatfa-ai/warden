@@ -219,6 +219,7 @@ function App() {
         showTypeBadges: cfg.showTypeBadges ?? true,
         showStatusIndicators: cfg.showStatusIndicators ?? true,
         showProjectBadges: cfg.showProjectBadges ?? false,
+        hideOfflineHosts: cfg.hideOfflineHosts ?? false,
       });
       setConfirmDestructiveActions(cfg.confirmDestructiveActions ?? true);
     } catch (e) {
@@ -533,6 +534,7 @@ function App() {
     showTypeBadges: true,
     showStatusIndicators: true,
     showProjectBadges: false,
+    hideOfflineHosts: false,
   });
   // Resize drag state
   const [isResizingSidebar, setIsResizingSidebar] = useState(false);
@@ -686,6 +688,7 @@ function App() {
               showTypeBadges={displaySettings.showTypeBadges}
               showStatusIndicators={displaySettings.showStatusIndicators}
               showProjectBadges={displaySettings.showProjectBadges}
+              hideOfflineHosts={displaySettings.hideOfflineHosts}
             />
           </ErrorBoundary>
         </section>

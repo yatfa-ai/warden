@@ -340,6 +340,7 @@ app.get('/api/config', (_req, res) => res.json({
   showTypeBadges: cfg.showTypeBadges,
   showStatusIndicators: cfg.showStatusIndicators,
   showProjectBadges: cfg.showProjectBadges,
+  hideOfflineHosts: cfg.hideOfflineHosts,
 }));
 
 // PUT /api/config — update configuration and persist
@@ -348,7 +349,8 @@ app.put('/api/config', (req, res) => {
           observerConfirmMode, observerAutoStart, observerSessionTimeout,
           confirmDestructiveActions,
           notifyChatOps, notifyErrors, notifySuccess, notifyObserver,
-          showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges } = req.body;
+          showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges,
+          hideOfflineHosts } = req.body;
   if (hosts && Array.isArray(hosts)) cfg.hosts = hosts;
   if (typeof pollIntervalMs === 'number') cfg.pollIntervalMs = pollIntervalMs;
   if (typeof tmuxSession === 'string') cfg.tmuxSession = tmuxSession;
@@ -373,6 +375,7 @@ app.put('/api/config', (req, res) => {
   if (typeof showTypeBadges === 'boolean') cfg.showTypeBadges = showTypeBadges;
   if (typeof showStatusIndicators === 'boolean') cfg.showStatusIndicators = showStatusIndicators;
   if (typeof showProjectBadges === 'boolean') cfg.showProjectBadges = showProjectBadges;
+  if (typeof hideOfflineHosts === 'boolean') cfg.hideOfflineHosts = hideOfflineHosts;
   save(cfg); // persist to ~/.yatfa-warden/config.json
   res.json({ ok: true });
 });

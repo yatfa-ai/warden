@@ -38,6 +38,7 @@ interface ConfigData {
   showTypeBadges?: boolean;
   showStatusIndicators?: boolean;
   showProjectBadges?: boolean;
+  hideOfflineHosts?: boolean;
 }
 
 interface Props {
@@ -94,6 +95,7 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
     showTypeBadges: true,
     showStatusIndicators: true,
     showProjectBadges: false,
+    hideOfflineHosts: false,
   });
   const [availableHosts, setAvailableHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -129,6 +131,7 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
           showTypeBadges: configData.showTypeBadges ?? true,
           showStatusIndicators: configData.showStatusIndicators ?? true,
           showProjectBadges: configData.showProjectBadges ?? false,
+          hideOfflineHosts: configData.hideOfflineHosts ?? false,
         });
         setAvailableHosts(hostsData.hosts || []);
       })
@@ -408,6 +411,18 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   />
                   <Label htmlFor="showProjectBadges" className="cursor-pointer">
                     Show project badges
+                  </Label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="hideOfflineHosts"
+                    checked={config.hideOfflineHosts ?? false}
+                    onCheckedChange={(checked) =>
+                      setConfig({ ...config, hideOfflineHosts: checked === true })
+                    }
+                  />
+                  <Label htmlFor="hideOfflineHosts" className="cursor-pointer">
+                    Hide offline hosts (collapse into an expandable summary)
                   </Label>
                 </div>
               </SettingsSection>
