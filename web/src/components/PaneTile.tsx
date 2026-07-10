@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Terminal } from '@xterm/xterm';
+import { Terminal, type ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
@@ -9,6 +9,26 @@ import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { StatusDot } from '@/components/StatusDot';
 import { toast } from 'sonner';
+
+// Two explicit xterm theme objects with hex values derived from the app's design
+// tokens (web/src/index.css). xterm.js does not reliably parse oklch(), so we
+// pass concrete hex rather than the raw token strings (nuance #2):
+//   light : --background oklch(1 0 0) #ffffff  /  --foreground oklch(0.145 0 0) #0a0a0a
+//   dark  : pure black (preserves the shipped dark terminal look + matches the
+//           bg-black container so there is no seam in the padding gap)  /
+//           --foreground oklch(0.985 0 0) #fafafa.
+// The ANSI 16-color palette is left at xterm defaults so colored program output
+// (red errors, green success, …) is unchanged; only the surface bg/fg/cursor +
+// a subtle selection highlight are themed to match.
+const TERMINAL_THEMES: Record<'light' | 'dark', ITheme> = {
+  light: { background: '#ffffff', foreground: '#0a0a0a', cursor: '#0a0a0a', cursorAccent: '#ffffff', selectionBackground: 'rgba(10, 10, 10, 0.15)' },
+  dark: { background: '#000000', foreground: '#fafafa', cursor: '#fafafa', cursorAccent: '#000000', selectionBackground: 'rgba(250, 250, 250, 0.20)' },
+};
+
+// Container background that wraps the xterm canvas. Must match the canvas
+// background above so the px-1/py-0.5 padding gap around the terminal never shows
+// a different color.
+const TERMINAL_BG_CLASS: Record<'light' | 'dark', string> = { light: 'bg-white', dark: 'bg-black' };
 
 interface Props {
   id: string;
@@ -27,9 +47,14 @@ interface Props {
   fontSize: number;       // global, persisted terminal font size (UiState)
   onFontSizeChange: (n: number) => void;  // bump the shared global preference
   scrollback: number;     // global, persisted terminal scrollback depth (UiState)
+  // Resolved terminal surface color (App resolves the terminalColorScheme pref +
+  // the effective app theme down to a concrete value here). Drives the xterm
+  // `theme` option + the container background, and re-themes already-open panes
+  // live via the [terminalTheme] effect below.
+  terminalTheme: 'light' | 'dark';
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, terminalTheme }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -56,6 +81,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       fontFamily: '"Cascadia Code", "JetBrains Mono", "Fira Code", "Symbols Nerd Font", ui-monospace, Menlo, Consolas, monospace',
       fontSize: safeFontSize, convertEol: false, scrollback: safeScrollback, cursorBlink: true,
       allowProposedApi: true,
+      theme: TERMINAL_THEMES[terminalTheme],
     });
     const fit = new FitAddon();
     const search = new SearchAddon();
@@ -134,6 +160,15 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // covers the cases where xterm does accept the live change.
   useEffect(() => { if (termRef.current) { termRef.current.options.fontSize = safeFontSize; termRef.current.options.scrollback = safeScrollback; try { fitRef.current?.fit(); } catch {} } }, [safeFontSize, safeScrollback]);
 
+  // terminal theme (App-resolved terminalColorScheme + effective theme) — re-theme
+  // already-open panes live without a reopen, mirroring the font-size/scrollback
+  // live effect. Fires on mount (initial paint already happened via the ctor, but
+  // this also covers the first render) and whenever the resolved color changes —
+  // including a manual Color Scheme toggle, the Terminal color scheme pref, or an
+  // OS theme flip while Color Scheme = "Match app theme" (App tracks an
+  // effectiveTheme React state so the prop actually changes here).
+  useEffect(() => { if (termRef.current) { termRef.current.options.theme = TERMINAL_THEMES[terminalTheme]; try { fitRef.current?.fit(); } catch {} } }, [terminalTheme]);
+
   // external search trigger from global search
   useEffect(() => {
     if (externalSearchQuery && searchRef.current) {
@@ -209,7 +244,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     <ContextMenu>
       <ContextMenuTrigger asChild>
     <div onClick={onFocus}
-      className={`flex flex-col h-full w-full min-h-0 rounded-lg overflow-hidden border bg-black transition-all duration-200 ease-in-out ${focused ? 'border-primary shadow-lg shadow-primary/20' : 'border-border'}`}>
+      className={`flex flex-col h-full w-full min-h-0 rounded-lg overflow-hidden border ${TERMINAL_BG_CLASS[terminalTheme]} transition-all duration-200 ease-in-out ${focused ? 'border-primary shadow-lg shadow-primary/20' : 'border-border'}`}>
       {/* header toolbar */}
       <div onDoubleClick={(e) => { stop(e); onToggleMax(); }}
         className="flex items-center gap-1 px-2 py-1 compact:py-0.5 bg-muted text-xs shrink-0 select-none">

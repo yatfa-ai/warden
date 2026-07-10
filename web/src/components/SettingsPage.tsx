@@ -14,7 +14,7 @@ import {
 } from '@/components/ui/select';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ArrowLeft } from 'lucide-react';
-import { type Theme } from '@/lib/theme';
+import { type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { type Density } from '@/lib/density';
 import { type RestoreOnStartup, type PaneLayout } from '@/lib/storage';
 import { putJson } from '@/lib/api';
@@ -70,6 +70,11 @@ interface Props {
   // effect. It must never be added to the `config` state / PUT /api/config body.
   terminalScrollback: number;
   setTerminalScrollback: (n: number) => void;
+  // Terminal color scheme is likewise a pure client-side localStorage pref: it
+  // sets the xterm surface (background/foreground) and is persisted by App's
+  // saveUi effect. It must never be added to the `config` state / PUT /api/config body.
+  terminalColorScheme: TerminalColorScheme;
+  setTerminalColorScheme: (v: TerminalColorScheme) => void;
   // Default agent type + host pre-filled in the ＋ new chat form. Pure client-side
   // localStorage prefs: applied instantly via the prop callbacks and persisted by
   // App's saveUi effect. They must never be added to the `config` state /
@@ -90,7 +95,7 @@ function SettingsSection({ title, children }: { title: string; children: ReactNo
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback, terminalColorScheme, setTerminalColorScheme, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -497,6 +502,23 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   </Select>
                   <p className="text-xs text-muted-foreground">
                     Choose how Warden appears. "System" automatically switches between light and dark based on your OS settings.
+                  </p>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="terminalColorScheme">Terminal color scheme</Label>
+                  <Select value={terminalColorScheme} onValueChange={(v) => setTerminalColorScheme(v as TerminalColorScheme)}>
+                    <SelectTrigger id="terminalColorScheme" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="auto">Match app theme (default)</SelectItem>
+                      <SelectItem value="dark">Always dark</SelectItem>
+                      <SelectItem value="light">Always light</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    How terminal panes are colored. "Match app theme" follows the Color Scheme above (including System); "Always dark/light" forces it regardless of the rest of the UI. Applies live to open panes.
                   </p>
                 </div>
 

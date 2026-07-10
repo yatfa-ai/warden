@@ -23,6 +23,12 @@ export interface UiState {
   observerWidth?: number;
   terminalFontSize?: number;
   terminalScrollback?: number;
+  // Terminal color scheme: 'auto' (default) makes the terminal surface follow
+  // the app's Light/Dark/System chrome preference; 'dark'/'light' force it
+  // regardless of chrome (the common power-user "always dark terminal" case).
+  // Pure client-side pref (like terminalFontSize/scrollback); never sent to the
+  // backend / /api/config.
+  terminalColorScheme?: 'auto' | 'dark' | 'light';
   theme?: 'light' | 'dark' | 'system';
   // UI density: 'comfortable' (default = today's spacing) or 'compact' (tighter
   // rows/headers/gaps so more agents fit per screen). Pure client-side pref.
@@ -61,6 +67,7 @@ export function loadUi(): UiState {
         observerWidth: typeof v.observerWidth === 'number' ? v.observerWidth : 380,
         terminalFontSize: typeof v.terminalFontSize === 'number' ? v.terminalFontSize : 14,
         terminalScrollback: typeof v.terminalScrollback === 'number' ? v.terminalScrollback : 10000,
+        terminalColorScheme: ['auto', 'dark', 'light'].includes(v.terminalColorScheme) ? v.terminalColorScheme : 'auto',
         theme: v.theme ?? 'system',
         density: v.density === 'compact' ? 'compact' : 'comfortable',
         paneLayout: (v.paneLayout === 'stacked' || v.paneLayout === 'side-by-side') ? v.paneLayout : 'auto',
@@ -73,7 +80,7 @@ export function loadUi(): UiState {
       };
     }
   } catch { /* ignore */ }
-  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14, terminalScrollback: 10000, theme: 'system', density: 'comfortable', paneLayout: 'auto', restoreOnStartup: 'previous', defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', paneHost: {}, agentFilter: 'all', agentSort: 'manual' };
+  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14, terminalScrollback: 10000, terminalColorScheme: 'auto', theme: 'system', density: 'comfortable', paneLayout: 'auto', restoreOnStartup: 'previous', defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', paneHost: {}, agentFilter: 'all', agentSort: 'manual' };
 }
 
 export function saveUi(s: UiState) {

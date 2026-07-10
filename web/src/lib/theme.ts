@@ -5,6 +5,22 @@
 
 export type Theme = 'light' | 'dark' | 'system';
 
+// Terminal color scheme preference (persisted client-side in UiState):
+// - 'auto' (default): the terminal surface follows the app's effective
+//   Light/Dark chrome preference (which itself resolves 'system' via the OS).
+// - 'dark' / 'light': force the terminal surface regardless of chrome.
+export type TerminalColorScheme = 'auto' | 'dark' | 'light';
+
+/**
+ * Resolve the terminal surface color ('light' | 'dark') from the Terminal color
+ * scheme preference. 'auto' defers to the app's currently-effective theme
+ * (the caller passes the OS-resolved effective theme); 'dark'/'light' force it.
+ * Pure: no DOM access, so it is trivially testable.
+ */
+export function resolveTerminalTheme(scheme: TerminalColorScheme, effective: 'light' | 'dark'): 'light' | 'dark' {
+  return scheme === 'auto' ? effective : scheme;
+}
+
 /**
  * Get the effective theme (light or dark) based on theme preference.
  * If theme is 'system', detects OS color scheme preference.
