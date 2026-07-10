@@ -131,9 +131,14 @@ describe('host-aware chat catalog (host+session composite identity) — WARDEN-2
   });
 
   it('(d) rename targets exactly one host when the name repeats across hosts', async () => {
+    // Seed the OTHER host FIRST. loadCatalog() preserves on-disk order, so against
+    // the OLD bare-session find (c.session === session), find() returns host-b and
+    // renames the WRONG entry. Only the composite (host+session) find lands on
+    // (local) — so the `host` arg is load-bearing: revert the rename site and this
+    // test goes red.
     seedCatalog([
-      { kind: 'tmux', host: '(local)', session: SEED_SESSION, name: 'local-name', cwd: '/tmp', cmd: 'claude' },
       { kind: 'tmux', host: 'host-b', session: SEED_SESSION, name: 'remote-name', cwd: '/tmp', cmd: 'claude' },
+      { kind: 'tmux', host: '(local)', session: SEED_SESSION, name: 'local-name', cwd: '/tmp', cmd: 'claude' },
     ]);
     const res = await fetch(`${baseUrl}/api/rename`, json({ session: SEED_SESSION, host: '(local)', name: 'renamed-local' }));
     assert.strictEqual(res.status, 200);
@@ -144,10 +149,19 @@ describe('host-aware chat catalog (host+session composite identity) — WARDEN-2
   });
 
   it('(d) rename without host in body defaults to local and resolves unambiguously', async () => {
-    seedCatalog([{ kind: 'tmux', host: '(local)', session: SEED_SESSION, name: 'old', cwd: '/tmp', cmd: 'claude' }]);
-    const res = await fetch(`${baseUrl}/api/rename`, json({ session: SEED_SESSION, name: 'new' })); // no host
+    // Same load-bearing ordering: seed a DIFFERENT host first, then (local). With
+    // host omitted, the handler defaults to local, so only the local entry is
+    // renamed. On the OLD (session-only) code, find() returns host-b first → the
+    // local entry stays 'old' and this test goes red.
+    seedCatalog([
+      { kind: 'tmux', host: 'host-b', session: SEED_SESSION, name: 'remote', cwd: '/tmp', cmd: 'claude' },
+      { kind: 'tmux', host: '(local)', session: SEED_SESSION, name: 'old', cwd: '/tmp', cmd: 'claude' },
+    ]);
+    const res = await fetch(`${baseUrl}/api/rename`, json({ session: SEED_SESSION, name: 'new' })); // no host → local
     assert.strictEqual(res.status, 200);
-    assert.strictEqual(readCatalog()[0].name, 'new');
+    const cat = readCatalog();
+    assert.strictEqual(cat.find((c) => c.host === '(local)').name, 'new', 'default-to-local renamed the local entry');
+    assert.strictEqual(cat.find((c) => c.host === 'host-b').name, 'remote', 'other host entry untouched');
     seedCatalog([]);
   });
 

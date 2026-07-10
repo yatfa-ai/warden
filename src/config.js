@@ -58,15 +58,17 @@ const LOCAL = '(local)';
 // match would either falsely collide (spawn 409) or silently delete the wrong
 // host's entry (kill/resume) once names may repeat across hosts. Legacy entries
 // written before host-scoping lack `host` — treat them as local.
-export function sameCatalogEntry(c, host, session) {
-  return c.session === session && (c.host || LOCAL) === (host || LOCAL);
-}
-
-// Stable composite key for a catalog entry — the same `${host}:${session}` shape
-// the runtime chat id uses (buildAndSpawn / resume), so catalog identity and live
-// chat identity agree.
+//
+// `catalogKey` is the single source of truth for that composite shape — the same
+// `${host}:${session}` form the runtime chat id uses (buildAndSpawn / resume in
+// server.js) — and `sameCatalogEntry` is just key equality, so catalog identity
+// and live chat identity can never drift apart.
 export function catalogKey(c) {
   return `${c.host || LOCAL}:${c.session}`;
+}
+
+export function sameCatalogEntry(c, host, session) {
+  return catalogKey(c) === catalogKey({ host, session });
 }
 
 export function loadCatalog() {
