@@ -950,12 +950,37 @@ export function parseGitShowNameStatus(output) {
   return out;
 }
 
+// The `--pretty=format:` used by /api/git-log: short hash | subject | author |
+// relative date. Shared by the local (spawnSync) and remote (SSH) paths so the two
+// can't drift. The '|' separators are shellQuote'd on the remote path so they aren't
+// read as shell pipes (the WARDEN-122 quoting lesson).
+const GIT_LOG_PRETTY = '%h|%s|%an|%ar';
+
+// Build the remote SSH command for /api/git-log. Exported so its shellQuoting — of
+// BOTH the pretty format and the HEAD..@{u} rev range — is unit-testable, mirroring
+// buildGitDiffScript. `incoming` splices in `HEAD..@{u}` (commits the upstream has
+// that HEAD doesn't); the token is shellQuote'd because its '{'/'}' risk brace
+// expansion in some shells — the same reason /api/git-status quotes '@{u}...HEAD'.
+// 2>/dev/null keeps the no-upstream case exit-clean with empty stdout so the route
+// returns { commits: [], error: null } (200, not a 500).
+export function buildGitLogCmd(cwd, limit, incoming) {
+  const range = incoming ? ` ${shellQuote('HEAD..@{u}')}` : '';
+  return `cd ${shellQuote(cwd)} && git log -${limit}${range} --pretty=format:${shellQuote(GIT_LOG_PRETTY)} 2>/dev/null`;
+}
+
 // Recent commit history (git log) for a chat's repo. Mirrors /api/git-status: local chats
 // run git via spawnSync, remote chats run over SSH with shellQuote(cwd). A non-git or no-cwd
 // repo yields an empty list (never a 500). limit is clamped to [1, 50].
 app.get('/api/git-log', async (req, res) => {
   const chatId = String(req.query.id || '');
   const limit = Math.min(Math.max(parseInt(String(req.query.limit || '5'), 10) || 5, 1), 50);
+  // range=incoming → list commits reachable from @{u} but NOT HEAD (the "behind"
+  // commits — what the upstream has that we don't). Absent → today's HEAD-reachable
+  // log. @{u} is git's upstream rev spec, already used by /api/git-status's
+  // ahead/behind count, so this introduces no new staleness or network fetch. The
+  // ahead/behind COUNT shipped in WARDEN-153; this completes the explorable behind
+  // half (WARDEN-225). Strictly read-only — no fetch/pull/merge/checkout.
+  const incoming = String(req.query.range || '') === 'incoming';
   const { chat, error } = await resolve(chatId);
   if (error) return res.status(404).json({ error });
 
@@ -964,17 +989,24 @@ app.get('/api/git-log', async (req, res) => {
     if (!cwd) return res.json({ commits: [], error: 'no cwd' });
 
     // short hash | subject | author | relative date
-    const pretty = '%h|%s|%an|%ar';
     let raw = '';
     if (chat.host === LOCAL) {
-      // Local execution: use spawnSync directly
-      const r = runLocalGit(['log', `-${limit}`, `--pretty=format:${pretty}`], cwd);
+      // Local execution: use spawnSync directly. With no rev range, `git log -N`
+      // lists HEAD-reachable commits (today's behavior). range=incoming swaps in
+      // `HEAD..@{u}` — commits the upstream has that HEAD doesn't. When there is
+      // no upstream (detached HEAD / untracked branch / non-git) git exits non-zero
+      // with empty stdout → raw stays '' → { commits: [], error: null } (200, not
+      // a 500), mirroring parseAheadBehind's null tolerance.
+      const args = ['log'];
+      if (incoming) args.push('HEAD..@{u}');
+      args.push(`-${limit}`, `--pretty=format:${GIT_LOG_PRETTY}`);
+      const r = runLocalGit(args, cwd);
       raw = r.stdout?.toString().trim() || '';
     } else {
-      // Remote execution: SSH. shellQuote the pretty format so the '|' separators aren't
-      // interpreted as shell pipes.
-      const cmd = `cd ${shellQuote(cwd)} && git log -${limit} --pretty=format:${shellQuote(pretty)} 2>/dev/null`;
-      const rr = await run(chat.host, cmd, { timeout: 8000 });
+      // Remote execution: SSH. buildGitLogCmd shellQuotes the pretty format and the
+      // HEAD..@{u} range; 2>/dev/null swallows the no-upstream case so a detached-HEAD
+      // or untracked remote branch yields empty → 200, never a 500.
+      const rr = await run(chat.host, buildGitLogCmd(cwd, limit, incoming), { timeout: 8000 });
       raw = rr.ok ? rr.stdout.trim() : '';
     }
 
