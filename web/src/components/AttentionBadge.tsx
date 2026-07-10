@@ -2,7 +2,6 @@ import { useState, type ReactNode } from 'react';
 import { TriangleAlert } from 'lucide-react';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { Button } from '@/components/ui/button';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { useAttentionRollup } from '@/lib/useAttentionRollup';
 import type { Chat } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -63,12 +62,21 @@ export function AttentionBadge({ onOpenChat, onOpenActivity }: Props) {
           <span className={cn('text-xs font-medium tabular-nums', tone)}>{total}</span>
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-72 p-0 flex flex-col max-h-80">
-        <div className="flex items-center gap-2 px-3 py-2 border-b shrink-0">
+      <PopoverContent align="end" className="w-72 p-0">
+        <div className="flex items-center gap-2 px-3 py-2 border-b">
           <TriangleAlert className={cn('size-3.5', tone)} />
           <span className="text-sm font-semibold">{total} need attention</span>
         </div>
-        <ScrollArea className="flex-1 min-h-0">
+        {/*
+          Bounded with max-h-* + overflow-y-auto (NOT Radix ScrollArea). The Radix
+          Viewport is height:100%, which needs a *definite* ancestor height to resolve
+          against — but max-height (and flex-1/min-h-0 through an overflow:visible
+          PopoverContent) does NOT establish one, so a ScrollArea grows to fit all rows
+          and never scrolls (verified: rows past ~7 were clipped & unreachable). A plain
+          div's own max-height directly caps its own scroll, so it shrinks for short lists
+          and scrolls for long ones (e.g. a host outage taking many agents critical).
+        */}
+        <div className="max-h-72 overflow-y-auto">
           <div className="p-1.5 flex flex-col gap-2">
             {critical.length > 0 && (
               <Section title="Critical" count={critical.length} tone="text-red-500">
@@ -95,7 +103,7 @@ export function AttentionBadge({ onOpenChat, onOpenActivity }: Props) {
               </Section>
             )}
           </div>
-        </ScrollArea>
+        </div>
       </PopoverContent>
     </Popover>
   );
