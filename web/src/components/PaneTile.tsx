@@ -6,6 +6,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { streamApi } from '@/lib/stream';
 import type { Chat } from '@/lib/types';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { toast } from 'sonner';
 
 interface Props {
@@ -194,6 +195,8 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   );
 
   return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
     <div onClick={onFocus}
       className={`flex flex-col h-full w-full min-h-0 rounded-lg overflow-hidden border bg-black transition-all duration-200 ease-in-out ${focused ? 'border-primary shadow-lg shadow-primary/20' : 'border-border'}`}>
       {/* header toolbar */}
@@ -223,7 +226,9 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           <Btn title="close search" onClick={() => setShowSearch(false)}>×</Btn>
         </div>
       )}
-      <div ref={wrapRef} className="flex-1 min-h-0 px-1 py-0.5 overflow-hidden relative" onClick={() => termRef.current?.focus()}>
+      {/* terminal surface — stop the contextmenu event so right-clicks here keep the xterm
+          native paste menu instead of opening the themed pane menu (see Done criterion). */}
+      <div ref={wrapRef} className="flex-1 min-h-0 px-1 py-0.5 overflow-hidden relative" onContextMenu={(e) => e.stopPropagation()} onClick={() => termRef.current?.focus()}>
         {!connected && !errored && (
           <div className="absolute inset-0 flex items-center justify-center gap-2 text-[11px] text-muted-foreground pointer-events-none select-none">
             <span className="size-3 rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground animate-spin" />
@@ -232,5 +237,18 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
         )}
       </div>
     </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={() => setShowSearch(!showSearch)}>Search</ContextMenuItem>
+        <ContextMenuItem onSelect={() => termRef.current?.clear()}>Clear</ContextMenuItem>
+        <ContextMenuItem disabled={downloading || !chat} onSelect={() => downloadPane()}>Download</ContextMenuItem>
+        <ContextMenuItem variant="destructive" onSelect={() => onKill()}>Force-kill</ContextMenuItem>
+        <ContextMenuItem onSelect={() => onFontSizeChange(Math.max(8, safeFontSize - 1))}>Smaller font</ContextMenuItem>
+        <ContextMenuItem onSelect={() => onFontSizeChange(Math.min(24, safeFontSize + 1))}>Bigger font</ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onSelect={() => onToggleMax()}>{maximized ? 'Restore' : 'Maximize'}</ContextMenuItem>
+        <ContextMenuItem variant="destructive" onSelect={() => onClose()}>Close</ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
