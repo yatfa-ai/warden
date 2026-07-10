@@ -13,10 +13,10 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, Trash2 } from 'lucide-react';
 import { type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { type Density } from '@/lib/density';
-import { type RestoreOnStartup, type PaneLayout } from '@/lib/storage';
+import { type RestoreOnStartup, type PaneLayout, type CustomPreset, BUILTIN_PRESETS } from '@/lib/storage';
 import { putJson } from '@/lib/api';
 import { toast } from 'sonner';
 
@@ -78,11 +78,17 @@ interface Props {
   // Default agent type + host pre-filled in the ＋ new chat form. Pure client-side
   // localStorage prefs: applied instantly via the prop callbacks and persisted by
   // App's saveUi effect. They must never be added to the `config` state /
-  // PUT /api/config body.
-  defaultNewChatPreset: 'claude' | 'shell';
-  setDefaultNewChatPreset: (v: 'claude' | 'shell') => void;
+  // PUT /api/config body. `defaultNewChatPreset` is a reserved built-in name
+  // ('claude' | 'shell') OR a custom preset name.
+  defaultNewChatPreset: string;
+  setDefaultNewChatPreset: (v: string) => void;
   defaultNewChatHost: string;
   setDefaultNewChatHost: (v: string) => void;
+  // User-defined spawn presets (named quick-fill commands beyond claude/shell).
+  // Pure client-side localStorage pref, persisted by App's saveUi effect; never
+  // sent to the backend.
+  customPresets: CustomPreset[];
+  setCustomPresets: (v: CustomPreset[]) => void;
 }
 
 /** A titled group of related settings, separated by a top border. */
@@ -95,7 +101,78 @@ function SettingsSection({ title, children }: { title: string; children: ReactNo
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback, terminalColorScheme, setTerminalColorScheme, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost }: Props) {
+/**
+ * One editable custom preset row: an inline name field (committed on blur/Enter,
+ * reverted on a rejected rename) and a live-editable command field, plus delete.
+ * Stateless w.r.t. its own value except the name draft — the list is the source
+ * of truth, so this is the only piece of local state needed.
+ */
+function PresetRow({
+  preset,
+  isDefault,
+  onRename,
+  onCmdChange,
+  onDelete,
+}: {
+  preset: CustomPreset;
+  isDefault: boolean;
+  onRename: (oldName: string, newName: string) => boolean;
+  onCmdChange: (name: string, cmd: string) => void;
+  onDelete: (name: string) => void;
+}) {
+  const [nameDraft, setNameDraft] = useState(preset.name);
+  // Re-sync the draft if the preset's name changes from the outside (e.g. after
+  // a coordinated default rename or a load), so the input never drifts.
+  useEffect(() => {
+    setNameDraft(preset.name);
+  }, [preset.name]);
+
+  const commitName = () => {
+    const trimmed = nameDraft.trim();
+    if (trimmed && trimmed !== preset.name) {
+      if (!onRename(preset.name, trimmed)) setNameDraft(preset.name); // revert on rejection
+    } else {
+      setNameDraft(preset.name); // empty or unchanged → revert
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-1 rounded-md border bg-muted/30 p-2">
+      <div className="flex items-center gap-2">
+        <Input
+          value={nameDraft}
+          onChange={(e) => setNameDraft(e.target.value)}
+          onBlur={commitName}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') e.currentTarget.blur();
+            if (e.key === 'Escape') setNameDraft(preset.name);
+          }}
+          className="h-8 flex-1"
+          placeholder="name"
+          aria-label="Preset name"
+        />
+        {isDefault && <Badge variant="secondary">default</Badge>}
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          onClick={() => onDelete(preset.name)}
+          aria-label={`Delete ${preset.name} preset`}
+        >
+          <Trash2 />
+        </Button>
+      </div>
+      <Input
+        value={preset.cmd}
+        onChange={(e) => onCmdChange(preset.name, e.target.value)}
+        className="h-8"
+        placeholder="command"
+        aria-label={`${preset.name} command`}
+      />
+    </div>
+  );
+}
+
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback, terminalColorScheme, setTerminalColorScheme, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -194,6 +271,62 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
   };
 
   const availableHostsToAdd = availableHosts.filter((h) => !config.hosts.includes(h));
+
+  // --- Custom spawn-preset management (create / rename / delete) -------------
+  // All pure client-side: edits apply instantly via setCustomPresets and are
+  // persisted by App's saveUi effect. Renaming/deleting a preset that is the
+  // current default keeps the default in sync (rename tracks it; delete falls
+  // back to claude) so the default never dangles.
+  const [newPresetName, setNewPresetName] = useState('');
+  const [newPresetCmd, setNewPresetCmd] = useState('');
+
+  const isReservedName = (name: string) => (BUILTIN_PRESETS as readonly string[]).includes(name);
+
+  const addPreset = () => {
+    const name = newPresetName.trim();
+    const cmd = newPresetCmd.trim();
+    if (!name || !cmd) {
+      toast.error('Preset needs both a name and a command.');
+      return;
+    }
+    if (isReservedName(name)) {
+      toast.error(`"${name}" is a reserved preset name (use the built-in instead).`);
+      return;
+    }
+    if (customPresets.some((p) => p.name.toLowerCase() === name.toLowerCase())) {
+      toast.error(`A preset named "${name}" already exists.`);
+      return;
+    }
+    setCustomPresets([...customPresets, { name, cmd }]);
+    setNewPresetName('');
+    setNewPresetCmd('');
+  };
+
+  // Returns true on success (PresetRow reverts its draft on false). Coordinated
+  // with the default so renaming the current default keeps it selected.
+  const renamePreset = (oldName: string, newName: string): boolean => {
+    if (isReservedName(newName)) {
+      toast.error(`"${newName}" is a reserved preset name (use the built-in instead).`);
+      return false;
+    }
+    // Exclude the preset being renamed so a case-only rename (codex → Codex) is allowed.
+    if (customPresets.some((p) => p.name !== oldName && p.name.toLowerCase() === newName.toLowerCase())) {
+      toast.error(`A preset named "${newName}" already exists.`);
+      return false;
+    }
+    setCustomPresets(customPresets.map((p) => (p.name === oldName ? { ...p, name: newName } : p)));
+    if (defaultNewChatPreset === oldName) setDefaultNewChatPreset(newName);
+    return true;
+  };
+
+  const updatePresetCmd = (name: string, cmd: string) => {
+    setCustomPresets(customPresets.map((p) => (p.name === name ? { ...p, cmd } : p)));
+  };
+
+  const deletePreset = (name: string) => {
+    setCustomPresets(customPresets.filter((p) => p.name !== name));
+    if (defaultNewChatPreset === name) setDefaultNewChatPreset('claude');
+  };
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
@@ -581,7 +714,7 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   <Label htmlFor="defaultNewChatPreset">Default agent type</Label>
                   <Select
                     value={defaultNewChatPreset}
-                    onValueChange={(v) => setDefaultNewChatPreset(v as 'claude' | 'shell')}
+                    onValueChange={(v) => setDefaultNewChatPreset(v)}
                   >
                     <SelectTrigger id="defaultNewChatPreset" className="w-full">
                       <SelectValue />
@@ -589,10 +722,85 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                     <SelectContent>
                       <SelectItem value="claude">claude (default)</SelectItem>
                       <SelectItem value="shell">shell</SelectItem>
+                      {customPresets.map((p) => (
+                        <SelectItem key={p.name} value={p.name}>
+                          {p.name}
+                        </SelectItem>
+                      ))}
+                      {/* A default naming a since-deleted preset must never leave
+                          an empty trigger — render it visibly but disabled so the
+                          user sees it's gone. Mirrors the default-host fallback. */}
+                      {defaultNewChatPreset !== 'claude' &&
+                        defaultNewChatPreset !== 'shell' &&
+                        !customPresets.some((p) => p.name === defaultNewChatPreset) && (
+                          <SelectItem value={defaultNewChatPreset} disabled>
+                            {defaultNewChatPreset} (deleted)
+                          </SelectItem>
+                        )}
                     </SelectContent>
                   </Select>
                   <p className="text-xs text-muted-foreground">
-                    Which command preset the ＋ new chat form starts with.
+                    Which command preset the ＋ new chat form starts with. Define your own below (e.g. codex, gemini, a wrapper script).
+                  </p>
+                </div>
+
+                {/* Custom spawn presets — create / rename / delete. Pure client-side. */}
+                <div className="flex flex-col gap-2">
+                  <Label>Custom presets</Label>
+                  {customPresets.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">
+                      No custom presets yet. Add one to turn any agent command into a one-click spawn button.
+                    </p>
+                  ) : (
+                    <div className="flex flex-col gap-2">
+                      {customPresets.map((p) => (
+                        <PresetRow
+                          key={p.name}
+                          preset={p}
+                          isDefault={defaultNewChatPreset === p.name}
+                          onRename={renamePreset}
+                          onCmdChange={updatePresetCmd}
+                          onDelete={deletePreset}
+                        />
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Add a new preset */}
+                  <div className="flex flex-col gap-1 rounded-md border bg-muted/30 p-2">
+                    <Input
+                      value={newPresetName}
+                      onChange={(e) => setNewPresetName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          addPreset();
+                        }
+                      }}
+                      className="h-8"
+                      placeholder="name (e.g. codex)"
+                      aria-label="New preset name"
+                      maxLength={32}
+                    />
+                    <Input
+                      value={newPresetCmd}
+                      onChange={(e) => setNewPresetCmd(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          addPreset();
+                        }
+                      }}
+                      className="h-8"
+                      placeholder="command (e.g. codex)"
+                      aria-label="New preset command"
+                    />
+                    <Button variant="outline" size="sm" className="w-full" onClick={addPreset}>
+                      Add preset
+                    </Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Custom presets appear as one-click buttons in the ＋ new chat form and can be set as the default above. Names can't reuse the built-ins claude/shell.
                   </p>
                 </div>
 

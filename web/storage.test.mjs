@@ -113,6 +113,76 @@ test('both prefs survive an empty-mode mount (carried by the live spread, not th
   assert.equal(after.defaultNewChatHost, 'prod-box');
 });
 
+console.log('\ncustomPresets validate + round-trip through loadUi/saveUi');
+test('defaults to [] when nothing is stored', () => {
+  reset();
+  assert.deepEqual(loadUi().customPresets, []);
+});
+test('valid presets round-trip', () => {
+  reset();
+  saveUi({ ...loadUi(), customPresets: [{ name: 'codex', cmd: 'codex' }, { name: 'gemini', cmd: 'gemini -m pro' }] });
+  assert.deepEqual(loadUi().customPresets, [{ name: 'codex', cmd: 'codex' }, { name: 'gemini', cmd: 'gemini -m pro' }]);
+});
+test('a non-array customPresets coerces to [] (defensive, no throw)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: 'bogus' }));
+  assert.deepEqual(loadUi().customPresets, []);
+});
+test('entries missing name or cmd are dropped (never blank the spawn command)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: 'ok', cmd: 'ok' }, { name: 'nocmd' }, { cmd: 'noname' }, {}] }));
+  assert.deepEqual(loadUi().customPresets, [{ name: 'ok', cmd: 'ok' }]);
+});
+test('reserved built-in names (claude/shell) are rejected as custom presets', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: 'claude', cmd: 'whatever' }, { name: 'shell', cmd: 'bash' }, { name: 'codex', cmd: 'codex' }] }));
+  assert.deepEqual(loadUi().customPresets, [{ name: 'codex', cmd: 'codex' }]);
+});
+test('duplicate names are de-duplicated (case-insensitive, first wins)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: 'Codex', cmd: 'codex' }, { name: 'codex', cmd: 'codex2' }] }));
+  assert.deepEqual(loadUi().customPresets, [{ name: 'Codex', cmd: 'codex' }]);
+});
+test('names over 32 chars are dropped', () => {
+  reset();
+  const long = 'x'.repeat(33);
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: long, cmd: 'cmd' }, { name: 'ok', cmd: 'ok' }] }));
+  assert.deepEqual(loadUi().customPresets, [{ name: 'ok', cmd: 'ok' }]);
+});
+
+console.log('\ndefaultNewChatPreset (widened) accepts a custom preset name and falls back on delete');
+test('a custom preset name can be the default and round-trips', () => {
+  reset();
+  saveUi({ ...loadUi(), customPresets: [{ name: 'codex', cmd: 'codex' }], defaultNewChatPreset: 'codex' });
+  const ui = loadUi();
+  assert.equal(ui.defaultNewChatPreset, 'codex');
+  assert.deepEqual(ui.customPresets, [{ name: 'codex', cmd: 'codex' }]);
+});
+test('a default naming a since-deleted preset falls back to claude (criterion e)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [], defaultNewChatPreset: 'codex' }));
+  // codex is not in the (empty) custom list → must not dangle
+  assert.equal(loadUi().defaultNewChatPreset, 'claude');
+});
+test('built-in claude/shell defaults remain valid', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPreset: 'shell' }));
+  assert.equal(loadUi().defaultNewChatPreset, 'shell');
+});
+test('a stored non-string preset coerces back to claude (defensive)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPreset: 42 }));
+  assert.equal(loadUi().defaultNewChatPreset, 'claude');
+});
+test('custom presets survive an empty-mode mount (criterion c)', () => {
+  reset();
+  const d0 = loadUi();
+  saveUi(persistUiState({ ...d0, customPresets: [{ name: 'codex', cmd: 'codex' }], defaultNewChatPreset: 'codex' }, 'empty', d0, true));
+  const after = loadUi();
+  assert.deepEqual(after.customPresets, [{ name: 'codex', cmd: 'codex' }]);
+  assert.equal(after.defaultNewChatPreset, 'codex');
+});
+
 console.log('\npaneLayout round-trips through loadUi/saveUi');
 test('defaults to "auto" when nothing is stored', () => {
   reset();
