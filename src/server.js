@@ -13,8 +13,9 @@ import { WebSocketServer } from 'ws';
 import { load, save, loadCatalog, saveCatalog, allSshHosts, sameCatalogEntry } from './config.js';
 import * as collections from './collections.js';
 import { capturePanes, resolveChatWithRefresh, catalogChats, discoverHost, discoverAll } from './chats.js';
-import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream, disableMouse, detectMouse } from './tmux.js';
+import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream, disableMouse, detectMouse, probeSession } from './tmux.js';
 import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude, startConnectionPoolCleanup, validateHost } from './ssh.js';
+import { classifyProbe } from './sessionRecovery.js';
 import { Observer } from './observer.js';
 import { hasCredentials, resolveModel } from './llm.js';
 import { listSessions, createSession, renameSession, deleteSession } from './sessions.js';
@@ -1841,6 +1842,36 @@ app.post('/api/session-kill', async (req, res) => {
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Re-create a chat's tmux session by re-running its command (WARDEN-231 recovery
+// panel → [Re-spawn agent]). Only chats warden owns — manual/spawned kind:'tmux'
+// with a stored `cmd` — are respawnable; yatfa chats have no cmd (their session
+// is managed by the running container) and are rejected. Kills any stale session
+// first (a dead session is a no-op for kill-session), then spawns under the SAME
+// session name so the existing pane/tab re-attaches by id. Does NOT touch the
+// catalog — the entry already carries the right cmd/cwd/host/session.
+app.post('/api/respawn', async (req, res) => {
+  const r = await resolve(String(req.body?.id || ''));
+  if (r.error) return res.status(404).json(r);
+  const chat = r.chat;
+  if (chat.kind !== 'tmux' || !chat.cmd) {
+    return res.status(400).json({ error: 'this chat has no command to re-spawn (only spawned tmux chats can be re-spawned)' });
+  }
+  const err = await preflightTmux(chat.host);
+  if (err) return res.status(400).json({ error: err });
+  // Clear any dead/stale session under this name before recreating it.
+  try { await killTmux(chat, cfg); } catch { /* a dead session may not exist */ }
+  const spawnChat = { host: chat.host, session: chat.session, cwd: chat.cwd || '', cmd: chat.cmd };
+  try { await spawnTmux(spawnChat); }
+  catch (e) { return res.status(500).json({ error: e.message }); }
+  // `new-session -d` returns ok even when the inner command fails to start, so
+  // verify the session actually came up — mirroring /api/spawn's check.
+  if (!(await hasSession(spawnChat, cfg))) {
+    const bin = String(chat.cmd).split(/\s+/)[0] || 'the command';
+    return res.status(500).json({ error: `\`${bin}\` failed to start on ${chat.host} — tmux session died immediately. Is it installed and on PATH there?` });
+  }
+  res.json({ ok: true });
+});
+
 // Helper function to detect binary files by extension
 export function isBinaryFile(filePath) {
   const binaryExtensions = [
@@ -2398,6 +2429,29 @@ streamWss.on('connection', (ws) => {
       const chat = r.chat;
       const cols = Math.max(20, Math.floor(m.cols || 100));
       const rows = Math.max(6, Math.floor(m.rows || 30));
+      // Bounded liveness probe BEFORE spawning the live PTY (WARDEN-231). A dead
+      // session previously made the attach PTY exit immediately → the server
+      // emitted {type:'ended'} → the pane spun an infinite "connecting" spinner
+      // with no escape. Probing first lets us tell session-dead (host up, session
+      // absent) from host-unreachable (SSH can't deliver) and emit a distinct
+      // message the frontend branches on instead of hanging. A null reason means
+      // the session is alive (or the probe was inconclusive) → fall through to a
+      // normal attach; the frontend's immediate-end backstop still catches any
+      // race the probe missed.
+      let reason = null;
+      try { reason = classifyProbe(await probeSession(chat, cfg)); }
+      catch { /* probe threw → leave reason null and attempt a normal attach */ }
+      if (reason === 'host_unreachable') {
+        send({ type: 'host_unreachable', id: m.id });
+        appendEvent({ type: 'error', error: 'host unreachable', context: 'attach', id: m.id, host: chat.host, container: chat.container });
+        return;
+      }
+      if (reason === 'session_dead') {
+        send({ type: 'session_dead', id: m.id });
+        appendEvent({ type: 'error', error: 'session dead', context: 'attach', id: m.id, host: chat.host, container: chat.container });
+        return;
+      }
+
       // WARDEN-261 — Seamless copy: if the client opted this host in
       // (m.seamlessCopy), disable tmux mouse on attach so xterm owns the
       // selection and the standard select+copy gesture works with no tmux
@@ -2405,7 +2459,9 @@ streamWss.on('connection', (ws) => {
       // on (copy is impaired), push a mouse_state notice so the client can show
       // a dismissible hint offering to enable Seamless copy. Both are best-
       // effort + non-blocking (fired concurrently with the PTY attach) so a slow
-      // or unreachable host never delays or breaks the attach.
+      // or unreachable host never delays or breaks the attach. Gated behind the
+      // probe above: a dead/unreachable session returns before this, so mouse
+      // state is only probed for a session we're actually going to attach.
       if (m.seamlessCopy) {
         disableMouse(chat, cfg).catch(() => { /* best-effort: copy degrades to today's behavior */ });
       } else {
@@ -2413,6 +2469,7 @@ streamWss.on('connection', (ws) => {
           .then((on) => { if (on) send({ type: 'mouse_state', id: m.id, mouseOn: true }); })
           .catch(() => { /* unreadable → no hint, never block attach */ });
       }
+
       let pty;
       try { pty = attachStream(chat, cfg, { cols, rows }); }
       catch (e) {

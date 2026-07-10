@@ -529,9 +529,13 @@ export function toMsysPath(p) {
   return p.replace(/^([A-Za-z]):[\\/]/, (_m, d) => `/${d.toLowerCase()}/`).replace(/\\/g, '/');
 }
 
-// Run tmux locally with argv. Returns {ok, code, stdout, stderr}.
-export function runLocalTmux(args) {
-  const r = spawnSync(TMUX_BIN, args, { env: LOCAL_ENV, windowsHide: true, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });
+// Run tmux locally with argv. Returns {ok, code, stdout, stderr}. `opts.timeout`
+// (ms) bounds the call — spawnSync sends SIGTERM to the tmux process if it
+// exceeds the budget, which is how the has-session liveness probe stays bounded
+// for local chats too (WARDEN-231). Without it a local probe could never hang,
+// but threading the option keeps the contract symmetric with the remote path.
+export function runLocalTmux(args, opts = {}) {
+  const r = spawnSync(TMUX_BIN, args, { env: LOCAL_ENV, windowsHide: true, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024, timeout: opts.timeout });
   return { ok: r.status === 0, code: r.status ?? -1, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 
@@ -546,7 +550,7 @@ export function attachLocalTmux(args, { cols = 100, rows = 30 } = {}) {
 // For a yatfa chat (container set) on a remote, prefixes `docker exec <c>`.
 
 export async function runTmux(chat, args, opts = {}) {
-  if (chat.host === '(local)') return runLocalTmux(args);
+  if (chat.host === '(local)') return runLocalTmux(args, { timeout: opts.timeout });
   const prefix = chat.container ? `docker exec ${shellQuote(chat.container)} ` : '';
 
   // Use pooled connection for remote hosts

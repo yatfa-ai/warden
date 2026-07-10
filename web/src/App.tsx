@@ -622,6 +622,12 @@ function App() {
     await refresh();
     openChat(result.data.chat.key || result.data.chat.id);
   }, [focused, defaultSplitShell, refresh, openChat]);
+  // A chat was spawned from a pane's recovery panel (open-shell / re-spawn,
+  // WARDEN-231): refresh the list so the new chat appears, then open + focus it.
+  const handlePaneSpawned = useCallback((chat: Chat) => {
+    void refresh();
+    openChat(chat.key || chat.id);
+  }, [refresh, openChat]);
 
   // close pane: pane gone, tab stays
   const closePane = useCallback((id: string) => {
@@ -1182,6 +1188,7 @@ function App() {
             onClearNew={clearNew}
             onForceKill={forceKill}
             onSplitShell={handleSplitShell}
+            onSpawned={handlePaneSpawned}
             externalSearchQuery={externalSearchQuery}
             onToggleSidebar={toggleSidebar}
             onToggleObserver={toggleObserver}
