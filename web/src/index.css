@@ -201,3 +201,33 @@
     color: var(--accent-foreground);
   }
 }
+
+/*
+ * Respect prefers-reduced-motion (WCAG 2.3.3 "Animation from Interactions").
+ *
+ * When the OS / DevTools "reduce motion" preference is on (vestibular / motion
+ * sensitivity), every non-essential animation and transition is forced to
+ * complete instantly to its END keyframe — content is never hidden, just shown
+ * without the motion. fade-in ends at opacity 1 (visible), zoom-in-95 at scale
+ * 1 (full size), animate-pulse (skeleton + PaneTile) settles to its solid base
+ * state, and transform transitions (button press, switch thumb slide, tab
+ * indicator) snap to their final position. With reduce-motion OFF, behavior is
+ * pixel-identical to today — this block is inert.
+ *
+ * DELIBERATELY UNLAYERED + !important: Tailwind v4 assigns its generated
+ * utilities (animate-pulse, animate-in, fade-in-0, zoom-in-95, slide-in-from-*,
+ * transition-all, …) to the `utilities` cascade layer, which sorts AFTER
+ * `base`. A reset placed inside @layer base (above) would silently lose to
+ * those utilities and do nothing. Unlayered styles outrank every layered style,
+ * and !important is belt-and-suspenders — together they guarantee this wins over
+ * the utilities layer. Near-zero duration (not 0) + iteration-count 1 is what
+ * preserves final visibility rather than freezing mid-animation.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
