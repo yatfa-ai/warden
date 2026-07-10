@@ -1,36 +1,37 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { ActivityEvent } from '@/lib/types';
 import { Button } from '@/components/ui/button';
+import { useLiveTimeline } from '@/lib/useLiveTimeline';
+import { formatUpdatedAgo } from '@/lib/timelinePacing';
 
 export function ActivityTimeline() {
-  const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [filtered, setFiltered] = useState<ActivityEvent[]>([]);
-  const [loading, setLoading] = useState(true);
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [agentFilter, setAgentFilter] = useState<string>('all');
   const [hostFilter, setHostFilter] = useState<string>('all');
   const [limit, setLimit] = useState(100);
+  // Re-render once per second so the "Updated Ns ago" label stays fresh.
+  const [now, setNow] = useState(() => Date.now());
+
+  const {
+    events,
+    loading,
+    refreshing,
+    isLive,
+    setIsLive,
+    lastUpdated,
+    refresh,
+  } = useLiveTimeline(limit);
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   // Extract unique values for filters
   const allTypes = Array.from(new Set(events.map((e) => e.type)));
   const allAgents = Array.from(new Set(events.map((e) => e.container).filter(Boolean)));
   const allHosts = Array.from(new Set(events.map((e) => e.host).filter(Boolean)));
-
-  const fetchEvents = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await fetch(`/api/activity?limit=${limit}`);
-      const j = await res.json();
-      setEvents(j.events || []);
-    } catch (e) {
-      console.error('Failed to fetch activity:', e);
-    }
-    setLoading(false);
-  }, [limit]);
-
-  useEffect(() => {
-    fetchEvents();
-  }, [fetchEvents]);
 
   // Apply filters
   useEffect(() => {
@@ -189,9 +190,24 @@ export function ActivityTimeline() {
       <div className="flex-shrink-0 p-3 border-b space-y-3">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold">Activity Timeline</h2>
-          <Button size="sm" variant="outline" onClick={fetchEvents} disabled={loading}>
-            {loading ? 'Loading...' : 'Refresh'}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setIsLive((v) => !v)}
+              title={isLive ? 'Pause live updates' : 'Resume live updates'}
+            >
+              <span
+                className={`inline-block size-2 rounded-full mr-1.5 ${
+                  isLive ? 'bg-green-500 animate-pulse' : 'bg-muted-foreground'
+                }`}
+              />
+              {isLive ? 'Live' : 'Paused'}
+            </Button>
+            <Button size="sm" variant="outline" onClick={refresh} disabled={loading || refreshing}>
+              {refreshing ? 'Refreshing...' : 'Refresh'}
+            </Button>
+          </div>
         </div>
 
         {/* Filters */}
@@ -250,6 +266,11 @@ export function ActivityTimeline() {
         {/* Stats */}
         <div className="text-xs text-muted-foreground">
           Showing {filtered.length} of {events.length} events
+          {!isLive
+            ? ' · Paused'
+            : lastUpdated
+              ? ` · Updated ${formatUpdatedAgo(now, lastUpdated)}`
+              : ''}
         </div>
       </div>
 
