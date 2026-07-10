@@ -1,6 +1,6 @@
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert';
-import { summarizeOpenChats, suggestNextActions, Observer, TOOLS } from './observer.js';
+import { summarizeOpenChats, suggestNextActions, readChats, Observer, TOOLS } from './observer.js';
 import { createSession, deleteSession } from './sessions.js';
 
 // Shared config passed through to capturePanes.
@@ -421,6 +421,343 @@ describe('summarizeOpenChats', () => {
 
       assert.strictEqual(result.chats[0].state, 'active');
     });
+  });
+});
+
+describe('read_chats tool registration', () => {
+  it('is registered in the TOOLS array with an object input schema', () => {
+    const tool = TOOLS.find((t) => t.name === 'read_chats');
+    assert.ok(tool, 'read_chats tool should be registered');
+    assert.strictEqual(tool.input_schema.type, 'object');
+    assert.deepStrictEqual(tool.input_schema.required, [], 'no arg is required (ids OR open_only)');
+    assert.ok(tool.input_schema.properties.ids, 'exposes an ids array property');
+    assert.ok(tool.input_schema.properties.open_only, 'exposes an open_only property');
+    assert.ok(tool.input_schema.properties.lines, 'exposes a lines property');
+  });
+});
+
+describe('readChats (batched concurrent read)', () => {
+  // Build several chats on different hosts so multi-pane / partial-host scenarios
+  // have realistic keys to match against.
+  function worker() { return yatfaChat(); }
+  function planner() {
+    return yatfaChat({
+      id: 'host1:myproject-planner', key: 'myproject-planner', container: 'myproject-planner',
+      role: 'planner',
+    });
+  }
+  function reviewer() {
+    return yatfaChat({
+      id: 'host2:myproject-reviewer', key: 'myproject-reviewer', container: 'myproject-reviewer',
+      host: 'host2', project: 'myproject', role: 'reviewer',
+    });
+  }
+
+  describe('multi-pane success (ids mode)', () => {
+    it('returns raw pane content per requested pane in one result (not a structured classification)', async () => {
+      const chats = [worker(), planner()];
+      const capturePanes = mock.fn(async (_cs) => ({
+        'myproject-worker': 'worker output line',
+        'myproject-planner': 'planner output line',
+      }));
+
+      const result = await readChats(['myproject-worker', 'myproject-planner'], false, [], chats, capturePanes, cfg);
+
+      assert.strictEqual(result.count, 2);
+      assert.strictEqual(result.chats.length, 2);
+      // Each entry carries the RAW pane (a `pane` field) — distinct from
+      // summarize_chats, which returns structured fields (state/errors/...) and no pane.
+      const w = result.chats.find((c) => c.id === 'myproject-worker');
+      assert.ok(w, 'worker entry present');
+      assert.strictEqual(w.ok, true);
+      assert.strictEqual(w.pane, 'worker output line');
+      assert.strictEqual(w.host, 'host1');
+      assert.strictEqual(w.role, 'worker');
+      assert.ok(!('state' in w) && !('errors' in w), 'no classification fields — this is raw content');
+      assert.strictEqual(result.summary.read, 2);
+      assert.strictEqual(result.summary.captureFailed, 0);
+    });
+
+    it('calls capturePanes exactly once with all resolved chats and the cfg (concurrent, no serial loop)', async () => {
+      // WARDEN-88: a serial await-in-loop would call capturePanes once PER pane.
+      // The batched design calls it exactly ONCE for N panes.
+      const chats = [worker(), planner(), reviewer()];
+      const capturePanes = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.key, `pane-${c.key}`])));
+
+      await readChats(['myproject-worker', 'myproject-planner', 'myproject-reviewer'], false, [], chats, capturePanes, cfg);
+
+      assert.strictEqual(capturePanes.mock.callCount(), 1, 'one batched capturePanes call regardless of pane count');
+      const passed = capturePanes.mock.calls[0].arguments[0];
+      assert.strictEqual(passed.length, 3, 'all three panes are read in that single call');
+      assert.strictEqual(capturePanes.mock.calls[0].arguments[1], cfg, 'cfg is forwarded');
+    });
+
+    it('dedupes ids that resolve to the same pane', async () => {
+      const chats = [worker()];
+      const capturePanes = mock.fn(async (cs) => ({ [cs[0].key]: 'only pane' }));
+
+      // 'myproject-worker' (exact container) and 'worker' (role) both hit the same chat.
+      const result = await readChats(['myproject-worker', 'worker'], false, [], chats, capturePanes, cfg);
+
+      assert.strictEqual(result.count, 1, 'the same pane is not read twice');
+      assert.strictEqual(capturePanes.mock.calls[0].arguments[0].length, 1);
+    });
+
+    it('resolves a manual/tmux chat (container null) by session', async () => {
+      const chat = tmuxChat();
+      const capturePanes = mock.fn(async (cs) => ({ [cs[0].key]: 'manual pane text' }));
+
+      const result = await readChats(['manual-session'], false, [], [chat], capturePanes, cfg);
+
+      assert.strictEqual(result.count, 1);
+      assert.strictEqual(result.chats[0].id, 'manual-session');
+      assert.strictEqual(result.chats[0].pane, 'manual pane text');
+    });
+  });
+
+  describe('open_only resolution', () => {
+    it('reads exactly the open tabs when open_only is true (ignores ids)', async () => {
+      const worker_ = worker();
+      const planner_ = planner();
+      const reviewer_ = reviewer(); // not open
+      const capturePanes = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.key, `pane-${c.key}`])));
+
+      const result = await readChats(['myproject-reviewer'], true,
+        ['myproject-worker', 'myproject-planner'], [worker_, planner_, reviewer_], capturePanes, cfg);
+
+      // ids is ignored under open_only; only the two open tabs are read.
+      assert.strictEqual(result.count, 2);
+      assert.deepStrictEqual(result.chats.map((c) => c.id).sort(), ['myproject-planner', 'myproject-worker']);
+      assert.strictEqual(capturePanes.mock.calls[0].arguments[0].length, 2);
+    });
+
+    it('returns the "no tabs" error when open_only is true and nothing is open', async () => {
+      const capturePanes = mock.fn(async () => ({}));
+      const result = await readChats([], true, [], [worker()], capturePanes, cfg);
+
+      assert.strictEqual(result.error, 'no tabs are open. open some agent panes first.');
+      assert.strictEqual(capturePanes.mock.callCount(), 0);
+    });
+
+    it('returns the "do not match" error when open_only tabs match no discovered chat', async () => {
+      const capturePanes = mock.fn(async () => ({}));
+      const result = await readChats([], true, ['ghost-tab'], [worker()], capturePanes, cfg);
+
+      assert.strictEqual(result.error, 'open tabs do not match any discovered chats. try refreshing with list_chats.');
+      assert.strictEqual(capturePanes.mock.callCount(), 0);
+    });
+  });
+
+  describe('partial host failure (WARDEN-89: failures reported, not dropped)', () => {
+    it('flags the pane whose host capture failed while returning the others, never omitting it', async () => {
+      // capturePanes silently skips a host whose SSH fails, so the reviewer (host2)
+      // has NO key in the result map. readChats must surface it as a flagged entry
+      // rather than dropping it — the dangerous input is the missing key.
+      const chats = [worker(), planner(), reviewer()];
+      const capturePanes = mock.fn(async (cs) => {
+        const out = {};
+        for (const c of cs) if (c.host !== 'host2') out[c.key] = `pane-${c.key}`;
+        return out;
+      });
+
+      const result = await readChats(
+        ['myproject-worker', 'myproject-planner', 'myproject-reviewer'], false, [], chats, capturePanes, cfg);
+
+      assert.strictEqual(result.chats.length, 3, 'all three requested panes yield an entry');
+      const failed = result.chats.find((c) => c.id === 'myproject-reviewer');
+      assert.ok(failed, 'the failed-host pane is still present — NOT dropped');
+      assert.strictEqual(failed.ok, false);
+      assert.strictEqual(failed.host, 'host2');
+      assert.ok(!('pane' in failed), 'no pane content for a failed capture');
+      assert.ok(failed.error.includes('host2'), 'the error names the unreachable host');
+
+      const ok = result.chats.filter((c) => c.ok);
+      assert.strictEqual(ok.length, 2);
+      assert.deepStrictEqual(ok.map((c) => c.id).sort(), ['myproject-planner', 'myproject-worker']);
+      assert.strictEqual(result.summary.captureFailed, 1);
+      assert.strictEqual(result.summary.read, 2);
+    });
+  });
+
+  describe('id resolution failures (surfaced per-id, not fatal)', () => {
+    it('reports an unmatched id per-id while still reading the ids that resolve', async () => {
+      const chats = [worker()];
+      const capturePanes = mock.fn(async (cs) => ({ [cs[0].key]: 'pane' }));
+
+      const result = await readChats(['myproject-worker', 'no-such-agent'], false, [], chats, capturePanes, cfg);
+
+      assert.strictEqual(result.count, 1, 'the resolvable id is still read');
+      assert.strictEqual(result.chats[0].id, 'myproject-worker');
+      assert.ok(Array.isArray(result.errors) && result.errors.length === 1, 'the bad id is reported');
+      assert.strictEqual(result.errors[0].id, 'no-such-agent');
+      assert.ok(/no chat matches/.test(result.errors[0].error));
+      assert.strictEqual(result.summary.resolutionFailed, 1);
+    });
+
+    it('reports an ambiguous id per-id (does not silently pick one)', async () => {
+      const a = worker();
+      const b = yatfaChat({ id: 'host2:other-worker', key: 'other-worker', container: 'other-worker', host: 'host2' });
+      const capturePanes = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.key, 'x'])));
+
+      const result = await readChats(['worker'], false, [], [a, b], capturePanes, cfg);
+
+      // 'worker' matches both by role → ambiguous. No pane is read; the error is surfaced.
+      assert.strictEqual(result.count, undefined, 'no success shape when nothing resolves');
+      assert.ok(result.error);
+      assert.ok(Array.isArray(result.errors) && result.errors.length === 1);
+      assert.ok(/ambiguous/.test(result.errors[0].error), 'the ambiguity is named');
+      assert.strictEqual(capturePanes.mock.callCount(), 0, 'nothing to capture when the sole id is ambiguous');
+    });
+
+    it('returns a "provide ids or open_only" error when neither mode is supplied', async () => {
+      const capturePanes = mock.fn(async () => ({}));
+      const result = await readChats(undefined, false, [], [worker()], capturePanes, cfg);
+
+      assert.strictEqual(result.error, 'provide an array of ids or set open_only: true.');
+      assert.strictEqual(capturePanes.mock.callCount(), 0);
+    });
+
+    it('ignores blank/non-string ids rather than treating them as a match', async () => {
+      const capturePanes = mock.fn(async (cs) => ({ [cs[0].key]: 'pane' }));
+      // mixed with a valid id; the blanks must not error or match.
+      const result = await readChats(['', '  ', 'myproject-worker'], false, [], [worker()], capturePanes, cfg);
+
+      assert.strictEqual(result.count, 1);
+      assert.strictEqual(result.chats[0].id, 'myproject-worker');
+      assert.strictEqual(capturePanes.mock.calls[0].arguments[0].length, 1);
+    });
+  });
+
+  describe('bounded output (WARDEN-167 AC #5)', () => {
+    it('trims each pane to the last `lines` lines', async () => {
+      const chat = worker();
+      const longPane = Array.from({ length: 60 }, (_, i) => `line ${i}`).join('\n');
+      const capturePanes = mock.fn(async () => ({ [chat.key]: longPane }));
+
+      const result = await readChats(['myproject-worker'], false, [], [chat], capturePanes, cfg, { lines: 5 });
+
+      const out = result.chats[0].pane.split('\n');
+      assert.strictEqual(out.length, 5);
+      assert.deepStrictEqual(out, ['line 55', 'line 56', 'line 57', 'line 58', 'line 59']);
+    });
+
+    it('treats lines <= 0 as the minimum of 1 line', async () => {
+      const chat = worker();
+      const capturePanes = mock.fn(async () => ({ [chat.key]: 'a\nb\nc' }));
+
+      const result = await readChats(['myproject-worker'], false, [], [chat], capturePanes, cfg, { lines: 0 });
+
+      assert.strictEqual(result.chats[0].pane, 'c');
+    });
+
+    it('caps how many panes are captured and surfaces the overflow as skipped (no silent drop)', async () => {
+      const chats = [worker(), planner(), reviewer()];
+      const capturePanes = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.key, `pane-${c.key}`])));
+
+      const result = await readChats(
+        ['myproject-worker', 'myproject-planner', 'myproject-reviewer'], false, [], chats, capturePanes, cfg,
+        { maxPanes: 2 });
+
+      // Only 2 are captured; the 3rd is surfaced as skipped, not silently truncated.
+      assert.strictEqual(capturePanes.mock.calls[0].arguments[0].length, 2, 'capturePanes only sees the capped count');
+      assert.strictEqual(result.count, 3, 'all requested panes still have an entry');
+      const skipped = result.chats.filter((c) => c.skipped);
+      assert.strictEqual(skipped.length, 1);
+      assert.strictEqual(skipped[0].ok, false);
+      assert.ok(/max pane cap/.test(skipped[0].error), 'the skip reason is stated');
+      assert.strictEqual(result.summary.skipped, 1);
+      assert.strictEqual(result.summary.read, 2);
+    });
+  });
+
+  describe('raw content fidelity (matches read_chat, distinct from summarize)', () => {
+    it('preserves raw pane text including ANSI (does not strip — read_chat keeps it)', async () => {
+      // read_chat returns raw capture output (ANSI intact); read_chats is its batched
+      // sibling and preserves the same fidelity rather than stripping like summarize.
+      const chat = worker();
+      const pane = '\x1b[31mError: build failed\x1b[0m\nRunning setup.';
+      const capturePanes = mock.fn(async () => ({ [chat.key]: pane }));
+
+      const result = await readChats(['myproject-worker'], false, [], [chat], capturePanes, cfg);
+
+      assert.ok(result.chats[0].pane.includes('\x1b'), 'raw ANSI is preserved, matching read_chat');
+      assert.ok(/Error: build failed/.test(result.chats[0].pane));
+    });
+  });
+
+  describe('error handling', () => {
+    it('returns the error message when capturePanes throws (does not reject)', async () => {
+      const chat = worker();
+      const capturePanes = mock.fn(async () => { throw new Error('ssh connection refused'); });
+
+      const result = await readChats(['myproject-worker'], false, [], [chat], capturePanes, cfg);
+
+      assert.ok(result.error);
+      assert.strictEqual(result.error, 'ssh connection refused');
+    });
+  });
+});
+
+describe('Observer _execTool read_chats dispatch', () => {
+  // The success/content behavior is covered by the readChats pure-function suite
+  // above (mocked capturePanes). These dispatch tests cover only paths that run
+  // BEFORE capturePanes is reached — _execTool wires the real module-level
+  // capturePanes, which cannot be mocked on Node 20 (WARDEN-130), so a success
+  // assertion here would hit live SSH. The guard + wiring paths below exercise the
+  // dispatch without that constraint.
+
+  it('open_only with empty openTabs returns the "no tabs" error', async () => {
+    const obs = new Observer(cfg, {});
+    obs.openTabs = [];
+    obs.lastChats = [yatfaChat()];
+
+    const result = await obs._execTool('read_chats', { open_only: true });
+
+    assert.strictEqual(result.error, 'no tabs are open. open some agent panes first.');
+  });
+
+  it('open_only forwards effectiveOpenTabs + lastChats (ghost tab → "do not match")', async () => {
+    // Reaching the "do not match" guard proves _execTool passed open_only through
+    // to readChats and supplied effectiveOpenTabs() + this.lastChats.
+    const obs = new Observer(cfg, {});
+    obs.openTabs = ['ghost-tab'];
+    obs.lastChats = [yatfaChat()];
+
+    const result = await obs._execTool('read_chats', { open_only: true });
+
+    assert.strictEqual(result.error, 'open tabs do not match any discovered chats. try refreshing with list_chats.');
+  });
+
+  it('ids mode forwards input.ids + lastChats to readChats (unknown id → resolution error)', async () => {
+    // Reaching readChats' resolution logic (not the usage guard) proves _execTool
+    // forwarded ids and lastChats. An unknown id resolves to nothing without ever
+    // calling capturePanes, so this needs no SSH.
+    const obs = new Observer(cfg, {});
+    obs.lastChats = [yatfaChat()];
+
+    const result = await obs._execTool('read_chats', { ids: ['totally-unknown-id'] });
+
+    assert.ok(/none of the requested ids resolved/.test(result.error));
+    assert.ok(Array.isArray(result.errors) && result.errors.length === 1);
+    assert.strictEqual(result.errors[0].id, 'totally-unknown-id');
+  });
+
+  it('returns the usage error when neither ids nor open_only is supplied', async () => {
+    const obs = new Observer(cfg, {});
+    obs.lastChats = [yatfaChat()];
+
+    const result = await obs._execTool('read_chats', {});
+
+    assert.strictEqual(result.error, 'provide an array of ids or set open_only: true.');
+  });
+
+  it('returns the usage error when ids is an empty array and open_only is false', async () => {
+    const obs = new Observer(cfg, {});
+    obs.lastChats = [yatfaChat()];
+
+    const result = await obs._execTool('read_chats', { ids: [] });
+
+    assert.strictEqual(result.error, 'provide an array of ids or set open_only: true.');
   });
 });
 
