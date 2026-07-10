@@ -38,6 +38,9 @@ interface Props {
   fontSize: number;
   onFontSizeChange: (n: number) => void;
   scrollback: number;
+  // Global, persisted terminal font family (UiState). Pure pass-through to
+  // PaneTile — App owns the value (and the empty → default fallback).
+  fontFamily: string;
   paneLayout: PaneLayout;
   // Resolved terminal surface color (App resolves terminalColorScheme +
   // effectiveTheme down to a concrete 'light' | 'dark' here). Pure pass-through
@@ -52,7 +55,7 @@ interface Props {
 
 function colsFor(n: number) { return n <= 1 ? 1 : Math.ceil(Math.sqrt(n)); }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onOpenChat, onForceKill, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, paneLayout, terminalTheme, terminalCursorStyle }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onOpenChat, onForceKill, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalTheme, terminalCursorStyle }: Props) {
   const [splitOpen, setSplitOpen] = useState(false);
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
@@ -242,6 +245,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     externalSearchQuery={externalSearchQuery?.paneId === t.id ? externalSearchQuery.query : undefined}
                     fontSize={fontSize} onFontSizeChange={onFontSizeChange}
                     scrollback={scrollback}
+                    fontFamily={fontFamily}
                     terminalTheme={terminalTheme}
                     terminalCursorStyle={terminalCursorStyle}
                   />

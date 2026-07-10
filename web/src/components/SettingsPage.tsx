@@ -16,9 +16,27 @@ import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ArrowLeft, Trash2 } from 'lucide-react';
 import { type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { type Density } from '@/lib/density';
-import { type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type CustomPreset, type PresetNameIssue, PRESET_NAME_MAX, validatePresetName } from '@/lib/storage';
+import { type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type CustomPreset, type PresetNameIssue, PRESET_NAME_MAX, validatePresetName, DEFAULT_TERMINAL_FONT_FAMILY } from '@/lib/storage';
 import { putJson } from '@/lib/api';
 import { toast } from 'sonner';
+
+// Curated common monospace fonts for the "Terminal font family" control. Each
+// `value` is a complete, valid CSS font-family string (the chosen face first,
+// then sane monospace fallbacks) so it can be passed straight to xterm. "System
+// default" maps to DEFAULT_TERMINAL_FONT_FAMILY (today's exact stack). Anything
+// not in this list is "Custom…" (free-text input below).
+const TERMINAL_FONT_OPTIONS: { label: string; value: string }[] = [
+  { label: 'System default', value: DEFAULT_TERMINAL_FONT_FAMILY },
+  { label: 'Cascadia Code', value: '"Cascadia Code", "JetBrains Mono", "Fira Code", ui-monospace, Menlo, Consolas, monospace' },
+  { label: 'JetBrains Mono', value: '"JetBrains Mono", "Cascadia Code", "Fira Code", ui-monospace, Menlo, Consolas, monospace' },
+  { label: 'Fira Code', value: '"Fira Code", "JetBrains Mono", "Cascadia Code", ui-monospace, Menlo, Consolas, monospace' },
+  { label: 'Source Code Pro', value: '"Source Code Pro", "JetBrains Mono", "Cascadia Code", ui-monospace, Menlo, Consolas, monospace' },
+  { label: 'Menlo', value: 'Menlo, "Cascadia Code", "JetBrains Mono", ui-monospace, Consolas, monospace' },
+  { label: 'Consolas', value: 'Consolas, "Cascadia Code", "JetBrains Mono", ui-monospace, Menlo, monospace' },
+];
+// Sentinel value the Select uses to mean "show the free-text Custom input".
+// (Radix Select forbids an empty-string option value, so this is non-empty.)
+const CUSTOM_FONT_VALUE = '__custom__';
 
 interface ConfigData {
   hosts: string[];
@@ -70,6 +88,12 @@ interface Props {
   // effect. It must never be added to the `config` state / PUT /api/config body.
   terminalScrollback: number;
   setTerminalScrollback: (n: number) => void;
+  // Terminal font family is likewise a pure client-side localStorage pref: it
+  // sets the xterm CSS font-family for every agent pane and is persisted by
+  // App's saveUi effect. It must never be added to the `config` state /
+  // PUT /api/config body. Applies live to open panes.
+  terminalFontFamily: string;
+  setTerminalFontFamily: (v: string) => void;
   // Terminal color scheme is likewise a pure client-side localStorage pref: it
   // sets the xterm surface (background/foreground) and is persisted by App's
   // saveUi effect. It must never be added to the `config` state / PUT /api/config body.
@@ -201,7 +225,7 @@ function PresetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -225,6 +249,18 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
   const [availableHosts, setAvailableHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+
+  // Terminal font family Select: a curated font, or "Custom…" which reveals a
+  // free-text input for any installed CSS font (e.g. a Nerd Font for glyphs).
+  // The pref is always the full CSS font-family string; customFontMode tracks
+  // whether the free-text field is shown (initialized from whether the saved
+  // value is already a non-curated/custom value). A blank custom value falls
+  // back to the default stack, but we stay in custom mode so the field doesn't
+  // vanish mid-edit.
+  const matchedCurated = TERMINAL_FONT_OPTIONS.find((f) => f.value === terminalFontFamily);
+  const [customFontMode, setCustomFontMode] = useState(!matchedCurated);
+  const [customFontText, setCustomFontText] = useState(!matchedCurated ? terminalFontFamily : '');
+  const fontSelectValue = customFontMode ? CUSTOM_FONT_VALUE : terminalFontFamily;
 
   // Load current config and available hosts when the page mounts.
   useEffect(() => {
@@ -639,6 +675,54 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   />
                   <p className="text-xs text-muted-foreground">
                     Applies to all terminal panes (8–24). Use the A− / A+ buttons on any pane to adjust the same value.
+                  </p>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="terminalFontFamily">Terminal font family</Label>
+                  <Select
+                    value={fontSelectValue}
+                    onValueChange={(v) => {
+                      if (v === CUSTOM_FONT_VALUE) {
+                        setCustomFontMode(true);
+                        // Seed the field with the current custom value, or blank
+                        // when switching from a curated font (effective font
+                        // stays put until the user types something new).
+                        setCustomFontText(matchedCurated ? '' : terminalFontFamily);
+                      } else {
+                        setCustomFontMode(false);
+                        setCustomFontText('');
+                        setTerminalFontFamily(v);
+                      }
+                    }}
+                  >
+                    <SelectTrigger id="terminalFontFamily" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {TERMINAL_FONT_OPTIONS.map((f) => (
+                        <SelectItem key={f.label} value={f.value}>{f.label}</SelectItem>
+                      ))}
+                      <SelectItem value={CUSTOM_FONT_VALUE}>Custom…</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {customFontMode && (
+                    <Input
+                      aria-label="Custom terminal font family"
+                      value={customFontText}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setCustomFontText(v);
+                        // A blank custom value falls back to the default stack
+                        // (never a blank pane); we stay in custom mode so the
+                        // field keeps showing while editing.
+                        setTerminalFontFamily(v.trim() === '' ? DEFAULT_TERMINAL_FONT_FAMILY : v);
+                      }}
+                      placeholder='e.g. "Hack Nerd Font", ui-monospace, monospace'
+                    />
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    Monospace font for all agent panes. Pick a common font, or choose <strong>Custom…</strong> to paste any installed CSS font-family (e.g. a Nerd Font for glyphs). Applies live to open panes; blank reverts to the system default.
                   </p>
                 </div>
 

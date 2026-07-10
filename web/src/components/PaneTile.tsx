@@ -6,7 +6,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { streamApi } from '@/lib/stream';
 import type { Chat } from '@/lib/types';
 import { findPathCandidates } from '@/lib/path-links';
-import type { TerminalCursorStyle } from '@/lib/storage';
+import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle } from '@/lib/storage';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { StatusDot } from '@/components/StatusDot';
@@ -68,6 +68,11 @@ interface Props {
   fontSize: number;       // global, persisted terminal font size (UiState)
   onFontSizeChange: (n: number) => void;  // bump the shared global preference
   scrollback: number;     // global, persisted terminal scrollback depth (UiState)
+  // Global, persisted terminal font family (UiState) — the CSS font-family
+  // value xterm renders. Empty falls back to the default stack at the use site
+  // (App already guarantees non-empty, but we guard here too so a pane never
+  // goes blank). Settings-only: no in-pane control, unlike font size.
+  fontFamily: string;
   // Resolved terminal surface color (App resolves the terminalColorScheme pref +
   // the effective app theme down to a concrete value here). Drives the xterm
   // `theme` option + the container background, and re-themes already-open panes
@@ -80,7 +85,7 @@ interface Props {
   terminalCursorStyle: TerminalCursorStyle;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, terminalTheme, terminalCursorStyle }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalTheme, terminalCursorStyle }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -116,9 +121,15 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // xterm must never receive an out-of-range scrollback, so bound it here too.
   const safeScrollback = Math.max(100, Math.min(100000, Math.round(scrollback)));
 
+  // Defensive fallback: App guarantees fontFamily is non-empty, but an empty
+  // CSS font-family value blanks the whole pane (criterion: no broken/blank
+  // pane on an empty/unknown custom value). Fall back to the default stack so
+  // the terminal is always legible.
+  const safeFontFamily = fontFamily || DEFAULT_TERMINAL_FONT_FAMILY;
+
   useEffect(() => {
     const term = new Terminal({
-      fontFamily: '"Cascadia Code", "JetBrains Mono", "Fira Code", "Symbols Nerd Font", ui-monospace, Menlo, Consolas, monospace',
+      fontFamily: safeFontFamily,
       fontSize: safeFontSize, convertEol: false, scrollback: safeScrollback,
       cursorBlink: CURSOR_OPTIONS[terminalCursorStyle].cursorBlink,
       cursorStyle: CURSOR_OPTIONS[terminalCursorStyle].cursorStyle,
@@ -325,7 +336,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // buffered terminal; new panes always pick up the new value, existing open
   // panes pick it up on reopen. Setting options.scrollback here is harmless and
   // covers the cases where xterm does accept the live change.
-  useEffect(() => { if (termRef.current) { termRef.current.options.fontSize = safeFontSize; termRef.current.options.scrollback = safeScrollback; try { fitRef.current?.fit(); } catch {} } }, [safeFontSize, safeScrollback]);
+  useEffect(() => { if (termRef.current) { termRef.current.options.fontSize = safeFontSize; termRef.current.options.scrollback = safeScrollback; termRef.current.options.fontFamily = safeFontFamily; try { fitRef.current?.fit(); } catch {} } }, [safeFontSize, safeScrollback, safeFontFamily]);
 
   // terminal theme (App-resolved terminalColorScheme + effective theme) — re-theme
   // already-open panes live without a reopen, mirroring the font-size/scrollback
