@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { parseGitStatusPorcelain, parseAheadBehind, isConflictStatus } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, isConflictStatus } from './gitStatus.js';
 
 describe('parseGitStatusPorcelain', () => {
   it('parses the most common case: unstaged modification as the FIRST file', () => {
@@ -230,5 +230,109 @@ describe('parseAheadBehind', () => {
 
   it('tolerates leading/trailing whitespace', () => {
     assert.deepEqual(parseAheadBehind('  2\t5  '), { ahead: 5, behind: 2 });
+  });
+});
+
+describe('parseStashCount', () => {
+  // `git stash list` prints one reflog line per shelved WIP entry. An empty repo
+  // (or a non-git cwd whose `git stash list` errors to stderr) yields empty
+  // stdout → null, so the badge renders no indicator. The eager count surfaces
+  // parked work that `git status --porcelain` hides (WARDEN-211).
+
+  it('counts N non-empty stash lines as N', () => {
+    const out = 'stash@{0}: WIP on main: abc1234 third\nstash@{1}: WIP on main: def5678 second\n';
+    assert.equal(parseStashCount(out), 2);
+  });
+
+  it('counts a single stash as 1', () => {
+    assert.equal(parseStashCount('stash@{0}: WIP on main: abc1234 msg\n'), 1);
+  });
+
+  it('returns null for empty output (no stashes / non-git)', () => {
+    assert.equal(parseStashCount(''), null);
+  });
+
+  it('tolerates a trailing newline without inflating the count', () => {
+    assert.equal(parseStashCount('stash@{0}: WIP on main: msg\n\n'), 1);
+  });
+
+  it('treats whitespace-only output as null', () => {
+    assert.equal(parseStashCount('   \n  \n'), null);
+  });
+
+  it('handles undefined / null input without throwing', () => {
+    assert.equal(parseStashCount(undefined), null);
+    assert.equal(parseStashCount(null), null);
+  });
+
+  it('accepts a Buffer input', () => {
+    assert.equal(parseStashCount(Buffer.from('stash@{0}: WIP on main: msg\n')), 1);
+  });
+
+  it('tolerates CRLF line endings (e.g. over SSH)', () => {
+    const out = 'stash@{0}: WIP on main: a\r\nstash@{1}: WIP on main: b\r\n';
+    assert.equal(parseStashCount(out), 2);
+  });
+});
+
+describe('parseStashList', () => {
+  // `git stash list --pretty=format:%gd|%s|%cr` emits `<ref>|<subject>|<date>`.
+  // The subject sits in the MIDDLE and may contain '|', so we peel the ref off
+  // the front and the date off the back — same approach as parseGitLogLine
+  // (WARDEN-211).
+
+  it('parses a normal ref|subject|date line', () => {
+    assert.deepEqual(parseStashList('stash@{0}|WIP on main: abc1234 fix|2 hours ago\n'), [
+      { ref: 'stash@{0}', subject: 'WIP on main: abc1234 fix', date: '2 hours ago' },
+    ]);
+  });
+
+  it('parses multiple stashes (newest first, matching git order)', () => {
+    const out = 'stash@{0}|WIP on main: aaa newest|5 minutes ago\nstash@{1}|WIP on main: bbb older|1 day ago\n';
+    assert.deepEqual(parseStashList(out), [
+      { ref: 'stash@{0}', subject: 'WIP on main: aaa newest', date: '5 minutes ago' },
+      { ref: 'stash@{1}', subject: 'WIP on main: bbb older', date: '1 day ago' },
+    ]);
+  });
+
+  it('keeps a literal "|" inside the subject', () => {
+    const out = 'stash@{0}|merge a | b | c|3 hours ago\n';
+    assert.deepEqual(parseStashList(out), [
+      { ref: 'stash@{0}', subject: 'merge a | b | c', date: '3 hours ago' },
+    ]);
+  });
+
+  it('handles a subject with no "|" (whole tail is subject, empty date)', () => {
+    assert.deepEqual(parseStashList('stash@{0}|just a subject, no date pipe\n'), [
+      { ref: 'stash@{0}', subject: 'just a subject, no date pipe', date: '' },
+    ]);
+  });
+
+  it('handles a line with no separators at all', () => {
+    assert.deepEqual(parseStashList('lonelyref\n'), [
+      { ref: 'lonelyref', subject: '', date: '' },
+    ]);
+  });
+
+  it('returns [] for empty / whitespace-only output', () => {
+    assert.deepEqual(parseStashList(''), []);
+    assert.deepEqual(parseStashList('   \n  \n'), []);
+  });
+
+  it('handles undefined / null input without throwing', () => {
+    assert.deepEqual(parseStashList(undefined), []);
+    assert.deepEqual(parseStashList(null), []);
+  });
+
+  it('accepts a Buffer input', () => {
+    assert.deepEqual(parseStashList(Buffer.from('stash@{0}|WIP on main: msg|1 hour ago\n')), [
+      { ref: 'stash@{0}', subject: 'WIP on main: msg', date: '1 hour ago' },
+    ]);
+  });
+
+  it('tolerates CRLF line endings (e.g. over SSH)', () => {
+    assert.deepEqual(parseStashList('stash@{0}|WIP on main: msg|1 hour ago\r\n'), [
+      { ref: 'stash@{0}', subject: 'WIP on main: msg', date: '1 hour ago' },
+    ]);
   });
 });
