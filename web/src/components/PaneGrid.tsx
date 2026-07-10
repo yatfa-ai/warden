@@ -15,7 +15,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import type { Chat } from '@/lib/types';
-import type { PaneLayout } from '@/lib/storage';
+import type { PaneLayout, TerminalCursorStyle } from '@/lib/storage';
 
 export interface OpenTile { id: string }
 
@@ -44,11 +44,15 @@ interface Props {
   // to PaneTile — App owns the resolution so an OS theme flip can re-theme open
   // panes live without PaneGrid knowing about the scheme pref.
   terminalTheme: 'light' | 'dark';
+  // Terminal cursor shape × blink (blink/steady × block/underline/bar). Pure
+  // pass-through to PaneTile; App owns the state so a Settings change live-
+  // updates every open pane.
+  terminalCursorStyle: TerminalCursorStyle;
 }
 
 function colsFor(n: number) { return n <= 1 ? 1 : Math.ceil(Math.sqrt(n)); }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onOpenChat, onForceKill, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, paneLayout, terminalTheme }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onOpenChat, onForceKill, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, paneLayout, terminalTheme, terminalCursorStyle }: Props) {
   const [splitOpen, setSplitOpen] = useState(false);
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
@@ -239,6 +243,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     fontSize={fontSize} onFontSizeChange={onFontSizeChange}
                     scrollback={scrollback}
                     terminalTheme={terminalTheme}
+                    terminalCursorStyle={terminalCursorStyle}
                   />
                 </div>
               );

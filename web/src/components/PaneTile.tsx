@@ -6,6 +6,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { streamApi } from '@/lib/stream';
 import type { Chat } from '@/lib/types';
 import { findPathCandidates } from '@/lib/path-links';
+import type { TerminalCursorStyle } from '@/lib/storage';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { StatusDot } from '@/components/StatusDot';
@@ -35,6 +36,21 @@ const TERMINAL_BG_CLASS: Record<'light' | 'dark', string> = { light: 'bg-white',
 // The open-on-click modifier matches VSCode: Cmd on macOS, Ctrl everywhere else.
 const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPod|Pad/i.test(navigator.platform || navigator.userAgent || '');
 
+// Map the persisted cursor-style pref to xterm's `cursorStyle` + `cursorBlink`
+// options. A Record keyed by the full union makes this exhaustive — add a union
+// member and TypeScript errors here until it's mapped. 'blink-block' is the
+// default and reproduces today's exact cursor (block + blink) so an upgrade is a
+// no-op visually. Read in both the constructor (mount) and the live-updating
+// effect below so a mid-session change applies to already-open panes.
+const CURSOR_OPTIONS: Record<TerminalCursorStyle, { cursorStyle: 'block' | 'underline' | 'bar'; cursorBlink: boolean }> = {
+  'blink-block': { cursorStyle: 'block', cursorBlink: true },
+  'steady-block': { cursorStyle: 'block', cursorBlink: false },
+  'blink-underline': { cursorStyle: 'underline', cursorBlink: true },
+  'steady-underline': { cursorStyle: 'underline', cursorBlink: false },
+  'blink-bar': { cursorStyle: 'bar', cursorBlink: true },
+  'steady-bar': { cursorStyle: 'bar', cursorBlink: false },
+};
+
 interface Props {
   id: string;
   label?: string;
@@ -57,9 +73,14 @@ interface Props {
   // `theme` option + the container background, and re-themes already-open panes
   // live via the [terminalTheme] effect below.
   terminalTheme: 'light' | 'dark';
+  // Terminal cursor shape × blink (blink/steady × block/underline/bar). Drives
+  // the xterm `cursorStyle` + `cursorBlink` options. A 'steady-*' value stops the
+  // blink — the accessibility payoff vs WARDEN-190 — and applies live to already-
+  // open panes via the [terminalCursorStyle] effect below.
+  terminalCursorStyle: TerminalCursorStyle;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, terminalTheme }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, terminalTheme, terminalCursorStyle }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -98,7 +119,9 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   useEffect(() => {
     const term = new Terminal({
       fontFamily: '"Cascadia Code", "JetBrains Mono", "Fira Code", "Symbols Nerd Font", ui-monospace, Menlo, Consolas, monospace',
-      fontSize: safeFontSize, convertEol: false, scrollback: safeScrollback, cursorBlink: true,
+      fontSize: safeFontSize, convertEol: false, scrollback: safeScrollback,
+      cursorBlink: CURSOR_OPTIONS[terminalCursorStyle].cursorBlink,
+      cursorStyle: CURSOR_OPTIONS[terminalCursorStyle].cursorStyle,
       allowProposedApi: true,
       theme: TERMINAL_THEMES[terminalTheme],
     });
@@ -312,6 +335,21 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // OS theme flip while Color Scheme = "Match app theme" (App tracks an
   // effectiveTheme React state so the prop actually changes here).
   useEffect(() => { if (termRef.current) { termRef.current.options.theme = TERMINAL_THEMES[terminalTheme]; try { fitRef.current?.fit(); } catch {} } }, [terminalTheme]);
+
+  // cursor style + blink — live-update already-open panes so a `steady-*`
+  // selection stops the blink immediately. This is the accessibility payoff vs
+  // WARDEN-190, whose reduced-motion work was CSS + scroll only and never reached
+  // xterm's independently-timed cursor blink. The constructor seeds the value at
+  // mount; this effect mirrors the [terminalTheme] live option update above so a
+  // mid-session change applies without a reopen (and newly-opened panes honor it
+  // from the constructor).
+  useEffect(() => {
+    if (termRef.current) {
+      const o = CURSOR_OPTIONS[terminalCursorStyle];
+      termRef.current.options.cursorStyle = o.cursorStyle;
+      termRef.current.options.cursorBlink = o.cursorBlink;
+    }
+  }, [terminalCursorStyle]);
 
   // external search trigger from global search
   useEffect(() => {

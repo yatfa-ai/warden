@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
-import { loadUi, saveUi, persistUiState, initialWorkspace, type RestoreOnStartup, type PaneLayout, type CustomPreset, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
+import { loadUi, saveUi, persistUiState, initialWorkspace, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type CustomPreset, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
 import { applyTheme, listenSystemThemeChange, getEffectiveTheme, resolveTerminalTheme, type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
 import type { Chat } from '@/lib/types';
@@ -133,6 +133,11 @@ function App() {
   // terminalFontSize/scrollback): persisted by the saveUi effect below, never
   // sent to the backend.
   const [terminalColorScheme, setTerminalColorScheme] = useState<TerminalColorScheme>(() => uiState.terminalColorScheme ?? 'auto');
+  // Terminal cursor style (shape × blink). Pure client-side pref (like
+  // terminalFontSize/scrollback/colorScheme): persisted by the saveUi effect
+  // below, applied live to all open panes via PaneTile's effect, and never sent
+  // to the backend. 'blink-block' is the default (today's exact cursor).
+  const [terminalCursorStyle, setTerminalCursorStyle] = useState<TerminalCursorStyle>(() => uiState.terminalCursorStyle ?? 'blink-block');
   // Default agent type + host pre-filled in the ＋ new chat form, plus the
   // user-defined custom presets (named quick-fill commands beyond claude/shell).
   // All pure client-side prefs (like density/terminalFontSize): persisted by the
@@ -237,8 +242,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalColorScheme, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalColorScheme, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, restoreOnStartup, startedEmpty]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -830,6 +835,8 @@ function App() {
           setTerminalScrollback={setTerminalScrollback}
           terminalColorScheme={terminalColorScheme}
           setTerminalColorScheme={setTerminalColorScheme}
+          terminalCursorStyle={terminalCursorStyle}
+          setTerminalCursorStyle={setTerminalCursorStyle}
           defaultNewChatPreset={defaultNewChatPreset}
           setDefaultNewChatPreset={setDefaultNewChatPreset}
           defaultNewChatHost={defaultNewChatHost}
@@ -914,6 +921,7 @@ function App() {
             scrollback={terminalScrollback}
             paneLayout={paneLayout}
             terminalTheme={terminalTheme}
+            terminalCursorStyle={terminalCursorStyle}
           />
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"

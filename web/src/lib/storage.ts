@@ -11,6 +11,19 @@ export type RestoreOnStartup = 'previous' | 'empty';
 // (single column, full-width), or 'side-by-side' (single row). Pure client-side pref.
 export type PaneLayout = 'auto' | 'stacked' | 'side-by-side';
 
+// Terminal cursor shape × blink for every agent pane. 'blink-block' (default)
+// reproduces today's exact cursor (xterm's block + cursorBlink). The 'steady-*'
+// variants stop the blink — the one piece of always-on motion WARDEN-190's
+// reduced-motion work (CSS + scroll only) never reached, since xterm's cursor
+// blink is independently timed. Pure client-side pref; never sent to the backend.
+export type TerminalCursorStyle =
+  | 'blink-block'
+  | 'steady-block'
+  | 'blink-underline'
+  | 'steady-underline'
+  | 'blink-bar'
+  | 'steady-bar';
+
 // A user-defined spawn preset: a named quick-fill command beyond the two
 // built-in claude/shell presets (e.g. "codex" → "codex"). Pure client-side pref;
 // never sent to the backend. `name` is also a valid `defaultNewChatPreset` value.
@@ -81,6 +94,10 @@ export interface UiState {
   // Pure client-side pref (like terminalFontSize/scrollback); never sent to the
   // backend / /api/config.
   terminalColorScheme?: 'auto' | 'dark' | 'light';
+  // Terminal cursor shape × blink (blink/steady × block/underline/bar). Defaults
+  // to 'blink-block' (today's exact cursor). Pure client-side pref (like
+  // terminalFontSize/scrollback/colorScheme); never sent to the backend.
+  terminalCursorStyle?: TerminalCursorStyle;
   theme?: 'light' | 'dark' | 'system';
   // UI density: 'comfortable' (default = today's spacing) or 'compact' (tighter
   // rows/headers/gaps so more agents fit per screen). Pure client-side pref.
@@ -165,6 +182,7 @@ export function loadUi(): UiState {
         terminalFontSize: typeof v.terminalFontSize === 'number' ? v.terminalFontSize : 14,
         terminalScrollback: typeof v.terminalScrollback === 'number' ? v.terminalScrollback : 10000,
         terminalColorScheme: ['auto', 'dark', 'light'].includes(v.terminalColorScheme) ? v.terminalColorScheme : 'auto',
+        terminalCursorStyle: ['blink-block', 'steady-block', 'blink-underline', 'steady-underline', 'blink-bar', 'steady-bar'].includes(v.terminalCursorStyle) ? v.terminalCursorStyle : 'blink-block',
         theme: v.theme ?? 'system',
         density: v.density === 'compact' ? 'compact' : 'comfortable',
         paneLayout: (v.paneLayout === 'stacked' || v.paneLayout === 'side-by-side') ? v.paneLayout : 'auto',
@@ -178,7 +196,7 @@ export function loadUi(): UiState {
       };
     }
   } catch { /* ignore */ }
-  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14, terminalScrollback: 10000, terminalColorScheme: 'auto', theme: 'system', density: 'comfortable', paneLayout: 'auto', restoreOnStartup: 'previous', defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', customPresets: [], paneHost: {}, agentFilter: 'all', agentSort: 'manual' };
+  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14, terminalScrollback: 10000, terminalColorScheme: 'auto', terminalCursorStyle: 'blink-block', theme: 'system', density: 'comfortable', paneLayout: 'auto', restoreOnStartup: 'previous', defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', customPresets: [], paneHost: {}, agentFilter: 'all', agentSort: 'manual' };
 }
 
 export function saveUi(s: UiState) {
