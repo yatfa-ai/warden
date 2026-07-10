@@ -723,7 +723,7 @@ function App() {
     }
   }, [isResizingSidebar, isResizingObserver]);
 
-  // Live panel widths via ref so the window-resize clamp reads fresh values
+  // Live panel widths via ref so the space-change clamp reads fresh values
   // without re-subscribing its listener on every drag tick. (Mirrors the
   // focusedRef.current = focused pattern above.)
   const sidebarWidthRef = useRef(sidebarWidth);
@@ -731,21 +731,38 @@ function App() {
   const observerWidthRef = useRef(observerWidth);
   observerWidthRef.current = observerWidth;
 
-  // Re-clamp panel widths when the viewport shrinks so a smaller window can't
-  // leave the two panels too wide together and crush the middle pane column.
-  // Enlarging is a no-op: in-range widths clamp back to themselves (WARDEN-183).
-  useEffect(() => {
-    const onResize = () => {
-      const clamped = clampLayoutWidths(
-        { sidebar: sidebarWidthRef.current, observer: observerWidthRef.current },
-        { windowWidth: window.innerWidth, healthCollapsed },
-      );
-      setSidebarWidth(clamped.sidebar);
-      setObserverWidth(clamped.observer);
-    };
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
+  // Re-clamp both panel widths against the current viewport + health state so the
+  // sidebar and observer together can never starve the middle pane column. This
+  // is the single re-clamp entry point for every change in AVAILABLE LAYOUT SPACE
+  // — both effects below call it (WARDEN-183). Enlarging space is a no-op:
+  // in-range widths clamp back to themselves.
+  const applyLayoutClamp = useCallback(() => {
+    const clamped = clampLayoutWidths(
+      { sidebar: sidebarWidthRef.current, observer: observerWidthRef.current },
+      { windowWidth: window.innerWidth, healthCollapsed },
+    );
+    setSidebarWidth(clamped.sidebar);
+    setObserverWidth(clamped.observer);
   }, [healthCollapsed]);
+
+  // (1) Window resize: a smaller viewport shrinks the space the two panels share.
+  useEffect(() => {
+    window.addEventListener('resize', applyLayoutClamp);
+    return () => window.removeEventListener('resize', applyLayoutClamp);
+  }, [applyLayoutClamp]);
+
+  // (2) Health toggle: expanding the health panel reserves HEALTH_WIDTH and so
+  // shrinks the shared space by 320px. Without re-clamping here, opening health
+  // near the 900px window floor leaves the sidebar + observer at their pre-toggle
+  // widths and crushes the middle pane column to ~0 — the resize listener above
+  // only re-subscribes on a health change; it never fires on the toggle itself.
+  // REQUIRED for the middle-pane invariant: removing this re-introduces the
+  // WARDEN-183 crush (see layout.test.mjs). Side-panel collapse/expand needs no
+  // clamp here: collapsing only frees space, and expanding reintroduces a width
+  // already clamped to the current window + health, so the invariant holds.
+  useEffect(() => {
+    applyLayoutClamp();
+  }, [applyLayoutClamp]);
 
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">

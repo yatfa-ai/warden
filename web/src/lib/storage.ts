@@ -233,12 +233,16 @@ export function clampObserverWidth(requested: number, sidebarWidth: number, ctx:
   return clampN(requested, OBSERVER_MIN, Math.max(OBSERVER_MIN, cap));
 }
 
-// Re-clamp BOTH panels together — for persisted-width load and window-resize,
-// where neither panel is the active drag. If a stale pair or a shrunken viewport
-// would together starve the middle (sum > shared space), each is trimmed toward
-// its floor — sidebar first, then observer — until the pair fits. At the 900px
-// window floor there is always room for both minimums (180 + 300 + 320 = 800),
-// so neither falls below its usable floor in practice.
+// Re-clamp BOTH panels together — for persisted-width load, window-resize, and
+// health-toggle, where neither panel is the active drag. If a stale pair or a
+// shrunken viewport would together starve the middle (sum > shared space), each
+// is trimmed toward its floor until the pair fits. The trim is deliberately
+// ASYMMETRIC: the sidebar yields toward its floor first, and only once it can
+// give no more does the observer give way — so a tighter layout shrinks the
+// narrower, less-critical rail before the chat pane. Deterministic, not a sign
+// of a bug; don't "fix" it toward symmetry without intent. At the 900px window
+// floor there is always room for both minimums (180 + 300 + 320 = 800), so
+// neither falls below its usable floor in practice.
 export function clampLayoutWidths(
   requested: { sidebar: number; observer: number },
   ctx: LayoutContext,

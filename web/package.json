@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "test": "node storage.test.mjs && node diff.test.mjs && node timelinePacing.test.mjs && node gitStateSummary.test.mjs && node attentionRollup.test.mjs && node utils.test.mjs && node path-links.test.mjs",
+    "test": "node storage.test.mjs && node diff.test.mjs && node layout.test.mjs && node timelinePacing.test.mjs && node gitStateSummary.test.mjs && node attentionRollup.test.mjs && node utils.test.mjs && node path-links.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
