@@ -9,7 +9,7 @@ import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ChatSidebar } from '@/components/ChatSidebar';
 import { PaneGrid } from '@/components/PaneGrid';
 import { ObserverTabs } from '@/components/ObserverTabs';
-import { SettingsDialog } from '@/components/SettingsDialog';
+import { SettingsPage } from '@/components/SettingsPage';
 import { GlobalSearchDialog } from '@/components/GlobalSearchDialog';
 import { HealthDashboard } from '@/components/HealthDashboard';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
@@ -620,6 +620,23 @@ function App() {
           </div>
         </div>
       )}
+      {settingsOpen ? (
+        <SettingsPage
+          onClose={() => setSettingsOpen(false)}
+          onConfigChange={handleConfigChange}
+          theme={theme}
+          setTheme={setTheme}
+          density={density}
+          setDensity={setDensity}
+          restoreOnStartup={restoreOnStartup}
+          setRestoreOnStartup={setRestoreOnStartup}
+          terminalFontSize={terminalFontSize}
+          setTerminalFontSize={setTerminalFontSize}
+          terminalScrollback={terminalScrollback}
+          setTerminalScrollback={setTerminalScrollback}
+        />
+      ) : (
+        <>
       <header className="flex items-center gap-3 px-3 h-11 border-b shrink-0">
         <IconTooltip label="toggle sidebar" side="bottom"><button onClick={() => setSidebarCollapsed(!sidebarCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{sidebarCollapsed ? '▸' : '◂'}</button></IconTooltip>
         <span className="font-semibold tracking-wide">Yatfa Warden</span>
@@ -707,21 +724,8 @@ function App() {
           />
         </section>
       </main>
-      <SettingsDialog
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        onConfigChange={handleConfigChange}
-        theme={theme}
-        setTheme={setTheme}
-        density={density}
-        setDensity={setDensity}
-        restoreOnStartup={restoreOnStartup}
-        setRestoreOnStartup={setRestoreOnStartup}
-        terminalFontSize={terminalFontSize}
-        setTerminalFontSize={setTerminalFontSize}
-        terminalScrollback={terminalScrollback}
-        setTerminalScrollback={setTerminalScrollback}
-      />
+        </>
+      )}
       <GlobalSearchDialog
         open={showGlobalSearch}
         onClose={() => setShowGlobalSearch(false)}
