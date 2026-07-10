@@ -29,6 +29,7 @@ const DEFAULTS = {
   showTypeBadges: true,      // Show type labels (shell/claude/yatfa)
   showStatusIndicators: true, // Show status dots (active/idle/dead)
   showProjectBadges: false,   // Show project name badges
+  hideOfflineHosts: false,    // Collapse offline SSH hosts into an expandable "Offline (N)" row in the sidebar
 };
 
 export function load() {
