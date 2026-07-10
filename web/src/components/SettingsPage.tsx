@@ -540,7 +540,7 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   <Label htmlFor="defaultNewChatHost">Default host</Label>
                   <Select value={defaultNewChatHost} onValueChange={(v) => setDefaultNewChatHost(v)}>
                     <SelectTrigger id="defaultNewChatHost" className="w-full">
-                      <SelectValue />
+                      <SelectValue placeholder="this machine (local)" />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="(local)">this machine (local)</SelectItem>
@@ -549,10 +549,19 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                           {h}
                         </SelectItem>
                       ))}
+                      {/* A stored default host that's no longer detected must never leave
+                          an empty/dangling trigger — render it visibly but disabled so the
+                          user sees it's gone and can pick a new default. Mirrors the
+                          "never empty" rule NewChatForm enforces at open time. */}
+                      {defaultNewChatHost !== '(local)' && !availableHosts.includes(defaultNewChatHost) && (
+                        <SelectItem value={defaultNewChatHost} disabled>
+                          {defaultNewChatHost} (no longer available)
+                        </SelectItem>
+                      )}
                     </SelectContent>
                   </Select>
                   <p className="text-xs text-muted-foreground">
-                    Where new chats spawn by default. Detected SSH hosts appear here; a host no longer available falls back to local at spawn time.
+                    Where new chats spawn by default. Detected SSH hosts appear here; a default host no longer available is shown disabled here and falls back to local at spawn time.
                   </p>
                 </div>
               </SettingsSection>

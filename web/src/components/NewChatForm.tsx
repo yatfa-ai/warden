@@ -15,13 +15,14 @@ const THIS_MACHINE = '(local)';
 export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) {
   // Pre-fill from the saved default-new-chat prefs (Settings → New Chats). These
   // are pure client-side localStorage values; if unset they fall back to the
-  // prior hard-coded behavior (claude preset, this machine).
-  const saved = loadUi();
+  // prior hard-coded behavior (claude preset, this machine). Lazy initializers
+  // so loadUi() runs once on mount — not on every render/keystroke — matching
+  // App.tsx's lazy-init pattern for client prefs.
   const [open, setOpen] = useState(false);
   const [sshHosts, setSshHosts] = useState<string[]>([]);
   const [claudePath, setClaudePath] = useState('claude');
-  const [host, setHost] = useState(saved.defaultNewChatHost ?? THIS_MACHINE);
-  const [preset, setPreset] = useState<'claude' | 'shell'>(saved.defaultNewChatPreset ?? 'claude');
+  const [host, setHost] = useState(() => loadUi().defaultNewChatHost ?? THIS_MACHINE);
+  const [preset, setPreset] = useState<'claude' | 'shell'>(() => loadUi().defaultNewChatPreset ?? 'claude');
   const [session, setSession] = useState('');
   const [cwd, setCwd] = useState('');
   const [cmd, setCmd] = useState('claude --dangerously-skip-permissions');
