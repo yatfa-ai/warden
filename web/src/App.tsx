@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
-import { loadUi, saveUi, persistUiState, initialWorkspace, type RestoreOnStartup, type PaneLayout, type CustomPreset } from '@/lib/storage';
+import { loadUi, saveUi, persistUiState, initialWorkspace, type RestoreOnStartup, type PaneLayout, type CustomPreset, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
 import { applyTheme, listenSystemThemeChange, getEffectiveTheme, resolveTerminalTheme, type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
 import type { Chat } from '@/lib/types';
@@ -83,8 +83,18 @@ function App() {
   // disk-only (active=null), so this set is what bounds the live-refresh SSH cost to visited
   // hosts rather than the whole fleet.
   const discoveredHostsRef = useRef<Set<string>>(new Set());
-  const [sidebarWidth, setSidebarWidth] = useState(() => uiState.sidebarWidth ?? 220);
-  const [observerWidth, setObserverWidth] = useState(() => uiState.observerWidth ?? 380);
+  // Persisted panel widths are clamped to their usable floors on mount so a
+  // stale value (saved on a wider window, or from before WARDEN-183) can't crush
+  // the middle pane column. Computed once via a lazy initializer, then split
+  // into the two independent states the rest of the component reads.
+  const [initialWidths] = useState(() =>
+    clampLayoutWidths(
+      { sidebar: uiState.sidebarWidth ?? 220, observer: uiState.observerWidth ?? 380 },
+      { windowWidth: window.innerWidth, healthCollapsed: uiState.healthCollapsed ?? true },
+    ),
+  );
+  const [sidebarWidth, setSidebarWidth] = useState(initialWidths.sidebar);
+  const [observerWidth, setObserverWidth] = useState(initialWidths.observer);
   const [maximized, setMaximized] = useState<string | null>(null);
   const [newActivity, setNewActivity] = useState<Set<string>>(new Set());
   const [streamConn, setStreamConn] = useState(false);
@@ -658,11 +668,19 @@ function App() {
   const dragStartX = useRef<number>(0);
   const dragStartSidebarWidth = useRef<number>(0);
   const dragStartObserverWidth = useRef<number>(0);
+  // Width of the *other* (non-dragged) panel + health state captured at drag
+  // start, so the mousemove clamp can reserve the middle-pane floor (WARDEN-183)
+  // without the effect needing live state in its deps — keeps the original
+  // ref-based drag pattern (effect deps stay just the isResizing flags).
+  const dragOtherWidth = useRef<number>(0);
+  const dragHealthCollapsed = useRef<boolean>(true);
 
   const handleSidebarMouseDown = (e: React.MouseEvent) => {
     setIsResizingSidebar(true);
     dragStartX.current = e.clientX;
     dragStartSidebarWidth.current = sidebarWidth;
+    dragOtherWidth.current = observerCollapsed ? 0 : observerWidth;
+    dragHealthCollapsed.current = healthCollapsed;
     e.preventDefault();
   };
 
@@ -670,20 +688,23 @@ function App() {
     setIsResizingObserver(true);
     dragStartX.current = e.clientX;
     dragStartObserverWidth.current = observerWidth;
+    dragOtherWidth.current = sidebarCollapsed ? 0 : sidebarWidth;
+    dragHealthCollapsed.current = healthCollapsed;
     e.preventDefault();
   };
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
+      const ctx = { windowWidth: window.innerWidth, healthCollapsed: dragHealthCollapsed.current };
       if (isResizingSidebar) {
         const delta = e.clientX - dragStartX.current;
         const newWidth = dragStartSidebarWidth.current + delta;
-        setSidebarWidth(Math.max(180, Math.min(400, newWidth)));
+        setSidebarWidth(clampSidebarWidth(newWidth, dragOtherWidth.current, ctx));
       }
       if (isResizingObserver) {
         const delta = dragStartX.current - e.clientX;
         const newWidth = dragStartObserverWidth.current + delta;
-        setObserverWidth(Math.max(300, Math.min(600, newWidth)));
+        setObserverWidth(clampObserverWidth(newWidth, dragOtherWidth.current, ctx));
       }
     };
 
@@ -701,6 +722,30 @@ function App() {
       };
     }
   }, [isResizingSidebar, isResizingObserver]);
+
+  // Live panel widths via ref so the window-resize clamp reads fresh values
+  // without re-subscribing its listener on every drag tick. (Mirrors the
+  // focusedRef.current = focused pattern above.)
+  const sidebarWidthRef = useRef(sidebarWidth);
+  sidebarWidthRef.current = sidebarWidth;
+  const observerWidthRef = useRef(observerWidth);
+  observerWidthRef.current = observerWidth;
+
+  // Re-clamp panel widths when the viewport shrinks so a smaller window can't
+  // leave the two panels too wide together and crush the middle pane column.
+  // Enlarging is a no-op: in-range widths clamp back to themselves (WARDEN-183).
+  useEffect(() => {
+    const onResize = () => {
+      const clamped = clampLayoutWidths(
+        { sidebar: sidebarWidthRef.current, observer: observerWidthRef.current },
+        { windowWidth: window.innerWidth, healthCollapsed },
+      );
+      setSidebarWidth(clamped.sidebar);
+      setObserverWidth(clamped.observer);
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [healthCollapsed]);
 
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">
@@ -855,7 +900,7 @@ function App() {
           </ErrorBoundary>
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden"
-          style={{ width: healthCollapsed ? 0 : 320, flexShrink: 0, opacity: healthCollapsed ? 0 : 1 }}>
+          style={{ width: healthCollapsed ? 0 : HEALTH_WIDTH, flexShrink: 0, opacity: healthCollapsed ? 0 : 1 }}>
           <HealthDashboard
             onOpenChat={openChat}
             onClose={() => setHealthCollapsed(true)}

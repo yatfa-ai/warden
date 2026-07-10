@@ -185,6 +185,76 @@ export function saveUi(s: UiState) {
   try { localStorage.setItem(KEY, JSON.stringify(s)); } catch { /* ignore */ }
 }
 
+// --- Resizable layout width clamps (WARDEN-183) ----------------------------
+// Usable floors + caps for the two user-resizable panels, the reserved middle-
+// pane column floor, and the fixed health-panel width. The drag handler, the
+// window-resize listener, AND the persisted-width load all route through the
+// clamp helpers below so a single source of truth governs every path: no panel
+// can be crushed below a usable size, and two wide panels can never starve the
+// middle pane column. These are layout *bounds* (tracked in px against mouse /
+// viewport math), not inline visual styles — so WARDEN-68 Rule 2 (no magic-
+// number inline px) does not apply to them; visual min-widths on inputs/tiles
+// use Tailwind scale classes instead.
+export const SIDEBAR_MIN = 180;
+export const SIDEBAR_MAX = 400;
+export const OBSERVER_MIN = 300;
+export const OBSERVER_MAX = 600;
+// Middle pane column floor — the anti-crush reserve. The clamps subtract it
+// (plus the health panel when expanded) from the viewport so the sidebar and
+// observer together can never leave the middle pane below this width.
+export const PANE_MIN = 320;
+export const HEALTH_WIDTH = 320;
+
+export interface LayoutContext {
+  windowWidth: number;
+  healthCollapsed: boolean;
+}
+
+const clampN = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
+
+// Viewport space the two resizable panels may share: viewport minus the middle-
+// pane floor and the health panel (when expanded).
+function sharedWidth(ctx: LayoutContext): number {
+  return ctx.windowWidth - PANE_MIN - (ctx.healthCollapsed ? 0 : HEALTH_WIDTH);
+}
+
+// Clamp the sidebar width to [SIDEBAR_MIN, SIDEBAR_MAX], further capped so it
+// can't crowd the middle pane below PANE_MIN given the observer's live width.
+// Used by the sidebar drag handler — only the dragged panel is in motion, so
+// the other panel's width is passed in (0 when collapsed).
+export function clampSidebarWidth(requested: number, observerWidth: number, ctx: LayoutContext): number {
+  const cap = Math.min(SIDEBAR_MAX, sharedWidth(ctx) - observerWidth);
+  return clampN(requested, SIDEBAR_MIN, Math.max(SIDEBAR_MIN, cap));
+}
+
+// Symmetric clamp for the observer panel.
+export function clampObserverWidth(requested: number, sidebarWidth: number, ctx: LayoutContext): number {
+  const cap = Math.min(OBSERVER_MAX, sharedWidth(ctx) - sidebarWidth);
+  return clampN(requested, OBSERVER_MIN, Math.max(OBSERVER_MIN, cap));
+}
+
+// Re-clamp BOTH panels together — for persisted-width load and window-resize,
+// where neither panel is the active drag. If a stale pair or a shrunken viewport
+// would together starve the middle (sum > shared space), each is trimmed toward
+// its floor — sidebar first, then observer — until the pair fits. At the 900px
+// window floor there is always room for both minimums (180 + 300 + 320 = 800),
+// so neither falls below its usable floor in practice.
+export function clampLayoutWidths(
+  requested: { sidebar: number; observer: number },
+  ctx: LayoutContext,
+): { sidebar: number; observer: number } {
+  let sidebar = clampN(requested.sidebar, SIDEBAR_MIN, SIDEBAR_MAX);
+  let observer = clampN(requested.observer, OBSERVER_MIN, OBSERVER_MAX);
+  const overshoot = sidebar + observer - sharedWidth(ctx);
+  if (overshoot > 0) {
+    const sidebarTrim = Math.min(overshoot, Math.max(0, sidebar - SIDEBAR_MIN));
+    sidebar -= sidebarTrim;
+    const remaining = overshoot - sidebarTrim;
+    if (remaining > 0) observer -= Math.min(remaining, Math.max(0, observer - OBSERVER_MIN));
+  }
+  return { sidebar, observer };
+}
+
 // The workspace fields that the "Restore workspace on startup" pref gates. These
 // are what an 'empty' launch must blank and what 'previous' must restore. paneHost
 // is required here: initialWorkspace always returns a concrete object for it.
