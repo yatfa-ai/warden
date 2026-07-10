@@ -21,6 +21,7 @@ import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { cn } from '@/lib/utils';
 import type { Chat, Collection } from '@/lib/types';
 import { loadUi, saveUi } from '@/lib/storage';
+import { StatusDot } from '@/components/StatusDot';
 
 // One row from /api/git-log (a parsed %h|%s|%an|%ar git log line).
 export type GitCommit = { hash: string; subject: string; author: string; date: string };
@@ -857,16 +858,22 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
               const hostStatus = hostStatuses[h];
               return (
               <button key={h} onClick={() => enterHost(h)} className="flex items-center gap-2 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 w-full transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background">
-                <span className={`size-2 rounded-full ${n ? 'bg-green-500' : 'bg-muted-foreground/40'}`} />
+                <StatusDot
+                  tone={n ? 'green' : 'muted'}
+                  variant={n ? 'solid' : 'ring'}
+                  label={n ? `${n} active chat${n !== 1 ? 's' : ''}` : 'No active chats'}
+                />
                 <span className="flex-1 truncate">{LABEL[h] || h}</span>
                 {h === THIS_MACHINE && <span className="text-[10px] text-cyan-400">local</span>}
                 {h !== THIS_MACHINE && (
-                  <span
-                    className={`size-2 rounded-full ${
-                      hostStatus?.status === 'online' ? 'bg-green-500' :
-                      hostStatus?.status === 'offline' ? 'bg-red-500' :
-                      'bg-gray-400'
-                    }`}
+                  <StatusDot
+                    tone={hostStatus?.status === 'online' ? 'green' : hostStatus?.status === 'offline' ? 'red' : 'gray'}
+                    variant={hostStatus?.status === 'online' ? 'solid' : hostStatus?.status === 'offline' ? 'square' : 'ring'}
+                    label={
+                      hostStatus?.status === 'online'
+                        ? `Online${hostStatus?.latency_ms ? ` (${hostStatus.latency_ms}ms)` : ''}`
+                        : hostStatus?.status === 'offline' ? 'Offline' : 'Unknown'
+                    }
                     title={hostStatus?.status === 'online' && hostStatus?.latency_ms ?
                       `${hostStatus.status} (${hostStatus.latency_ms}ms)` :
                       hostStatus?.status || 'unknown'}
@@ -1101,7 +1108,19 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
       onKeyDown={(e) => { if (!editing && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onOpen(); } }}
       className={`group flex items-center gap-2 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent cursor-pointer transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${open ? 'bg-accent' : ''} ${dim ? 'opacity-60' : ''}`}
     >
-      {showStatusIndicators !== false && <span className={`size-2 rounded-full shrink-0 ${open ? 'bg-green-500' : c.active ? 'bg-green-500/50' : 'bg-muted-foreground/40'}`} />}
+      {showStatusIndicators !== false && (
+        // Three grayscale-legible states via shape, not hue:
+        //   open   = solid filled circle (●)
+        //   active = half-filled glyph   (◐) — distinct from both open & idle
+        //   idle   = hollow ring         (○)
+        open ? (
+          <StatusDot tone="green" variant="solid" label="Open" />
+        ) : c.active ? (
+          <StatusDot tone="green" variant="glyph" glyph="◐" label="Active" />
+        ) : (
+          <StatusDot tone="muted" variant="ring" label="Idle" />
+        )
+      )}
       {editing ? (
         <Input autoFocus value={val} onClick={(e) => e.stopPropagation()} onChange={(e) => setVal(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { setVal(c.name || c.key || c.id); setEditing(false); } }} className="h-5 text-[11px] px-1 flex-1" />
       ) : (
@@ -1234,7 +1253,13 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChat
     >
       <div className="flex items-center gap-2">
         <span className={`text-muted-foreground/40 ${canDrag ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'} select-none`}>⠿</span>
-        {showStatusIndicators !== false && <span className={`size-2 rounded-full shrink-0 ${dead ? 'bg-red-500' : isOpen ? 'bg-green-500' : 'bg-muted-foreground/40'}`} />}
+        {showStatusIndicators !== false && (
+          <StatusDot
+            tone={dead ? 'red' : isOpen ? 'green' : 'muted'}
+            variant={dead ? 'square' : isOpen ? 'solid' : 'ring'}
+            label={dead ? 'Dead' : isOpen ? 'Open' : 'Idle'}
+          />
+        )}
         {editing ? (
           <Input autoFocus value={val} onClick={(e) => e.stopPropagation()} onChange={(e) => setVal(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { setVal(c ? displayName(c) : id); setEditing(false); } }} className="h-5 text-[11px] px-1 flex-1" />
         ) : (
@@ -1310,7 +1335,7 @@ function DiscoverItemRow({ it, resumingId, onOpen, onResume }: { it: DiscoverIte
   if (it.kind === 'live') {
     return (
       <Button variant="ghost" onClick={onOpen} className="w-full h-auto justify-start gap-2 px-2 py-1.5 text-xs font-normal hover:bg-accent">
-        <span className="size-2 rounded-full shrink-0 bg-green-500" />
+        <StatusDot tone="green" variant="solid" label="Live session" />
         <span className="truncate flex-1">{it.label}</span>
         {it.time ? <span className="text-[10px] text-muted-foreground shrink-0">{ago(it.time)}</span> : null}
         <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span>
@@ -1321,7 +1346,7 @@ function DiscoverItemRow({ it, resumingId, onOpen, onResume }: { it: DiscoverIte
   const isLoading = resumingId === it.id;
   return (
     <div className="group flex items-center gap-2 px-2 py-1.5 rounded-md text-xs hover:bg-accent transition-colors">
-      <span className="size-2 rounded-full shrink-0 bg-cyan-500/50" />
+      <StatusDot tone="cyan" variant="ring" label="History session (resumable)" />
       <div className="flex-1 min-w-0">
         <Button variant="ghost" onClick={onResume} disabled={isLoading} className="h-auto w-full justify-start px-1 py-0 truncate text-xs font-normal">{it.label}</Button>
         {it.snippet ? <div className="px-1 truncate text-[10px] text-muted-foreground/80 italic" title={it.snippet}>{it.snippet}</div> : null}
@@ -1498,7 +1523,12 @@ function OpenChatBrowser({ open, onOpenChange, hosts, chats, allSessions, loadin
               const st = hostStatuses[h];
               return (
                 <Button key={h} size="xs" variant={on ? 'secondary' : 'outline'} onClick={() => toggleHost(h)} className="gap-1">
-                  <span className={`size-1.5 rounded-full ${st?.status === 'online' ? 'bg-green-500' : st?.status === 'offline' ? 'bg-red-500' : 'bg-muted-foreground/50'}`} />
+                  <StatusDot
+                    size="size-1.5"
+                    tone={st?.status === 'online' ? 'green' : st?.status === 'offline' ? 'red' : 'muted'}
+                    variant={st?.status === 'online' ? 'solid' : st?.status === 'offline' ? 'square' : 'ring'}
+                    label={st?.status ? st.status.charAt(0).toUpperCase() + st.status.slice(1) : 'Unknown'}
+                  />
                   {h === THIS_MACHINE ? 'this machine' : h}
                 </Button>
               );

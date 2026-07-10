@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { HealthBadge } from './HealthBadge';
 import type { HealthData } from '@/lib/types';
-import { getHealthBgColor, HealthState } from '@/lib/healthUtils';
+import { HealthState, getHealthIcon, formatHealthState } from '@/lib/healthUtils';
 import type { HealthStateValue } from '@/lib/healthUtils';
+import { StatusDot, type StatusTone } from '@/components/StatusDot';
 
 interface Props {
   onOpenChat: (id: string) => void;
@@ -40,6 +40,38 @@ function normalizeHealthState(state: string | undefined): HealthStateValue {
     unknown: HealthState.UNKNOWN
   };
   return validStates[state.toLowerCase()] ?? HealthState.UNKNOWN;
+}
+
+/** Map a health state to a StatusDot color family. */
+function healthTone(state: HealthStateValue): StatusTone {
+  switch (state) {
+    case HealthState.HEALTHY:
+      return 'green';
+    case HealthState.WARNING:
+      return 'yellow';
+    case HealthState.CRITICAL:
+      return 'red';
+    case HealthState.IDLE:
+      return 'gray';
+    default:
+      return 'muted';
+  }
+}
+
+/**
+ * Health status indicator — pairs the health color with a distinct per-state
+ * glyph (from getHealthIcon) plus an accessible name, so health state survives
+ * grayscale / color-vision deficiency and is announced by screen readers.
+ */
+function HealthDot({ state }: { state: HealthStateValue }) {
+  return (
+    <StatusDot
+      variant="glyph"
+      glyph={getHealthIcon(state)}
+      tone={healthTone(state)}
+      label={formatHealthState(state)}
+    />
+  );
 }
 
 export function HealthDashboard({ onOpenChat, onClose }: Props) {
@@ -140,7 +172,7 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
                         className="flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 transition-colors"
                       >
                         {/* Status Indicator */}
-                        <span className={`size-2 rounded-full shrink-0 ${getHealthBgColor(normalizeHealthState(agent.healthState))}`} />
+                        <HealthDot state={normalizeHealthState(agent.healthState)} />
 
                         {/* Agent Name */}
                         <span className="truncate flex-1">
@@ -166,11 +198,6 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
                           <span className="text-[10px] text-muted-foreground">
                             {ago(agent.lastActivity)} ago
                           </span>
-                        )}
-
-                        {/* Health Badge */}
-                        {agent.healthState && (
-                          <HealthBadge state={normalizeHealthState(agent.healthState)} showLabel={false} size="sm" />
                         )}
                       </button>
                     ))}

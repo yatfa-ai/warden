@@ -7,6 +7,7 @@ import { streamApi } from '@/lib/stream';
 import type { Chat } from '@/lib/types';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
+import { StatusDot } from '@/components/StatusDot';
 import { toast } from 'sonner';
 
 interface Props {
@@ -212,7 +213,11 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       {/* header toolbar */}
       <div onDoubleClick={(e) => { stop(e); onToggleMax(); }}
         className="flex items-center gap-1 px-2 py-1 compact:py-0.5 bg-muted text-xs shrink-0 select-none">
-        <span className={`size-2 rounded-full shrink-0 ${connected ? 'bg-green-500' : errored ? 'bg-red-500' : 'bg-yellow-500/80 animate-pulse'}`} />
+        <StatusDot
+          tone={connected ? 'green' : errored ? 'red' : 'yellow'}
+          variant={connected ? 'solid' : errored ? 'square' : 'pulse'}
+          label={connected ? 'Connected' : errored ? 'Error' : 'Connecting'}
+        />
         <span className="truncate flex-1 font-medium">{label || id}</span>
         {hasNew && <span className="text-[9px] text-cyan-400 bg-cyan-500/10 px-1 rounded animate-pulse">new</span>}
         <Btn title="search" active={showSearch} onClick={() => setShowSearch(!showSearch)}>⌕</Btn>
