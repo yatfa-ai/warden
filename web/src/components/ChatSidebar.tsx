@@ -230,6 +230,10 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [loadingHost, setLoadingHost] = useState<string | null>(null);
   const [allSessions, setAllSessions] = useState<(ClaudeSession & { host: string })[]>([]);
   const [loadingAllSessions, setLoadingAllSessions] = useState(false);
+  // Cross-host "All Sessions" pagination (WARDEN-176). `hasMoreSessions` mirrors the
+  // server's `hasMore` so Load-more converges; `loadingMoreSessions` gates the button.
+  const [hasMoreSessions, setHasMoreSessions] = useState(false);
+  const [loadingMoreSessions, setLoadingMoreSessions] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
   const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string; files?: GitFile[]; ahead?: number | null; behind?: number | null }>>({});
   // recent commit history (git log) per chatId — cached so re-expanding the badge is instant
@@ -331,16 +335,47 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     }
   };
 
+  // Page size for the cross-host "All Sessions" list. Matches the server default
+  // (and the old hard global cap), so page 1 is identical to the pre-pagination UI.
+  const ALL_SESSIONS_PAGE = 40;
+
+  // Fetch page 1 of the cross-host session list (most-recent first), REPLACING the
+  // loaded set. Used on mount, on browser open, and as the manual refresh — every
+  // call resets to the newest page so the long tail is reached via Load-more, not
+  // by scrolling a stale list.
   const fetchAllSessions = async () => {
     setLoadingAllSessions(true);
     try {
-      const r = await fetch('/api/claude-sessions-all');
+      const r = await fetch(`/api/claude-sessions-all?offset=0&limit=${ALL_SESSIONS_PAGE}`);
       const j = await r.json();
       setAllSessions(j.sessions || []);
+      setHasMoreSessions(!!j.hasMore);
     } catch (error) {
       console.error('[claude-sessions-all] Failed:', error);
     }
     setLoadingAllSessions(false);
+  };
+
+  // Fetch the NEXT page and APPEND it to the loaded set. Offset = the number already
+  // loaded, since the server paginates over the global recency-sorted timeline.
+  // Sessions are deduped by host:id so a shifting timeline (a host becoming
+  // reachable between requests) can't produce visual duplicates.
+  const loadMoreSessions = async () => {
+    if (loadingMoreSessions || !hasMoreSessions) return;
+    setLoadingMoreSessions(true);
+    try {
+      const r = await fetch(`/api/claude-sessions-all?offset=${allSessions.length}&limit=${ALL_SESSIONS_PAGE}`);
+      const j = await r.json();
+      const next = (j.sessions || []) as (ClaudeSession & { host: string })[];
+      setHasMoreSessions(!!j.hasMore);
+      setAllSessions((prev) => {
+        const seen = new Set(prev.map((s) => `${s.host}:${s.id}`));
+        return [...prev, ...next.filter((s) => !seen.has(`${s.host}:${s.id}`))];
+      });
+    } catch (error) {
+      console.error('[claude-sessions-all load-more] Failed:', error);
+    }
+    setLoadingMoreSessions(false);
   };
   const enterHost = (host: string) => {
     const status = hostStatuses[host];
@@ -841,7 +876,10 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
         chats={chats}
         allSessions={allSessions}
         loadingAllSessions={loadingAllSessions}
+        hasMoreSessions={hasMoreSessions}
+        loadingMoreSessions={loadingMoreSessions}
         onRefreshSessions={fetchAllSessions}
+        onLoadMoreSessions={loadMoreSessions}
         onOpenChat={onOpenChat}
         onResume={onResume}
         onDiscoverHost={onDiscoverHost}
@@ -1278,14 +1316,17 @@ function DiscoverItemRow({ it, resumingId, onOpen, onResume }: { it: DiscoverIte
 // Single merged, host-scoped picker. Hosts are multiselect chips (persisted, defaulting to
 // the user's usual hosts). The list dedupes: a Claude history session already running as a
 // live resume-tmux appears once (as a live item), not in both live and history.
-function OpenChatBrowser({ open, onOpenChange, hosts, chats, allSessions, loadingAllSessions, onRefreshSessions, onOpenChat, onResume, onDiscoverHost, hostStatuses }: {
+function OpenChatBrowser({ open, onOpenChange, hosts, chats, allSessions, loadingAllSessions, hasMoreSessions, loadingMoreSessions, onRefreshSessions, onLoadMoreSessions, onOpenChat, onResume, onDiscoverHost, hostStatuses }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   hosts: string[];
   chats: Chat[];
   allSessions: (ClaudeSession & { host: string })[];
   loadingAllSessions: boolean;
+  hasMoreSessions: boolean;
+  loadingMoreSessions: boolean;
   onRefreshSessions: () => void;
+  onLoadMoreSessions: () => void;
   onOpenChat: (id: string) => void;
   onResume: (id: string, description: string, cwd: string, host: string) => void;
   onDiscoverHost: (host: string) => void;
@@ -1465,6 +1506,19 @@ function OpenChatBrowser({ open, onOpenChange, hosts, chats, allSessions, loadin
                 <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-muted-foreground">
                   <Skeleton className="size-2 rounded-full" /> searching session content…
                 </div>
+              )}
+              {/* Load more surfaces the long tail (sessions older than the newest
+                  page) without requiring a search. Only relevant when browsing the
+                  history list — a content query uses /api/claude-sessions-search,
+                  which has its own results, so hide this while searching. */}
+              {!query.trim() && hasMoreSessions && filtered.length > 0 && (
+                <button
+                  onClick={onLoadMoreSessions}
+                  disabled={loadingMoreSessions}
+                  className="mt-1 mx-auto text-[11px] text-blue-400 hover:text-blue-300 disabled:text-muted-foreground/50 disabled:cursor-default rounded px-2 py-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                >
+                  {loadingMoreSessions ? 'loading…' : '↓ load more'}
+                </button>
               )}
             </div>
           </ScrollArea>

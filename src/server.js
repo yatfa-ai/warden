@@ -515,8 +515,11 @@ function collectLocalSessionFiles() {
   return files;
 }
 
-function localClaudeSessions() {
-  return collectLocalSessionFiles().slice(0, 40).map((f) => {
+// `limit` bounds the returned list (most-recent first). Defaults to 40 to keep
+// `/api/claude-sessions` (the single-host resume list) unchanged; the unified
+// "All Sessions" endpoint passes a larger window for pagination (WARDEN-176).
+function localClaudeSessions(limit = 40) {
+  return collectLocalSessionFiles().slice(0, limit).map((f) => {
     let cwd = '';
     let summary = '';
     try {
@@ -529,7 +532,12 @@ function localClaudeSessions() {
     return { id: f.id, cwd, summary, mtime: f.mtime };
   }).filter((s) => s.cwd);
 }
-async function remoteClaudeSessions(host) {
+// `limit` bounds the returned list (most-recent first). Defaults to 40 so
+// `/api/claude-sessions` is unchanged; the "All Sessions" endpoint passes a
+// larger window for pagination (WARDEN-176). The remote script already walks
+// every file and transfers each head, so the per-request SSH cost is the same
+// regardless of limit — only the in-Node slice changes.
+async function remoteClaudeSessions(host, limit = 40) {
   const script = `for f in ~/.claude/projects/*/*.jsonl; do [ -f "$f" ] || continue; id=$(basename "$f" .jsonl); mt=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null); printf '___S\\t%s\\t%s\\n' "$id" "$mt"; head -c 6000 "$f"; printf '\\n___E\\t%s\\n' "$id"; done`;
   const res = await run(host, script, { timeout: 15000 });
   if (!res.ok) return [];
@@ -550,7 +558,7 @@ async function remoteClaudeSessions(host) {
     if (cur) buf.push(line);
   }
   out.sort((a, b) => b.mtime - a.mtime);
-  return out.slice(0, 40);
+  return out.slice(0, limit);
 }
 
 // ---- full-content session search (WARDEN-161) ----
@@ -690,17 +698,51 @@ app.get('/api/claude-sessions', async (req, res) => {
   const claudeAvailable = !!(await detectClaude(host));
   res.json({ sessions, claudeAvailable });
 });
-app.get('/api/claude-sessions-all', async (_req, res) => {
+// Merge per-host session buckets into ONE globally-sorted, paginated list for the
+// unified "All Sessions" view. Pure + exported so the cross-host interleaving and
+// offset/limit math is unit-testable without SSH (WARDEN-176). `buckets` is a list
+// of { host, sessions } where each host's sessions are already most-recent-first.
+// Returns { sessions, hasMore } for the requested [offset, offset+limit) page.
+//
+// hasMore is honest ONLY when each bucket already carries the global top
+// (offset+limit+1) of its host: a session at global rank k has host-rank ≤ k, so
+// the (offset+limit)-th global item (the "is there a next page?" sentinel) is
+// guaranteed present iff every host contributed at least offset+limit+1 rows. The
+// endpoint computes that per-host window (perHost) before calling this.
+export function mergeAndPaginateSessions(buckets, offset, limit) {
+  const all = buckets.flatMap(({ host, sessions }) => sessions.map((s) => ({ ...s, host })));
+  all.sort((a, b) => b.mtime - a.mtime);
+  return { sessions: all.slice(offset, offset + limit), hasMore: all.length > offset + limit };
+}
+
+// Page-size guardrails for the unified "All Sessions" endpoint. Default 40 matches
+// the old hard global cap (so page 1 is unchanged), clamped to bound remote cost.
+const ALL_SESSIONS_DEFAULT_LIMIT = 40;
+const ALL_SESSIONS_MAX_LIMIT = 200;
+// Per-host fetch window ceiling. The endpoint asks for offset+limit+1 per host so
+// `hasMore` is honest (see mergeAndPaginateSessions); this clamp bounds memory and
+// remote transfer for pathological scale — far above any realistic page window.
+const ALL_SESSIONS_MAX_PER_HOST = 1000;
+
+app.get('/api/claude-sessions-all', async (req, res) => {
+  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+  const limit = Math.min(
+    ALL_SESSIONS_MAX_LIMIT,
+    Math.max(1, parseInt(req.query.limit, 10) || ALL_SESSIONS_DEFAULT_LIMIT),
+  );
+  // Per-host window: offset+limit+1 so the global boundary item is always fetched
+  // and `hasMore` is computed honestly (clamped to bound remote SSH cost).
+  const perHost = Math.min(ALL_SESSIONS_MAX_PER_HOST, offset + limit + 1);
   const hosts = [LOCAL, ...cfg.hosts];
   const results = await Promise.allSettled(hosts.map(async (host) => {
-    const sessions = host === LOCAL ? localClaudeSessions() : await remoteClaudeSessions(host);
-    return { host, sessions: sessions.slice(0, 20) }; // limit per host
+    const sessions = host === LOCAL ? localClaudeSessions(perHost) : await remoteClaudeSessions(host, perHost);
+    return { host, sessions };
   }));
-  const all = results
+  const buckets = results
     .filter((r) => r.status === 'fulfilled')
-    .flatMap((r) => r.value.sessions.map((s) => ({ ...s, host: r.value.host })));
-  all.sort((a, b) => b.mtime - a.mtime);
-  res.json({ sessions: all.slice(0, 40) });
+    .map((r) => ({ host: r.value.host, sessions: r.value.sessions }));
+  const { sessions, hasMore } = mergeAndPaginateSessions(buckets, offset, limit);
+  res.json({ sessions, hasMore });
 });
 
 // GET /api/claude-sessions-search?q= — full-content search across EVERY host's
