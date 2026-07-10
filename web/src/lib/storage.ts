@@ -7,6 +7,10 @@ const KEY = 'warden:ui:v2';
 // exact behavior) or starts with a clean workspace ('empty'). Pure client-side pref.
 export type RestoreOnStartup = 'previous' | 'empty';
 
+// How open agent panes are arranged: 'auto' (default = today's grid), 'stacked'
+// (single column, full-width), or 'side-by-side' (single row). Pure client-side pref.
+export type PaneLayout = 'auto' | 'stacked' | 'side-by-side';
+
 export interface UiState {
   activeTabs: string[];
   hiddenTabs: string[];
@@ -23,6 +27,10 @@ export interface UiState {
   // UI density: 'comfortable' (default = today's spacing) or 'compact' (tighter
   // rows/headers/gaps so more agents fit per screen). Pure client-side pref.
   density?: 'comfortable' | 'compact';
+  // Pane layout: how open agent panes are arranged. 'auto' (default = today's
+  // grid: cols = ceil(sqrt(n))), 'stacked' (single column), or 'side-by-side'
+  // (single row). Pure client-side pref; never sent to the backend.
+  paneLayout?: PaneLayout;
   // Whether launch reopens the previous workspace ('previous') or starts empty
   // ('empty'). Pure client-side pref; never sent to the backend.
   restoreOnStartup?: RestoreOnStartup;
@@ -55,6 +63,7 @@ export function loadUi(): UiState {
         terminalScrollback: typeof v.terminalScrollback === 'number' ? v.terminalScrollback : 10000,
         theme: v.theme ?? 'system',
         density: v.density === 'compact' ? 'compact' : 'comfortable',
+        paneLayout: (v.paneLayout === 'stacked' || v.paneLayout === 'side-by-side') ? v.paneLayout : 'auto',
         restoreOnStartup: v.restoreOnStartup === 'empty' ? 'empty' : 'previous',
         defaultNewChatPreset: v.defaultNewChatPreset === 'shell' ? 'shell' : 'claude',
         defaultNewChatHost: typeof v.defaultNewChatHost === 'string' ? v.defaultNewChatHost : '(local)',
@@ -64,7 +73,7 @@ export function loadUi(): UiState {
       };
     }
   } catch { /* ignore */ }
-  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14, terminalScrollback: 10000, theme: 'system', density: 'comfortable', restoreOnStartup: 'previous', defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', paneHost: {}, agentFilter: 'all', agentSort: 'manual' };
+  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14, terminalScrollback: 10000, theme: 'system', density: 'comfortable', paneLayout: 'auto', restoreOnStartup: 'previous', defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', paneHost: {}, agentFilter: 'all', agentSort: 'manual' };
 }
 
 export function saveUi(s: UiState) {
