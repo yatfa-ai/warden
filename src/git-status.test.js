@@ -36,6 +36,8 @@ let tempHome;
 let cleanRepo;
 let mergeRepo;
 let nonGitDir;
+let detachedRepo;
+let detachedShortSha;
 
 function git(args, cwd) {
   const r = spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'inherit'] });
@@ -94,7 +96,29 @@ before(async () => {
   nonGitDir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitstatus-nongit-'));
   fs.writeFileSync(path.join(nonGitDir, 'readme.txt'), 'not a repo\n');
 
-  // Catalog with three LOCAL manual chats, resolved by bare session id (no ':'
+  // ---- detachedRepo: one commit, then `git checkout --detach` so HEAD is not
+  // on any branch — the state an agent lands in after `git checkout <sha>`. The
+  // badge must surface this distinctly (detached:true + a short SHA) instead of
+  // the misleading literal "HEAD" label (WARDEN-239).
+  detachedRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitstatus-detached-'));
+  git(['init', '-q'], detachedRepo);
+  git(['config', 'user.email', 'test@example.com'], detachedRepo);
+  git(['config', 'user.name', 'Tester'], detachedRepo);
+  fs.writeFileSync(path.join(detachedRepo, 'd.txt'), 'd\n');
+  git(['add', '.'], detachedRepo);
+  git(['commit', '-q', '-m', 'init'], detachedRepo);
+  const detachedSha = git(['rev-parse', 'HEAD'], detachedRepo).stdout.toString().trim();
+  git(['checkout', '-q', '--detach', detachedSha], detachedRepo);
+  // Sanity: HEAD must genuinely be detached (symbolic-ref non-zero). The git()
+  // helper throws on non-zero, so probe with a raw spawnSync.
+  const symProbe = spawnSync('git', ['symbolic-ref', '-q', 'HEAD'], {
+    cwd: detachedRepo, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  assert.notStrictEqual(symProbe.status, 0, 'detachedRepo HEAD must be detached');
+  detachedShortSha = git(['rev-parse', '--short', 'HEAD'], detachedRepo).stdout.toString().trim();
+  assert.ok(detachedShortSha, 'expected a short SHA for the detached repo');
+
+  // Catalog with LOCAL manual chats, resolved by bare session id (no ':'
   // prefix) so no host/tmux discovery runs.
   fs.writeFileSync(
     path.join(wardenDir, 'chats.json'),
@@ -102,6 +126,7 @@ before(async () => {
       { host: '(local)', session: 'warden-clean', cwd: cleanRepo, cmd: 'bash', name: 'warden-clean' },
       { host: '(local)', session: 'warden-merge', cwd: mergeRepo, cmd: 'bash', name: 'warden-merge' },
       { host: '(local)', session: 'warden-nongit', cwd: nonGitDir, cmd: 'bash', name: 'warden-nongit' },
+      { host: '(local)', session: 'warden-detached', cwd: detachedRepo, cmd: 'bash', name: 'warden-detached' },
     ]),
   );
 
@@ -119,7 +144,7 @@ after(async () => {
   if (httpServer) await new Promise((r) => httpServer.close(r));
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  for (const d of [cleanRepo, mergeRepo, nonGitDir, tempHome]) {
+  for (const d of [cleanRepo, mergeRepo, nonGitDir, detachedRepo, tempHome]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 });
@@ -134,6 +159,9 @@ describe('/api/git-status in-progress + conflict detection (real Express app)', 
     assert.strictEqual(body.clean, true);
     assert.ok(body.inProgress, 'response must include inProgress');
     assert.strictEqual(body.inProgress.operation, null);
+    // No regression: a normal branch is NOT detached and reports no short SHA.
+    assert.strictEqual(body.detached, false);
+    assert.strictEqual(body.headSha, null);
   });
 
   it('detects an in-progress merge and flags the conflicted file', async () => {
@@ -163,10 +191,61 @@ describe('/api/git-status in-progress + conflict detection (real Express app)', 
     const body = await res.json();
     assert.strictEqual(body.branch, null);
     assert.strictEqual(body.inProgress.operation, null);
+    // A non-git cwd must NOT be misread as detached (symbolic-ref fails here too,
+    // but the inGitRepo guard — branch truthy — keeps it false).
+    assert.strictEqual(body.detached, false);
+    assert.strictEqual(body.headSha, null);
   });
 
   it('returns 404 for an unknown chat id', async () => {
     const res = await fetch(`${baseUrl}/api/git-status?id=does-not-exist`);
     assert.strictEqual(res.status, 404);
+  });
+});
+
+describe('/api/git-status detached-HEAD detection (real Express app)', () => {
+  // Covers WARDEN-239 acceptance criteria for the LOCAL spawnSync path:
+  //   - a detached repo → detached:true + a visible short SHA (NOT the literal
+  //     "HEAD" string and NOT silent on ahead/behind)
+  //   - the branch ? gate is kept so uncommitted files still surface on detached
+  // The remote (SSH) path uses the same symbolic-ref test via a chained command;
+  // driving a real SSH host in CI is out of scope.
+
+  it('reports detached:true with a short SHA for a detached-HEAD repo', async () => {
+    const res = await fetch(`${baseUrl}/api/git-status?id=warden-detached`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.error, null);
+    // The headline assertions: the state is surfaced distinctly.
+    assert.strictEqual(body.detached, true);
+    assert.ok(body.headSha, 'a detached repo must report a short SHA');
+    assert.strictEqual(body.headSha, detachedShortSha, 'headSha must equal git rev-parse --short HEAD');
+    // The short SHA is what the badge shows INSTEAD of the misleading "HEAD".
+    assert.notStrictEqual(body.headSha, 'HEAD');
+  });
+
+  it('keeps the branch gate so files/clean/inProgress still surface on detached', async () => {
+    // A detached HEAD can still have uncommitted changes / an in-progress op —
+    // the branch ? gate must NOT null them out just because we're detached.
+    const body = await (await fetch(`${baseUrl}/api/git-status?id=warden-detached`)).json();
+    assert.strictEqual(body.detached, true);
+    assert.strictEqual(body.clean, true);          // gate passes (truthy branch)
+    assert.strictEqual(body.inProgress.operation, null);
+    assert.ok(body.files !== null, 'files must still surface (not nulled) on detached');
+    // ahead/behind are null on detached (no @{u}) — by design.
+    assert.strictEqual(body.ahead, null);
+    assert.strictEqual(body.behind, null);
+  });
+
+  it('flags a detached repo with uncommitted changes as not-clean', async () => {
+    // Mutate the detached repo, then re-query: detached stays true AND the
+    // uncommitted file surfaces (clean:false) through the kept branch gate.
+    fs.writeFileSync(path.join(detachedRepo, 'd.txt'), 'changed\n');
+    const body = await (await fetch(`${baseUrl}/api/git-status?id=warden-detached`)).json();
+    assert.strictEqual(body.detached, true);
+    assert.strictEqual(body.clean, false);
+    assert.ok((body.files || []).some((f) => f.path === 'd.txt'), 'd.txt must surface as a changed file');
+    // Restore so sibling tests aren't affected.
+    git(['checkout', '-q', '--', 'd.txt'], detachedRepo);
   });
 });

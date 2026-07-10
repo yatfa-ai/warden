@@ -59,6 +59,58 @@ export function isConflictStatus(xy) {
   return UNMERGED_STATUS_CODES.has((xy ?? '').toString().trim());
 }
 
+/**
+ * Decide whether a repo is in detached-HEAD state from `git symbolic-ref -q HEAD`.
+ *
+ * `git symbolic-ref -q HEAD` exits 0 (printing `refs/heads/<name>`) when HEAD
+ * points at a branch, and exits non-zero with no output when HEAD is detached.
+ * BUT it also exits non-zero outside any git repo ("fatal: not a git
+ * repository"), so the exit code alone is ambiguous — a non-git cwd would
+ * falsely read as detached. The caller therefore passes `inGitRepo` (true iff
+ * `git rev-parse --abbrev-ref HEAD` succeeded, i.e. the repo is real), and we
+ * only call it detached when BOTH hold: inside a repo AND symbolic-ref refused
+ * to resolve a branch.
+ *
+ * This is the canonical git detached-HEAD test, preferred over
+ * `branch === 'HEAD'` (a branch could in principle be named "HEAD"). Extracted
+ * as a pure helper so the detection is unit-testable in isolation, mirroring
+ * `parseAheadBehind` (WARDEN-239). Detection is fundamentally exit-code based
+ * (not stdout parsing), hence the exitCode argument.
+ *
+ * @param {number|null|undefined} symbolicRefExitCode - exit status of `git symbolic-ref -q HEAD`.
+ * @param {boolean} inGitRepo - true iff HEAD resolved (we are inside a real git repo).
+ * @returns {boolean}
+ */
+export function isDetachedHead(symbolicRefExitCode, inGitRepo) {
+  if (!inGitRepo) return false;
+  // Only status === 0 means HEAD resolved to a branch. Any other value — a
+  // non-zero exit (1/128 …), or null when the process was killed by a signal —
+  // means HEAD did NOT resolve, i.e. detached. Strict `!== 0` (rather than
+  // `Number(…) !== 0`) is what keeps null from collapsing to 0 and reading as
+  // attached.
+  return symbolicRefExitCode !== 0;
+}
+
+/**
+ * Normalize `git rev-parse --short HEAD` output into a short SHA string (or null).
+ *
+ * A non-zero exit / empty output (non-git cwd, or a freshly-init'd repo with no
+ * commits yet) → null, mirroring `parseAheadBehind`'s tolerance of missing
+ * input. On success returns the trimmed short SHA (e.g. "554b5e9"). The short
+ * SHA replaces the misleading literal "HEAD" label the badge would otherwise
+ * render for a detached repo (WARDEN-239). Extracted as a pure helper so the
+ * normalization is unit-testable, mirroring `parseAheadBehind`.
+ *
+ * @param {string|Buffer|undefined} output - Raw stdout from `git rev-parse --short HEAD`.
+ * @param {number|null|undefined} [exitCode] - exit status; when omitted/unknown the output is trusted.
+ * @returns {string | null}
+ */
+export function normalizeHeadSha(output, exitCode) {
+  if (exitCode !== undefined && exitCode !== 0) return null;
+  const sha = (output ?? '').toString().trim();
+  return sha || null;
+}
+
 export function parseGitStatusPorcelain(output) {
   const raw = (output ?? '').toString();
   return raw

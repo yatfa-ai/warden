@@ -317,7 +317,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [hasMoreSessions, setHasMoreSessions] = useState(false);
   const [loadingMoreSessions, setLoadingMoreSessions] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
-  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string; files?: GitFile[]; ahead?: number | null; behind?: number | null; inProgress?: { operation: string | null }; stashCount?: number | null }>>({});
+  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; detached?: boolean; headSha?: string | null; clean: boolean | null; cwd: string; files?: GitFile[]; ahead?: number | null; behind?: number | null; inProgress?: { operation: string | null }; stashCount?: number | null }>>({});
   // recent commit history (git log) per chatId — cached so re-expanding the badge is instant
   const [gitLog, setGitLog] = useState<Record<string, GitCommit[]>>({});
   const [gitLogLoading, setGitLogLoading] = useState<Record<string, boolean>>({});
@@ -375,7 +375,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       const r = await fetch(`/api/git-status?id=${encodeURIComponent(chatId)}`);
       const j = await r.json();
       if (j.branch) {
-        setGitStatus((p) => ({ ...p, [chatId]: { branch: j.branch, clean: j.clean, cwd: j.cwd, files: j.files, ahead: j.ahead, behind: j.behind, inProgress: j.inProgress, stashCount: j.stashCount } }));
+        setGitStatus((p) => ({ ...p, [chatId]: { branch: j.branch, detached: j.detached, headSha: j.headSha, clean: j.clean, cwd: j.cwd, files: j.files, ahead: j.ahead, behind: j.behind, inProgress: j.inProgress, stashCount: j.stashCount } }));
       }
     } catch (error) {
       // Git status is non-critical, so just log it without showing a toast
@@ -1155,7 +1155,7 @@ function CommitFile({ chatId, hash, file }: { chatId: string; hash: string; file
   );
 }
 
-function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, inProgress, stashCount, incomingCommits, incomingLoading, onFetchIncoming, className }: {
+function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, inProgress, stashCount, incomingCommits, incomingLoading, onFetchIncoming, detached, headSha, className }: {
   branch: string;
   clean: boolean | null;
   commits?: GitCommit[];
@@ -1172,6 +1172,11 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
   incomingCommits?: GitCommit[];
   incomingLoading?: boolean;
   onFetchIncoming?: () => void;
+  // WARDEN-239: HEAD is not on a branch (an agent checked out a specific commit).
+  // Rendered as a distinct amber glyph + the short SHA instead of the misleading
+  // literal "HEAD" branch label. ahead/behind are null on detached (no @{u}).
+  detached?: boolean;
+  headSha?: string | null;
   className?: string;
 }) {
   const aheadCount = typeof ahead === 'number' ? ahead : 0;
@@ -1183,12 +1188,19 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
   // revert/bisect), or null when none is in progress. This is the highest-value
   // signal in the badge: a blocked agent produces nothing until noticed (WARDEN-186).
   const operation = inProgress?.operation || null;
-  const titleParts = [branch];
+  // WARDEN-239: detached HEAD — render an amber ⎇ + short SHA instead of the
+  // misleading "HEAD" label. ahead/behind stay null (no upstream), so the
+  // ↑/↓ markers naturally don't render.
+  const isDetached = detached === true;
+  const sha = typeof headSha === 'string' ? headSha.trim() : '';
+  const titleParts = isDetached
+    ? [`detached HEAD${sha ? ` @ ${sha}` : ''}`, 'commits not on a branch; at risk if reflog expires']
+    : [branch];
   if (operation) titleParts.push(`${operation} in progress`);
   if (clean === false) titleParts.push('uncommitted changes');
   if (stashN > 0) titleParts.push(`${stashN} stashed`);
-  if (aheadCount > 0) titleParts.push(`${aheadCount} unpushed`);
-  if (behindCount > 0) titleParts.push(`${behindCount} behind remote`);
+  if (!isDetached && aheadCount > 0) titleParts.push(`${aheadCount} unpushed`);
+  if (!isDetached && behindCount > 0) titleParts.push(`${behindCount} behind remote`);
 
   // Per-commit expand state + the /api/git-show files cache (keyed by hash) so a
   // repeat expansion is instant. The popover owns the interaction, so this state
@@ -1256,11 +1268,16 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
         <button
           type="button"
           onClick={(e) => e.stopPropagation()}
-          className={cn('inline-flex items-center gap-0.5 text-[10px] text-cyan-400 hover:text-cyan-300 cursor-pointer', className)}
+          className={cn('inline-flex items-center gap-0.5 text-[10px] cursor-pointer', isDetached ? 'text-amber-400 hover:text-amber-300' : 'text-cyan-400 hover:text-cyan-300', className)}
           title={`${titleParts.join(' · ')} — click for recent commits`}
         >
           {operation && <span className="text-red-400 font-medium" title={`${operation} in progress`}>⚠ {operation}</span>}
-          {branch}
+          {isDetached ? (
+            <>
+              <span title="detached HEAD — commits not on a branch; at risk if reflog expires">⎇</span>
+              {sha && <span className="font-mono">{sha}</span>}
+            </>
+          ) : branch}
           {clean === false && <span className="text-yellow-400">±</span>}
           {aheadCount > 0 && <span className="text-amber-400">↑{aheadCount}</span>}
           {behindCount > 0 && <span className="text-blue-400">↓{behindCount}</span>}
@@ -1276,7 +1293,7 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
         >
           <div className="mb-1 flex items-center justify-between gap-2 px-0.5">
             <span className="truncate text-[10px] font-medium text-muted-foreground">
-              recent commits · {branch}
+              recent commits · {isDetached ? `detached${sha ? ` @ ${sha}` : ''}` : branch}
               {aheadCount > 0 && <span className="text-amber-400"> · ↑ {aheadCount} unpushed</span>}
             </span>
             <IconTooltip label="refresh" disabled={loading || incomingLoading}>
@@ -1410,7 +1427,7 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hos
   // WARDEN-198: per-host reachability from the 30s /api/hosts/status poll.
   // 'offline' → the row renders a distinct "unreachable" state.
   hostStatus?: 'online' | 'offline' | 'unknown';
-  gitInfo?: { branch: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; inProgress?: { operation: string | null }; stashCount?: number | null };
+  gitInfo?: { branch: string | null; detached?: boolean; headSha?: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; inProgress?: { operation: string | null }; stashCount?: number | null };
   gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
   // WARDEN-225: incoming (behind) commits + their own fetch/loader, threaded to
   // GitBranchBadge the same way the local gitLog trio is.
@@ -1484,9 +1501,9 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hos
               {c.role && !isUser && <span className="ml-1 text-[10px] text-muted-foreground">{c.role}</span>}
               {showProjectBadges && c.project && <span className="ml-1 text-[10px] text-muted-foreground">{c.project}</span>}
               {isUser && showHostTags !== false && hostTag && <span className="ml-1 text-[10px] text-muted-foreground">{hostTag}</span>}
-              {gitInfo?.branch && (
+              {(gitInfo?.branch || gitInfo?.detached) && (
                 <GitBranchBadge
-                  branch={gitInfo.branch}
+                  branch={gitInfo.branch ?? ''}
                   chatId={c.key || c.id}
                   clean={gitInfo.clean}
                   commits={gitCommits}
@@ -1496,6 +1513,8 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hos
                   behind={gitInfo.behind}
                   inProgress={gitInfo.inProgress}
                   stashCount={gitInfo.stashCount}
+                  detached={gitInfo.detached}
+                  headSha={gitInfo.headSha}
                   incomingCommits={incomingCommits}
                   incomingLoading={incomingLoading}
                   onFetchIncoming={onFetchIncoming}
@@ -1559,7 +1578,7 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showHostTags
   onRemove: () => void;
   onRename: (session: string, kind: string, name: string, host?: string) => void;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
-  gitInfo?: { branch: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; inProgress?: { operation: string | null }; stashCount?: number | null };
+  gitInfo?: { branch: string | null; detached?: boolean; headSha?: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; inProgress?: { operation: string | null }; stashCount?: number | null };
   gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
   // WARDEN-225: incoming (behind) commits + their own fetch/loader.
   incomingCommits?: GitCommit[]; incomingLoading?: boolean; onFetchIncoming?: () => void;
@@ -1627,8 +1646,8 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showHostTags
         {!dead && !editing && showTypeBadges !== false && <span className={`text-[10px] ${TYPE_COLOR[type] || ''}`}>{type}</span>}
         {!dead && !editing && showHostTags !== false && hostTag && <span className="text-[10px] text-muted-foreground">{hostTag}</span>}
         {!dead && !editing && showProjectBadges && c?.project && <span className="text-[10px] text-muted-foreground">{c.project}</span>}
-        {!dead && !editing && gitInfo?.branch && (
-          <GitBranchBadge branch={gitInfo.branch} chatId={id} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} ahead={gitInfo.ahead} behind={gitInfo.behind} inProgress={gitInfo.inProgress} stashCount={gitInfo.stashCount} incomingCommits={incomingCommits} incomingLoading={incomingLoading} onFetchIncoming={onFetchIncoming} />
+        {!dead && !editing && (gitInfo?.branch || gitInfo?.detached) && (
+          <GitBranchBadge branch={gitInfo.branch ?? ''} chatId={id} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} ahead={gitInfo.ahead} behind={gitInfo.behind} inProgress={gitInfo.inProgress} stashCount={gitInfo.stashCount} detached={gitInfo.detached} headSha={gitInfo.headSha} incomingCommits={incomingCommits} incomingLoading={incomingLoading} onFetchIncoming={onFetchIncoming} />
         )}
         {!editing && canRename && (
           <IconTooltip label="rename"><Button variant="ghost" size="xs" className="px-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); startEdit(); }} aria-label="rename">✎</Button></IconTooltip>
