@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, isConflictStatus } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, isConflictStatus, isDetachedHead, normalizeHeadSha } from './gitStatus.js';
 
 describe('parseGitStatusPorcelain', () => {
   it('parses the most common case: unstaged modification as the FIRST file', () => {
@@ -166,6 +166,87 @@ describe('isConflictStatus', () => {
 
   it('accepts a Buffer input', () => {
     assert.equal(isConflictStatus(Buffer.from('UU')), true);
+  });
+});
+
+describe('isDetachedHead', () => {
+  // `git symbolic-ref -q HEAD` exits non-zero iff HEAD is detached (it prints
+  // refs/heads/<name> + exit 0 when on a branch). But it ALSO exits non-zero
+  // outside any git repo, so the inGitRepo guard is what keeps a non-git cwd
+  // from being misread as detached (WARDEN-239).
+
+  it('returns true for a non-zero symbolic-ref exit inside a repo (detached)', () => {
+    // detached HEAD → symbolic-ref refuses, exit 1.
+    assert.equal(isDetachedHead(1, true), true);
+  });
+
+  it('returns true for exit 128 inside a repo (detached, older git)', () => {
+    assert.equal(isDetachedHead(128, true), true);
+  });
+
+  it('returns false for exit 0 inside a repo (on a branch)', () => {
+    // symbolic-ref printed refs/heads/main and exited 0.
+    assert.equal(isDetachedHead(0, true), false);
+  });
+
+  it('returns false outside a git repo even when symbolic-ref exited non-zero', () => {
+    // A non-git cwd: symbolic-ref fails too (exit 128) but we are NOT detached —
+    // there is no repo. This is the case the inGitRepo guard exists for.
+    assert.equal(isDetachedHead(128, false), false);
+    assert.equal(isDetachedHead(1, false), false);
+  });
+
+  it('treats a null/undefined exit code as non-zero (refused to resolve) inside a repo', () => {
+    // spawnSync returns status null on signal/spawn error; treat as "did not
+    // succeed" rather than silently reading as attached.
+    assert.equal(isDetachedHead(null, true), true);
+    assert.equal(isDetachedHead(undefined, true), true);
+  });
+
+  it('treats a null/undefined exit code as NOT detached outside a repo', () => {
+    assert.equal(isDetachedHead(null, false), false);
+    assert.equal(isDetachedHead(undefined, false), false);
+  });
+});
+
+describe('normalizeHeadSha', () => {
+  // `git rev-parse --short HEAD` prints a short SHA on success; the helper trims
+  // it and nulls out the failure cases so the badge has nothing to show when the
+  // SHA is unavailable (WARDEN-239).
+
+  it('trims a normal short SHA on its own line', () => {
+    assert.equal(normalizeHeadSha('554b5e9\n'), '554b5e9');
+  });
+
+  it('trims surrounding whitespace', () => {
+    assert.equal(normalizeHeadSha('  554b5e9  \n'), '554b5e9');
+  });
+
+  it('returns null for a non-zero exit code', () => {
+    // Non-git cwd / empty repo → rev-parse errors.
+    assert.equal(normalizeHeadSha('', 128), null);
+    assert.equal(normalizeHeadSha('554b5e9\n', 1), null);
+  });
+
+  it('returns null for empty / whitespace-only output on a successful exit', () => {
+    assert.equal(normalizeHeadSha('', 0), null);
+    assert.equal(normalizeHeadSha('   \n', 0), null);
+  });
+
+  it('trusts the output when no exit code is supplied', () => {
+    // The remote run() path already encodes exit-0 in its .ok flag, so the
+    // helper is called with just stdout — it must not null a valid SHA.
+    assert.equal(normalizeHeadSha('554b5e9\n'), '554b5e9');
+    assert.equal(normalizeHeadSha(''), null);
+  });
+
+  it('handles undefined / null input without throwing', () => {
+    assert.equal(normalizeHeadSha(undefined), null);
+    assert.equal(normalizeHeadSha(null), null);
+  });
+
+  it('accepts a Buffer input', () => {
+    assert.equal(normalizeHeadSha(Buffer.from('554b5e9\n')), '554b5e9');
   });
 });
 

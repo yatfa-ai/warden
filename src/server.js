@@ -21,7 +21,7 @@ import { listSessions, createSession, renameSession, deleteSession } from './ses
 import { appendEvent, rotateEvents, readEvents, getStatsSince } from './activity.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { checkHost } from './hostStatus.js';
-import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, isDetachedHead, normalizeHeadSha } from './gitStatus.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = load();
@@ -785,7 +785,7 @@ app.get('/api/git-status', async (req, res) => {
 
   try {
     const cwd = chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
-    if (!cwd) return res.json({ branch: null, clean: null, cwd: '', ahead: null, behind: null, inProgress: { operation: null }, stashCount: null, files: null, error: 'no cwd' });
+    if (!cwd) return res.json({ branch: null, detached: false, headSha: null, clean: null, cwd: '', ahead: null, behind: null, inProgress: { operation: null }, stashCount: null, files: null, error: 'no cwd' });
 
     let branch = '';
     let clean = true;
@@ -794,11 +794,29 @@ app.get('/api/git-status', async (req, res) => {
     let behind = null;
     let inProgressOp = null;
     let stashCount = null;
+    let detached = false;
+    let headSha = null;
 
     if (chat.host === LOCAL) {
       // Local execution: use spawnSync directly
       const branchResult = runLocalGit(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
       branch = branchResult.stdout?.toString().trim() || '';
+
+      // Detached-HEAD detection (WARDEN-239). `git symbolic-ref -q HEAD` exits
+      // non-zero iff HEAD is detached (it prints refs/heads/<name> + exit 0 when
+      // on a branch) — the canonical test, more reliable than `branch === 'HEAD'`
+      // (a branch could in principle be named "HEAD"). Guarded by `branch`
+      // (truthy ⟺ the rev-parse above succeeded ⟺ we're inside a real repo) so a
+      // NON-git cwd — where symbolic-ref also fails — is NOT misread as detached.
+      // The short SHA replaces the misleading literal "HEAD" label the badge
+      // would otherwise show; it's only fetched when detached to keep the normal
+      // branch path's command set unchanged.
+      const symRefResult = runLocalGit(['symbolic-ref', '-q', 'HEAD'], cwd);
+      detached = isDetachedHead(symRefResult.status, !!branch);
+      if (detached) {
+        const shaResult = runLocalGit(['rev-parse', '--short', 'HEAD'], cwd);
+        headSha = normalizeHeadSha(shaResult.stdout, shaResult.status);
+      }
 
       const statusResult = runLocalGit(['status', '--porcelain'], cwd);
       const statusRaw = statusResult.stdout?.toString() || '';
@@ -839,7 +857,16 @@ app.get('/api/git-status', async (req, res) => {
       stashCount = parseStashCount(stashResult.stdout?.toString() || '');
     } else {
       // Remote execution: use SSH
-      const gitBranchCmd = `cd ${shellQuote(cwd)} && git rev-parse --abbrev-ref HEAD 2>/dev/null`;
+      // Fold detached-HEAD detection into the branch probe: after rev-parse
+      // prints the abbrev-ref, the chained group echoes 'branch' (symbolic-ref
+      // resolved HEAD) or 'detached' (it refused). The `{ …; }` is a bash
+      // command group (parsed under bash -lc), not brace expansion. On a non-git
+      // cwd rev-parse fails → the `&&` short-circuits → group never runs → empty
+      // stdout → branch='' (and the !!branch guard keeps it from reading
+      // detached). Mirrors the local symbolic-ref probe (WARDEN-239).
+      const gitBranchCmd =
+        `cd ${shellQuote(cwd)} && git rev-parse --abbrev-ref HEAD 2>/dev/null && ` +
+        `{ git symbolic-ref -q HEAD >/dev/null && echo branch || echo detached; }`;
       const gitStatusCmd = `cd ${shellQuote(cwd)} && git status --porcelain 2>/dev/null`;
       // The @{u}...HEAD rev spec is a constant, but we shellQuote it anyway:
       // '{' / '}' risk brace expansion in some shells, and this is consistent
@@ -847,7 +874,23 @@ app.get('/api/git-status', async (req, res) => {
       const gitAheadBehindCmd = `cd ${shellQuote(cwd)} && git rev-list --left-right --count ${shellQuote('@{u}...HEAD')} 2>/dev/null`;
 
       const r1 = await run(chat.host, gitBranchCmd, { timeout: 8000 });
-      branch = r1.ok ? r1.stdout.trim() : '';
+      const r1lines = (r1.ok ? (r1.stdout || '') : '')
+        .split('\n').map((l) => l.trim()).filter(Boolean);
+      branch = r1lines[0] || '';
+      // Line 2 is 'branch' | 'detached'. Route through isDetachedHead so the
+      // "only detached inside a real repo" guard (inGitRepo = !!branch) lives in
+      // one place shared with the local path; 'detached' maps to a non-zero
+      // exit, anything else to exit 0.
+      detached = isDetachedHead(r1lines[1] === 'detached' ? 1 : 0, !!branch);
+      // Short SHA for the detached badge — a separate SSH round-trip, so only
+      // fired when detached (nothing to show on a normal branch). run()'s .ok
+      // already encodes the exit-0 check, so normalizeHeadSha is called with just
+      // stdout (WARDEN-239).
+      if (detached) {
+        const gitShaCmd = `cd ${shellQuote(cwd)} && git rev-parse --short HEAD 2>/dev/null`;
+        const rSha = await run(chat.host, gitShaCmd, { timeout: 8000 });
+        headSha = rSha.ok ? normalizeHeadSha(rSha.stdout) : null;
+      }
 
       const r2 = await run(chat.host, gitStatusCmd, { timeout: 8000 });
       const statusRaw = r2.ok ? (r2.stdout || '') : '';
@@ -892,6 +935,14 @@ app.get('/api/git-status', async (req, res) => {
 
     res.json({
       branch: branch || null,
+      // detached: true only inside a real repo whose HEAD is not on a branch.
+      // headSha: the short SHA shown in place of the misleading "HEAD" label.
+      // The branch ? gate is kept so files/clean/inProgress still surface on a
+      // detached HEAD (you still want to see uncommitted changes); ahead/behind
+      // are already null there (parseAheadBehind returns nulls with no @{u})
+      // (WARDEN-239).
+      detached,
+      headSha,
       clean: branch ? clean : null,
       cwd,
       ahead: branch ? ahead : null,
@@ -902,7 +953,7 @@ app.get('/api/git-status', async (req, res) => {
       error: null,
     });
   } catch (e) {
-    res.json({ branch: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, inProgress: { operation: null }, stashCount: null, files: null, error: e.message });
+    res.json({ branch: null, detached: false, headSha: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, inProgress: { operation: null }, stashCount: null, files: null, error: e.message });
   }
 });
 
