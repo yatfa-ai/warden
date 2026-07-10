@@ -285,9 +285,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [tabSearchQuery, setTabSearchQuery] = useState('');
-  const [killingChatId, setKillingChatId] = useState<string | null>(null);
   const [resumingSessionId, setResumingSessionId] = useState<string | null>(null);
-  const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
   const [pinnedChatIds, setPinnedChatIds] = useState<Set<string>>(new Set());
   const [projectFilter, setProjectFilter] = useState<string | null>(null);
   const [hostSessions, setHostSessions] = useState<Record<string, { sessions: ClaudeSession[]; claudeAvailable?: boolean }>>({});
@@ -603,26 +601,6 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     }
   };
 
-  const handleKill = async (id: string) => {
-    if (killingChatId) return;
-    setKillingChatId(id);
-    try {
-      await onKill(id);
-    } finally {
-      setKillingChatId(null);
-    }
-  };
-
-  const handleRename = async (session: string, kind: string, name: string) => {
-    if (renamingChatId) return;
-    setRenamingChatId(session);
-    try {
-      await onRename(session, kind, name);
-    } finally {
-      setRenamingChatId(null);
-    }
-  };
-
   if (view.kind === 'collection') {
     const { collection: C } = view;
     let agents = collections.length > 0
@@ -672,19 +650,19 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             {(visibleActive.length > 0 || idle.length > 0 || hiddenActive.length > 0) && (
               <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">● matching agents</div>
             )}
-            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onHide={() => onHideTab(c.key || c.id)} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
+            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onHide={() => onHideTab(c.key || c.id)} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
             {hiddenActive.length > 0 && (
               <>
                 <SectionToggle expanded={hiddenExpanded} onClick={() => setHiddenExpanded(!hiddenExpanded)} label={`hidden (${hiddenActive.length})`} />
                 {hiddenExpanded && hiddenActive.map((c) => (
-                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onUnhide={() => onUnhideTab(c.key || c.id)} dim showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />
+                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onUnhide={() => onUnhideTab(c.key || c.id)} dim showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />
                 ))}
               </>
             )}
             {idle.length > 0 && (
               <>
                 <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">idle</div>
-                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} dim showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
+                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} dim showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
               </>
             )}
             {agents.length === 0 && (
@@ -736,19 +714,19 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             {(visibleActive.length > 0 || idle.length > 0 || hiddenActive.length > 0) && (
               <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">● live (tmux)</div>
             )}
-            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onHide={() => onHideTab(c.key || c.id)} gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
+            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onHide={() => onHideTab(c.key || c.id)} gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
             {hiddenActive.length > 0 && (
               <>
                 <SectionToggle expanded={hiddenExpanded} onClick={() => setHiddenExpanded(!hiddenExpanded)} label={`hidden (${hiddenActive.length})`} />
                 {hiddenExpanded && hiddenActive.map((c) => (
-                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} onUnhide={() => onUnhideTab(c.key || c.id)} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />
+                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onUnhide={() => onUnhideTab(c.key || c.id)} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />
                 ))}
               </>
             )}
             {idle.length > 0 && (
               <>
                 <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">idle</div>
-                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => handleKill(c.key || c.id)} onRename={(session, kind, name) => handleRename(session, kind, name)} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} killingChatId={killingChatId} renamingChatId={renamingChatId} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
+                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
               </>
             )}
             <div className="mt-3 mb-1 border-t border-border/50" />
@@ -900,11 +878,9 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                 isOpen={openPanes.has(id)}
                 onOpen={() => onOpenChat(id)}
                 onRemove={() => onRemoveActive(id)}
-                onRename={(session, kind, name) => handleRename(session, kind, name)}
-                renamingChatId={renamingChatId}
+                onRename={onRename}
                 onHide={() => onHideTab(id)}
-                onKill={() => handleKill(id)}
-                killingChatId={killingChatId}
+                onKill={() => onKill(id)}
                 canDrag={canDrag}
                 showHostTags={showHostTags}
                 showTypeBadges={showTypeBadges}
@@ -1276,7 +1252,7 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
   );
 }
 
-function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hostStatus, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, onOpenDiff, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, killingChatId, renamingChatId, isPinned, onTogglePin }: {
+function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hostStatus, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, onOpenDiff, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, isPinned, onTogglePin }: {
   c: Chat; open: boolean; onOpen: () => void; onKill: () => void;
   onRename: (session: string, kind: string, name: string) => void;
   onHide?: () => void; onUnhide?: () => void; dim?: boolean;
@@ -1287,7 +1263,6 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hos
   gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
   onOpenDiff?: (path: string) => void;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
-  killingChatId?: string | null; renamingChatId?: string | null;
   isPinned?: boolean; onTogglePin?: () => void;
 }) {
   const isUser = c.kind === 'tmux';
@@ -1297,9 +1272,6 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hos
   const type = chatType(c);
   const typeColor = TYPE_COLOR[type] || 'text-violet-400';
   const hostTag = isUser ? (c.host === '(local)' ? 'local' : (c.host || '')) : null;
-  const chatId = c.key || c.id;
-  const isKilling = killingChatId === chatId;
-  const isRenaming = renamingChatId === chatId;
   // WARDEN-198: when this agent's managed host is offline, render a distinct
   // "unreachable" state instead of the ambiguous idle/undiscovered gray dot.
   // Driven by the shared 30s host-status poll, so it self-clears on recovery.
@@ -1397,13 +1369,12 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hos
         <>
           {onHide && <IconTooltip label="hide"><button className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground px-0.5 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded" onClick={(e) => { e.stopPropagation(); onHide(); }}>▾</button></IconTooltip>}
           {onUnhide && <IconTooltip label="unhide"><button className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground px-0.5 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded" onClick={(e) => { e.stopPropagation(); onUnhide(); }}>▴</button></IconTooltip>}
-          <IconTooltip label="kill + forget" disabled={isKilling || isRenaming}>
+          <IconTooltip label="kill + forget">
             <button
-              className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-red-500 px-0.5 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded"
+              className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-red-500 px-0.5 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded"
               onClick={(e) => { e.stopPropagation(); onKill(); }}
-              disabled={isKilling || isRenaming}
             >
-              {isKilling ? <Skeleton className="h-3 w-3" /> : '×'}
+              ×
             </button>
           </IconTooltip>
         </>
@@ -1422,14 +1393,13 @@ function hostTagOf(host: string) { return host === THIS_MACHINE ? 'local' : host
 // gating rename off double-click avoids the two-fires-before-dblclick open-then-edit jank);
 // yatfa agents are not renameable. Drag-reorder is preserved via the parent-owned
 // dragIdx/dragOverIdx pair.
-function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChatId, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, onOpenDiff, canDrag, originalIdx, dragIdx, dragOverIdx, setDragIdx, setDragOverIdx, onReorder, onHide, onKill, killingChatId }: {
+function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, onOpenDiff, canDrag, originalIdx, dragIdx, dragOverIdx, setDragIdx, setDragOverIdx, onReorder, onHide, onKill }: {
   id: string;
   c?: Chat;
   isOpen: boolean;
   onOpen: () => void;
   onRemove: () => void;
   onRename: (session: string, kind: string, name: string) => void;
-  renamingChatId?: string | null;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
   gitInfo?: { branch: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; inProgress?: { operation: string | null } };
   gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
@@ -1441,15 +1411,11 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChat
   onReorder: (from: number, to: number) => void;
   onHide?: () => void;
   onKill?: () => void;
-  killingChatId?: string | null;
 }) {
   const type = c ? chatType(c) : '?';
   const hostTag = c ? hostTagOf(c.host) : '';
   const dead = !c || c.active === false;
   const canRename = !!c && c.kind === 'tmux';
-  const chatKey = c?.key || c?.id || id;
-  const isRenaming = renamingChatId === chatKey;
-  const isKilling = killingChatId === chatKey;
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(() => (c ? displayName(c) : id));
 
@@ -1505,7 +1471,7 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChat
           <GitBranchBadge branch={gitInfo.branch} chatId={id} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} ahead={gitInfo.ahead} behind={gitInfo.behind} inProgress={gitInfo.inProgress} />
         )}
         {!editing && canRename && (
-          <IconTooltip label="rename"><Button variant="ghost" size="xs" className="px-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); startEdit(); }} disabled={isRenaming} aria-label="rename">{isRenaming ? <Skeleton className="h-3 w-3" /> : '✎'}</Button></IconTooltip>
+          <IconTooltip label="rename"><Button variant="ghost" size="xs" className="px-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); startEdit(); }} aria-label="rename">✎</Button></IconTooltip>
         )}
         <IconTooltip label={dead ? 'remove dead tab' : 'remove'}><button className={`px-1 text-sm active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded ${dead ? 'text-red-500 font-bold' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-red-500'}`} onClick={(e) => { e.stopPropagation(); onRemove(); }}>×</button></IconTooltip>
       </div>
@@ -1520,8 +1486,8 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChat
         <ContextMenuItem onSelect={() => onOpen()}>Open</ContextMenuItem>
         {!dead && onHide && <ContextMenuItem onSelect={() => onHide()}>Hide</ContextMenuItem>}
         {!dead && onKill && (
-          <ContextMenuItem disabled={isKilling} onSelect={() => onKill()}>
-            {isKilling ? <Skeleton className="h-3 w-16" /> : 'Kill session'}
+          <ContextMenuItem onSelect={() => onKill()}>
+            Kill session
           </ContextMenuItem>
         )}
         <ContextMenuSeparator />
