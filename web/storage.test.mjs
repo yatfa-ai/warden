@@ -69,6 +69,50 @@ test('a missing field loads as "previous"', () => {
   assert.equal(loadUi().restoreOnStartup, 'previous');
 });
 
+console.log('\ndefault-new-chat prefs (agent type + host) round-trip through loadUi/saveUi');
+test('preset defaults to "claude" and host to "(local)" when nothing is stored', () => {
+  reset();
+  const ui = loadUi();
+  assert.equal(ui.defaultNewChatPreset, 'claude');
+  assert.equal(ui.defaultNewChatHost, '(local)');
+});
+test('shell preset + a remote host round-trip', () => {
+  reset();
+  saveUi({ ...loadUi(), defaultNewChatPreset: 'shell', defaultNewChatHost: 'prod-box' });
+  const ui = loadUi();
+  assert.equal(ui.defaultNewChatPreset, 'shell');
+  assert.equal(ui.defaultNewChatHost, 'prod-box');
+});
+test('an out-of-allow-set preset coerces back to "claude" on load (defensive)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPreset: 'bogus', defaultNewChatHost: 'prod-box' }));
+  const ui = loadUi();
+  assert.equal(ui.defaultNewChatPreset, 'claude');
+  assert.equal(ui.defaultNewChatHost, 'prod-box', 'host is unaffected by preset coercion');
+});
+test('a non-string host coerces back to "(local)" on load (defensive)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatHost: 42 }));
+  assert.equal(loadUi().defaultNewChatHost, '(local)');
+});
+test('missing fields load as the defaults', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  const ui = loadUi();
+  assert.equal(ui.defaultNewChatPreset, 'claude');
+  assert.equal(ui.defaultNewChatHost, '(local)');
+});
+test('both prefs survive an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
+  // The new prefs are NOT workspace fields, so persistUiState spreads them from
+  // `live`. Confirm an empty-launch still round-trips a freshly set default.
+  reset();
+  const d0 = loadUi();
+  saveUi(persistUiState({ ...d0, defaultNewChatPreset: 'shell', defaultNewChatHost: 'prod-box' }, 'empty', d0, true));
+  const after = loadUi();
+  assert.equal(after.defaultNewChatPreset, 'shell');
+  assert.equal(after.defaultNewChatHost, 'prod-box');
+});
+
 console.log('\ninitialWorkspace gates the workspace on mount');
 test('"previous" restores the last-saved workspace', () => {
   const disk = { ...loadUi(), activeTabs: ['a', 'b'], hiddenTabs: ['h'], openPanes: ['a'], focused: 'a', paneHost: { a: 'host' } };

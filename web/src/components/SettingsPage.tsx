@@ -64,6 +64,14 @@ interface Props {
   // effect. It must never be added to the `config` state / PUT /api/config body.
   terminalScrollback: number;
   setTerminalScrollback: (n: number) => void;
+  // Default agent type + host pre-filled in the ＋ new chat form. Pure client-side
+  // localStorage prefs: applied instantly via the prop callbacks and persisted by
+  // App's saveUi effect. They must never be added to the `config` state /
+  // PUT /api/config body.
+  defaultNewChatPreset: 'claude' | 'shell';
+  setDefaultNewChatPreset: (v: 'claude' | 'shell') => void;
+  defaultNewChatHost: string;
+  setDefaultNewChatHost: (v: string) => void;
 }
 
 /** A titled group of related settings, separated by a top border. */
@@ -76,7 +84,7 @@ function SettingsSection({ title, children }: { title: string; children: ReactNo
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -518,6 +526,57 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   </Select>
                   <p className="text-xs text-muted-foreground">
                     Reopen the tabs and panes you had open at last close, or start every launch with a clean workspace.
+                  </p>
+                </div>
+              </SettingsSection>
+
+              {/* New Chats — client-side default agent type + host for the ＋ new spawn form */}
+              <SettingsSection title="New Chats">
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="defaultNewChatPreset">Default agent type</Label>
+                  <Select
+                    value={defaultNewChatPreset}
+                    onValueChange={(v) => setDefaultNewChatPreset(v as 'claude' | 'shell')}
+                  >
+                    <SelectTrigger id="defaultNewChatPreset" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="claude">claude (default)</SelectItem>
+                      <SelectItem value="shell">shell</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Which command preset the ＋ new chat form starts with.
+                  </p>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="defaultNewChatHost">Default host</Label>
+                  <Select value={defaultNewChatHost} onValueChange={(v) => setDefaultNewChatHost(v)}>
+                    <SelectTrigger id="defaultNewChatHost" className="w-full">
+                      <SelectValue placeholder="this machine (local)" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="(local)">this machine (local)</SelectItem>
+                      {availableHosts.map((h) => (
+                        <SelectItem key={h} value={h}>
+                          {h}
+                        </SelectItem>
+                      ))}
+                      {/* A stored default host that's no longer detected must never leave
+                          an empty/dangling trigger — render it visibly but disabled so the
+                          user sees it's gone and can pick a new default. Mirrors the
+                          "never empty" rule NewChatForm enforces at open time. */}
+                      {defaultNewChatHost !== '(local)' && !availableHosts.includes(defaultNewChatHost) && (
+                        <SelectItem value={defaultNewChatHost} disabled>
+                          {defaultNewChatHost} (no longer available)
+                        </SelectItem>
+                      )}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Where new chats spawn by default. Detected SSH hosts appear here; a default host no longer available is shown disabled here and falls back to local at spawn time.
                   </p>
                 </div>
               </SettingsSection>

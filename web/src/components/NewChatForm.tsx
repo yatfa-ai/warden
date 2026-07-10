@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Input } from '@/components/ui/input';
 import { postJson } from '@/lib/api';
+import { loadUi } from '@/lib/storage';
 import type { Chat } from '@/lib/types';
 
 const THIS_MACHINE = '(local)';
@@ -12,11 +13,16 @@ const THIS_MACHINE = '(local)';
 //   remote host  → host tmux (required) — durable + resumable
 // A claude/shell preset pre-fills the command.
 export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) {
+  // Pre-fill from the saved default-new-chat prefs (Settings → New Chats). These
+  // are pure client-side localStorage values; if unset they fall back to the
+  // prior hard-coded behavior (claude preset, this machine). Lazy initializers
+  // so loadUi() runs once on mount — not on every render/keystroke — matching
+  // App.tsx's lazy-init pattern for client prefs.
   const [open, setOpen] = useState(false);
   const [sshHosts, setSshHosts] = useState<string[]>([]);
   const [claudePath, setClaudePath] = useState('claude');
-  const [host, setHost] = useState(THIS_MACHINE);
-  const [preset, setPreset] = useState<'claude' | 'shell'>('claude');
+  const [host, setHost] = useState(() => loadUi().defaultNewChatHost ?? THIS_MACHINE);
+  const [preset, setPreset] = useState<'claude' | 'shell'>(() => loadUi().defaultNewChatPreset ?? 'claude');
   const [session, setSession] = useState('');
   const [cwd, setCwd] = useState('');
   const [cmd, setCmd] = useState('claude --dangerously-skip-permissions');
@@ -25,7 +31,18 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
 
   useEffect(() => {
     if (!open) return;
-    fetch('/api/ssh-hosts').then((r) => r.json()).then((j) => setSshHosts(j.hosts || [])).catch((error) => console.error('[ssh-hosts] Failed:', error));
+    fetch('/api/ssh-hosts')
+      .then((r) => r.json())
+      .then((j) => {
+        const hosts: string[] = j.hosts || [];
+        setSshHosts(hosts);
+        // Graceful fallback: a stored default host that's no longer configured
+        // (removed from SSH hosts / no longer detected) must never leave a
+        // dangling/empty option — drop back to local. Functional update keeps
+        // `host` out of this effect's deps so it doesn't re-fetch on change.
+        setHost((cur) => (cur !== THIS_MACHINE && !hosts.includes(cur) ? THIS_MACHINE : cur));
+      })
+      .catch((error) => console.error('[ssh-hosts] Failed:', error));
     fetch('/api/this-session').then((r) => r.json()).then((t) => { if (t.claudePath) setClaudePath(t.claudePath); }).catch((error) => console.error('[this-session] Failed:', error));
   }, [open]);
 

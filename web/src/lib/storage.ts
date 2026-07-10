@@ -26,6 +26,11 @@ export interface UiState {
   // Whether launch reopens the previous workspace ('previous') or starts empty
   // ('empty'). Pure client-side pref; never sent to the backend.
   restoreOnStartup?: RestoreOnStartup;
+  // Default agent type (claude/shell) and host ('(local)' or a configured SSH
+  // host) pre-filled in the New Chats spawn form. Pure client-side prefs; never
+  // sent to the backend.
+  defaultNewChatPreset?: 'claude' | 'shell';
+  defaultNewChatHost?: string;
   // pane id (chat key) -> host, so restored remote panes know which host to discover.
   paneHost?: Record<string, string>;
   agentFilter?: 'all' | 'yatfa' | 'claude' | 'manual' | 'active' | 'hidden';
@@ -51,13 +56,15 @@ export function loadUi(): UiState {
         theme: v.theme ?? 'system',
         density: v.density === 'compact' ? 'compact' : 'comfortable',
         restoreOnStartup: v.restoreOnStartup === 'empty' ? 'empty' : 'previous',
+        defaultNewChatPreset: v.defaultNewChatPreset === 'shell' ? 'shell' : 'claude',
+        defaultNewChatHost: typeof v.defaultNewChatHost === 'string' ? v.defaultNewChatHost : '(local)',
         paneHost: (v.paneHost && typeof v.paneHost === 'object') ? v.paneHost : {},
         agentFilter: v.agentFilter ?? 'all',
         agentSort: v.agentSort ?? 'manual',
       };
     }
   } catch { /* ignore */ }
-  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14, terminalScrollback: 10000, theme: 'system', density: 'comfortable', restoreOnStartup: 'previous', paneHost: {}, agentFilter: 'all', agentSort: 'manual' };
+  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14, terminalScrollback: 10000, theme: 'system', density: 'comfortable', restoreOnStartup: 'previous', defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', paneHost: {}, agentFilter: 'all', agentSort: 'manual' };
 }
 
 export function saveUi(s: UiState) {

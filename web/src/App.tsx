@@ -72,6 +72,11 @@ function App() {
   const [density, setDensity] = useState<Density>(() => uiState.density ?? 'comfortable');
   const [terminalFontSize, setTerminalFontSize] = useState(() => uiState.terminalFontSize ?? 14);
   const [terminalScrollback, setTerminalScrollback] = useState(() => uiState.terminalScrollback ?? 10000);
+  // Default agent type + host pre-filled in the ＋ new chat form. Pure client-side
+  // prefs (like density/terminalFontSize): persisted by the saveUi effect below,
+  // never sent to the backend.
+  const [defaultNewChatPreset, setDefaultNewChatPreset] = useState<'claude' | 'shell'>(() => uiState.defaultNewChatPreset ?? 'claude');
+  const [defaultNewChatHost, setDefaultNewChatHost] = useState(() => uiState.defaultNewChatHost ?? THIS_MACHINE);
   const { prefs, reload: reloadNotificationPrefs } = useNotificationPrefs();
   // "Confirm before destructive actions" preference (default on). Gates both
   // destructive kill paths — force-kill (tmux session) and kill chat. Loaded
@@ -160,8 +165,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, theme, density, paneHost }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, theme, density, paneHost, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, theme, density, paneHost, defaultNewChatPreset, defaultNewChatHost }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, theme, density, paneHost, defaultNewChatPreset, defaultNewChatHost, restoreOnStartup, startedEmpty]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -637,6 +642,10 @@ function App() {
           setTerminalFontSize={setTerminalFontSize}
           terminalScrollback={terminalScrollback}
           setTerminalScrollback={setTerminalScrollback}
+          defaultNewChatPreset={defaultNewChatPreset}
+          setDefaultNewChatPreset={setDefaultNewChatPreset}
+          defaultNewChatHost={defaultNewChatHost}
+          setDefaultNewChatHost={setDefaultNewChatHost}
         />
       ) : (
         <>
