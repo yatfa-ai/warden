@@ -865,6 +865,31 @@ export function parseGitLogLine(line) {
   return { hash, subject: mid.slice(0, midPipe), author: mid.slice(midPipe + 1), date };
 }
 
+// Parse `git show --name-status --pretty=format: <hash>` output into [{ path, status }].
+// Each line is `<code>\t<path>` where the code is a single letter (A/M/D/T) or a
+// rename/copy with a similarity score (`R100`/`C75`) followed by `old<TAB>new`. The
+// {path,status} shape intentionally matches `GitFile` so the frontend's
+// `GitChangedFile` row renders touched files unchanged. For rename/copy we report the
+// NEW path (it exists at that commit, so a per-file `git show` on it works) and a
+// single-letter status. Exported for unit tests. See WARDEN-180.
+export function parseGitShowNameStatus(output) {
+  const raw = (output ?? '').toString();
+  const out = [];
+  for (const line of raw.split('\n').map((l) => l.replace(/\r$/, ''))) {
+    if (!line.trim()) continue;
+    const tab = line.indexOf('\t');
+    if (tab === -1) continue; // not a name-status record
+    const code = line.slice(0, tab);
+    const rest = line.slice(tab + 1);
+    const letter = code[0]; // A / M / D / T / R / C
+    // Rename (R<score>) / copy (C<score>): "R100\told\tnew" → take the new path.
+    // Otherwise: "M\tpath".
+    const path = (letter === 'R' || letter === 'C') ? rest.slice(rest.indexOf('\t') + 1) : rest;
+    if (path) out.push({ status: letter || code, path });
+  }
+  return out;
+}
+
 // Recent commit history (git log) for a chat's repo. Mirrors /api/git-status: local chats
 // run git via spawnSync, remote chats run over SSH with shellQuote(cwd). A non-git or no-cwd
 // repo yields an empty list (never a 500). limit is clamped to [1, 50].
@@ -1031,6 +1056,86 @@ app.get('/api/git-diff', async (req, res) => {
     res.json({ diff: result.diff, untracked: !!result.untracked, path: filePath, error: null });
   } catch (e) {
     res.json({ diff: null, untracked: false, path: filePath, error: e.message });
+  }
+});
+
+// Validate a git-show per-file `path` param. We use a LEXICAL check (not realpath)
+// because the file may not exist in the working tree — a commit that DELETED it still
+// has a diff to show, but `realpath` would throw ENOENT and wrongly block it. A
+// relative path with no `..` segment and no absolute/home-relative prefix cannot
+// escape the repo root that `git show` resolves against. Rejects null bytes, POSIX
+// and Windows absolute paths, `~`-relative paths, and any `..` traversal segment.
+// Distinct from isPathWithinCwd (WARDEN-151): that one guards a working-tree FILE
+// (realpath-hardened against symlink escapes), whereas this validates a git pathspec
+// against an arbitrary commit — a path the current tree may not even contain — so a
+// purely lexical rule is the right containment model here.
+function isSafeRelativePath(p) {
+  if (!p || typeof p !== 'string') return false;
+  if (p.includes('\0')) return false;
+  if (p.startsWith('/') || p.startsWith('~') || /^[A-Za-z]:[\\/]/.test(p)) return false;
+  if (p.split(/[\\/]/).some((seg) => seg === '..')) return false;
+  return true;
+}
+
+// Inspect a single commit (git show). Mirrors /api/git-log: local chats run git via
+// spawnSync, remote chats run over SSH with shellQuote(cwd)+shellQuote(hash). A
+// non-git / no-cwd / unknown-hash repo yields an empty result (never a 500).
+//
+//   GET /api/git-show?id=<chatId>&hash=<hash>           → { files: [{path,status}] }
+//   GET /api/git-show?id=<chatId>&hash=<hash>&path=<p>  → { diff: "<patch text>" }
+//
+// `hash` is clamped to short/long hex ([0-9a-f]{4,40}) — anything else (e.g.
+// "--version", shell metacharacters) is rejected before it reaches git or the remote
+// shell, mirroring the shellQuote care taken in /api/git-log. `path`, when present,
+// is a git pathspec and gets the isSafeRelativePath containment check.
+app.get('/api/git-show', async (req, res) => {
+  const chatId = String(req.query.id || '');
+  const hash = String(req.query.hash || '');
+  const filePath = String(req.query.path || '').trim();
+  const { chat, error } = await resolve(chatId);
+  if (error) return res.status(404).json({ error });
+
+  // Reject malformed hashes before any git invocation: hex only, 4–40 chars.
+  if (!/^[0-9a-f]{4,40}$/i.test(hash)) {
+    return res.json({ files: [], diff: null, error: 'invalid hash' });
+  }
+  // Reject unsafe per-file paths (absolute / traversal). Bad path → empty, never 500.
+  if (filePath && !isSafeRelativePath(filePath)) {
+    return res.json({ files: [], diff: null, error: 'invalid path' });
+  }
+
+  try {
+    const cwd = chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
+    if (!cwd) return res.json({ files: [], diff: null, error: 'no cwd' });
+
+    let files = [];
+    let diff = null;
+
+    if (chat.host === LOCAL) {
+      if (filePath) {
+        // --format= strips the commit header (author/date/message) so we get ONLY the
+        // file's patch — exactly what inspecting a single file should surface.
+        const r = runLocalGit(['show', '--format=', hash, '--', filePath], cwd);
+        diff = capDiff(r.stdout?.toString() || '');
+      } else {
+        const r = runLocalGit(['show', '--name-status', '--pretty=format:', hash], cwd);
+        files = parseGitShowNameStatus(r.stdout?.toString() || '');
+      }
+    } else {
+      if (filePath) {
+        const cmd = `cd ${shellQuote(cwd)} && git show --format= ${shellQuote(hash)} -- ${shellQuote(filePath)} 2>/dev/null`;
+        const rr = await run(chat.host, cmd, { timeout: 8000 });
+        diff = capDiff(rr.ok ? (rr.stdout || '') : '');
+      } else {
+        const cmd = `cd ${shellQuote(cwd)} && git show --name-status --pretty=format: ${shellQuote(hash)} 2>/dev/null`;
+        const rr = await run(chat.host, cmd, { timeout: 8000 });
+        files = parseGitShowNameStatus(rr.ok ? (rr.stdout || '') : '');
+      }
+    }
+
+    res.json({ files, diff, error: null });
+  } catch (e) {
+    res.json({ files: [], diff: null, error: e.message });
   }
 });
 

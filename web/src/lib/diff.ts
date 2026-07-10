@@ -35,3 +35,17 @@ export function classifyDiffLine(line: string): DiffLineKind {
   if (line.startsWith('-')) return 'remove';
   return 'context';
 }
+
+// Shared palette mapping a DiffLineKind → Tailwind class. Used by BOTH the modal
+// working-tree diff viewer (DiffViewer, WARDEN-151) and the inline committed-diff
+// block (DiffBlock in ChatSidebar, WARDEN-180) so a file's diff renders identically
+// whether it's reached from the changed-files list or from an expanded commit.
+// +added green / -removed red, hunk + file headers muted, context slightly dimmed —
+// matching the sidebar's status palette so diffs read as part of the same surface.
+export const DIFF_LINE_CLASS: Record<DiffLineKind, string> = {
+  add: 'text-green-400',
+  remove: 'text-red-400',
+  hunk: 'text-muted-foreground',
+  meta: 'text-muted-foreground',
+  context: 'text-foreground/80',
+};

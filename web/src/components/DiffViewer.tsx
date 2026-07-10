@@ -9,7 +9,7 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Loader2Icon, FileIcon, AlertCircleIcon } from 'lucide-react';
-import { classifyDiffLine } from '@/lib/diff';
+import { classifyDiffLine, DIFF_LINE_CLASS } from '@/lib/diff';
 
 interface DiffViewerProps {
   chatId: string;
@@ -17,17 +17,6 @@ interface DiffViewerProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
-
-// Map a diff-line kind (see classifyDiffLine) to the existing sidebar status palette:
-// +added green / -removed red, hunk + file headers muted. text-green-400 / text-red-400
-// match ChatSidebar's status colors so the viewer reads as part of the same surface.
-const DIFF_LINE_CLASS: Record<string, string> = {
-  add: 'text-green-400',
-  remove: 'text-red-400',
-  hunk: 'text-muted-foreground',
-  meta: 'text-muted-foreground',
-  context: 'text-foreground/80',
-};
 
 export function DiffViewer({ chatId, filePath, open, onOpenChange }: DiffViewerProps) {
   const [diff, setDiff] = useState<string | null>(null);
