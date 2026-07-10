@@ -11,6 +11,58 @@ export type RestoreOnStartup = 'previous' | 'empty';
 // (single column, full-width), or 'side-by-side' (single row). Pure client-side pref.
 export type PaneLayout = 'auto' | 'stacked' | 'side-by-side';
 
+// A user-defined spawn preset: a named quick-fill command beyond the two
+// built-in claude/shell presets (e.g. "codex" → "codex"). Pure client-side pref;
+// never sent to the backend. `name` is also a valid `defaultNewChatPreset` value.
+export interface CustomPreset {
+  name: string;
+  cmd: string;
+}
+
+// The reserved built-in preset names — custom presets may not reuse them (they
+// are always available as quick-fills regardless of the custom list).
+export const BUILTIN_PRESETS = ['claude', 'shell'] as const;
+
+// Maximum length of a custom preset name. Centralized here so every write site
+// (parseCustomPresets, SettingsPage add/rename, the name Inputs' maxLength)
+// agrees with the load-time sanitizer on one bound — the in-memory list can
+// never hold a name the sanitizer would silently drop on next reload.
+export const PRESET_NAME_MAX = 32;
+
+// Reserved built-in name check, CASE-INSENSITIVE — so "Claude"/"Shell" are
+// rejected just like "claude"/"shell". This matches the case-insensitive name
+// de-duplication, so a custom preset can never near-collide with a built-in
+// quick-fill that is always rendered regardless of the custom list.
+export function isReservedPresetName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return BUILTIN_PRESETS.some((b) => b.toLowerCase() === lower);
+}
+
+// The validation outcome for a candidate preset name. `null` means acceptable.
+export type PresetNameIssue = 'empty' | 'too-long' | 'reserved' | 'duplicate';
+
+// Validate a candidate preset name against the SAME contract parseCustomPresets
+// enforces at load time, so the Settings write sites (add/rename) can never
+// persist a name the sanitizer would silently drop. Pure and dependency-free so
+// it is unit-tested directly (there is no React test runner in this repo).
+//   - `existing`: the current custom-preset list (for duplicate detection)
+//   - `except`:   an entry name to EXCLUDE from duplicate detection (for renames,
+//                 so a case-only rename like codex -> Codex isn't its own dupe)
+// Trims the name first, matching how parseCustomPresets normalizes on load.
+export function validatePresetName(
+  name: string,
+  existing: CustomPreset[],
+  except?: string,
+): PresetNameIssue | null {
+  const n = name.trim();
+  if (!n) return 'empty';
+  if (n.length > PRESET_NAME_MAX) return 'too-long';
+  if (isReservedPresetName(n)) return 'reserved';
+  const lower = n.toLowerCase();
+  if (existing.some((p) => p.name !== except && p.name.toLowerCase() === lower)) return 'duplicate';
+  return null;
+}
+
 export interface UiState {
   activeTabs: string[];
   hiddenTabs: string[];
@@ -40,21 +92,66 @@ export interface UiState {
   // Whether launch reopens the previous workspace ('previous') or starts empty
   // ('empty'). Pure client-side pref; never sent to the backend.
   restoreOnStartup?: RestoreOnStartup;
-  // Default agent type (claude/shell) and host ('(local)' or a configured SSH
-  // host) pre-filled in the New Chats spawn form. Pure client-side prefs; never
-  // sent to the backend.
-  defaultNewChatPreset?: 'claude' | 'shell';
+  // Default agent type pre-filled in the New Chats spawn form. 'claude' and
+  // 'shell' are reserved built-ins; any other value must name a `customPresets`
+  // entry (falls back to 'claude' if that preset was since deleted). Pure
+  // client-side pref; never sent to the backend.
+  defaultNewChatPreset?: string;
   defaultNewChatHost?: string;
+  // User-defined spawn presets (named quick-fill commands beyond claude/shell).
+  // Validated on load: entries missing a name/cmd are dropped, names are bounded
+  // (≤32 chars) and de-duplicated, and reserved built-in names are rejected.
+  // Pure client-side pref; never sent to the backend.
+  customPresets?: CustomPreset[];
   // pane id (chat key) -> host, so restored remote panes know which host to discover.
   paneHost?: Record<string, string>;
   agentFilter?: 'all' | 'yatfa' | 'claude' | 'manual' | 'active' | 'hidden';
   agentSort?: 'manual' | 'name' | 'host' | 'status' | 'activity';
 }
 
+// Sanitize a raw customPresets value into a valid CustomPreset[]. Defensive:
+// never throws on malformed input (WARDEN-89) — it drops bad entries instead, so
+// one corrupt entry can never blank the spawn command. Drops entries missing a
+// name or cmd, names over PRESET_NAME_MAX chars, reserved built-in names
+// (case-insensitive), and duplicates (case-insensitive; first occurrence wins).
+function parseCustomPresets(raw: unknown): CustomPreset[] {
+  if (!Array.isArray(raw)) {
+    if (raw !== undefined && raw !== null) {
+      // A present-but-wrong-type value is genuine corruption worth surfacing.
+      console.warn('[loadUi] customPresets is not an array; ignoring:', raw);
+    }
+    return [];
+  }
+  const seen = new Set<string>();
+  const out: CustomPreset[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const e = entry as Record<string, unknown>;
+    const name = typeof e.name === 'string' ? e.name.trim() : '';
+    const cmd = typeof e.cmd === 'string' ? e.cmd.trim() : '';
+    if (!name || !cmd) continue;
+    if (name.length > PRESET_NAME_MAX) continue;
+    if (isReservedPresetName(name)) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ name, cmd });
+  }
+  return out;
+}
+
 export function loadUi(): UiState {
   try {
     const v = JSON.parse(localStorage.getItem(KEY) || '');
     if (v && Array.isArray(v.activeTabs)) {
+      // Parse custom presets first so defaultNewChatPreset can be validated
+      // against them: a default naming a since-deleted preset falls back to claude.
+      const customPresets = parseCustomPresets(v.customPresets);
+      const presetIsValid = (p: unknown): boolean =>
+        typeof p === 'string' && (
+          (BUILTIN_PRESETS as readonly string[]).includes(p) ||
+          customPresets.some((c) => c.name === p)
+        );
       return {
         activeTabs: v.activeTabs.map((t: any) => typeof t === 'string' ? t : t.id),
         hiddenTabs: Array.isArray(v.hiddenTabs) ? v.hiddenTabs : [],
@@ -72,15 +169,16 @@ export function loadUi(): UiState {
         density: v.density === 'compact' ? 'compact' : 'comfortable',
         paneLayout: (v.paneLayout === 'stacked' || v.paneLayout === 'side-by-side') ? v.paneLayout : 'auto',
         restoreOnStartup: v.restoreOnStartup === 'empty' ? 'empty' : 'previous',
-        defaultNewChatPreset: v.defaultNewChatPreset === 'shell' ? 'shell' : 'claude',
+        defaultNewChatPreset: presetIsValid(v.defaultNewChatPreset) ? (v.defaultNewChatPreset as string) : 'claude',
         defaultNewChatHost: typeof v.defaultNewChatHost === 'string' ? v.defaultNewChatHost : '(local)',
+        customPresets,
         paneHost: (v.paneHost && typeof v.paneHost === 'object') ? v.paneHost : {},
         agentFilter: v.agentFilter ?? 'all',
         agentSort: v.agentSort ?? 'manual',
       };
     }
   } catch { /* ignore */ }
-  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14, terminalScrollback: 10000, terminalColorScheme: 'auto', theme: 'system', density: 'comfortable', paneLayout: 'auto', restoreOnStartup: 'previous', defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', paneHost: {}, agentFilter: 'all', agentSort: 'manual' };
+  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14, terminalScrollback: 10000, terminalColorScheme: 'auto', theme: 'system', density: 'comfortable', paneLayout: 'auto', restoreOnStartup: 'previous', defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', customPresets: [], paneHost: {}, agentFilter: 'all', agentSort: 'manual' };
 }
 
 export function saveUi(s: UiState) {

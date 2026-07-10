@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
-import { loadUi, saveUi, persistUiState, initialWorkspace, type RestoreOnStartup, type PaneLayout } from '@/lib/storage';
+import { loadUi, saveUi, persistUiState, initialWorkspace, type RestoreOnStartup, type PaneLayout, type CustomPreset } from '@/lib/storage';
 import { applyTheme, listenSystemThemeChange, getEffectiveTheme, resolveTerminalTheme, type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
 import type { Chat } from '@/lib/types';
@@ -118,11 +118,14 @@ function App() {
   // terminalFontSize/scrollback): persisted by the saveUi effect below, never
   // sent to the backend.
   const [terminalColorScheme, setTerminalColorScheme] = useState<TerminalColorScheme>(() => uiState.terminalColorScheme ?? 'auto');
-  // Default agent type + host pre-filled in the ＋ new chat form. Pure client-side
-  // prefs (like density/terminalFontSize): persisted by the saveUi effect below,
-  // never sent to the backend.
-  const [defaultNewChatPreset, setDefaultNewChatPreset] = useState<'claude' | 'shell'>(() => uiState.defaultNewChatPreset ?? 'claude');
+  // Default agent type + host pre-filled in the ＋ new chat form, plus the
+  // user-defined custom presets (named quick-fill commands beyond claude/shell).
+  // All pure client-side prefs (like density/terminalFontSize): persisted by the
+  // saveUi effect below, never sent to the backend. defaultNewChatPreset is a
+  // reserved built-in name ('claude' | 'shell') or a custom preset name.
+  const [defaultNewChatPreset, setDefaultNewChatPreset] = useState<string>(() => uiState.defaultNewChatPreset ?? 'claude');
   const [defaultNewChatHost, setDefaultNewChatHost] = useState(() => uiState.defaultNewChatHost ?? THIS_MACHINE);
+  const [customPresets, setCustomPresets] = useState<CustomPreset[]>(() => uiState.customPresets ?? []);
   const { prefs, reload: reloadNotificationPrefs } = useNotificationPrefs();
   // "Confirm before destructive actions" preference (default on). Gates both
   // destructive kill paths — force-kill (tmux session) and kill chat. Loaded
@@ -219,8 +222,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalColorScheme, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalColorScheme, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalColorScheme, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalColorScheme, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, restoreOnStartup, startedEmpty]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -758,6 +761,8 @@ function App() {
           setDefaultNewChatPreset={setDefaultNewChatPreset}
           defaultNewChatHost={defaultNewChatHost}
           setDefaultNewChatHost={setDefaultNewChatHost}
+          customPresets={customPresets}
+          setCustomPresets={setCustomPresets}
         />
       ) : (
         <>

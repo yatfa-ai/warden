@@ -11,18 +11,24 @@ const THIS_MACHINE = '(local)';
 // Inline (non-modal) spawn. The HOST decides the mechanism:
 //   this machine → direct PTY (no tmux; Windows has none)
 //   remote host  → host tmux (required) — durable + resumable
-// A claude/shell preset pre-fills the command.
+// A claude/shell preset — or any user-defined preset from Settings — pre-fills
+// the command.
 export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) {
   // Pre-fill from the saved default-new-chat prefs (Settings → New Chats). These
   // are pure client-side localStorage values; if unset they fall back to the
   // prior hard-coded behavior (claude preset, this machine). Lazy initializers
   // so loadUi() runs once on mount — not on every render/keystroke — matching
   // App.tsx's lazy-init pattern for client prefs.
+  const [initialUi] = useState(() => loadUi());
   const [open, setOpen] = useState(false);
   const [sshHosts, setSshHosts] = useState<string[]>([]);
   const [claudePath, setClaudePath] = useState('claude');
-  const [host, setHost] = useState(() => loadUi().defaultNewChatHost ?? THIS_MACHINE);
-  const [preset, setPreset] = useState<'claude' | 'shell'>(() => loadUi().defaultNewChatPreset ?? 'claude');
+  const [host, setHost] = useState(() => initialUi.defaultNewChatHost ?? THIS_MACHINE);
+  // preset is a built-in name ('claude' | 'shell') or a custom preset name.
+  // loadUi already validated the stored default against the custom list, so a
+  // default naming a since-deleted preset has already fallen back to 'claude'.
+  const [preset, setPreset] = useState<string>(() => initialUi.defaultNewChatPreset ?? 'claude');
+  const [customPresets] = useState(() => initialUi.customPresets ?? []);
   const [session, setSession] = useState('');
   const [cwd, setCwd] = useState('');
   const [cmd, setCmd] = useState('claude --dangerously-skip-permissions');
@@ -48,11 +54,20 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
 
   useEffect(() => {
     if (!open) return;
-    const def = preset === 'shell'
-      ? 'bash'
-      : (host === THIS_MACHINE ? `${claudePath} --dangerously-skip-permissions` : 'claude --dangerously-skip-permissions');
+    let def: string;
+    if (preset === 'shell') {
+      def = 'bash';
+    } else if (preset === 'claude') {
+      def = host === THIS_MACHINE ? `${claudePath} --dangerously-skip-permissions` : 'claude --dangerously-skip-permissions';
+    } else {
+      // Custom preset — fill from its saved command. If it's somehow missing
+      // (e.g. deleted elsewhere this session), fall back to the claude default
+      // so the command is never left empty.
+      const found = customPresets.find((p) => p.name === preset);
+      def = found ? found.cmd : 'claude --dangerously-skip-permissions';
+    }
     setCmd(def);
-  }, [host, preset, open, claudePath]);
+  }, [host, preset, open, claudePath, customPresets]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -80,9 +95,12 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
         <option value={THIS_MACHINE}>this machine (direct)</option>
         {sshHosts.map((h) => <option key={h} value={h}>{h} (tmux)</option>)}
       </select>
-      <div className="flex gap-1">
+      <div className="flex flex-wrap gap-1">
         <Button size="sm" type="button" variant={preset === 'claude' ? 'default' : 'outline'} className="h-6 text-[11px] flex-1" onClick={() => setPreset('claude')}>claude</Button>
         <Button size="sm" type="button" variant={preset === 'shell' ? 'default' : 'outline'} className="h-6 text-[11px] flex-1" onClick={() => setPreset('shell')}>shell</Button>
+        {customPresets.map((p, i) => (
+          <Button key={`custom-${i}-${p.name}`} size="sm" type="button" variant={preset === p.name ? 'default' : 'outline'} className="h-6 text-[11px] flex-1" onClick={() => setPreset(p.name)}>{p.name}</Button>
+        ))}
       </div>
       <Input value={session} onChange={(e) => setSession(e.target.value)} placeholder="session name" className="h-7 text-[11px]" />
       <Input value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="cwd (dir)" className="h-7 text-[11px]" />
