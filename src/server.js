@@ -21,7 +21,7 @@ import { listSessions, createSession, renameSession, deleteSession } from './ses
 import { appendEvent, rotateEvents, readEvents, getStatsSince } from './activity.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { checkHost } from './hostStatus.js';
-import { parseGitStatusPorcelain, parseAheadBehind } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList } from './gitStatus.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = load();
@@ -785,7 +785,7 @@ app.get('/api/git-status', async (req, res) => {
 
   try {
     const cwd = chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
-    if (!cwd) return res.json({ branch: null, clean: null, cwd: '', ahead: null, behind: null, inProgress: { operation: null }, files: null, error: 'no cwd' });
+    if (!cwd) return res.json({ branch: null, clean: null, cwd: '', ahead: null, behind: null, inProgress: { operation: null }, stashCount: null, files: null, error: 'no cwd' });
 
     let branch = '';
     let clean = true;
@@ -793,6 +793,7 @@ app.get('/api/git-status', async (req, res) => {
     let ahead = null;
     let behind = null;
     let inProgressOp = null;
+    let stashCount = null;
 
     if (chat.host === LOCAL) {
       // Local execution: use spawnSync directly
@@ -829,6 +830,13 @@ app.get('/api/git-status', async (req, res) => {
         else if (fs.existsSync(path.join(gd, 'rebase-merge')) || fs.existsSync(path.join(gd, 'rebase-apply'))) inProgressOp = 'rebase';
         else if (fs.existsSync(path.join(gd, 'BISECT_LOG'))) inProgressOp = 'bisect';
       }
+
+      // Shelved WIP: `git stash list` emits one line per stash, empty when none.
+      // --porcelain status never surfaces stashes, so a clean tree with parked
+      // work would otherwise read clean:true — count the list so the badge can
+      // show 🗄 N (WARDEN-211). Non-git/empty → parseStashCount nulls it.
+      const stashResult = runLocalGit(['stash', 'list'], cwd);
+      stashCount = parseStashCount(stashResult.stdout?.toString() || '');
     } else {
       // Remote execution: use SSH
       const gitBranchCmd = `cd ${shellQuote(cwd)} && git rev-parse --abbrev-ref HEAD 2>/dev/null`;
@@ -873,6 +881,13 @@ app.get('/api/git-status', async (req, res) => {
       // The group emits one op per matching marker; take the first (priority order).
       const first = (r4.stdout || '').split('\n').map((l) => l.trim()).find(Boolean);
       if (first) inProgressOp = first;
+
+      // Shelved WIP over SSH — same one-line-per-stash format as the local path.
+      // 2>/dev/null swallows the non-git case so an empty/erroring repo yields ''
+      // → parseStashCount null (WARDEN-211).
+      const gitStashCmd = `cd ${shellQuote(cwd)} && git stash list 2>/dev/null`;
+      const r5 = await run(chat.host, gitStashCmd, { timeout: 8000 });
+      stashCount = parseStashCount(r5.ok ? (r5.stdout || '') : '');
     }
 
     res.json({
@@ -882,11 +897,12 @@ app.get('/api/git-status', async (req, res) => {
       ahead: branch ? ahead : null,
       behind: branch ? behind : null,
       inProgress: { operation: branch ? inProgressOp : null },
+      stashCount: branch ? stashCount : null,
       files: branch ? files : null,
       error: null,
     });
   } catch (e) {
-    res.json({ branch: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, inProgress: { operation: null }, files: null, error: e.message });
+    res.json({ branch: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, inProgress: { operation: null }, stashCount: null, files: null, error: e.message });
   }
 });
 
@@ -1180,6 +1196,46 @@ app.get('/api/git-show', async (req, res) => {
     res.json({ files, diff, error: null });
   } catch (e) {
     res.json({ files: [], diff: null, error: e.message });
+  }
+});
+
+// Shelved work-in-progress detail (git stash list). Mirrors /api/git-log: local
+// chats run git via spawnSync, remote chats run over SSH with shellQuote(cwd).
+// We reuse git-log's --pretty pipe format (`%gd|%s|%cr`) so the subject (which
+// may itself contain '|') is peeled front/back by the exported `parseStashList`
+// helper. A non-git / no-cwd / stash-free repo yields an empty list (never a
+// 500). The eager per-chat count lives in /api/git-status's `stashCount`; this
+// endpoint is the lazy detail fetched only when the stash section is opened.
+//
+//   GET /api/git-stash?id=<chatId>  → { stashes: [{ ref, subject, date }], error }
+app.get('/api/git-stash', async (req, res) => {
+  const chatId = String(req.query.id || '');
+  const { chat, error } = await resolve(chatId);
+  if (error) return res.status(404).json({ error });
+
+  try {
+    const cwd = chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
+    if (!cwd) return res.json({ stashes: [], error: 'no cwd' });
+
+    // reflog selector | subject | relative date  (subject may contain '|')
+    const pretty = '%gd|%s|%cr';
+    let raw = '';
+    if (chat.host === LOCAL) {
+      // Local execution: use spawnSync directly
+      const r = runLocalGit(['stash', 'list', `--pretty=format:${pretty}`], cwd);
+      raw = r.stdout?.toString().trim() || '';
+    } else {
+      // Remote execution: SSH. shellQuote the pretty format so the '|' separators
+      // aren't interpreted as shell pipes (same WARDEN-122 quoting lesson as git-log).
+      const cmd = `cd ${shellQuote(cwd)} && git stash list --pretty=format:${shellQuote(pretty)} 2>/dev/null`;
+      const rr = await run(chat.host, cmd, { timeout: 8000 });
+      raw = rr.ok ? rr.stdout.trim() : '';
+    }
+
+    const stashes = raw ? parseStashList(raw) : [];
+    res.json({ stashes, error: null });
+  } catch (e) {
+    res.json({ stashes: [], error: e.message });
   }
 });
 

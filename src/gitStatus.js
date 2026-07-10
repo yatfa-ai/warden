@@ -107,3 +107,63 @@ export function parseAheadBehind(output) {
   if (Number.isNaN(behind) || Number.isNaN(ahead)) return { ahead: null, behind: null };
   return { ahead, behind };
 }
+
+/**
+ * Count the number of `git stash list` entries.
+ *
+ * Delegates to `parseStashList` (same line-splitting/CRLF/empty-filter pipeline)
+ * rather than re-implementing it — mirroring how `parseGitStatusPorcelain` reuses
+ * `isConflictStatus`. `git stash list` prints one reflog line per shelved WIP
+ * entry; an empty output (no stashes, or a non-git / no-cwd repo whose
+ * `git stash list` errors to stderr) has zero entries. We surface the count so a
+ * stashed-but-clean tree reads `stashCount: N` instead of a misleading
+ * `clean: true` — the core gap, since `git status --porcelain` emits no stash
+ * entries (WARDEN-211).
+ *
+ * Mirrors `parseAheadBehind`: empty / undefined / whitespace-only input → `null`
+ * (the frontend renders no indicator), `N` entries → `N`. The route additionally
+ * guards non-git/no-cwd with `branch ? count : null`.
+ *
+ * @param {string|Buffer|undefined} output - Raw stdout from `git stash list`.
+ * @returns {number | null}
+ */
+export function parseStashCount(output) {
+  const count = parseStashList(output).length;
+  return count > 0 ? count : null;
+}
+
+/**
+ * Parse `git stash list --pretty=format:%gd|%s|%cr` output into
+ * `[{ ref, subject, date }]`.
+ *
+ * `%gd` is the reflog selector (`stash@{0}`), `%s` the stash subject (e.g.
+ * "WIP on main: abc1234 …"), and `%cr` the relative committer date. The subject
+ * sits in the MIDDLE and MAY contain the `|` separator (a stash created with a
+ * custom message like "merge a | b"), so — like `parseGitLogLine` — we peel the
+ * ref off the front and the date off the back, leaving everything between as the
+ * subject. CRLF (over SSH) is tolerated per line.
+ *
+ * Empty / undefined input → `[]` (no stashes), never throws. Exported for unit
+ * tests. See WARDEN-211.
+ *
+ * @param {string|Buffer|undefined} output - Raw stdout from `git stash list --pretty`.
+ * @returns {Array<{ ref: string, subject: string, date: string }>}
+ */
+export function parseStashList(output) {
+  const raw = (output ?? '').toString();
+  return raw
+    .split('\n')
+    .map((line) => line.replace(/\r$/, '')) // tolerate CRLF (e.g. over SSH)
+    .filter((line) => line.trim())           // drop the trailing empty line + blanks
+    .map((line) => {
+      const firstPipe = line.indexOf('|');
+      if (firstPipe === -1) return { ref: line, subject: '', date: '' };
+      const ref = line.slice(0, firstPipe);
+      const tail = line.slice(firstPipe + 1);
+      const lastPipe = tail.lastIndexOf('|');
+      if (lastPipe === -1) return { ref, subject: tail, date: '' };
+      const date = tail.slice(lastPipe + 1);
+      const subject = tail.slice(0, lastPipe);
+      return { ref, subject, date };
+    });
+}

@@ -28,6 +28,10 @@ import { StatusDot } from '@/components/StatusDot';
 // One row from /api/git-log (a parsed %h|%s|%an|%ar git log line).
 export type GitCommit = { hash: string; subject: string; author: string; date: string };
 
+// One row from /api/git-stash (a parsed %gd|%s|%cr `git stash list` line) — the
+// lazy detail behind the eager `stashCount` in /api/git-status. Read-only.
+export type GitStash = { ref: string; subject: string; date: string };
+
 export interface ClaudeSession { id: string; cwd: string; summary: string; mtime: number }
 
 // One row from /api/claude-sessions-search (a session whose conversation body
@@ -314,7 +318,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [hasMoreSessions, setHasMoreSessions] = useState(false);
   const [loadingMoreSessions, setLoadingMoreSessions] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
-  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string; files?: GitFile[]; ahead?: number | null; behind?: number | null; inProgress?: { operation: string | null } }>>({});
+  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; clean: boolean | null; cwd: string; files?: GitFile[]; ahead?: number | null; behind?: number | null; inProgress?: { operation: string | null }; stashCount?: number | null }>>({});
   // recent commit history (git log) per chatId — cached so re-expanding the badge is instant
   const [gitLog, setGitLog] = useState<Record<string, GitCommit[]>>({});
   const [gitLogLoading, setGitLogLoading] = useState<Record<string, boolean>>({});
@@ -364,7 +368,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       const r = await fetch(`/api/git-status?id=${encodeURIComponent(chatId)}`);
       const j = await r.json();
       if (j.branch) {
-        setGitStatus((p) => ({ ...p, [chatId]: { branch: j.branch, clean: j.clean, cwd: j.cwd, files: j.files, ahead: j.ahead, behind: j.behind, inProgress: j.inProgress } }));
+        setGitStatus((p) => ({ ...p, [chatId]: { branch: j.branch, clean: j.clean, cwd: j.cwd, files: j.files, ahead: j.ahead, behind: j.behind, inProgress: j.inProgress, stashCount: j.stashCount } }));
       }
     } catch (error) {
       // Git status is non-critical, so just log it without showing a toast
@@ -1159,7 +1163,7 @@ function CommitFile({ chatId, hash, file }: { chatId: string; hash: string; file
   );
 }
 
-function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, inProgress, className }: {
+function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, inProgress, stashCount, className }: {
   branch: string;
   clean: boolean | null;
   commits?: GitCommit[];
@@ -1169,10 +1173,14 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
   behind?: number | null;
   chatId: string;
   inProgress?: { operation: string | null };
+  stashCount?: number | null;
   className?: string;
 }) {
   const aheadCount = typeof ahead === 'number' ? ahead : 0;
   const behindCount = typeof behind === 'number' ? behind : 0;
+  // Shelved work-in-progress (`git stash`): porcelain status is clean while real,
+  // recoverable work is parked, so the count is surfaced separately (WARDEN-211).
+  const stashN = typeof stashCount === 'number' ? stashCount : 0;
   // The operation an agent is blocked mid-way through (merge/rebase/cherry-pick/
   // revert/bisect), or null when none is in progress. This is the highest-value
   // signal in the badge: a blocked agent produces nothing until noticed (WARDEN-186).
@@ -1180,6 +1188,7 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
   const titleParts = [branch];
   if (operation) titleParts.push(`${operation} in progress`);
   if (clean === false) titleParts.push('uncommitted changes');
+  if (stashN > 0) titleParts.push(`${stashN} stashed`);
   if (aheadCount > 0) titleParts.push(`${aheadCount} unpushed`);
   if (behindCount > 0) titleParts.push(`${behindCount} behind remote`);
 
@@ -1189,6 +1198,12 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
   const [expandedHash, setExpandedHash] = useState<string | null>(null);
   const [showCache, setShowCache] = useState<Record<string, { files?: GitFile[]; error?: string | null }>>({});
   const [showLoading, setShowLoading] = useState<Record<string, boolean>>({});
+
+  // Lazy stash detail (mirror of fetchShow for commits): undefined = not yet
+  // fetched, [] = fetched-but-empty (stashes dropped since the count was read),
+  // so we don't refetch forever on a legitimately-empty result.
+  const [stashList, setStashList] = useState<GitStash[] | undefined>(undefined);
+  const [stashLoading, setStashLoading] = useState(false);
 
   const fetchShow = async (hash: string) => {
     if (showCache[hash] || showLoading[hash]) return;
@@ -1204,6 +1219,21 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
     }
   };
 
+  // Always fetch (like fetchGitLog); dedup is handled at the call site (onOpenChange
+  // guards on stashList === undefined, and the refresh button is disabled while loading).
+  const fetchStash = async () => {
+    setStashLoading(true);
+    try {
+      const r = await fetch(`/api/git-stash?id=${encodeURIComponent(chatId)}`);
+      const j = await r.json();
+      setStashList(Array.isArray(j.stashes) ? j.stashes : []);
+    } catch {
+      setStashList([]);
+    } finally {
+      setStashLoading(false);
+    }
+  };
+
   const toggleCommit = (hash: string) => {
     if (expandedHash === hash) {
       setExpandedHash(null);
@@ -1214,7 +1244,7 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
   };
 
   return (
-    <RadixPopover.Root onOpenChange={(open) => { if (open && commits === undefined && !loading) onFetch?.(); }}>
+    <RadixPopover.Root onOpenChange={(open) => { if (open) { if (commits === undefined && !loading) onFetch?.(); if (stashN > 0 && stashList === undefined && !stashLoading) fetchStash(); } }}>
       <RadixPopover.Trigger asChild>
         <button
           type="button"
@@ -1227,6 +1257,7 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
           {clean === false && <span className="text-yellow-400">±</span>}
           {aheadCount > 0 && <span className="text-amber-400">↑{aheadCount}</span>}
           {behindCount > 0 && <span className="text-blue-400">↓{behindCount}</span>}
+          {stashN > 0 && <span className="text-fuchsia-400" title={`${stashN} stashed`}>🗄{stashN}</span>}
         </button>
       </RadixPopover.Trigger>
       <RadixPopover.Portal>
@@ -1296,6 +1327,37 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
           ) : (
             <div className="px-1 py-1 text-[10px] text-muted-foreground">no commits</div>
           )}
+          {stashN > 0 && (
+            <div className="mt-1.5 border-t border-border pt-1.5">
+              <div className="mb-0.5 flex items-center justify-between gap-2 px-0.5">
+                <span className="truncate text-[10px] font-medium text-fuchsia-400">🗄 stashed work · {stashN}</span>
+                <IconTooltip label="refresh stashes" disabled={stashLoading}>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); fetchStash(); }}
+                    className="shrink-0 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+                    disabled={stashLoading}
+                  >↻</button>
+                </IconTooltip>
+              </div>
+              {stashLoading && stashList === undefined ? (
+                <div className="flex items-center gap-1.5 px-1 py-1">
+                  <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">loading…</span>
+                </div>
+              ) : stashList && stashList.length > 0 ? (
+                <ul className="max-h-40 overflow-auto">
+                  {stashList.map((s, i) => (
+                    <li key={s.ref || i} className="rounded px-1 py-0.5 text-left">
+                      <span className="block truncate text-[10px] text-foreground" title={s.subject}>{s.subject}</span>
+                      {s.date && <span className="block text-[10px] text-muted-foreground">{s.date}</span>}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="px-1 py-1 text-[10px] text-muted-foreground">no stashes</div>
+              )}
+            </div>
+          )}
         </RadixPopover.Content>
       </RadixPopover.Portal>
     </RadixPopover.Root>
@@ -1309,7 +1371,7 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hos
   // WARDEN-198: per-host reachability from the 30s /api/hosts/status poll.
   // 'offline' → the row renders a distinct "unreachable" state.
   hostStatus?: 'online' | 'offline' | 'unknown';
-  gitInfo?: { branch: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; inProgress?: { operation: string | null } };
+  gitInfo?: { branch: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; inProgress?: { operation: string | null }; stashCount?: number | null };
   gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
   onOpenDiff?: (path: string) => void;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
@@ -1395,6 +1457,7 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hos
                   ahead={gitInfo.ahead}
                   behind={gitInfo.behind}
                   inProgress={gitInfo.inProgress}
+                  stashCount={gitInfo.stashCount}
                   className="ml-1"
                 />
               )}
@@ -1457,7 +1520,7 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChat
   onRename: (session: string, kind: string, name: string) => void;
   renamingChatId?: string | null;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
-  gitInfo?: { branch: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; inProgress?: { operation: string | null } };
+  gitInfo?: { branch: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; inProgress?: { operation: string | null }; stashCount?: number | null };
   gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
   onOpenDiff?: (path: string) => void;
   canDrag: boolean;
@@ -1528,7 +1591,7 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChat
         {!dead && !editing && showHostTags !== false && hostTag && <span className="text-[10px] text-muted-foreground">{hostTag}</span>}
         {!dead && !editing && showProjectBadges && c?.project && <span className="text-[10px] text-muted-foreground">{c.project}</span>}
         {!dead && !editing && gitInfo?.branch && (
-          <GitBranchBadge branch={gitInfo.branch} chatId={id} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} ahead={gitInfo.ahead} behind={gitInfo.behind} inProgress={gitInfo.inProgress} />
+          <GitBranchBadge branch={gitInfo.branch} chatId={id} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} ahead={gitInfo.ahead} behind={gitInfo.behind} inProgress={gitInfo.inProgress} stashCount={gitInfo.stashCount} />
         )}
         {!editing && canRename && (
           <IconTooltip label="rename"><Button variant="ghost" size="xs" className="px-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); startEdit(); }} disabled={isRenaming} aria-label="rename">{isRenaming ? <Skeleton className="h-3 w-3" /> : '✎'}</Button></IconTooltip>
