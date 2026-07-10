@@ -208,6 +208,19 @@ export const HEALTH_WIDTH = 320;
 export interface LayoutContext {
   windowWidth: number;
   healthCollapsed: boolean;
+  // Collapse state for the shared re-clamp (clampLayoutWidths). A collapsed
+  // panel is hidden — its flex column is width 0 — so it reserves NO shared
+  // space and is never trimmed; only the *visible* panel(s) are clamped against
+  // the space they actually occupy. The drag clamps already pass the OTHER panel
+  // as 0 when it is collapsed (`dragOtherWidth = otherCollapsed ? 0 : other`),
+  // so a panel can be dragged wide while its neighbor is hidden, storing a width
+  // that only fits alone. The shared clamp must match that collapse-awareness so
+  // a lone visible panel is never trimmed to reserve room for a hidden one, and
+  // so the re-clamp that fires on the hidden panel's EXPAND trims the pair back
+  // to fit (WARDEN-183 round 3). Optional: absent = visible (backward-compatible
+  // with the load/drag callers that don't track collapse).
+  sidebarCollapsed?: boolean;
+  observerCollapsed?: boolean;
 }
 
 const clampN = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
@@ -234,27 +247,46 @@ export function clampObserverWidth(requested: number, sidebarWidth: number, ctx:
 }
 
 // Re-clamp BOTH panels together — for persisted-width load, window-resize, and
-// health-toggle, where neither panel is the active drag. If a stale pair or a
-// shrunken viewport would together starve the middle (sum > shared space), each
-// is trimmed toward its floor until the pair fits. The trim is deliberately
-// ASYMMETRIC: the sidebar yields toward its floor first, and only once it can
-// give no more does the observer give way — so a tighter layout shrinks the
-// narrower, less-critical rail before the chat pane. Deterministic, not a sign
-// of a bug; don't "fix" it toward symmetry without intent. At the 900px window
-// floor there is always room for both minimums (180 + 300 + 320 = 800), so
-// neither falls below its usable floor in practice.
+// any change in AVAILABLE/VISIBLE LAYOUT SPACE (health toggle, sidebar/observer
+// collapse toggles), where neither panel is the active drag. A collapsed panel
+// reserves no shared space and is never trimmed: widening one rail while the
+// other is collapsed can store a width that only fits alone (the drag clamp
+// treats a collapsed neighbor as 0), so the re-clamp that fires on the other
+// rail's EXPAND is what trims the pair back to fit. Without it the middle pane
+// column is crushed (WARDEN-183 round 3). If a stale pair or a shrunken viewport
+// would together starve the middle (visible widths sum > shared space), each
+// VISIBLE panel is trimmed toward its floor until they fit. The trim is
+// deliberately ASYMMETRIC: the sidebar yields toward its floor first, and only
+// once it can give no more does the observer give way — so a tighter layout
+// shrinks the narrower, less-critical rail before the chat pane. Deterministic,
+// not a sign of a bug; don't "fix" it toward symmetry without intent. At the
+// 900px window floor there is always room for both minimums (180 + 300 + 320 =
+// 800), so neither visible panel falls below its usable floor in practice.
 export function clampLayoutWidths(
   requested: { sidebar: number; observer: number },
   ctx: LayoutContext,
 ): { sidebar: number; observer: number } {
+  const sidebarVisible = !ctx.sidebarCollapsed;
+  const observerVisible = !ctx.observerCollapsed;
+  // Clamp each stored width into its own usable band regardless of visibility
+  // (so a value stored while hidden is still in band when later expanded).
   let sidebar = clampN(requested.sidebar, SIDEBAR_MIN, SIDEBAR_MAX);
   let observer = clampN(requested.observer, OBSERVER_MIN, OBSERVER_MAX);
-  const overshoot = sidebar + observer - sharedWidth(ctx);
+  // Only visible panels consume shared space; a hidden panel reserves none.
+  const overshoot =
+    (sidebarVisible ? sidebar : 0) + (observerVisible ? observer : 0) - sharedWidth(ctx);
   if (overshoot > 0) {
-    const sidebarTrim = Math.min(overshoot, Math.max(0, sidebar - SIDEBAR_MIN));
-    sidebar -= sidebarTrim;
-    const remaining = overshoot - sidebarTrim;
-    if (remaining > 0) observer -= Math.min(remaining, Math.max(0, observer - OBSERVER_MIN));
+    // Trim visible panels toward their floors — sidebar yields first.
+    if (sidebarVisible) {
+      const sidebarTrim = Math.min(overshoot, Math.max(0, sidebar - SIDEBAR_MIN));
+      sidebar -= sidebarTrim;
+      const remaining = overshoot - sidebarTrim;
+      if (remaining > 0 && observerVisible) {
+        observer -= Math.min(remaining, Math.max(0, observer - OBSERVER_MIN));
+      }
+    } else if (observerVisible) {
+      observer -= Math.min(overshoot, Math.max(0, observer - OBSERVER_MIN));
+    }
   }
   return { sidebar, observer };
 }

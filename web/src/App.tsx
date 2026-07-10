@@ -90,7 +90,12 @@ function App() {
   const [initialWidths] = useState(() =>
     clampLayoutWidths(
       { sidebar: uiState.sidebarWidth ?? 220, observer: uiState.observerWidth ?? 380 },
-      { windowWidth: window.innerWidth, healthCollapsed: uiState.healthCollapsed ?? true },
+      {
+        windowWidth: window.innerWidth,
+        healthCollapsed: uiState.healthCollapsed ?? true,
+        sidebarCollapsed: uiState.sidebarCollapsed,
+        observerCollapsed: uiState.observerCollapsed,
+      },
     ),
   );
   const [sidebarWidth, setSidebarWidth] = useState(initialWidths.sidebar);
@@ -731,19 +736,22 @@ function App() {
   const observerWidthRef = useRef(observerWidth);
   observerWidthRef.current = observerWidth;
 
-  // Re-clamp both panel widths against the current viewport + health state so the
-  // sidebar and observer together can never starve the middle pane column. This
-  // is the single re-clamp entry point for every change in AVAILABLE LAYOUT SPACE
-  // — both effects below call it (WARDEN-183). Enlarging space is a no-op:
-  // in-range widths clamp back to themselves.
+  // Re-clamp both panel widths against the current viewport, health state, AND
+  // panel-collapse state so the visible panels together can never starve the
+  // middle pane column. This is the single re-clamp entry point for every change
+  // in AVAILABLE/VISIBLE LAYOUT SPACE — effect (1) (window resize) and effect
+  // (2) (health + sidebar/observer collapse toggles) both call it (WARDEN-183).
+  // Enlarging space (window grows, a panel collapses) is a no-op: in-range widths
+  // clamp back to themselves. The deps are the space-shaping flags only (NOT the
+  // width states), so setting the widths here cannot retrigger this callback.
   const applyLayoutClamp = useCallback(() => {
     const clamped = clampLayoutWidths(
       { sidebar: sidebarWidthRef.current, observer: observerWidthRef.current },
-      { windowWidth: window.innerWidth, healthCollapsed },
+      { windowWidth: window.innerWidth, healthCollapsed, sidebarCollapsed, observerCollapsed },
     );
     setSidebarWidth(clamped.sidebar);
     setObserverWidth(clamped.observer);
-  }, [healthCollapsed]);
+  }, [healthCollapsed, sidebarCollapsed, observerCollapsed]);
 
   // (1) Window resize: a smaller viewport shrinks the space the two panels share.
   useEffect(() => {
@@ -751,15 +759,18 @@ function App() {
     return () => window.removeEventListener('resize', applyLayoutClamp);
   }, [applyLayoutClamp]);
 
-  // (2) Health toggle: expanding the health panel reserves HEALTH_WIDTH and so
-  // shrinks the shared space by 320px. Without re-clamping here, opening health
-  // near the 900px window floor leaves the sidebar + observer at their pre-toggle
-  // widths and crushes the middle pane column to ~0 — the resize listener above
-  // only re-subscribes on a health change; it never fires on the toggle itself.
-  // REQUIRED for the middle-pane invariant: removing this re-introduces the
-  // WARDEN-183 crush (see layout.test.mjs). Side-panel collapse/expand needs no
-  // clamp here: collapsing only frees space, and expanding reintroduces a width
-  // already clamped to the current window + health, so the invariant holds.
+  // (2) Space-shape changes: the health toggle AND the sidebar/observer collapse
+  // toggles all change how much shared width the VISIBLE panels may occupy.
+  // Health expanding reserves HEALTH_WIDTH (−320px). Expanding a side panel
+  // re-introduces a width that may have been dragged wide while the OTHER panel
+  // was collapsed — the drag clamp treats a collapsed neighbor as width 0
+  // (`dragOtherWidth = otherCollapsed ? 0 : other`), so a wide drag there stores
+  // a value that only fits when that neighbor is hidden. Without re-clamping on
+  // the expand, both visible panels keep their full stored widths and the middle
+  // pane column is crushed (to ~0 at the 900px floor). Collapsing only frees
+  // space (a no-op clamp); the EXPAND direction is the one that needs this.
+  // REQUIRED for the middle-pane invariant: removing it re-introduces the
+  // WARDEN-183 crush (see layout.test.mjs, "expand re-clamp").
   useEffect(() => {
     applyLayoutClamp();
   }, [applyLayoutClamp]);

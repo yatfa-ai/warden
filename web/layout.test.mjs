@@ -14,13 +14,21 @@
 // can't catch that because they never model the "a space changed, so re-clamp"
 // step — they only call the clamp once, in isolation.
 //
+// Round 3 found the SAME class of wiring gap on the sidebar/observer EXPAND path:
+// a panel dragged wide while the other is collapsed stores a width that only fits
+// alone (the drag clamp treats a collapsed neighbor as width 0). Expanding the
+// collapsed panel re-introduces that width with no re-clamp, crushing the middle.
+// Modeled in the "expand re-clamp" section below.
+//
 // This file models that step. `Layout` below is a mini-model of App's space-
-// change handling: it holds the two panel widths and, on any change in available
-// layout space, re-clamps them through the REAL clampLayoutWidths — exactly what
-// App's applyLayoutClamp does (App's resize listener AND its health-toggle effect
-// both call it). Driving a health toggle through this model at 900px is the
-// scenario that regressed; the assertions pin the contract that a space change
-// MUST re-invoke the clamp so the middle pane is never crushed.
+// change handling: it holds the two panel widths and collapse flags, and on any
+// change in available/visible layout space re-clamps them through the REAL
+// clampLayoutWidths — exactly what App's applyLayoutClamp does (App's resize
+// listener AND its space-shape effect — health + sidebar/observer collapse
+// toggles — both call it). Driving a health toggle, and a side-panel expand,
+// through this model at 900px are the scenarios that regressed; the assertions
+// pin the contract that a space change MUST re-invoke the clamp so the middle
+// pane is never crushed.
 //
 // Run: node layout.test.mjs   (from web/)
 import { transformWithOxc } from 'vite';
@@ -41,6 +49,8 @@ const tmpFile = join(tmpDir, 'storage.mjs');
 writeFileSync(tmpFile, code);
 const {
   clampLayoutWidths,
+  clampSidebarWidth,
+  clampObserverWidth,
   SIDEBAR_MIN,
   OBSERVER_MIN,
   PANE_MIN,
@@ -60,17 +70,25 @@ const middle = (ctx, sb, ob) =>
   ctx.windowWidth - sb - ob - (ctx.healthCollapsed ? 0 : HEALTH_WIDTH);
 
 // Mini-model of App's space-change re-clamp. App keeps the two panel widths in
-// state; on window resize and on health toggle its applyLayoutClamp callback runs
-// clampLayoutWidths over them. `.reclamp()` below IS that callback. Skipping it
-// (as the WARDEN-183 bug did on health toggle) is what the "BUG repro" tests
-// simulate by simply not calling reclamp after changing the space.
+// state, plus the sidebar/observer collapse flags; on window resize and on any
+// space-shape toggle (health, sidebar, observer) its applyLayoutClamp callback
+// runs clampLayoutWidths over them with the full collapse-aware ctx. `.reclamp()`
+// below IS that callback — it merges `this` collapse state into the ctx.
+// Skipping it (as the WARDEN-183 bug did on health toggle, and again on
+// side-panel EXPAND in round 3) is what the "BUG repro" tests simulate by simply
+// not calling reclamp after changing the space.
 class Layout {
-  constructor(sidebar, observer) {
+  constructor(sidebar, observer, { sidebarCollapsed = false, observerCollapsed = false } = {}) {
     this.sidebar = sidebar;
     this.observer = observer;
+    this.sidebarCollapsed = sidebarCollapsed;
+    this.observerCollapsed = observerCollapsed;
   }
   reclamp(ctx) {
-    const r = clampLayoutWidths({ sidebar: this.sidebar, observer: this.observer }, ctx);
+    const r = clampLayoutWidths(
+      { sidebar: this.sidebar, observer: this.observer },
+      { ...ctx, sidebarCollapsed: this.sidebarCollapsed, observerCollapsed: this.observerCollapsed },
+    );
     this.sidebar = r.sidebar;
     this.observer = r.observer;
     return this;
@@ -164,6 +182,75 @@ test('a window resize after the toggle also keeps the middle >= PANE_MIN', () =>
       (l.sidebar === SIDEBAR_MIN && l.observer === OBSERVER_MIN),
     'middle keeps its floor, or both panels are at their floors if the window is too small',
   );
+});
+
+console.log('\nexpand re-clamp: widening one rail while the other is collapsed, then expanding, never crushes the middle (WARDEN-183 round 3)');
+
+test('collapse-aware math: a lone visible panel is never trimmed to reserve room for a hidden one', () => {
+  // Sidebar collapsed (hidden → width 0 in the flex row), observer dragged to the
+  // full shared width. The re-clamp must treat the hidden sidebar as 0 so the
+  // lone visible observer keeps its width. The pre-round-3 math subtracted the
+  // sidebar's STORED width too and would wrongly shrink the observer to 400.
+  const ctx = { windowWidth: 900, healthCollapsed: true };
+  const l = new Layout(200, 580, { sidebarCollapsed: true }).reclamp(ctx);
+  assert.equal(l.observer, 580, 'lone visible observer keeps its wide value');
+  assert.equal(l.sidebar, 200, 'hidden sidebar stored width is left untouched');
+  // The visible layout (sidebar hidden) has plenty of middle.
+  assert.ok(middle(ctx, 0, l.observer) >= PANE_MIN, 'middle >= PANE_MIN with only the observer visible');
+});
+
+test('BUG repro: expanding a rail WITHOUT a re-clamp crushes the middle below PANE_MIN', () => {
+  // The reviewer's realistic 3-action sequence at the 900px floor: collapse the
+  // sidebar, drag the observer wide (the drag clamp sees the collapsed neighbor
+  // as width 0 and allows 580), then EXPAND the sidebar. If App did NOT re-clamp
+  // on the expand (the round-3 regression), both panels keep their full stored
+  // widths and the middle pane column is crushed.
+  const ctx = { windowWidth: 900, healthCollapsed: true };
+  const l = new Layout(220, 380).reclamp(ctx); // mount -> sidebar=200, observer=380
+  l.sidebarCollapsed = true; // collapse sidebar
+  l.observer = clampObserverWidth(580, 0, ctx); // drag observer wide (neighbor=0)
+  l.sidebarCollapsed = false; // expand sidebar — NO reclamp (the bug)
+  assert.ok(
+    middle(ctx, l.sidebar, l.observer) < PANE_MIN,
+    'middle is crushed below PANE_MIN when the expand is not re-clamped',
+  );
+});
+
+test('FIX: expanding a rail re-clamps so the middle keeps its floor (realistic 3-action)', () => {
+  // Same setup, but the expand fires applyLayoutClamp (App's space-shape effect).
+  // The pair is trimmed (sidebar yields to its floor first) so the middle keeps
+  // PANE_MIN instead of being crushed.
+  const ctx = { windowWidth: 900, healthCollapsed: true };
+  const l = new Layout(220, 380).reclamp(ctx); // sidebar=200, observer=380
+  l.sidebarCollapsed = true;
+  l.observer = clampObserverWidth(580, 0, ctx); // drag observer to 580
+  l.sidebarCollapsed = false; // expand sidebar
+  l.reclamp(ctx); // <- the fix: re-clamp on expand
+  assert.equal(l.sidebar, SIDEBAR_MIN, 'sidebar gives way to its floor first');
+  assert.equal(l.observer, 400, 'observer trimmed to fit the now-shared space');
+  assert.ok(l.observer >= OBSERVER_MIN, 'observer never below its usable floor');
+  assert.equal(middle(ctx, l.sidebar, l.observer), PANE_MIN, 'middle exactly at the floor');
+});
+
+test('FIX: the decisive collapse-dance no longer crushes the middle to 0', () => {
+  // The worst-case sequence the reviewer drove through the real functions:
+  // collapse sidebar -> widen observer -> collapse observer -> expand sidebar ->
+  // widen sidebar (neighbor=0) -> expand observer. Pre-fix this left the middle
+  // at -80 -> crushed to 0. With expand re-clamp + collapse-aware math the final
+  // expand trims the pair and the middle keeps its floor.
+  const ctx = { windowWidth: 900, healthCollapsed: true };
+  const l = new Layout(220, 380).reclamp(ctx);
+  l.sidebarCollapsed = true; // collapse sidebar
+  l.observer = clampObserverWidth(580, 0, ctx); // widen observer
+  l.observerCollapsed = true; // collapse observer
+  l.sidebarCollapsed = false; // expand sidebar
+  l.reclamp(ctx); // re-clamp (sidebar visible, observer hidden)
+  l.sidebar = clampSidebarWidth(400, 0, ctx); // widen sidebar (neighbor=0)
+  l.observerCollapsed = false; // expand observer
+  l.reclamp(ctx); // <- the fix: re-clamp on expand
+  assert.ok(l.sidebar >= SIDEBAR_MIN && l.observer >= OBSERVER_MIN, 'both panels within usable bands');
+  assert.ok(middle(ctx, l.sidebar, l.observer) > 0, 'middle is not crushed to 0');
+  assert.equal(middle(ctx, l.sidebar, l.observer), PANE_MIN, 'middle exactly at the floor');
 });
 
 console.log(`\n✓ LAYOUT TESTS PASS (${passed})`);
