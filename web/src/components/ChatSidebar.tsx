@@ -12,12 +12,13 @@ import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
-import { SlidersHorizontal, WifiOff } from 'lucide-react';
+import { SlidersHorizontal, WifiOff, EyeIcon } from 'lucide-react';
 import { NewChatForm } from './NewChatForm';
 import { CollectionsSection } from './CollectionsSection';
 import { CreateCollectionDialog } from './CreateCollectionDialog';
 import { DiffViewer } from './DiffViewer';
 import { DiffBlock } from './DiffBlock';
+import { SessionTranscriptViewer } from './SessionTranscriptViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { cn } from '@/lib/utils';
 import { summarizeProjectGitState } from '@/lib/gitStateSummary';
@@ -1684,7 +1685,7 @@ interface DiscoverItem {
   snippet?: string;      // content-match snippet (full-content search only)
 }
 
-function DiscoverItemRow({ it, resumingId, onOpen, onResume }: { it: DiscoverItem; resumingId: string | null; onOpen: () => void; onResume: () => void; }) {
+function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView }: { it: DiscoverItem; resumingId: string | null; onOpen: () => void; onResume: () => void; onView: () => void; }) {
   if (it.kind === 'live') {
     return (
       <Button variant="ghost" onClick={onOpen} className="w-full h-auto justify-start gap-2 px-2 py-1.5 text-xs font-normal hover:bg-accent">
@@ -1706,6 +1707,11 @@ function DiscoverItemRow({ it, resumingId, onOpen, onResume }: { it: DiscoverIte
       </div>
       {it.time ? <span className="text-[10px] text-muted-foreground shrink-0">{ago(it.time)}</span> : null}
       <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span>
+      <IconTooltip label="view transcript (read-only)">
+        <Button variant="ghost" size="icon-xs" onClick={onView} aria-label="View transcript" className="text-muted-foreground hover:text-foreground">
+          <EyeIcon />
+        </Button>
+      </IconTooltip>
       <IconTooltip label="bump to live (resume)" disabled={isLoading}>
         <Button variant="ghost" size="xs" onClick={onResume} disabled={isLoading} className="text-[10px] text-cyan-400 hover:text-cyan-300 px-1 h-auto">
           {isLoading ? <Skeleton className="h-3 w-6 inline-block" /> : '↻ resume'}
@@ -1737,6 +1743,9 @@ function OpenChatBrowser({ open, onOpenChange, hosts, chats, allSessions, loadin
   const [selected, setSelected] = useState<string[] | undefined>(undefined);
   const [query, setQuery] = useState('');
   const [resumingId, setResumingId] = useState<string | null>(null);
+  // The history session whose read-only transcript is open (null = viewer closed).
+  // Lifted here (not per-row) so the viewer is a sibling dialog over the browser.
+  const [viewing, setViewing] = useState<{ id: string; host: string; label: string } | null>(null);
   const [contentResults, setContentResults] = useState<SessionSearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
 
@@ -1861,6 +1870,7 @@ function OpenChatBrowser({ open, onOpenChange, hosts, chats, allSessions, loadin
   };
 
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
@@ -1906,6 +1916,7 @@ function OpenChatBrowser({ open, onOpenChange, hosts, chats, allSessions, loadin
                     resumingId={resumingId}
                     onOpen={() => { if (it.openId) { onOpenChat(it.openId); onOpenChange(false); } }}
                     onResume={() => handleResume(it)}
+                    onView={() => { if (it.resume) setViewing({ id: it.resume.id, host: it.resume.host, label: it.label }); }}
                   />
                 ))
               )}
@@ -1932,5 +1943,11 @@ function OpenChatBrowser({ open, onOpenChange, hosts, chats, allSessions, loadin
         </div>
       </DialogContent>
     </Dialog>
+    <SessionTranscriptViewer
+      open={!!viewing}
+      onOpenChange={(o) => { if (!o) setViewing(null); }}
+      session={viewing}
+    />
+    </>
   );
 }

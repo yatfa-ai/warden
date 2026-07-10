@@ -579,6 +579,16 @@ const SESSION_SEARCH_SNIP_TRANSFER = 1500; // bounded matched-line transfer over
 // few hundred files is cheap; only the top PER_HOST get a head read.
 const SESSION_SEARCH_LOCAL_SCAN = 500;
 
+// ---- read-only transcript view (WARDEN-233) ----
+// Caps for the read-only single-session viewer. A huge transcript must not blow
+// up the UI or the remote SSH transfer. SESSION_VIEW_MAX_BYTES bounds the body
+// transfer (a `tail -c` window remotely / a tail read locally); the head window
+// for cwd is the same 8KB the list endpoints already read. SESSION_VIEW_MAX_MESSAGES
+// is a secondary message-count cap (most-recent kept) so a transcript of many
+// short messages stays bounded too.
+const SESSION_VIEW_MAX_BYTES = 400_000;
+const SESSION_VIEW_MAX_MESSAGES = 500;
+
 // Search the local JSONL archive for sessions whose body contains `q` (literal,
 // case-insensitive — same fixed-string semantics as the remote `grep -F`). Returns
 // up to SESSION_SEARCH_PER_HOST matches, most-recent first, each with cwd/summary
@@ -695,6 +705,147 @@ async function remoteSearchClaudeSessions(host, q) {
   return out.slice(0, SESSION_SEARCH_PER_HOST);
 }
 
+// ---- read-only transcript view (WARDEN-233) ----
+// The full-content search above finds sessions; this makes any ONE past session
+// fully readable WITHOUT resuming it (no live `claude` process, no tmux, no
+// catalog entry). Same JSONL archive + the same extractMessageText primitive; the
+// difference is we map EVERY line into a {role, text, ts} message and bound the
+// result instead of returning one snippet.
+
+// Map one JSONL line into a transcript message {role, text, ts} for the read-only
+// viewer, reusing extractMessageText's human-text extraction + null-skip semantics
+// (tool_result blobs, summary records, malformed JSON → null → skipped). Adds the
+// role + timestamp extractMessageText doesn't surface. Exported so the message
+// mapping is unit-testable like extractMessageText.
+export function extractTranscriptMessage(line) {
+  const text = extractMessageText(line);
+  // null = not a renderable message (tool_result/summary/malformed); an empty
+  // string (a text block with no text, e.g. beside tool_use blocks) would render
+  // a stray empty bubble, so skip it too.
+  if (!text || !text.trim()) return null;
+  let j;
+  try { j = JSON.parse(line); } catch { return null; }
+  const role = (j && j.message && j.message.role) || (j && j.type) || 'unknown';
+  return { role, text, ts: (j && j.timestamp) || '' };
+}
+
+// Build the bounded {cwd, messages, truncated} view from a head window (for cwd,
+// via parseJsonlHead) and a body window (for the message list, via
+// extractTranscriptMessage per line). Pure + exported so the bounding/tail logic
+// is unit-testable without disk or SSH. `truncated` is true when the message count
+// exceeded the cap (the oldest messages were dropped to keep the most recent).
+export function buildTranscriptView(headText, bodyText) {
+  const cwd = parseJsonlHead(headText || '').cwd;
+  const messages = [];
+  for (const line of (bodyText || '').split('\n')) {
+    if (!line.trim()) continue;
+    const msg = extractTranscriptMessage(line);
+    if (msg) messages.push(msg);
+  }
+  let truncated = false;
+  if (messages.length > SESSION_VIEW_MAX_MESSAGES) {
+    truncated = true;
+    // Keep the most recent (tail) — the head of the body window is the oldest.
+    messages.splice(0, messages.length - SESSION_VIEW_MAX_MESSAGES);
+  }
+  return { cwd, messages, truncated };
+}
+
+// Resolve a local session JSONL by id across every project dir (the session id IS
+// the basename; ids are unique per file). Returns the absolute path or null.
+function findLocalSessionFile(id) {
+  const dir = path.join(os.homedir(), '.claude', 'projects');
+  try {
+    for (const proj of fs.readdirSync(dir)) {
+      const fp = path.join(dir, proj, `${id}.jsonl`);
+      try { if (fs.statSync(fp).isFile()) return fp; } catch { /* not in this project dir */ }
+    }
+  } catch { /* no projects dir */ }
+  return null;
+}
+
+// Read ONE local session into the bounded transcript view. Reads a head window
+// (8KB) for cwd and a tail window (SESSION_VIEW_MAX_BYTES) for the message body —
+// never the whole file, so a giant transcript stays cheap. Returns {notFound} when
+// the id matches no local file.
+function readLocalSessionTranscript(id) {
+  const file = findLocalSessionFile(id);
+  if (!file) return { notFound: true };
+  let headText = '';
+  let bodyText = '';
+  let byteTruncated = false;
+  try {
+    const size = fs.statSync(file).size;
+    const fd = fs.openSync(file, 'r');
+    try {
+      // Head window (8KB) for cwd — the same head read localClaudeSessions uses.
+      const hlen = Math.min(size, 8192);
+      const hbuf = Buffer.alloc(hlen);
+      fs.readSync(fd, hbuf, 0, hlen, 0);
+      headText = hbuf.toString('utf8');
+      // Body tail window (bounded) for the message list.
+      byteTruncated = size > SESSION_VIEW_MAX_BYTES;
+      const blen = Math.min(size, SESSION_VIEW_MAX_BYTES);
+      const bbuf = Buffer.alloc(blen);
+      fs.readSync(fd, bbuf, 0, blen, size - blen);
+      bodyText = bbuf.toString('utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch { /* noop — empty windows yield an empty message list */ }
+  const view = buildTranscriptView(headText, bodyText);
+  view.truncated = view.truncated || byteTruncated;
+  return view;
+}
+
+// Remote (SSH) twin of readLocalSessionTranscript. ONE SSH call resolves the
+// (unique) file by its id basename, emits a size line, a head window (for cwd),
+// and a bounded tail window (for the body) — delimited so the server can split
+// them. `___NOSESSION` (and a zero exit) when the id matches no remote file.
+// Exported so the shell surface + shape is unit-testable like buildSessionSearchScript.
+// `id` is validated /^[\w-]+$/ at the endpoint, so it has no shell metacharacters.
+export function buildSessionReadScript(id) {
+  return [
+    `set -- ~/.claude/projects/*/${id}.jsonl`,
+    'if [ -f "$1" ]; then',
+    '  sz=$(stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null)',
+    "  printf '___SZ\\t%s\\n' \"$sz\"",
+    "  printf '___HEAD\\n'; head -c 8192 \"$1\"",
+    `  printf '\\n___BODY\\n'; tail -c ${SESSION_VIEW_MAX_BYTES} "$1"`,
+    'else',
+    "  printf '___NOSESSION\\n'",
+    'fi',
+  ].join('\n');
+}
+
+// Parse the remote read script's delimited output into {cwd, messages, truncated}
+// (or {notFound}). Splits the head/body windows on the ___HEAD/___BODY markers,
+// reads the byte size from ___SZ to flag byte-truncation, and detects the
+// ___NOSESSION not-found marker. Pure + exported so the remote parsing is
+// unit-testable without SSH (the found branch never emits ___NOSESSION, and the
+// not-found branch emits ONLY it, so the marker is unambiguous — same trust model
+// the search endpoint uses for ___SNIP).
+export function parseSessionReadOutput(stdout) {
+  if (stdout.startsWith('___NOSESSION')) return { notFound: true };
+  const HEAD = '___HEAD\n';
+  const BODY = '___BODY\n';
+  const headIdx = stdout.indexOf(HEAD);
+  const bodyIdx = stdout.indexOf(BODY);
+  let headText = '';
+  let bodyText = stdout;
+  if (headIdx !== -1 && bodyIdx !== -1) {
+    headText = stdout.slice(headIdx + HEAD.length, bodyIdx);
+    bodyText = stdout.slice(bodyIdx + BODY.length);
+  }
+  let byteTruncated = false;
+  const szm = stdout.match(/^___SZ\t(\d+)/);
+  const size = szm ? Number(szm[1]) : 0;
+  if (size && size > SESSION_VIEW_MAX_BYTES) byteTruncated = true;
+  const view = buildTranscriptView(headText, bodyText);
+  view.truncated = view.truncated || byteTruncated;
+  return view;
+}
+
 app.get('/api/claude-sessions', async (req, res) => {
   const host = String(req.query.host || LOCAL);
   const sessions = host === LOCAL ? localClaudeSessions() : await remoteClaudeSessions(host);
@@ -768,6 +919,35 @@ app.get('/api/claude-sessions-search', async (req, res) => {
     })));
   all.sort((a, b) => b.mtime - a.mtime);
   res.json({ results: all.slice(0, SESSION_SEARCH_GLOBAL) });
+});
+
+// GET /api/claude-session?id=&host= — read-only transcript of ONE past session
+// across any host, WITHOUT resuming it (no live `claude` process, no tmux session,
+// no catalog entry). Local host reads the JSONL from disk; a remote host reads it
+// over SSH via buildSessionReadScript (same hosts the search already reaches). The
+// output is bounded (a tail window + a message cap) so a huge transcript can't
+// blow up the UI or the remote transfer. Response on success:
+//   { host, cwd, messages: [{role, text, ts}], truncated? }
+// An unreachable host degrades to { host, error: 'host unreachable' } (run()'s
+// default timeout means it never hangs) rather than failing the request.
+app.get('/api/claude-session', async (req, res) => {
+  const id = String(req.query.id || '');
+  if (!/^[\w-]+$/.test(id)) return res.status(400).json({ error: 'invalid session id' });
+  const host = String(req.query.host || LOCAL);
+  try {
+    if (host === LOCAL) {
+      const view = readLocalSessionTranscript(id);
+      if (view.notFound) return res.status(404).json({ error: 'session not found' });
+      return res.json({ host, cwd: view.cwd, messages: view.messages, truncated: view.truncated });
+    }
+    const rr = await run(host, buildSessionReadScript(id), { timeout: 15000 });
+    if (!rr.ok) return res.json({ host, error: 'host unreachable' });
+    const view = parseSessionReadOutput(rr.stdout);
+    if (view.notFound) return res.status(404).json({ error: 'session not found' });
+    return res.json({ host, cwd: view.cwd, messages: view.messages, truncated: view.truncated });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Run git locally: captured stdout, inherited stderr, in a HIDDEN window. Centralizing
