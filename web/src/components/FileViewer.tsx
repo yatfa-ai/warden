@@ -235,8 +235,8 @@ function AnnotatedContent({ content, blame, blameLoading, blameError, chatId, fi
         prevHash = b ? b.hash : '';
         return (
           <div key={lineNo} className="group/line flex items-start gap-2 rounded px-1 hover:bg-accent/30">
-            <span className="w-8 shrink-0 select-none pr-2 text-right text-[11px] leading-5 text-muted-foreground/40 group-hover/line:text-muted-foreground">{lineNo}</span>
-            <div className="flex w-56 shrink-0 items-center gap-1.5 text-[11px] leading-5">
+            <span className="w-8 shrink-0 select-none pr-2 text-right text-xs leading-5 text-muted-foreground/40 group-hover/line:text-muted-foreground">{lineNo}</span>
+            <div className="flex w-56 shrink-0 items-center gap-1.5 text-xs leading-5">
               {b && atBoundary ? (
                 <>
                   <BlameHash chatId={chatId} filePath={filePath} blame={b} />
@@ -285,14 +285,15 @@ function BlameHash({ chatId, filePath, blame }: { chatId: string; filePath: stri
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
-        <button
-          type="button"
-          className="shrink-0 font-mono text-cyan-400/80 hover:text-cyan-300 hover:underline cursor-pointer"
+        <Button
+          variant="ghost"
+          size="xs"
+          className="h-auto shrink-0 px-0 font-mono text-cyan-400/80 hover:text-cyan-300 hover:underline"
           title={`inspect what commit ${shortHash} did to this file`}
           onClick={(e) => e.stopPropagation()}
         >
           {shortHash}
-        </button>
+        </Button>
       </PopoverTrigger>
       <PopoverContent
         align="start"
