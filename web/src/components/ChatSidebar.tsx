@@ -19,6 +19,7 @@ import { CreateCollectionDialog } from './CreateCollectionDialog';
 import { DiffViewer } from './DiffViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { cn } from '@/lib/utils';
+import { classifyDiffLine, DIFF_LINE_CLASS } from '@/lib/diff';
 import type { Chat, Collection } from '@/lib/types';
 import { loadUi, saveUi } from '@/lib/storage';
 
@@ -34,29 +35,44 @@ export interface SessionSearchResult { host: string; sessionId: string; cwd: str
 export interface GitFile { path: string; status: string }
 
 /** A single changed-file row: status indicator (M/A/D/??) + truncated path.
- *  Clickable when `onOpen` is supplied (opens the per-file DiffViewer); the click
- *  stops propagation so it never also opens the parent chat row. */
+ *  Interactive (a real <button>) only when `onOpen` is supplied — it opens the
+ *  per-file DiffViewer and the click stops propagation so it never also opens the
+ *  parent chat row. Without `onOpen` it renders as a plain non-interactive <span>:
+ *  this lets it be embedded inside ANOTHER interactive row (an expanded commit's
+ *  touched-file list, where the whole row is the affordance) without nesting
+ *  interactive elements or swallowing the parent's click — and avoids a <button>
+ *  with no handler, which is poor a11y. */
 function GitChangedFile({ file, onOpen }: { file: GitFile; onOpen?: (path: string) => void }) {
   const color =
     file.status === 'M' ? 'text-yellow-400' :
     file.status === 'A' ? 'text-green-400' :
     file.status === 'D' ? 'text-red-400' :
     'text-gray-400';
-  return (
-    <button
-      type="button"
-      onClick={(e) => { e.stopPropagation(); onOpen?.(file.path); }}
-      // Stop the keydown from reaching the parent row's onKeyDown (Enter/Space → open
-      // chat): without this, keyboard-activating the file button would open the chat
-      // pane instead of the diff, because the row handler calls preventDefault() before
-      // the button's activation click can fire.
-      onKeyDown={(e) => e.stopPropagation()}
-      title={onOpen ? `view diff: ${file.path}` : undefined}
-      className="flex items-center gap-1 w-full text-left rounded-sm text-[9px] text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
-    >
+  const content = (
+    <>
       <span className={color}>{file.status}</span>
       <span className="truncate">{file.path}</span>
-    </button>
+    </>
+  );
+  if (onOpen) {
+    return (
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onOpen(file.path); }}
+        // Stop the keydown from reaching the parent row's onKeyDown (Enter/Space → open
+        // chat): without this, keyboard-activating the file button would open the chat
+        // pane instead of the diff, because the row handler calls preventDefault() before
+        // the button's activation click can fire.
+        onKeyDown={(e) => e.stopPropagation()}
+        title={`view diff: ${file.path}`}
+        className="flex items-center gap-1 w-full text-left rounded-sm text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+      >
+        {content}
+      </button>
+    );
+  }
+  return (
+    <span className="flex items-center gap-1 text-[10px] text-muted-foreground">{content}</span>
   );
 }
 
@@ -982,7 +998,75 @@ function AgentFilterSortControls({
 // to document.body via Radix Popover so it isn't clipped by the `truncate` name span
 // this badge sits inside (in ChatRow). stopPropagation on clicks keeps it from also
 // opening the chat pane (mirrors the other inline buttons in these rows).
-function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, className }: {
+/** Render a committed diff as a scrollable, colorized monospace block, reusing the
+ *  shared line classifier + palette (classifyDiffLine / DIFF_LINE_CLASS in
+ *  @/lib/diff) so a commit's file diff renders identically to the modal working-tree
+ *  DiffViewer (WARDEN-151) — same green/red/muted coloring, no second classifier. */
+function DiffBlock({ diff }: { diff: string }) {
+  return (
+    <pre className="mt-0.5 max-h-64 overflow-auto rounded bg-muted/40 p-1 font-mono text-[10px] leading-tight whitespace-pre">
+      {diff.split('\n').map((ln, i) => (
+        <div key={i} className={DIFF_LINE_CLASS[classifyDiffLine(ln)]}>{ln || ' '}</div>
+      ))}
+    </pre>
+  );
+}
+
+/** One touched-file row inside an expanded commit. Click to fetch and reveal the
+ *  committed diff for that file (`git show --format= <hash> -- <path>`). Owns its
+ *  diff fetch state so a re-collapse/re-expand is instant. */
+function CommitFile({ chatId, hash, file }: { chatId: string; hash: string; file: GitFile }) {
+  const [open, setOpen] = useState(false);
+  const [diff, setDiff] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [fetched, setFetched] = useState(false);
+
+  const toggle = async () => {
+    if (!open && !fetched) {
+      setLoading(true);
+      try {
+        const r = await fetch(`/api/git-show?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(hash)}&path=${encodeURIComponent(file.path)}`);
+        const j = await r.json();
+        setDiff(typeof j.diff === 'string' ? j.diff : null);
+      } catch {
+        setDiff(null);
+      } finally {
+        setLoading(false);
+        setFetched(true);
+      }
+    }
+    setOpen((o) => !o);
+  };
+
+  return (
+    <div className="pl-2">
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        aria-label={`inspect committed diff for ${file.path}`}
+        onClick={(e) => { e.stopPropagation(); toggle(); }}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggle(); } }}
+        title="click to inspect this file's committed diff"
+        className="flex w-full items-center gap-1 rounded px-0.5 py-px text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+      >
+        <div className="min-w-0 flex-1"><GitChangedFile file={file} /></div>
+        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{loading ? '…' : open ? '▾' : '▸'}</span>
+      </div>
+      {open && (
+        loading ? (
+          <div className="px-1 text-[10px] text-muted-foreground">loading diff…</div>
+        ) : diff ? (
+          <DiffBlock diff={diff} />
+        ) : (
+          <div className="px-1 text-[10px] text-muted-foreground">no diff</div>
+        )
+      )}
+    </div>
+  );
+}
+
+function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, className }: {
   branch: string;
   clean: boolean | null;
   commits?: GitCommit[];
@@ -990,6 +1074,7 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
   onFetch?: () => void;
   ahead?: number | null;
   behind?: number | null;
+  chatId: string;
   className?: string;
 }) {
   const aheadCount = typeof ahead === 'number' ? ahead : 0;
@@ -998,6 +1083,37 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
   if (clean === false) titleParts.push('uncommitted changes');
   if (aheadCount > 0) titleParts.push(`${aheadCount} unpushed`);
   if (behindCount > 0) titleParts.push(`${behindCount} behind remote`);
+
+  // Per-commit expand state + the /api/git-show files cache (keyed by hash) so a
+  // repeat expansion is instant. The popover owns the interaction, so this state
+  // lives here rather than being prop-drilled through ChatRow/ChatSidebar.
+  const [expandedHash, setExpandedHash] = useState<string | null>(null);
+  const [showCache, setShowCache] = useState<Record<string, { files?: GitFile[]; error?: string | null }>>({});
+  const [showLoading, setShowLoading] = useState<Record<string, boolean>>({});
+
+  const fetchShow = async (hash: string) => {
+    if (showCache[hash] || showLoading[hash]) return;
+    setShowLoading((p) => ({ ...p, [hash]: true }));
+    try {
+      const r = await fetch(`/api/git-show?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(hash)}`);
+      const j = await r.json();
+      setShowCache((p) => ({ ...p, [hash]: { files: Array.isArray(j.files) ? j.files : [], error: j.error } }));
+    } catch {
+      setShowCache((p) => ({ ...p, [hash]: { files: [], error: 'fetch failed' } }));
+    } finally {
+      setShowLoading((p) => ({ ...p, [hash]: false }));
+    }
+  };
+
+  const toggleCommit = (hash: string) => {
+    if (expandedHash === hash) {
+      setExpandedHash(null);
+    } else {
+      setExpandedHash(hash);
+      if (!showCache[hash]) fetchShow(hash);
+    }
+  };
+
   return (
     <RadixPopover.Root onOpenChange={(open) => { if (open && commits === undefined && !loading) onFetch?.(); }}>
       <RadixPopover.Trigger asChild>
@@ -1039,14 +1155,41 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
               <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">loading…</span>
             </div>
           ) : commits && commits.length > 0 ? (
-            <ul className="max-h-56 overflow-auto">
+            <ul className="max-h-72 overflow-auto">
               {commits.map((cm) => (
-                <li key={cm.hash} className="flex gap-1.5 rounded px-1 py-0.5 hover:bg-accent">
-                  <span className="shrink-0 font-mono text-[10px] text-cyan-400/80">{cm.hash}</span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[10px] text-foreground" title={cm.subject}>{cm.subject}</span>
-                    <span className="block text-[10px] text-muted-foreground">{cm.date}{cm.author ? ` · ${cm.author}` : ''}</span>
-                  </span>
+                <li key={cm.hash} className="rounded">
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    aria-expanded={expandedHash === cm.hash}
+                    aria-label={`inspect files changed by commit ${cm.hash}`}
+                    onClick={(e) => { e.stopPropagation(); toggleCommit(cm.hash); }}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleCommit(cm.hash); } }}
+                    title="click to inspect the files this commit changed"
+                    className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+                  >
+                    <span className="shrink-0 font-mono text-[10px] text-cyan-400/80">{cm.hash}</span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[10px] text-foreground" title={cm.subject}>{cm.subject}</span>
+                      <span className="block text-[10px] text-muted-foreground">{cm.date}{cm.author ? ` · ${cm.author}` : ''}</span>
+                    </span>
+                    <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{expandedHash === cm.hash ? '▾' : '▸'}</span>
+                  </div>
+                  {expandedHash === cm.hash && (
+                    <div className="pb-1 pl-1">
+                      {showLoading[cm.hash] && !showCache[cm.hash] ? (
+                        <div className="px-1 text-[10px] text-muted-foreground">loading files…</div>
+                      ) : (showCache[cm.hash]?.files?.length ?? 0) > 0 ? (
+                        <div className="flex flex-col gap-0.5">
+                          {showCache[cm.hash]!.files!.map((f) => (
+                            <CommitFile key={f.path} chatId={chatId} hash={cm.hash} file={f} />
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="px-1 text-[10px] text-muted-foreground">{showCache[cm.hash]?.error ? 'failed to load' : 'no files'}</div>
+                      )}
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
@@ -1116,6 +1259,7 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, git
               {gitInfo?.branch && (
                 <GitBranchBadge
                   branch={gitInfo.branch}
+                  chatId={c.key || c.id}
                   clean={gitInfo.clean}
                   commits={gitCommits}
                   loading={gitLogLoading}
@@ -1249,7 +1393,7 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, renamingChat
         {!dead && !editing && showHostTags !== false && hostTag && <span className="text-[10px] text-muted-foreground">{hostTag}</span>}
         {!dead && !editing && showProjectBadges && c?.project && <span className="text-[10px] text-muted-foreground">{c.project}</span>}
         {!dead && !editing && gitInfo?.branch && (
-          <GitBranchBadge branch={gitInfo.branch} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} ahead={gitInfo.ahead} behind={gitInfo.behind} />
+          <GitBranchBadge branch={gitInfo.branch} chatId={id} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} ahead={gitInfo.ahead} behind={gitInfo.behind} />
         )}
         {!editing && canRename && (
           <IconTooltip label="rename"><Button variant="ghost" size="xs" className="px-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); startEdit(); }} disabled={isRenaming} aria-label="rename">{isRenaming ? <Skeleton className="h-3 w-3" /> : '✎'}</Button></IconTooltip>
