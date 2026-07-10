@@ -66,6 +66,34 @@ const EDGE = findBrowser();
     }));
     console.log('observer:', JSON.stringify(obs));
 
+    // Attention badge (WARDEN-228): the badge must agree with its own data source.
+    // Poll until the badge's visibility matches a fresh read of the same formula
+    // buildAttentionRollup uses (critical + warning agents, plus directives + errors
+    // from the last 15m). Self-stabilizes — no fixed-wait flakiness: passes as soon
+    // as the badge's mount-fetch resolves; times out only on a real mismatch (bug).
+    // polling: 1s keeps the re-fetch off the endpoint between checks.
+    await page.waitForFunction(async () => {
+      const after = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+      const [h, s] = await Promise.allSettled([
+        fetch('/api/health').then((r) => (r.ok ? r.json() : null)),
+        fetch('/api/activity/stats?after=' + encodeURIComponent(after)).then((r) => (r.ok ? r.json() : null)),
+      ]);
+      const health = h.status === 'fulfilled' ? h.value : null;
+      const stats = s.status === 'fulfilled' ? s.value : null;
+      const crit = (health && health.groups && health.groups.critical || []).length;
+      const warn = (health && health.groups && health.groups.warning || []).length;
+      const dir = Number(stats && stats.directive_proposed) || 0;
+      const err = Number(stats && stats.error) || 0;
+      const expected = crit + warn + dir + err > 0;
+      const present = !!document.querySelector('[aria-label*="need attention"]');
+      return expected === present;
+    }, { timeout: 10000, polling: 1000 });
+    const badgeState = await page.evaluate(() => {
+      const el = document.querySelector('[aria-label*="need attention"]');
+      return el ? el.getAttribute('aria-label') : 'absent (zero attention)';
+    });
+    console.log('attention badge:', badgeState);
+
     console.log('\nERRORS:', errors.length ? '\n' + errors.slice(0, 20).join('\n') : 'none');
     await browser.close();
     const ok = errors.length === 0 && rootKids > 0 && chatBtns.length > 0 && xterm.present && xterm.h > 450 && grid.xterms === 4 && grid.cols === 2 && obs.input && obs.newBtn;
