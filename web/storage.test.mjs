@@ -302,6 +302,38 @@ test('the pref survives an empty-mode mount (carried by the live spread, not the
   assert.equal(loadUi().terminalColorScheme, 'light');
 });
 
+console.log('\nterminal cursor style (blink/steady × block/underline/bar) round-trips through loadUi/saveUi');
+test('defaults to "blink-block" when nothing is stored', () => {
+  reset();
+  assert.equal(loadUi().terminalCursorStyle, 'blink-block');
+});
+test('all six values round-trip', () => {
+  const all = ['blink-block', 'steady-block', 'blink-underline', 'steady-underline', 'blink-bar', 'steady-bar'];
+  for (const v of all) {
+    reset();
+    saveUi({ ...loadUi(), terminalCursorStyle: v });
+    assert.equal(loadUi().terminalCursorStyle, v, `${v} should round-trip`);
+  }
+});
+test('an out-of-allow-set value coerces back to "blink-block" on load (defensive)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], terminalCursorStyle: 'diagonal' }));
+  assert.equal(loadUi().terminalCursorStyle, 'blink-block');
+});
+test('a missing field loads as "blink-block"', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  assert.equal(loadUi().terminalCursorStyle, 'blink-block');
+});
+test('the pref survives an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
+  // terminalCursorStyle is NOT a workspace field, so persistUiState spreads it
+  // from `live`. Confirm an empty-launch still round-trips a freshly set value.
+  reset();
+  const d0 = loadUi();
+  saveUi(persistUiState({ ...d0, terminalCursorStyle: 'steady-bar' }, 'empty', d0, true));
+  assert.equal(loadUi().terminalCursorStyle, 'steady-bar');
+});
+
 console.log('\ninitialWorkspace gates the workspace on mount');
 test('"previous" restores the last-saved workspace', () => {
   const disk = { ...loadUi(), activeTabs: ['a', 'b'], hiddenTabs: ['h'], openPanes: ['a'], focused: 'a', paneHost: { a: 'host' } };

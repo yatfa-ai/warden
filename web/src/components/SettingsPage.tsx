@@ -16,7 +16,7 @@ import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ArrowLeft, Trash2 } from 'lucide-react';
 import { type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { type Density } from '@/lib/density';
-import { type RestoreOnStartup, type PaneLayout, type CustomPreset, type PresetNameIssue, PRESET_NAME_MAX, validatePresetName } from '@/lib/storage';
+import { type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type CustomPreset, type PresetNameIssue, PRESET_NAME_MAX, validatePresetName } from '@/lib/storage';
 import { putJson } from '@/lib/api';
 import { toast } from 'sonner';
 
@@ -75,6 +75,12 @@ interface Props {
   // saveUi effect. It must never be added to the `config` state / PUT /api/config body.
   terminalColorScheme: TerminalColorScheme;
   setTerminalColorScheme: (v: TerminalColorScheme) => void;
+  // Terminal cursor style (shape × blink) is likewise a pure client-side
+  // localStorage pref: it sets the xterm cursorStyle + cursorBlink and is
+  // persisted by App's saveUi effect. It must never be added to the `config`
+  // state / PUT /api/config body.
+  terminalCursorStyle: TerminalCursorStyle;
+  setTerminalCursorStyle: (v: TerminalCursorStyle) => void;
   // Default agent type + host pre-filled in the ＋ new chat form. Pure client-side
   // localStorage prefs: applied instantly via the prop callbacks and persisted by
   // App's saveUi effect. They must never be added to the `config` state /
@@ -195,7 +201,7 @@ function PresetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback, terminalColorScheme, setTerminalColorScheme, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -687,6 +693,26 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   </Select>
                   <p className="text-xs text-muted-foreground">
                     How terminal panes are colored. "Match app theme" follows the Color Scheme above (including System); "Always dark/light" forces it regardless of the rest of the UI. Applies live to open panes.
+                  </p>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="terminalCursorStyle">Terminal cursor style</Label>
+                  <Select value={terminalCursorStyle} onValueChange={(v) => setTerminalCursorStyle(v as TerminalCursorStyle)}>
+                    <SelectTrigger id="terminalCursorStyle" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="blink-block">Blinking block (default)</SelectItem>
+                      <SelectItem value="steady-block">Steady block</SelectItem>
+                      <SelectItem value="blink-underline">Blinking underline</SelectItem>
+                      <SelectItem value="steady-underline">Steady underline</SelectItem>
+                      <SelectItem value="blink-bar">Blinking bar</SelectItem>
+                      <SelectItem value="steady-bar">Steady bar</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Cursor shape and whether it blinks in terminal panes. "Steady" options stop the blink — useful if you reduce motion at the OS level (WARDEN-190 only covered page motion, not this cursor). Applies live to all open panes.
                   </p>
                 </div>
 
