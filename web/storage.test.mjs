@@ -33,7 +33,7 @@ const { code } = await transformWithOxc(src, storagePath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-storage-test-'));
 const tmpFile = join(tmpDir, 'storage.mjs');
 writeFileSync(tmpFile, code);
-const { loadUi, saveUi, persistUiState, initialWorkspace, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, SIDEBAR_MIN, SIDEBAR_MAX, OBSERVER_MIN, OBSERVER_MAX, PANE_MIN, HEALTH_WIDTH } = await import(tmpFile);
+const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, SIDEBAR_MIN, SIDEBAR_MAX, OBSERVER_MIN, OBSERVER_MAX, PANE_MIN, HEALTH_WIDTH } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -499,6 +499,84 @@ test('clampLayoutWidths preserves the floors at the 900px window with health col
   assert.ok(r.sidebar >= SIDEBAR_MIN, 'sidebar >= SIDEBAR_MIN');
   assert.ok(r.observer >= OBSERVER_MIN, 'observer >= OBSERVER_MIN');
   assert.ok(middle(900, r.sidebar, r.observer) >= PANE_MIN, 'middle pane >= PANE_MIN');
+});
+
+// --- Key-version migration guard (WARDEN-181) --------------------------------
+// readVersioned promotes the newest surviving payload forward to the current key
+// so a future KEY bump (v2 -> v3 ...) never silently drops the user's data. Each
+// test asserts the actual state change — data physically moves to the current
+// key and the old key is cleared — not merely that load returned a value.
+console.log('\nreadVersioned key-migration guard promotes old payloads forward');
+
+test('UI data under an older versioned key (v1) is promoted forward to v2 on load', () => {
+  reset();
+  // Only the older key exists; the current key (v2) is absent.
+  mem.set('warden:ui:v1', JSON.stringify({ activeTabs: ['chat-a'], theme: 'dark', density: 'compact' }));
+  const ui = loadUi();
+  // The data survived the (simulated) version bump and was read correctly.
+  assert.deepEqual(ui.activeTabs, ['chat-a']);
+  assert.equal(ui.theme, 'dark');
+  assert.equal(ui.density, 'compact');
+  // The payload physically migrated forward: v2 now holds it, v1 is cleared.
+  assert.ok(mem.has('warden:ui:v2'), 'payload promoted to the current key');
+  assert.ok(!mem.has('warden:ui:v1'), 'old key removed after promotion');
+});
+
+test('UI data under the current key (v2) is read as-is and triggers no migration', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['keep'], theme: 'light' }));
+  const ui = loadUi();
+  assert.deepEqual(ui.activeTabs, ['keep']);
+  assert.equal(ui.theme, 'light');
+  // No older key existed, so none was touched.
+  assert.ok(!mem.has('warden:ui:v1'), 'no spurious older key created');
+});
+
+test('UI data under a legacy unversioned key (warden:ui) is promoted to v2', () => {
+  reset();
+  // Pre-versioning shape: the bare prefix key, no :vN suffix.
+  mem.set('warden:ui', JSON.stringify({ activeTabs: ['legacy'], terminalFontSize: 18 }));
+  const ui = loadUi();
+  assert.deepEqual(ui.activeTabs, ['legacy']);
+  assert.equal(ui.terminalFontSize, 18);
+  assert.ok(mem.has('warden:ui:v2'), 'legacy payload promoted to the current key');
+  assert.ok(!mem.has('warden:ui'), 'legacy unversioned key removed after promotion');
+});
+
+test('UI migration prefers the newest surviving version (v2 beats v1)', () => {
+  reset();
+  // Both keys present (e.g. a partial bump left an old copy behind). The current
+  // version wins and the older copy is left untouched (it was never read).
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['newer'] }));
+  mem.set('warden:ui:v1', JSON.stringify({ activeTabs: ['older'] }));
+  const ui = loadUi();
+  assert.deepEqual(ui.activeTabs, ['newer']);
+  assert.ok(mem.has('warden:ui:v1'), 'unread older key is not disturbed');
+});
+
+test('corrupt UI JSON falls back to defaults instead of throwing (WARDEN-89)', () => {
+  reset();
+  mem.set('warden:ui:v2', '{not valid json');
+  const ui = loadUi();
+  assert.deepEqual(ui.activeTabs, []);
+  assert.equal(ui.theme, 'system', 'falls back to the default theme');
+});
+
+test('observer data under a legacy unversioned key (warden:observer) promotes to v1', () => {
+  reset();
+  mem.set('warden:observer', JSON.stringify({ openIds: ['obs-1', 'obs-2'], activeId: 'obs-2' }));
+  const obs = loadObs();
+  assert.deepEqual(obs.openIds, ['obs-1', 'obs-2']);
+  assert.equal(obs.activeId, 'obs-2');
+  assert.ok(mem.has('warden:observer:v1'), 'observer payload promoted to the current key');
+  assert.ok(!mem.has('warden:observer'), 'legacy observer key removed after promotion');
+});
+
+test('observer round-trips under the current key without disturbing older keys', () => {
+  reset();
+  saveObs({ openIds: ['s1'], activeId: 's1' });
+  assert.deepEqual(loadObs().openIds, ['s1']);
+  assert.ok(!mem.has('warden:observer'), 'no legacy key created on a normal save/load');
 });
 
 console.log(`\n✓ STORAGE TESTS PASS (${passed})`);
