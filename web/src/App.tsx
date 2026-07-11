@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
-import { loadUi, saveUi, persistUiState, initialWorkspace, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type CustomPreset, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
+import { loadUi, saveUi, persistUiState, initialWorkspace, DEFAULT_TERMINAL_FONT_FAMILY, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type CustomPreset, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
 import { applyTheme, listenSystemThemeChange, getEffectiveTheme, resolveTerminalTheme, type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
 import type { Chat } from '@/lib/types';
@@ -128,6 +128,12 @@ function App() {
   const [paneLayout, setPaneLayout] = useState<PaneLayout>(() => uiState.paneLayout ?? 'auto');
   const [terminalFontSize, setTerminalFontSize] = useState(() => uiState.terminalFontSize ?? 14);
   const [terminalScrollback, setTerminalScrollback] = useState(() => uiState.terminalScrollback ?? 10000);
+  // Terminal font family: the CSS font-family value every agent pane renders.
+  // '' / absent / blank → DEFAULT_TERMINAL_FONT_FAMILY (today's exact stack) so
+  // an empty or unknown custom value can never blank a pane (uses || not ?? on
+  // purpose: '' must fall back). Pure client-side pref (like terminalFontSize/
+  // scrollback): persisted by the saveUi effect below, never sent to the backend.
+  const [terminalFontFamily, setTerminalFontFamily] = useState(() => uiState.terminalFontFamily || DEFAULT_TERMINAL_FONT_FAMILY);
   // Terminal color scheme: 'auto' follows the effective app theme (above);
   // 'dark'/'light' force the terminal surface. Pure client-side pref (like
   // terminalFontSize/scrollback): persisted by the saveUi effect below, never
@@ -242,8 +248,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, restoreOnStartup, startedEmpty]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -833,6 +839,8 @@ function App() {
           setTerminalFontSize={setTerminalFontSize}
           terminalScrollback={terminalScrollback}
           setTerminalScrollback={setTerminalScrollback}
+          terminalFontFamily={terminalFontFamily}
+          setTerminalFontFamily={setTerminalFontFamily}
           terminalColorScheme={terminalColorScheme}
           setTerminalColorScheme={setTerminalColorScheme}
           terminalCursorStyle={terminalCursorStyle}
@@ -919,6 +927,7 @@ function App() {
             fontSize={terminalFontSize}
             onFontSizeChange={setTerminalFontSize}
             scrollback={terminalScrollback}
+            fontFamily={terminalFontFamily}
             paneLayout={paneLayout}
             terminalTheme={terminalTheme}
             terminalCursorStyle={terminalCursorStyle}

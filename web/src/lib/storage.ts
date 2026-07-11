@@ -12,6 +12,14 @@ const KEY = 'warden:ui:v2';
 const KEY_PREFIX = 'warden:ui';
 const KEY_VERSION = 2;
 
+// The default monospace font stack for every agent terminal pane. Must stay
+// byte-identical to the previous hardcoded literal baked into PaneTile's
+// Terminal constructor so "System default" reproduces today's exact appearance.
+// Exported so storage (the pref owner), PaneTile (the use site), and the
+// Settings curated list ("System default") all reference one source of truth.
+export const DEFAULT_TERMINAL_FONT_FAMILY =
+  '"Cascadia Code", "JetBrains Mono", "Fira Code", "Symbols Nerd Font", ui-monospace, Menlo, Consolas, monospace';
+
 // Whether launch reopens the previous workspace ('previous', default = today's
 // exact behavior) or starts with a clean workspace ('empty'). Pure client-side pref.
 export type RestoreOnStartup = 'previous' | 'empty';
@@ -97,6 +105,12 @@ export interface UiState {
   observerWidth?: number;
   terminalFontSize?: number;
   terminalScrollback?: number;
+  // Terminal font family: the CSS font-family value xterm renders in every agent
+  // pane. '' / absent = the DEFAULT_TERMINAL_FONT_FAMILY stack (today's look);
+  // a curated named font or any pasted CSS value (e.g. a Nerd Font) otherwise.
+  // Pure client-side pref (like terminalFontSize/scrollback); never sent to the
+  // backend / /api/config.
+  terminalFontFamily?: string;
   // Terminal color scheme: 'auto' (default) makes the terminal surface follow
   // the app's Light/Dark/System chrome preference; 'dark'/'light' force it
   // regardless of chrome (the common power-user "always dark terminal" case).
@@ -208,7 +222,8 @@ const DEFAULT_UI: UiState = {
   activeTabs: [], hiddenTabs: [], openPanes: [], focused: null,
   sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true,
   sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14,
-  terminalScrollback: 10000, terminalColorScheme: 'auto',
+  terminalScrollback: 10000, terminalFontFamily: '',
+  terminalColorScheme: 'auto',
   terminalCursorStyle: 'blink-block',
   theme: 'system', density: 'comfortable', paneLayout: 'auto',
   restoreOnStartup: 'previous',
@@ -240,6 +255,7 @@ export function loadUi(): UiState {
         observerWidth: typeof v.observerWidth === 'number' ? v.observerWidth : 380,
         terminalFontSize: typeof v.terminalFontSize === 'number' ? v.terminalFontSize : 14,
         terminalScrollback: typeof v.terminalScrollback === 'number' ? v.terminalScrollback : 10000,
+        terminalFontFamily: typeof v.terminalFontFamily === 'string' ? v.terminalFontFamily : '',
         terminalColorScheme: ['auto', 'dark', 'light'].includes(v.terminalColorScheme) ? v.terminalColorScheme : 'auto',
         terminalCursorStyle: ['blink-block', 'steady-block', 'blink-underline', 'steady-underline', 'blink-bar', 'steady-bar'].includes(v.terminalCursorStyle) ? v.terminalCursorStyle : 'blink-block',
         theme: v.theme ?? 'system',
