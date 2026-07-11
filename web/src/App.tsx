@@ -10,6 +10,7 @@ import { ChatSidebar } from '@/components/ChatSidebar';
 import { PaneGrid } from '@/components/PaneGrid';
 import { ObserverTabs } from '@/components/ObserverTabs';
 import { SettingsPage } from '@/components/SettingsPage';
+import { OpenChatBrowserPage } from '@/components/OpenChatBrowserPage';
 import { GlobalSearchDialog } from '@/components/GlobalSearchDialog';
 import { HealthDashboard } from '@/components/HealthDashboard';
 import { AttentionBadge } from '@/components/AttentionBadge';
@@ -395,6 +396,31 @@ function App() {
     void discoverHost(THIS_MACHINE);
   }, [discoverHost]);
 
+  // Poll host connectivity statuses every 30s. Lifted here from ChatSidebar so the
+  // dots stay live while the full-page Open Chat browser (which replaces the
+  // sidebar) is open. Graceful degradation: on failure every host reads 'unknown'.
+  useEffect(() => {
+    const fetchHostStatuses = async () => {
+      try {
+        const r = await fetch('/api/hosts/status');
+        const j = await r.json();
+        const statuses: Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }> = {};
+        j.hosts.forEach((h: { host: string; status: string; latency_ms: number | null }) => {
+          statuses[h.host] = {
+            status: h.status as 'online' | 'offline' | 'unknown',
+            latency_ms: h.latency_ms,
+          };
+        });
+        setHostStatuses(statuses);
+      } catch {
+        // Graceful degradation — leave prior statuses (or unknown) in place.
+      }
+    };
+    fetchHostStatuses();
+    const interval = window.setInterval(fetchHostStatuses, 30000);
+    return () => window.clearInterval(interval);
+  }, []);
+
   // open chat: add to active tabs + open pane + focus
   const openChat = useCallback((id: string) => {
     setActiveTabs((p) => p.includes(id) ? p : [...p, id]);
@@ -698,8 +724,21 @@ function App() {
   const terminalTheme = resolveTerminalTheme(terminalColorScheme, effectiveTheme);
   // The chat the observer should bind to when "observe focused" is clicked.
   const focusedChat = chats.find((c) => (c.key || c.id) === focused) || null;
+  // Selectable host list for the Open Chat browser's multiselect chips: this
+  // machine plus every configured SSH host.
+  const hosts = [THIS_MACHINE, ...sshHosts];
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Full-page "Open chat" browser view (WARDEN-216). Mirrors settingsOpen: an
+  // App-level boolean toggled by the sidebar's "Open chat…" button; when true the
+  // view-switch ternary below swaps the workspace for the browser page. Formerly a
+  // blocking Dialog modal — now a full-page view per WARDEN-68 Rule 7 (the browser
+  // is an unbounded list + search, not a ≤200-symbol confirmation).
+  const [chatBrowserOpen, setChatBrowserOpen] = useState(false);
+  // Host connectivity statuses. Polled at the App level (formerly inside
+  // ChatSidebar) so they stay live while the full-page browser view — which
+  // replaces ChatSidebar — is open. Fed to both ChatSidebar and the browser page.
+  const [hostStatuses, setHostStatuses] = useState<Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }>>({});
   // Display customization settings
   const [displaySettings, setDisplaySettings] = useState({
     showHostTags: true,
@@ -884,6 +923,16 @@ function App() {
           defaultSplitShell={defaultSplitShell}
           setDefaultSplitShell={setDefaultSplitShell}
         />
+      ) : chatBrowserOpen ? (
+        <OpenChatBrowserPage
+          onClose={() => setChatBrowserOpen(false)}
+          hosts={hosts}
+          chats={chats}
+          onOpenChat={openChat}
+          onResume={resumeSession}
+          onDiscoverHost={discoverHost}
+          hostStatuses={hostStatuses}
+        />
       ) : (
         <>
       <header className="flex items-center gap-3 px-3 h-11 border-b shrink-0">
@@ -936,6 +985,8 @@ function App() {
               showStatusIndicators={displaySettings.showStatusIndicators}
               showProjectBadges={displaySettings.showProjectBadges}
               hideOfflineHosts={displaySettings.hideOfflineHosts}
+              onOpenChatBrowser={() => setChatBrowserOpen(true)}
+              hostStatuses={hostStatuses}
             />
           </ErrorBoundary>
         </section>

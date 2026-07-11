@@ -6,24 +6,23 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { EmptyState } from '@/components/EmptyState';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
-import { SlidersHorizontal, WifiOff, EyeIcon } from 'lucide-react';
+import { SlidersHorizontal, WifiOff } from 'lucide-react';
 import { NewChatForm } from './NewChatForm';
 import { CollectionsSection } from './CollectionsSection';
 import { CreateCollectionDialog } from './CreateCollectionDialog';
 import { DiffViewer } from './DiffViewer';
 import { DiffBlock } from './DiffBlock';
-import { SessionTranscriptViewer } from './SessionTranscriptViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { cn } from '@/lib/utils';
 import { summarizeProjectGitState } from '@/lib/gitStateSummary';
 import type { Chat, Collection } from '@/lib/types';
 import { loadUi, saveUi } from '@/lib/storage';
+import { THIS_MACHINE, ago, basename, chatType, displayName, hostTagOf } from '@/lib/chatDisplay';
 import { StatusDot } from '@/components/StatusDot';
 
 // One row from /api/git-log (a parsed %h|%s|%an|%ar git log line).
@@ -114,29 +113,15 @@ interface Props {
   showStatusIndicators?: boolean;
   showProjectBadges?: boolean;
   hideOfflineHosts?: boolean;
+  // Open the full-page "Open chat" browser view (App-level boolean). Replaces the
+  // former in-sidebar modal trigger.
+  onOpenChatBrowser: () => void;
+  // Host connectivity statuses (polled at the App level so they stay live while
+  // the full-page browser view — which replaces this sidebar — is open).
+  hostStatuses: Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }>;
 }
 
-const THIS_MACHINE = '(local)';
 const LABEL: Record<string, string> = { '(local)': 'this machine' };
-function ago(ms: number) {
-  const s = Math.floor((Date.now() - ms) / 1000);
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h`;
-  return `${Math.floor(s / 86400)}d`;
-}
-function basename(p: string) { return (p || '').replace(/[\\/]+/g, '/').replace(/\/$/, '').split('/').pop() || p; }
-function chatType(c?: Chat): string {
-  if (!c) return '?';
-  if (c.kind === 'yatfa') return 'yatfa';
-  const bin = (c.cmd || '').split(/\s+/)[0].replace(/^.*[/\\]/, '');
-  if (bin === 'claude' || bin === 'claude.exe') return (c.cmd || '').includes('--resume') ? 'resume' : 'claude';
-  if (['bash', 'sh', 'zsh', 'fish', 'pwsh', 'powershell', 'cmd.exe'].includes(bin)) return 'shell';
-  // An empty cmd is a tmux session launched with no explicit command — i.e. the
-  // host's login shell (the ＋ split "no explicit shell" case, WARDEN-223) — so
-  // it reads as 'shell', not the generic 'manual'.
-  return bin || 'shell';
-}
 
 // Agent-list filter/sort controls (WARDEN-91). Shared across the root, host, and
 // collection views so the option lists and matching logic can never drift.
@@ -204,26 +189,6 @@ const TYPE_COLOR: Record<string, string> = {
 
 // Process + cwd basename label, e.g. "claude · warden". This is the guaranteed fallback
 // that ensures a spawned chat's meaningless random id (chat-xxxxx) is NEVER the label.
-function processCwdLabel(c: Chat): string {
-  const proc = chatType(c);
-  const dir = basename(c.cwd || '');
-  return dir ? `${proc} · ${dir}` : proc;
-}
-
-// Display-name precedence (WARDEN-163):
-//   yatfa agents     → project-role (the container/key name; not user-renameable)
-//   manual/spawned   → user rename > Claude description (carried as `name` on resume)
-//                      > process+cwd basename > internal key
-// The raw chat-xxxxx id is NEVER shown: a fresh spawn has name === key, so it falls
-// through to processCwdLabel. A user rename or a resumed session sets name ≠ key.
-function displayName(c?: Chat): string {
-  if (!c) return '?';
-  if (c.kind === 'yatfa') return c.key || c.id;
-  if (c.name && c.name !== c.key) return c.name;
-  return processCwdLabel(c);
-}
-
-
 function findChat(chats: Chat[], id: string) { return chats.find((c) => (c.key || c.id) === id); }
 
 // Skeleton components for loading states
@@ -299,7 +264,7 @@ function GitStateBadges({ dirty, unpushed }: { dirty: number; unpushed: number }
   );
 }
 
-export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts }: Props) {
+export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
   const [offlineExpanded, setOfflineExpanded] = useState(false);
@@ -313,13 +278,6 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [projectFilter, setProjectFilter] = useState<string | null>(null);
   const [hostSessions, setHostSessions] = useState<Record<string, { sessions: ClaudeSession[]; claudeAvailable?: boolean }>>({});
   const [loadingHost, setLoadingHost] = useState<string | null>(null);
-  const [allSessions, setAllSessions] = useState<(ClaudeSession & { host: string })[]>([]);
-  const [loadingAllSessions, setLoadingAllSessions] = useState(false);
-  // Cross-host "All Sessions" pagination (WARDEN-176). `hasMoreSessions` mirrors the
-  // server's `hasMore` so Load-more converges; `loadingMoreSessions` gates the button.
-  const [hasMoreSessions, setHasMoreSessions] = useState(false);
-  const [loadingMoreSessions, setLoadingMoreSessions] = useState(false);
-  const [browserOpen, setBrowserOpen] = useState(false);
   const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; detached?: boolean; headSha?: string | null; clean: boolean | null; cwd: string; files?: GitFile[]; ahead?: number | null; behind?: number | null; inProgress?: { operation: string | null }; stashCount?: number | null }>>({});
   // recent commit history (git log) per chatId — cached so re-expanding the badge is instant
   const [gitLog, setGitLog] = useState<Record<string, GitCommit[]>>({});
@@ -354,11 +312,6 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     () => summarizeProjectGitState(chats, gitStatus),
     [chats, gitStatus],
   );
-
-  const [hostStatuses, setHostStatuses] = useState<Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }>>({});
-
-  // Fetch all sessions on mount
-  useEffect(() => { fetchAllSessions(); }, []);
 
   const fetchHostSessions = async (host: string) => {
     setLoadingHost(host);
@@ -456,48 +409,6 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     }
   };
 
-  // Page size for the cross-host "All Sessions" list. Matches the server default
-  // (and the old hard global cap), so page 1 is identical to the pre-pagination UI.
-  const ALL_SESSIONS_PAGE = 40;
-
-  // Fetch page 1 of the cross-host session list (most-recent first), REPLACING the
-  // loaded set. Used on mount, on browser open, and as the manual refresh — every
-  // call resets to the newest page so the long tail is reached via Load-more, not
-  // by scrolling a stale list.
-  const fetchAllSessions = async () => {
-    setLoadingAllSessions(true);
-    try {
-      const r = await fetch(`/api/claude-sessions-all?offset=0&limit=${ALL_SESSIONS_PAGE}`);
-      const j = await r.json();
-      setAllSessions(j.sessions || []);
-      setHasMoreSessions(!!j.hasMore);
-    } catch (error) {
-      console.error('[claude-sessions-all] Failed:', error);
-    }
-    setLoadingAllSessions(false);
-  };
-
-  // Fetch the NEXT page and APPEND it to the loaded set. Offset = the number already
-  // loaded, since the server paginates over the global recency-sorted timeline.
-  // Sessions are deduped by host:id so a shifting timeline (a host becoming
-  // reachable between requests) can't produce visual duplicates.
-  const loadMoreSessions = async () => {
-    if (loadingMoreSessions || !hasMoreSessions) return;
-    setLoadingMoreSessions(true);
-    try {
-      const r = await fetch(`/api/claude-sessions-all?offset=${allSessions.length}&limit=${ALL_SESSIONS_PAGE}`);
-      const j = await r.json();
-      const next = (j.sessions || []) as (ClaudeSession & { host: string })[];
-      setHasMoreSessions(!!j.hasMore);
-      setAllSessions((prev) => {
-        const seen = new Set(prev.map((s) => `${s.host}:${s.id}`));
-        return [...prev, ...next.filter((s) => !seen.has(`${s.host}:${s.id}`))];
-      });
-    } catch (error) {
-      console.error('[claude-sessions-all load-more] Failed:', error);
-    }
-    setLoadingMoreSessions(false);
-  };
   const enterHost = (host: string) => {
     const status = hostStatuses[host];
     if (status?.status === 'offline') {
@@ -538,30 +449,6 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   // Fetch collections on mount
   useEffect(() => {
     fetchCollections();
-  }, []);
-
-  // Fetch host connectivity statuses every 30 seconds
-  useEffect(() => {
-    const fetchHostStatuses = async () => {
-      try {
-        const r = await fetch('/api/hosts/status');
-        const j = await r.json();
-        const statuses: Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }> = {};
-        j.hosts.forEach((h: { host: string; status: string; latency_ms: number | null }) => {
-          statuses[h.host] = {
-            status: h.status as 'online' | 'offline' | 'unknown',
-            latency_ms: h.latency_ms
-          };
-        });
-        setHostStatuses(statuses);
-      } catch {
-        // Graceful degradation - show unknown status
-      }
-    };
-
-    fetchHostStatuses();
-    const interval = setInterval(fetchHostStatuses, 30000);
-    return () => clearInterval(interval);
   }, []);
 
   // Load filter/sort from localStorage on mount
@@ -972,7 +859,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => setBrowserOpen(true)}
+              onClick={onOpenChatBrowser}
               className="w-full justify-start gap-1 text-xs text-blue-400 hover:text-blue-300"
             >
               <span>↗</span>
@@ -1005,22 +892,6 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
         onOpenChange={setCreateDialogOpen}
         onCreated={handleCollectionCreated}
         existingCollections={collections}
-      />
-      <OpenChatBrowser
-        open={browserOpen}
-        onOpenChange={setBrowserOpen}
-        hosts={hosts}
-        chats={chats}
-        allSessions={allSessions}
-        loadingAllSessions={loadingAllSessions}
-        hasMoreSessions={hasMoreSessions}
-        loadingMoreSessions={loadingMoreSessions}
-        onRefreshSessions={fetchAllSessions}
-        onLoadMoreSessions={loadMoreSessions}
-        onOpenChat={onOpenChat}
-        onResume={onResume}
-        onDiscoverHost={onDiscoverHost}
-        hostStatuses={hostStatuses}
       />
       <DiffViewer
         chatId={diffTarget?.chatId ?? ''}
@@ -1564,7 +1435,7 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hos
 }
 
 // Host tag for display: (local) → "local", else the host name.
-function hostTagOf(host: string) { return host === THIS_MACHINE ? 'local' : host; }
+
 
 // A row in the primary "opened chats" list (the user's activeTabs working set).
 // Table-like columns: drag handle · status indicator · display name · last-activity time
@@ -1676,300 +1547,5 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showHostTags
         <ContextMenuItem variant="destructive" onSelect={() => onRemove()}>Remove tab</ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
-  );
-}
-
-// ---- "Open chat" discovery browser ----
-// Persisted host multiselect (the user's browsing scope). Stored under its own key so it
-// can't race with App's centralized UiState save. Undefined = first run → default later.
-const DISCOVER_HOSTS_KEY = 'warden:discover-hosts:v1';
-function loadDiscoverHosts(): string[] | undefined {
-  try {
-    const v = JSON.parse(localStorage.getItem(DISCOVER_HOSTS_KEY) || '');
-    if (Array.isArray(v)) return v.filter((h) => typeof h === 'string');
-  } catch { /* ignore */ }
-  return undefined;
-}
-function saveDiscoverHosts(hosts: string[]) {
-  try { localStorage.setItem(DISCOVER_HOSTS_KEY, JSON.stringify(hosts)); } catch { /* ignore */ }
-}
-
-// One normalized row in the merged discovery list.
-interface DiscoverItem {
-  id: string;            // unique list key
-  kind: 'live' | 'history';
-  label: string;         // display name
-  hostTag: string;
-  sub: string;           // secondary line: host · cwd · time
-  time: number;          // recency, for sorting (0 = unknown)
-  openId?: string;       // live: chat key/id to openChat
-  resume?: { id: string; description: string; cwd: string; host: string }; // history: resume params
-  snippet?: string;      // content-match snippet (full-content search only)
-}
-
-function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView }: { it: DiscoverItem; resumingId: string | null; onOpen: () => void; onResume: () => void; onView: () => void; }) {
-  if (it.kind === 'live') {
-    return (
-      <Button variant="ghost" onClick={onOpen} className="w-full h-auto justify-start gap-2 px-2 py-1.5 text-xs font-normal hover:bg-accent">
-        <StatusDot tone="green" variant="solid" label="Live session" />
-        <span className="truncate flex-1">{it.label}</span>
-        {it.time ? <span className="text-[10px] text-muted-foreground shrink-0">{ago(it.time)}</span> : null}
-        <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span>
-        <span className="text-[10px] text-green-500/80 shrink-0">live</span>
-      </Button>
-    );
-  }
-  const isLoading = resumingId === it.id;
-  return (
-    <div className="group flex items-center gap-2 px-2 py-1.5 rounded-md text-xs hover:bg-accent transition-colors">
-      <StatusDot tone="cyan" variant="ring" label="History session (resumable)" />
-      <div className="flex-1 min-w-0">
-        <Button variant="ghost" onClick={onResume} disabled={isLoading} className="h-auto w-full justify-start px-1 py-0 truncate text-xs font-normal">{it.label}</Button>
-        {it.snippet ? <div className="px-1 truncate text-[10px] text-muted-foreground/80 italic" title={it.snippet}>{it.snippet}</div> : null}
-      </div>
-      {it.time ? <span className="text-[10px] text-muted-foreground shrink-0">{ago(it.time)}</span> : null}
-      <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span>
-      <IconTooltip label="view transcript (read-only)">
-        <Button variant="ghost" size="icon-xs" onClick={onView} aria-label="View transcript" className="text-muted-foreground hover:text-foreground">
-          <EyeIcon />
-        </Button>
-      </IconTooltip>
-      <IconTooltip label="bump to live (resume)" disabled={isLoading}>
-        <Button variant="ghost" size="xs" onClick={onResume} disabled={isLoading} className="text-[10px] text-cyan-400 hover:text-cyan-300 px-1 h-auto">
-          {isLoading ? <Skeleton className="h-3 w-6 inline-block" /> : '↻ resume'}
-        </Button>
-      </IconTooltip>
-    </div>
-  );
-}
-
-// Single merged, host-scoped picker. Hosts are multiselect chips (persisted, defaulting to
-// the user's usual hosts). The list dedupes: a Claude history session already running as a
-// live resume-tmux appears once (as a live item), not in both live and history.
-function OpenChatBrowser({ open, onOpenChange, hosts, chats, allSessions, loadingAllSessions, hasMoreSessions, loadingMoreSessions, onRefreshSessions, onLoadMoreSessions, onOpenChat, onResume, onDiscoverHost, hostStatuses }: {
-  open: boolean;
-  onOpenChange: (o: boolean) => void;
-  hosts: string[];
-  chats: Chat[];
-  allSessions: (ClaudeSession & { host: string })[];
-  loadingAllSessions: boolean;
-  hasMoreSessions: boolean;
-  loadingMoreSessions: boolean;
-  onRefreshSessions: () => void;
-  onLoadMoreSessions: () => void;
-  onOpenChat: (id: string) => void;
-  onResume: (id: string, description: string, cwd: string, host: string) => void;
-  onDiscoverHost: (host: string) => void;
-  hostStatuses: Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }>;
-}) {
-  const [selected, setSelected] = useState<string[] | undefined>(undefined);
-  const [query, setQuery] = useState('');
-  const [resumingId, setResumingId] = useState<string | null>(null);
-  // The history session whose read-only transcript is open (null = viewer closed).
-  // Lifted here (not per-row) so the viewer is a sibling dialog over the browser.
-  const [viewing, setViewing] = useState<{ id: string; host: string; label: string } | null>(null);
-  const [contentResults, setContentResults] = useState<SessionSearchResult[]>([]);
-  const [searchLoading, setSearchLoading] = useState(false);
-
-  // Load persisted host selection once.
-  useEffect(() => { setSelected(loadDiscoverHosts()); }, []);
-
-  // "usual hosts" = hosts of the user's currently-active chats (their daily scope).
-  const usualHosts = useMemo(() => {
-    const set = new Set<string>();
-    for (const c of chats) if (c.active && c.host) set.add(c.host);
-    return Array.from(set);
-  }, [chats]);
-
-  // Resolved selection: persisted → usual hosts → all hosts.
-  const effective = useMemo(() => {
-    if (selected && selected.length) return selected;
-    return usualHosts.length ? usualHosts : hosts;
-  }, [selected, usualHosts, hosts]);
-
-  // On open: refresh history sessions and discover selected remote hosts so live items
-  // populate. Fire-and-forget — chats update flows back as each host resolves.
-  useEffect(() => {
-    if (!open) return;
-    onRefreshSessions();
-    effective.forEach((h) => { if (h !== THIS_MACHINE) onDiscoverHost(h); });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
-
-  // Full-content session search (WARDEN-161). When the query is non-empty, debounce
-  // and hit /api/claude-sessions-search so matches INSIDE a session's body — not just
-  // its summary — surface, including sessions outside the top-40 list. Empty query
-  // clears results so the instant top-40 list is preserved (no regression).
-  useEffect(() => {
-    const q = query.trim();
-    if (!q) { setContentResults([]); setSearchLoading(false); return; }
-    setSearchLoading(true);
-    // Clear the previous query's results immediately so stale matches (and their
-    // snippets) are never rendered under the new query while the debounce waits.
-    setContentResults([]);
-    let cancelled = false;
-    const t = setTimeout(async () => {
-      try {
-        const r = await fetch(`/api/claude-sessions-search?q=${encodeURIComponent(q)}`);
-        if (!r.ok) throw new Error(`session search HTTP ${r.status}`);
-        const j = await r.json();
-        if (!cancelled) setContentResults(Array.isArray(j.results) ? j.results : []);
-      } catch (error) {
-        console.error('[claude-sessions-search] Failed:', error);
-        if (!cancelled) setContentResults([]);
-      } finally {
-        if (!cancelled) setSearchLoading(false);
-      }
-    }, 300);
-    return () => { cancelled = true; clearTimeout(t); };
-  }, [query]);
-
-  const toggleHost = (h: string) => {
-    setSelected((prev) => {
-      const base = prev && prev.length ? prev : effective;
-      const next = base.includes(h) ? base.filter((x) => x !== h) : [...base, h];
-      saveDiscoverHosts(next);
-      if (!base.includes(h) && h !== THIS_MACHINE) onDiscoverHost(h);
-      return next;
-    });
-  };
-
-  // Build the merged, deduped list. Live tmux sessions first (tracking resume- keys to
-  // dedupe), then Claude history sessions minus those already shown live.
-  const items = useMemo<DiscoverItem[]>(() => {
-    const sel = new Set(effective);
-    const out: DiscoverItem[] = [];
-    const liveResumeSid8 = new Set<string>();
-    for (const c of chats) {
-      if (!sel.has(c.host) || c.active !== true) continue;
-      const key = c.key || c.id;
-      if (key && key.startsWith('resume-')) liveResumeSid8.add(key.slice(7));
-      out.push({
-        id: 'live:' + key, kind: 'live', label: displayName(c),
-        hostTag: hostTagOf(c.host),
-        sub: `${hostTagOf(c.host)}${c.cwd ? ' · ' + basename(c.cwd) : ''}`,
-        time: c.lastActivity || 0, openId: key,
-      });
-    }
-    // History source: full-content search results when a query is present
-    // (reaches sessions OUTSIDE the top-40 by what was discussed), else the
-    // instant top-40 list. Either way, dedupe against live resume sessions.
-    const q = query.trim();
-    const history: { id: string; host: string; cwd: string; summary: string; mtime: number; snippet?: string }[] = q
-      ? contentResults.map((r) => ({ id: r.sessionId, host: r.host, cwd: r.cwd, summary: r.summary, mtime: r.mtime, snippet: r.snippet }))
-      : allSessions.map((s) => ({ id: s.id, host: s.host, cwd: s.cwd, summary: s.summary, mtime: s.mtime }));
-    for (const s of history) {
-      if (!sel.has(s.host)) continue;
-      if (liveResumeSid8.has(s.id.slice(0, 8))) continue; // already shown as live
-      out.push({
-        id: 'hist:' + s.host + ':' + s.id, kind: 'history',
-        label: s.summary || `${basename(s.cwd) || 'session'} · ${hostTagOf(s.host)}`,
-        hostTag: hostTagOf(s.host), sub: `${hostTagOf(s.host)} · ${basename(s.cwd)}`,
-        time: s.mtime, snippet: s.snippet,
-        resume: { id: s.id, description: s.summary, cwd: s.cwd, host: s.host },
-      });
-    }
-    out.sort((a, b) => b.time - a.time);
-    return out;
-  }, [effective, chats, allSessions, contentResults, query]);
-
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return items;
-    // History rows already matched via full-content search; only live rows get
-    // the metadata filter so a running session is still findable by name/host.
-    return items.filter((it) => {
-      if (it.kind === 'history') return true;
-      return it.label.toLowerCase().includes(q) || it.sub.toLowerCase().includes(q);
-    });
-  }, [items, query]);
-
-  const handleResume = async (it: DiscoverItem) => {
-    if (!it.resume || resumingId) return;
-    setResumingId(it.id);
-    try { await onResume(it.resume.id, it.resume.description, it.resume.cwd, it.resume.host); onOpenChange(false); }
-    finally { setResumingId(null); }
-  };
-
-  return (
-    <>
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
-        <DialogHeader>
-          <DialogTitle>Open chat</DialogTitle>
-          <DialogDescription>
-            One merged list across your hosts — live tmux sessions and Claude history. Search finds sessions by what was discussed in them, not just their title — across every host.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-wrap gap-1.5">
-            {hosts.map((h) => {
-              const on = effective.includes(h);
-              const st = hostStatuses[h];
-              return (
-                <Button key={h} size="xs" variant={on ? 'secondary' : 'outline'} onClick={() => toggleHost(h)} className="gap-1">
-                  <StatusDot
-                    size="size-1.5"
-                    tone={st?.status === 'online' ? 'green' : st?.status === 'offline' ? 'red' : 'muted'}
-                    variant={st?.status === 'online' ? 'solid' : st?.status === 'offline' ? 'square' : 'ring'}
-                    label={st?.status ? st.status.charAt(0).toUpperCase() + st.status.slice(1) : 'Unknown'}
-                  />
-                  {h === THIS_MACHINE ? 'this machine' : h}
-                </Button>
-              );
-            })}
-          </div>
-          <Input placeholder="Search live + history sessions…" value={query} onChange={(e) => setQuery(e.target.value)} className="text-xs" />
-          <ScrollArea className="max-h-80">
-            <div className="flex flex-col gap-0.5 pr-1">
-              {loadingAllSessions && items.length === 0 ? (
-                [1, 2, 3, 4].map((i) => <SessionRowSkeleton key={i} />)
-              ) : searchLoading && filtered.length === 0 ? (
-                [1, 2, 3].map((i) => <SessionRowSkeleton key={i} />)
-              ) : filtered.length === 0 ? (
-                <div className="text-xs text-muted-foreground p-4 text-center">
-                  {query ? 'No matches across selected hosts' : effective.length === 0 ? 'Select at least one host' : 'Nothing runnable on the selected hosts yet'}
-                </div>
-              ) : (
-                filtered.map((it) => (
-                  <DiscoverItemRow
-                    key={it.id}
-                    it={it}
-                    resumingId={resumingId}
-                    onOpen={() => { if (it.openId) { onOpenChat(it.openId); onOpenChange(false); } }}
-                    onResume={() => handleResume(it)}
-                    onView={() => { if (it.resume) setViewing({ id: it.resume.id, host: it.resume.host, label: it.label }); }}
-                  />
-                ))
-              )}
-              {searchLoading && filtered.length > 0 && (
-                <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-muted-foreground">
-                  <Skeleton className="size-2 rounded-full" /> searching session content…
-                </div>
-              )}
-              {/* Load more surfaces the long tail (sessions older than the newest
-                  page) without requiring a search. Only relevant when browsing the
-                  history list — a content query uses /api/claude-sessions-search,
-                  which has its own results, so hide this while searching. */}
-              {!query.trim() && hasMoreSessions && filtered.length > 0 && (
-                <button
-                  onClick={onLoadMoreSessions}
-                  disabled={loadingMoreSessions}
-                  className="mt-1 mx-auto text-[11px] text-blue-400 hover:text-blue-300 disabled:text-muted-foreground/50 disabled:cursor-default rounded px-2 py-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-                >
-                  {loadingMoreSessions ? 'loading…' : '↓ load more'}
-                </button>
-              )}
-            </div>
-          </ScrollArea>
-        </div>
-      </DialogContent>
-    </Dialog>
-    <SessionTranscriptViewer
-      open={!!viewing}
-      onOpenChange={(o) => { if (!o) setViewing(null); }}
-      session={viewing}
-    />
-    </>
   );
 }
