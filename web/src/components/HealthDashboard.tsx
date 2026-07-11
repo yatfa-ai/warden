@@ -12,6 +12,7 @@ import {
   type HostHealthGroup,
 } from '@/lib/healthUtils';
 import { StatusDot, type StatusTone } from '@/components/StatusDot';
+import { Button } from '@/components/ui/button';
 import { useHostStatuses } from '@/lib/useHostStatuses';
 
 interface Props {
@@ -128,6 +129,12 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
   // Bucket agents by host, order hosts degraded-first (offline → critical-heavy
   // → agent count), and order each host's agents healthy → critical. Pure inputs
   // → cheap to memoize; recomputes when the catalog or connectivity changes.
+  //
+  // The `.sort()` calls mutate `groups` and each `g.agents` in place. That is safe
+  // because `groupByHost` returns fresh arrays it owns (a new array per host, plus
+  // a spread copy of EMPTY_COUNTS) — nothing here is shared with `healthData`, so
+  // sorting cannot mutate the wire data. If `groupByHost` is ever refactored to
+  // return shared/cached arrays, these sorts would silently mutate them — revisit.
   const hostGroups = useMemo<HostHealthGroup[]>(() => {
     if (!healthData) return [];
     const groups = groupByHost(healthData.agents);
@@ -186,24 +193,32 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
       <div className="flex items-center gap-2 px-3 py-2 border-b shrink-0">
         <span className="font-semibold tracking-wide text-sm">Fleet Health</span>
         <div className="ml-auto flex items-center gap-1.5">
-          {/* Group-by toggle (WARDEN-237): Health (default, no regression) / Host */}
+          {/* Group-by toggle (WARDEN-237): Health (default, no regression) / Host.
+              Two shadcn Buttons in a labelled group — the active option uses
+              variant="secondary" so the selection reads at a glance, and size="xs"
+              supplies the compact sizing (replacing the old magic-number
+              px-1.5 py-0.5 text-[10px]). */}
           <div
             className="flex items-center rounded-md border border-border overflow-hidden"
             role="group"
             aria-label="Group agents by"
           >
-            <button
-              onClick={() => setGroupBy('health')}
+            <Button
+              variant={groupBy === 'health' ? 'secondary' : 'ghost'}
+              size="xs"
               aria-pressed={groupBy === 'health'}
+              onClick={() => setGroupBy('health')}
               title="Group agents by health state"
-              className={`px-1.5 py-0.5 text-[10px] transition-colors ${groupBy === 'health' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
-            >Health</button>
-            <button
-              onClick={() => setGroupBy('host')}
+              className="rounded-none"
+            >Health</Button>
+            <Button
+              variant={groupBy === 'host' ? 'secondary' : 'ghost'}
+              size="xs"
               aria-pressed={groupBy === 'host'}
+              onClick={() => setGroupBy('host')}
               title="Group agents by host, with connectivity + health distribution"
-              className={`px-1.5 py-0.5 text-[10px] transition-colors ${groupBy === 'host' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
-            >Host</button>
+              className="rounded-none"
+            >Host</Button>
           </div>
           <button className="text-xs text-muted-foreground hover:text-foreground active:scale-95 transition-all duration-150 ease-out" onClick={fetchHealth} disabled={loading}>
             {loading ? '…' : '↻'}
@@ -245,7 +260,7 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
       {/* Agent catalog */}
       {healthData && (
         <ScrollArea className="flex-1 min-h-0">
-          <div className="p-2 flex flex-col gap-3">
+          <div className="p-2 flex flex-col gap-3 min-w-0">
             {groupBy === 'health' ? (
               HEALTH_SECTION_ORDER.filter(section => {
                 const agents = healthData.groups[section];
@@ -280,52 +295,74 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
                   const hostLabel = group.host === '(local)' ? 'local' : group.host;
 
                   return (
-                    <div key={group.host} className="flex flex-col gap-1">
-                      {/* Per-host summary line: connectivity fused with health distribution */}
-                      <button
+                    <div key={group.host} className="flex flex-col gap-1 min-w-0">
+                      {/*
+                        Per-host header — TWO lines, so the health distribution (the most
+                        diagnosis-relevant content) always has room and is never clipped by
+                        a long hostname. Line 1 fuses connectivity + agent count; line 2 is
+                        the per-host health distribution.
+
+                        Why two lines: the dashboard panel is 320px (HEALTH_WIDTH). A long
+                        hostname (FQDN) and a rich distribution cannot both fit one line —
+                        the Radix ScrollArea viewport wraps content in display:table, which
+                        grows to the content's max-content, so a long single-word hostname
+                        would inflate the row past the panel and clip the distribution off
+                        the right edge. `truncate flex-1` on the hostname (mirroring the
+                        agent row) makes its max-content contribution ~0 so line 1 can't
+                        inflate the row; putting the distribution on its own line gives it
+                        the full panel width so even a 5-segment distribution fits. The
+                        `min-w-0` on this section + the content div break the min-width:auto
+                        cascade at each ancestor (WARDEN-237).
+                      */}
+                      <Button
+                        variant="ghost"
                         onClick={() => setCollapsedHosts(prev => ({ ...prev, [group.host]: !prev[group.host] }))}
                         aria-expanded={!collapsed}
                         aria-label={`${hostLabel}: ${group.agents.length} agent${group.agents.length !== 1 ? 's' : ''}${collapsed ? ', expand' : ', collapse'}`}
                         title={collapsed ? 'Expand host' : 'Collapse host'}
-                        className="flex items-center gap-1.5 px-2 py-1 rounded-md text-left hover:bg-accent/60 transition-colors w-full"
+                        className="flex flex-col items-stretch justify-start gap-0.5 h-auto w-full min-w-0 px-2 py-1 rounded-md font-normal"
                       >
-                        <span className="text-[10px] text-muted-foreground/60 w-2 shrink-0">{collapsed ? '▸' : '▾'}</span>
-                        <StatusDot
-                          tone={status?.status === 'online' ? 'green' : status?.status === 'offline' ? 'red' : 'gray'}
-                          variant={status?.status === 'online' ? 'solid' : status?.status === 'offline' ? 'square' : 'ring'}
-                          label={
-                            status?.status === 'online'
-                              ? `Online${status.latency_ms ? ` (${status.latency_ms}ms)` : ''}`
-                              : status?.status === 'offline' ? 'Offline' : 'Unknown connectivity'
-                          }
-                          title={
-                            status?.status === 'online' && status.latency_ms
-                              ? `${status.status} (${status.latency_ms}ms)`
-                              : status?.status || 'unknown'
-                          }
-                        />
-                        <span className="text-xs font-semibold truncate">
-                          {hostLabel}
-                        </span>
-                        <span className="text-[10px] text-muted-foreground shrink-0">
-                          {status?.status ?? 'unknown'}
-                          {status?.status === 'online' && status.latency_ms ? ` ${status.latency_ms}ms` : ''}
-                        </span>
-                        <span className="text-[10px] text-muted-foreground/50 shrink-0">·</span>
-                        <span className="text-[10px] text-muted-foreground shrink-0">
-                          {group.agents.length} agent{group.agents.length !== 1 ? 's' : ''}
-                        </span>
-                        {/* Health distribution — only non-zero states, colored to match the summary bar */}
+                        {/* Line 1: chevron + connectivity dot + host (truncates) + status + count */}
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="text-[10px] text-muted-foreground/60 w-2 shrink-0">{collapsed ? '▸' : '▾'}</span>
+                          <StatusDot
+                            tone={status?.status === 'online' ? 'green' : status?.status === 'offline' ? 'red' : 'gray'}
+                            variant={status?.status === 'online' ? 'solid' : status?.status === 'offline' ? 'square' : 'ring'}
+                            label={
+                              status?.status === 'online'
+                                ? `Online${status.latency_ms ? ` (${status.latency_ms}ms)` : ''}`
+                                : status?.status === 'offline' ? 'Offline' : 'Unknown connectivity'
+                            }
+                            title={
+                              status?.status === 'online' && status.latency_ms
+                                ? `${status.status} (${status.latency_ms}ms)`
+                                : status?.status || 'unknown'
+                            }
+                          />
+                          <span className="text-xs font-semibold truncate flex-1 min-w-0">
+                            {hostLabel}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground shrink-0">
+                            {status?.status ?? 'unknown'}
+                            {status?.status === 'online' && status.latency_ms ? ` ${status.latency_ms}ms` : ''}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground/50 shrink-0">·</span>
+                          <span className="text-[10px] text-muted-foreground shrink-0">
+                            {group.agents.length} agent{group.agents.length !== 1 ? 's' : ''}
+                          </span>
+                        </div>
+                        {/* Line 2: health distribution — only non-zero states, colored to match
+                            the summary bar. Indented (pl-7) to align under the hostname. */}
                         {dist.length > 0 && (
-                          <span className="flex items-center gap-1.5 ml-auto shrink-0">
+                          <div className="flex items-center gap-1.5 min-w-0 pl-7">
                             {dist.map(s => (
                               <span key={s} className={`text-[10px] ${HEALTH_DIST_COLOR[s]}`}>
                                 {group.counts[s]} {formatHealthState(s).toLowerCase()}
                               </span>
                             ))}
-                          </span>
+                          </div>
                         )}
-                      </button>
+                      </Button>
 
                       {/* Agents beneath, reusing the standard row */}
                       {!collapsed && (
