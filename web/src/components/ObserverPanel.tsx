@@ -770,6 +770,7 @@ const TOOL_LABELS: Record<string, string> = {
   summarize_chats: 'summarize chats',
   analyze_agents: 'analyze agents',
   suggest_next_actions: 'suggest actions',
+  alert_changes: 'alert changes',
 };
 
 function toolLabel(name: string): string {
