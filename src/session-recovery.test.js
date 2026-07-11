@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { probeSession } from './tmux.js';
-import { runLocalTmux } from './ssh.js';
+import { runLocalTmux, shellQuote } from './ssh.js';
 import { classifyProbe } from './sessionRecovery.js';
 
 /**
@@ -147,6 +147,14 @@ describe('/api/respawn HTTP endpoint (real Express app from server.js)', () => {
   let tempHome;
   const session = `warden-test-respawn-${process.pid}-${Math.random().toString(36).slice(2, 6)}`;
   const nocmdSession = `warden-test-nocmd-${process.pid}-${Math.random().toString(36).slice(2, 6)}`;
+  // A chat whose catalog cmd is bare `claude …` — the WARDEN-231 blocker case.
+  // The fix must resolve bare `claude` to an absolute path before spawning
+  // (resolveClaudeCmd); the test asserts the spawned argv carries that absolute
+  // path, not the bare word. See the claude-cmd `before` setup below.
+  const claudeSession = `warden-test-claude-${process.pid}-${Math.random().toString(36).slice(2, 6)}`;
+  let fakeClaude;
+  let marker;
+  let originalExecPath;
 
   before(async () => {
     originalHome = process.env.HOME;
@@ -157,11 +165,26 @@ describe('/api/respawn HTTP endpoint (real Express app from server.js)', () => {
     fs.writeFileSync(path.join(wardenDir, 'config.json'), JSON.stringify({ hosts: [] }));
     // Two local catalog chats: one respawnable (cmd that stays alive), one
     // cmd-less (must be rejected — mirrors yatfa chats which have no cmd).
+    // Plus a bare-`claude` chat: detectClaude('(local)') honors CLAUDE_CODE_EXECPATH,
+    // so a fake binary placed OFF-PATH there is what resolveClaudeCmd must substitute.
+    const claudeDir = path.join(tempHome, 'fake-claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fakeClaude = path.join(claudeDir, 'claude');
+    marker = path.join(tempHome, 'respawn-argv.txt');
+    // The fake `claude` records how it was invoked ($0) then idles. If respawn ran
+    // the raw catalog cmd verbatim, bare `claude` is not on PATH (the fake dir
+    // isn't) and the session dies → 500; the marker would never be written. Only
+    // resolveClaudeCmd substituting the absolute CLAUDE_CODE_EXECPATH lands here.
+    fs.writeFileSync(fakeClaude, `#!/bin/sh\necho "$0" > ${shellQuote(marker)}\nexec sleep 3600\n`);
+    fs.chmodSync(fakeClaude, 0o755);
+    originalExecPath = process.env.CLAUDE_CODE_EXECPATH;
+    process.env.CLAUDE_CODE_EXECPATH = fakeClaude;
     fs.writeFileSync(
       path.join(wardenDir, 'chats.json'),
       JSON.stringify([
         { kind: 'tmux', host: LOCAL, session, name: 'respawn target', cwd: '', cmd: 'sleep 3600' },
         { kind: 'tmux', host: LOCAL, session: nocmdSession, name: 'no cmd', cwd: '', cmd: '' },
+        { kind: 'tmux', host: LOCAL, session: claudeSession, name: 'claude chat', cwd: '', cmd: 'claude --dangerously-skip-permissions' },
       ]),
     );
 
@@ -177,9 +200,11 @@ describe('/api/respawn HTTP endpoint (real Express app from server.js)', () => {
   after(async () => {
     if (httpServer) await new Promise((r) => httpServer.close(r));
     // Clean up any tmux session we created.
-    for (const s of [session, nocmdSession]) {
+    for (const s of [session, nocmdSession, claudeSession]) {
       try { runLocalTmux(['kill-session', '-t', s]); } catch { /* best effort */ }
     }
+    if (originalExecPath === undefined) delete process.env.CLAUDE_CODE_EXECPATH;
+    else process.env.CLAUDE_CODE_EXECPATH = originalExecPath;
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
     try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best effort */ }
@@ -228,5 +253,34 @@ describe('/api/respawn HTTP endpoint (real Express app from server.js)', () => {
       body: JSON.stringify({ id: `${LOCAL}:does-not-exist-${Math.random().toString(36).slice(2, 6)}` }),
     });
     assert.strictEqual(res.status, 404);
+  });
+
+  it('resolves a bare `claude` cmd to an absolute path before respawning (WARDEN-231 blocker)', async () => {
+    // The catalog cmd is the bare word `claude`, but the only discoverable claude
+    // (the fake binary) sits off-PATH and is reachable solely via
+    // CLAUDE_CODE_EXECPATH. Without resolveClaudeCmd, tmux runs bare `claude`,
+    // which isn't on PATH → the session dies → 500 and no marker is ever written.
+    // With the fix, resolveClaudeCmd substitutes the absolute path, the fake
+    // binary runs, and it records $0 == the absolute path. Asserting the marker
+    // equals fakeClaude (an absolute path, not the bare word) proves the call.
+    assert.strictEqual(runLocalTmux(['has-session', '-t', claudeSession]).ok, false);
+    const res = await fetch(`${baseUrl}/api/respawn`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: `${LOCAL}:${claudeSession}` }),
+    });
+    const body = await res.json();
+    assert.ok(res.ok, `expected 2xx, got ${res.status}: ${JSON.stringify(body)}`);
+    assert.strictEqual(body.ok, true);
+    assert.strictEqual(runLocalTmux(['has-session', '-t', claudeSession]).ok, true);
+    // The fake claude writes its invocation ($0) to the marker once it starts.
+    // Poll briefly — hasSession returning true slightly races the echo flushing.
+    let invoked = '';
+    for (let i = 0; i < 50 && !invoked; i++) {
+      try { invoked = fs.readFileSync(marker, 'utf8').trim(); } catch { /* not written yet */ }
+      if (!invoked) await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.strictEqual(invoked, fakeClaude, `respawn must spawn the resolved absolute path, not bare \`claude\` (got ${JSON.stringify(invoked)})`);
+    assert.ok(invoked.startsWith(path.dirname(fakeClaude)), 'spawned path is the resolved absolute fake-claude, not a bare word');
   });
 });

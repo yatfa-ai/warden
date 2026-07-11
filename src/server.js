@@ -1860,13 +1860,21 @@ app.post('/api/respawn', async (req, res) => {
   if (err) return res.status(400).json({ error: err });
   // Clear any dead/stale session under this name before recreating it.
   try { await killTmux(chat, cfg); } catch { /* a dead session may not exist */ }
-  const spawnChat = { host: chat.host, session: chat.session, cwd: chat.cwd || '', cmd: chat.cmd };
+  // Resolve a bare `claude` cmd to its full path on the host — claude is often in
+  // a .zshrc-only PATH (e.g. ~/.local/bin) that tmux's non-login shell can't see,
+  // so spawning the raw catalog cmd verbatim makes the session die on start on the
+  // very remote hosts this recovery path targets (the WARDEN-231 bug report). The
+  // catalog stores the RAW user-typed cmd, so resolution must happen here at
+  // respawn time. Mirrors buildAndSpawn / /api/resume (both resolve before spawn).
+  const resolved = await resolveClaudeCmd(chat.host, chat.cmd);
+  if (resolved.error) return res.status(400).json({ error: resolved.error });
+  const spawnChat = { host: chat.host, session: chat.session, cwd: chat.cwd || '', cmd: resolved.cmd };
   try { await spawnTmux(spawnChat); }
   catch (e) { return res.status(500).json({ error: e.message }); }
   // `new-session -d` returns ok even when the inner command fails to start, so
   // verify the session actually came up — mirroring /api/spawn's check.
   if (!(await hasSession(spawnChat, cfg))) {
-    const bin = String(chat.cmd).split(/\s+/)[0] || 'the command';
+    const bin = String(resolved.cmd).split(/\s+/)[0] || 'the command';
     return res.status(500).json({ error: `\`${bin}\` failed to start on ${chat.host} — tmux session died immediately. Is it installed and on PATH there?` });
   }
   res.json({ ok: true });

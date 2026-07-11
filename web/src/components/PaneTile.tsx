@@ -11,7 +11,6 @@ import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBeha
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Button } from '@/components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
-import { Button } from '@/components/ui/button';
 import { StatusDot } from '@/components/StatusDot';
 import { FileViewer } from './FileViewer';
 import { postJson } from '@/lib/api';
@@ -162,6 +161,14 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   //   error             — resolve/attach threw; minimal error panel.
   type Phase = 'connecting' | 'connected' | 'session_dead' | 'host_unreachable' | 'error';
   const [phase, setPhase] = useState<Phase>('connecting');
+  // Mirror phase into a ref so the elapsed-seconds interval (attach effect) can
+  // stop itself the instant we leave 'connecting'. The interval closure can't
+  // read `phase` directly (the attach effect's deps are [id, host, retryNonce],
+  // not phase, so the closure would be stale); without this ref the 1s interval
+  // keeps calling setElapsed forever once a dead/unreachable panel is showing,
+  // re-rendering the pane every second for as long as it's left open.
+  const phaseRef = useRef<Phase>('connecting');
+  useEffect(() => { phaseRef.current = phase; }, [phase]);
   // Seconds elapsed since the current attach attempt began — shown while
   // connecting so a slow/unresponsive host reads as "connecting… Ns", not a
   // static spinner. Reset on each attach.
@@ -474,9 +481,15 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     const seamlessCopy = !!hostOptionsRef.current[hostKey]?.seamlessCopy;
     streamApi.send({ type: 'attach', id, host, cols: term?.cols ?? 100, rows: term?.rows ?? 30, seamlessCopy });
 
-    // Elapsed-seconds counter so a slow host reads as "connecting… Ns".
+    // Elapsed-seconds counter so a slow host reads as "connecting… Ns". Stops
+    // itself once we leave 'connecting' (probe settled, watchdog fired, or a
+    // session_dead/host_unreachable arrived) so a dead pane left open doesn't
+    // re-render every second forever — elapsed is only shown while connecting.
     let secs = 0;
-    const elapsedTimer = setInterval(() => { secs += 1; setElapsed(secs); }, 1000);
+    const elapsedTimer = setInterval(() => {
+      if (phaseRef.current !== 'connecting') { clearInterval(elapsedTimer); return; }
+      secs += 1; setElapsed(secs);
+    }, 1000);
     // 15s watchdog (mirrors the Observer panel's hard-timeout pattern): if the
     // server is silent and we're still connecting — e.g. an unresponsive host
     // where the probe hangs longer than its own bound — surface an explicit
@@ -796,7 +809,6 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
             onRetry={retryAttach}
             onClose={onClose}
           />
-        )}
         )}
       </div>
     </div>
