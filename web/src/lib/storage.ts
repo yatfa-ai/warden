@@ -1,7 +1,16 @@
 // UI state persisted in localStorage.
 // activeTabs = the user's persistent working set (survives reload, pane close, host nav).
 // openPanes = which tabs have a live terminal open right now (subset of activeTabs).
+//
+// NOTE on durability (WARDEN-181): localStorage persists across a normal restart
+// inside the OS-default userData dir. Reads below go through readVersioned() so a
+// FUTURE localStorage KEY-version bump (v2 -> v3 ...) can never silently drop the
+// user's data — the newest surviving payload is promoted forward to the current
+// key instead. Persistence errors are surfaced via console.warn rather than
+// swallowed (WARDEN-89), so a quota/serialization failure is never silent.
 const KEY = 'warden:ui:v2';
+const KEY_PREFIX = 'warden:ui';
+const KEY_VERSION = 2;
 
 // Whether launch reopens the previous workspace ('previous', default = today's
 // exact behavior) or starts with a clean workspace ('empty'). Pure client-side pref.
@@ -157,9 +166,59 @@ function parseCustomPresets(raw: unknown): CustomPreset[] {
   return out;
 }
 
+// Version-tolerant read: prefer the current key, but if it is absent, walk down
+// to older versioned (and finally unversioned) keys and promote the newest
+// surviving payload up to the current key. This guarantees a key-version bump
+// (v2 -> v3 ...) never silently drops the user's data — the prior payload
+// migrates forward instead. Returns the raw string, or null if nothing survives.
+function readVersioned(prefix: string, version: number): string | null {
+  const currentKey = `${prefix}:v${version}`;
+  const cur = localStorage.getItem(currentKey);
+  if (cur != null) return cur;
+  for (let v = version - 1; v >= 1; v--) {
+    const k = `${prefix}:v${v}`;
+    const raw = localStorage.getItem(k);
+    if (raw != null) {
+      try {
+        localStorage.setItem(currentKey, raw);
+        localStorage.removeItem(k);
+      } catch (e) {
+        console.warn(`[warden:storage] failed to migrate ${k} -> ${currentKey}`, e);
+      }
+      return raw;
+    }
+  }
+  // Legacy unversioned key (pre-versioning) — promote it too.
+  const legacy = localStorage.getItem(prefix);
+  if (legacy != null) {
+    try {
+      localStorage.setItem(currentKey, legacy);
+      localStorage.removeItem(prefix);
+    } catch (e) {
+      console.warn(`[warden:storage] failed to migrate ${prefix} -> ${currentKey}`, e);
+    }
+    return legacy;
+  }
+  return null;
+}
+
+// The defaults returned when nothing valid is stored. Centralized so the load
+// fallback and every "missing field" coercion agree on one set of values.
+const DEFAULT_UI: UiState = {
+  activeTabs: [], hiddenTabs: [], openPanes: [], focused: null,
+  sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true,
+  sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14,
+  terminalScrollback: 10000, terminalColorScheme: 'auto',
+  terminalCursorStyle: 'blink-block',
+  theme: 'system', density: 'comfortable', paneLayout: 'auto',
+  restoreOnStartup: 'previous',
+  defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', customPresets: [],
+  paneHost: {}, agentFilter: 'all', agentSort: 'manual',
+};
+
 export function loadUi(): UiState {
   try {
-    const v = JSON.parse(localStorage.getItem(KEY) || '');
+    const v = JSON.parse(readVersioned(KEY_PREFIX, KEY_VERSION) ?? 'null');
     if (v && Array.isArray(v.activeTabs)) {
       // Parse custom presets first so defaultNewChatPreset can be validated
       // against them: a default naming a since-deleted preset falls back to claude.
@@ -195,12 +254,16 @@ export function loadUi(): UiState {
         agentSort: v.agentSort ?? 'manual',
       };
     }
-  } catch { /* ignore */ }
-  return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true, sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14, terminalScrollback: 10000, terminalColorScheme: 'auto', terminalCursorStyle: 'blink-block', theme: 'system', density: 'comfortable', paneLayout: 'auto', restoreOnStartup: 'previous', defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', customPresets: [], paneHost: {}, agentFilter: 'all', agentSort: 'manual' };
+  } catch (e) {
+    // WARDEN-89: surface the real failure instead of silently swallowing it.
+    console.warn('[warden:storage] loadUi failed, using defaults', e);
+  }
+  return { ...DEFAULT_UI };
 }
 
 export function saveUi(s: UiState) {
-  try { localStorage.setItem(KEY, JSON.stringify(s)); } catch { /* ignore */ }
+  try { localStorage.setItem(KEY, JSON.stringify(s)); }
+  catch (e) { console.warn('[warden:storage] saveUi failed', e); }
 }
 
 // --- Resizable layout width clamps (WARDEN-183) ----------------------------
@@ -368,14 +431,19 @@ export function persistUiState(
 
 // Observer tabs
 const OBS_KEY = 'warden:observer:v1';
+const OBS_PREFIX = 'warden:observer';
+const OBS_VERSION = 1;
 export interface ObsUi { openIds: string[]; activeId: string | null; viewMode?: 'sessions' | 'activity' }
 export function loadObs(): ObsUi {
   try {
-    const v = JSON.parse(localStorage.getItem(OBS_KEY) || '');
+    const v = JSON.parse(readVersioned(OBS_PREFIX, OBS_VERSION) ?? 'null');
     if (v && Array.isArray(v.openIds)) return { openIds: v.openIds, activeId: v.activeId ?? null, viewMode: v.viewMode || 'sessions' };
-  } catch { /* ignore */ }
+  } catch (e) {
+    console.warn('[warden:storage] loadObs failed, using defaults', e);
+  }
   return { openIds: [], activeId: null, viewMode: 'sessions' };
 }
 export function saveObs(s: ObsUi) {
-  try { localStorage.setItem(OBS_KEY, JSON.stringify(s)); } catch { /* ignore */ }
+  try { localStorage.setItem(OBS_KEY, JSON.stringify(s)); }
+  catch (e) { console.warn('[warden:storage] saveObs failed', e); }
 }

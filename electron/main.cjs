@@ -61,9 +61,16 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
-  win.webContents.session.clearCache().then(() => {
-    win.loadURL(`http://${HOST}:${PORT}/?_t=${Date.now()}`);
-  });
+  // Fresh frontend after an update is already guaranteed WITHOUT clearing the
+  // session, so we load directly: the `?_t=` cache-buster forces a fresh
+  // index.html, the server serves HTML with `Cache-Control: no-cache, no-store,
+  // must-revalidate`, and Vite's content-hashed asset names mean a new build
+  // references brand-new files that are never served stale. session.clearCache()
+  // was removed (WARDEN-181): it is redundant for freshness (HTTP-cache-only)
+  // and was the original suspect for wiping client state on launch — clearing
+  // it every launch is unnecessary surface area. localStorage/IndexedDB live in
+  // the userData dir and are not touched by loadURL here.
+  win.loadURL(`http://${HOST}:${PORT}/?_t=${Date.now()}`);
   win.on('closed', () => { win = null; });
 }
 
