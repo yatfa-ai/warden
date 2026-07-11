@@ -1,6 +1,14 @@
-import { describe, it, mock } from 'node:test';
+import { describe, it, mock, before, after } from 'node:test';
 import assert from 'node:assert';
-import { summarizeOpenChats, suggestNextActions, readChats, Observer, TOOLS } from './observer.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import {
+  summarizeOpenChats, suggestNextActions, readChats, Observer, TOOLS,
+  alertChangedAgents, diffAlerts, detectCompleted, transcriptPhaseOf,
+  filterRealTranscriptEntries, parseTranscriptTail, paneSignature,
+  readTranscriptPhase, buildTranscriptTailScript, parsePhaseFromTailOutput,
+} from './observer.js';
 import { createSession, deleteSession } from './sessions.js';
 
 // Shared config passed through to capturePanes.
@@ -1144,5 +1152,596 @@ describe('Observer chat context (cross-host resumption)', () => {
     } finally {
       deleteSession(s.id);
     }
+  });
+});
+
+// ======================= WARDEN-166: change-aware state cache =======================
+
+// Build a transcript entry object (the shape Claude Code writes to .jsonl).
+function tEntry(type, opts = {}) {
+  return { type, ...opts };
+}
+function assistantEntry(stopReason, text = 'ok') {
+  return tEntry('assistant', { message: { role: 'assistant', content: [{ type: 'text', text }], stop_reason: stopReason } });
+}
+function userEntry(text = 'go') {
+  return tEntry('user', { message: { role: 'user', content: text } });
+}
+
+describe('WARDEN-166 pure helpers', () => {
+  describe('filterRealTranscriptEntries', () => {
+    it('keeps user/assistant entries and drops metadata types', () => {
+      const entries = [
+        tEntry('mode'),
+        tEntry('summary', { summary: 'old' }),
+        tEntry('permission-mode'),
+        tEntry('ai-title'),
+        tEntry('last-prompt'),
+        tEntry('file-history-snapshot'),
+        tEntry('attachment'),
+        tEntry('system'),
+        userEntry(),
+        assistantEntry('end_turn'),
+      ];
+      const real = filterRealTranscriptEntries(entries);
+      assert.strictEqual(real.length, 2, 'only the user + assistant entries survive');
+      assert.deepStrictEqual(real.map((e) => e.type), ['user', 'assistant']);
+    });
+
+    it('returns an empty array when every entry is metadata', () => {
+      assert.deepStrictEqual(filterRealTranscriptEntries([tEntry('mode'), tEntry('summary')]), []);
+    });
+  });
+
+  describe('transcriptPhaseOf', () => {
+    it('awaiting-input: last real entry is an assistant message that ended a turn', () => {
+      for (const sr of ['end_turn', 'stop_sequence', 'max_tokens']) {
+        assert.strictEqual(transcriptPhaseOf([userEntry(), assistantEntry(sr)]), 'awaiting-input',
+          `${sr} means the turn ended → awaiting input`);
+      }
+    });
+
+    it('mid-turn: last real entry is an assistant tool_use (turn ongoing)', () => {
+      assert.strictEqual(transcriptPhaseOf([userEntry(), assistantEntry('tool_use')]), 'mid-turn');
+    });
+
+    it('mid-turn: last real entry is a user message (turn just started)', () => {
+      assert.strictEqual(transcriptPhaseOf([assistantEntry('end_turn'), userEntry()]), 'mid-turn');
+    });
+
+    it('ignores trailing metadata entries when finding the last real entry', () => {
+      // A mode/permission-mode/summary line appended after the assistant end_turn
+      // must NOT change the phase — the last REAL entry is still the end_turn.
+      const entries = [
+        userEntry(),
+        assistantEntry('end_turn'),
+        tEntry('mode'),
+        tEntry('permission-mode'),
+        tEntry('summary', { summary: 'compaction' }),
+      ];
+      assert.strictEqual(transcriptPhaseOf(entries), 'awaiting-input');
+    });
+
+    it('returns null when there are no real entries', () => {
+      assert.strictEqual(transcriptPhaseOf([tEntry('mode'), tEntry('summary')]), null);
+      assert.strictEqual(transcriptPhaseOf([]), null);
+    });
+
+    it('returns null for an assistant line with an unrecognized stop_reason', () => {
+      assert.strictEqual(transcriptPhaseOf([assistantEntry(undefined)]), null);
+    });
+  });
+
+  describe('parseTranscriptTail', () => {
+    it('parses JSON lines and skips the leading partial line + malformed lines', () => {
+      // tail -c leaves a partial first line; JSON.parse throws on it → skipped.
+      const text = '{"type":"partial\n' +
+        JSON.stringify(userEntry()) + '\n' +
+        'not-json-at-all\n' +
+        JSON.stringify(assistantEntry('end_turn')) + '\n';
+      const entries = parseTranscriptTail(text);
+      assert.strictEqual(entries.length, 2, 'partial + malformed lines dropped');
+      assert.strictEqual(transcriptPhaseOf(entries), 'awaiting-input');
+    });
+  });
+
+  describe('detectCompleted', () => {
+    it('transcript path: fires on mid-turn → awaiting-input flip', () => {
+      assert.strictEqual(detectCompleted('active', 'mid-turn', 'active', 'awaiting-input'), true);
+    });
+
+    it('transcript path: does NOT fire when the phase did not flip', () => {
+      assert.strictEqual(detectCompleted('idle', 'awaiting-input', 'idle', 'awaiting-input'), false);
+      assert.strictEqual(detectCompleted('active', 'mid-turn', 'active', 'mid-turn'), false);
+    });
+
+    it('transcript path is authoritative even if the pane state stayed active', () => {
+      // The pane still reads "active" but the transcript flipped → completed. This
+      // is exactly the case pane-text alone cannot catch (the whole point of the
+      // transcript signal).
+      assert.strictEqual(detectCompleted('active', 'mid-turn', 'active', 'awaiting-input'), true);
+    });
+
+    it('fallback path: fires on a working-state → clean-idle transition (no transcript)', () => {
+      for (const prior of ['active', 'stuck', 'erroring', 'blocked', 'waiting']) {
+        assert.strictEqual(detectCompleted(prior, null, 'idle', null), true,
+          `${prior} → idle is a completed transition`);
+      }
+    });
+
+    it('fallback path: does NOT fire when prior was already idle', () => {
+      assert.strictEqual(detectCompleted('idle', null, 'idle', null), false);
+    });
+
+    it('fallback path: does NOT fire on working → working', () => {
+      assert.strictEqual(detectCompleted('active', null, 'erroring', null), false);
+    });
+
+    it('falls back to pane state when only one phase is known (mixed)', () => {
+      // prior phase known, current phase null (transcript read failed this round)
+      // → not "both known", so use the fallback: active → idle fires.
+      assert.strictEqual(detectCompleted('active', 'mid-turn', 'idle', null), true);
+    });
+  });
+
+  describe('paneSignature', () => {
+    it('is stable for identical content and changes when content changes', () => {
+      assert.strictEqual(paneSignature('a\nb\nc'), paneSignature('a\nb\nc'));
+      assert.notStrictEqual(paneSignature('a\nb\nc'), paneSignature('a\nb\nd'));
+    });
+
+    it('ignores blank/whitespace-only lines in the count', () => {
+      assert.strictEqual(paneSignature('a\n\nb'), '2:b');
+    });
+  });
+});
+
+describe('WARDEN-166 diffAlerts (pure diff core)', () => {
+  // Helper: a curObserved entry with the metadata diffAlerts attaches alerts to.
+  function obs(key, state, phase = null, extra = {}) {
+    return [key, { id: key, key, host: 'h', role: 'worker', project: 'p', state, phase, ...extra }];
+  }
+  function prior(key, state, phase = null) { return { [key]: { state, phase } }; }
+
+  it('fires an alert only on change-into an alertable state', () => {
+    // active → idle (no transcript) is completed; idle → idle is nothing.
+    const cache = prior('w', 'idle');
+    const cur = Object.fromEntries([obs('w', 'idle')]);
+    assert.strictEqual(diffAlerts(cache, cur).alerts.length, 0, 'idle→idle is not a change');
+  });
+
+  it('fires idle when an agent newly goes idle (transcript present, no flip)', () => {
+    const cache = prior('w', 'active', 'awaiting-input');
+    const cur = Object.fromEntries([obs('w', 'idle', 'awaiting-input')]);
+    const { alerts } = diffAlerts(cache, cur);
+    assert.strictEqual(alerts.length, 1);
+    assert.strictEqual(alerts[0].alert, 'idle', 'awaiting-input→awaiting-input is not completed, so bare idle fires');
+    assert.strictEqual(alerts[0].fromState, 'active');
+    assert.strictEqual(alerts[0].toState, 'idle');
+  });
+
+  it('fires erroring only on change-into-erroring', () => {
+    assert.strictEqual(diffAlerts(prior('w', 'active'), Object.fromEntries([obs('w', 'erroring')])).alerts[0].alert, 'erroring');
+    assert.strictEqual(diffAlerts(prior('w', 'erroring'), Object.fromEntries([obs('w', 'erroring')])).alerts.length, 0, 'already erroring → no alert');
+  });
+
+  it('fires stuck only on change-into-stuck', () => {
+    assert.strictEqual(diffAlerts(prior('w', 'active'), Object.fromEntries([obs('w', 'stuck')])).alerts[0].alert, 'stuck');
+  });
+
+  it('fires completed on the mid-turn → awaiting-input flip', () => {
+    const cache = prior('w', 'active', 'mid-turn');
+    const cur = Object.fromEntries([obs('w', 'idle', 'awaiting-input')]);
+    const { alerts } = diffAlerts(cache, cur);
+    assert.strictEqual(alerts.length, 1);
+    assert.strictEqual(alerts[0].alert, 'completed', 'the flip is a completed event, not a bare idle');
+  });
+
+  it('a newly-erroring pane wins over a simultaneous completed flip (does not mask the error)', () => {
+    // The turn ended (mid-turn → awaiting-input) BUT the pane now shows an error.
+    // Erroring is more actionable than "it finished", so it must be reported — not
+    // masked behind completed.
+    const cache = prior('w', 'active', 'mid-turn');
+    const cur = Object.fromEntries([obs('w', 'erroring', 'awaiting-input')]);
+    const { alerts } = diffAlerts(cache, cur);
+    assert.strictEqual(alerts.length, 1);
+    assert.strictEqual(alerts[0].alert, 'erroring');
+  });
+
+  it('a newly-stuck pane wins over a simultaneous completed flip', () => {
+    const cache = prior('w', 'active', 'mid-turn');
+    const cur = Object.fromEntries([obs('w', 'stuck', 'awaiting-input')]);
+    const { alerts } = diffAlerts(cache, cur);
+    assert.strictEqual(alerts.length, 1);
+    assert.strictEqual(alerts[0].alert, 'stuck');
+  });
+
+  it('does NOT alert on the very first observation (no baseline)', () => {
+    // Cold cache: the agent is new, not "newly changed into" a state.
+    const { alerts } = diffAlerts({}, Object.fromEntries([obs('w', 'erroring')]));
+    assert.strictEqual(alerts.length, 0);
+  });
+
+  it('is a no-op when nothing changed', () => {
+    const cache = { w: { state: 'idle', phase: 'awaiting-input' }, x: { state: 'active', phase: 'mid-turn' } };
+    const cur = Object.fromEntries([obs('w', 'idle', 'awaiting-input'), obs('x', 'active', 'mid-turn', { id: 'x', key: 'x' })]);
+    assert.strictEqual(diffAlerts(cache, cur).alerts.length, 0);
+  });
+
+  it('sorts alerts by severity (erroring > stuck > completed > idle)', () => {
+    const cache = {
+      e: { state: 'active' }, s: { state: 'active' }, i: { state: 'active', phase: 'awaiting-input' },
+    };
+    const cur = Object.fromEntries([
+      obs('e', 'erroring'), obs('s', 'stuck'), obs('i', 'idle', 'awaiting-input'),
+    ]);
+    const { alerts } = diffAlerts(cache, cur);
+    assert.deepStrictEqual(alerts.map((a) => a.alert), ['erroring', 'stuck', 'idle']);
+  });
+
+  it('reports per-alert-type counts in the summary', () => {
+    const cache = { a: { state: 'active' }, b: { state: 'active' } };
+    const cur = Object.fromEntries([obs('a', 'erroring'), obs('b', 'stuck')]);
+    const { summary } = diffAlerts(cache, cur);
+    assert.strictEqual(summary.total, 2);
+    assert.strictEqual(summary.erroring, 1);
+    assert.strictEqual(summary.stuck, 1);
+    assert.strictEqual(summary.completed, 0);
+    assert.strictEqual(summary.idle, 0);
+  });
+});
+
+describe('WARDEN-166 buildTranscriptTailScript + parsePhaseFromTailOutput', () => {
+  it('builds a script that finds the most-recent transcript and tails it', () => {
+    const s = buildTranscriptTailScript();
+    for (const frag of ['"$HOME"/.claude/projects', 'ls -t', 'tail -c 8192', '___TAIL', '___NONE']) {
+      assert.ok(s.includes(frag), `script contains "${frag}"`);
+    }
+  });
+
+  it('parses a ___TAIL payload into a phase', () => {
+    const stdout = '___TAIL\n' + JSON.stringify(userEntry()) + '\n' + JSON.stringify(assistantEntry('end_turn')) + '\n';
+    assert.strictEqual(parsePhaseFromTailOutput(stdout), 'awaiting-input');
+  });
+
+  it('returns null for ___NONE (no transcript)', () => {
+    assert.strictEqual(parsePhaseFromTailOutput('___NONE\n'), null);
+  });
+
+  it('returns null for empty/unreachable output', () => {
+    assert.strictEqual(parsePhaseFromTailOutput(''), null);
+    assert.strictEqual(parsePhaseFromTailOutput(undefined), null);
+  });
+});
+
+describe('WARDEN-166 readTranscriptPhase (local-filesystem branch)', () => {
+  // The local branch reads os.homedir()/.claude/projects — redirect HOME to a
+  // throwaway dir so the test is isolated and never touches the real archive.
+  let realHome;
+  let tmp;
+  before(() => {
+    realHome = process.env.HOME;
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-phase-'));
+    process.env.HOME = tmp;
+  });
+  after(() => {
+    process.env.HOME = realHome;
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* noop */ }
+  });
+
+  function writeTranscript(entries) {
+    const dir = path.join(tmp, '.claude', 'projects', 'proj');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'session-uuid.jsonl');
+    fs.writeFileSync(file, entries.map((e) => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+    return file;
+  }
+
+  it('returns awaiting-input when the transcript ends on end_turn', async () => {
+    writeTranscript([userEntry(), assistantEntry('end_turn')]);
+    const phase = await readTranscriptPhase({ container: null, host: '(local)', key: 'm', session: 'm' });
+    assert.strictEqual(phase, 'awaiting-input');
+  });
+
+  it('returns mid-turn when the transcript ends on tool_use', async () => {
+    writeTranscript([userEntry(), assistantEntry('tool_use')]);
+    const phase = await readTranscriptPhase({ container: null, host: '(local)', key: 'm', session: 'm' });
+    assert.strictEqual(phase, 'mid-turn');
+  });
+
+  it('returns null when there is no transcript at all', async () => {
+    // Fresh tmp with no .claude/projects (writeTranscript not called here, but a
+    // prior test wrote one — wipe to be sure this asserts the empty case).
+    fs.rmSync(path.join(tmp, '.claude'), { recursive: true, force: true });
+    const phase = await readTranscriptPhase({ container: null, host: '(local)', key: 'm', session: 'm' });
+    assert.strictEqual(phase, null);
+  });
+});
+
+describe('WARDEN-166 alertChangedAgents (DI core)', () => {
+  // capturePanes mock that returns a pane string per chat key.
+  function captureFor(panes) {
+    return mock.fn(async (chats) => Object.fromEntries(
+      chats.filter((c) => panes[c.key] != null).map((c) => [c.key, panes[c.key]]),
+    ));
+  }
+  const openTabs = (chats) => chats.map((c) => c.container || c.session);
+
+  it('returns the empty-tabs guard error and does not capture', async () => {
+    const capturePanes = mock.fn(async () => ({}));
+    const res = await alertChangedAgents([], [yatfaChat()], capturePanes, async () => null, cfg, {});
+    assert.strictEqual(res.error, 'no tabs are open. open some agent panes first.');
+    assert.strictEqual(capturePanes.mock.callCount(), 0);
+  });
+
+  it('returns the stale-state guard error when open tabs match no chat', async () => {
+    const capturePanes = mock.fn(async () => ({}));
+    const res = await alertChangedAgents(['ghost'], [yatfaChat()], capturePanes, async () => null, cfg, {});
+    assert.strictEqual(res.error, 'open tabs do not match any discovered chats. try refreshing with list_chats.');
+  });
+
+  it('establishes a baseline on a cold cache (no alerts) and reports baseline:true', async () => {
+    const chat = yatfaChat();
+    const capturePanes = captureFor({ 'myproject-worker': 'Error: boom' });
+    const res = await alertChangedAgents(openTabs([chat]), [chat], capturePanes, async () => null, cfg, {});
+    assert.strictEqual(res.baseline, true);
+    assert.deepStrictEqual(res.alerts, [], 'cold cache → no alerts even for an erroring pane');
+    assert.ok(res.observedState['myproject-worker'], 'observedState captured for the next diff');
+    assert.strictEqual(res.observedState['myproject-worker'].state, 'erroring');
+  });
+
+  it('fires an erroring alert only on change-into-state (second read)', async () => {
+    const chat = yatfaChat();
+    let pane = 'Building the project'; // active
+    const capturePanes = mock.fn(async () => ({ 'myproject-worker': pane }));
+    const rtp = async () => null;
+    const r1 = await alertChangedAgents(openTabs([chat]), [chat], capturePanes, rtp, cfg, {});
+    assert.deepStrictEqual(r1.alerts, [], 'first read is baseline');
+
+    pane = 'Error: build failed'; // now erroring
+    const r2 = await alertChangedAgents(openTabs([chat]), [chat], capturePanes, rtp, cfg, r1.observedState);
+    assert.strictEqual(r2.alerts.length, 1);
+    assert.strictEqual(r2.alerts[0].alert, 'erroring');
+    assert.strictEqual(r2.alerts[0].id, 'myproject-worker');
+    assert.strictEqual(r2.alerts[0].fromState, 'active');
+    assert.strictEqual(r2.alerts[0].toState, 'erroring');
+  });
+
+  it('fires a stuck alert on change-into-stuck', async () => {
+    const chat = yatfaChat();
+    let pane = 'Building the project';
+    const capturePanes = mock.fn(async () => ({ 'myproject-worker': pane }));
+    const r1 = await alertChangedAgents(openTabs([chat]), [chat], capturePanes, async () => null, cfg, {});
+    pane = Array(6).fill('Retrying connection to host in 5 seconds...').join('\n'); // stuck
+    const r2 = await alertChangedAgents(openTabs([chat]), [chat], capturePanes, async () => null, cfg, r1.observedState);
+    assert.strictEqual(r2.alerts[0].alert, 'stuck');
+  });
+
+  it('fires completed on the mid-turn → awaiting-input transcript flip (pane unchanged)', async () => {
+    // The pane stays "active" both reads — only the transcript phase flips. This
+    // is the signal pane text alone cannot catch.
+    const chat = yatfaChat();
+    const capturePanes = mock.fn(async () => ({ 'myproject-worker': 'Building the project' }));
+    let phase = 'mid-turn';
+    const rtp = mock.fn(async () => phase);
+    const r1 = await alertChangedAgents(openTabs([chat]), [chat], capturePanes, rtp, cfg, {});
+    assert.deepStrictEqual(r1.alerts, [], 'baseline');
+    assert.strictEqual(r1.observedState['myproject-worker'].phase, 'mid-turn');
+
+    phase = 'awaiting-input'; // the agent finished its turn
+    const r2 = await alertChangedAgents(openTabs([chat]), [chat], capturePanes, rtp, cfg, r1.observedState);
+    assert.strictEqual(r2.alerts.length, 1);
+    assert.strictEqual(r2.alerts[0].alert, 'completed');
+  });
+
+  it('fires completed via the fallback path (transcript-less working → idle)', async () => {
+    const chat = yatfaChat({ active: false });
+    let pane = 'Building the project'; // active (needs c.active — set true for this read)
+    const chats = [chat];
+    // Use two chats instances to vary active across reads: simplest is to flip
+    // chat.active directly between calls since classifyPane reads c.active.
+    chat.active = true;
+    const capturePanes = mock.fn(async () => ({ 'myproject-worker': pane }));
+    const r1 = await alertChangedAgents(openTabs(chats), chats, capturePanes, async () => null, cfg, {});
+    assert.deepStrictEqual(r1.alerts, [], 'baseline');
+
+    chat.active = false;
+    pane = 'Ready.'; // clean idle
+    const r2 = await alertChangedAgents(openTabs(chats), chats, capturePanes, async () => null, cfg, r1.observedState);
+    assert.strictEqual(r2.alerts.length, 1);
+    assert.strictEqual(r2.alerts[0].alert, 'completed', 'working → clean idle with no transcript is completed');
+  });
+
+  it('is a no-op when nothing changed between reads', async () => {
+    const chat = yatfaChat({ active: false });
+    const chats = [chat];
+    const capturePanes = mock.fn(async () => ({ 'myproject-worker': 'Ready.' }));
+    const rtp = async () => 'awaiting-input';
+    const r1 = await alertChangedAgents(openTabs(chats), chats, capturePanes, rtp, cfg, {});
+    const r2 = await alertChangedAgents(openTabs(chats), chats, capturePanes, rtp, cfg, r1.observedState);
+    assert.deepStrictEqual(r2.alerts, [], 'same pane + same phase → no alerts');
+  });
+
+  it('surfaces capture failures per agent in the summary (not as alerts)', async () => {
+    const ok = yatfaChat();
+    const bad = yatfaChat({ id: 'host1:proj-bad', key: 'proj-bad', container: 'proj-bad' });
+    const chats = [ok, bad];
+    // bad's host capture "fails" → no key returned for it.
+    const capturePanes = mock.fn(async (cs) => Object.fromEntries(
+      cs.filter((c) => c.key === 'myproject-worker').map((c) => [c.key, 'Building the project']),
+    ));
+    // Baseline read: both active.
+    const r1 = await alertChangedAgents(openTabs(chats), chats, capturePanes, async () => null, cfg, {});
+    assert.strictEqual(r1.summary.captureFailed, 1, 'bad is flagged capture_failed on the baseline read too');
+    assert.strictEqual(r1.observedState['proj-bad'].state, 'capture_failed');
+  });
+
+  it('injects readTranscriptPhase (no SSH in the test) — per-agent failure → null phase', async () => {
+    const chat = yatfaChat();
+    const capturePanes = captureFor({ 'myproject-worker': 'Building the project' });
+    let calls = 0;
+    const rtp = async () => { calls++; throw new Error('ssh refused'); };
+    const res = await alertChangedAgents(openTabs([chat]), [chat], capturePanes, rtp, cfg, {});
+    assert.ok(calls > 0, 'readTranscriptPhase was invoked');
+    assert.strictEqual(res.observedState['myproject-worker'].phase, null, 'a throwing reader degrades to null, not a crash');
+  });
+});
+
+describe('WARDEN-166 summarizeOpenChats changed_only + observedState', () => {
+  it('attaches an observedState side-channel keyed by chat key', async () => {
+    const chat = yatfaChat();
+    const capturePanes = mock.fn(async (cs) => ({ [cs[0].key]: 'Error: boom' }));
+    const res = await summarizeOpenChats([chat.container], [chat], capturePanes, cfg);
+    assert.ok(res.observedState, 'observedState side-channel present');
+    assert.strictEqual(res.observedState['myproject-worker'].state, 'erroring');
+    assert.ok(typeof res.observedState['myproject-worker'].sig === 'string');
+  });
+
+  it('changed_only returns only agents whose state or content changed', async () => {
+    const worker = yatfaChat();
+    const researcher = yatfaChat({
+      id: 'host1:myproject-researcher', key: 'myproject-researcher', container: 'myproject-researcher', role: 'researcher',
+    });
+    const panes = { 'myproject-worker': 'Building', 'myproject-researcher': 'Idle output' };
+    const capturePanes = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.key, panes[c.key]])));
+
+    // Baseline read (no lastReadState yet) to seed the cache.
+    const base = await summarizeOpenChats(
+      ['myproject-worker', 'myproject-researcher'], [worker, researcher], capturePanes, cfg);
+
+    // Now change ONLY the worker; researcher unchanged. changed_only must drop the
+    // researcher and keep the worker.
+    const panes2 = { 'myproject-worker': 'Error: now failing', 'myproject-researcher': 'Idle output' };
+    const capturePanes2 = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.key, panes2[c.key]])));
+    const res = await summarizeOpenChats(
+      ['myproject-worker', 'myproject-researcher'], [worker, researcher], capturePanes2, cfg,
+      { changed_only: true }, undefined, base.observedState);
+
+    assert.strictEqual(res.changedOnly, true);
+    assert.strictEqual(res.chats.length, 1, 'only the changed worker is returned');
+    assert.strictEqual(res.chats[0].id, 'myproject-worker');
+    // observedState still reflects BOTH agents so the cache stays current.
+    assert.ok(res.observedState['myproject-worker']);
+    assert.ok(res.observedState['myproject-researcher']);
+  });
+
+  it('changed_only with no prior cache returns everything (all "new")', async () => {
+    const chat = yatfaChat();
+    const capturePanes = mock.fn(async (cs) => ({ [cs[0].key]: 'Building' }));
+    const res = await summarizeOpenChats([chat.container], [chat], capturePanes, cfg,
+      { changed_only: true }, undefined, {});
+    assert.strictEqual(res.chats.length, 1);
+  });
+});
+
+describe('WARDEN-166 readChats changed_only + observedState', () => {
+  it('attaches observedState while keeping entries RAW (no state field on entries)', async () => {
+    const chat = yatfaChat();
+    const capturePanes = mock.fn(async (cs) => ({ [cs[0].key]: 'raw pane' }));
+    const res = await readChats(['myproject-worker'], false, [], [chat], capturePanes, cfg);
+    assert.ok(res.observedState, 'observedState side-channel present');
+    assert.ok(!('state' in res.chats[0]), 'result entries stay raw — no classification fields');
+    assert.strictEqual(res.chats[0].pane, 'raw pane');
+  });
+
+  it('changed_only drops panes whose content signature is unchanged', async () => {
+    const worker = yatfaChat();
+    const researcher = yatfaChat({
+      id: 'host1:myproject-researcher', key: 'myproject-researcher', container: 'myproject-researcher', role: 'researcher',
+    });
+    const chats = [worker, researcher];
+    const panes = { 'myproject-worker': 'same content', 'myproject-researcher': 'same content' };
+    const capturePanes = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.key, panes[c.key]])));
+
+    // Baseline to seed the cache.
+    const base = await readChats(['myproject-worker', 'myproject-researcher'], false, [], chats, capturePanes, cfg);
+
+    // Only the worker pane changes.
+    const panes2 = { 'myproject-worker': 'CHANGED content', 'myproject-researcher': 'same content' };
+    const capturePanes2 = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.key, panes2[c.key]])));
+    const res = await readChats(['myproject-worker', 'myproject-researcher'], false, [], chats, capturePanes2, cfg,
+      { changed_only: true }, undefined, base.observedState);
+
+    const readIds = res.chats.filter((c) => c.ok).map((c) => c.id);
+    assert.deepStrictEqual(readIds, ['myproject-worker'], 'only the changed pane is returned');
+    assert.strictEqual(res.changedOnly, true);
+  });
+});
+
+describe('WARDEN-166 Observer cache wiring', () => {
+  it('starts with an empty in-memory lastReadState', () => {
+    const obs = new Observer(cfg, {});
+    assert.deepStrictEqual(obs.lastReadState, {});
+  });
+
+  it('_mergeReadState records state/phase/sig + ts from an observed side-channel', () => {
+    const obs = new Observer(cfg, {});
+    obs._mergeReadState({ 'myproject-worker': { state: 'erroring', phase: null, sig: '3:x' } });
+    const e = obs.lastReadState['myproject-worker'];
+    assert.strictEqual(e.state, 'erroring');
+    assert.strictEqual(e.sig, '3:x');
+    assert.ok(typeof e.ts === 'number' && e.ts > 0, 'timestamp recorded');
+  });
+
+  it('_mergeReadState preserves a previously cached phase when the new read omits it', () => {
+    // read_chat / a plain summarize refresh pane state but pass phase:null; the
+    // cached transcript phase must survive so the next alert can still flip.
+    const obs = new Observer(cfg, {});
+    obs._mergeReadState({ 'k': { state: 'active', phase: 'mid-turn', sig: 'a' } });
+    obs._mergeReadState({ 'k': { state: 'active', phase: null, sig: 'b' } });
+    assert.strictEqual(obs.lastReadState['k'].phase, 'mid-turn', 'phase preserved across a phase-less refresh');
+    assert.strictEqual(obs.lastReadState['k'].sig, 'b', 'sig refreshed');
+  });
+
+  it('summarize_chats updates the cache as a side-effect (mocked capturePanes via _mergeReadState)', async () => {
+    // The DI core produces observedState; the Observer merges it. Together this is
+    // the "cache updates on read" side-effect (tested without SSH by driving the
+    // pure core + the merge, not _execTool which wires the real capturePanes).
+    const chat = yatfaChat();
+    const capturePanes = mock.fn(async (cs) => ({ [cs[0].key]: 'Error: boom' }));
+    const obs = new Observer(cfg, {});
+    const res = await summarizeOpenChats([chat.container], [chat], capturePanes, cfg);
+    obs._mergeReadState(res.observedState);
+    assert.strictEqual(obs.lastReadState['myproject-worker'].state, 'erroring');
+  });
+});
+
+describe('WARDEN-166 Observer _execTool alert_changes dispatch', () => {
+  // As with the read_chats/summarize_chats dispatch suites, _execTool wires the
+  // real module-level capturePanes + readTranscriptPhase, which can't be mocked
+  // on Node 20 and would hit live SSH. So these cover the GUARD paths that run
+  // before any capture; the alert logic itself is covered by the alertChangedAgents
+  // DI suite above with injected mocks.
+
+  it('returns the empty-tabs error when nothing is open', async () => {
+    const obs = new Observer(cfg, {});
+    obs.openTabs = [];
+    obs.lastChats = [yatfaChat()];
+    const res = await obs._execTool('alert_changes', {});
+    assert.strictEqual(res.error, 'no tabs are open. open some agent panes first.');
+  });
+
+  it('returns the stale-state error when open tabs match no chat', async () => {
+    const obs = new Observer(cfg, {});
+    obs.openTabs = ['ghost-tab'];
+    obs.lastChats = [yatfaChat()];
+    const res = await obs._execTool('alert_changes', {});
+    assert.strictEqual(res.error, 'open tabs do not match any discovered chats. try refreshing with list_chats.');
+  });
+});
+
+describe('WARDEN-166 alert_changes tool registration', () => {
+  it('is registered in the TOOLS array with an object input schema', () => {
+    const tool = TOOLS.find((t) => t.name === 'alert_changes');
+    assert.ok(tool, 'alert_changes tool should be registered');
+    assert.strictEqual(tool.input_schema.type, 'object');
+    assert.deepStrictEqual(tool.input_schema.required, []);
+  });
+
+  it('summarize_chats and read_chats expose a changed_only flag', () => {
+    const summ = TOOLS.find((t) => t.name === 'summarize_chats');
+    const read = TOOLS.find((t) => t.name === 'read_chats');
+    assert.ok(summ.input_schema.properties.changed_only, 'summarize_chats has changed_only');
+    assert.ok(read.input_schema.properties.changed_only, 'read_chats has changed_only');
   });
 });

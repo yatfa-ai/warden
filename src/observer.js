@@ -6,9 +6,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { discoverAll, capturePanes, resolveChat } from './chats.js';
+import { run, shellQuote } from './ssh.js';
 import { read as readPane, send as sendPane } from './tmux.js';
 import { complete } from './llm.js';
 import { getSession, saveMessages, appendTranscript } from './sessions.js';
+
+const LOCAL = '(local)';
 
 const DIRECTIVES_LOG = path.join(os.homedir(), '.yatfa-warden', 'directives.md');
 // Warden data dir — the ONLY root write_file may write under (user decision:
@@ -22,11 +25,12 @@ const SYSTEM = `You are Yatfa Warden — an observer and orchestrator for severa
 You operate ONLY through these tools:
 - list_chats(): discover every agent chat + whether it is active (running its TUI) or idle.
 - read_chat({id, lines}): read an agent's current terminal pane. ALWAYS read before you advise on a specific agent — never assume.
-- read_chats({ids, open_only?, lines?}): read several panes in ONE batched call — much cheaper than several read_chat round trips when you must read multiple agents in full. Pass ids (array of substrings) OR open_only: true to read all open panes at once. Returns each pane's raw content per pane; capture failures are reported per pane, never dropped.
+- read_chats({ids, open_only?, lines?, changed_only?}): read several panes in ONE batched call — much cheaper than several read_chat round trips when you must read multiple agents in full. Pass ids (array of substrings) OR open_only: true to read all open panes at once. Returns each pane's raw content per pane; capture failures are reported per pane, never dropped. Set changed_only: true on a follow-up to get back only panes whose content changed since the last read.
 - send_directive({id, directive}): propose a message to an agent. The user MUST approve every send; you propose and wait for the gate.
-- summarize_chats({per_agent_lines?}): structured, size-bounded summary of every open chat — one entry per pane with role, state (active/idle/stuck/erroring/blocked/waiting), last action, errors, current step, and goal. Failed captures are flagged per-entry, never omitted. Use this when the user asks "what's happening", "what are they working on", or you need a complete picture to advise well.
+- summarize_chats({per_agent_lines?, changed_only?}): structured, size-bounded summary of every open chat — one entry per pane with role, state (active/idle/stuck/erroring/blocked/waiting), last action, errors, current step, and goal. Failed captures are flagged per-entry, never omitted. Use this when the user asks "what's happening", "what are they working on", or you need a complete picture to advise well. Set changed_only: true to get back only agents whose state or content changed since the last read.
 - analyze_agents(): detect patterns across all open tabs. Returns structured insights about which agents are stuck, erroring, idle, or need coordination. Use this to answer "what needs attention?" or diagnose workflow issues.
 - suggest_next_actions(): analyze all open agent tabs and suggest prioritized, concrete next actions for the human. Classifies agent states (stuck, erroring, waiting, blocked, idle, active) and identifies urgent issues requiring immediate attention. Returns sorted suggestions with urgency levels.
+- alert_changes(): on-demand check that reports ONLY open agents newly entering a state worth alerting on since the last read — idle, erroring, stuck (repeating output), or completed-a-task. It diffs against the last-read cache, so only CHANGES surface (no re-reading everything). Use this when the user asks "what needs attention", "who finished", or "what changed". NOTE: the first call on a cold cache establishes a baseline and returns no alerts — call summarize_chats first, then alert_changes later to see what changed.
 - write_file({path, content, append?}): save TEXT to a file under the warden data dir (~/.yatfa-warden/), e.g. reports/summary.md or snapshots/agent-X.md. Use this to persist observations, findings, snapshots, or reports worth keeping between turns — it is your only durable output channel besides send_directive (which only talks to agents). path is relative to the data dir; set append: true to add to a file instead of overwriting. Writes are confined to the data dir.
 
 Your job:
@@ -87,24 +91,26 @@ export const TOOLS = [
   },
   {
     name: 'read_chats',
-    description: "Read several agent panes at once in ONE batched call — far cheaper than many read_chat round trips when you must read multiple agents in full. Pass ids (array of unique substrings: container, project, or role) and an optional lines cap, OR pass open_only: true to read exactly the user's open panes. Returns each pane's raw content keyed per pane in one result. Per-pane capture or id-resolution failures are reported per pane, never dropped.",
+    description: "Read several agent panes at once in ONE batched call — far cheaper than many read_chat round trips when you must read multiple agents in full. Pass ids (array of unique substrings: container, project, or role) and an optional lines cap, OR pass open_only: true to read exactly the user's open panes. Returns each pane's raw content keyed per pane in one result. Per-pane capture or id-resolution failures are reported per pane, never dropped. Set changed_only: true to get back only panes whose content changed since the last read (skips unchanged agents on follow-up).",
     input_schema: {
       type: 'object',
       properties: {
         ids: { type: 'array', items: { type: 'string' }, description: 'Agent ids (unique substrings) to read in full.' },
         open_only: { type: 'boolean', description: "If true, read exactly the open panes (the user's watched tabs); ids are ignored." },
         lines: { type: 'number', description: 'Max scrollback lines per pane (default 60; capture fetches up to 60).' },
+        changed_only: { type: 'boolean', description: 'If true, return only panes whose content changed since the last read (diff against the last-read cache). Default false.' },
       },
       required: [],
     },
   },
   {
     name: 'summarize_chats',
-    description: 'Read all open tabs at once and return a structured, size-bounded summary of what each agent is doing. Returns one entry per open chat with role, state (active/idle/stuck/erroring/blocked/waiting), last action, errors, current step, and goal. Capture failures are flagged per-entry, not omitted. Pass per_agent_lines to bound how much recent pane output each entry carries (default 15).',
+    description: 'Read all open tabs at once and return a structured, size-bounded summary of what each agent is doing. Returns one entry per open chat with role, state (active/idle/stuck/erroring/blocked/waiting), last action, errors, current step, and goal. Capture failures are flagged per-entry, not omitted. Pass per_agent_lines to bound how much recent pane output each entry carries (default 15). Set changed_only: true to get back only agents whose state or content changed since the last read.',
     input_schema: {
       type: 'object',
       properties: {
         per_agent_lines: { type: 'number', description: 'Max recent pane lines to include per agent (default 15). Lower = more concise summary; higher = more context.' },
+        changed_only: { type: 'boolean', description: 'If true, return only agents whose state or content changed since the last read (diff against the last-read cache). Default false.' },
       },
       required: [],
     },
@@ -117,6 +123,11 @@ export const TOOLS = [
   {
     name: 'suggest_next_actions',
     description: 'Analyze all open agent tabs and suggest prioritized, concrete next actions for the human. Classifies agent states (stuck, erroring, waiting, blocked, idle, active) and identifies urgent issues requiring immediate attention. Returns sorted suggestions with urgency levels.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'alert_changes',
+    description: "On-demand: check the open agents and report ONLY those that newly entered a state worth alerting on since the last read — idle, erroring, stuck (repeating output), or completed-a-task. No background watcher; call this when the user asks 'what needs attention' or 'who finished'. It reads each open pane and (for Claude Code agents) the transcript to detect a task completing, then diffs against the last-read cache so only CHANGES surface. The FIRST call on a cold cache establishes a baseline and returns no alerts — call it once after a summarize, then again later to see what changed. No extra LLM calls.",
     input_schema: { type: 'object', properties: {}, required: [] },
   },
   {
@@ -332,12 +343,243 @@ function inferGoal(clean, c) {
   return null;
 }
 
+// ---------------- change-aware state cache (WARDEN-166) ----------------
+//
+// The conservative core of change-awareness: a per-agent last-read snapshot
+// (pane state + content signature + transcript phase + timestamp) kept as a
+// side-effect of normal opt-in reads, a "what changed since last read" diff,
+// and an on-demand alert trigger. NO background polling, NO autonomous token
+// spend (WARDEN-75) — every read is caller-driven. The pure helpers below are
+// fully unit-testable with no SSH/tmux; the async DI core (alertChangedAgents)
+// takes capturePanes + readTranscriptPhase as injected dependencies for the same
+// reason (mock.module is unavailable on the project's Node — WARDEN-130).
+
+// Content signature for change detection: stable across reads unless the pane's
+// line count or its last line actually changed. Two captures with the same sig
+// are "unchanged content", so the diff can skip them on follow-up reads.
+export function paneSignature(cleanPane) {
+  const lines = String(cleanPane).split('\n').map((l) => l.trimEnd()).filter((l) => l.trim().length > 0);
+  const last = lines.length ? lines[lines.length - 1] : '';
+  return `${lines.length}:${last.slice(0, 120)}`;
+}
+
+// ---- completed-a-task detection (the one genuinely new signal) ----
+//
+// Idle / erroring / Stuck / Blocked / Waiting / Active are already returned by
+// classifyPane — reused as-is, no new patterns. "Completed" is new and its
+// PRIMARY signal is the Claude Code transcript (not pane text): a turn flips
+// mid-turn → awaiting-input when an agent finishes and is waiting for the next
+// prompt. Bare-tmux tabs without a transcript fall back to a pane-state
+// transition (working → clean idle).
+
+// Transcript entry types that carry no conversational signal — skipped when
+// locating the "last real" entry (per WARDEN-166 spec).
+const TRANSCRIPT_METADATA_TYPES = new Set([
+  'mode', 'ai-title', 'last-prompt', 'file-history-snapshot',
+  'attachment', 'system', 'summary', 'permission-mode',
+]);
+const STOP_AWAITING_INPUT = new Set(['end_turn', 'stop_sequence', 'max_tokens']);
+
+// Keep only real conversational entries (user / assistant), dropping metadata.
+export function filterRealTranscriptEntries(entries) {
+  return (entries || []).filter((e) => e && (e.type === 'user' || e.type === 'assistant')
+    && !TRANSCRIPT_METADATA_TYPES.has(e.type));
+}
+
+// Parse a transcript tail (raw text) into an array of JSON objects, skipping
+// unparseable lines. The leading partial line left by `tail -c N` is naturally
+// dropped because JSON.parse throws on it.
+export function parseTranscriptTail(text) {
+  const out = [];
+  for (const line of String(text || '').split('\n')) {
+    if (!line.trim()) continue;
+    try { out.push(JSON.parse(line)); } catch { /* partial / malformed → skip */ }
+  }
+  return out;
+}
+
+// Determine an agent's turn phase from its transcript entries:
+//   'awaiting-input' — last real entry is an assistant message that ended a turn
+//                      (stop_reason ∈ {end_turn, stop_sequence, max_tokens}).
+//   'mid-turn'       — last real entry is a user message, OR an assistant message
+//                      mid-tool-use (stop_reason = 'tool_use'): the turn is ongoing.
+//   null             — indeterminate (no real entries, or an assistant line with an
+//                      unrecognized stop_reason). A stale mid-turn from a dead agent
+//                      never flips to end_turn, so this never false-fires.
+export function transcriptPhaseOf(entries) {
+  const real = filterRealTranscriptEntries(entries);
+  if (!real.length) return null;
+  const last = real[real.length - 1];
+  const stopReason = last && last.message ? last.message.stop_reason : undefined;
+  if (last.type === 'assistant') {
+    if (STOP_AWAITING_INPUT.has(stopReason)) return 'awaiting-input';
+    if (stopReason === 'tool_use') return 'mid-turn';
+    return null;
+  }
+  return 'mid-turn'; // last real entry is a user message → turn in progress
+}
+
+// Did this agent just complete a task? Transcript path is authoritative when both
+// phases are known (fires on the mid-turn → awaiting-input flip); otherwise the
+// transcript-less fallback fires on a working-state → clean-idle transition.
+const WORKING_STATES = new Set(['active', 'stuck', 'erroring', 'blocked', 'waiting']);
+export function detectCompleted(priorState, priorPhase, curState, curPhase) {
+  if (priorPhase && curPhase) {
+    return priorPhase === 'mid-turn' && curPhase === 'awaiting-input';
+  }
+  return WORKING_STATES.has(priorState) && curState === 'idle';
+}
+
+// States that warrant an alert when newly entered. ('completed' is a transient
+// event derived in diffAlerts, not a persistent classifyPane state.)
+const ALERTABLE_STATES = new Set(['idle', 'erroring', 'stuck']);
+const ALERT_PRIORITY = { erroring: 0, stuck: 1, completed: 2, idle: 3 };
+
+// Diff a prior cache snapshot against a freshly observed one and surface ONLY
+// agents that newly entered an alertable state (idle / erroring / stuck /
+// completed) since the last read. Fires on change-into-state only: an agent
+// already in the state produces no alert, and an agent with no prior baseline
+// (first observation) produces none either. At most ONE alert per agent per
+// diff, chosen by urgency: a newly-erroring/stuck pane beats "completed" (an
+// error is more actionable than "it finished"), and "completed" beats a bare
+// newly-idle (idle is the expected post-completion pane, so reporting both is
+// redundant). Pure — the heart of AC #3.
+export function diffAlerts(priorReadState, curObserved) {
+  const prior = priorReadState || {};
+  const cur = curObserved || {};
+  const alerts = [];
+  for (const [key, c] of Object.entries(cur)) {
+    const p = prior[key];
+    if (!p) continue; // no last read → no diff
+    const completed = detectCompleted(p.state, p.phase, c.state, c.phase);
+    const newlyEntered = ALERTABLE_STATES.has(c.state) && p.state !== c.state;
+    // Urgency precedence: erroring > stuck > completed > idle. Newly-erroring or
+    // newly-stuck wins over a simultaneous completed flip (don't mask an error
+    // behind "it finished"). Completed wins over bare idle (post-finish idle is
+    // expected, not a separate alert).
+    let alert = null;
+    if (c.state === 'erroring' && newlyEntered) alert = 'erroring';
+    else if (c.state === 'stuck' && newlyEntered) alert = 'stuck';
+    else if (completed) alert = 'completed';
+    else if (c.state === 'idle' && newlyEntered) alert = 'idle';
+    if (alert) {
+      alerts.push({ id: c.id, key, host: c.host, role: c.role, project: c.project,
+        alert, fromState: p.state || null, toState: c.state });
+    }
+  }
+  alerts.sort((a, b) => (ALERT_PRIORITY[a.alert] ?? 9) - (ALERT_PRIORITY[b.alert] ?? 9));
+  const count = (a) => alerts.filter((x) => x.alert === a).length;
+  return {
+    alerts,
+    summary: {
+      total: alerts.length,
+      erroring: count('erroring'),
+      stuck: count('stuck'),
+      completed: count('completed'),
+      idle: count('idle'),
+    },
+  };
+}
+
+// ---- reading a live agent's transcript tail (the impure part) ----
+//
+// The completed signal needs the transcript's last assistant stop_reason. The
+// history browser already walks ~/.claude/projects/*/*.jsonl, but only on the
+// SSH HOST — a yatfa agent's `claude` runs INSIDE its container, so its
+// transcript lives at the in-container $HOME/.claude/projects. buildTranscriptTailScript
+// is the host/container-portable script that finds the most-recently-modified
+// .jsonl and tails it; readTranscriptPhase wraps it for the three chat shapes.
+
+// Shell script: locate the most-recently-modified transcript and tail its last
+// 8 KB (plenty for the last assistant message + stop_reason). Emits ___TAIL /
+// ___NONE markers parsed by parsePhaseFromTailOutput. Runs on a host or inside a
+// container (via docker exec) unchanged — it only touches $HOME/.claude/projects.
+export function buildTranscriptTailScript() {
+  return [
+    'f=$(ls -t "$HOME"/.claude/projects/*/*.jsonl 2>/dev/null | head -1)',
+    'if [ -n "$f" ]; then',
+    "  printf '___TAIL\\n'; tail -c 8192 \"$f\"",
+    'else',
+    "  printf '___NONE\\n'",
+    'fi',
+  ].join('\n');
+}
+
+// Parse the marked stdout of buildTranscriptTailScript into a phase (or null when
+// there is no transcript / the host was unreachable). Pure — fed fake stdout in
+// tests exactly like parseSessionReadOutput is (WARDEN-130 testing pattern).
+export function parsePhaseFromTailOutput(stdout) {
+  const s = String(stdout || '');
+  const idx = s.indexOf('___TAIL');
+  if (idx < 0) return null; // ___NONE, empty, or host unreachable
+  return transcriptPhaseOf(parseTranscriptTail(s.slice(idx + '___TAIL'.length)));
+}
+
+// Read the local filesystem's most-recent transcript tail and return it in the
+// ___TAIL-marked shape parsePhaseFromTailOutput expects (or '' if none). Uses
+// os.homedir(), so a test redirects HOME to a throwaway dir to isolate it.
+function readLocalTranscriptTail() {
+  const dir = path.join(os.homedir(), '.claude', 'projects');
+  const files = [];
+  let projects;
+  try { projects = fs.readdirSync(dir); } catch { return ''; } // no ~/.claude/projects
+  for (const proj of projects) {
+    const pdir = path.join(dir, proj);
+    try { if (!fs.statSync(pdir).isDirectory()) continue; } catch { continue; }
+    for (const f of fs.readdirSync(pdir)) {
+      if (!f.endsWith('.jsonl')) continue;
+      const fp = path.join(pdir, f);
+      try { files.push({ fp, mtime: fs.statSync(fp).mtimeMs }); } catch { /* skip */ }
+    }
+  }
+  if (!files.length) return '';
+  files.sort((a, b) => b.mtime - a.mtime);
+  const { fp } = files[0];
+  const size = fs.statSync(fp).size;
+  const len = Math.min(size, 8192);
+  const fd = fs.openSync(fp, 'r');
+  const buf = Buffer.alloc(len);
+  fs.readSync(fd, buf, 0, len, size - len);
+  fs.closeSync(fd);
+  return '___TAIL\n' + buf.toString('utf8');
+}
+
+// Read a live agent's transcript phase. Returns 'mid-turn' | 'awaiting-input' |
+// null (null = no transcript available → caller falls back to the pane-state
+// path). Best-effort: any failure resolves to null so a transcript read can never
+// block or break a pane read (WARDEN-89: failures surfaced, never fatal).
+export async function readTranscriptPhase(chat, cfg = {}) {
+  if (!chat) return null;
+  try {
+    let stdout = '';
+    if (chat.container) {
+      // yatfa docker agent: claude runs in-container, so reach its transcript via
+      // docker exec (no existing code path did this — WARDEN-166 adds it).
+      const cmd = `docker exec ${shellQuote(chat.container)} sh -c ${shellQuote(buildTranscriptTailScript())}`;
+      const res = await run(chat.host, cmd, { timeout: 10000 }, cfg);
+      if (!res.ok) return null;
+      stdout = res.stdout;
+    } else if (chat.host === LOCAL) {
+      // bare local tmux 'claude' session: transcript on the local filesystem.
+      stdout = readLocalTranscriptTail();
+    } else {
+      // bare remote tmux session: transcript on the remote host.
+      const res = await run(chat.host, buildTranscriptTailScript(), { timeout: 10000 }, cfg);
+      if (!res.ok) return null;
+      stdout = res.stdout;
+    }
+    return parsePhaseFromTailOutput(stdout);
+  } catch {
+    return null;
+  }
+}
+
 // Pure, dependency-injected core of the summarize_chats tool. capturePanes is passed
 // in so this logic is unit-testable without SSH/tmux (mock.module is unavailable on
 // the project's Node version). Returns a STRUCTURED per-agent summary (not raw ANSI):
 // one entry per open pane, with capture failures flagged per-entry rather than
 // silently dropped. `opts.per_agent_lines` (default 15) bounds each entry's excerpt.
-export async function summarizeOpenChats(openTabs, lastChats, capturePanes, cfg, opts = {}) {
+export async function summarizeOpenChats(openTabs, lastChats, capturePanes, cfg, opts = {}, readTranscriptPhase, lastReadState) {
   const open = new Set(openTabs || []);
   if (open.size === 0) return { error: 'no tabs are open. open some agent panes first.' };
 
@@ -351,11 +593,20 @@ export async function summarizeOpenChats(openTabs, lastChats, capturePanes, cfg,
   }
 
   const perAgentLines = Math.max(1, Number.isFinite(opts.per_agent_lines) ? opts.per_agent_lines : 15);
+  // Transcript phase is read ONLY when the caller opted in (passed a
+  // readTranscriptPhase fn) — a plain summarize stays a single capturePanes
+  // round-trip. WARDEN-75: no autonomous cost, change-awareness is opt-in.
+  const wantPhase = typeof readTranscriptPhase === 'function';
+  const diffing = opts.changed_only === true && !!lastReadState;
 
   try {
     const panes = await capturePanes(openChats, cfg);
 
-    const chats = openChats.map(c => {
+    // Build the structured per-agent entries AND a parallel observedState map
+    // (key → {state, phase, sig}) in one pass. observedState is the side-channel
+    // the Observer merges into its last-read cache (WARDEN-166); it is stripped
+    // from the LLM-facing result by the dispatcher and never reaches the model.
+    const built = openChats.map(c => {
       const base = {
         id: c.container || c.session,
         host: c.host,
@@ -371,32 +622,75 @@ export async function summarizeOpenChats(openTabs, lastChats, capturePanes, cfg,
       // flagged failure instead of omitting the entry (failures reported, not dropped).
       if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
         return {
-          ...base,
+          entry: {
+            ...base,
+            state: 'capture_failed',
+            captureError: true,
+            error: `failed to capture pane on ${c.host} (host unreachable or tmux capture error)`,
+            errors: [],
+            lastAction: null,
+            currentStep: null,
+            goal: inferGoal('', c),
+            excerpt: null,
+          },
+          key: c.key,
           state: 'capture_failed',
-          captureError: true,
-          error: `failed to capture pane on ${c.host} (host unreachable or tmux capture error)`,
-          errors: [],
-          lastAction: null,
-          currentStep: null,
-          goal: inferGoal('', c),
-          excerpt: null,
+          sig: null,
         };
       }
 
       const clean = stripAnsi(panes[c.key] || '');
       const excerpt = clean.split('\n').slice(-perAgentLines).join('\n').trim();
+      const cls = classifyPane(clean, c);
       return {
-        ...base,
-        ...classifyPane(clean, c),
-        captureError: false,
-        excerpt,
+        entry: {
+          ...base,
+          ...cls,
+          captureError: false,
+          excerpt,
+        },
+        key: c.key,
+        state: cls.state,
+        sig: paneSignature(clean),
       };
     });
+
+    // observedState reflects EVERY open agent (so the cache stays current), not
+    // just the diff-filtered subset.
+    const observedState = {};
+    for (const b of built) observedState[b.key] = { state: b.state, phase: null, sig: b.sig };
+
+    // Optional transcript-phase pass (concurrent, per-agent failures → null).
+    if (wantPhase) {
+      await Promise.all(openChats.map(async (c) => {
+        const ob = observedState[c.key];
+        if (!ob || ob.state === 'capture_failed') return;
+        try { ob.phase = await readTranscriptPhase(c, cfg); }
+        catch { ob.phase = null; }
+      }));
+    }
+
+    // Opt-in diff (WARDEN-166 AC #2): return only agents whose state OR content
+    // changed since the last read. observedState still covers all agents; only the
+    // returned `chats` set is narrowed. A newly seen agent (no prior) counts as
+    // changed so the first diff surfaces everything once.
+    let chats = built.map(b => b.entry);
+    if (diffing) {
+      chats = built
+        .filter(b => {
+          const p = lastReadState[b.key];
+          if (!p) return true;
+          return p.state !== b.state || p.sig !== b.sig;
+        })
+        .map(b => b.entry);
+    }
 
     const countBy = (pred) => chats.filter(pred).length;
     return {
       chats,
+      observedState,
       count: chats.length,
+      changedOnly: diffing === true,
       summary: {
         total: chats.length,
         active: countBy(e => e.state === 'active'),
@@ -437,9 +731,11 @@ export async function summarizeOpenChats(openTabs, lastChats, capturePanes, cfg,
 // many panes are captured, with the overflow surfaced as skipped (no silent
 // truncation). capturePanes fetches up to 60 lines per pane, so `lines` trims
 // within that window.
-export async function readChats(ids, openOnly, openTabs, lastChats, capturePanes, cfg, opts = {}) {
+export async function readChats(ids, openOnly, openTabs, lastChats, capturePanes, cfg, opts = {}, readTranscriptPhase, lastReadState) {
   const lines = Math.max(1, Number.isFinite(opts.lines) ? opts.lines : 60);
   const maxPanes = Math.max(1, Number.isFinite(opts.maxPanes) ? opts.maxPanes : 8);
+  const wantPhase = typeof readTranscriptPhase === 'function';
+  const diffing = opts.changed_only === true && !!lastReadState;
   const chats = (lastChats || []);
   const resolutionErrors = [];
 
@@ -498,33 +794,59 @@ export async function readChats(ids, openOnly, openTabs, lastChats, capturePanes
       id: c.container || c.session, host: c.host, project: c.project, role: c.role, active: c.active,
     });
 
-    const read = toCapture.map((c) => {
-      // A capture that succeeded always sets panes[c.key] (even to ''). A MISSING
-      // key means capturePanes silently dropped this pane (host SSH failure, or a
-      // local capture error) — surface it as a flagged failure, never omit it.
+    // Build the raw-pane entries AND the observedState side-channel (key →
+    // {state, phase, sig}) for the last-read cache (WARDEN-166). Entries stay RAW
+    // (a `pane` field, no classification) — observedState carries the state for
+    // caching without polluting the raw-content result. Per-pane phase reads run
+    // concurrently (WARDEN-88) and only when opted in; per-pane failures → null.
+    const observedState = {};
+    const read = await Promise.all(toCapture.map(async (c) => {
       if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
+        observedState[c.key] = { state: 'capture_failed', phase: null, sig: null };
         return {
           ...base(c), ok: false,
           error: `failed to capture pane on ${c.host} (host unreachable or tmux capture error)`,
         };
       }
       const raw = panes[c.key] || '';
+      const clean = stripAnsi(raw);
+      let phase = null;
+      if (wantPhase) {
+        try { phase = await readTranscriptPhase(c, cfg); } catch { phase = null; }
+      }
+      observedState[c.key] = { state: classifyPane(clean, c).state, phase, sig: paneSignature(clean) };
       return { ...base(c), ok: true, pane: raw.split('\n').slice(-lines).join('\n') };
-    });
+    }));
 
     const skipped = overflow.map((c) => ({
       ...base(c), ok: false, skipped: true,
       error: `omitted: max pane cap (${maxPanes}) reached — narrow your ids or use open_only.`,
     }));
 
-    const entries = [...read, ...skipped];
+    // Opt-in diff (WARDEN-166 AC #2): drop successfully-read panes whose content
+    // signature is unchanged since the last read. Failed captures and skipped
+    // (cap-overflow) entries are kept — they are conditions, not "unchanged
+    // content", and must stay surfaced (WARDEN-89).
+    let readForResult = read;
+    if (diffing) {
+      readForResult = read.filter((e) => {
+        if (!e.ok) return true;
+        const p = lastReadState[e.id]; // id === key for both chat shapes
+        if (!p) return true; // newly read → changed
+        return p.sig !== (observedState[e.id] && observedState[e.id].sig);
+      });
+    }
+
+    const entries = [...readForResult, ...skipped];
     return {
       chats: entries,
+      observedState,
       errors: resolutionErrors,
+      changedOnly: diffing === true,
       count: entries.length,
       summary: {
         total: resolved.length,
-        read: read.filter((e) => e.ok).length,
+        read: readForResult.filter((e) => e.ok).length,
         captureFailed: read.filter((e) => !e.ok).length,
         skipped: skipped.length,
         resolutionFailed: resolutionErrors.length,
@@ -648,6 +970,88 @@ export async function suggestNextActions(openTabs, lastChats, capturePanes, cfg)
   }
 }
 
+// Pure, dependency-injected core of the alert_changes tool (WARDEN-166 AC #3).
+// An ON-DEMAND trigger — never called by a background loop (WARDEN-75). It
+// captures every open pane (concurrent via capturePanes — WARDEN-88), classifies
+// each with the EXISTING classifyPane (no new patterns, no extra LLM calls),
+// reads each agent's transcript phase (readTranscriptPhase injected so this is
+// unit-testable with no SSH/tmux), and diffs against the last-read cache to
+// surface ONLY agents newly entering an alertable state (idle / erroring /
+// stuck / completed). Returns the alerts plus an observedState side-channel the
+// Observer merges into its cache so the NEXT diff has a fresh baseline.
+export async function alertChangedAgents(openTabs, lastChats, capturePanes, readTranscriptPhase, cfg, lastReadState) {
+  const open = new Set(openTabs || []);
+  if (open.size === 0) return { error: 'no tabs are open. open some agent panes first.' };
+
+  const openChats = (lastChats || []).filter(c =>
+    open.has(c.container || c.session) || open.has(c.key)
+  );
+
+  if (openChats.length === 0) {
+    return { error: 'open tabs do not match any discovered chats. try refreshing with list_chats.' };
+  }
+
+  try {
+    const panes = await capturePanes(openChats, cfg);
+
+    // Per-agent observe (concurrent): classify the pane + read the transcript
+    // phase. Capture failures and transcript failures are surfaced/degraded per
+    // agent, never dropped — a missing pane key is a capture_failed state, and a
+    // transcript error resolves to phase null (the pane-state fallback path).
+    const observedState = {};
+    let captureFailed = 0;
+    await Promise.all(openChats.map(async (c) => {
+      if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
+        observedState[c.key] = { state: 'capture_failed', phase: null, sig: null };
+        captureFailed += 1;
+        return;
+      }
+      const clean = stripAnsi(panes[c.key] || '');
+      const state = classifyPane(clean, c).state;
+      let phase = null;
+      if (typeof readTranscriptPhase === 'function') {
+        try { phase = await readTranscriptPhase(c, cfg); } catch { phase = null; }
+      }
+      observedState[c.key] = { state, phase, sig: paneSignature(clean) };
+    }));
+
+    // Attach chat metadata to the observed snapshot so diffAlerts can build
+    // self-describing alert objects (id/host/role/project).
+    const curObserved = {};
+    for (const c of openChats) {
+      const ob = observedState[c.key];
+      if (!ob) continue;
+      curObserved[c.key] = {
+        ...ob,
+        id: c.container || c.session,
+        key: c.key,
+        host: c.host,
+        role: c.role,
+        project: c.project,
+      };
+    }
+
+    const { alerts, summary: diffSummary } = diffAlerts(lastReadState || {}, curObserved);
+
+    return {
+      alerts,
+      observedState,
+      // Guidance for the model: if there is no baseline yet, the first call only
+      // establishes one (no alerts) — say so explicitly so it doesn't conclude
+      // "nothing needs attention" from a cold cache.
+      baseline: Object.keys(lastReadState || {}).length === 0,
+      summary: {
+        total: openChats.length,
+        alertCount: alerts.length,
+        captureFailed,
+        ...diffSummary,
+      },
+    };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
 export class Observer {
   constructor(cfg, { sid, gate, onTool, onToolResult, onText, chatContext } = {}) {
     this.cfg = cfg;
@@ -661,6 +1065,11 @@ export class Observer {
     // onText: optional (text) => void  streams assistant text emitted mid-loop
     this.onText = onText;
     this.lastChats = [];
+    // Per-agent last-read state cache (WARDEN-166): key → { state, phase, sig, ts }.
+    // Updated as a SIDE-EFFECT of summarize_chats / read_chats / read_chat — never
+    // by a background loop (WARDEN-75). In-memory, matching lastChats. Drives the
+    // changed_only diff and the alert_changes trigger.
+    this.lastReadState = {};
     // resume an existing persisted conversation (if any)
     const existing = sid ? getSession(sid) : null;
     this.name = existing?.name || null;
@@ -694,6 +1103,28 @@ export class Observer {
     const key = this.boundKey;
     if (key) tabs.add(key);
     return Array.from(tabs);
+  }
+
+  // Merge a read's observedState side-channel into the last-read cache (the
+  // side-effect that makes the cache change-aware). Timestamped so a future
+  // persisted-cache refinement could age entries out (WARDEN-88 sizing); today
+  // it is in-memory only, matching lastChats.
+  _mergeReadState(observed) {
+    if (!observed || typeof observed !== 'object') return;
+    const ts = Date.now();
+    for (const [key, v] of Object.entries(observed)) {
+      if (!v || typeof v !== 'object') continue;
+      // Preserve a previously cached transcript phase when this read didn't
+      // observe one (a plain read_chat/summarize only refreshes pane state), so
+      // the next alert diff still has a phase to flip against.
+      const prevPhase = this.lastReadState[key] && this.lastReadState[key].phase;
+      this.lastReadState[key] = {
+        state: v.state,
+        phase: v.phase != null ? v.phase : (prevPhase != null ? prevPhase : null),
+        sig: v.sig != null ? v.sig : null,
+        ts,
+      };
+    }
   }
 
   getChatContext() {
@@ -761,12 +1192,30 @@ export class Observer {
       if (chat.error) return chat;
       try {
         const pane = await readPane(chat, this.cfg, input.lines || 120);
+        // WARDEN-166: cache the last-read pane state + content signature as a
+        // side-effect of the read. Phase is left to the opt-in change-awareness
+        // tools (summarize/read_chats with changed_only, or alert_changes) so a
+        // plain read_chat stays a single round-trip. Best-effort, never blocks.
+        try {
+          const clean = stripAnsi(pane);
+          this._mergeReadState({
+            [chat.key]: { state: classifyPane(clean, chat).state, phase: null, sig: paneSignature(clean) },
+          });
+        } catch { /* cache update is best-effort */ }
         return { id: chat.container, host: chat.host, pane: pane.slice(-8000) };
       } catch (e) { return { error: e.message }; }
     }
     if (name === 'read_chats') {
-      return readChats(input.ids, !!input.open_only, this.effectiveOpenTabs(),
-        this.lastChats, capturePanes, this.cfg, input);
+      // changed_only opts into change-awareness: thread readTranscriptPhase so the
+      // cache records a transcript phase, and the last-read cache so the result is
+      // narrowed to changed panes. A plain read_chats stays phase-free (cheap).
+      const rtp = input.changed_only ? readTranscriptPhase : undefined;
+      const res = await readChats(input.ids, !!input.open_only, this.effectiveOpenTabs(),
+        this.lastChats, capturePanes, this.cfg, input, rtp, this.lastReadState);
+      this._mergeReadState(res.observedState);
+      const out = { ...res };
+      delete out.observedState;
+      return out;
     }
     if (name === 'send_directive') {
       const chat = await this._resolve(input.id);
@@ -781,7 +1230,14 @@ export class Observer {
       } catch (e) { return { error: e.message }; }
     }
     if (name === 'summarize_chats') {
-      return summarizeOpenChats(this.effectiveOpenTabs(), this.lastChats, capturePanes, this.cfg, input);
+      // changed_only opts into change-awareness (threads readTranscriptPhase +
+      // the cache); a plain summarize stays phase-free and single-round-trip.
+      const rtp = input.changed_only ? readTranscriptPhase : undefined;
+      const res = await summarizeOpenChats(this.effectiveOpenTabs(), this.lastChats, capturePanes, this.cfg, input, rtp, this.lastReadState);
+      this._mergeReadState(res.observedState);
+      const out = { ...res };
+      delete out.observedState;
+      return out;
     }
     if (name === 'analyze_agents') {
       const open = new Set(this.effectiveOpenTabs());
@@ -850,6 +1306,17 @@ export class Observer {
     }
     if (name === 'suggest_next_actions') {
       return suggestNextActions(this.effectiveOpenTabs(), this.lastChats, capturePanes, this.cfg);
+    }
+    if (name === 'alert_changes') {
+      // On-demand change-awareness trigger (WARDEN-166). Always reads transcript
+      // phase so a completed-task flip can fire. Never invoked by a background
+      // loop (WARDEN-75). The first call on a cold cache only establishes a
+      // baseline (no alerts) — surfaced via res.baseline.
+      const res = await alertChangedAgents(this.effectiveOpenTabs(), this.lastChats, capturePanes, readTranscriptPhase, this.cfg, this.lastReadState);
+      this._mergeReadState(res.observedState);
+      const out = { ...res };
+      delete out.observedState;
+      return out;
     }
     if (name === 'write_file') {
       // Writes confined to the warden data dir only. Ensure it exists (first run),
