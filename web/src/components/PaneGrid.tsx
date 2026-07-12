@@ -15,7 +15,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import type { Chat } from '@/lib/types';
-import type { PaneLayout, TerminalCursorStyle } from '@/lib/storage';
+import type { PaneLayout, TerminalCursorStyle, OnExitBehavior } from '@/lib/storage';
 
 export interface OpenTile { id: string }
 
@@ -53,11 +53,15 @@ interface Props {
   // pass-through to PaneTile; App owns the state so a Settings change live-
   // updates every open pane.
   terminalCursorStyle: TerminalCursorStyle;
+  // "Pane on agent exit" behavior (keep | dim | auto-close). Pure pass-through to
+  // PaneTile — App owns the persisted pref; PaneTile reacts to its own chat's
+  // live→exited transition. See WARDEN-248.
+  onExitBehavior: OnExitBehavior;
 }
 
 function colsFor(n: number) { return n <= 1 ? 1 : Math.ceil(Math.sqrt(n)); }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalTheme, terminalCursorStyle }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalTheme, terminalCursorStyle, onExitBehavior }: Props) {
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
   const [fileInput, setFileInput] = useState('');
@@ -242,6 +246,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     fontFamily={fontFamily}
                     terminalTheme={terminalTheme}
                     terminalCursorStyle={terminalCursorStyle}
+                    onExitBehavior={onExitBehavior}
                   />
                 </div>
               );
