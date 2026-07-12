@@ -11,10 +11,13 @@ import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
+import { Checkbox } from '@/components/ui/checkbox';
 import { SlidersHorizontal, WifiOff } from 'lucide-react';
 import { NewChatForm } from './NewChatForm';
 import { CollectionsSection } from './CollectionsSection';
 import { CreateCollectionDialog } from './CreateCollectionDialog';
+import { BroadcastDialog } from './BroadcastDialog';
+import { summarizeBroadcast, formatBroadcastToast } from '@/lib/broadcast';
 import { DiffViewer } from './DiffViewer';
 import { DiffBlock } from './DiffBlock';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
@@ -189,6 +192,33 @@ function SectionToggle({ expanded, onClick, label, title }: {
       <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
       <span className="flex-1 truncate text-left">{label}</span>
     </Button>
+  );
+}
+
+/**
+ * The contextual action bar for multi-select broadcast (WARDEN-292). Appears at
+ * the foot of a fleet view only when ≥1 agent is selected, showing the live
+ * count and the three selection actions: select-all (within the current visible
+ * list), clear, and "Send to N…" (which opens the confirm-and-send dialog —
+ * nothing is sent until the dialog's explicit Confirm). Built on shadcn <Button>
+ * per the WARDEN-68 quality bar. shrink-0 so it stays pinned at the bottom while
+ * the fleet list scrolls above it.
+ */
+function BroadcastActionBar({ count, onSelectAll, onClear, onSend }: {
+  count: number;
+  onSelectAll: () => void;
+  onClear: () => void;
+  onSend: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-1.5 px-2 py-1.5 border-t shrink-0 bg-accent/40">
+      <span className="text-xs text-muted-foreground whitespace-nowrap">{count} selected</span>
+      <div className="ml-auto flex items-center gap-1">
+        <Button variant="ghost" size="xs" onClick={onSelectAll} title="select every agent in this list">All</Button>
+        <Button variant="ghost" size="xs" onClick={onClear} title="clear the selection">Clear</Button>
+        <Button size="xs" onClick={onSend}>Send to {count}…</Button>
+      </div>
+    </div>
   );
 }
 
@@ -490,6 +520,19 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [agentFilter, setAgentFilter] = useState<AgentFilter>('all');
   const [agentSort, setAgentSort] = useState<AgentSort>('manual');
 
+  // Multi-select broadcast (WARDEN-292): the set of selected agent ids, held at
+  // the ChatSidebar level so it can span the active/hidden/idle fleet lists in
+  // whichever fleet view (host or collection) is open. Keyed by `c.key || c.id`
+  // — the same identity openPanes/pinnedChatIds use — so a row stays selected
+  // across the active→hidden→idle regrouping within one view. Selection is
+  // scoped to the current fleet view: navigating away (back to root, into a
+  // host/collection, or opening a chat) clears it, so the human's mental model
+  // is "the agents I picked in THIS list," never a stale cross-view mix. v1
+  // wires selection into ChatRow (the fleet lists) only — OpenedChatRow (the
+  // root active-tabs working set) is intentionally excluded.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [broadcastOpen, setBroadcastOpen] = useState(false);
+
   // Extract project counts from active agents
   const projectCounts = chats.reduce((acc, c) => {
     if (c.active && c.project) {
@@ -629,6 +672,82 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     } catch (error) {
       console.error('[pins-save] Failed:', error);
     }
+  };
+
+  // --- Multi-select broadcast (WARDEN-292) -------------------------------------
+  // A broadcast is a chat operation (it types into agent tmux sessions), so its
+  // result toast is gated on the same pref as kill/resume/rename (notifyChatOps)
+  // — success AND failure — matching App.tsx's convention for chat-op feedback.
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const selectAll = (ids: string[]) => setSelectedIds(new Set(ids));
+  const clearSelection = () => setSelectedIds(new Set());
+
+  // Selection is scoped to the current fleet view — clear it whenever the view
+  // changes (root ↔ host ↔ collection). Opening a chat from a fleet view also
+  // navigates to root (openFromHost), so this covers the "selected, then peeked
+  // at a chat" path too: the selection has been discharged or abandoned by then.
+  useEffect(() => { setSelectedIds(new Set()); }, [view]);
+
+  // Resolve the selected ids to their chats (in chats order) for the confirm
+  // dialog's target list. Stale ids (an agent that died between selecting and
+  // sending) simply don't resolve here and are absent from the list — but they
+  // are STILL sent to in handleBroadcastSend (which iterates selectedIds, not
+  // this list) so a dead target is reported as a per-agent failure rather than
+  // silently dropped.
+  const selectedChats = useMemo(
+    () => (selectedIds.size === 0 ? [] : chats.filter((c) => selectedIds.has(c.key || c.id))),
+    [chats, selectedIds],
+  );
+
+  // Fan the message out to every selected agent via the existing per-target
+  // /api/send path (server.js:182 → sendPane → tmux send-keys), then summarize.
+  // Promise.allSettled (not Promise.all) so a partial failure — one host
+  // unreachable, one session dead — is reported per-agent and does NOT abort the
+  // other sends. Never throws: failure is encoded in the summary. Returns the
+  // summary so the BroadcastDialog can close on completion.
+  const handleBroadcastSend = async (text: string) => {
+    const ids = Array.from(selectedIds);
+    const results = await Promise.allSettled(
+      ids.map((id) =>
+        fetch('/api/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, text }),
+        }).then(async (r) =>
+          r.ok
+            ? { ok: true }
+            : { ok: false, error: (await r.json().catch(() => ({}))).error || `HTTP ${r.status}` },
+        ),
+      ),
+    );
+    const nameOf = (id: string) => {
+      const c = findChat(chats, id);
+      return c ? displayName(c) : id;
+    };
+    const summary = summarizeBroadcast(results, ids, nameOf);
+    const outcome = formatBroadcastToast(summary);
+    if (prefs.notifyChatOps) {
+      if (outcome.variant === 'success') {
+        toast.success(outcome.title);
+      } else {
+        // whitespace-pre-line so the per-agent failure list (joined with \n in
+        // formatBroadcastToast) renders one failure per line instead of
+        // collapsing to a single run-on line — sonner's default description
+        // element normalizes whitespace.
+        toast.error(outcome.title, { description: <span className="whitespace-pre-line">{outcome.description}</span> });
+      }
+    }
+    // The broadcast's intent is discharged — clear the selection regardless of
+    // outcome. Failed targets remain visible in the toast; the human can
+    // re-select and retry if needed.
+    setSelectedIds(new Set());
+    return summary;
   };
 
   const enterHost = (host: string) => {
@@ -816,19 +935,19 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             {(visibleActive.length > 0 || idle.length > 0 || hiddenActive.length > 0) && (
               <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">● matching agents</div>
             )}
-            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onHide={() => onHideTab(c.key || c.id)} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
+            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onHide={() => onHideTab(c.key || c.id)} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} />)}
             {hiddenActive.length > 0 && (
               <>
                 <SectionToggle expanded={hiddenExpanded} onClick={() => setHiddenExpanded(!hiddenExpanded)} label={`hidden (${hiddenActive.length})`} />
                 {hiddenExpanded && hiddenActive.map((c) => (
-                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onUnhide={() => onUnhideTab(c.key || c.id)} dim showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />
+                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onUnhide={() => onUnhideTab(c.key || c.id)} dim showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} />
                 ))}
               </>
             )}
             {idle.length > 0 && (
               <>
                 <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">idle</div>
-                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} dim showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
+                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} dim showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} />)}
               </>
             )}
             {agents.length === 0 && (
@@ -838,6 +957,24 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             )}
           </div>
         </ScrollArea>
+        {selectedIds.size > 0 && (
+          <BroadcastActionBar
+            count={selectedIds.size}
+            onSelectAll={() => selectAll(agents.map((c) => c.key || c.id))}
+            onClear={clearSelection}
+            onSend={() => setBroadcastOpen(true)}
+          />
+        )}
+        {/* Rendered in each view's own return because host/collection are
+            early-return branches — a single copy at the root would never mount
+            while a fleet view (where selection lives) is active. Only one view
+            is mounted at a time, so only one dialog instance exists. */}
+        <BroadcastDialog
+          open={broadcastOpen}
+          onOpenChange={setBroadcastOpen}
+          targets={selectedChats}
+          onSend={handleBroadcastSend}
+        />
       </div>
     );
   }
@@ -880,19 +1017,19 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             {(visibleActive.length > 0 || idle.length > 0 || hiddenActive.length > 0) && (
               <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">● live (tmux)</div>
             )}
-            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onHide={() => onHideTab(c.key || c.id)} gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
+            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onHide={() => onHideTab(c.key || c.id)} gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} />)}
             {hiddenActive.length > 0 && (
               <>
                 <SectionToggle expanded={hiddenExpanded} onClick={() => setHiddenExpanded(!hiddenExpanded)} label={`hidden (${hiddenActive.length})`} />
                 {hiddenExpanded && hiddenActive.map((c) => (
-                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onUnhide={() => onUnhideTab(c.key || c.id)} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />
+                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onUnhide={() => onUnhideTab(c.key || c.id)} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} />
                 ))}
               </>
             )}
             {idle.length > 0 && (
               <>
                 <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">idle</div>
-                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
+                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} />)}
               </>
             )}
             <div className="mt-3 mb-1 border-t border-border/50" />
@@ -947,6 +1084,20 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             )}
           </div>
         </ScrollArea>
+        {selectedIds.size > 0 && (
+          <BroadcastActionBar
+            count={selectedIds.size}
+            onSelectAll={() => selectAll(sortedHostChats.map((c) => c.key || c.id))}
+            onClear={clearSelection}
+            onSend={() => setBroadcastOpen(true)}
+          />
+        )}
+        <BroadcastDialog
+          open={broadcastOpen}
+          onOpenChange={setBroadcastOpen}
+          targets={selectedChats}
+          onSend={handleBroadcastSend}
+        />
       </div>
     );
   }
@@ -1125,6 +1276,12 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
         filePath={diffTarget?.path ?? ''}
         open={!!diffTarget}
         onOpenChange={(o) => { if (!o) setDiffTarget(null); }}
+      />
+      <BroadcastDialog
+        open={broadcastOpen}
+        onOpenChange={setBroadcastOpen}
+        targets={selectedChats}
+        onSend={handleBroadcastSend}
       />
     </div>
   );
@@ -1561,7 +1718,7 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
   );
 }
 
-function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hostStatus, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, isPinned, onTogglePin }: {
+function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hostStatus, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, isPinned, onTogglePin, selected, onToggleSelect, selectionActive }: {
   c: Chat; open: boolean; onOpen: () => void; onKill: () => void;
   onRename: (session: string, kind: string, name: string, host?: string) => void;
   onHide?: () => void; onUnhide?: () => void; dim?: boolean;
@@ -1578,6 +1735,13 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hos
   onOpenDiff?: (path: string) => void;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
   isPinned?: boolean; onTogglePin?: () => void;
+  // WARDEN-292: multi-select for broadcast. `selected` is this row's membership
+  // in the sidebar's selection set; `onToggleSelect` flips it. `selectionActive`
+  // (≥1 agent selected anywhere in the view) reveals every row's checkbox at full
+  // opacity so the human can keep picking without per-row hover — otherwise the
+  // checkbox is hover/focus-only (mirrors the pin/hide/kill hover-button pattern
+  // at line ~1542) to keep the default fleet list uncluttered.
+  selected?: boolean; onToggleSelect?: () => void; selectionActive?: boolean;
 }) {
   const isUser = c.kind === 'tmux';
   const canRename = isUser;
@@ -1611,6 +1775,25 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hos
       onKeyDown={(e) => { if (!editing && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onOpen(); } }}
       className={`group flex items-center gap-2 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent cursor-pointer transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${open ? 'bg-accent' : ''} ${dim || hostOffline ? 'opacity-60' : ''}`}
     >
+      {onToggleSelect && (
+        // The selection checkbox sits leftmost, before the status dot. Click +
+        // keydown stop propagation (mirrors the pin/hide/kill hover buttons
+        // below) so toggling selection never also opens the chat. Subtle
+        // (hover/focus-revealed) until selection is active somewhere in the view
+        // or this row is itself selected — keeps the default fleet list quiet
+        // while staying keyboard-accessible (focus-within reveals it).
+        <span
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
+          className={cn('flex shrink-0 items-center', selected || selectionActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100')}
+        >
+          <Checkbox
+            checked={!!selected}
+            onCheckedChange={() => onToggleSelect()}
+            aria-label={`${selected ? 'deselect' : 'select'} ${c.name || c.key || c.id}`}
+          />
+        </span>
+      )}
       {showStatusIndicators !== false && (
         // Four grayscale-legible states via shape, not hue:
         //   open         = solid filled circle (●)
