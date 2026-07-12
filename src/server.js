@@ -1223,13 +1223,16 @@ const GIT_LOG_PRETTY = '%h|%s|%an|%ar';
 app.get('/api/git-log', async (req, res) => {
   const chatId = String(req.query.id || '');
   const limit = Math.min(Math.max(parseInt(String(req.query.limit || '5'), 10) || 5, 1), 50);
-  // range=incoming → list commits reachable from @{u} but NOT HEAD (the "behind"
-  // commits — what the upstream has that we don't). Absent → today's HEAD-reachable
-  // log. @{u} is git's upstream rev spec, already used by /api/git-status's
-  // ahead/behind count, so this introduces no new staleness or network fetch. The
-  // ahead/behind COUNT shipped in WARDEN-153; this completes the explorable behind
-  // half (WARDEN-225). Strictly read-only — no fetch/pull/merge/checkout.
-  const incoming = String(req.query.range || '') === 'incoming';
+  // range selects a commit window:
+  //   incoming → HEAD..@{u}  (commits @{u} has that HEAD doesn't — the "behind" list)
+  //   outgoing → @{u}..HEAD  (commits HEAD has that @{u} doesn't — the "unpushed/ahead" list)
+  //   absent   → today's HEAD-reachable log.
+  // @{u} is git's upstream rev spec, already used by /api/git-status's ahead/behind
+  // count, so this introduces no new staleness or network fetch. The ahead/behind
+  // COUNT shipped in WARDEN-153; the behind LIST in WARDEN-225; this completes the
+  // explorable ahead half (WARDEN-252). Strictly read-only — no fetch/pull/merge/checkout.
+  const range = String(req.query.range || '');
+  const rangeRev = range === 'incoming' ? 'HEAD..@{u}' : range === 'outgoing' ? '@{u}..HEAD' : null;
   const { chat, error } = await resolve(chatId);
   if (error) return res.status(404).json({ error });
 
@@ -1238,13 +1241,13 @@ app.get('/api/git-log', async (req, res) => {
     if (!cwd) return res.json({ commits: [], error: 'no cwd' });
 
     // short hash | subject | author | relative date (GIT_LOG_PRETTY). runGit passes
-    // --pretty as a single argv element (no shell on the LOCAL branch) so the '|'
-    // separators can't be read as pipes; the remote branch shellQuotes it (and the
-    // HEAD..@{u} range, brace-expansion-safe) for the same reason (WARDEN-122).
-    // yatfa chats run this inside the container (WARDEN-235). range=incoming splices
-    // in HEAD..@{u} — the behind commits (WARDEN-225); absent → HEAD-reachable log.
+    // --pretty (and the range rev) as a single argv element (no shell on the LOCAL
+    // branch) so the '|' separators can't be read as pipes and the @{u}..HEAD range
+    // stays brace-expansion-safe; the remote branch shellQuotes each arg for the same
+    // reason (WARDEN-122). yatfa chats run this inside the container (WARDEN-235).
+    // range=incoming/outgoing splices in the corresponding rev; absent → HEAD log.
     const args = ['log'];
-    if (incoming) args.push('HEAD..@{u}');
+    if (rangeRev) args.push(rangeRev);
     args.push(`-${limit}`, `--pretty=format:${GIT_LOG_PRETTY}`);
     const r = await runGit(chat, args, cwd);
     const raw = r.ok ? r.stdout.trim() : '';
