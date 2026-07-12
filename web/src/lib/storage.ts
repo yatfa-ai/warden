@@ -151,6 +151,11 @@ export interface UiState {
   // output), or 'auto-close' (remove via closePane once). Pure client-side pref;
   // never sent to the backend. See OnExitBehavior / WARDEN-248.
   onExitBehavior?: OnExitBehavior;
+  // Whether opening/resuming/splitting a chat auto-focuses the new pane (default
+  // true = today's behavior). When false the focused pane is preserved; xterm's
+  // native click-to-focus lets the user focus a pane on demand. Pure client-side
+  // pref; never sent to the backend. See WARDEN-274.
+  autoFocusNewPane?: boolean;
   // Whether launch reopens the previous workspace ('previous') or starts empty
   // ('empty'). Pure client-side pref; never sent to the backend.
   restoreOnStartup?: RestoreOnStartup;
@@ -257,6 +262,7 @@ const DEFAULT_UI: UiState = {
   terminalCursorStyle: 'blink-block',
   theme: 'system', density: 'comfortable', paneLayout: 'auto',
   onExitBehavior: 'keep',
+  autoFocusNewPane: true,
   restoreOnStartup: 'previous',
   defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', customPresets: [],
   defaultSplitShell: '',
@@ -297,6 +303,9 @@ export function loadUi(): UiState {
         density: v.density === 'compact' ? 'compact' : 'comfortable',
         paneLayout: (v.paneLayout === 'stacked' || v.paneLayout === 'side-by-side') ? v.paneLayout : 'auto',
         onExitBehavior: ['keep', 'dim', 'auto-close'].includes(v.onExitBehavior) ? v.onExitBehavior : 'keep',
+        // Only an explicit false opts out; absent/unknown defaults to true so a
+        // partial payload never silently disables focus-stealing.
+        autoFocusNewPane: v.autoFocusNewPane !== false,
         restoreOnStartup: v.restoreOnStartup === 'empty' ? 'empty' : 'previous',
         defaultNewChatPreset: presetIsValid(v.defaultNewChatPreset) ? (v.defaultNewChatPreset as string) : 'claude',
         defaultNewChatHost: typeof v.defaultNewChatHost === 'string' ? v.defaultNewChatHost : '(local)',
