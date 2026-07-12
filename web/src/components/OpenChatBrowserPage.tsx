@@ -189,18 +189,22 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Escape returns to the workspace (mirrors the modal's Escape-to-close). Skip
-  // while the read-only transcript viewer is open so the first Escape dismisses
-  // only that nested Dialog (Radix DismissableLayer handles it in capture phase
-  // but doesn't stopPropagation), and a second Escape closes the page. `viewing`
-  // is read from the current render's closure — when the transcript's Escape
-  // fires, the setViewing(null) it triggers hasn't flushed yet, so `viewing` is
-  // still truthy here and the page correctly stays open.
+  // Escape returns to the workspace (mirrors the modal's Escape-to-close). Gate
+  // on the event, not on the `viewing` React state: when the nested transcript
+  // viewer (a Radix Dialog) is open, its DismissableLayer handles Escape on
+  // `document` in the CAPTURE phase and calls event.preventDefault(). This page
+  // listener is on `window` (bubble phase), which runs AFTER capture — so by the
+  // time it fires the transcript's setViewing(null) has already flushed and
+  // `viewing` would read as null (closure state races the capture-phase mutation).
+  // `defaultPrevented` is a flag on the event object itself, set in capture and
+  // visible to every later listener, so it can't race: the first Escape (handled
+  // by the transcript) is skipped here, a second Escape (no viewer open) closes
+  // the page.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !viewing) onClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.defaultPrevented) onClose(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose, viewing]);
+  }, [onClose]);
 
   // Full-content session search (WARDEN-161). When the query is non-empty, debounce
   // and hit /api/claude-sessions-search so matches INSIDE a session's body — not just
