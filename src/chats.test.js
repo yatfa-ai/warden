@@ -1,6 +1,6 @@
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert';
-import { resolveChat, resolveChatWithRefresh, comparePinned } from './chats.js';
+import { resolveChat, resolveChatWithRefresh, comparePinned, parseDiscoverRow } from './chats.js';
 
 describe('resolveChat', () => {
   const mockChats = [
@@ -329,5 +329,72 @@ describe('comparePinned (pin-first sort)', () => {
     const pins = new Set(['remote:agent']);
     assert.ok(comparePinned(localAgent, remoteAgent, pins) > 0, 'remote pinned sorts first');
     assert.ok(comparePinned(remoteAgent, localAgent, pins) < 0);
+  });
+});
+
+// parseDiscoverRow parses one TSV row from DISCOVER_SCRIPT (WARDEN-235). Discovery
+// runs `docker ps` + per-container `docker exec` over SSH, which CI can't do, so
+// the row parser is the unit-testable seam for the new `cwd` column. The layout
+// is  name \t status \t cwd \t active  (cwd second-to-last, active last); a legacy
+// 3-column row (pre-cwd) must still parse with cwd ''.
+describe('parseDiscoverRow', () => {
+  it('parses a 4-column row: name, status, cwd, active', () => {
+    // active yatfa agent whose pane sits in /workspace
+    assert.deepStrictEqual(parseDiscoverRow('myproject-worker\tUp 2 hours\t/workspace\t1'), {
+      name: 'myproject-worker', status: 'Up 2 hours', cwd: '/workspace', active: true,
+    });
+  });
+
+  it('reads active=FALSE when the trailing flag is 0', () => {
+    const row = parseDiscoverRow('proj-researcher\tUp 5 min\t/app\t0');
+    assert.strictEqual(row.active, false);
+  });
+
+  it('reads cwd as the second-to-last column (active stays last)', () => {
+    // An idle container whose WorkingDir fallback was /app — cwd must NOT be
+    // confused with the active flag.
+    const row = parseDiscoverRow('c\tUp\t/app\t0');
+    assert.strictEqual(row.cwd, '/app');
+    assert.strictEqual(row.active, false);
+  });
+
+  it('preserves a status containing spaces', () => {
+    const row = parseDiscoverRow('c\tUp 3 hours (healthy)\t/w\t1');
+    assert.strictEqual(row.status, 'Up 3 hours (healthy)');
+  });
+
+  it('rejoins a status that itself contains a tab', () => {
+    // Defensive: if docker's Status field ever embeds a tab, the middle columns
+    // between name and cwd are the status (rejoined), not split into cwd/active.
+    const row = parseDiscoverRow('c\tUp\tand\tmore\t/w\t1');
+    assert.strictEqual(row.status, 'Up\tand\tmore');
+    assert.strictEqual(row.cwd, '/w');
+    assert.strictEqual(row.active, true);
+  });
+
+  it('tolerates an empty cwd (derivation failed) without dropping the row', () => {
+    // Neither pane path nor WorkingDir resolved → cwd '' → discover() sets
+    // chat.cwd undefined (the git routes then treat it as "no cwd" rather than
+    // falling back to Warden's own repo). The row is still a valid chat.
+    const row = parseDiscoverRow('c\tUp\t\t1');
+    assert.strictEqual(row.cwd, '');
+    assert.strictEqual(row.active, true);
+  });
+
+  it('parses a legacy 3-column row (pre-cwd) with cwd ""', () => {
+    // Backward compat: an older discover script emitting name/status/active must
+    // not break — cwd reads as '' and the chat still resolves.
+    assert.deepStrictEqual(parseDiscoverRow('c\tUp 1 hour\t1'), {
+      name: 'c', status: 'Up 1 hour', cwd: '', active: true,
+    });
+  });
+
+  it('returns null for blank / too-short / malformed rows', () => {
+    assert.strictEqual(parseDiscoverRow(''), null);
+    assert.strictEqual(parseDiscoverRow('   '), null);
+    assert.strictEqual(parseDiscoverRow(null), null);
+    assert.strictEqual(parseDiscoverRow(undefined), null);
+    assert.strictEqual(parseDiscoverRow('only-name'), null);            // 1 column
+    assert.strictEqual(parseDiscoverRow('a\tb'), null);                 // 2 columns
   });
 });

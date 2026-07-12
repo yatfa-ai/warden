@@ -185,6 +185,28 @@ export function parseStashCount(output) {
 }
 
 /**
+ * Build the local (host) argv to run `git -C <cwd> <args>` INSIDE a yatfa
+ * container via `docker exec`. The in-container cwd is passed to git with `-C`
+ * (not a shell `cd`) so there is NO shell and therefore NO injection surface:
+ * `gitArgs` are spliced verbatim after `git`, exactly like the manual-local
+ * `spawnSync('git', args, {cwd})` path this mirrors. `docker exec <c>` (no
+ * `-w`) runs in the container's default dir, then `git -C <cwd>` re-targets —
+ * robust whether or not the image set a WORKDIR.
+ *
+ * Pure (just builds an array) so the docker-exec transport is unit-testable
+ * without docker. The argv is `['docker', 'exec', container, 'git', '-C', cwd,
+ * ...gitArgs]`. See WARDEN-235.
+ *
+ * @param {string} container - Container name (chat.container).
+ * @param {string} cwd - In-container working directory (derived at discovery).
+ * @param {string[]} gitArgs - git argv AFTER `git` (e.g. ['status','--porcelain']).
+ * @returns {string[]}
+ */
+export function buildDockerGitArgv(container, cwd, gitArgs) {
+  return ['docker', 'exec', container, 'git', '-C', cwd, ...gitArgs];
+}
+
+/**
  * Parse `git stash list --pretty=format:%gd|%s|%cr` output into
  * `[{ ref, subject, date }]`.
  *
