@@ -971,7 +971,7 @@ function runLocalGit(args, cwd) {
 //
 // manual/tmux chats keep the original local fallback (their cwd is a real host
 // path, and LOCAL manual chats have always shown the host repo at process.cwd()).
-function gitCwd(chat) {
+export function gitCwd(chat) {
   if (chat.container) return chat.cwd || '';
   return chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
 }
@@ -992,7 +992,7 @@ function gitCwd(chat) {
 // cwd + each arg (the same WARDEN-122 discipline as git-log/show). `2>/dev/null`
 // on the remote branches swallows non-git / detached noise so a non-repo reads
 // as empty, mirroring runLocalGit's non-zero-exit tolerance.
-async function runGit(chat, args, cwd) {
+export async function runGit(chat, args, cwd) {
   if (chat.container) {
     if (chat.host === LOCAL) {
       const argv = buildDockerGitArgv(chat.container, cwd, args);
