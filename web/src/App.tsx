@@ -4,6 +4,7 @@ import { postJson } from '@/lib/api';
 import { loadUi, saveUi, persistUiState, initialWorkspace, DEFAULT_TERMINAL_FONT_FAMILY, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
 import { applyTheme, listenSystemThemeChange, getEffectiveTheme, resolveTerminalTheme, type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
+import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ChatSidebar } from '@/components/ChatSidebar';
@@ -165,6 +166,15 @@ function App() {
   // client-side pref (like the new-chat prefs above): persisted by the saveUi
   // effect below, never sent to the backend.
   const [defaultSplitShell, setDefaultSplitShell] = useState(() => uiState.defaultSplitShell ?? '');
+  // "Remember window position and size" is an Electron-main-owned pref, NOT a
+  // renderer localStorage pref like the ones above: the OS window bounds must be
+  // readable at createWindow() time (before this renderer loads), so the flag +
+  // bounds live in main's window-state.json and are read/written through the IPC
+  // bridge in electron.ts. This React state is only a display mirror — main's
+  // file is the source of truth — so it is deliberately NOT part of UiState or
+  // the saveUi effect. Defaults to true; loads from main on mount (a no-op that
+  // stays true in a plain browser where the bridge is absent). See WARDEN-263.
+  const [rememberWindowBounds, setRememberWindowBoundsState] = useState(true);
   const { prefs, reload: reloadNotificationPrefs } = useNotificationPrefs();
   // "Confirm before destructive actions" preference (default on). Gates both
   // destructive kill paths — force-kill (tmux session) and kill chat. Loaded
@@ -184,6 +194,9 @@ function App() {
     streamApi.connect();
     refresh();
     refreshConfigPrefs();
+    // Load the main-owned "remember window bounds" flag (no-op in a browser;
+    // stays at the true default when the IPC bridge is absent). WARDEN-263.
+    void getRememberWindowBounds().then(setRememberWindowBoundsState);
 
     // Check for activity since last close
     const checkActivitySinceClose = async () => {
@@ -344,6 +357,16 @@ function App() {
     reloadNotificationPrefs();
     refreshConfigPrefs();
   }, [refresh, reloadNotificationPrefs, refreshConfigPrefs]);
+
+  // Write-through setter for the main-owned "remember window bounds" flag: update
+  // the display mirror AND persist to main via IPC. A stable callback so the
+  // SettingsPage prop identity doesn't churn on every poll tick (matching the
+  // other stable setters passed down). No-op in a browser (persist call resolves
+  // without the bridge). WARDEN-263.
+  const setRememberWindowBounds = useCallback((v: boolean) => {
+    setRememberWindowBoundsState(v);
+    void persistRememberWindowBounds(v);
+  }, []);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
   // its entries in the chats list so dots update to green/red.
@@ -935,6 +958,8 @@ function App() {
           setCustomPresets={setCustomPresets}
           defaultSplitShell={defaultSplitShell}
           setDefaultSplitShell={setDefaultSplitShell}
+          rememberWindowBounds={rememberWindowBounds}
+          setRememberWindowBounds={setRememberWindowBounds}
         />
       ) : chatBrowserOpen ? (
         <OpenChatBrowserPage
