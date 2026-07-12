@@ -23,6 +23,11 @@ import { summarizeProjectGitState } from '@/lib/gitStateSummary';
 import type { Chat, Collection } from '@/lib/types';
 import { loadUi, saveUi } from '@/lib/storage';
 import { THIS_MACHINE, ago, basename, chatType, displayName, hostTagOf } from '@/lib/chatDisplay';
+import {
+  matchesAgentFilter, compareChats, sortChats, findChat,
+  FILTER_OPTIONS, SORT_OPTIONS,
+  type AgentFilter, type AgentSort,
+} from '@/lib/agentFilter';
 import { StatusDot } from '@/components/StatusDot';
 
 // One row from /api/git-log (a parsed %h|%s|%an|%ar git log line).
@@ -123,73 +128,10 @@ interface Props {
 
 const LABEL: Record<string, string> = { '(local)': 'this machine' };
 
-// Agent-list filter/sort controls (WARDEN-91). Shared across the root, host, and
-// collection views so the option lists and matching logic can never drift.
-export type AgentFilter = 'all' | 'yatfa' | 'claude' | 'manual' | 'active' | 'hidden';
-export type AgentSort = 'manual' | 'name' | 'host' | 'status' | 'activity';
-
-const FILTER_OPTIONS: { value: AgentFilter; label: string }[] = [
-  { value: 'all', label: 'All' },
-  { value: 'yatfa', label: 'Yatfa agents only' },
-  { value: 'claude', label: 'Claude sessions only' },
-  { value: 'manual', label: 'Manual/shell only' },
-  { value: 'active', label: 'Active only' },
-  { value: 'hidden', label: 'Hidden only' },
-];
-
-const SORT_OPTIONS: { value: AgentSort; label: string }[] = [
-  { value: 'manual', label: 'Manual order' },
-  { value: 'name', label: 'Name (A-Z)' },
-  { value: 'host', label: 'Host' },
-  { value: 'status', label: 'Status (active first)' },
-  { value: 'activity', label: 'Last activity' },
-];
-
-// Does `c` pass the active agent filter? Hidden membership matches on the
-// host-prefixed id (`key || id`) so it lines up with hideTab()/activeTabs.
-function matchesAgentFilter(c: Chat, filter: AgentFilter, hiddenTabs: string[]): boolean {
-  switch (filter) {
-    case 'yatfa': return chatType(c) === 'yatfa';
-    case 'claude': { const t = chatType(c); return t === 'claude' || t === 'resume'; }
-    case 'manual': { const t = chatType(c); return t === 'shell' || t === 'manual'; }
-    case 'active': return c.active === true;
-    case 'hidden': return hiddenTabs.includes(c.key || c.id);
-    case 'all':
-    default: return true;
-  }
-}
-
-// Comparator for non-manual sorts. `manual` is handled by the caller (it
-// preserves drag order and must not touch the array).
-function compareChats(a: Chat, b: Chat, sort: AgentSort): number {
-  switch (sort) {
-    case 'name': return (a.name || a.id).localeCompare(b.name || b.id);
-    case 'host': return (a.host || '').localeCompare(b.host || '');
-    case 'status': {
-      const sa = a.active === true ? 1 : 0;
-      const sb = b.active === true ? 1 : 0;
-      return sa !== sb ? sb - sa : a.id.localeCompare(b.id);
-    }
-    case 'activity': return (b.lastActivity || 0) - (a.lastActivity || 0);
-    case 'manual':
-    default: return 0;
-  }
-}
-
-// Sort a chat list by the selected criterion. Manual sort is a no-op that
-// returns the input unchanged so drag-to-reorder order is preserved.
-function sortChats(chats: Chat[], sort: AgentSort): Chat[] {
-  return sort === 'manual' ? chats : [...chats].sort((a, b) => compareChats(a, b, sort));
-}
-
 const TYPE_COLOR: Record<string, string> = {
   resume: 'text-cyan-400', claude: 'text-green-400', shell: 'text-yellow-400',
   yatfa: 'text-blue-400', manual: 'text-violet-400', '?': 'text-muted-foreground',
 };
-
-// Process + cwd basename label, e.g. "claude · warden". This is the guaranteed fallback
-// that ensures a spawned chat's meaningless random id (chat-xxxxx) is NEVER the label.
-function findChat(chats: Chat[], id: string) { return chats.find((c) => (c.key || c.id) === id); }
 
 // Skeleton components for loading states
 function ChatRowSkeleton({ dim = false }: { dim?: boolean }) {
