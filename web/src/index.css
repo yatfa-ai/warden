@@ -66,11 +66,14 @@
  * single source of truth and `:root` mirrors it for FOUC avoidance only.
  *
  * Selection contrast (the WARDEN-143 bug) is fixed structurally: `::selection`
- * (in @layer base below) now reads `--primary` / `--primary-foreground`. Every
- * theme defines that pair as a saturated brand color + its guaranteed-contrast
- * counterpart (same pair the buttons use), so selection is visibly distinct
- * against the neutral page background AND its text passes WCAG AA against the
- * selection background — in every theme, light and dark.
+ * (in @layer base below) now reads a DEDICATED `--selection` /
+ * `--selection-foreground` pair, decoupled from the button brand color
+ * (`--primary`/`--primary-foreground`, whose contrast is tuned for buttons, not
+ * for a selection highlight). Every theme defines that pair so the selection
+ * background is visibly distinct against the neutral page background AND its text
+ * passes WCAG AA against the selection background — in every theme, light and
+ * dark. The `selection-contrast.test.mjs` suite asserts both ratios against these
+ * shipped values, so "passes WCAG AA" is verified, not asserted.
  *
  * Palette sources (published hex): GitHub Primer, VS Code Light+/Dark+,
  * Catppuccin Mocha, Dracula, Nord, Atom One Dark.
@@ -80,6 +83,8 @@
 :root {
     --radius: 0.625rem;
     --background: #0d1117;
+    --selection: #1f6feb;
+    --selection-foreground: #ffffff;
     --foreground: #e6edf3;
     --card: #161b22;
     --card-foreground: #e6edf3;
@@ -115,6 +120,8 @@
 /* --- GitHub Light (Primer) -------------------------------------------------- */
 [data-theme="github-light"] {
     --background: #ffffff;
+    --selection: #0969da;
+    --selection-foreground: #ffffff;
     --foreground: #1f2328;
     --card: #ffffff;
     --card-foreground: #1f2328;
@@ -150,6 +157,8 @@
 /* --- Light+ (VS Code) ------------------------------------------------------- */
 [data-theme="vscode-light"] {
     --background: #ffffff;
+    --selection: #007acc;
+    --selection-foreground: #ffffff;
     --foreground: #333333;
     --card: #f3f3f3;
     --card-foreground: #333333;
@@ -185,6 +194,8 @@
 /* --- GitHub Dark (Primer) --------------------------------------------------- */
 [data-theme="github-dark"] {
     --background: #0d1117;
+    --selection: #1f6feb;
+    --selection-foreground: #ffffff;
     --foreground: #e6edf3;
     --card: #161b22;
     --card-foreground: #e6edf3;
@@ -220,6 +231,8 @@
 /* --- Dark+ (VS Code) -------------------------------------------------------- */
 [data-theme="vscode-dark"] {
     --background: #1e1e1e;
+    --selection: #1177bb;
+    --selection-foreground: #ffffff;
     --foreground: #d4d4d4;
     --card: #252526;
     --card-foreground: #d4d4d4;
@@ -255,6 +268,8 @@
 /* --- Catppuccin Mocha ------------------------------------------------------- */
 [data-theme="catppuccin-mocha"] {
     --background: #1e1e2e;
+    --selection: #cba6f7;
+    --selection-foreground: #1e1e2e;
     --foreground: #cdd6f4;
     --card: #181825;
     --card-foreground: #cdd6f4;
@@ -290,6 +305,8 @@
 /* --- Dracula ---------------------------------------------------------------- */
 [data-theme="dracula"] {
     --background: #282a36;
+    --selection: #bd93f9;
+    --selection-foreground: #282a36;
     --foreground: #f8f8f2;
     --card: #21222c;
     --card-foreground: #f8f8f2;
@@ -325,6 +342,8 @@
 /* --- Nord ------------------------------------------------------------------- */
 [data-theme="nord"] {
     --background: #2e3440;
+    --selection: #88c0d0;
+    --selection-foreground: #2e3440;
     --foreground: #d8dee9;
     --card: #3b4252;
     --card-foreground: #d8dee9;
@@ -360,6 +379,8 @@
 /* --- One Dark (Atom) -------------------------------------------------------- */
 [data-theme="one-dark"] {
     --background: #282c34;
+    --selection: #61afef;
+    --selection-foreground: #282c34;
     --foreground: #abb2bf;
     --card: #21252b;
     --card-foreground: #abb2bf;
@@ -469,23 +490,29 @@
    * Themed text selection.
    *
    * Replaces the OS-default (often jarring blue) highlight with the active
-   * theme's brand pair. The selection fix (WARDEN-143 → WARDEN-255): the old
-   * rule read `--accent`/`--accent-foreground`, and in the hand-rolled dark
-   * palette `--accent` sat a hair above the page background while the selection
-   * text equaled normal text — selection was nearly invisible. Now every theme
-   * defines `--primary` as a saturated brand color with a guaranteed-contrast
-   * `--primary-foreground` (the same pair buttons use), so the selection
-   * background is visibly distinct against the neutral page AND the selected
-   * text passes WCAG AA against the selection background, in every theme.
+   * theme's dedicated selection pair. The selection fix (WARDEN-143 →
+   * WARDEN-255): the old rule read `--accent`/`--accent-foreground`, and in the
+   * hand-rolled dark palette `--accent` sat a hair above the page background
+   * while the selection text equaled normal text — selection was nearly
+   * invisible. The first named-theme pass reused the button brand pair
+   * (`--primary`/`--primary-foreground`), but that pair is contrast-tuned for
+   * buttons, not a selection highlight, and it MISSED the WCAG AA bar in two
+   * themes (the default GitHub Dark among them). So selection now has its OWN
+   * token pair, tuned per theme so:
+   *   - the selected text contrasts with the selection background ≥ 4.5:1
+   *     (WCAG 2.x AA for normal text), AND
+   *   - the selection background contrasts with the page `--background` ≥ 3:1
+   *     (the distinctness bar so the highlight is clearly visible).
+   * Both ratios are asserted in `selection-contrast.test.mjs` for every theme.
    * (xterm disables user-select on the terminal, so it is unaffected.)
    */
   ::selection {
-    background-color: var(--primary);
-    color: var(--primary-foreground);
+    background-color: var(--selection);
+    color: var(--selection-foreground);
   }
   ::-moz-selection {
-    background-color: var(--primary);
-    color: var(--primary-foreground);
+    background-color: var(--selection);
+    color: var(--selection-foreground);
   }
 }
 
