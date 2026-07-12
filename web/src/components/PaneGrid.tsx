@@ -63,11 +63,16 @@ interface Props {
   // PaneTile — App owns the persisted pref; PaneTile reacts to its own chat's
   // live→exited transition. See WARDEN-248.
   onExitBehavior: OnExitBehavior;
+  // Show the host tag in each pane header (WARDEN-290). Pure pass-through to
+  // PaneTile — App owns the persisted showHostTags pref (displaySettings) so a
+  // Settings toggle live-updates already-open pane headers, mirroring the
+  // sidebar's live update.
+  showHostTags?: boolean;
 }
 
 function colsFor(n: number) { return n <= 1 ? 1 : Math.ceil(Math.sqrt(n)); }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalTheme, terminalCursorStyle, copyOnSelect, onExitBehavior }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalTheme, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags }: Props) {
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
   const [fileInput, setFileInput] = useState('');
@@ -254,6 +259,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     terminalCursorStyle={terminalCursorStyle}
                     copyOnSelect={copyOnSelect}
                     onExitBehavior={onExitBehavior}
+                    showHostTags={showHostTags}
                   />
                 </div>
               );
