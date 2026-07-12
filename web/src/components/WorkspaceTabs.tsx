@@ -3,11 +3,8 @@ import { Plus, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
+import { PANE_DRAG_MIME } from '@/lib/dnd';
 import type { WorkspacePaneSet } from '@/lib/storage';
-
-// The drag payload MIME a PaneTile writes when dragged (WARDEN-108: stable pane
-// ids as payload, never filtered array indices). The drop targets below read it.
-export const PANE_DRAG_MIME = 'application/x-warden-pane';
 
 interface Props {
   workspaces: WorkspacePaneSet[];

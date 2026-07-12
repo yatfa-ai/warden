@@ -978,12 +978,15 @@ function App() {
   }, []);
 
   // Drop a pane on the ＋ button → new workspace containing it, then switch.
+  // Mirrors movePaneToWorkspace's source-focus handling: when the dragged pane
+  // was the focused one, fall back to the source workspace's first remaining
+  // pane (not null) so that workspace never shows a visible-but-unfocused pane.
   const movePaneToNewWorkspace = useCallback((paneId: string) => {
-    setWorkspaces((prev) => prev.map((w) =>
-      w.openPanes.includes(paneId)
-        ? { ...w, openPanes: w.openPanes.filter((x) => x !== paneId), focused: w.focused === paneId ? null : w.focused }
-        : w,
-    ));
+    setWorkspaces((prev) => prev.map((w) => {
+      if (!w.openPanes.includes(paneId)) return w;
+      const remaining = w.openPanes.filter((x) => x !== paneId);
+      return { ...w, openPanes: remaining, focused: w.focused === paneId ? (remaining[0] ?? null) : w.focused };
+    }));
     createWorkspace(paneId);
   }, [createWorkspace]);
 

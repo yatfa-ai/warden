@@ -8,17 +8,13 @@ import type { Chat } from '@/lib/types';
 import { findPathCandidates } from '@/lib/path-links';
 import { hostTagOf } from '@/lib/chatDisplay';
 import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBehavior, type HostOptionsMap } from '@/lib/storage';
+import { PANE_DRAG_MIME } from '@/lib/dnd';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Button } from '@/components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { StatusDot } from '@/components/StatusDot';
 import { FileViewer } from './FileViewer';
 import { toast } from 'sonner';
-
-// The drag payload MIME written when a pane is dragged onto a workspace tab
-// (WARDEN-108: stable pane ids as payload, never filtered array indices). The
-// workspace tab strip (WorkspaceTabs) reads this on drop to move the pane.
-export const PANE_DRAG_MIME = 'application/x-warden-pane';
 
 // Two explicit xterm theme objects with hex values derived from the app's design
 // tokens (web/src/index.css). xterm.js does not reliably parse oklch(), so we
