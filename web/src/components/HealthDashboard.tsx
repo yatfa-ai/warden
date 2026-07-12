@@ -259,7 +259,7 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
 
       {/* Agent catalog */}
       {healthData && (
-        <ScrollArea className="flex-1 min-h-0">
+        <ScrollArea className="flex-1 min-h-0 health-fleet-scroll">
           <div className="p-2 flex flex-col gap-3 min-w-0">
             {groupBy === 'health' ? (
               HEALTH_SECTION_ORDER.filter(section => {
@@ -297,22 +297,29 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
                   return (
                     <div key={group.host} className="flex flex-col gap-1 min-w-0">
                       {/*
-                        Per-host header — TWO lines, so the health distribution (the most
-                        diagnosis-relevant content) always has room and is never clipped by
-                        a long hostname. Line 1 fuses connectivity + agent count; line 2 is
-                        the per-host health distribution.
+                        Per-host header — TWO lines, so the health distribution
+                        (the most diagnosis-relevant content) always has its own
+                        line and is never squeezed by a long hostname.
 
-                        Why two lines: the dashboard panel is 320px (HEALTH_WIDTH). A long
-                        hostname (FQDN) and a rich distribution cannot both fit one line —
-                        the Radix ScrollArea viewport wraps content in display:table, which
-                        grows to the content's max-content, so a long single-word hostname
-                        would inflate the row past the panel and clip the distribution off
-                        the right edge. `truncate flex-1` on the hostname (mirroring the
-                        agent row) makes its max-content contribution ~0 so line 1 can't
-                        inflate the row; putting the distribution on its own line gives it
-                        the full panel width so even a 5-segment distribution fits. The
-                        `min-w-0` on this section + the content div break the min-width:auto
-                        cascade at each ancestor (WARDEN-237).
+                        Why two lines (UX): the dashboard panel is 320px
+                        (HEALTH_WIDTH). Fusing connectivity + a long hostname + a
+                        rich 5-segment distribution onto one line is noisy and
+                        fragile; giving the distribution line 2 the full panel
+                        width (indented under the hostname) keeps it legible even
+                        with 3-digit counts across all five states.
+
+                        Overflow handling is NOT done here — it lives in CSS. The
+                        `health-fleet-scroll` class on the ScrollArea (above)
+                        switches Radix's `display:table` viewport wrapper to
+                        `display:block`, which gives the wrapper a DEFINITE width
+                        (the panel width). Only against that definite width can
+                        `truncate flex-1 min-w-0` on the hostname actually shrink
+                        and ellipsize it — on its own (under the table wrapper's
+                        indefinite, grow-to-max-content sizing) it does nothing,
+                        and a long FQDN inflates the row past the panel and
+                        hard-clips without an ellipsis. See the rule + trace in
+                        index.css. The `min-w-0`s here are belt-and-suspenders.
+                        (WARDEN-237)
                       */}
                       <Button
                         variant="ghost"

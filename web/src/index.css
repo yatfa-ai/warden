@@ -203,6 +203,44 @@
 }
 
 /*
+ * Fleet Health Dashboard: neutralize the Radix ScrollArea `display:table`
+ * viewport wrapper so host/agent rows are constrained to the panel width.
+ *
+ * Radix wraps the Viewport's children in <div style="min-width:100%;display:table">
+ * (@radix-ui/react-scroll-area/dist/index.js:167). `display:table` sizes to the
+ * CONTENT's max-content, so under an indefinite-width ancestor it grows to fit
+ * the widest child instead of capping at the viewport — and a long single-word
+ * hostname (FQDN) then inflates the whole row past the 320px (HEALTH_WIDTH) panel
+ * and hard-clips without ellipsizing. `flex-1`/`min-w-0`/`truncate` on the
+ * hostname CANNOT prevent this on their own: `min-w-0` only allows shrinking
+ * AGAINST a definite constraint, but the table wrapper never establishes one (it
+ * grows to max-content), so the shrink never triggers — `flex-1`'s percentage
+ * flex-basis resolves to `auto`→max-content under indefinite sizing, and the full
+ * hostname width flows up and inflates the wrapper. (Confirmed end-to-end in the
+ * reviewer sandbox via live DOM geometry: viewport scrollWidth 535 > clientWidth
+ * 320, hostname offsetWidth === scrollWidth = 341, not ellipsizing.)
+ *
+ * Switching just this scroll region's wrapper to `display:block` makes it a block
+ * box that fills the viewport width (a DEFINITE width), so its flex-row
+ * descendants now resolve `flex-1`/`min-w-0`/`truncate` against that definite
+ * width: long hostnames ellipsize and the row can no longer inflate the viewport
+ * (viewport.scrollWidth === clientWidth; hostname.scrollWidth > offsetWidth).
+ * Vertical scrolling is unaffected — the custom scrollbar reads the viewport's
+ * scrollHeight, which the wrapper's display mode does not change.
+ *
+ * SCOPED to `.health-fleet-scroll` (the Fleet Health ScrollArea ONLY): a GLOBAL
+ * override would regress other ScrollAreas that WANT horizontal overflow —
+ * FileViewer / SessionTranscriptViewer render long code lines that should scroll
+ * horizontally, which the `display:table` wrapper is what enables. UNLAYERED +
+ * !important so it beats the wrapper's inline `display:table` (an !important
+ * author declaration outranks a normal inline style), mirroring the
+ * prefers-reduced-motion override below. (WARDEN-237)
+ */
+.health-fleet-scroll [data-slot="scroll-area-viewport"] > div {
+  display: block !important;
+}
+
+/*
  * Respect prefers-reduced-motion (WCAG 2.3.3 "Animation from Interactions").
  *
  * When the OS / DevTools "reduce motion" preference is on (vestibular / motion

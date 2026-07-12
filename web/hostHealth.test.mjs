@@ -139,14 +139,23 @@ test('identical priority falls back to host name (deterministic)', () => {
 });
 
 console.log('\ncompareHostGroups: unknown connectivity is NOT prioritized as offline');
-test('unknown-connectivity host with critical agents still ranks by health', () => {
-  const known = groupByHost([agent('a1', { host: 'known', healthState: 'critical' })])[0];
-  const mystery = groupByHost([agent('a2', { host: 'mystery', healthState: 'healthy' })])[0];
-  // 'known' has a critical agent and no connectivity record -> should still rank
-  // above the all-healthy 'mystery' host (critical-heavy rule), proving unknown
-  // connectivity is treated as neutral, not as offline.
-  const sorted = [mystery, known].sort((a, b) => compareHostGroups(a, b, none));
-  assert.deepEqual(sorted.map((g) => g.host), ['known', 'mystery']);
+test('offline host outranks unknown-connectivity host even when the unknown one is critical-heavy', () => {
+  // The decisive guard for "unknown is neutral, not offline". An OFFLINE host
+  // with ZERO critical agents must still rank ABOVE an unknown-connectivity host
+  // that HAS a critical agent — because offline (priority 0) precedes unknown
+  // (priority 1). A buggy sort that treated `undefined` connectivity as offline
+  // would TIE the two hosts on the offline axis and then promote the
+  // critical-heavy unknown host first — so this assertion FLIPS under that bug
+  // and only holds when unknown is genuinely neutral. (The earlier "more
+  // critical agents ranks above fewer" case already covers critical-heavy
+  // ordering among same-tier hosts; this one isolates the unknown-vs-offline
+  // axis, which the prior version of this test could not — it seeded BOTH hosts
+  // with unknown connectivity, so even the buggy sort produced the same order.)
+  const offlineHost = groupByHost([agent('a1', { host: 'down', healthState: 'healthy' })])[0];
+  const unknownHost = groupByHost([agent('a2', { host: 'mystery', healthState: 'critical' })])[0];
+  const offlineOnly = (h) => (h === 'down' ? 'offline' : undefined);
+  const sorted = [unknownHost, offlineHost].sort((a, b) => compareHostGroups(a, b, offlineOnly));
+  assert.deepEqual(sorted.map((g) => g.host), ['down', 'mystery']);
 });
 
 console.log(`\n${passed} passed`);
