@@ -24,7 +24,9 @@
     "dev:server": "node scripts/dev.mjs server",
     "dev:git": "node scripts/dev.mjs git",
     "dev:build": "node scripts/dev.mjs build",
-    "dev:test": "node scripts/dev.mjs test"
+    "dev:test": "node scripts/dev.mjs test",
+    "companion:build": "bash companion/build.sh",
+    "companion:bench": "node scripts/companion-benchmark.mjs"
   },
   "dependencies": {
     "express": "^5.2.1",
@@ -44,8 +46,12 @@
       "src/**/*",
       "web/dist/**/*",
       "electron/**/*",
+      "companion/dist/**/*",
       "node_modules/**/*",
       "package.json"
+    ],
+    "asarUnpack": [
+      "companion/dist/**/*"
     ],
     "directories": {
       "output": "release"

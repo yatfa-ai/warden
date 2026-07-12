@@ -5,8 +5,11 @@
 // whether `container` is set, and uses `session` for the tmux target.
 import { run, runWithPool, runLocalTmux, shellQuote } from './ssh.js';
 import { loadCatalog } from './config.js';
+import { ROLES, parseContainerName, buildChat, sortChats } from './chatMeta.js';
+// Re-export for any external consumer; the canonical home is now ./chatMeta.js.
+export { ROLES, parseContainerName };
+import { isCompanionTransportEnabled, discover as discoverViaCompanion } from './companion.js';
 
-const ROLES = new Set(['planner', 'worker', 'reviewer', 'researcher']);
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 const LOCAL = '(local)';
 
@@ -25,7 +28,7 @@ const LOCAL = '(local)';
 //
 // `tr -d '\r'` on the pane path tolerates a CRLF that can sneak in over an SSH
 // pty; any residual whitespace is trimmed in JS.
-const DISCOVER_SCRIPT = `
+export const DISCOVER_SCRIPT = `
 docker ps --format '{{.Names}}\\t{{.Status}}' 2>/dev/null | while IFS=$(printf '\\t') read -r name status; do
   [ -z "$name" ] && continue
   cwd=''
@@ -39,12 +42,6 @@ docker ps --format '{{.Names}}\\t{{.Status}}' 2>/dev/null | while IFS=$(printf '
   printf '%s\\t%s\\t%s\\t%s\\n' "$name" "$status" "$cwd" "$a"
 done
 `;
-
-function parseContainerName(name) {
-  const idx = name.lastIndexOf('-');
-  if (idx < 0) return { project: name, role: '' };
-  return { project: name.slice(0, idx), role: name.slice(idx + 1) };
-}
 
 // Parse one TSV row emitted by DISCOVER_SCRIPT into the fields discover() needs.
 // Row layout:  name \t status \t cwd \t active
@@ -95,9 +92,26 @@ function localAliveSessions() {
   return new Set((res.stdout || '').split('\n').map((s) => s.replace(/\r$/, '').trim()).filter(Boolean));
 }
 
-export async function discover(host, cfg, opts = {}) {
+export async function discover(host, cfg, opts = {}, deps = {}) {
+  // Experimental companion transport (WARDEN-272): for REMOTE hosts only, when
+  // WARDEN_COMPANION_TRANSPORT=1 is set, route discover through the bootstrapped
+  // host companion (one persistent stdio RPC channel, zero per-op ssh handshakes).
+  // The default SSH path below is byte-for-byte unchanged and remains the default.
+  // companion.discover() is companion-or-fail: it returns {ok:false} with an
+  // actionable error and never silently falls back here.
+  //
+  // `deps` is a test seam for the routing guard (the wiring that decides default
+  // vs companion is otherwise untested): isCompanionTransportEnabled /
+  // discoverViaCompanion / runWithPool are injectable so a test can assert
+  // delegation AND non-fallthrough to the default path without real ssh.
+  const isEnabled = deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled;
+  if (host !== LOCAL && isEnabled()) {
+    return (deps.discoverViaCompanion ?? discoverViaCompanion)(host, cfg, opts);
+  }
+
+  const runWithPoolFn = deps.runWithPool ?? runWithPool;
   const timeout = (cfg.connectTimeout ?? 10) * 1000 + 25000;
-  const res = await runWithPool(host, DISCOVER_SCRIPT, { timeout }, cfg);
+  const res = await runWithPoolFn(host, DISCOVER_SCRIPT, { timeout }, cfg);
   if (!res.ok) {
     return { host, ok: false, error: (res.stderr || '').trim() || `ssh exited ${res.code}`, chats: [] };
   }
@@ -111,19 +125,10 @@ export async function discover(host, cfg, opts = {}) {
     const row = parseDiscoverRow(line);
     if (!row) continue;
     const { name, status, cwd, active } = row;
-    const { project, role } = parseContainerName(name);
 
-    const chat = {
-      id: `${host}:${name}`, key: name, kind: 'yatfa',
-      host, container: name, session,
-      project, role, isAgent: ROLES.has(role), active, status,
-      // In-container working dir (pane path, else image WorkingDir — resolved in
-      // the discover script). Empty when neither could be derived → the git routes
-      // treat that as "no cwd" rather than falling back to Warden's own repo.
-      // See WARDEN-235.
-      cwd: cwd.trim() || undefined,
-      lastActivity: null,
-    };
+    // The chat literal is shared with the companion path via buildChat(), so the
+    // two discovery paths cannot drift on shape (WARDEN-272 review #5).
+    const chat = buildChat(host, name, status, cwd, active, session);
 
     chats.push(chat);
     if (active) {
@@ -160,7 +165,7 @@ export async function discover(host, cfg, opts = {}) {
     );
   }
 
-  chats.sort((a, b) => (b.active - a.active) || a.key.localeCompare(b.key));
+  sortChats(chats);
   return { host, ok: true, chats };
 }
 
