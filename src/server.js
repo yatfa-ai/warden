@@ -18,7 +18,7 @@ import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude, startConnectionP
 import { Observer } from './observer.js';
 import { hasCredentials, resolveModel } from './llm.js';
 import { listSessions, createSession, renameSession, deleteSession } from './sessions.js';
-import { appendEvent, rotateEvents, readEvents, getStatsSince } from './activity.js';
+import { appendEvent, rotateEvents, readEvents, getStatsSince, getSeriesSince } from './activity.js';
 import { buildSnapshot, diffLifecycles } from './lifecycle.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { checkHost } from './hostStatus.js';
@@ -216,6 +216,17 @@ app.get('/api/activity/stats', (req, res) => {
   const after = req.query.after ? new Date(req.query.after).getTime() : Date.now() - (24 * 60 * 60 * 1000); // Default: last 24 hours
   const stats = getStatsSince(after);
   res.json(stats);
+});
+
+// Per-agent activity series for the Fleet Health sparklines (WARDEN-299). Mirrors
+// the stats endpoint's default window (last 24h) and adds an hourly bucket grid a
+// sparkline can join by `container`. Deliberately a separate endpoint — the
+// dashboard fetches it on a slow ~60s cadence, never on the 10s /api/health poll.
+app.get('/api/activity/series', (req, res) => {
+  const after = req.query.after ? new Date(req.query.after).getTime() : Date.now() - (24 * 60 * 60 * 1000); // Default: last 24 hours
+  const rawBucket = req.query.bucket ? parseInt(String(req.query.bucket), 10) : 3_600_000; // default 1h
+  const bucket = Number.isFinite(rawBucket) && rawBucket > 0 ? rawBucket : 3_600_000;
+  res.json(getSeriesSince(after, { bucketMs: bucket }));
 });
 
 app.get('/api/ssh-hosts', (_req, res) => res.json({ hosts: allSshHosts(), configured: cfg.hosts }));

@@ -12,8 +12,10 @@ import {
   type HostHealthGroup,
 } from '@/lib/healthUtils';
 import { StatusDot, type StatusTone } from '@/components/StatusDot';
+import { Sparkline } from '@/components/Sparkline';
 import { Button } from '@/components/ui/button';
 import { useHostStatuses } from '@/lib/useHostStatuses';
+import { useActivitySeries } from '@/lib/useActivitySeries';
 
 interface Props {
   onOpenChat: (id: string) => void;
@@ -101,6 +103,10 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
   // Shared /api/hosts/status poll (singleton) — fuses per-host connectivity into
   // each host section's summary line.
   const hostStatuses = useHostStatuses();
+  // Per-agent 24h activity series for the row sparklines (WARDEN-299). Fetched on
+  // its own slow ~60s cadence inside the hook — explicitly NOT part of the 10s
+  // /api/health poll below, so adding the sparklines is a no-op on the hot path.
+  const { series: activitySeries } = useActivitySeries();
 
   const fetchHealth = async () => {
     setLoading(true);
@@ -150,6 +156,26 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
   // One agent row, reused by both the health-state and host views. `showHost`
   // hides the per-row host tag in host mode (the section header already names
   // the host — a repeated tag would be noise).
+  //
+  // The sparkline data is joined per-row via this map (container → bucket
+  // arrays + sums). It is memoized on `activitySeries` ONLY — the 24h series
+  // refreshes on its own ~60s cadence, so the 10s /api/health tick above never
+  // recomputes it (the join is a plain O(1) Map lookup inside renderAgent).
+  const agentActivity = useMemo<Map<string, { values: number[]; errors: number[]; totalSum: number; errorSum: number }>>(() => {
+    const map = new Map();
+    if (!activitySeries) return map;
+    for (const [container, entry] of Object.entries(activitySeries.series)) {
+      let totalSum = 0;
+      let errorSum = 0;
+      for (let i = 0; i < entry.total.length; i++) {
+        totalSum += entry.total[i] | 0;
+        errorSum += entry.error[i] | 0;
+      }
+      map.set(container, { values: entry.total, errors: entry.error, totalSum, errorSum });
+    }
+    return map;
+  }, [activitySeries]);
+
   const renderAgent = (agent: Chat, showHost: boolean) => (
     <button
       key={agent.id}
@@ -177,6 +203,23 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
           {agent.host}
         </span>
       )}
+
+      {/* Activity sparkline (WARDEN-299) — only for rows with a container that
+          has activity in the window. Manual/tmux chats and quiet containers
+          render nothing here (graceful sparsity). Sized with spacing tokens and
+          tightened under `.compact` so it tracks the row density. */}
+      {(() => {
+        const a = agent.container ? agentActivity.get(agent.container) : undefined;
+        if (!a) return null;
+        return (
+          <Sparkline
+            values={a.values}
+            errors={a.errors}
+            ariaLabel={`${a.totalSum} event${a.totalSum === 1 ? '' : 's'}, ${a.errorSum} error${a.errorSum === 1 ? '' : 's'} in the last 24 hours`}
+            className="w-14 h-4 compact:w-12 compact:h-3.5"
+          />
+        );
+      })()}
 
       {/* Last Activity */}
       {agent.lastActivity && (
