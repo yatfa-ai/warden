@@ -458,7 +458,51 @@ export async function discover(host, cfg = {}, opts = {}, deps = {}) {
   }
 }
 
-// ----------------------- spawn-cost model (benchmark) -----------------------
+// -------------------------------- capturePanes --------------------------------
+// WARDEN-276 (slice 2 of roadmap WARDEN-270). capture-pane is the highest-
+// frequency remote op (every observer poll + the 2s monitor tick), so routing
+// it over the persistent companion channel collapses the per-tick ssh handshake
+// that dominates the ControlMaster-disabled / Windows path. The bootstrap+
+// channel are slice 1's, reused verbatim; this only adds the RPC client + the
+// host-side capturePanes RPC (companion/main.go) that runs the batched,
+// sentinel-framed tmux capture LOCALLY on the host.
+
+// capturePanes() over the companion channel, for ONE host's pane list. Returns
+// { host, ok, panes } where panes is the key->content map, or { host, ok:false,
+// error, panes:{} } on ANY failure — it NEVER falls back to raw SSH (the
+// experimental path's contract; opt out via WARDEN_COMPANION_TRANSPORT). The
+// returned map is the SAME shape the default runWithPool capturePanes path
+// produces (sentinel framing reproduced faithfully on the host side).
+export async function capturePanes(host, list, cfg = {}, opts = {}, deps = {}) {
+  if (host === LOCAL) {
+    return { host, ok: false, error: 'companion transport does not apply to the local host', panes: {} };
+  }
+  try {
+    const channel = await getChannel(host, cfg, deps);
+    // Send the per-host pane list. `container` is null for bare-tmux / manual
+    // chats so the companion selects bare `tmux` (vs `docker exec <c> tmux`).
+    // The target falls back container -> 'agent', identical to chats.js.
+    const panes = (list || []).map((c) => ({
+      key: c.key,
+      container: c.container || null,
+      session: c.session || c.container || 'agent',
+    }));
+    const result = await channel.call('capturePanes', { panes }, { timeout: opts.timeout ?? 15000 });
+    return { host, ok: true, panes: (result && result.panes) || {} };
+  } catch (e) {
+    let msg;
+    if (e instanceof CompanionTransportError) {
+      msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
+    } else if (e instanceof CompanionRpcError) {
+      msg = e.message;
+    } else {
+      msg = `companion capturePanes failed on ${host}: ${e?.message ?? e}`;
+    }
+    return { host, ok: false, error: msg, panes: {} };
+  }
+}
+
+
 // Pure model of per-tick ssh spawn cost, used by scripts/companion-benchmark.mjs
 // and unit-tested here (WARDEN-272 AC #5: "a spawn/handshake counter per discover
 // tick"). Mirrors the real transport:

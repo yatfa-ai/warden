@@ -11,7 +11,7 @@
 //
 // Protocol (one JSON object per line):
 //
-//	request : {"id":<any-json>,"method":"ping"|"discover","params":{...}}
+//	request : {"id":<any-json>,"method":"ping"|"discover"|"capturePanes","params":{...}}
 //	response: {"id":<echoed>,"ok":true,"result":{...}}
 //	          {"id":<echoed>,"ok":false,"error":"..."}
 //
@@ -98,7 +98,7 @@ func main() {
 		case "ping":
 			write(Response{ID: req.ID, OK: true, Result: map[string]any{
 				"version": version,
-				"methods": []string{"ping", "discover"},
+				"methods": []string{"ping", "discover", "capturePanes"},
 			}})
 		case "discover":
 			containers, err := discover(req.Params)
@@ -107,6 +107,15 @@ func main() {
 			} else {
 				write(Response{ID: req.ID, OK: true, Result: map[string]any{
 					"containers": containers,
+				}})
+			}
+		case "capturePanes":
+			panes, err := capturePanes(req.Params)
+			if err != nil {
+				write(Response{ID: req.ID, OK: false, Error: err.Error()})
+			} else {
+				write(Response{ID: req.ID, OK: true, Result: map[string]any{
+					"panes": panes,
 				}})
 			}
 		default:
@@ -200,4 +209,153 @@ func captureFirst(name string, args ...string) string {
 		return ""
 	}
 	return strings.TrimSpace(strings.TrimRight(string(out), "\r"))
+}
+
+// ----------------------------- capturePanes ---------------------------------
+// WARDEN-276 (slice 2 of roadmap WARDEN-270). capture-pane is the highest-
+// frequency remote op (it fires on every observer poll + the 2s monitor tick),
+// so migrating it onto the companion channel collapses the per-tick ssh
+// handshake that dominates the ControlMaster-disabled / Windows path. The
+// bootstrap+channel are slice 1's, reused verbatim; this only adds the RPC.
+
+// capturePaneReq is one pane to capture. Mirrors the per-pane fields the JS
+// capturePanes path needs: Key (the map key / sentinel tag), Container (docker
+// container, or "" for a bare-tmux chat), Session (the tmux target, falling back
+// to Container then "agent" — identical to src/chats.js).
+type capturePaneReq struct {
+	Key       string `json:"key"`
+	Container string `json:"container"`
+	Session   string `json:"session"`
+}
+
+type capturePanesParams struct {
+	Panes []capturePaneReq `json:"panes"`
+}
+
+// shellQuote wraps s in POSIX single quotes, escaping embedded single quotes.
+// Byte-identical to src/ssh.js shellQuote() so the host-side command the
+// companion builds matches the default runWithPool capturePanes path exactly.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// buildCaptureScript builds the batched, sentinel-framed capture script for one
+// host. It is byte-for-byte identical to src/chats.js buildCaptureScript(list):
+// each pane is bracketed by ___B_<key>___ / ___E_<key>___ sentinels, and the
+// tmux invocation is `docker exec <container> tmux` when a container is set,
+// else bare `tmux` (so bare-tmux / manual chats still work). The whole batch
+// runs in one shell — one local fan-out, zero further ssh handshakes.
+//
+// NOTE: like the default JS path, <key> is interpolated inside the single-quoted
+// printf argument verbatim. Keys are warden chat keys (container / session
+// names matching ^[A-Za-z0-9_.-]+$), never free-form user input, so they cannot
+// break the single-quoting — the same trust boundary the default path relies on.
+func buildCaptureScript(panes []capturePaneReq) string {
+	parts := make([]string, 0, len(panes))
+	for _, c := range panes {
+		key := c.Key
+		var tmuxCmd string
+		if c.Container != "" {
+			tmuxCmd = "docker exec " + shellQuote(c.Container) + " tmux"
+		} else {
+			tmuxCmd = "tmux"
+		}
+		target := c.Session
+		if target == "" {
+			target = c.Container
+		}
+		if target == "" {
+			target = "agent"
+		}
+		s := shellQuote(target)
+		parts = append(parts,
+			"printf '___B_"+key+"___\\n'; "+tmuxCmd+
+				" capture-pane -t "+s+" -p -e -S -60 -E - 2>/dev/null; "+
+				"printf '\\n___E_"+key+"___\\n'")
+	}
+	return strings.Join(parts, "; ")
+}
+
+// stripSentinel returns the key from a ___B_<key>___ / ___E_<key>___ line, or
+// ok=false when the line is not a sentinel (or the key is empty — the JS parser
+// regex (.+) requires at least one character, which this mirrors).
+func stripSentinel(line, prefix string) (key string, ok bool) {
+	const suffix = "___"
+	if !strings.HasPrefix(line, prefix) || !strings.HasSuffix(line, suffix) {
+		return "", false
+	}
+	k := line[len(prefix):len(line)-len(suffix)]
+	if k == "" {
+		return "", false
+	}
+	return k, true
+}
+
+// parseCaptureSentinels extracts the key->content map from the stdout of the
+// batched capture script. Byte-for-byte equivalent to src/chats.js
+// parseCaptureSentinels(): a ___B_<key>___ line opens a pane (resetting the
+// buffer, no commit), ___E_<key>___ closes it (committing the buffered lines
+// joined by "\n"), and any line in between is captured content. Lines outside a
+// B/E block are ignored, so a login-shell profile banner cannot corrupt output.
+func parseCaptureSentinels(stdout string) map[string]string {
+	out := map[string]string{}
+	var cur string
+	inBlock := false
+	var buf []string
+	for _, ln := range strings.Split(stdout, "\n") {
+		if key, isB := stripSentinel(ln, "___B_"); isB {
+			cur = key
+			buf = nil
+			inBlock = true
+			continue
+		}
+		if _, isE := stripSentinel(ln, "___E_"); isE {
+			if inBlock {
+				out[cur] = strings.Join(buf, "\n")
+			}
+			inBlock = false
+			cur = ""
+			buf = nil
+			continue
+		}
+		if inBlock {
+			buf = append(buf, ln)
+		}
+	}
+	return out
+}
+
+// capturePanes mirrors warden's batched capturePanes (src/chats.js) for ONE host:
+// build the ___B_/___E_ sentinel-framed batch script, run it once in a login
+// shell LOCALLY on the host (the per-op-handshake win — no further ssh), parse
+// the sentinels back into a key->content map, return it in one RPC response. The
+// docker-exec vs bare-tmux selection is reproduced faithfully via
+// buildCaptureScript so both yatfa (container set) and manual (bare-tmux) chats
+// work through the companion.
+func capturePanes(params json.RawMessage) (map[string]string, error) {
+	var p capturePanesParams
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid capturePanes params: %s", err)
+		}
+	}
+	if len(p.Panes) == 0 {
+		return map[string]string{}, nil
+	}
+	script := buildCaptureScript(p.Panes)
+	// `bash -lc` mirrors the default runWithPool path (CLAUDE.md: always wrap
+	// remote commands in a login shell) so docker/tmux resolve on PATH exactly as
+	// they do over SSH today.
+	out, err := exec.Command("bash", "-lc", script).Output()
+	if err != nil {
+		stderr := ""
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr = strings.TrimSpace(string(exitErr.Stderr))
+		}
+		if stderr == "" {
+			stderr = err.Error()
+		}
+		return nil, fmt.Errorf("capturePanes script failed: %s", stderr)
+	}
+	return parseCaptureSentinels(string(out)), nil
 }

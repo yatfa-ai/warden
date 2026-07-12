@@ -12,15 +12,26 @@
 // getConnection returns socketPath:null → a fresh ssh handshake every op) that is
 // the difference between ~seconds and near-instant per discover tick.
 //
+// WARDEN-276 (slice 2) adds a capture-pane leg: capture-pane is the HIGHEST-
+// frequency remote op (it fires on every observer poll — summarizeOpenChats,
+// readChats, suggestNextActions, alertChangedAgents — PLUS the 2s monitor tick),
+// so the same handshake collapse compounds at a much higher cadence than
+// discover. capturePanes() already batches every pane into ONE runWithPool ssh
+// spawn per host per tick (O(hosts), not O(hosts×panes)); the companion win is
+// still purely the per-tick handshake elimination, now across the busier polling
+// surface. Both legs are reported below.
+//
 // Two parts:
 //   Part 1 (always):  a deterministic spawn/handshake-count projection per tick —
 //                     the roadmap's success measure, with no host required.
+//                     Covers BOTH discover and capture-pane (slice 2).
 //   Part 2 (--host):  a LIVE replay against a real host. The default side runs
-//                     discover ticks on the ControlMaster-disabled path (the
-//                     Windows-equivalent, one handshake per tick); the companion
-//                     side runs the real src/companion.js (bootstrap once, then
-//                     RPC over the one channel). Reports real spawn counts + the
-//                     before/after per-tick wall-clock cost.
+//                     ops on the ControlMaster-disabled path (the Windows-
+//                     equivalent, one handshake per tick); the companion side
+//                     runs the real src/companion.js (bootstrap once, then RPC
+//                     over the one channel). Reports real spawn counts + the
+//                     before/after per-tick wall-clock cost, for discover AND
+//                     capture-pane.
 //
 // Usage:
 //   node scripts/companion-benchmark.mjs                       # Part 1 only
@@ -31,10 +42,11 @@ import { spawn } from 'node:child_process';
 import { SSH_BASE_OPTS, SSH_BIN, shellQuote, run as sshRun } from '../src/ssh.js';
 import {
   discover as companionDiscover,
+  capturePanes as companionCapturePanes,
   _resetChannelCacheForTests,
   projectSpawnModel,
 } from '../src/companion.js';
-import { DISCOVER_SCRIPT } from '../src/chats.js';
+import { DISCOVER_SCRIPT, buildCaptureScript } from '../src/chats.js';
 
 // --------------------------------- args -------------------------------------
 
@@ -71,12 +83,18 @@ What it proves:
 
 // ----------------------------- Part 1: model --------------------------------
 
+// How often capture-pane actually fires in warden — used to size the capture-pane
+// leg at its real (busy) polling cadence. The monitor ticks every 2s; the observer
+// polls on readChats/summarizeOpenChats/suggestNextActions/alertChangedAgents.
+const MONITOR_TICK_MS = 2000;
+const CAPTURE_TICKS_PER_MIN = Math.round(60_000 / MONITOR_TICK_MS); // 30/min (monitor alone)
+
 function printProjection(hosts, ticks) {
   const m = projectSpawnModel({ hosts, ticks });
   const steadyTicks = Math.max(0, ticks - 1); // ticks after the first (bootstrap) one
 
   console.log('━'.repeat(72));
-  console.log(`Part 1 — ssh-spawn / handshake projection  (${hosts} host(s), ${ticks} discover tick(s))`);
+  console.log(`Part 1.a — discover: handshake projection  (${hosts} host(s), ${ticks} tick(s))`);
   console.log('━'.repeat(72));
   console.log('Each discover tick fans out one ssh op per host. The model counts ssh');
   console.log('spawns (= handshakes on the ControlMaster-disabled / Windows path):');
@@ -95,8 +113,43 @@ function printProjection(hosts, ticks) {
     console.log(`  ▶ companion breaks even after ~${Math.ceil(winTicks)} tick(s)/host, then every further tick is free.`);
   }
   console.log();
-  console.log('This is the roadmap success measure: per-op handshake elimination');
-  console.log('across the polling cadence (lifecycle poll + monitor + refreshes).');
+  console.log('discover fires on the 60s lifecycle poll + 2s monitor + refreshes.');
+  console.log();
+}
+
+// Slice 2 (WARDEN-276): the capture-pane leg. capturePanes() ALREADY batches every
+// pane into ONE runWithPool ssh spawn per host per tick (O(hosts), not O(panes)),
+// so — like discover — the companion win is purely the per-tick handshake
+// elimination, NOT a spawn-count reduction. The difference is CADENCE: capture-pane
+// fires on every observer poll PLUS the 2s monitor tick, so the handshake savings
+// compound far faster than discover's. This projection sizes that at the real rate.
+function printCaptureProjection(hosts, ticks) {
+  const m = projectSpawnModel({ hosts, ticks });
+  console.log('━'.repeat(72));
+  console.log(`Part 1.b — capture-pane: handshake projection  (${hosts} host(s), ${ticks} tick(s))`);
+  console.log('━'.repeat(72));
+  console.log('capture-pane is the highest-frequency remote op: it fires on EVERY');
+  console.log('observer poll (summarizeOpenChats/readChats/suggestNextActions/');
+  console.log('alertChangedAgents) PLUS the 2s monitor tick. capturePanes() already');
+  console.log('batches all panes/host into ONE ssh spawn (O(hosts)/tick, not O(panes)),');
+  console.log('so the companion win is the per-tick HANDSHAKE, not a spawn reduction:');
+  console.log();
+  console.log('  DEFAULT path (runWithPool, no companion):');
+  console.log(`    1 handshake / host / tick  →  ${hosts} × ${ticks} = ${m.before.totalSpawns} handshakes`);
+  console.log('  COMPANION path:');
+  console.log(`    reuses slice 1's bootstrapped channel — 0 handshakes/tick`);
+  console.log(`    (bootstrap cost was paid by discover; capture-pane rides the same channel)`);
+  console.log(`    total = ${m.after.totalSpawns} handshakes (all bootstrap, 0 capture)`);
+  console.log();
+  const delta = m.before.totalSpawns - m.after.totalSpawns;
+  console.log(`  ▶ handshakes saved over ${ticks} capture ticks: ${m.before.totalSpawns} → ${m.after.totalSpawns}  (−${delta})`);
+  // Size the win at the real monitor cadence (30 ticks/min) over a minute.
+  const perMin = projectSpawnModel({ hosts, ticks: CAPTURE_TICKS_PER_MIN });
+  console.log(`  ▶ at the 2s monitor rate (${CAPTURE_TICKS_PER_MIN} ticks/min), ${hosts} host(s) save`);
+  console.log(`    ${perMin.before.totalSpawns} → ${perMin.after.totalSpawns} handshakes/min  (−${perMin.savedSpawns}/min from capture-pane alone)`);
+  console.log();
+  console.log('This is the roadmap\'s "polling-tick" success-metric leg: per-tick');
+  console.log('handshake collapse on the busiest remote op.');
   console.log();
 }
 
@@ -145,9 +198,9 @@ function summarize(samples) {
   return { n: vals.length, avg, p95, min: vals[0] || 0, max: vals[vals.length - 1] || 0 };
 }
 
-async function liveBenchmark(host, ticks) {
+async function liveDiscoverBenchmark(host, ticks) {
   console.log('━'.repeat(72));
-  console.log(`Part 2 — LIVE ControlMaster-disabled replay  (host: ${host}, ${ticks} tick(s))`);
+  console.log(`Part 2.a — discover: LIVE ControlMaster-disabled replay  (host: ${host}, ${ticks} tick(s))`);
   console.log('━'.repeat(72));
   console.log('Default side: one fresh ssh handshake per discover tick (ControlMaster off).');
   console.log('Companion side: real src/companion.js — bootstrap once, then RPC over one channel.');
@@ -215,16 +268,116 @@ async function liveBenchmark(host, ticks) {
   console.log();
 }
 
+// Slice 2 (WARDEN-276): the capture-pane live leg. Same shape as the discover
+// leg — default side runs the batched capture script via a fresh
+// ControlMaster-disabled ssh per tick; companion side runs the real
+// capturePanes RPC over the persistent channel (0 handshakes/tick). The pane list
+// is discovered once up front (default path) so both sides capture the same
+// panes; if the host has no discoverable panes the leg is skipped gracefully.
+async function liveCaptureBenchmark(host, ticks) {
+  console.log('━'.repeat(72));
+  console.log(`Part 2.b — capture-pane: LIVE ControlMaster-disabled replay  (host: ${host}, ${ticks} tick(s))`);
+  console.log('━'.repeat(72));
+  console.log('Default side: one fresh ssh handshake per capture tick (ControlMaster off).');
+  console.log('Companion side: capturePanes RPC over slice 1\'s channel — 0 handshakes/tick.');
+  console.log();
+
+  // Discover the host once (default path) to get the pane list both sides capture.
+  const probe = await sshRunNoMaster(host, DISCOVER_SCRIPT, 60000, { val: 0 });
+  const chats = chatsFromDiscoverStdout(host, probe.stdout);
+  if (!chats.length) {
+    console.log(`(no discoverable yatfa chats on ${host} — capture-pane leg skipped; discover leg above still valid.)\n`);
+    return;
+  }
+  console.log(`discovered ${chats.length} pane(s) to capture: ${chats.map((c) => c.key).slice(0, 6).join(', ')}${chats.length > 6 ? ' …' : ''}`);
+  const captureScript = buildCaptureScript(chats);
+  console.log();
+
+  const defaultSpawns = { val: 0 };
+  const companionSpawns = { val: 0 };
+  const countingSpawn = (...a) => { companionSpawns.val++; return spawn(...a); };
+
+  // ---- DEFAULT: N ticks, each a ControlMaster-disabled ssh capture batch ----
+  console.log(`▶ default path: ${ticks} capture tick(s), handshake each …`);
+  const defaultSamples = [];
+  for (let i = 0; i < ticks; i++) {
+    const r = await timed(() => sshRunNoMaster(host, captureScript, 30000, defaultSpawns));
+    defaultSamples.push(r);
+    const panes = countSentinels(r.stdout);
+    process.stdout.write(`   tick ${i + 1}/${ticks}: ${r.ms.toFixed(0).padStart(6)} ms  ${r.ok ? `ok (${panes} pane(s))` : 'cmd-failed (handshake still measured)'}\n`);
+  }
+
+  // ---- COMPANION: bootstrap once, then N capture ticks over the channel ----
+  console.log(`▶ companion path: bootstrap + ${ticks} capture tick(s) over the channel …`);
+  _resetChannelCacheForTests();
+  const bootR = await timed(() =>
+    companionCapturePanes(host, chats, { connectTimeout: 10 }, { timeout: 30000 }, { spawn: countingSpawn }));
+  console.log(`   bootstrap + 1st capture: ${bootR.ms.toFixed(0).padStart(6)} ms  ${bootR.ok ? `ok (${Object.keys(bootR.panes).length} pane(s))` : `error: ${(bootR.error || '').slice(0, 80)}`}`);
+  const companionSamples = [{ ms: bootR.ms, ok: bootR.ok }];
+  for (let i = 1; i < ticks; i++) {
+    const r = await timed(() =>
+      companionCapturePanes(host, chats, { connectTimeout: 10 }, { timeout: 30000 }, { spawn: countingSpawn }));
+    companionSamples.push(r);
+    process.stdout.write(`   tick ${i + 1}/${ticks}: ${r.ms.toFixed(0).padStart(6)} ms  ${r.ok ? `ok (${Object.keys(r.panes).length} pane(s))` : `error: ${(r.error || '').slice(0, 80)}`}\n`);
+  }
+  _resetChannelCacheForTests();
+
+  // ---- report ----
+  const def = summarize(defaultSamples);
+  const steady = summarize(companionSamples.slice(1));
+
+  console.log();
+  console.log('── results ──────────────────────────────────────────────────────');
+  console.log(`  spawns (ssh processes started):`);
+  console.log(`     default   : ${defaultSpawns.val}  (≈ ${ticks} handshakes — one capture batch/tick)`);
+  console.log(`     companion : ${companionSpawns.val}  (bootstrap only; capture rides the channel, 0/tick)`);
+  console.log(`  per-tick wall-clock (handshake + remote work):`);
+  console.log(`     default   : avg ${def.avg.toFixed(0)} ms  (p95 ${def.p95.toFixed(0)} ms) over ${def.n}`);
+  if (steady.n > 0) {
+    console.log(`     companion : avg ${steady.avg.toFixed(0)} ms  (p95 ${steady.p95.toFixed(0)} ms) over ${steady.n} steady tick(s)`);
+    const saved = def.avg - steady.avg;
+    console.log(`  ▶ handshake cost eliminated per capture tick: ~${Math.max(0, saved).toFixed(0)} ms`);
+  }
+  console.log('────────────────────────────────────────────────────────────────');
+  console.log('Note: capture-pane fires on every observer poll + the 2s monitor tick,');
+  console.log('so this per-tick handshake win compounds at the roadmap\'s busiest cadence.');
+  console.log();
+}
+
+// Parse the default discover script's stdout into chat objects capturePanes can
+// consume (key/container/session). The discover TSV is name \t status \t cwd \t
+// active; only name (the container) is needed to target a capture. yatfa chats
+// use session 'agent' (CLAUDE.md topology).
+function chatsFromDiscoverStdout(host, stdout) {
+  const chats = [];
+  for (const line of (stdout || '').split('\n')) {
+    const name = line.split('\t')[0];
+    if (!name) continue;
+    chats.push({ host, key: name, container: name, session: 'agent' });
+  }
+  return chats;
+}
+
+// Count how many ___B_<key>___ sentinel lines a capture batch returned — a cheap
+// correctness signal that panes were actually captured (not just that ssh ok'd).
+function countSentinels(stdout) {
+  const m = (stdout || '').match(/^___B_.+___$/gm);
+  return m ? m.length : 0;
+}
+
+
 // --------------------------------- main -------------------------------------
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) { console.log(HELP); return; }
 
-  console.log('warden companion-transport benchmark  (WARDEN-272 / roadmap WARDEN-270)\n');
+  console.log('warden companion-transport benchmark  (WARDEN-272 + WARDEN-276 / roadmap WARDEN-270)\n');
 
-  // Part 1 always runs — deterministic, no host needed.
+  // Part 1 always runs — deterministic, no host needed. Both the discover and
+  // capture-pane handshake projections (the roadmap's success measure).
   printProjection(args.hosts, args.ticks);
+  printCaptureProjection(args.hosts, args.ticks);
 
   if (!args.host) {
     console.log('Part 2 (live replay) skipped — pass --host <ssh-host> to measure the real');
@@ -235,7 +388,8 @@ async function main() {
   }
 
   try {
-    await liveBenchmark(args.host, args.ticks);
+    await liveDiscoverBenchmark(args.host, args.ticks);
+    await liveCaptureBenchmark(args.host, args.ticks);
   } catch (e) {
     console.error(`\nbenchmark failed: ${e?.message ?? e}`);
     console.error('(is the host reachable over SSH with key auth? BatchMode=yes is used.)');

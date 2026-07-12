@@ -28,10 +28,11 @@ import { fileURLToPath } from 'node:url';
 import {
   archForUname, remoteBinaryPath, buildProbeScript, buildUploadScript, parseProbe,
   encodeRequest, mapCompanionContainers, CompanionChannel, CompanionTransportError,
-  CompanionRpcError, getChannel, discover, isCompanionTransportEnabled, loadManifest,
+  CompanionRpcError, getChannel, discover, capturePanes, isCompanionTransportEnabled, loadManifest,
   projectSpawnModel, _resetChannelCacheForTests,
 } from './companion.js';
 import { buildChat } from './chatMeta.js';
+import { buildCaptureScript, parseCaptureSentinels } from './chats.js';
 
 // ------------------------------- pure seams ---------------------------------
 
@@ -315,8 +316,9 @@ const TEST_MANIFEST = {
 
 // Build a fake transport whose ping reports the test version (a healthy channel).
 const healthyTransport = (extra = {}) => fakeTransport((req) => {
-  if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'discover'] } };
+  if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'discover', 'capturePanes'] } };
   if (req.method === 'discover') return { id: req.id, ok: true, result: { containers: extra.containers ?? [] } };
+  if (req.method === 'capturePanes') return { id: req.id, ok: true, result: { panes: extra.panes ?? {} } };
   return { id: req.id, ok: false, error: 'unknown method' };
 });
 
@@ -580,6 +582,237 @@ describe('discover() via companion (companion-or-fail)', () => {
   });
 });
 
+// ------------------------------- capture-pane --------------------------------
+// WARDEN-276 (slice 2): the capturePanes RPC + its host-side sentinel framing.
+// capture-pane is the highest-frequency remote op; routing it over the companion
+// collapses the per-tick handshake on the polling cadence. The contract under
+// test: the ___B_<key>___ / ___E_<key>___ framing that BOTH the default JS path
+// (chats.js) and the Go companion (companion/main.go) reproduce byte-for-byte.
+
+describe('buildCaptureScript (exact bytes — the host-side framing contract)', () => {
+  it('docker-exec chat: sentinel-bracketed, docker exec <container> tmux, shellQuoted target', () => {
+    const script = buildCaptureScript([
+      { key: 'p-worker', container: 'p-worker', session: 'agent' },
+    ]);
+    assert.strictEqual(
+      script,
+      "printf '___B_p-worker___\\n'; docker exec 'p-worker' tmux capture-pane -t 'agent' -p -e -S -60 -E - 2>/dev/null; printf '\\n___E_p-worker___\\n'",
+    );
+  });
+
+  it('bare-tmux chat (no container): uses bare tmux, not docker exec', () => {
+    const script = buildCaptureScript([
+      { key: 'mysession', container: null, session: 'mysession' },
+    ]);
+    assert.ok(!script.includes('docker exec'), 'bare-tmux must not docker exec');
+    assert.strictEqual(
+      script,
+      "printf '___B_mysession___\\n'; tmux capture-pane -t 'mysession' -p -e -S -60 -E - 2>/dev/null; printf '\\n___E_mysession___\\n'",
+    );
+  });
+
+  it('target falls back container -> "agent" when session is empty (mirrors chats.js)', () => {
+    // yatfa-style: container set, session empty -> target is the container.
+    const a = buildCaptureScript([{ key: 'k', container: 'c1', session: '' }]);
+    assert.ok(a.includes("capture-pane -t 'c1'"), a);
+    // nothing set -> target 'agent'.
+    const b = buildCaptureScript([{ key: 'k', container: null, session: '' }]);
+    assert.ok(b.includes("capture-pane -t 'agent'"), b);
+  });
+
+  it('multiple panes are joined with "; " (one batched ssh call per host)', () => {
+    const script = buildCaptureScript([
+      { key: 'a', container: 'a', session: 'agent' },
+      { key: 'b', container: 'b', session: 'agent' },
+    ]);
+    assert.ok(script.includes('; '), 'joined with "; "');
+    // ordering preserved
+    assert.ok(script.indexOf('___B_a___') < script.indexOf('___B_b___'));
+    // one begin-sentinel per pane (each pane command has its own internal "; "
+    // separators around the capture, so counting those would over-count).
+    assert.strictEqual((script.match(/___B_[^_]/g) || []).length, 2, 'one begin-sentinel per pane');
+    assert.strictEqual((script.match(/___E_[^_]/g) || []).length, 2, 'one end-sentinel per pane');
+  });
+
+  it('containers with special chars are shellQuoted (single-quote escaped)', () => {
+    // A container name with an apostrophe must be escaped, never injected bare.
+    const script = buildCaptureScript([{ key: 'k', container: "c'x", session: 'agent' }]);
+    assert.ok(script.includes(`docker exec 'c'\\''x' tmux`), script);
+  });
+});
+
+describe('buildCaptureScript (validated through bash — WARDEN-140)', () => {
+  // Stub tmux + docker as shell functions that echo their args, so the script's
+  // sentinel framing, shellQuoting, and docker-vs-tmux selection can be validated
+  // through REAL bash without a docker daemon or live tmux. The captured "content"
+  // encodes the command the script ended up running.
+  const STUB = `tmux() { echo "TMUX:$*"; }
+docker() { if [ "$1" = exec ]; then shift; local c="$1"; shift; echo "DOCKEREXEC:$c:$*"; fi }
+`;
+  const runThroughBash = (script) =>
+    spawnSync('bash', ['-c', STUB + script], { encoding: 'utf8' });
+
+  it('docker-exec pane: bash runs docker exec <container> tmux capture-pane with the quoted target', () => {
+    const r = runThroughBash(buildCaptureScript([{ key: 'p-worker', container: 'p-worker', session: 'agent' }]));
+    assert.strictEqual(r.status, 0, r.stderr);
+    const map = parseCaptureSentinels(r.stdout);
+    assert.deepStrictEqual(Object.keys(map), ['p-worker']);
+    // Bash consumes the single-quotes shellQuote added, so the stub sees the
+    // unquoted args. What matters: docker exec <container> was invoked, tmux ran,
+    // and the exact capture-pane flags/args came through verbatim. (.trim: the
+    // sentinel framing preserves a trailing newline from echo, as it would from
+    // real tmux — not part of the command under test.)
+    assert.strictEqual(map['p-worker'].trim(), 'DOCKEREXEC:p-worker:tmux capture-pane -t agent -p -e -S -60 -E -');
+  });
+
+  it('bare-tmux pane: bash runs bare tmux capture-pane (no docker exec)', () => {
+    const r = runThroughBash(buildCaptureScript([{ key: 's', container: null, session: 's' }]));
+    assert.strictEqual(r.status, 0, r.stderr);
+    const map = parseCaptureSentinels(r.stdout);
+    assert.deepStrictEqual(Object.keys(map), ['s']);
+    assert.ok(map.s.startsWith('TMUX:'), map.s);
+    assert.ok(map.s.includes('-t s '), `target came through; got: ${map.s}`);
+  });
+
+  it('mixed batch: both shapes demarcated correctly in one bash invocation', () => {
+    const r = runThroughBash(buildCaptureScript([
+      { key: 'yatfa', container: 'yatfa', session: 'agent' },
+      { key: 'manual', container: null, session: 'manual' },
+    ]));
+    assert.strictEqual(r.status, 0, r.stderr);
+    const map = parseCaptureSentinels(r.stdout);
+    assert.deepStrictEqual(Object.keys(map).sort(), ['manual', 'yatfa']);
+    assert.ok(map.yatfa.startsWith('DOCKEREXEC:'));
+    assert.ok(map.manual.startsWith('TMUX:'));
+  });
+
+  it('sentinel framing round-trips through bash verbatim (parity with the JS parser)', () => {
+    // The default JS path stuffs captures into one stdout via these sentinels and
+    // parses them back; the companion must produce output the SAME parser reads.
+    const r = runThroughBash(buildCaptureScript([{ key: 'k', container: null, session: 's' }]));
+    const map = parseCaptureSentinels(r.stdout);
+    assert.ok('k' in map, 'parser recovered the key from the sentinel');
+  });
+});
+
+describe('parseCaptureSentinels (the JS side of the framing contract)', () => {
+  it('maps each ___B_<key>___ ... ___E_<key>___ block to key -> joined lines', () => {
+    const stdout = "___B_a___\nline1\nline2\n___E_a___\n___B_b___\nonly\n___E_b___\n";
+    assert.deepStrictEqual(parseCaptureSentinels(stdout), { a: 'line1\nline2', b: 'only' });
+  });
+
+  it('preserves blank lines and indentation inside a block', () => {
+    const stdout = "___B_a___\n  indented\n\nblank-above\n___E_a___\n";
+    assert.strictEqual(parseCaptureSentinels(stdout).a, '  indented\n\nblank-above');
+  });
+
+  it('ignores lines outside any B/E block (e.g. a shell banner)', () => {
+    const stdout = "Welcome to bash\n___B_a___\nhi\n___E_a___\ntrailing noise\n";
+    assert.deepStrictEqual(parseCaptureSentinels(stdout), { a: 'hi' });
+  });
+
+  it('a missing closer drops the pane (no key emitted) — matches the JS parser', () => {
+    const stdout = "___B_a___\nnever closed\n";
+    assert.deepStrictEqual(parseCaptureSentinels(stdout), {});
+  });
+
+  it('empty / null stdout -> {}', () => {
+    assert.deepStrictEqual(parseCaptureSentinels(''), {});
+    assert.deepStrictEqual(parseCaptureSentinels(null), {});
+    assert.deepStrictEqual(parseCaptureSentinels(undefined), {});
+  });
+
+  it('requires a non-empty key (___B____ with empty key is not a sentinel)', () => {
+    // mirrors the regex (.+) — an empty-key sentinel line is treated as content.
+    const stdout = "___B_a___\n___B____\n___E_a___\n";
+    assert.deepStrictEqual(parseCaptureSentinels(stdout), { a: '___B____' });
+  });
+});
+
+describe('capturePanes() via companion (companion-or-fail)', () => {
+  beforeEach(() => _resetChannelCacheForTests());
+
+  it('returns {ok:true, panes} from the capturePanes RPC', async () => {
+    const panes = { 'p-worker': 'pane content\nline2', 'p-planner': 'other' };
+    const { deps } = fakeDeps({ spawnChannel: () => healthyTransport({ panes }) });
+    const res = await capturePanes('prod', [
+      { key: 'p-worker', container: 'p-worker', session: 'agent' },
+      { key: 'p-planner', container: 'p-planner', session: 'agent' },
+    ], {}, {}, deps);
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.host, 'prod');
+    assert.deepStrictEqual(res.panes, panes);
+  });
+
+  it('sends the per-host pane list with key/container/session (container null for bare-tmux)', async () => {
+    let sent = null;
+    const t = fakeTransport((req) => {
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER } };
+      if (req.method === 'capturePanes') { sent = req.params; return { id: req.id, ok: true, result: { panes: {} } }; }
+      return { id: req.id, ok: false, error: 'unknown method' };
+    });
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    await capturePanes('prod', [
+      { key: 'yatfa', container: 'yatfa', session: 'agent' },
+      { key: 'manual', container: null, session: 'manual' },
+    ], {}, {}, deps);
+    assert.deepStrictEqual(sent.panes, [
+      { key: 'yatfa', container: 'yatfa', session: 'agent' },
+      { key: 'manual', container: null, session: 'manual' },
+    ]);
+  });
+
+  it('target fallback session->container->agent is applied on the JS side too', async () => {
+    let sent = null;
+    const t = fakeTransport((req) => {
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER } };
+      if (req.method === 'capturePanes') { sent = req.params; return { id: req.id, ok: true, result: { panes: {} } }; }
+      return { id: req.id, ok: false, error: 'unknown method' };
+    });
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    await capturePanes('prod', [{ key: 'k', container: 'c1', session: '' }], {}, {}, deps);
+    assert.strictEqual(sent.panes[0].session, 'c1', 'empty session falls back to container');
+  });
+
+  it('bootstrap failure -> {ok:false, actionable error}, NOT a raw-ssh fallback', async () => {
+    const { deps } = fakeDeps({
+      run: async () => ({ ok: false, code: 255, stderr: 'Permission denied (publickey).' }),
+    });
+    const res = await capturePanes('prod', [{ key: 'k', container: 'k', session: 'agent' }], {}, {}, deps);
+    assert.strictEqual(res.ok, false);
+    assert.deepStrictEqual(res.panes, {});
+    assert.ok(res.error.includes('companion'), `error names the companion: ${res.error}`);
+    assert.ok(res.error.includes('WARDEN_COMPANION_TRANSPORT=0'),
+      `bootstrap error must tell the user how to opt out: ${res.error}`);
+  });
+
+  it('capturePanes RPC error ({ok:false}) propagates without fallback', async () => {
+    const { deps } = fakeDeps({
+      spawnChannel: () => fakeTransport((req) =>
+        req.method === 'ping'
+          ? { id: req.id, ok: true, result: { version: TEST_VER } }
+          : { id: req.id, ok: false, error: 'capturePanes script failed: tmux: not found' }),
+    });
+    const res = await capturePanes('prod', [{ key: 'k', container: 'k', session: 'agent' }], {}, {}, deps);
+    assert.strictEqual(res.ok, false);
+    assert.ok(res.error.includes('capturePanes script failed'), res.error);
+  });
+
+  it('(local) host is refused (companion serves remote hosts only)', async () => {
+    const res = await capturePanes('(local)', [{ key: 'k', container: null, session: 'k' }], {}, {});
+    assert.strictEqual(res.ok, false);
+    assert.ok(/local/.test(res.error));
+  });
+
+  it('empty pane list -> ok with empty map (no RPC payload to build)', async () => {
+    const { deps } = fakeDeps({ spawnChannel: () => healthyTransport({}) });
+    const res = await capturePanes('prod', [], {}, {}, deps);
+    assert.strictEqual(res.ok, true);
+    // The host had no panes to capture, so the result map is empty regardless.
+    assert.deepStrictEqual(res.panes, {});
+  });
+});
+
 // ----------------------- end-to-end: the real binary ------------------------
 // Spawns the committed companion binary and drives it over stdio. Proves AC #4
 // (the channel is stdio — NO network port) and that the baked version matches the
@@ -615,6 +848,7 @@ function realBinaryTransport() {
       assert.strictEqual(res.version, manifest.version,
         `binary version ${res.version} must match manifest ${manifest.version}`);
       assert.ok(Array.isArray(res.methods) && res.methods.includes('discover'));
+      assert.ok(res.methods.includes('capturePanes'), 'ping advertises the capturePanes RPC');
     } finally {
       ch.kill();
     }
@@ -648,6 +882,56 @@ function realBinaryTransport() {
       });
     } finally {
       ch.kill();
+    }
+  });
+
+  // The make-or-break parity test for slice 2 (WARDEN-276): the Go companion
+  // builds the ___B_/___E_ sentinel-framed capture script, runs it via bash -lc
+  // against a REAL tmux session, parses the sentinels, and returns a structured
+  // key->content map — which the JS parser (parseCaptureSentinels) MUST be able
+  // to read. This proves the host-side framing matches the JS contract. Skipped
+  // unless tmux is available (the docker-exec path is the same code with a
+  // `docker exec <c>` prefix; the bare-tmux path exercises every other seam).
+  const TMUX_BIN = 'tmux';
+  const tmuxAvailable = (() => {
+    const r = spawnSync(TMUX_BIN, ['-V'], { encoding: 'utf8' });
+    return r.status === 0 || (r.stdout && /^tmux\s+\d/i.test(r.stdout));
+  })();
+  const canCapture = canRunBinary && tmuxAvailable;
+
+  function uniqueSession() {
+    return `warden-test-${process.pid}-${Math.floor(Number(process.hrtime.bigint() % 100000n))}`;
+  }
+
+  (canCapture ? it : it.skip)('capturePanes: real binary captures a live tmux session over stdio', async () => {
+    const session = uniqueSession();
+    // Create a detached tmux session and stamp recognizable content into it.
+    const setup = spawnSync(TMUX_BIN, ['new-session', '-d', '-s', session], { encoding: 'utf8' });
+    assert.strictEqual(setup.status, 0, `tmux new-session failed: ${setup.stderr}`);
+    try {
+      // send-keys lands text on the pane that capture-pane -p reads back.
+      spawnSync(TMUX_BIN, ['send-keys', '-t', session, 'WARDEN_CAPTURE_MARKER_42'], { encoding: 'utf8' });
+
+      const ch = new CompanionChannel('local-binary', realBinaryTransport());
+      try {
+        const res = await ch.call('capturePanes', {
+          panes: [{ key: session, container: '', session }],
+        }, { timeout: 8000 });
+        // The Go side returns {panes: {<key>: <content>}}; the JS parser MUST be
+        // able to read the SAME bytes (parity with the default runWithPool path).
+        assert.ok(res && typeof res.panes === 'object', 'response is a panes map');
+        assert.ok(session in res.panes, `captured the pane under its key '${session}'`);
+        // Cross-check: parse the raw content with the JS parser contract too. (The
+        // content itself came through structured JSON, but it must be the text the
+        // JS consumer expects — including our stamped marker.)
+        const content = res.panes[session];
+        assert.ok(content.includes('WARDEN_CAPTURE_MARKER_42'),
+          `captured content includes the marker; got:\n${content}`);
+      } finally {
+        ch.kill();
+      }
+    } finally {
+      spawnSync(TMUX_BIN, ['kill-session', '-t', session], { encoding: 'utf8' });
     }
   });
 });

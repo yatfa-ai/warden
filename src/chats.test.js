@@ -1,7 +1,82 @@
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert';
-import { resolveChat, resolveChatWithRefresh, comparePinned, parseDiscoverRow, discover } from './chats.js';
+import { spawnSync } from 'node:child_process';
+import { resolveChat, resolveChatWithRefresh, comparePinned, parseDiscoverRow, discover, capturePanes } from './chats.js';
 import { buildChat } from './chatMeta.js';
+
+// ----------------------------- capturePanes routing -------------------------
+// WARDEN-276: under WARDEN_COMPANION_TRANSPORT=1, REMOTE hosts route capture-pane
+// through the companion; the LOCAL fast path must stay on runLocalTmux and NEVER
+// touch the companion. The cleanest proof is end-to-end against a real local tmux
+// session: if LOCAL accidentally routed to the companion, the companion refuses
+// (local) hosts and the content would be missing. So a successful capture under
+// the opt-in IS proof the LOCAL path bypassed the companion. Skipped without tmux.
+
+const TMUX_BIN = 'tmux';
+function tmuxAvailable() {
+  const r = spawnSync(TMUX_BIN, ['-V'], { encoding: 'utf8' });
+  return r.status === 0 || (r.stdout && /^tmux\s+\d/i.test(r.stdout));
+}
+function uniqueSession() {
+  return `warden-test-${process.pid}-${Math.floor(Number(process.hrtime.bigint() % 100000n))}`;
+}
+
+(tmuxAvailable() ? describe : describe.skip)('capturePanes routing (LOCAL bypasses the companion)', () => {
+  let savedEnv;
+
+  function makeLocalChat(session) {
+    return { host: '(local)', key: session, container: null, session };
+  }
+
+  // For these tests runLocalTmux captures from a REAL detached tmux session.
+  function withSession(name, fn) {
+    return async () => {
+      const setup = spawnSync(TMUX_BIN, ['new-session', '-d', '-s', name], { encoding: 'utf8' });
+      assert.strictEqual(setup.status, 0, `tmux new-session failed: ${setup.stderr}`);
+      try {
+        spawnSync(TMUX_BIN, ['send-keys', '-t', name, 'WARDEN_LOCAL_MARKER_7'], { encoding: 'utf8' });
+        await fn();
+      } finally {
+        spawnSync(TMUX_BIN, ['kill-session', '-t', name], { encoding: 'utf8' });
+      }
+    };
+  }
+
+  it('LOCAL fast path captures via runLocalTmux even under WARDEN_COMPANION_TRANSPORT=1', async () => {
+    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+    process.env.WARDEN_COMPANION_TRANSPORT = '1';
+    const name = uniqueSession();
+    try {
+      await withSession(name, async () => {
+        const out = await capturePanes([makeLocalChat(name)], {});
+        // The capture succeeded via the LOCAL path — proving the companion (which
+        // refuses (local) hosts) was NOT consulted.
+        assert.ok(out[name], `LOCAL pane was captured: ${JSON.stringify(Object.keys(out))}`);
+        assert.ok(out[name].includes('WARDEN_LOCAL_MARKER_7'),
+          `captured the marker; got:\n${out[name]}`);
+      })();
+    } finally {
+      if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+      else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
+    }
+  });
+
+  it('default path (no env var) is unchanged: LOCAL captures identically', async () => {
+    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+    delete process.env.WARDEN_COMPANION_TRANSPORT;
+    const name = uniqueSession();
+    try {
+      await withSession(name, async () => {
+        const out = await capturePanes([makeLocalChat(name)], {});
+        assert.ok(out[name], 'default LOCAL capture works');
+        assert.ok(out[name].includes('WARDEN_LOCAL_MARKER_7'));
+      })();
+    } finally {
+      if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+      else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
+    }
+  });
+});
 
 describe('resolveChat', () => {
   const mockChats = [
