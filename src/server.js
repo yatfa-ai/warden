@@ -2355,10 +2355,22 @@ try { rotateEvents(); } catch { /* ignore */ }
 // stays negligible against the 7-day rotation regardless of the 60s cadence.
 let lifecycleTimer = null;
 let prevSnapshot = new Map(); // id → { host, container, role, project, active, ok }
+// Re-entrancy guard. A single discoverAll sweep can take longer than the 60s tick
+// (slow/unreachable hosts each wait on ConnectTimeout; per-agent SSH on Windows),
+// so without this guard ticks overlap and pile up — compounding load into the
+// exact global slowdown WARDEN-147 introduced. A tick already in flight makes the
+// next interval a no-op rather than stacking a second full-fleet sweep on it.
+let lifecycleRunning = false;
 
 const LIFECYCLE_INTERVAL_MS = 60_000;
 
 async function tickLifecycle() {
+  if (lifecycleRunning) return;
+  lifecycleRunning = true;
+  return tickLifecycleBody().finally(() => { lifecycleRunning = false; });
+}
+
+async function tickLifecycleBody() {
   // No remote hosts and no catalog → discoverAll has nothing to observe. But
   // FIRST drain any pending transitions in prevSnapshot against an empty fleet.
   // The last agent ending (or the user removing their last configured host) can
@@ -2379,7 +2391,12 @@ async function tickLifecycle() {
   }
   let chats, errors;
   try {
-    ({ chats, errors } = await discoverAll(cfg.hosts, cfg));
+    // Lean sweep: { activity: false } skips the per-agent activity SSH (remote)
+    // and the per-session capture-pane (local). The lifecycle diff needs only
+    // alive/dead TRANSITIONS, not timestamps — and those per-agent round-trips
+    // (a fresh ssh.exe each on Windows, which has no ControlMaster multiplexing)
+    // were the bulk of the unconditional 60s sweep's cost.
+    ({ chats, errors } = await discoverAll(cfg.hosts, cfg, { activity: false }));
   } catch {
     return; // transient discovery failure; retry next tick
   }

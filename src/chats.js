@@ -79,7 +79,23 @@ export function comparePinned(a, b, pins) {
   return pa - pb;
 }
 
-export async function discover(host, cfg) {
+// Resolve ALL alive local tmux session names in ONE spawnSync — a single
+// `list-sessions` — instead of one `has-session` spawnSync per catalog chat.
+// The per-chat loop ran synchronously inside a `.map`, so it blocked the Node
+// event loop for ~N × (process-spawn cost) on every discovery; on Windows/MSYS2
+// each spawnSync is a heavy tmux.exe fork, and with the 60s lifecycle poll
+// (WARDEN-147) PLUS the frontend's own 60s local re-discover, that froze the
+// whole server whenever a tick landed — every HTTP request (open settings, etc.)
+// queued behind it. One call regardless of N; membership tested in JS. Returns
+// an empty Set when no tmux server is running (list-sessions exits non-zero) so
+// every catalog chat correctly reads inactive.
+function localAliveSessions() {
+  const res = runLocalTmux(['list-sessions', '-F', '#{session_name}']);
+  if (!res.ok) return new Set();
+  return new Set((res.stdout || '').split('\n').map((s) => s.replace(/\r$/, '').trim()).filter(Boolean));
+}
+
+export async function discover(host, cfg, opts = {}) {
   const timeout = (cfg.connectTimeout ?? 10) * 1000 + 25000;
   const res = await runWithPool(host, DISCOVER_SCRIPT, { timeout }, cfg);
   if (!res.ok) {
@@ -115,8 +131,12 @@ export async function discover(host, cfg) {
     }
   }
 
-  // Second pass: capture activity timestamps concurrently for all active agents
-  if (activeAgents.length > 0) {
+  // Second pass: capture activity timestamps concurrently for all active agents.
+  // Skipped in the "lean" path (opts.activity === false, used by the lifecycle
+  // poll): that diff needs only alive/dead transitions, and this block spawns one
+  // fresh ssh per active agent — on Windows (no SSH ControlMaster multiplexing)
+  // the bulk of the unconditional 60s fleet sweep's cost. WARDEN-147 regression.
+  if (opts.activity !== false && activeAgents.length > 0) {
     const activityResults = await Promise.all(
       activeAgents.map(chat =>
         run(host, `docker exec ${chat.container} tmux capture-pane -t ${session} -p -S - -E - 2>/dev/null | head -1`, { timeout: 1000 })
@@ -187,8 +207,8 @@ async function discoverManual(host, entries, cfg) {
   return result;
 }
 
-export async function discoverAll(hosts, cfg) {
-  const results = await Promise.all(hosts.map((h) => discover(h, cfg)));
+export async function discoverAll(hosts, cfg, opts = {}) {
+  const results = await Promise.all(hosts.map((h) => discover(h, cfg, { activity: opts.activity })));
   let all = [];
   const errors = results.filter((r) => !r.ok).map((r) => ({ host: r.host, error: r.error }));
   for (const r of results) if (r.ok) all = all.concat(r.chats);
@@ -199,9 +219,15 @@ export async function discoverAll(hosts, cfg) {
     const byHost = {};
     for (const e of catalog) (byHost[e.host || LOCAL] ||= []).push(e);
     await Promise.all(Object.entries(byHost).map(async ([host, entries]) => {
-      const actives = host === LOCAL
-        ? entries.map((e) => ({ e, active: runLocalTmux(['has-session', '-t', e.session]).ok }))
-        : (await discoverManual(host, entries, cfg)).map((e) => ({ e, active: e.active }));
+      // Local: ONE spawnSync (list-sessions) resolves every catalog chat's
+      // alive/dead state via Set membership — not N blocking has-session calls.
+      let actives;
+      if (host === LOCAL) {
+        const alive = localAliveSessions();
+        actives = entries.map((e) => ({ e, active: alive.has(e.session) }));
+      } else {
+        actives = (await discoverManual(host, entries, cfg)).map((e) => ({ e, active: e.active }));
+      }
 
       // Create result objects first
       const resultObjects = actives.map(({ e, active }) => ({
@@ -213,9 +239,10 @@ export async function discoverAll(hosts, cfg) {
         lastActivity: null,
       }));
 
-      // Capture activity timestamps concurrently for active local sessions
+      // Capture activity timestamps concurrently for active local sessions.
+      // Skipped in the lean path (lifecycle poll) — that diff needs only alive/dead.
       const activeLocalSessions = resultObjects.filter(obj => obj.active && host === LOCAL);
-      if (activeLocalSessions.length > 0) {
+      if (opts.activity !== false && activeLocalSessions.length > 0) {
         await Promise.all(
           activeLocalSessions.map(obj =>
             Promise.resolve(runLocalTmux(['capture-pane', '-t', obj.session, '-p', '-S', '-', '-E', '-']))
@@ -288,8 +315,12 @@ export async function discoverHost(host, cfg) {
 
   if (host === LOCAL) {
     const entries = loadCatalog().filter((e) => (e.host || LOCAL) === LOCAL);
+    // ONE spawnSync (list-sessions) resolves every local catalog chat's
+    // alive/dead state — not N blocking has-session calls (this runs on the
+    // frontend's 60s /api/discover refresh for THIS_MACHINE too).
+    const alive = localAliveSessions();
     const objs = entries.map((e) => ({
-      e, o: toCatalogChat(LOCAL, e, runLocalTmux(['has-session', '-t', e.session]).ok, null),
+      e, o: toCatalogChat(LOCAL, e, alive.has(e.session), null),
     })).map((x) => x.o);
     await Promise.all(objs.filter((o) => o.active).map((o) =>
       Promise.resolve(runLocalTmux(['capture-pane', '-t', o.session, '-p', '-S', '-', '-E', '-']))
