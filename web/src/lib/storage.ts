@@ -138,6 +138,13 @@ export interface UiState {
   // client-side pref; never sent to the backend.
   defaultNewChatPreset?: string;
   defaultNewChatHost?: string;
+  // Default shell launched by the pane-grid ＋ split button (WARDEN-223). A
+  // non-empty value (e.g. 'zsh', 'pwsh') is the `cmd` every split spawns; blank
+  // (default) means "no explicit shell" — the host launches its own login shell
+  // (auto-detected per host, never hardcoded). Independent of the New Chats
+  // spawn presets above (a scratch terminal is a different concern). Pure
+  // client-side pref; never sent to the backend / /api/config.
+  defaultSplitShell?: string;
   // User-defined spawn presets (named quick-fill commands beyond claude/shell).
   // Validated on load: entries missing a name/cmd are dropped, names are bounded
   // (≤32 chars) and de-duplicated, and reserved built-in names are rejected.
@@ -228,6 +235,7 @@ const DEFAULT_UI: UiState = {
   theme: 'system', density: 'comfortable', paneLayout: 'auto',
   restoreOnStartup: 'previous',
   defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', customPresets: [],
+  defaultSplitShell: '',
   paneHost: {}, agentFilter: 'all', agentSort: 'manual',
 };
 
@@ -264,6 +272,9 @@ export function loadUi(): UiState {
         restoreOnStartup: v.restoreOnStartup === 'empty' ? 'empty' : 'previous',
         defaultNewChatPreset: presetIsValid(v.defaultNewChatPreset) ? (v.defaultNewChatPreset as string) : 'claude',
         defaultNewChatHost: typeof v.defaultNewChatHost === 'string' ? v.defaultNewChatHost : '(local)',
+        // Trim on load so stray whitespace never becomes the spawned shell name;
+        // blank is the meaningful "auto-detect host login shell" value.
+        defaultSplitShell: typeof v.defaultSplitShell === 'string' ? v.defaultSplitShell.trim() : '',
         customPresets,
         paneHost: (v.paneHost && typeof v.paneHost === 'object') ? v.paneHost : {},
         agentFilter: v.agentFilter ?? 'all',
