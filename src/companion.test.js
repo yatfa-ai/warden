@@ -1,9 +1,9 @@
 // Tests for the host companion transport (WARDEN-272, slice 1 of roadmap WARDEN-270).
 //
 // Coverage map:
-//   - pure seams: archForUname, mapCompanionContainers (parity with the default
-//     discover() chat shape), encodeRequest, parseProbe, projectSpawnModel,
-//     isCompanionTransportEnabled.
+//   - pure seams: targetForUname (OS-aware host-target selection),
+//     mapCompanionContainers (parity with the default discover() chat shape),
+//     encodeRequest, parseProbe, projectSpawnModel, isCompanionTransportEnabled.
 //   - RPC framing: CompanionChannel.call round-trip + error/timeout/dead handling,
 //     driven through a fake transport (no real ssh).
 //   - remote bash builders: buildProbeScript / buildUploadScript validated by
@@ -26,7 +26,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import {
-  archForUname, remoteBinaryPath, buildProbeScript, buildUploadScript, parseProbe,
+  targetForUname, remoteBinaryPath, buildProbeScript, buildUploadScript, parseProbe,
   encodeRequest, mapCompanionContainers, CompanionChannel, CompanionTransportError,
   CompanionRpcError, getChannel, discover, capturePanes, isCompanionTransportEnabled, loadManifest,
   projectSpawnModel, _resetChannelCacheForTests,
@@ -36,18 +36,31 @@ import { buildCaptureScript, parseCaptureSentinels } from './chats.js';
 
 // ------------------------------- pure seams ---------------------------------
 
-describe('archForUname', () => {
-  for (const [uname, want] of [
-    ['x86_64', 'amd64'], ['amd64', 'amd64'], ['AMD64', 'amd64'],
-    ['aarch64', 'arm64'], ['arm64', 'arm64'],
+describe('targetForUname (OS-aware host-target selection)', () => {
+  // (uname -s, uname -m) -> {goos, goarch} for every supported cross-compile pair.
+  for (const [os, arch, want] of [
+    ['Linux', 'x86_64', { goos: 'linux', goarch: 'amd64' }],
+    ['Linux', 'amd64', { goos: 'linux', goarch: 'amd64' }],
+    ['Linux', 'aarch64', { goos: 'linux', goarch: 'arm64' }],
+    ['Linux', 'arm64', { goos: 'linux', goarch: 'arm64' }],
+    ['Darwin', 'x86_64', { goos: 'darwin', goarch: 'amd64' }],     // Intel mac
+    ['Darwin', 'arm64', { goos: 'darwin', goarch: 'arm64' }],       // Apple Silicon
+    ['MINGW64_NT-10.0-19045', 'x86_64', { goos: 'windows', goarch: 'amd64' }], // Git Bash (WARDEN-294's reason for existing)
+    ['MINGW32_NT-6.3', 'AMD64', { goos: 'windows', goarch: 'amd64' }],
+    ['CYGWIN_NT-10.0', 'aarch64', { goos: 'windows', goarch: 'arm64' }],
+    ['MSYS_NT-10.0', 'arm64', { goos: 'windows', goarch: 'arm64' }],
   ]) {
-    it(`maps ${uname} -> ${want}`, () => {
-      assert.strictEqual(archForUname(uname), want);
+    it(`maps ${os} + ${arch} -> ${want.goos}/${want.goarch}`, () => {
+      assert.deepStrictEqual(targetForUname(os, arch), want);
     });
   }
-  it('returns null for unsupported / empty arch', () => {
-    for (const u of ['', 'mips', 'ppc64le', 'riscv64', undefined, null]) {
-      assert.strictEqual(archForUname(u), null, `expected null for ${JSON.stringify(u)}`);
+  it('returns null for unsupported / empty os or arch (no wrong-OS fallback)', () => {
+    for (const [os, arch] of [
+      ['', 'x86_64'], ['Linux', ''], [null, 'x86_64'], ['Linux', null],
+      ['FreeBSD', 'x86_64'], ['SunOS', 'amd64'],    // unsupported OS
+      ['Linux', 'riscv64'], ['Darwin', 'ppc64le'],  // unsupported arch
+    ]) {
+      assert.strictEqual(targetForUname(os, arch), null, `expected null for ${JSON.stringify(os)},${JSON.stringify(arch)}`);
     }
   });
 });
@@ -130,15 +143,26 @@ describe('mapCompanionContainers (maps containers into the shared buildChat)', (
 });
 
 describe('parseProbe', () => {
-  it('parses ARCH + HAVE=1', () => {
-    assert.deepStrictEqual(parseProbe('ARCH=x86_64\nHAVE=1\n'), { arch: 'x86_64', have: true });
+  it('parses OS + ARCH + HAVE=1', () => {
+    assert.deepStrictEqual(parseProbe('OS=Linux\nARCH=x86_64\nHAVE=1\n'), { os: 'Linux', arch: 'x86_64', have: true });
   });
   it('parses HAVE=0', () => {
-    assert.deepStrictEqual(parseProbe('ARCH=aarch64\nHAVE=0\n'), { arch: 'aarch64', have: false });
+    assert.deepStrictEqual(parseProbe('OS=Linux\nARCH=aarch64\nHAVE=0\n'), { os: 'Linux', arch: 'aarch64', have: false });
   });
-  it('handles missing HAVE / noisy stdout', () => {
-    assert.deepStrictEqual(parseProbe('ARCH=arm64\n'), { arch: 'arm64', have: false });
-    assert.deepStrictEqual(parseProbe(''), { arch: '', have: false });
+  it('parses a Windows (MINGW) probe — uname -s carries the OS detail', () => {
+    assert.deepStrictEqual(parseProbe('OS=MINGW64_NT-10.0-19045\nARCH=x86_64\nHAVE=1\n'),
+      { os: 'MINGW64_NT-10.0-19045', arch: 'x86_64', have: true });
+  });
+  it('handles missing fields / noisy stdout', () => {
+    assert.deepStrictEqual(parseProbe('ARCH=arm64\n'), { os: '', arch: 'arm64', have: false });
+    assert.deepStrictEqual(parseProbe(''), { os: '', arch: '', have: false });
+  });
+  it('tolerates trailing \r (Windows CRLF probe via Git Bash)', () => {
+    // A Windows Git Bash probe may emit CRLF. In JS regex `.` excludes line
+    // terminators, so the captured OS/ARCH values never include the \r; parseProbe
+    // still .trim()s defensively. Either way targetForUname sees a clean value.
+    assert.deepStrictEqual(parseProbe('OS=Darwin\r\nARCH=arm64\r\nHAVE=1\r\n'),
+      { os: 'Darwin', arch: 'arm64', have: true });
   });
 });
 
@@ -190,7 +214,7 @@ describe('buildProbeScript (validated through bash)', () => {
       env: { ...process.env, HOME: tmp }, encoding: 'utf8',
     });
     assert.strictEqual(r.status, 0, r.stderr);
-    assert.deepStrictEqual(parseProbe(r.stdout), { arch: expectArch(), have: true });
+    assert.deepStrictEqual(parseProbe(r.stdout), { os: expectOs(), arch: expectArch(), have: true });
     fs.rmSync(bin, { force: true });
   });
 
@@ -199,7 +223,7 @@ describe('buildProbeScript (validated through bash)', () => {
       env: { ...process.env, HOME: tmp }, encoding: 'utf8',
     });
     assert.strictEqual(r.status, 0, r.stderr);
-    assert.deepStrictEqual(parseProbe(r.stdout), { arch: expectArch(), have: false });
+    assert.deepStrictEqual(parseProbe(r.stdout), { os: expectOs(), arch: expectArch(), have: false });
   });
 });
 
@@ -221,8 +245,11 @@ describe('buildUploadScript (validated through bash)', () => {
   });
 });
 
-// The arch this test machine reports via uname -m — so the probe bash tests can
-// assert the real ARCH= line without hardcoding.
+// The os/arch this test machine reports via uname -s / uname -m — so the probe
+// bash tests can assert the real OS= + ARCH= lines without hardcoding.
+function expectOs() {
+  return spawnSync('uname', ['-s'], { encoding: 'utf8' }).stdout.trim();
+}
 function expectArch() {
   return spawnSync('uname', ['-m'], { encoding: 'utf8' }).stdout.trim();
 }
@@ -311,6 +338,10 @@ const TEST_MANIFEST = {
   binaries: {
     'linux/amd64': 'warden-companion-linux-amd64',
     'linux/arm64': 'warden-companion-linux-arm64',
+    'darwin/amd64': 'warden-companion-darwin-amd64',
+    'darwin/arm64': 'warden-companion-darwin-arm64',
+    'windows/amd64': 'warden-companion-windows-amd64.exe',
+    'windows/arm64': 'warden-companion-windows-arm64.exe',
   },
 };
 
@@ -328,7 +359,7 @@ function fakeDeps(overrides = {}) {
   const calls = { run: 0, upload: 0, spawnChannel: 0 };
   const deps = {
     manifest: TEST_MANIFEST,
-    run: async () => { calls.run++; return { ok: true, stdout: 'ARCH=x86_64\nHAVE=0\n' }; },
+    run: async () => { calls.run++; return { ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' }; },
     upload: async () => { calls.upload++; return { ok: true }; },
     spawnChannel: () => { calls.spawnChannel++; return healthyTransport(overrides.containers ? { containers: overrides.containers } : {}); },
     ...overrides,
@@ -394,7 +425,7 @@ describe('getChannel / bootstrap orchestration', () => {
 
   it('skips upload when the right-version binary already exists (HAVE=1)', async () => {
     const { deps, calls } = fakeDeps({
-      run: async () => ({ ok: true, stdout: 'ARCH=aarch64\nHAVE=1\n' }),
+      run: async () => ({ ok: true, stdout: 'OS=Linux\nARCH=aarch64\nHAVE=1\n' }),
     });
     await getChannel('prod-2', {}, deps);
     assert.strictEqual(calls.upload, 0, 'HAVE=1 → no upload');
@@ -406,7 +437,7 @@ describe('getChannel / bootstrap orchestration', () => {
     // re-upload and respawn, and the second channel reports the right version.
     let spawns = 0;
     const { deps, calls } = fakeDeps({
-      run: async () => ({ ok: true, stdout: 'ARCH=x86_64\nHAVE=1\n' }),
+      run: async () => ({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=1\n' }),
       spawnChannel: () => {
         spawns++;
         return spawns === 1
@@ -434,14 +465,51 @@ describe('getChannel / bootstrap orchestration', () => {
     assert.strictEqual(calls.spawnChannel, 0);
   });
 
-  it('unsupported host arch -> CompanionTransportError', async () => {
-    const { deps } = fakeDeps({
-      run: async () => ({ ok: true, stdout: 'ARCH=riscv64\nHAVE=0\n' }),
+  it('unsupported host target (unknown os or arch) -> CompanionTransportError, no wrong-OS fallback', async () => {
+    // A host whose (uname -s, uname -m) pair isn't in the matrix must NOT get a
+    // best-effort linux binary — that would exec-fail opaquely on macOS/Windows.
+    // targetForUname returns null and the bootstrap names the supported set.
+    const { deps: depsArch } = fakeDeps({
+      run: async () => ({ ok: true, stdout: 'OS=Linux\nARCH=riscv64\nHAVE=0\n' }),
     });
-    await assert.rejects(() => getChannel('prod-5', {}, deps), (e) => {
-      assert.ok(/linux\/amd64 and linux\/arm64 only/.test(e.message), e.message);
+    await assert.rejects(() => getChannel('prod-5a', {}, depsArch), (e) => {
+      assert.ok(e instanceof CompanionTransportError);
+      assert.ok(/riscv64/.test(e.message), `names the bad arch: ${e.message}`);
+      assert.ok(/windows\/arm64 only/.test(e.message), `names the full supported set: ${e.message}`);
       return true;
     });
+    const { deps: depsOs } = fakeDeps({
+      run: async () => ({ ok: true, stdout: 'OS=FreeBSD\nARCH=amd64\nHAVE=0\n' }),
+    });
+    await assert.rejects(() => getChannel('prod-5b', {}, depsOs), (e) => {
+      assert.ok(/FreeBSD/.test(e.message), `names the bad os: ${e.message}`);
+      return true;
+    });
+  });
+
+  it('OS-aware selection: a Darwin host uploads the DARWIN binary (no hard-coded linux/)', async () => {
+    // The whole point of WARDEN-294: a macOS arm64 host must select the darwin
+    // Mach-O binary, not the linux one. Pre-294 this selected linux/arm64 and
+    // failed opaquely ("cannot execute binary file"). Asserts the uploaded path.
+    let uploadedBinary;
+    const { deps } = fakeDeps({
+      run: async () => ({ ok: true, stdout: 'OS=Darwin\nARCH=arm64\nHAVE=0\n' }),
+      upload: async (_h, localBinary) => { uploadedBinary = localBinary; return { ok: true }; },
+    });
+    await getChannel('mac-1', {}, deps);
+    assert.ok((uploadedBinary || '').endsWith('warden-companion-darwin-arm64'),
+      `selected ${uploadedBinary} (expected the darwin/arm64 binary)`);
+  });
+
+  it('OS-aware selection: a MINGW (Windows) host uploads the WINDOWS .exe binary', async () => {
+    let uploadedBinary;
+    const { deps } = fakeDeps({
+      run: async () => ({ ok: true, stdout: 'OS=MINGW64_NT-10.0-19045\nARCH=x86_64\nHAVE=0\n' }),
+      upload: async (_h, localBinary) => { uploadedBinary = localBinary; return { ok: true }; },
+    });
+    await getChannel('win-1', {}, deps);
+    assert.ok((uploadedBinary || '').endsWith('warden-companion-windows-amd64.exe'),
+      `selected ${uploadedBinary} (expected the windows/amd64 .exe)`);
   });
 
   it('upload failure -> CompanionTransportError (no silent success)', async () => {
@@ -487,7 +555,7 @@ describe('getChannel / bootstrap orchestration', () => {
     let spawnCalls = 0;
     const ch = await getChannel('prod-count', {}, {
       manifest: TEST_MANIFEST,
-      run: async () => { runCalls++; return { ok: true, stdout: 'ARCH=x86_64\nHAVE=0\n' }; },
+      run: async () => { runCalls++; return { ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' }; },
       spawn: (...a) => { spawnCalls++; return fakeSpawnChildFactory(TEST_VER)(...a); },
     });
     assert.ok(ch instanceof CompanionChannel);
