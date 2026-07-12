@@ -2,6 +2,10 @@
   "version": "8986543f5a7c",
   "binaries": {
     "linux/amd64": "warden-companion-linux-amd64",
-    "linux/arm64": "warden-companion-linux-arm64"
+    "linux/arm64": "warden-companion-linux-arm64",
+    "darwin/amd64": "warden-companion-darwin-amd64",
+    "darwin/arm64": "warden-companion-darwin-arm64",
+    "windows/amd64": "warden-companion-windows-amd64.exe",
+    "windows/arm64": "warden-companion-windows-arm64.exe"
   }
 }

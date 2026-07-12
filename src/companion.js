@@ -40,6 +40,14 @@ function distDir() {
 }
 
 let _manifest;
+// The full cross-compile matrix (linux/darwin/windows × amd64/arm64). build.sh
+// emits a binary for each target; loadManifest validates all six are present, and
+// targetForUname maps a host's (uname -s, uname -m) into one of them.
+const SUPPORTED_TARGETS = [
+  'linux/amd64', 'linux/arm64',
+  'darwin/amd64', 'darwin/arm64',
+  'windows/amd64', 'windows/arm64',
+];
 export function loadManifest() {
   if (_manifest) return _manifest;
   const p = path.join(distDir(), 'manifest.json');
@@ -48,8 +56,8 @@ export function loadManifest() {
   if (!raw.version || !/^[a-f0-9]+$/.test(raw.version)) {
     throw new Error(`companion manifest has invalid version: ${JSON.stringify(raw.version)}`);
   }
-  if (!raw.binaries || !raw.binaries['linux/amd64'] || !raw.binaries['linux/arm64']) {
-    throw new Error('companion manifest missing linux/amd64 + linux/arm64 binary entries');
+  if (!raw.binaries || !SUPPORTED_TARGETS.every((t) => raw.binaries[t])) {
+    throw new Error(`companion manifest missing binary entries (expected all of ${SUPPORTED_TARGETS.join(', ')})`);
   }
   _manifest = raw;
   return raw;
@@ -58,12 +66,27 @@ export function loadManifest() {
 // Test seam: override the manifest (and thus the version + binary map).
 export function _setManifestForTests(m) { _manifest = m; }
 
-// Map a remote `uname -m` string to a bundled binary arch, or null if unsupported.
-export function archForUname(m) {
-  if (!m) return null;
-  if (/^(x86_64|amd64)$/i.test(m)) return 'amd64';
-  if (/^(aarch64|arm64)$/i.test(m)) return 'arm64';
-  return null;
+// Map a host's reported (uname -s, uname -m) to a cross-compile target
+// {goos, goarch}, or null if the pair isn't in the supported matrix.
+//
+// `uname -s` values: "Linux", "Darwin", and on Windows "MINGW*_NT-*" (Git Bash /
+// MSYS2), "CYGWIN_NT-*", or "MSYS_NT-*". `uname -m` is x86_64/amd64 or
+// aarch64/arm64. BOTH dimensions must resolve: an unknown OS OR an unknown arch
+// yields null, so the bootstrap surfaces a clear CompanionTransportError rather
+// than selecting a wrong-OS binary that fails opaquely at exec (the macOS/Windows
+// selection that WARDEN-294 makes OS-aware).
+export function targetForUname(osStr, archStr) {
+  if (!osStr || !archStr) return null;
+  let goos;
+  if (/^Darwin/i.test(osStr)) goos = 'darwin';
+  else if (/^Linux/i.test(osStr)) goos = 'linux';
+  else if (/^(MINGW|CYGWIN|MSYS)/i.test(osStr)) goos = 'windows';
+  else return null;
+  let goarch;
+  if (/^(x86_64|amd64)$/i.test(archStr)) goarch = 'amd64';
+  else if (/^(aarch64|arm64)$/i.test(archStr)) goarch = 'arm64';
+  else return null;
+  return { goos, goarch };
 }
 
 // The remote path for the companion binary. `version` is validated hex from the
@@ -76,14 +99,17 @@ export function remoteBinaryPath(version) {
 // All bash that runs remotely is built by exported, bash-lc-testable helpers
 // (WARDEN-140: extract + test remote command builders rather than hand-assemble).
 
-// Probe the host arch and whether the right-version binary already exists.
-// Emits two parseable lines:
-//   ARCH=x86_64
+// Probe the host OS + arch and whether the right-version binary already exists.
+// Emits three parseable lines:
+//   OS=Linux                 (uname -s)
+//   ARCH=x86_64              (uname -m)
 //   HAVE=1   (1 if companion-<ver> exists & is executable, else 0)
-// `$HOME` is in DOUBLE quotes so it expands remotely; the version is validated
-// hex so it is safe to interpolate (never user-controlled).
+// OS + arch together drive OS-aware binary selection (WARDEN-294): a darwin host
+// must select the darwin binary, not the linux one. `$HOME` is in DOUBLE quotes
+// so it expands remotely; the version is validated hex so it is safe to
+// interpolate (never user-controlled).
 export function buildProbeScript(remotePath) {
-  return `echo "ARCH=$(uname -m)"; echo "HAVE=$(test -x "${remotePath}" && echo 1 || echo 0)"`;
+  return `echo "OS=$(uname -s)"; echo "ARCH=$(uname -m)"; echo "HAVE=$(test -x "${remotePath}" && echo 1 || echo 0)"`;
 }
 
 // Receive the binary on stdin, write it to the remote path, make executable.
@@ -94,9 +120,10 @@ export function buildUploadScript(remotePath) {
 
 export function parseProbe(stdout) {
   const s = stdout || '';
+  const os = (/^OS=(.+)$/m.exec(s) || [])[1];
   const arch = (/^ARCH=(.+)$/m.exec(s) || [])[1];
   const haveMatch = (/^HAVE=([01])$/m.exec(s) || [])[1];
-  return { arch: arch ? arch.trim() : '', have: haveMatch === '1' };
+  return { os: os ? os.trim() : '', arch: arch ? arch.trim() : '', have: haveMatch === '1' };
 }
 
 // RPC request framing — one JSON object per line. id is owned by the caller and
@@ -348,13 +375,13 @@ async function bootstrapChannel(host, cfg, deps) {
     throw new CompanionTransportError(host,
       `bootstrap probe failed: ${(probeRes.stderr || '').trim() || `ssh exited ${probeRes.code}`}`);
   }
-  const { arch, have } = parseProbe(probeRes.stdout);
-  const goArch = archForUname(arch);
-  if (!goArch) {
+  const { os, arch, have } = parseProbe(probeRes.stdout);
+  const target = targetForUname(os, arch);
+  if (!target) {
     throw new CompanionTransportError(host,
-      `host reports arch '${arch || 'unknown'}'; the bundled companion supports linux/amd64 and linux/arm64 only (the macOS/Windows cross-compile matrix is a later slice)`);
+      `host reports os '${os || 'unknown'}' arch '${arch || 'unknown'}'; the bundled companion supports ${SUPPORTED_TARGETS.join(', ')} only`);
   }
-  const binaryPath = path.join(distDir(), manifest.binaries[`linux/${goArch}`]);
+  const binaryPath = path.join(distDir(), manifest.binaries[`${target.goos}/${target.goarch}`]);
   if (!fs.existsSync(binaryPath)) {
     throw new CompanionTransportError(host, `bundled companion binary not found at ${binaryPath}`);
   }
