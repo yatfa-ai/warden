@@ -18,6 +18,7 @@ import { type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { type Density } from '@/lib/density';
 import { type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type PresetNameIssue, PRESET_NAME_MAX, validatePresetName, DEFAULT_TERMINAL_FONT_FAMILY } from '@/lib/storage';
 import { hasWindowBridge } from '@/lib/electron';
+import { requestAlertPermission } from '@/lib/desktopAlerts';
 import { putJson } from '@/lib/api';
 import { toast } from 'sonner';
 
@@ -144,6 +145,14 @@ interface Props {
   // web bundle runs in all three contexts. See WARDEN-263.
   rememberWindowBounds: boolean;
   setRememberWindowBounds: (v: boolean) => void;
+  // Opt-in OS desktop alerts when agents need attention AND Warden is unfocused
+  // (WARDEN-259). Pure client-side localStorage pref (NOT backend config): it
+  // applies instantly via the prop callback (forwarded to the AttentionBadge) and
+  // is persisted by App's saveUi effect. It must NEVER be added to the `config`
+  // state / PUT /api/config body — the adjacent toast toggles use setConfig, but
+  // this is a different delivery channel AND a different persistence path.
+  attentionDesktopAlerts: boolean;
+  setAttentionDesktopAlerts: (v: boolean) => void;
 }
 
 /** A titled group of related settings, separated by a top border. */
@@ -250,7 +259,7 @@ function PresetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -1121,6 +1130,33 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   </div>
                   <p className="text-xs text-muted-foreground">
                     Observer connection timeout and gate prompt notifications
+                  </p>
+                </div>
+
+                {/* Desktop alerts (WARDEN-259) — a DIFFERENT channel + persistence
+                    path than the toast toggles above. Those gate in-app toasts via
+                    the server-side `config` / PUT /api/config; this is a pure
+                    client-side localStorage pref that fires an OS notification when
+                    an agent newly needs attention while Warden is UNFOCUSED (the
+                    always-on badge already covers the in-app case). On enable we
+                    request OS permission fire-and-forget; if denied the toggle still
+                    flips on but alerts simply no-op until granted. */}
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      id="attentionDesktopAlerts"
+                      checked={attentionDesktopAlerts}
+                      onCheckedChange={(v) => {
+                        setAttentionDesktopAlerts(v);
+                        if (v) void requestAlertPermission();
+                      }}
+                    />
+                    <Label htmlFor="attentionDesktopAlerts" className="cursor-pointer">
+                      Desktop alerts when agents need attention (while Warden is unfocused)
+                    </Label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Show an OS notification when an agent goes critical/warning or a new directive/error lands while you’re in another app. Clicking it focuses Warden. Your OS will ask for permission when you turn this on.
                   </p>
                 </div>
               </SettingsSection>

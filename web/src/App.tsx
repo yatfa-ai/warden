@@ -136,6 +136,12 @@ function App() {
   // saveUi effect below, never sent to the backend. See WARDEN-248.
   const [onExitBehavior, setOnExitBehavior] = useState<OnExitBehavior>(() => uiState.onExitBehavior ?? 'keep');
   const [terminalFontSize, setTerminalFontSize] = useState(() => uiState.terminalFontSize ?? 14);
+  // Opt-in OS desktop alerts when agents need attention and Warden is unfocused
+  // (WARDEN-259). Pure client-side pref (like terminalFontSize/scrollback):
+  // persisted by the saveUi effect below, forwarded to the AttentionBadge's
+  // useAttentionRollup so the existing poll fires an OS notification on a rollup
+  // increase while hidden. Never sent to the backend.
+  const [attentionDesktopAlerts, setAttentionDesktopAlerts] = useState(() => uiState.attentionDesktopAlerts ?? false);
   const [terminalScrollback, setTerminalScrollback] = useState(() => uiState.terminalScrollback ?? 10000);
   // Terminal font family: the CSS font-family value every agent pane renders.
   // '' / absent / blank → DEFAULT_TERMINAL_FONT_FAMILY (today's exact stack) so
@@ -274,8 +280,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, onExitBehavior, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, defaultSplitShell }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, onExitBehavior, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, defaultSplitShell, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, onExitBehavior, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, defaultSplitShell }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, onExitBehavior, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, defaultSplitShell, restoreOnStartup, startedEmpty]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -942,6 +948,8 @@ function App() {
           setRestoreOnStartup={setRestoreOnStartup}
           terminalFontSize={terminalFontSize}
           setTerminalFontSize={setTerminalFontSize}
+          attentionDesktopAlerts={attentionDesktopAlerts}
+          setAttentionDesktopAlerts={setAttentionDesktopAlerts}
           terminalScrollback={terminalScrollback}
           setTerminalScrollback={setTerminalScrollback}
           terminalFontFamily={terminalFontFamily}
@@ -984,7 +992,7 @@ function App() {
           label={streamConn ? 'Connected' : 'Disconnected'}
           className="transition-colors duration-300 ease-in-out"
         />
-        <AttentionBadge onOpenChat={openChat} onOpenActivity={openActivityTab} />
+        <AttentionBadge onOpenChat={openChat} onOpenActivity={openActivityTab} attentionDesktopAlerts={attentionDesktopAlerts} />
         <IconTooltip label="global search (Ctrl+Shift+F)" side="bottom"><button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⌕</button></IconTooltip>
         <IconTooltip label="toggle health panel" side="bottom"><button onClick={() => setHealthCollapsed(!healthCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{healthCollapsed ? '◂' : '▸'} Health</button></IconTooltip>
         <IconTooltip label="toggle observer" side="bottom"><button onClick={() => setObserverCollapsed(!observerCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>
