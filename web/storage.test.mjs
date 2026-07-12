@@ -334,6 +334,46 @@ test('the pref survives an empty-mode mount (carried by the live spread, not the
   assert.equal(loadUi().terminalCursorStyle, 'steady-bar');
 });
 
+console.log('\ncopyOnSelect (opt-in select-to-copy) round-trips through loadUi/saveUi — WARDEN-285');
+test('defaults to false when nothing is stored (today\'s exact behavior, zero regression)', () => {
+  reset();
+  assert.equal(loadUi().copyOnSelect, false);
+});
+test('true round-trips', () => {
+  reset();
+  saveUi({ ...loadUi(), copyOnSelect: true });
+  assert.equal(loadUi().copyOnSelect, true);
+});
+test('false round-trips (stays off)', () => {
+  reset();
+  saveUi({ ...loadUi(), copyOnSelect: false });
+  assert.equal(loadUi().copyOnSelect, false);
+});
+test('only an explicitly-stored true enables it — missing stays false (opt-in)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  assert.equal(loadUi().copyOnSelect, false);
+});
+test('a non-boolean coerces back to false on load (defensive)', () => {
+  // copyOnSelect === true is the only gate, so a truthy-but-not-true value
+  // (1, "true", {}) must NOT enable it. This is the conservative default.
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], copyOnSelect: 1 }));
+  assert.equal(loadUi().copyOnSelect, false);
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], copyOnSelect: 'true' }));
+  assert.equal(loadUi().copyOnSelect, false);
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], copyOnSelect: {} }));
+  assert.equal(loadUi().copyOnSelect, false);
+});
+test('the pref survives an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
+  // copyOnSelect is NOT a workspace field, so persistUiState spreads it from
+  // `live`. Confirm an empty-launch still round-trips a freshly enabled value.
+  reset();
+  const d0 = loadUi();
+  saveUi(persistUiState({ ...d0, copyOnSelect: true }, 'empty', d0, true));
+  assert.equal(loadUi().copyOnSelect, true);
+});
+
 console.log('\nonExitBehavior (keep/dim/auto-close) round-trips through loadUi/saveUi — WARDEN-248');
 test('defaults to "keep" when nothing is stored', () => {
   reset();

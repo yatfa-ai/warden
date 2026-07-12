@@ -138,6 +138,13 @@ export interface UiState {
   // to 'blink-block' (today's exact cursor). Pure client-side pref (like
   // terminalFontSize/scrollback/colorScheme); never sent to the backend.
   terminalCursorStyle?: TerminalCursorStyle;
+  // "Copy on select": when true, completing a text selection in any agent pane
+  // copies it to the system clipboard immediately (no Ctrl/Cmd+C needed) — the
+  // select-to-copy behavior humans expect from iTerm2/GNOME-Terminal/Windows
+  // Terminal. Default OFF (opt-in = today's exact behavior, zero regression).
+  // Pure client-side pref (like terminalFontSize/scrollback); never sent to the
+  // backend. See WARDEN-285.
+  copyOnSelect?: boolean;
   theme?: 'light' | 'dark' | 'system';
   // UI density: 'comfortable' (default = today's spacing) or 'compact' (tighter
   // rows/headers/gaps so more agents fit per screen). Pure client-side pref.
@@ -260,6 +267,7 @@ const DEFAULT_UI: UiState = {
   terminalScrollback: 10000, terminalFontFamily: '',
   terminalColorScheme: 'auto',
   terminalCursorStyle: 'blink-block',
+  copyOnSelect: false,
   theme: 'system', density: 'comfortable', paneLayout: 'auto',
   onExitBehavior: 'keep',
   autoFocusNewPane: true,
@@ -299,6 +307,9 @@ export function loadUi(): UiState {
         terminalFontFamily: typeof v.terminalFontFamily === 'string' ? v.terminalFontFamily : '',
         terminalColorScheme: ['auto', 'dark', 'light'].includes(v.terminalColorScheme) ? v.terminalColorScheme : 'auto',
         terminalCursorStyle: ['blink-block', 'steady-block', 'blink-underline', 'steady-underline', 'blink-bar', 'steady-bar'].includes(v.terminalCursorStyle) ? v.terminalCursorStyle : 'blink-block',
+        // Opt-in: only an explicitly-stored `true` enables it. Anything else
+        // (missing / false / wrong type) stays OFF — the conservative default.
+        copyOnSelect: v.copyOnSelect === true,
         theme: v.theme ?? 'system',
         density: v.density === 'compact' ? 'compact' : 'comfortable',
         paneLayout: (v.paneLayout === 'stacked' || v.paneLayout === 'side-by-side') ? v.paneLayout : 'auto',

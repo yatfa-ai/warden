@@ -51,6 +51,23 @@ const CURSOR_OPTIONS: Record<TerminalCursorStyle, { cursorStyle: 'block' | 'unde
   'steady-bar': { cursorStyle: 'bar', cursorBlink: false },
 };
 
+// Copy the xterm selection to the system clipboard via the Electron-safe
+// document.execCommand('copy') textarea fallback — the SAME path the Ctrl/Cmd+C
+// handler below uses (navigator.clipboard fails silently in Electron, per the
+// inline note there). No-op on an empty selection so a CLEARED selection never
+// clobbers the clipboard (onSelectionChange also fires on de-select). Factored
+// out so the two callers — Ctrl/Cmd+C and copy-on-select — share one clipboard
+// routine instead of duplicating it. (WARDEN-285)
+function copySelectionToClipboard(term: Terminal): void {
+  const s = term.getSelection();
+  if (!s) return;
+  const ta = document.createElement('textarea');
+  ta.value = s; ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); } catch {}
+  document.body.removeChild(ta);
+}
+
 interface Props {
   id: string;
   label?: string;
@@ -83,6 +100,13 @@ interface Props {
   // blink — the accessibility payoff vs WARDEN-190 — and applies live to already-
   // open panes via the [terminalCursorStyle] effect below.
   terminalCursorStyle: TerminalCursorStyle;
+  // "Copy on select" (WARDEN-285): when true, completing a text selection in
+  // this pane copies it to the clipboard immediately (no Ctrl/Cmd+C needed).
+  // App owns the persisted pref; PaneTile mirrors it into a ref and the
+  // onSelectionChange handler reads the latest value so a Settings toggle
+  // applies LIVE to already-open panes (toggling OFF stops auto-copy at once).
+  // Default OFF = today's exact behavior (zero regression).
+  copyOnSelect: boolean;
   // "Pane on agent exit" behavior (WARDEN-248): what this pane does when its
   // agent process exits. 'keep' leaves the pane untouched (today's behavior);
   // 'dim' shows an "agent exited" overlay + reduced opacity while keeping the
@@ -92,7 +116,7 @@ interface Props {
   onExitBehavior: OnExitBehavior;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalTheme, terminalCursorStyle, onExitBehavior }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalTheme, terminalCursorStyle, copyOnSelect, onExitBehavior }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -147,6 +171,16 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // the terminal is always legible.
   const safeFontFamily = fontFamily || DEFAULT_TERMINAL_FONT_FAMILY;
 
+  // WARDEN-285: mirror the latest copyOnSelect pref into a ref. The
+  // onSelectionChange handler is registered ONCE at mount (below) and reads this
+  // ref at selection time, so a Settings toggle applies LIVE to already-open
+  // panes — toggling OFF stops auto-copying immediately, toggling ON starts it —
+  // without re-running the mount effect (which would tear down and rebuild the
+  // terminal). Assigned during render, the same latest-value mirror pattern as
+  // activeTabsRef/openPanesRef in App.tsx.
+  const copyOnSelectRef = useRef(copyOnSelect);
+  copyOnSelectRef.current = copyOnSelect;
+
   useEffect(() => {
     const term = new Terminal({
       fontFamily: safeFontFamily,
@@ -167,19 +201,22 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     termRef.current = term; fitRef.current = fit; searchRef.current = search;
     term.onData((d) => streamApi.send({ type: 'input', id, data: d }));
     term.onResize(() => streamApi.send({ type: 'resize', id, cols: term.cols, rows: term.rows }));
+    // WARDEN-285: copy-on-select. Registered once at mount; the handler reads the
+    // latest pref from copyOnSelectRef so a Settings toggle applies live to this
+    // already-open pane (gating at mount only would leave a stale handler after a
+    // toggle-OFF). onSelectionChange fires on a completed selection AND on a
+    // cleared one, so copySelectionToClipboard guards on a non-empty getSelection
+    // — de-selecting never clobbers the clipboard.
+    const selectionDisposable = term.onSelectionChange(() => {
+      if (copyOnSelectRef.current) copySelectionToClipboard(term);
+    });
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true;
       const ctrl = e.ctrlKey || e.metaKey;
       if (!ctrl) return true;
       if (e.code === 'KeyC') {
-        const s = term.getSelection();
-        if (s) {
-          // Use execCommand fallback (navigator.clipboard fails silently in Electron)
-          const ta = document.createElement('textarea');
-          ta.value = s; ta.style.position = 'fixed'; ta.style.opacity = '0';
-          document.body.appendChild(ta); ta.select();
-          try { document.execCommand('copy'); } catch {}
-          document.body.removeChild(ta);
+        if (term.getSelection()) {
+          copySelectionToClipboard(term);
           return false;
         }
         return true;
@@ -332,6 +369,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     const t = setTimeout(doFit, 50);
     return () => {
       clearTimeout(t); ro.disconnect();
+      selectionDisposable.dispose();
       linkProvider.dispose(); hideTooltip();
       if (tooltipElRef.current) tooltipElRef.current = null;
       term.dispose(); termRef.current = null;
