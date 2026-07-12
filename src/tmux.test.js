@@ -116,7 +116,7 @@ describe('parseMouseState (WARDEN-261)', () => {
     // A failed read (host down, tmux error, no server, unexpected output) must
     // be null so the frontend never shows the "copy impaired" hint on a failure.
     assert.strictEqual(parseMouseState(''), null);
-    assert.strictEqual(parseMouseState(''), null);
+    assert.strictEqual(parseMouseState('   '), null);
     assert.strictEqual(parseMouseState('unknown option: mouse'), null);
     assert.strictEqual(parseMouseState(undefined), null);
     assert.strictEqual(parseMouseState(null), null);

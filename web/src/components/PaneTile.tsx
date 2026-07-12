@@ -9,6 +9,7 @@ import { findPathCandidates } from '@/lib/path-links';
 import { hostTagOf } from '@/lib/chatDisplay';
 import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBehavior, type HostOptionsMap } from '@/lib/storage';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
+import { Button } from '@/components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { StatusDot } from '@/components/StatusDot';
 import { FileViewer } from './FileViewer';
@@ -428,11 +429,16 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     // WARDEN-261: tell the backend whether to disable tmux mouse for this host
     // (Seamless copy). Read from the ref so a Settings toggle applies on the NEXT
     // attach — hostOptions is deliberately NOT a dep, so toggling never re-
-    // attaches (kills/recreates the PTY of) an already-open pane.
-    const seamlessCopy = !!hostOptionsRef.current[host || '(local)']?.seamlessCopy;
+    // attaches (kills/recreates the PTY of) an already-open pane. Keyed by
+    // `hostKey` so the toggle and the per-host hint dismissal always resolve to
+    // the same host for this pane.
+    const seamlessCopy = !!hostOptionsRef.current[hostKey]?.seamlessCopy;
     streamApi.send({ type: 'attach', id, host, cols: term.cols, rows: term.rows, seamlessCopy });
     return () => { streamApi.send({ type: 'detach', id }); };
-  }, [id, host]);
+    // `hostKey` is the pane's host identity (stable string — only changes when the
+    // actual host changes, never on a Seamless-copy toggle), so listing it never
+    // re-attaches on a pref change. hostOptions stays out on purpose (see above).
+  }, [id, host, hostKey]);
 
   // clear "new" badge on focus
   useEffect(() => { if (focused && hasNew) onClearNew(); }, [focused]);
@@ -638,16 +644,14 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           copy is off for this host AND the user hasn't dismissed it. Non-blocking
           (a thin strip, not a modal); dismissal is persisted per host by App. */}
       {mouseOn && !copyHintDismissed[hostKey] && (
-        <div className="flex items-center gap-2 px-2 py-1 compact:py-0.5 bg-amber-500/10 border-b border-amber-500/30 text-[11px] text-amber-700 dark:text-amber-300 shrink-0">
+        <div className="flex items-center gap-2 px-2 py-1 compact:py-0.5 bg-amber-500/10 border-b border-amber-500/30 text-xs text-amber-700 dark:text-amber-300 shrink-0">
           <span className="flex-1 truncate">
             Copy may not grab selected text — tmux mouse is on for this host. Enable <strong>Seamless copy</strong> in Settings to fix it.
           </span>
-          <button
-            onClick={(e) => { stop(e); onDismissCopyHint(hostKey); }}
+          <Button variant="ghost" size="icon" className="size-5"
             aria-label="Dismiss copy hint"
             title="Dismiss (silenced for this host)"
-            className="shrink-0 px-1 hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded"
-          >×</button>
+            onClick={(e) => { stop(e); onDismissCopyHint(hostKey); }}>×</Button>
         </div>
       )}
       {/* terminal surface — stop the contextmenu event so right-clicks here keep the xterm
