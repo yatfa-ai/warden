@@ -123,6 +123,40 @@ describe('diffLifecycles — first run (empty prev)', () => {
   });
 });
 
+// Regression for WARDEN-147: when the fleet empties (last agent ended, or the user
+// removed their last configured host), src/server.js's tickLifecycle drains
+// prevSnapshot against an EMPTY next before going dormant — otherwise the guard
+// short-circuits before the diff and the final agent_ended is permanently lost
+// (or emitted minutes late with a wrong timestamp). These pin down the EXACT
+// contract that drain call — diffLifecycles(prevSnapshot, new Map()) — relies on.
+describe('diffLifecycles — draining to an empty fleet (server dormant path)', () => {
+  it('emits agent_ended for EVERY tracked chat when next is empty', () => {
+    const prev = map(
+      row('hostA:c1'),
+      row('hostB:c2', { host: 'hostB' }),
+      row('hostC:c3', { host: 'hostC' }),
+    );
+    const events = diffLifecycles(prev, new Map());
+    assert.deepStrictEqual(types(events), ['agent_ended', 'agent_ended', 'agent_ended']);
+    assert.deepStrictEqual(events.map((e) => e.id), ['hostA:c1', 'hostB:c2', 'hostC:c3']);
+  });
+
+  it('emits nothing when prev is already empty (no false drain)', () => {
+    assert.deepStrictEqual(diffLifecycles(new Map(), new Map()), []);
+  });
+
+  it('preserves host attribution on the drain so events stay host-filterable', () => {
+    const prev = map(row('hostB:c1', { host: 'hostB', container: 'proj-worker', role: 'worker', project: 'proj' }));
+    const [event] = diffLifecycles(prev, new Map());
+    assert.strictEqual(event.type, 'agent_ended');
+    assert.strictEqual(event.id, 'hostB:c1');
+    assert.strictEqual(event.host, 'hostB');
+    assert.strictEqual(event.container, 'proj-worker');
+    assert.strictEqual(event.role, 'worker');
+    assert.strictEqual(event.project, 'proj');
+  });
+});
+
 describe('buildSnapshot', () => {
   it('maps discovered chats with ok:true and coerces active to boolean', () => {
     const snap = buildSnapshot(new Map(), [

@@ -2343,8 +2343,24 @@ let prevSnapshot = new Map(); // id → { host, container, role, project, active
 const LIFECYCLE_INTERVAL_MS = 60_000;
 
 async function tickLifecycle() {
-  // No remote hosts and no catalog → discoverAll has nothing to observe.
-  if (!cfg.hosts.length && !loadCatalog().length) return;
+  // No remote hosts and no catalog → discoverAll has nothing to observe. But
+  // FIRST drain any pending transitions in prevSnapshot against an empty fleet.
+  // The last agent ending (or the user removing their last configured host) can
+  // empty the catalog/hosts while prevSnapshot still tracks it; this guard would
+  // otherwise short-circuit BEFORE the diff — permanently suppressing that final
+  // agent_ended, or emitting it minutes late with a wrong timestamp once some
+  // other agent later reappears (the only thing that would un-freeze the diff).
+  // diffLifecycles(prev, ∅) emits agent_ended for every tracked chat, so draining
+  // then going dormant captures the real disappearance(s) and frees the snapshot.
+  if (!cfg.hosts.length && !loadCatalog().length) {
+    if (prevSnapshot.size > 0) {
+      for (const event of diffLifecycles(prevSnapshot, new Map())) {
+        try { appendEvent(event); } catch { /* ignore single-event write failures */ }
+      }
+      prevSnapshot = new Map();
+    }
+    return;
+  }
   let chats, errors;
   try {
     ({ chats, errors } = await discoverAll(cfg.hosts, cfg));
@@ -2376,7 +2392,10 @@ function startLifecyclePoll() {
 // Exported for HTTP-level integration tests (see src/server-hosts-status.test.js).
 // Not used by the running server — startServer() below drives the module-level
 // `server` directly.
-export { app };
+// tickLifecycle is exported so src/server-lifecycle.test.js can drive a single
+// lifecycle tick deterministically (the running server drives it off a 60s
+// setInterval via startLifecyclePoll, which is too slow for a test).
+export { app, tickLifecycle };
 
 export function startServer(port = 7421, host = '127.0.0.1') {
   server.on('error', (e) => {
