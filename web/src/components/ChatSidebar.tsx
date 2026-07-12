@@ -132,7 +132,10 @@ function chatType(c?: Chat): string {
   const bin = (c.cmd || '').split(/\s+/)[0].replace(/^.*[/\\]/, '');
   if (bin === 'claude' || bin === 'claude.exe') return (c.cmd || '').includes('--resume') ? 'resume' : 'claude';
   if (['bash', 'sh', 'zsh', 'fish', 'pwsh', 'powershell', 'cmd.exe'].includes(bin)) return 'shell';
-  return bin || 'manual';
+  // An empty cmd is a tmux session launched with no explicit command — i.e. the
+  // host's login shell (the ＋ split "no explicit shell" case, WARDEN-223) — so
+  // it reads as 'shell', not the generic 'manual'.
+  return bin || 'shell';
 }
 
 // Agent-list filter/sort controls (WARDEN-91). Shared across the root, host, and

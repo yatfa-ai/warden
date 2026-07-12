@@ -30,8 +30,10 @@ interface Props {
   onClose: (id: string) => void;
   onToggleMax: (id: string) => void;
   onClearNew: (id: string) => void;
-  onOpenChat: (id: string) => void;
   onForceKill: (id: string) => void;
+  // ＋ split (WARDEN-223): spawn a host shell pane derived from the focused
+  // pane (same host + cwd). App owns the spawn; PaneGrid only fires it.
+  onSplitShell?: () => void;
   externalSearchQuery?: { paneId: string; query: string } | null;
   onToggleSidebar?: () => void;
   onToggleObserver?: () => void;
@@ -55,8 +57,7 @@ interface Props {
 
 function colsFor(n: number) { return n <= 1 ? 1 : Math.ceil(Math.sqrt(n)); }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onOpenChat, onForceKill, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalTheme, terminalCursorStyle }: Props) {
-  const [splitOpen, setSplitOpen] = useState(false);
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalTheme, terminalCursorStyle }: Props) {
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
   const [fileInput, setFileInput] = useState('');
@@ -98,7 +99,6 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
     setFileInput(`${cwd}/`);
     setFileInputError(''); // Clear any previous error
     setFileOpen(false);
-    setSplitOpen(false); // Close split menu if open
     setFilePromptOpen(true); // Open the path-entry Dialog
   };
 
@@ -210,23 +210,17 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
             <IconTooltip label="open file from chat directory"><Button variant="ghost" size="xs" onClick={handleFilePrompt}>📄 file</Button></IconTooltip>
           </>
         )}
-        <IconTooltip label="split — open another chat as a pane"><Button variant="ghost" size="xs" onClick={() => setSplitOpen(!splitOpen)}>＋ split</Button></IconTooltip>
-        {splitOpen && (
-          <>
-            <div className="fixed inset-0 z-40" onClick={() => setSplitOpen(false)} />
-            <div className="absolute right-2 top-full mt-1 z-50 w-72 max-h-80 overflow-auto bg-popover border rounded-md shadow-lg p-1">
-              {chats.filter((c) => c.active !== false).map((c) => (
-                <button key={c.id} onClick={() => { onOpenChat(c.key || c.id); setSplitOpen(false); }}
-                  className={`flex items-center gap-2 w-full text-left px-2 py-1.5 compact:py-1 rounded text-xs hover:bg-accent active:bg-accent/80 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${tiles.some(t => t.id === (c.key||c.id)) ? 'opacity-50' : ''}`}>
-                  <span className="truncate flex-1">{c.name || c.key || c.id}</span>
-                  <span className="text-[10px] text-muted-foreground">{c.host === '(local)' ? 'local' : c.host}</span>
-                  {tiles.some(t => t.id === (c.key||c.id)) && <span className="text-[10px] text-green-500">open</span>}
-                </button>
-              ))}
-              {chats.filter((c) => c.active !== false).length === 0 && <div className="text-xs text-muted-foreground p-2 text-center">no chats available</div>}
-            </div>
-          </>
-        )}
+        {/* ＋ split (WARDEN-223): one-click spawn of a host shell pane derived
+            from the focused pane (same host + cwd). Host/cwd come from the
+            focused pane, so the button is disabled with an explanatory tooltip
+            when nothing is focused. The chat-picker dropdown this replaced is
+            gone — split is no longer "open another agent", it's a scratch shell. */}
+        <IconTooltip
+          label={focusedChat ? 'split — open a shell on this pane’s host' : 'focus a pane to split a shell next to it'}
+          disabled={!focusedChat}
+        >
+          <Button variant="ghost" size="xs" onClick={() => onSplitShell?.()} disabled={!focusedChat}>＋ split</Button>
+        </IconTooltip>
       </div>
       <div className="flex-1 min-h-0 p-1">
         {n === 0 ? (

@@ -51,11 +51,17 @@ export async function resize(chat, cfg, cols, rows) {
 }
 
 // Spawn the chat's tmux session (detached): new-session -d, cwd (msys-translated
-// for local), then the command (claude / bash / …) as trailing argv.
+// for local), then the command (claude / bash / …) as trailing argv. An empty
+// `cmd` is honored: no trailing argv is appended, so tmux launches its own
+// default shell — the host's login shell (auto-detected). This is the ＋ split
+// path's "no explicit shell" case (WARDEN-223): the caller chooses the shell by
+// omitting it rather than hardcoding `bash`. Every caller sets `cmd` explicitly
+// (the /api/spawn handler defaults it to claude when omitted), so dropping the
+// former `|| 'claude …'` fallback here only changes the empty-string case.
 export async function spawn(chat, _cfg) {
   const s = sess(chat, _cfg);
   const cwd = chat.host === '(local)' ? toMsysPath(chat.cwd || '') : (chat.cwd || '');
-  const cmdParts = String(chat.cmd || 'claude --dangerously-skip-permissions').split(/\s+/).filter(Boolean);
+  const cmdParts = chat.cmd ? String(chat.cmd).split(/\s+/).filter(Boolean) : [];
   const args = ['new-session', '-d', '-s', s, '-x', '120', '-y', '32'];
   if (cwd) args.push('-c', cwd);
   args.push(...cmdParts);

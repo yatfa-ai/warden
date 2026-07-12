@@ -152,6 +152,11 @@ function App() {
   const [defaultNewChatPreset, setDefaultNewChatPreset] = useState<string>(() => uiState.defaultNewChatPreset ?? 'claude');
   const [defaultNewChatHost, setDefaultNewChatHost] = useState(() => uiState.defaultNewChatHost ?? THIS_MACHINE);
   const [customPresets, setCustomPresets] = useState<CustomPreset[]>(() => uiState.customPresets ?? []);
+  // Default shell launched by the pane-grid ＋ split button (WARDEN-223). Blank
+  // means "no explicit shell" → the host launches its own login shell. Pure
+  // client-side pref (like the new-chat prefs above): persisted by the saveUi
+  // effect below, never sent to the backend.
+  const [defaultSplitShell, setDefaultSplitShell] = useState(() => uiState.defaultSplitShell ?? '');
   const { prefs, reload: reloadNotificationPrefs } = useNotificationPrefs();
   // "Confirm before destructive actions" preference (default on). Gates both
   // destructive kill paths — force-kill (tmux session) and kill chat. Loaded
@@ -248,8 +253,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, defaultSplitShell }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, defaultSplitShell, restoreOnStartup, startedEmpty]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -416,6 +421,31 @@ function App() {
     }
     openChat(chatKey);
   }, [openChat, discoverHost]);
+
+  // ＋ split (WARDEN-223): spawn a scratch shell pane next to the focused pane,
+  // derived entirely from it — same host, same cwd — like VSCode's integrated-
+  // terminal split. The shell `cmd` comes from the Default split shell setting;
+  // blank means "no explicit shell" so the host launches its own login shell.
+  // host/cwd are read from chatsRef so this callback isn't rebuilt on every poll.
+  // A yatfa pane has no cwd → empty → the host's default login dir, and its host
+  // is the SSH host, so the shell lands OUTSIDE the container (host-side tmux).
+  const handleSplitShell = useCallback(async () => {
+    const id = focused;
+    if (!id) return;
+    const fc = chatsRef.current.find((c) => (c.key || c.id) === id);
+    if (!fc) return;
+    const host = fc.host || THIS_MACHINE;
+    const cwd = fc.cwd || '';
+    const cmd = defaultSplitShell.trim();
+    const session = `split-${Math.random().toString(36).slice(2, 10)}`;
+    const result = await postJson<{ chat: Chat }>('/api/spawn', { host, session, cwd, cmd });
+    if (!result.ok || !result.data) {
+      toast.error(result.error || 'Failed to spawn split shell');
+      return;
+    }
+    await refresh();
+    openChat(result.data.chat.key || result.data.chat.id);
+  }, [focused, defaultSplitShell, refresh, openChat]);
 
   // close pane: pane gone, tab stays
   const closePane = useCallback((id: string) => {
@@ -851,6 +881,8 @@ function App() {
           setDefaultNewChatHost={setDefaultNewChatHost}
           customPresets={customPresets}
           setCustomPresets={setCustomPresets}
+          defaultSplitShell={defaultSplitShell}
+          setDefaultSplitShell={setDefaultSplitShell}
         />
       ) : (
         <>
@@ -919,8 +951,8 @@ function App() {
             onClose={closePane}
             onToggleMax={toggleMax}
             onClearNew={clearNew}
-            onOpenChat={openChat}
             onForceKill={forceKill}
+            onSplitShell={handleSplitShell}
             externalSearchQuery={externalSearchQuery}
             onToggleSidebar={toggleSidebar}
             onToggleObserver={toggleObserver}

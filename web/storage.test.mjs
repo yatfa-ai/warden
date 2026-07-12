@@ -579,4 +579,46 @@ test('observer round-trips under the current key without disturbing older keys',
   assert.ok(!mem.has('warden:observer'), 'no legacy key created on a normal save/load');
 });
 
+console.log('\ndefaultSplitShell (the ＋ split shell) round-trips through loadUi/saveUi — WARDEN-223');
+test('defaults to "" (auto-detect host login shell) when nothing is stored', () => {
+  reset();
+  assert.equal(loadUi().defaultSplitShell, '');
+});
+test('a set shell (e.g. zsh) round-trips', () => {
+  reset();
+  saveUi({ ...loadUi(), defaultSplitShell: 'zsh' });
+  assert.equal(loadUi().defaultSplitShell, 'zsh');
+});
+test('a blank value round-trips (the meaningful "auto-detect" value)', () => {
+  reset();
+  saveUi({ ...loadUi(), defaultSplitShell: '' });
+  assert.equal(loadUi().defaultSplitShell, '');
+});
+test('whitespace is trimmed on load so it can never become the spawned shell name', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultSplitShell: '  zsh  ' }));
+  assert.equal(loadUi().defaultSplitShell, 'zsh');
+  // All-whitespace collapses to the blank "auto-detect" value.
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultSplitShell: '   ' }));
+  assert.equal(loadUi().defaultSplitShell, '');
+});
+test('a non-string coerces back to "" (defensive)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultSplitShell: 42 }));
+  assert.equal(loadUi().defaultSplitShell, '');
+});
+test('a missing field loads as ""', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  assert.equal(loadUi().defaultSplitShell, '');
+});
+test('the pref survives an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
+  // defaultSplitShell is NOT a workspace field, so persistUiState spreads it from
+  // `live`. Confirm an empty-launch still round-trips a freshly set value.
+  reset();
+  const d0 = loadUi();
+  saveUi(persistUiState({ ...d0, defaultSplitShell: 'pwsh' }, 'empty', d0, true));
+  assert.equal(loadUi().defaultSplitShell, 'pwsh');
+});
+
 console.log(`\n✓ STORAGE TESTS PASS (${passed})`);

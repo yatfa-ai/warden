@@ -119,6 +119,12 @@ interface Props {
   // sent to the backend.
   customPresets: CustomPreset[];
   setCustomPresets: (v: CustomPreset[]) => void;
+  // Default shell launched by the pane-grid ＋ split button (WARDEN-223). Blank
+  // means "no explicit shell" → the host launches its own login shell. Pure
+  // client-side localStorage pref, persisted by App's saveUi effect; never sent
+  // to the backend. Independent of the spawn presets above.
+  defaultSplitShell: string;
+  setDefaultSplitShell: (v: string) => void;
 }
 
 /** A titled group of related settings, separated by a top border. */
@@ -225,7 +231,7 @@ function PresetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -975,6 +981,23 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   </Select>
                   <p className="text-xs text-muted-foreground">
                     Where new chats spawn by default. Detected SSH hosts appear here; a default host no longer available is shown disabled here and falls back to local at spawn time.
+                  </p>
+                </div>
+
+                {/* Default split shell (WARDEN-223): the shell the pane-grid ＋ split
+                    button spawns next to the focused pane. Blank = the host's own
+                    login shell (auto-detected per host; never hardcoded). A separate
+                    concern from the agent spawn presets above. */}
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="defaultSplitShell">Default split shell</Label>
+                  <Input
+                    id="defaultSplitShell"
+                    value={defaultSplitShell}
+                    onChange={(e) => setDefaultSplitShell(e.target.value)}
+                    placeholder="auto (host login shell)"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Shell launched by the ＋ split button next to a pane, on that pane's host at its working directory. Enter a name like <code className="bg-muted px-1 rounded">zsh</code> or <code className="bg-muted px-1 rounded">pwsh</code>; leave blank to use each host's default login shell.
                   </p>
                 </div>
               </SettingsSection>

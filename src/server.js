@@ -1668,7 +1668,13 @@ app.post('/api/spawn', async (req, res) => {
   const host = String(req.body?.host || LOCAL).trim() || LOCAL;
   const session = String(req.body?.session || '').trim();
   const cwd = String(req.body?.cwd || '').trim();
-  const cmd = String(req.body?.cmd || 'claude --dangerously-skip-permissions').trim();
+  // An OMITTED cmd defaults to claude (the historical spawn default). An EXPLICIT
+  // empty string is honored as-is: it flows through to tmux `new-session` with no
+  // trailing command, so the host launches its own login shell — the ＋ split
+  // "no explicit shell" case (WARDEN-223). (Previously `||` collapsed both into
+  // claude, so an empty cmd could never spawn a bare shell.)
+  const cmdRaw = req.body?.cmd;
+  const cmd = (cmdRaw === undefined ? 'claude --dangerously-skip-permissions' : String(cmdRaw)).trim();
   if (!session) return res.status(400).json({ error: 'session name is required' });
   if (!NAME_RE.test(session)) return res.status(400).json({ error: 'invalid session name (letters/digits/_-.)' });
   const catalog = loadCatalog();
