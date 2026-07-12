@@ -1445,7 +1445,9 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
   onFetchIncoming?: () => void;
   // WARDEN-252: the "ahead/unpushed" half — commits HEAD has that @{u} doesn't. The
   // symmetric counterpart to incomingCommits. Lazily fetched on open when aheadCount
-  // > 0, with its own cache/loader. Display-only (mirrors the incoming row shape).
+  // > 0, with its own cache/loader. Explorable (WARDEN-303): these commits ARE local
+  // (already in HEAD), so each row expands to its changed files + per-file diff via
+  // /api/git-show — unlike incoming, which stays display-only.
   outgoingCommits?: GitCommit[];
   outgoingLoading?: boolean;
   onFetchOutgoing?: () => void;
@@ -1644,18 +1646,43 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
               ) : outgoingCommits && outgoingCommits.length > 0 ? (
                 <ul className="max-h-72 overflow-auto">
                   {outgoingCommits.map((cm) => (
-                    // Display-only: matches the incoming row shape (WARDEN-252). Unlike
-                    // incoming, these commits ARE local (already in HEAD), so a per-commit
-                    // /api/git-show expand would be reliable — left for a follow-up to
-                    // keep this slice tightly mirrored on the incoming list.
+                    // Explorable (WARDEN-303): unlike the incoming list below, these
+                    // commits ARE local (already in HEAD), so a per-commit /api/git-show
+                    // expand is reliable. Mirrors the recent-commits row above, diverging
+                    // only in the amber hash color to match this list's "unpushed" styling.
                     <li key={cm.hash} className="rounded">
-                      <div className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left" title="unpushed commit (local, not yet pushed)">
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        aria-expanded={expandedHash === cm.hash}
+                        aria-label={`inspect files changed by commit ${cm.hash}`}
+                        onClick={(e) => { e.stopPropagation(); toggleCommit(cm.hash); }}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleCommit(cm.hash); } }}
+                        title="unpushed commit (local, not yet pushed) — click to inspect the files this commit changed"
+                        className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+                      >
                         <span className="shrink-0 font-mono text-[10px] text-amber-400/80">{cm.hash}</span>
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-[10px] text-foreground" title={cm.subject}>{cm.subject}</span>
                           <span className="block text-[10px] text-muted-foreground">{cm.date}{cm.author ? ` · ${cm.author}` : ''}</span>
                         </span>
+                        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{expandedHash === cm.hash ? '▾' : '▸'}</span>
                       </div>
+                      {expandedHash === cm.hash && (
+                        <div className="pb-1 pl-1">
+                          {showLoading[cm.hash] && !showCache[cm.hash] ? (
+                            <div className="px-1 text-[10px] text-muted-foreground">loading files…</div>
+                          ) : (showCache[cm.hash]?.files?.length ?? 0) > 0 ? (
+                            <div className="flex flex-col gap-0.5">
+                              {showCache[cm.hash]!.files!.map((f) => (
+                                <CommitFile key={f.path} chatId={chatId} hash={cm.hash} file={f} />
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="px-1 text-[10px] text-muted-foreground">{showCache[cm.hash]?.error ? 'failed to load' : 'no files'}</div>
+                          )}
+                        </div>
+                      )}
                     </li>
                   ))}
                 </ul>
