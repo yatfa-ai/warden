@@ -33,10 +33,13 @@ export interface SparklineProps {
   errors?: number[];
   /** Accessible summary, e.g. "12 events, 3 errors in the last 24 hours". Required — never color-only. */
   ariaLabel: string;
-  /** Element width as a Tailwind spacing-token class (e.g. 'w-16'). */
-  width?: string;
-  /** Element height as a Tailwind spacing-token class (e.g. 'h-5'). */
-  height?: string;
+  /**
+   * Element sizing as Tailwind spacing-token classes (e.g. 'w-14 h-4 compact:w-12
+   * compact:h-3.5'). The sole source of size — the SVG has no intrinsic size, so
+   * the caller always owns it (matches how the rest of HealthDashboard is sized;
+   * `cn`/twMerge layers density variants over the base). Theme/density-correct via
+   * the `compact:` variant, same as the panel's other rows.
+   */
   className?: string;
 }
 
@@ -54,8 +57,6 @@ export function Sparkline({
   values,
   errors,
   ariaLabel,
-  width = 'w-16',
-  height = 'h-5',
   className,
 }: SparklineProps) {
   const n = values.length;
@@ -71,7 +72,7 @@ export function Sparkline({
     <svg
       role="img"
       aria-label={ariaLabel}
-      className={cn('text-muted-foreground shrink-0', width, height, className)}
+      className={cn('text-muted-foreground shrink-0', className)}
       viewBox={`0 0 ${VB_W} ${VB_H}`}
       preserveAspectRatio="none"
     >

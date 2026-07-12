@@ -16,6 +16,7 @@ import { Sparkline } from '@/components/Sparkline';
 import { Button } from '@/components/ui/button';
 import { useHostStatuses } from '@/lib/useHostStatuses';
 import { useActivitySeries } from '@/lib/useActivitySeries';
+import { buildAgentActivity, selectAgentSparkline } from '@/lib/agentSparkline';
 
 interface Props {
   onOpenChat: (id: string) => void;
@@ -153,29 +154,33 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
     return groups;
   }, [healthData, hostStatuses]);
 
+  // Per-agent 24h activity series for the row sparklines (WARDEN-299), joined by
+  // `container`. Memoized on `activitySeries` ONLY — the 24h series refreshes on
+  // its own ~60s cadence, so the 10s /api/health tick above never recomputes it
+  // (the per-row join is a plain O(1) Map lookup in renderSparkline).
+  const agentActivity = useMemo(() => buildAgentActivity(activitySeries), [activitySeries]);
+  const bucketCount = activitySeries?.buckets.length ?? 0;
+
+  // The per-row sparkline, or null. Delegates the three cases (no container →
+  // none; container + events → real series; container + no events → idle flat
+  // baseline) to the pure selectAgentSparkline so the logic is unit-testable.
+  // Sized with spacing tokens and tightened under `.compact` to track row density.
+  const renderSparkline = (agent: Chat) => {
+    const sel = selectAgentSparkline(agent, agentActivity, bucketCount);
+    if (!sel) return null;
+    return (
+      <Sparkline
+        values={sel.values}
+        errors={sel.errors}
+        ariaLabel={sel.ariaLabel}
+        className="w-14 h-4 compact:w-12 compact:h-3.5"
+      />
+    );
+  };
+
   // One agent row, reused by both the health-state and host views. `showHost`
   // hides the per-row host tag in host mode (the section header already names
   // the host — a repeated tag would be noise).
-  //
-  // The sparkline data is joined per-row via this map (container → bucket
-  // arrays + sums). It is memoized on `activitySeries` ONLY — the 24h series
-  // refreshes on its own ~60s cadence, so the 10s /api/health tick above never
-  // recomputes it (the join is a plain O(1) Map lookup inside renderAgent).
-  const agentActivity = useMemo<Map<string, { values: number[]; errors: number[]; totalSum: number; errorSum: number }>>(() => {
-    const map = new Map();
-    if (!activitySeries) return map;
-    for (const [container, entry] of Object.entries(activitySeries.series)) {
-      let totalSum = 0;
-      let errorSum = 0;
-      for (let i = 0; i < entry.total.length; i++) {
-        totalSum += entry.total[i] | 0;
-        errorSum += entry.error[i] | 0;
-      }
-      map.set(container, { values: entry.total, errors: entry.error, totalSum, errorSum });
-    }
-    return map;
-  }, [activitySeries]);
-
   const renderAgent = (agent: Chat, showHost: boolean) => (
     <button
       key={agent.id}
@@ -204,22 +209,12 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
         </span>
       )}
 
-      {/* Activity sparkline (WARDEN-299) — only for rows with a container that
-          has activity in the window. Manual/tmux chats and quiet containers
-          render nothing here (graceful sparsity). Sized with spacing tokens and
-          tightened under `.compact` so it tracks the row density. */}
-      {(() => {
-        const a = agent.container ? agentActivity.get(agent.container) : undefined;
-        if (!a) return null;
-        return (
-          <Sparkline
-            values={a.values}
-            errors={a.errors}
-            ariaLabel={`${a.totalSum} event${a.totalSum === 1 ? '' : 's'}, ${a.errorSum} error${a.errorSum === 1 ? '' : 's'} in the last 24 hours`}
-            className="w-14 h-4 compact:w-12 compact:h-3.5"
-          />
-        );
-      })()}
+      {/* Activity sparkline (WARDEN-299). Only yatfa agents (which carry a
+          container) sparkline; manual/tmux chats render nothing. An agent with
+          events draws a bar series (error buckets tint red); an idle agent — a
+          container with zero events in the window — draws a deliberately flat
+          baseline, not a blank (criterion #1). See selectAgentSparkline. */}
+      {renderSparkline(agent)}
 
       {/* Last Activity */}
       {agent.lastActivity && (
