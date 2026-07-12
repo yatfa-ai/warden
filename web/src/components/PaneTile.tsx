@@ -6,6 +6,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { streamApi } from '@/lib/stream';
 import type { Chat } from '@/lib/types';
 import { findPathCandidates } from '@/lib/path-links';
+import { hostTagOf } from '@/lib/chatDisplay';
 import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBehavior } from '@/lib/storage';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
@@ -114,9 +115,14 @@ interface Props {
   // fires on a genuine live→exited transition (chat.active true→false of a pane
   // that was ever active), never on a pane whose agent never attached.
   onExitBehavior: OnExitBehavior;
+  // Show the host tag in the pane header (WARDEN-290). Mirrors the sidebar's
+  // showHostTags preference (WARDEN-37) onto the pane surface so a cross-host
+  // pane grid is no longer ambiguous. Pure pass-through from App via PaneGrid —
+  // one toggle governs both surfaces. Undefined/true → shown, false → hidden.
+  showHostTags?: boolean;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalTheme, terminalCursorStyle, copyOnSelect, onExitBehavior }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalTheme, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -537,6 +543,17 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // (set only on a genuine live→exited transition) AND the dim preference.
   const dimmed = agentExited && onExitBehavior === 'dim';
 
+  // WARDEN-290: host tag for the pane header — mirrors the sidebar ChatRow's tag
+  // (WARDEN-37) row-for-row so the two surfaces never diverge. Parity contract:
+  // the sidebar shows the host tag ONLY for user-spawned (tmux/manual) chats and
+  // shows the role instead for yatfa chats, so we gate on the same isUser rule
+  // (!chat covers a pane opened before its chat metadata loads, e.g. a restore
+  // hint). One showHostTags toggle governs both surfaces. The chat's host wins;
+  // the `host` restore-hint prop is the fallback. hostTagOf('(local)') → 'local';
+  // an undefined/empty host → '' (suppressed by the && guard at the render site).
+  const isUserChat = !chat || chat.kind === 'tmux';
+  const hostTag = showHostTags !== false && isUserChat ? hostTagOf(chat?.host ?? host ?? '') : '';
+
   return (
     <>
     <ContextMenu>
@@ -556,7 +573,10 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           variant={dimmed ? 'solid' : connected ? 'solid' : errored ? 'square' : 'pulse'}
           label={dimmed ? 'Exited' : connected ? 'Connected' : errored ? 'Error' : 'Connecting'}
         />
-        <span className="truncate flex-1 font-medium">{label || id}</span>
+        <span className="truncate flex-1 font-medium">
+          {label || id}
+          {hostTag && <span className="ml-1 text-[10px] text-muted-foreground">{hostTag}</span>}
+        </span>
         {hasNew && <span className="text-[9px] text-cyan-400 bg-cyan-500/10 px-1 rounded animate-pulse">new</span>}
         <Btn title="search" active={showSearch} onClick={() => setShowSearch(!showSearch)}>⌕</Btn>
         <Btn title="clear" onClick={() => termRef.current?.clear()}>⊘</Btn>

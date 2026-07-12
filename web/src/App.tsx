@@ -1107,6 +1107,7 @@ function App() {
             terminalCursorStyle={terminalCursorStyle}
             copyOnSelect={copyOnSelect}
             onExitBehavior={onExitBehavior}
+            showHostTags={displaySettings.showHostTags}
           />
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"
