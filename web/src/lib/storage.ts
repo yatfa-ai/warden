@@ -117,6 +117,10 @@ export interface UiState {
   sidebarWidth?: number;
   observerWidth?: number;
   terminalFontSize?: number;
+  // Opt-in OS desktop alert that fires when agents need attention AND Warden is
+  // unfocused (WARDEN-259). Default OFF (opt-in). Pure client-side pref (like
+  // terminalFontSize/scrollback); never sent to the backend / /api/config.
+  attentionDesktopAlerts?: boolean;
   terminalScrollback?: number;
   // Terminal font family: the CSS font-family value xterm renders in every agent
   // pane. '' / absent = the DEFAULT_TERMINAL_FONT_FAMILY stack (today's look);
@@ -247,6 +251,7 @@ const DEFAULT_UI: UiState = {
   activeTabs: [], hiddenTabs: [], openPanes: [], focused: null,
   sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true,
   sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14,
+  attentionDesktopAlerts: false,
   terminalScrollback: 10000, terminalFontFamily: '',
   terminalColorScheme: 'auto',
   terminalCursorStyle: 'blink-block',
@@ -281,6 +286,9 @@ export function loadUi(): UiState {
         sidebarWidth: typeof v.sidebarWidth === 'number' ? v.sidebarWidth : 220,
         observerWidth: typeof v.observerWidth === 'number' ? v.observerWidth : 380,
         terminalFontSize: typeof v.terminalFontSize === 'number' ? v.terminalFontSize : 14,
+        // Opt-in: only an explicitly-stored `true` enables it. Anything else
+        // (missing / false / wrong type) stays OFF — the conservative default.
+        attentionDesktopAlerts: v.attentionDesktopAlerts === true,
         terminalScrollback: typeof v.terminalScrollback === 'number' ? v.terminalScrollback : 10000,
         terminalFontFamily: typeof v.terminalFontFamily === 'string' ? v.terminalFontFamily : '',
         terminalColorScheme: ['auto', 'dark', 'light'].includes(v.terminalColorScheme) ? v.terminalColorScheme : 'auto',

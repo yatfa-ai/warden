@@ -11,6 +11,10 @@ interface Props {
   onOpenChat: (id: string) => void;
   /** Open the observer panel's Activity tab (reuses App's openActivityTab). */
   onOpenActivity: () => void;
+  /** Opt-in desktop alerts (WARDEN-259). Forwarded to useAttentionRollup so the
+   * existing poll keeps running while hidden AND fires an OS notification on a
+   * rollup increase while Warden is unfocused. */
+  attentionDesktopAlerts: boolean;
 }
 
 /**
@@ -26,8 +30,8 @@ interface Props {
  * link; the individual events themselves aren't fetchable as REST items, so each
  * links to the Activity tab rather than a specific event.
  */
-export function AttentionBadge({ onOpenChat, onOpenActivity }: Props) {
-  const { rollup } = useAttentionRollup();
+export function AttentionBadge({ onOpenChat, onOpenActivity, attentionDesktopAlerts }: Props) {
+  const { rollup } = useAttentionRollup(attentionDesktopAlerts);
   const [open, setOpen] = useState(false);
 
   // Zero-state: render nothing intrusive. (A neutral ✓ was considered per the AC,
