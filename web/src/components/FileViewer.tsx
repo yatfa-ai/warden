@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { DiffBlock } from './DiffBlock';
 import { MarkdownBody } from './MarkdownBody';
+import { tokenizeCode, languageFromPath, type Leaf } from '@/lib/highlight';
 import { Loader2Icon, FileIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon } from 'lucide-react';
 import { timeAgo } from '@/lib/utils';
 
@@ -137,6 +138,20 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
   // stay source-based regardless.
   const isMarkdown = /\.(md|markdown)$/i.test(filePath);
 
+  // Source-code highlighting (WARDEN-281): infer the language from the path and
+  // tokenize the file ONCE into per-line colored leaves, so the plain + line-jump
+  // branches below can drop colored spans into each row WITHOUT collapsing the file
+  // into a single tokenized blob (that would break the one-row-per-line grid
+  // WARDEN-227's scrollIntoView target and WARDEN-205's blame gutter rely on).
+  // `null` for an unsupported extension — including markdown, whose rendered mode is
+  // left untouched and whose source mode stays plain monospace. AnnotatedContent
+  // tokenizes independently (it owns its own content/filePath + the blame alignment).
+  const sourceLang = useMemo(() => languageFromPath(filePath), [filePath]);
+  const tokenLines = useMemo(
+    () => (sourceLang && content !== null ? tokenizeCode(content, sourceLang) : null),
+    [content, sourceLang],
+  );
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-4xl max-h-[80vh]">
@@ -202,7 +217,13 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
                 </div>
               ) : (
                 <pre className="text-sm font-mono whitespace-pre-wrap break-words">
-                  {content}
+                  {tokenLines ? (
+                    tokenLines.map((line, i) => (
+                      <div key={i}><HighlightedLine leaves={line} /></div>
+                    ))
+                  ) : (
+                    content
+                  )}
                 </pre>
               )
             )}
@@ -216,7 +237,9 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
                     <div key={n} ref={isTarget ? highlightRef : undefined}
                       className={`flex ${isTarget ? 'bg-primary/20 ring-1 ring-inset ring-primary/40 rounded-sm' : ''}`}>
                       <span className="select-none pr-3 text-right text-muted-foreground/40 min-w-[2.5rem]">{n}</span>
-                      <span className="whitespace-pre-wrap break-words flex-1">{text}</span>
+                      <span className="whitespace-pre-wrap break-words flex-1">
+                        {tokenLines ? <HighlightedLine leaves={tokenLines[i] ?? []} /> : text}
+                      </span>
                     </div>
                   );
                 })}
@@ -250,6 +273,18 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
   );
 }
 
+// Render one source line's colored leaves, or a single space for an empty line so
+// the row keeps its height (matches the `' '` fallback the source branches used
+// before highlighting). Shared by all three source-rendering branches so a file
+// reads identically in the plain, line-jump, and annotate views (WARDEN-281). Each
+// leaf is a `<span class="tok-…">` whose color comes from the `.tok-*` theme in
+// index.css; a leaf with an empty className is untyped whitespace/punctuation that
+// inherits the row's default text color.
+function HighlightedLine({ leaves }: { leaves: Leaf[] }) {
+  if (leaves.length === 0) return <>{' '}</>;
+  return <>{leaves.map((lf, i) => <span key={i} className={lf.className}>{lf.value}</span>)}</>;
+}
+
 // The annotated view: one row per file line, with a left gutter showing per-line
 // provenance (commit hash, author, relative date) and the line content on the right.
 // Provenance is shown only at the START of each blame "run" (consecutive lines from
@@ -272,6 +307,19 @@ function AnnotatedContent({ content, blame, blameLoading, blameError, chatId, fi
     if (split.length > 1 && content.endsWith('\n')) split.pop();
     return split;
   }, [content]);
+
+  // Source highlighting for the blame view (WARDEN-281): one leaf-row per source
+  // line, aligned to the SAME phantom-trailing-line drop applied to `lines` above so
+  // a highlighted row stays 1:1 with its blame entry (and its 1-based line number) —
+  // without that slice, a trailing newline would offset every colored row by one.
+  const tokenLines = useMemo(() => {
+    const lang = languageFromPath(filePath);
+    if (!lang) return null;
+    const full = tokenizeCode(content, lang);
+    if (!full) return null;
+    if (full.length > 1 && content.endsWith('\n')) return full.slice(0, -1);
+    return full;
+  }, [content, filePath]);
 
   const blameByLine = useMemo(() => {
     const m = new Map<number, BlameLine>();
@@ -319,7 +367,9 @@ function AnnotatedContent({ content, blame, blameLoading, blameError, chatId, fi
                 </>
               ) : null}
             </div>
-            <span className="flex-1 whitespace-pre-wrap break-words leading-5">{text || ' '}</span>
+            <span className="flex-1 whitespace-pre-wrap break-words leading-5">
+              {tokenLines ? <HighlightedLine leaves={tokenLines[i] ?? []} /> : (text || ' ')}
+            </span>
           </div>
         );
       })}

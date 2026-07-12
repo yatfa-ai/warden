@@ -277,3 +277,64 @@
     scroll-behavior: auto !important;
   }
 }
+
+/*
+ * Source-code syntax-highlighting theme for the FileViewer (WARDEN-281).
+ *
+ * The leaves emitted by src/lib/highlight.ts carry `tok-<prism-type>` classes (a
+ * single leaf can carry several — a type chain, e.g. `tok-string tok-template-string`
+ * for text inside a template literal). These rules color them by category so
+ * keywords / strings / comments / numbers read distinctly in the file viewer's
+ * source branches (plain, line-jump, and annotate). Theme-aware: a light palette on
+ * the default theme and a brighter palette under `.dark`, matching the dashboard's
+ * dual-theme support (the source area sits on `bg-muted/50`, light or dark).
+ * Selectors are grouped by the color each category gets; unlisted types (operators,
+ * punctuation, plain text) intentionally inherit the row's foreground and stay
+ * readable as-is. Unlayered so a `tok-*` rule is never shadowed by an inherited
+ * utility color, mirroring the other unlayered override blocks above.
+ */
+.tok-comment, .tok-prolog, .tok-doctype, .tok-cdata, .tok-shebang {
+  color: #6e7781; font-style: italic;
+}
+.tok-keyword, .tok-control, .tok-directive, .tok-atrule, .tok-important, .tok-unit {
+  color: #cf222e;
+}
+.tok-string, .tok-char, .tok-triple-quoted-string, .tok-template-string,
+.tok-template-punctuation, .tok-attr-value, .tok-url, .tok-insertion {
+  color: #116329;
+}
+.tok-number, .tok-boolean, .tok-constant, .tok-symbol, .tok-regex {
+  color: #9333ea;
+}
+.tok-function, .tok-function-variable, .tok-method, .tok-decorator {
+  color: #1d4ed8;
+}
+.tok-class-name, .tok-builtin, .tok-namespace, .tok-maybe, .tok-type {
+  color: #b45309;
+}
+.tok-property, .tok-tag, .tok-attr-name, .tok-key, .tok-selector, .tok-variable {
+  color: #0e7490;
+}
+
+.dark .tok-comment, .dark .tok-prolog, .dark .tok-doctype, .dark .tok-cdata, .dark .tok-shebang {
+  color: #8b949e; font-style: italic;
+}
+.dark .tok-keyword, .dark .tok-control, .dark .tok-directive, .dark .tok-atrule, .dark .tok-important, .dark .tok-unit {
+  color: #ff7b72;
+}
+.dark .tok-string, .dark .tok-char, .dark .tok-triple-quoted-string, .dark .tok-template-string,
+.dark .tok-template-punctuation, .dark .tok-attr-value, .dark .tok-url, .dark .tok-insertion {
+  color: #7ee787;
+}
+.dark .tok-number, .dark .tok-boolean, .dark .tok-constant, .dark .tok-symbol, .dark .tok-regex {
+  color: #d2a8ff;
+}
+.dark .tok-function, .dark .tok-function-variable, .dark .tok-method, .dark .tok-decorator {
+  color: #79c0ff;
+}
+.dark .tok-class-name, .dark .tok-builtin, .dark .tok-namespace, .dark .tok-maybe, .dark .tok-type {
+  color: #ffa657;
+}
+.dark .tok-property, .dark .tok-tag, .dark .tok-attr-name, .dark .tok-key, .dark .tok-selector, .dark .tok-variable {
+  color: #56d4dd;
+}
