@@ -10,7 +10,8 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { DiffBlock } from './DiffBlock';
-import { Loader2Icon, FileIcon, AlertCircleIcon, GitCommitHorizontalIcon } from 'lucide-react';
+import { MarkdownBody } from './MarkdownBody';
+import { Loader2Icon, FileIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon } from 'lucide-react';
 import { timeAgo } from '@/lib/utils';
 
 interface FileViewerProps {
@@ -43,6 +44,11 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
   const [blameError, setBlameError] = useState<string | null>(null);
   const [blameLoading, setBlameLoading] = useState(false);
 
+  // Rendered ⇄ Source view mode for markdown files (WARDEN-266). Only the plain
+  // view branch (!annotate && !hasLine) honors it; line-jump and blame views stay
+  // source-based regardless. Defaults to rendered so opening a README shows docs.
+  const [viewMode, setViewMode] = useState<'rendered' | 'source'>('rendered');
+
   useEffect(() => {
     if (!open) {
       setContent(null);
@@ -50,6 +56,7 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
       setAnnotate(false); // start each open fresh (avoid stale blame for a prior file)
       setBlame(null);
       setBlameError(null);
+      setViewMode('rendered'); // start each markdown open rendered (avoid stale source mode)
       return;
     }
 
@@ -125,6 +132,11 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
 
   const hasLine = typeof line === 'number' && line > 0;
 
+  // Markdown files render as formatted docs in the plain view branch (WARDEN-266).
+  // Case-insensitive so .MD / .Markdown match too. Line-jump and Annotate views
+  // stay source-based regardless.
+  const isMarkdown = /\.(md|markdown)$/i.test(filePath);
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-4xl max-h-[80vh]">
@@ -132,18 +144,38 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
           <DialogTitle className="flex items-center gap-2 pr-8">
             <FileIcon className="w-4 h-4 shrink-0" />
             <span className="truncate">{filePath}</span>
-            <Button
-              type="button"
-              variant={annotate ? 'default' : 'outline'}
-              size="sm"
-              className="ml-auto h-7 shrink-0 gap-1.5 text-xs"
-              onClick={() => setAnnotate((a) => !a)}
-              title={annotate ? 'Hide per-line git blame' : 'Show per-line git blame (which commit last touched each line)'}
-              aria-pressed={annotate}
-            >
-              <GitCommitHorizontalIcon className="w-3.5 h-3.5" />
-              Annotate
-            </Button>
+            <div className="ml-auto flex items-center gap-2">
+              {isMarkdown && (
+                <Button
+                  type="button"
+                  variant={viewMode === 'rendered' ? 'default' : 'outline'}
+                  size="sm"
+                  className="h-7 shrink-0 gap-1.5 text-xs"
+                  onClick={() => setViewMode((m) => (m === 'rendered' ? 'source' : 'rendered'))}
+                  title={viewMode === 'rendered' ? 'Show raw markdown source' : 'Show rendered documentation'}
+                  aria-pressed={viewMode === 'rendered'}
+                >
+                  {viewMode === 'rendered' ? (
+                    <BookOpenIcon className="w-3.5 h-3.5" />
+                  ) : (
+                    <Code2Icon className="w-3.5 h-3.5" />
+                  )}
+                  {viewMode === 'rendered' ? 'Rendered' : 'Source'}
+                </Button>
+              )}
+              <Button
+                type="button"
+                variant={annotate ? 'default' : 'outline'}
+                size="sm"
+                className="h-7 shrink-0 gap-1.5 text-xs"
+                onClick={() => setAnnotate((a) => !a)}
+                title={annotate ? 'Hide per-line git blame' : 'Show per-line git blame (which commit last touched each line)'}
+                aria-pressed={annotate}
+              >
+                <GitCommitHorizontalIcon className="w-3.5 h-3.5" />
+                Annotate
+              </Button>
+            </div>
           </DialogTitle>
         </DialogHeader>
 
@@ -164,9 +196,15 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
             )}
 
             {!loading && !error && content !== null && !annotate && !hasLine && (
-              <pre className="text-sm font-mono whitespace-pre-wrap break-words">
-                {content}
-              </pre>
+              isMarkdown && viewMode === 'rendered' ? (
+                <div className="flex flex-col gap-2 text-sm leading-relaxed">
+                  <MarkdownBody>{content}</MarkdownBody>
+                </div>
+              ) : (
+                <pre className="text-sm font-mono whitespace-pre-wrap break-words">
+                  {content}
+                </pre>
+              )
             )}
 
             {!loading && !error && content !== null && !annotate && hasLine && (
