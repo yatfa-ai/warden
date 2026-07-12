@@ -30,9 +30,30 @@ export interface GitStateStatus {
   ahead?: number | null;
 }
 
+// One contributing agent for a project's WIP breakdown (WARDEN-268). The project
+// chip's ±N / ↑N badges are now explorable: each popover lists exactly these
+// agents so a human can jump straight to the dirty/unpushed one instead of
+// scanning the whole project row by row. Kept deliberately minimal — no title,
+// no branch — so the helper stays pure and testable with plain objects (the same
+// decoupling the rest of this module relies on). The React layer joins
+// `key → displayName(findChat(chats, key))` and `gitStatus[key].branch`, both of
+// which are already in scope in ChatSidebar; display fields do NOT belong here.
+export interface ProjectGitAgent {
+  key: string;       // c.key || c.id — the same lookup the per-row GitBranchBadge uses
+  dirty: boolean;    // clean === false (the yellow ± signal)
+  ahead: number;     // status.ahead ?? 0 — the amber ↑N signal (> 0 ⇒ unpushed)
+}
+
 export interface ProjectGitState {
   dirty: number;     // # of the project's active agents with uncommitted changes
   unpushed: number;  // # of the project's active agents with unpushed commits
+  // The contributing agents behind those counts, in `chats` iteration order
+  // (deterministic, so tests assert deep equality). The ±N popover filters
+  // `agents.filter(a => a.dirty)`; the ↑N popover filters `agents.filter(a =>
+  // a.ahead > 0)`. An agent both dirty AND unpushed appears ONCE with both
+  // signals. `dirty`/`unpushed` are retained (the chip still reads them) even
+  // though they're now derivable — avoids churn at the two call sites.
+  agents: ProjectGitAgent[];
 }
 
 export interface ProjectGitSummary {
@@ -50,14 +71,16 @@ export interface ProjectGitSummary {
  * Only active chats with a project are considered (the same population the chips'
  * `projectCounts` are drawn from). A chat missing from `gitStatus` — still
  * loading, or a non-git cwd — is treated as neither (no guess). `total` is the
- * sum of the per-project counts.
+ * sum of the per-project counts. Each `ProjectGitState` also carries the
+ * contributing `agents` (in `chats` iteration order) so the chip badges can list
+ * exactly who is dirty/unpushed — `total.agents` is the union across projects.
  */
 export function summarizeProjectGitState(
   chats: GitStateChat[],
   gitStatus: Record<string, GitStateStatus>,
 ): ProjectGitSummary {
   const perProject: Record<string, ProjectGitState> = {};
-  const total: ProjectGitState = { dirty: 0, unpushed: 0 };
+  const total: ProjectGitState = { dirty: 0, unpushed: 0, agents: [] };
 
   for (const c of chats) {
     // Match projectCounts' population exactly (active && has a project) so the
@@ -70,18 +93,26 @@ export function summarizeProjectGitState(
     if (!status) continue;
 
     const dirty = status.clean === false;
-    const unpushed = typeof status.ahead === 'number' && status.ahead > 0;
+    const ahead = typeof status.ahead === 'number' ? status.ahead : 0;
+    const unpushed = ahead > 0;
     // A clean, pushed agent contributes nothing — skip it so clean projects stay
     // absent from the sparse map (and off the chips).
     if (!dirty && !unpushed) continue;
 
-    const entry = perProject[c.project] ?? { dirty: 0, unpushed: 0 };
+    // The agent entry shared by the per-project list and the global union. One
+    // entry per contributing agent, so a both-dirty-and-unpushed agent appears a
+    // single time with both signals (never duplicated).
+    const agent: ProjectGitAgent = { key: c.key || c.id, dirty, ahead };
+
+    const entry = perProject[c.project] ?? { dirty: 0, unpushed: 0, agents: [] };
     if (dirty) entry.dirty += 1;
     if (unpushed) entry.unpushed += 1;
+    entry.agents.push(agent);
     perProject[c.project] = entry;
 
     if (dirty) total.dirty += 1;
     if (unpushed) total.unpushed += 1;
+    total.agents.push(agent);
   }
 
   return { perProject, total };
