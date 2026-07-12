@@ -19,7 +19,7 @@ import { DiffViewer } from './DiffViewer';
 import { DiffBlock } from './DiffBlock';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { cn } from '@/lib/utils';
-import { summarizeProjectGitState, type ProjectGitAgent } from '@/lib/gitStateSummary';
+import { summarizeProjectGitState, detectProjectFileCollisions, type ProjectGitAgent, type FileCollision } from '@/lib/gitStateSummary';
 import type { Chat, Collection } from '@/lib/types';
 import { loadUi, saveUi } from '@/lib/storage';
 import { THIS_MACHINE, ago, basename, chatType, displayName, hostTagOf } from '@/lib/chatDisplay';
@@ -319,6 +319,136 @@ function GitStateBadges({ dirty, unpushed, agents, chats, gitStatus, onOpenChat 
   );
 }
 
+// ⚠ badge for cross-agent file-edit collisions (WARDEN-288). Surfaces on a project
+// chip (and the "All Projects" chip) when ≥2 active agents in that project each
+// have the SAME file path in their uncommitted working tree — a divergence
+// waiting to become a merge conflict. The proactive complement to WARDEN-185,
+// which surfaces a conflict AFTER an agent is already blocked; this warns before
+// either agent commits. A glance at the chip's ⚠N then tells a human which paths
+// two agents are racing on, so they can coordinate before the collision lands.
+//
+// Mirrors GitStateBadge's explorable-popover structure exactly (so the two badges
+// read as one system): a role="button" <span> trigger — NEVER a nested <button>,
+// since the chip is itself a <button> (invalid HTML; browsers misbehave);
+// stopPropagation on click/keydown so opening the popover does not also flip the
+// project filter; a RadixPopover whose rows are role="button" <div>s that call
+// onOpenChat(key) and close. The popover lists each colliding path as a header
+// with its contributing agents beneath — a human can jump to either agent.
+// No new fetch: the collisions come from the cached gitStatus map via
+// detectProjectFileCollisions (which reads the per-chat `files` already cached).
+function GitCollisionBadge({ collisions, chats, gitStatus, onOpenChat, showProject }: {
+  // Already scoped to this chip (a project's paths, or `total.paths` for the
+  // "All Projects" chip). Empty ⇒ renders nothing (no ⚠ on a clean chip).
+  collisions: FileCollision[];
+  chats: Chat[];
+  // Minimal slice the popover rows read (just the branch label) — the full
+  // gitStatus map ChatSidebar holds is structurally compatible.
+  gitStatus: Record<string, { branch: string | null }>;
+  onOpenChat: (id: string) => void;
+  // Show a project tag on each path header (the "All Projects" chip, where the
+  // same path can collide in two different projects and needs disambiguation).
+  // Looked up from the first contributor's chat in the React layer — the helper
+  // stays display-field-free, exactly like ProjectGitAgent.
+  showProject?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const count = collisions.length;
+  if (count <= 0) return null;
+  const title = `${count} file${count === 1 ? '' : 's'} edited by 2+ agents — click to list`;
+  return (
+    <RadixPopover.Root open={open} onOpenChange={setOpen}>
+      <RadixPopover.Trigger asChild>
+        {/* role="button" <span> (not a nested <button>): the chip is already a
+            <button>, so the trigger must not be one. The span needs its own
+            keydown (Enter/Space) since a non-button doesn't synthesize a click
+            from the keyboard, and stopPropagation so opening the popover doesn't
+            flip the project filter. Mirrors GitStateBadge's trigger. */}
+        <span
+          role="button"
+          tabIndex={0}
+          aria-label={title}
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              e.stopPropagation();
+              setOpen((o) => !o);
+            }
+          }}
+          title={title}
+          className="ml-0.5 inline-flex items-center text-[10px] cursor-pointer rounded-sm text-red-400 hover:text-red-300 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+        >
+          ⚠{count}
+        </span>
+      </RadixPopover.Trigger>
+      <RadixPopover.Portal>
+        <RadixPopover.Content
+          sideOffset={4}
+          align="start"
+          onClick={(e) => e.stopPropagation()}
+          className="z-50 min-w-56 max-w-80 rounded-md border border-border bg-popover p-1.5 text-popover-foreground shadow-lg outline-none data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0"
+        >
+          <div className="mb-1 px-0.5">
+            <span className="text-[10px] font-medium text-red-400">
+              same file · 2+ agents · {count} path{count === 1 ? '' : 's'}
+            </span>
+          </div>
+          <div className="max-h-72 overflow-auto flex flex-col gap-1">
+            {collisions.map((col) => {
+              // The project the first contributor belongs to — disambiguates the
+              // same path colliding in two different projects on the "All Projects" chip.
+              const project = showProject ? findChat(chats, col.agents[0]?.key)?.project : undefined;
+              return (
+                <div key={`${col.path}·${col.agents.map((a) => a.key).join(',')}`} className="rounded">
+                  <div className="flex items-center gap-1 px-1 py-0.5" title={col.path}>
+                    <span className="truncate text-[10px] text-foreground">{col.path}</span>
+                    {project && (
+                      <span className="ml-auto shrink-0 text-[10px] text-muted-foreground" title={project}>{project}</span>
+                    )}
+                  </div>
+                  <ul>
+                    {col.agents.map((a) => {
+                      const c = findChat(chats, a.key);
+                      const name = displayName(c);
+                      const branch = gitStatus[a.key]?.branch ?? null;
+                      return (
+                        <li key={a.key} className="rounded">
+                          {/* role="button" div (not a <button>) so the row is keyboard-
+                              operable without nesting interactive buttons inside the
+                              portaled popover content. Mirrors GitStateBadge's rows.
+                              Click → jump to the agent + close the popover. */}
+                          <div
+                            role="button"
+                            tabIndex={0}
+                            aria-label={`open ${name}`}
+                            onClick={(e) => { e.stopPropagation(); setOpen(false); onOpenChat(a.key); }}
+                            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setOpen(false); onOpenChat(a.key); } }}
+                            title={`open ${name}`}
+                            className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+                          >
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-[10px] text-foreground" title={name}>{name}</span>
+                              {branch && (
+                                <span className="block truncate text-[10px] text-cyan-400/80" title={branch}>
+                                  ⎇ {branch}
+                                </span>
+                              )}
+                            </span>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              );
+            })}
+          </div>
+        </RadixPopover.Content>
+      </RadixPopover.Portal>
+    </RadixPopover.Root>
+  );
+}
+
 export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
@@ -374,6 +504,17 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   // chips only flag agents whose repo state is actually known to be dirty/unpushed.
   const gitStateSummary = useMemo(
     () => summarizeProjectGitState(chats, gitStatus),
+    [chats, gitStatus],
+  );
+
+  // Cross-agent file-edit collisions (WARDEN-288): changed-file paths ≥2 active
+  // agents in the same project both have uncommitted — the proactive complement
+  // to the dirty/unpushed WIP summary above (which counts HOW MANY agents have
+  // WIP; this catches WHEN two are editing the SAME file). Reuses the same
+  // cached gitStatus map — whose value already carries each chat's changed
+  // `files` from /api/git-status — so no new fetch, no backend change.
+  const fileCollisions = useMemo(
+    () => detectProjectFileCollisions(chats, gitStatus),
     [chats, gitStatus],
   );
 
@@ -872,6 +1013,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
               >
                 All Projects ({chats.filter(c => c.active).length})
                 <GitStateBadges dirty={gitStateSummary.total.dirty} unpushed={gitStateSummary.total.unpushed} agents={gitStateSummary.total.agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
+                <GitCollisionBadge collisions={fileCollisions.total.paths} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} showProject />
               </button>
               {Object.entries(projectCounts).map(([project, count]) => (
                 <button
@@ -881,6 +1023,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                 >
                   {project} ({count})
                   <GitStateBadges dirty={gitStateSummary.perProject[project]?.dirty ?? 0} unpushed={gitStateSummary.perProject[project]?.unpushed ?? 0} agents={gitStateSummary.perProject[project]?.agents ?? []} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
+                  <GitCollisionBadge collisions={fileCollisions.perProject[project]?.paths ?? []} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
                 </button>
               ))}
             </div>

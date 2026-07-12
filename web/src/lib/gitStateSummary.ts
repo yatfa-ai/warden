@@ -24,10 +24,14 @@ export interface GitStateChat {
 
 // Minimal slice of a per-chat git status (matches the value shape ChatSidebar's
 // useState<Record<string, …>> map stores via fetchGitStatus). clean === false ⇒
-// uncommitted changes; ahead (a number > 0) ⇒ unpushed commits.
+// uncommitted changes; ahead (a number > 0) ⇒ unpushed commits. files is the
+// changed-file list /api/git-status already returns per chat (parsed from
+// `git status --porcelain`) — the join key detectProjectFileCollisions compares
+// across agents. null for a detached/no-branch chat (contributes nothing).
 export interface GitStateStatus {
   clean?: boolean | null;
   ahead?: number | null;
+  files?: { path: string }[] | null;
 }
 
 // One contributing agent for a project's WIP breakdown (WARDEN-268). The project
@@ -113,6 +117,123 @@ export function summarizeProjectGitState(
     if (dirty) total.dirty += 1;
     if (unpushed) total.unpushed += 1;
     total.agents.push(agent);
+  }
+
+  return { perProject, total };
+}
+
+// A changed-file path that ≥2 distinct active agents in the SAME project both
+// have in their uncommitted working tree — a cross-agent file-edit collision
+// (WARDEN-288). The proactive complement to WARDEN-185, which surfaces a
+// merge/rebase/cherry-pick conflict AFTER an agent is already blocked; this
+// surfaces a collision BEFORE either agent commits and diverges. `agents` lists
+// the contributors (≥2 distinct keys) in `chats` iteration order so tests assert
+// deep equality; the React layer joins key → displayName/project, exactly as the
+// ±N/↑N popovers do for ProjectGitAgent. Only `path` is the join key —
+// status/conflict fields are intentionally NOT part of it (two agents creating
+// the same new file path collide on `git add`/commit, so untracked `??` paths
+// count too).
+export interface FileCollision {
+  path: string;
+  agents: { key: string }[];  // ≥2 distinct agent keys, in chats iteration order
+}
+
+export interface FileCollisions {
+  // The colliding paths, in `chats` iteration order (deterministic, so tests
+  // assert deep equality). length = the ⚠ count shown on the chip.
+  paths: FileCollision[];
+}
+
+export interface FileCollisionSummary {
+  // Sparse "needs attention" map: only projects with ≥1 colliding path get an
+  // entry, so a clean project yields no key (the chip renders no ⚠), exactly as
+  // summarizeProjectGitState omits clean projects.
+  perProject: Record<string, FileCollisions>;
+  total: FileCollisions;  // union of colliding paths across all projects (for the "All Projects" chip)
+}
+
+/**
+ * Detect cross-agent file-edit collisions: changed-file paths that ≥2 distinct
+ * active agents in the SAME project both have in their uncommitted working tree
+ * (WARDEN-288). A glance at a project chip's ⚠ badge then warns a human — before
+ * either agent commits — that two agents are editing the same file and are about
+ * to diverge into a merge conflict. The proactive complement to WARDEN-185's
+ * post-block conflict surfacing.
+ *
+ * Population mirrors summarizeProjectGitState exactly (active chats with a
+ * project, status looked up by `key || id`). The changed-file `path`s come from
+ * the SAME cached gitStatus map — `/api/git-status` already returns per-chat
+ * `files` parsed from `git status --porcelain` — so there is no new fetch. A
+ * chat with `files: null` (detached/no-branch) or missing from the map (still
+ * loading / non-git) contributes nothing, exactly like a not-yet-fetched chat.
+ *
+ * Join key is `path` ONLY — status/conflict fields are not compared, and
+ * untracked (`??`) paths count (two agents creating the same new file collide on
+ * `git add`/commit). A path appearing twice in ONE agent's `files` does not
+ * self-collide: a collision requires ≥2 DISTINCT agent keys. `perProject` is
+ * sparse (a project with no collision has no entry → no ⚠); `total` is the union
+ * of colliding paths across all projects (for the "All Projects" chip). Paths
+ * and agents are emitted in `chats` iteration order so tests assert deep equality.
+ */
+export function detectProjectFileCollisions(
+  chats: GitStateChat[],
+  gitStatus: Record<string, GitStateStatus>,
+): FileCollisionSummary {
+  // project -> (path -> ordered distinct agent keys touching it). Maps preserve
+  // insertion order, so iterating them yields projects, paths, and agents all in
+  // first-seen (= chats iteration) order — the deterministic ordering tests rely on.
+  const byProject = new Map<string, Map<string, string[]>>();
+
+  for (const c of chats) {
+    // Same population gate as summarizeProjectGitState: only active chats with a
+    // project are represented by the chips.
+    if (!c.active || !c.project) continue;
+
+    const status = gitStatus[c.key || c.id];
+    // Unknown status (not yet fetched / non-git) ⇒ contributes nothing. A
+    // detached/no-branch chat has files: null and is skipped the same way — never
+    // a false collision from a chat whose files we don't actually know.
+    if (!status) continue;
+    const files = status.files;
+    if (!files || files.length === 0) continue;
+
+    const key = c.key || c.id;
+    let paths = byProject.get(c.project);
+    if (!paths) { paths = new Map(); byProject.set(c.project, paths); }
+
+    // Dedupe paths WITHIN this single agent: a path listed twice for one agent
+    // must not self-collide (a collision needs ≥2 distinct agent keys). Each chat
+    // is visited once, so distinct chats contribute distinct keys per path.
+    const seen = new Set<string>();
+    for (const f of files) {
+      const path = f?.path;
+      if (!path || seen.has(path)) continue;
+      seen.add(path);
+
+      let agents = paths.get(path);
+      if (!agents) { agents = []; paths.set(path, agents); }
+      agents.push(key);
+    }
+  }
+
+  const perProject: Record<string, FileCollisions> = {};
+  const total: FileCollisions = { paths: [] };
+
+  for (const [project, paths] of byProject) {
+    const colliding: FileCollision[] = [];
+    for (const [path, agents] of paths) {
+      // A collision needs ≥2 distinct agent keys — a single agent on a path is
+      // just ordinary WIP (already shown by the ±N badge), not a cross-agent risk.
+      if (agents.length >= 2) {
+        colliding.push({ path, agents: agents.map((k) => ({ key: k })) });
+      }
+    }
+    // Sparse: only projects with at least one colliding path get an entry, so a
+    // clean chip shows no ⚠.
+    if (colliding.length > 0) {
+      perProject[project] = { paths: colliding };
+      total.paths.push(...colliding);
+    }
   }
 
   return { perProject, total };
