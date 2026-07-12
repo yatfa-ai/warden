@@ -189,12 +189,18 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Escape returns to the workspace (mirrors the modal's Escape-to-close).
+  // Escape returns to the workspace (mirrors the modal's Escape-to-close). Skip
+  // while the read-only transcript viewer is open so the first Escape dismisses
+  // only that nested Dialog (Radix DismissableLayer handles it in capture phase
+  // but doesn't stopPropagation), and a second Escape closes the page. `viewing`
+  // is read from the current render's closure — when the transcript's Escape
+  // fires, the setViewing(null) it triggers hasn't flushed yet, so `viewing` is
+  // still truthy here and the page correctly stays open.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !viewing) onClose(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, viewing]);
 
   // Full-content session search (WARDEN-161). When the query is non-empty, debounce
   // and hit /api/claude-sessions-search so matches INSIDE a session's body — not just

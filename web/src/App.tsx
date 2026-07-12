@@ -735,6 +735,10 @@ function App() {
   // blocking Dialog modal — now a full-page view per WARDEN-68 Rule 7 (the browser
   // is an unbounded list + search, not a ≤200-symbol confirmation).
   const [chatBrowserOpen, setChatBrowserOpen] = useState(false);
+  // Stable close handler for the browser page. useState's setter is stable, so
+  // wrapping it here keeps `onClose` identity stable across chat-poll ticks —
+  // otherwise the page's Escape keydown effect would re-subscribe on every poll.
+  const closeChatBrowser = useCallback(() => setChatBrowserOpen(false), []);
   // Host connectivity statuses. Polled at the App level (formerly inside
   // ChatSidebar) so they stay live while the full-page browser view — which
   // replaces ChatSidebar — is open. Fed to both ChatSidebar and the browser page.
@@ -925,7 +929,7 @@ function App() {
         />
       ) : chatBrowserOpen ? (
         <OpenChatBrowserPage
-          onClose={() => setChatBrowserOpen(false)}
+          onClose={closeChatBrowser}
           hosts={hosts}
           chats={chats}
           onOpenChat={openChat}
