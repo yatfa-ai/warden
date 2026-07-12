@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
 import { loadUi, saveUi, persistUiState, initialWorkspace, DEFAULT_TERMINAL_FONT_FAMILY, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type HostOptionsMap, type WorkspacePaneSet, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
-import { applyTheme, listenSystemThemeChange, getEffectiveTheme, resolveTerminalTheme, type Theme, type TerminalColorScheme } from '@/lib/theme';
+import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThemeId, type Theme, type ThemeId, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray } from '@/lib/electron';
@@ -170,15 +170,16 @@ function App() {
   const [observerCollapsed, setObserverCollapsed] = useState(uiState.observerCollapsed);
   const [healthCollapsed, setHealthCollapsed] = useState(uiState.healthCollapsed ?? true);
   const [theme, setTheme] = useState<Theme>(() => uiState.theme ?? 'system');
-  // The OS-resolved effective theme (light/dark). The `theme` state variable
-  // stays 'system' on an OS flip, so chrome re-paints via a direct DOM class
-  // mutation in the [theme] effect — no React re-render. But the terminal
-  // surface re-themes imperatively inside PaneTile's effect, which only re-fires
-  // when this prop changes. Tracking effectiveTheme as React state and feeding it
-  // to resolveTerminalTheme is what makes "Match app theme" live-update on an OS
-  // flip (nuance #1): listenSystemThemeChange calls setEffectiveTheme, the prop
-  // propagates to PaneTile, and its [terminalTheme] effect re-paints open panes.
-  const [effectiveTheme, setEffectiveTheme] = useState<'light' | 'dark'>(() => getEffectiveTheme(uiState.theme ?? 'system'));
+  // The OS-resolved concrete theme id (e.g. 'github-dark', 'dracula'). The
+  // `theme` state variable stays 'system' on an OS flip, so chrome re-paints via
+  // a direct DOM attribute mutation in the [theme] effect — no React re-render.
+  // But the terminal surface re-themes imperatively inside PaneTile's effect,
+  // which only re-fires when its prop changes. Tracking resolvedThemeId as React
+  // state and feeding it to resolveTerminalThemeId is what makes "Match app
+  // theme" live-update on an OS flip (nuance #1): listenSystemThemeChange calls
+  // setResolvedThemeId, the prop propagates to PaneTile, and its effect
+  // re-paints open panes with the new theme's xterm palette.
+  const [resolvedThemeId, setResolvedThemeId] = useState<ThemeId>(() => resolveThemeId(uiState.theme ?? 'system'));
   const [density, setDensity] = useState<Density>(() => uiState.density ?? 'comfortable');
   const [paneLayout, setPaneLayout] = useState<PaneLayout>(() => uiState.paneLayout ?? 'auto');
   // "Pane on agent exit" behavior: what an already-open pane does when its agent
@@ -367,22 +368,23 @@ function App() {
 
   // apply theme on mount and when theme changes
   useEffect(() => {
-    // Apply theme immediately
+    // Apply theme immediately: sets the [data-theme] attribute (selecting the
+    // matching CSS token block) and toggles `.dark` from the theme's mode.
     applyTheme(theme);
-    // Keep the OS-resolved effective theme in sync so resolveTerminalTheme (and
-    // thus open terminal panes) follow a manual Color Scheme change live.
-    setEffectiveTheme(getEffectiveTheme(theme));
+    // Keep the resolved concrete theme id in sync so the terminal pane (which
+    // derives its xterm palette from it) follows a manual theme change live.
+    setResolvedThemeId(resolveThemeId(theme));
     saveUi({ ...loadUi(), theme });
 
     // If system mode, listen for system theme changes. The `theme` state stays
-    // 'system' here (chrome re-paints via applyTheme's direct DOM class toggle),
-    // but we ALSO push the resolved effective theme into React state so the
-    // terminal surface — which re-themes imperatively in PaneTile — live-updates
-    // on an OS flip (nuance #1).
+    // 'system' here (chrome re-paints via applyTheme's direct DOM attribute set),
+    // but we ALSO push the OS-resolved theme id into React state so the terminal
+    // surface — which re-themes imperatively in PaneTile — live-updates on an OS
+    // flip (nuance #1).
     if (theme === 'system') {
-      const cleanup = listenSystemThemeChange((t) => {
+      const cleanup = listenSystemThemeChange((id) => {
         applyTheme('system');
-        setEffectiveTheme(t);
+        setResolvedThemeId(id);
       });
       return cleanup;
     }
@@ -1019,12 +1021,13 @@ function App() {
 
   const openPaneSet = new Set(openPanes);
   const tiles = openPanes.map((id) => ({ id }));
-  // Resolved terminal surface color. 'auto' defers to the OS-resolved effective
-  // theme; 'dark'/'light' force it. Recomputed every render so a manual Color
-  // Scheme change — and, critically, an OS theme flip while Color Scheme =
-  // "System" (which updates effectiveTheme via listenSystemThemeChange) — changes
-  // this prop and re-themes already-open panes live via PaneTile's effect.
-  const terminalTheme = resolveTerminalTheme(terminalColorScheme, effectiveTheme);
+  // Resolved terminal theme id (which named theme's xterm palette to use).
+  // 'auto' defers to the active (OS-resolved) app theme; 'dark'/'light' force it
+  // to the system default dark/light theme. Recomputed every render so a manual
+  // theme change — and, critically, an OS theme flip while the app theme =
+  // "System" (which updates resolvedThemeId via listenSystemThemeChange) —
+  // changes this prop and re-themes already-open panes live via PaneTile's effect.
+  const terminalThemeId = resolveTerminalThemeId(terminalColorScheme, resolvedThemeId);
   // The chat the observer should bind to when "observe focused" is clicked.
   const focusedChat = chats.find((c) => (c.key || c.id) === focused) || null;
   // Selectable host list for the Open Chat browser's multiselect chips: this
@@ -1362,7 +1365,7 @@ function App() {
             scrollback={terminalScrollback}
             fontFamily={terminalFontFamily}
             paneLayout={paneLayout}
-            terminalTheme={terminalTheme}
+            terminalThemeId={terminalThemeId}
             terminalCursorStyle={terminalCursorStyle}
             copyOnSelect={copyOnSelect}
             onExitBehavior={onExitBehavior}

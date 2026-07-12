@@ -28,11 +28,18 @@ globalThis.localStorage = {
 const reset = () => mem.clear();
 
 // --- Load the REAL storage.ts (TS -> ESM via the OXC transform Vite bundles) -
-const src = readFileSync(storagePath, 'utf8');
-const { code } = await transformWithOxc(src, storagePath, {});
+// storage.ts imports normalizeThemePref from @/lib/themes (the WARDEN-255 theme
+// migration), so we transpile BOTH modules into the same tmp dir and rewrite
+// the bare `@/lib/themes` specifier to a relative path Node can resolve.
+const themesPath = resolve(__dirname, 'src/lib/themes.ts');
+const storageSrc = readFileSync(storagePath, 'utf8');
+const themesSrc = readFileSync(themesPath, 'utf8');
+const { code: storageCode } = await transformWithOxc(storageSrc, storagePath, {});
+const { code: themesCode } = await transformWithOxc(themesSrc, themesPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-storage-test-'));
+writeFileSync(join(tmpDir, 'themes.mjs'), themesCode);
 const tmpFile = join(tmpDir, 'storage.mjs');
-writeFileSync(tmpFile, code);
+writeFileSync(tmpFile, storageCode.replaceAll('@/lib/themes', './themes.mjs'));
 const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, SIDEBAR_MIN, SIDEBAR_MAX, OBSERVER_MIN, OBSERVER_MAX, PANE_MIN, HEALTH_WIDTH } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
@@ -634,12 +641,14 @@ console.log('\nreadVersioned key-migration guard promotes old payloads forward')
 
 test('UI data under an older versioned key (v1) is promoted forward to v2 on load', () => {
   reset();
-  // Only the older key exists; the current key (v2) is absent.
+  // Only the older key exists; the current key (v2) is absent. theme:'dark' is a
+  // legacy mode literal — it survives the KEY migration and is normalized to the
+  // GitHub Dark theme id (WARDEN-255) on the same load.
   mem.set('warden:ui:v1', JSON.stringify({ activeTabs: ['chat-a'], theme: 'dark', density: 'compact' }));
   const ui = loadUi();
   // The data survived the (simulated) version bump and was read correctly.
   assert.deepEqual(ui.activeTabs, ['chat-a']);
-  assert.equal(ui.theme, 'dark');
+  assert.equal(ui.theme, 'github-dark', 'legacy dark pref migrated to GitHub Dark');
   assert.equal(ui.density, 'compact');
   // The payload physically migrated forward: v2 now holds it, v1 is cleared.
   assert.ok(mem.has('warden:ui:v2'), 'payload promoted to the current key');
@@ -648,10 +657,12 @@ test('UI data under an older versioned key (v1) is promoted forward to v2 on loa
 
 test('UI data under the current key (v2) is read as-is and triggers no migration', () => {
   reset();
+  // theme:'light' is a legacy literal — no KEY migration (already on v2), but
+  // the value still normalizes to GitHub Light (WARDEN-255) on load.
   mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['keep'], theme: 'light' }));
   const ui = loadUi();
   assert.deepEqual(ui.activeTabs, ['keep']);
-  assert.equal(ui.theme, 'light');
+  assert.equal(ui.theme, 'github-light', 'legacy light pref migrated to GitHub Light');
   // No older key existed, so none was touched.
   assert.ok(!mem.has('warden:ui:v1'), 'no spurious older key created');
 });
@@ -915,6 +926,69 @@ test('a legacy payload with object-style openPanes entries still migrates', () =
   mem.set('warden:ui:v2', JSON.stringify({ activeTabs: [{ id: 'a' }, { id: 'b' }], openPanes: [{ id: 'a' }], focused: 'a' }));
   const ui = loadUi();
   assert.deepEqual(ui.workspaces[0].openPanes, ['a'], 'object openPanes normalized to ids during migration');
+});
+
+console.log('\ntheme (named-theme pref) round-trips through loadUi/saveUi — WARDEN-255');
+test('defaults to "system" when nothing is stored', () => {
+  reset();
+  assert.equal(loadUi().theme, 'system');
+});
+test('a named theme id round-trips', () => {
+  reset();
+  saveUi({ ...loadUi(), theme: 'dracula' });
+  assert.equal(loadUi().theme, 'dracula');
+});
+test('"system" round-trips', () => {
+  reset();
+  saveUi({ ...loadUi(), theme: 'system' });
+  assert.equal(loadUi().theme, 'system');
+});
+test('a legacy "dark" pref migrates to GitHub Dark on load (backward compatible)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], theme: 'dark' }));
+  assert.equal(loadUi().theme, 'github-dark');
+});
+test('a legacy "light" pref migrates to GitHub Light on load (backward compatible)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], theme: 'light' }));
+  assert.equal(loadUi().theme, 'github-light');
+});
+test('a legacy "system" pref stays "system" on load', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], theme: 'system' }));
+  assert.equal(loadUi().theme, 'system');
+});
+test('an unknown theme id coerces back to "system" on load (never loads a token-less theme)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], theme: 'octocat' }));
+  assert.equal(loadUi().theme, 'system');
+});
+test('a missing theme field loads as "system"', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  assert.equal(loadUi().theme, 'system');
+});
+test('a non-string theme coerces to "system" (defensive, no throw)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], theme: 42 }));
+  assert.equal(loadUi().theme, 'system');
+});
+test('the theme pref survives an empty-mode mount (carried by the live spread)', () => {
+  // theme is NOT a workspace field, so persistUiState spreads it from `live`.
+  reset();
+  const d0 = loadUi();
+  saveUi(persistUiState({ ...d0, theme: 'nord' }, 'empty', d0, true));
+  assert.equal(loadUi().theme, 'nord');
+});
+test('a migrated legacy value persists as the new id on the next save', () => {
+  // After migration (legacy 'dark' -> 'github-dark'), a normal saveUi/loadUi
+  // cycle must keep the migrated id — it does not revert to the legacy literal.
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], theme: 'dark' }));
+  const migrated = loadUi();
+  assert.equal(migrated.theme, 'github-dark');
+  saveUi({ ...migrated });
+  assert.equal(loadUi().theme, 'github-dark');
 });
 
 console.log(`\n✓ STORAGE TESTS PASS (${passed})`);
