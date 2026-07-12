@@ -5,8 +5,11 @@
 // whether `container` is set, and uses `session` for the tmux target.
 import { run, runWithPool, runLocalTmux, shellQuote } from './ssh.js';
 import { loadCatalog } from './config.js';
+import { ROLES, parseContainerName } from './chatMeta.js';
+// Re-export for any external consumer; the canonical home is now ./chatMeta.js.
+export { ROLES, parseContainerName };
+import { isCompanionTransportEnabled, discover as discoverViaCompanion } from './companion.js';
 
-const ROLES = new Set(['planner', 'worker', 'reviewer', 'researcher']);
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 const LOCAL = '(local)';
 
@@ -25,7 +28,7 @@ const LOCAL = '(local)';
 //
 // `tr -d '\r'` on the pane path tolerates a CRLF that can sneak in over an SSH
 // pty; any residual whitespace is trimmed in JS.
-const DISCOVER_SCRIPT = `
+export const DISCOVER_SCRIPT = `
 docker ps --format '{{.Names}}\\t{{.Status}}' 2>/dev/null | while IFS=$(printf '\\t') read -r name status; do
   [ -z "$name" ] && continue
   cwd=''
@@ -39,12 +42,6 @@ docker ps --format '{{.Names}}\\t{{.Status}}' 2>/dev/null | while IFS=$(printf '
   printf '%s\\t%s\\t%s\\t%s\\n' "$name" "$status" "$cwd" "$a"
 done
 `;
-
-function parseContainerName(name) {
-  const idx = name.lastIndexOf('-');
-  if (idx < 0) return { project: name, role: '' };
-  return { project: name.slice(0, idx), role: name.slice(idx + 1) };
-}
 
 // Parse one TSV row emitted by DISCOVER_SCRIPT into the fields discover() needs.
 // Row layout:  name \t status \t cwd \t active
@@ -96,6 +93,16 @@ function localAliveSessions() {
 }
 
 export async function discover(host, cfg, opts = {}) {
+  // Experimental companion transport (WARDEN-272): for REMOTE hosts only, when
+  // WARDEN_COMPANION_TRANSPORT=1 is set, route discover through the bootstrapped
+  // host companion (one persistent stdio RPC channel, zero per-op ssh handshakes).
+  // The default SSH path below is byte-for-byte unchanged and remains the default.
+  // companion.discover() is companion-or-fail: it returns {ok:false} with an
+  // actionable error and never silently falls back here.
+  if (host !== LOCAL && isCompanionTransportEnabled()) {
+    return discoverViaCompanion(host, cfg, opts);
+  }
+
   const timeout = (cfg.connectTimeout ?? 10) * 1000 + 25000;
   const res = await runWithPool(host, DISCOVER_SCRIPT, { timeout }, cfg);
   if (!res.ok) {

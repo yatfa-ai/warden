@@ -10,13 +10,13 @@ export function shellQuote(s) {
   return "'" + String(s).replace(/'/g, "'\\''") + "'";
 }
 
-const SSH_BASE_OPTS = [
+export const SSH_BASE_OPTS = [
   '-o', 'BatchMode=yes', // key auth only — never hang on a password prompt
   '-o', 'StrictHostKeyChecking=accept-new',
   '-o', 'ServerAliveInterval=30',  // Keep-alive for persistent connections
   '-o', 'ServerAliveCountMax=3',   // 3 unresponsive keep-alives → disconnect
 ];
-const SSH_BIN = process.platform === 'win32' ? 'ssh.exe' : 'ssh';
+export const SSH_BIN = process.platform === 'win32' ? 'ssh.exe' : 'ssh';
 
 // ---------------- Connection Pool ----------------
 // Persistent SSH connections to remote hosts. Reused across operations for

@@ -1,0 +1,7 @@
+{
+  "version": "90e14b746bed",
+  "binaries": {
+    "linux/amd64": "warden-companion-linux-amd64",
+    "linux/arm64": "warden-companion-linux-arm64"
+  }
+}
