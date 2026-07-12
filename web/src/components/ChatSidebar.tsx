@@ -236,8 +236,20 @@ function BroadcastActionBar({ count, onSelectAll, onClear, onSend }: {
 // are dirty without filtering the sidebar to the whole project and scanning it.
 // No new fetch: the contributing agents come from the cached gitStatus map via
 // summarizeProjectGitState; displayName/branch are joined here in the React layer.
+// Per-kind rendering config for GitStateBadge. Adding a third axis (behind,
+// WARDEN-297) is a row in this table rather than another branch in every
+// ternary. Each kind picks its glyph, color, label, the predicate that matches
+// its popover rows, and the per-row branch-line suffix. Colors stay in the same
+// visual system as the per-row GitBranchBadge: dirty yellow ±, unpushed amber ↑,
+// behind blue ↓.
+const GIT_STATE_KIND = {
+  dirty:   { glyph: '±', color: 'text-yellow-400 hover:text-yellow-300', label: 'uncommitted changes', match: (a: ProjectGitAgent) => a.dirty,     suffix: () => '' },
+  unpushed: { glyph: '↑', color: 'text-amber-400 hover:text-amber-300',  label: 'unpushed commits',    match: (a: ProjectGitAgent) => a.ahead > 0, suffix: (a: ProjectGitAgent) => (a.ahead > 0 ? ` · ↑ ${a.ahead}` : '') },
+  behind:   { glyph: '↓', color: 'text-blue-400 hover:text-blue-300',    label: 'behind upstream',     match: (a: ProjectGitAgent) => a.behind > 0, suffix: (a: ProjectGitAgent) => (a.behind > 0 ? ` · ↓ ${a.behind}` : '') },
+} as const;
+
 function GitStateBadge({ kind, count, agents, chats, gitStatus, onOpenChat }: {
-  kind: 'dirty' | 'unpushed';
+  kind: 'dirty' | 'unpushed' | 'behind';
   count: number;
   // Already scoped to this chip (a project's subset, or `total.agents` for the
   // "All Projects" chip); filtered below by `kind`.
@@ -250,10 +262,9 @@ function GitStateBadge({ kind, count, agents, chats, gitStatus, onOpenChat }: {
 }) {
   const [open, setOpen] = useState(false);
   if (count <= 0) return null;
-  const shown = agents.filter((a) => (kind === 'dirty' ? a.dirty : a.ahead > 0));
-  const isDirty = kind === 'dirty';
-  const label = isDirty ? 'uncommitted changes' : 'unpushed commits';
-  const title = `${count} agent${count === 1 ? '' : 's'} with ${label} — click to list`;
+  const cfg = GIT_STATE_KIND[kind];
+  const shown = agents.filter(cfg.match);
+  const title = `${count} agent${count === 1 ? '' : 's'} with ${cfg.label} — click to list`;
   return (
     <RadixPopover.Root open={open} onOpenChange={setOpen}>
       <RadixPopover.Trigger asChild>
@@ -277,9 +288,9 @@ function GitStateBadge({ kind, count, agents, chats, gitStatus, onOpenChat }: {
             }
           }}
           title={title}
-          className={cn('ml-0.5 inline-flex items-center text-[10px] cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary', isDirty ? 'text-yellow-400 hover:text-yellow-300' : 'text-amber-400 hover:text-amber-300')}
+          className={cn('ml-0.5 inline-flex items-center text-[10px] cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary', cfg.color)}
         >
-          {isDirty ? '±' : '↑'}{count}
+          {cfg.glyph}{count}
         </span>
       </RadixPopover.Trigger>
       <RadixPopover.Portal>
@@ -290,8 +301,8 @@ function GitStateBadge({ kind, count, agents, chats, gitStatus, onOpenChat }: {
           className="z-50 min-w-56 max-w-80 rounded-md border border-border bg-popover p-1.5 text-popover-foreground shadow-lg outline-none data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0"
         >
           <div className="mb-1 px-0.5">
-            <span className={cn('text-[10px] font-medium', isDirty ? 'text-yellow-400' : 'text-amber-400')}>
-              {label} · {count} agent{count === 1 ? '' : 's'}
+            <span className={cn('text-[10px] font-medium', cfg.color)}>
+              {cfg.label} · {count} agent{count === 1 ? '' : 's'}
             </span>
           </div>
           <ul className="max-h-72 overflow-auto">
@@ -318,7 +329,7 @@ function GitStateBadge({ kind, count, agents, chats, gitStatus, onOpenChat }: {
                       <span className="block truncate text-[10px] text-foreground" title={name}>{name}</span>
                       {branch && (
                         <span className="block truncate text-[10px] text-cyan-400/80" title={branch}>
-                          ⎇ {branch}{!isDirty && a.ahead > 0 ? ` · ↑ ${a.ahead}` : ''}
+                          ⎇ {branch}{cfg.suffix(a)}
                         </span>
                       )}
                     </span>
@@ -333,9 +344,10 @@ function GitStateBadge({ kind, count, agents, chats, gitStatus, onOpenChat }: {
   );
 }
 
-function GitStateBadges({ dirty, unpushed, agents, chats, gitStatus, onOpenChat }: {
+function GitStateBadges({ dirty, unpushed, behind, agents, chats, gitStatus, onOpenChat }: {
   dirty: number;
   unpushed: number;
+  behind: number;
   agents: ProjectGitAgent[];
   chats: Chat[];
   gitStatus: Record<string, { branch: string | null }>;
@@ -345,6 +357,7 @@ function GitStateBadges({ dirty, unpushed, agents, chats, gitStatus, onOpenChat 
     <>
       <GitStateBadge kind="dirty" count={dirty} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
       <GitStateBadge kind="unpushed" count={unpushed} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
+      <GitStateBadge kind="behind" count={behind} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
     </>
   );
 }
@@ -1163,7 +1176,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                 className={`text-xs px-2 py-1 rounded transition-all duration-150 ease-out active:scale-95 ${!projectFilter ? 'bg-accent' : 'hover:bg-accent/50'}`}
               >
                 All Projects ({chats.filter(c => c.active).length})
-                <GitStateBadges dirty={gitStateSummary.total.dirty} unpushed={gitStateSummary.total.unpushed} agents={gitStateSummary.total.agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
+                <GitStateBadges dirty={gitStateSummary.total.dirty} unpushed={gitStateSummary.total.unpushed} behind={gitStateSummary.total.behind} agents={gitStateSummary.total.agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
                 <GitCollisionBadge collisions={fileCollisions.total.paths} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} showProject />
               </button>
               {Object.entries(projectCounts).map(([project, count]) => (
@@ -1173,7 +1186,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                   className={`text-xs px-2 py-1 rounded transition-all duration-150 ease-out active:scale-95 ${projectFilter === project ? 'bg-accent' : 'hover:bg-accent/50'}`}
                 >
                   {project} ({count})
-                  <GitStateBadges dirty={gitStateSummary.perProject[project]?.dirty ?? 0} unpushed={gitStateSummary.perProject[project]?.unpushed ?? 0} agents={gitStateSummary.perProject[project]?.agents ?? []} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
+                  <GitStateBadges dirty={gitStateSummary.perProject[project]?.dirty ?? 0} unpushed={gitStateSummary.perProject[project]?.unpushed ?? 0} behind={gitStateSummary.perProject[project]?.behind ?? 0} agents={gitStateSummary.perProject[project]?.agents ?? []} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
                   <GitCollisionBadge collisions={fileCollisions.perProject[project]?.paths ?? []} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
                 </button>
               ))}

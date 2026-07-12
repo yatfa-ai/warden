@@ -1,21 +1,23 @@
 // Tests for summarizeProjectGitState — the pure aggregator behind the project
-// filter chips' uncommitted/unpushed WIP badges (WARDEN-201), now with the
+// filter chips' uncommitted/unpushed/behind WIP badges (WARDEN-201), now with the
 // per-project contributing-agent breakdown that makes those badges explorable
-// (WARDEN-268).
+// (WARDEN-268) and the third divergence axis, behind-upstream ↓N (WARDEN-297).
 //
 // There is no front-end test runner in this repo, so (like diff.test.mjs) this
 // loads the REAL src/lib/gitStateSummary.ts (transpiled TS -> ESM via Vite's OXC
 // transform) and exercises it directly with plain objects. The helper must be a
 // faithful, sparse mirror of the per-row GitBranchBadge vocabulary: clean===false
-// ⇒ dirty (yellow ±), ahead > 0 ⇒ unpushed (amber ↑N) — and a chat with unknown
-// status (missing from the cached gitStatus map) must count as NEITHER, never as
-// clean, so a still-loading agent can't masquerade as a clean repo.
+// ⇒ dirty (yellow ±), ahead > 0 ⇒ unpushed (amber ↑N), behind > 0 ⇒ behind
+// (blue ↓N) — and a chat with unknown status (missing from the cached gitStatus
+// map) must count as NEITHER, never as clean, so a still-loading agent can't
+// masquerade as a clean repo.
 //
 // The WARDEN-268 additions assert the `agents` breakdown: each contributing agent
-// (dirty and/or unpushed) appears once with { key, dirty, ahead }, in chats
-// iteration order, so the chip's ±N / ↑N popovers can list exactly who is dirty
-// vs. unpushed and jump to them. The helper stays display-field-free (no title,
-// no branch) — the React layer joins key → displayName/branch.
+// (dirty and/or unpushed and/or behind) appears once with { key, dirty, ahead,
+// behind }, in chats iteration order, so the chip's ±N / ↑N / ↓N popovers can
+// list exactly who is dirty vs. unpushed vs. behind and jump to them. The helper
+// stays display-field-free (no title, no branch) — the React layer joins
+// key → displayName/branch.
 //
 // Run: node gitStateSummary.test.mjs   (from web/)
 import { transformWithOxc } from 'vite';
@@ -47,38 +49,42 @@ const test = (name, fn) => {
 // A tiny builder so each case reads as "which agents have which status" rather
 // than a wall of {key,id,project,active} literals.
 const agent = (id, project, key) => ({ id, project, active: true, key });
-const status = (clean, ahead) => ({ clean, ahead });
-// The expected shape of a contributing-agent entry (WARDEN-268).
-const ag = (key, dirty, ahead) => ({ key, dirty, ahead });
+// behind defaults to 0 so every pre-WARDEN-297 case (which never specified a
+// behind count) still reads as "not behind" without touching each call site —
+// the implementation treats an absent behind exactly the same.
+const status = (clean, ahead, behind = 0) => ({ clean, ahead, behind });
+// The expected shape of a contributing-agent entry (WARDEN-268 + WARDEN-297).
+// behind defaults to 0 to mirror status(): a pre-297 expected agent is not behind.
+const ag = (key, dirty, ahead, behind = 0) => ({ key, dirty, ahead, behind });
 
 const sum = (chats, gitStatus) => summarizeProjectGitState(chats, gitStatus);
 
 console.log('\nclean project → no counts (badges hidden)');
-test('a clean, pushed agent yields no per-project entry and zero totals', () => {
+test('a clean, pushed, up-to-date agent yields no per-project entry and zero totals', () => {
   const r = sum([agent('a1', 'warden')], { a1: status(true, 0) });
   assert.deepEqual(r.perProject, {});
-  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, agents: [] });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, agents: [] });
 });
 
-console.log('\ndirty-only → counts toward dirty, not unpushed');
+console.log('\ndirty-only → counts toward dirty, not unpushed/behind');
 test('clean===false with ahead 0 → dirty:1, unpushed:0', () => {
   const r = sum([agent('a1', 'warden')], { a1: status(false, 0) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, agents: [ag('a1', true, 0)] } });
-  assert.deepEqual(r.total, { dirty: 1, unpushed: 0, agents: [ag('a1', true, 0)] });
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, agents: [ag('a1', true, 0)] } });
+  assert.deepEqual(r.total, { dirty: 1, unpushed: 0, behind: 0, agents: [ag('a1', true, 0)] });
 });
 
-console.log('\nunpushed-only → counts toward unpushed, not dirty');
+console.log('\nunpushed-only → counts toward unpushed, not dirty/behind');
 test('clean repo with ahead 3 → dirty:0, unpushed:1', () => {
   const r = sum([agent('a1', 'warden')], { a1: status(true, 3) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 1, agents: [ag('a1', false, 3)] } });
-  assert.deepEqual(r.total, { dirty: 0, unpushed: 1, agents: [ag('a1', false, 3)] });
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 1, behind: 0, agents: [ag('a1', false, 3)] } });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 1, behind: 0, agents: [ag('a1', false, 3)] });
 });
 
 console.log('\nboth → one agent contributes once to each counter (not doubled)');
 test('clean===false AND ahead 2 → dirty:1, unpushed:1', () => {
   const r = sum([agent('a1', 'warden')], { a1: status(false, 2) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 1, agents: [ag('a1', true, 2)] } });
-  assert.deepEqual(r.total, { dirty: 1, unpushed: 1, agents: [ag('a1', true, 2)] });
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 1, behind: 0, agents: [ag('a1', true, 2)] } });
+  assert.deepEqual(r.total, { dirty: 1, unpushed: 1, behind: 0, agents: [ag('a1', true, 2)] });
 });
 
 console.log('\nmulti-project aggregation');
@@ -99,50 +105,60 @@ test('counts accumulate per project and across projects independently', () => {
   };
   const r = sum(chats, gitStatus);
   assert.deepEqual(r.perProject, {
-    warden: { dirty: 2, unpushed: 1, agents: [ag('a1', true, 0), ag('a2', true, 2)] },
-    tinker: { dirty: 0, unpushed: 1, agents: [ag('b1', false, 5)] },
+    warden: { dirty: 2, unpushed: 1, behind: 0, agents: [ag('a1', true, 0), ag('a2', true, 2)] },
+    tinker: { dirty: 0, unpushed: 1, behind: 0, agents: [ag('b1', false, 5)] },
   });
-  assert.deepEqual(r.total, { dirty: 2, unpushed: 2, agents: [ag('a1', true, 0), ag('a2', true, 2), ag('b1', false, 5)] });
+  assert.deepEqual(r.total, { dirty: 2, unpushed: 2, behind: 0, agents: [ag('a1', true, 0), ag('a2', true, 2), ag('b1', false, 5)] });
 });
 
 console.log('\nunknown status (missing from gitStatus) counts as NEITHER, never clean');
 test('an active project agent absent from the map → no entry, no totals', () => {
   const r = sum([agent('a1', 'warden')], {});
   assert.deepEqual(r.perProject, {});
-  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, agents: [] });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, agents: [] });
 });
 test('a still-loading agent never masks a dirty sibling in the same project', () => {
   // a1 dirty & known, a2 unknown: a2 must NOT be treated as clean and must not
   // dilute a1's dirty count (the false-clean trap this slice guards against).
   const r = sum([agent('a1', 'warden'), agent('a2', 'warden')], { a1: status(false, 0) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, agents: [ag('a1', true, 0)] } });
-  assert.deepEqual(r.total, { dirty: 1, unpushed: 0, agents: [ag('a1', true, 0)] });
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, agents: [ag('a1', true, 0)] } });
+  assert.deepEqual(r.total, { dirty: 1, unpushed: 0, behind: 0, agents: [ag('a1', true, 0)] });
 });
 
 console.log('\nnull/unknown field values are quiet, not counted');
 test('clean:null is not dirty (only explicit clean===false is)', () => {
   const r = sum([agent('a1', 'warden')], { a1: status(null, 1) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 1, agents: [ag('a1', false, 1)] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 1, behind: 0, agents: [ag('a1', false, 1)] } });
 });
 test('ahead:null is not unpushed (only a number > 0 is)', () => {
   const r = sum([agent('a1', 'warden')], { a1: status(false, null) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, agents: [ag('a1', true, 0)] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, agents: [ag('a1', true, 0)] } });
+});
+test('behind:null is not behind (only a number > 0 is) — a non-tracking agent (detached / no upstream) stays quiet', () => {
+  // Mirrors ahead:null ⇒ not unpushed. behind:null means there is no @{u} to
+  // compare against, so the agent must NOT surface as behind.
+  const r = sum([agent('a1', 'warden')], { a1: status(false, 0, null) });
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, agents: [ag('a1', true, 0, 0)] } });
 });
 test('ahead:0 is not unpushed', () => {
   const r = sum([agent('a1', 'warden')], { a1: status(false, 0) });
   assert.equal(r.perProject.warden.unpushed, 0);
+});
+test('behind:0 is not behind', () => {
+  const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0) });
+  assert.equal(r.perProject.warden.behind, 0);
 });
 
 console.log('\npopulation matches projectCounts: inactive / project-less chats are skipped');
 test('inactive agent (active:false) is ignored even when dirty', () => {
   const r = sum([{ id: 'a1', project: 'warden', active: false }], { a1: status(false, 5) });
   assert.deepEqual(r.perProject, {});
-  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, agents: [] });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, agents: [] });
 });
 test('active agent without a project is ignored (chips are project-scoped)', () => {
   const r = sum([{ id: 'a1', active: true }], { a1: status(false, 5) });
   assert.deepEqual(r.perProject, {});
-  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, agents: [] });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, agents: [] });
 });
 
 console.log('\nkey resolution: status is looked up by key || id (matches per-row lookups)');
@@ -156,16 +172,16 @@ test('when key is set, the status is read from gitStatus[key], not gitStatus[id]
   };
   const r = sum(chats, gitStatus);
   assert.deepEqual(r.perProject, {});
-  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, agents: [] });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, agents: [] });
 });
 test('when no key, the status is read from gitStatus[id]', () => {
   const chats = [{ id: 'chat-1', project: 'warden', active: true }];
   const r = sum(chats, { 'chat-1': status(false, 0) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, agents: [ag('chat-1', true, 0)] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, agents: [ag('chat-1', true, 0)] } });
 });
 
 console.log('\ntotal always equals the sum across projects');
-test('total.dirty and total.unpushed equal the per-project sums', () => {
+test('total.dirty/unpushed/behind equal the per-project sums', () => {
   const chats = [
     agent('a1', 'warden'), agent('a2', 'warden'),
     agent('b1', 'tinker'), agent('c1', 'nova'),
@@ -177,8 +193,10 @@ test('total.dirty and total.unpushed equal the per-project sums', () => {
   const r = sum(chats, gitStatus);
   const sumDirty = Object.values(r.perProject).reduce((n, p) => n + p.dirty, 0);
   const sumUnpushed = Object.values(r.perProject).reduce((n, p) => n + p.unpushed, 0);
+  const sumBehind = Object.values(r.perProject).reduce((n, p) => n + p.behind, 0);
   assert.equal(r.total.dirty, sumDirty);
   assert.equal(r.total.unpushed, sumUnpushed);
+  assert.equal(r.total.behind, sumBehind);
   // c1 is clean → 'nova' is absent from the sparse map.
   assert.equal('nova' in r.perProject, false);
 });
@@ -187,7 +205,7 @@ console.log('\nempty inputs are safe');
 test('no chats → empty per-project, zero totals', () => {
   const r = sum([], { x: status(false, 5) });
   assert.deepEqual(r.perProject, {});
-  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, agents: [] });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, agents: [] });
 });
 
 console.log('\nagents breakdown: which agents have uncommitted/unpushed work (WARDEN-268)');
@@ -268,6 +286,85 @@ test('the dirty filter matches ±N and the ahead>0 filter matches ↑N (the popo
   assert.deepEqual(agents.filter((a) => a.ahead > 0), [ag('a2', true, 2), ag('a3', false, 5)]);
   assert.equal(r.perProject.warden.dirty, agents.filter((a) => a.dirty).length);
   assert.equal(r.perProject.warden.unpushed, agents.filter((a) => a.ahead > 0).length);
+});
+
+console.log('\nbehind axis (WARDEN-297): ↓N is the symmetric counterpart to ↑N');
+test('a behind-only agent now surfaces (behind:1, no dirty/unpushed) — the key behavioral change', () => {
+  // Before WARDEN-297 the skip-clean guard dropped a behind-only agent entirely
+  // (it was neither dirty nor unpushed). Now it must appear so the chip can show ↓N.
+  const r = sum([agent('a1', 'warden')], { a1: status(true, 0, 4) });
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 1, agents: [ag('a1', false, 0, 4)] } });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 1, agents: [ag('a1', false, 0, 4)] });
+});
+
+test('an agent both dirty AND behind appears ONCE with both signals', () => {
+  // clean===false AND behind 2: one entry, dirty + behind, counted in each.
+  const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 2) });
+  assert.equal(r.perProject.warden.agents.length, 1);
+  assert.deepEqual(r.perProject.warden.agents, [ag('a1', true, 0, 2)]);
+  assert.equal(r.perProject.warden.dirty, 1);
+  assert.equal(r.perProject.warden.behind, 1);
+  assert.equal(r.perProject.warden.unpushed, 0);
+});
+
+test('an agent both ahead AND behind (diverged both ways) appears ONCE with both signals', () => {
+  // A repo can be ahead AND behind simultaneously — local commits origin lacks AND
+  // origin commits local lacks. It must count toward both unpushed and behind,
+  // once, and the entry carries both counts.
+  const r = sum([agent('a1', 'warden')], { a1: status(true, 3, 5) });
+  assert.equal(r.perProject.warden.agents.length, 1);
+  assert.deepEqual(r.perProject.warden.agents, [ag('a1', false, 3, 5)]);
+  assert.equal(r.perProject.warden.unpushed, 1);
+  assert.equal(r.perProject.warden.behind, 1);
+});
+
+test('a behind agent mixes with dirty/unpushed siblings across the same project', () => {
+  const chats = [agent('a1', 'warden'), agent('a2', 'warden'), agent('a3', 'warden')];
+  const gitStatus = {
+    a1: status(false, 0, 0), // dirty only
+    a2: status(true, 0, 7),  // behind only
+    a3: status(false, 2, 3), // dirty + unpushed + behind (all three)
+  };
+  const r = sum(chats, gitStatus);
+  assert.deepEqual(r.perProject, {
+    warden: {
+      dirty: 2, unpushed: 1, behind: 2,
+      agents: [ag('a1', true, 0, 0), ag('a2', false, 0, 7), ag('a3', true, 2, 3)],
+    },
+  });
+  assert.deepEqual(r.total, {
+    dirty: 2, unpushed: 1, behind: 2,
+    agents: [ag('a1', true, 0, 0), ag('a2', false, 0, 7), ag('a3', true, 2, 3)],
+  });
+});
+
+test('the behind>0 filter matches ↓N (the popover contract), mirroring ±N / ↑N', () => {
+  // The ↓N chip popover lists agents.filter(a => a.behind > 0); that filtered
+  // length must equal the chip's behind count field — exact parity with the
+  // ±N/↑N contract above.
+  const chats = [agent('a1', 'warden'), agent('a2', 'warden'), agent('a3', 'warden')];
+  const gitStatus = {
+    a1: status(true, 0, 6),  // behind only
+    a2: status(false, 2, 1), // dirty + unpushed + behind
+    a3: status(false, 0, 0), // dirty only (not behind)
+  };
+  const r = sum(chats, gitStatus);
+  const agents = r.perProject.warden.agents;
+  // Iteration order is preserved: a1 (behind only) then a2 (all three); a3 is
+  // not behind so it is filtered out.
+  assert.deepEqual(agents.filter((a) => a.behind > 0), [ag('a1', false, 0, 6), ag('a2', true, 2, 1)]);
+  assert.equal(r.perProject.warden.behind, agents.filter((a) => a.behind > 0).length);
+});
+
+test('a behind-only project gets a sparse-map entry (it would have been absent pre-WARDEN-297)', () => {
+  // The sparse "needs attention" map now keys on behind too: a project whose only
+  // active agent is behind (clean tree, pushed, but stale) must NOT be dropped.
+  const r = sum([agent('a1', 'warden'), agent('b1', 'tinker')], {
+    a1: status(true, 0, 9), // behind only
+    b1: status(true, 0, 0), // clean → tinker absent
+  });
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 1, agents: [ag('a1', false, 0, 9)] } });
+  assert.equal('tinker' in r.perProject, false);
 });
 
 console.log(`\n✓ GIT STATE SUMMARY TESTS PASS (${passed})`);
