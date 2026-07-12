@@ -19,7 +19,7 @@ import { DiffViewer } from './DiffViewer';
 import { DiffBlock } from './DiffBlock';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { cn } from '@/lib/utils';
-import { summarizeProjectGitState } from '@/lib/gitStateSummary';
+import { summarizeProjectGitState, type ProjectGitAgent } from '@/lib/gitStateSummary';
 import type { Chat, Collection } from '@/lib/types';
 import { loadUi, saveUi } from '@/lib/storage';
 import { THIS_MACHINE, ago, basename, chatType, displayName, hostTagOf } from '@/lib/chatDisplay';
@@ -193,15 +193,128 @@ function SectionToggle({ expanded, onClick, label, title }: {
 }
 
 // Compact uncommitted/unpushed WIP badges appended to the project filter chips
-// (WARDEN-201). Renders nothing for a clean, pushed project — so the chips stay
-// quiet unless an agent actually has uncommitted (yellow `±N`) or unpushed
-// (amber `↑N`) work. Reuses GitBranchBadge's exact glyph + color vocabulary so the
-// chip totals read as part of the same visual system as the per-row branch badge.
-function GitStateBadges({ dirty, unpushed }: { dirty: number; unpushed: number }) {
+// (WARDEN-201), now explorable (WARDEN-268). Renders nothing for a clean, pushed
+// project — so the chips stay quiet unless an agent actually has uncommitted
+// (yellow `±N`) or unpushed (amber `↑N`) work. Reuses GitBranchBadge's exact glyph
+// + color vocabulary so the chip totals read as part of the same visual system as
+// the per-row branch badge.
+//
+// Each badge is a popover listing exactly the agents behind the count (the `±N`
+// popover shows the dirty agents; the `↑N` popover shows the unpushed ones), and
+// every row is a jump-to: click → open that agent's chat and close the popover.
+// This makes a fleet WIP signal actionable — "±3" now tells you *which* 3 agents
+// are dirty without filtering the sidebar to the whole project and scanning it.
+// No new fetch: the contributing agents come from the cached gitStatus map via
+// summarizeProjectGitState; displayName/branch are joined here in the React layer.
+function GitStateBadge({ kind, count, agents, chats, gitStatus, onOpenChat }: {
+  kind: 'dirty' | 'unpushed';
+  count: number;
+  // Already scoped to this chip (a project's subset, or `total.agents` for the
+  // "All Projects" chip); filtered below by `kind`.
+  agents: ProjectGitAgent[];
+  chats: Chat[];
+  // Minimal slice the popover rows read (just the branch label) — the full
+  // gitStatus map ChatSidebar holds is structurally compatible.
+  gitStatus: Record<string, { branch: string | null }>;
+  onOpenChat: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  if (count <= 0) return null;
+  const shown = agents.filter((a) => (kind === 'dirty' ? a.dirty : a.ahead > 0));
+  const isDirty = kind === 'dirty';
+  const label = isDirty ? 'uncommitted changes' : 'unpushed commits';
+  const title = `${count} agent${count === 1 ? '' : 's'} with ${label} — click to list`;
+  return (
+    <RadixPopover.Root open={open} onOpenChange={setOpen}>
+      <RadixPopover.Trigger asChild>
+        {/* The chip is a real <button>, so the trigger is a role="button" <span>
+            — NEVER a nested <button> (invalid HTML; browsers misbehave). The
+            span needs its own keydown (Enter/Space) since a non-button doesn't
+            synthesize a click from the keyboard. stopPropagation is mandatory so
+            opening the popover does not also flip the project filter (the badge
+            sits inside the chip's onClick=setProjectFilter button). Mirrors
+            GitBranchBadge's trigger, just on a span instead of a button. */}
+        <span
+          role="button"
+          tabIndex={0}
+          aria-label={title}
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              e.stopPropagation();
+              setOpen((o) => !o);
+            }
+          }}
+          title={title}
+          className={cn('ml-0.5 inline-flex items-center text-[10px] cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary', isDirty ? 'text-yellow-400 hover:text-yellow-300' : 'text-amber-400 hover:text-amber-300')}
+        >
+          {isDirty ? '±' : '↑'}{count}
+        </span>
+      </RadixPopover.Trigger>
+      <RadixPopover.Portal>
+        <RadixPopover.Content
+          sideOffset={4}
+          align="start"
+          onClick={(e) => e.stopPropagation()}
+          className="z-50 min-w-56 max-w-80 rounded-md border border-border bg-popover p-1.5 text-popover-foreground shadow-lg outline-none data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0"
+        >
+          <div className="mb-1 px-0.5">
+            <span className={cn('text-[10px] font-medium', isDirty ? 'text-yellow-400' : 'text-amber-400')}>
+              {label} · {count} agent{count === 1 ? '' : 's'}
+            </span>
+          </div>
+          <ul className="max-h-72 overflow-auto">
+            {shown.map((a) => {
+              const c = findChat(chats, a.key);
+              const name = displayName(c);
+              const branch = gitStatus[a.key]?.branch ?? null;
+              return (
+                <li key={a.key} className="rounded">
+                  {/* role="button" div (not a <button>) so the row is keyboard-
+                      operable without nesting interactive buttons inside the
+                      portaled popover content. The CommitFile row uses the same
+                      pattern. Click → jump to the agent + close the popover. */}
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`open ${name}`}
+                    onClick={(e) => { e.stopPropagation(); setOpen(false); onOpenChat(a.key); }}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setOpen(false); onOpenChat(a.key); } }}
+                    title={`open ${name}`}
+                    className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+                  >
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[10px] text-foreground" title={name}>{name}</span>
+                      {branch && (
+                        <span className="block truncate text-[10px] text-cyan-400/80" title={branch}>
+                          ⎇ {branch}{!isDirty && a.ahead > 0 ? ` · ↑ ${a.ahead}` : ''}
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </RadixPopover.Content>
+      </RadixPopover.Portal>
+    </RadixPopover.Root>
+  );
+}
+
+function GitStateBadges({ dirty, unpushed, agents, chats, gitStatus, onOpenChat }: {
+  dirty: number;
+  unpushed: number;
+  agents: ProjectGitAgent[];
+  chats: Chat[];
+  gitStatus: Record<string, { branch: string | null }>;
+  onOpenChat: (id: string) => void;
+}) {
   return (
     <>
-      {dirty > 0 && <span className="ml-0.5 text-[10px] text-yellow-400">±{dirty}</span>}
-      {unpushed > 0 && <span className="ml-0.5 text-[10px] text-amber-400">↑{unpushed}</span>}
+      <GitStateBadge kind="dirty" count={dirty} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
+      <GitStateBadge kind="unpushed" count={unpushed} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
     </>
   );
 }
@@ -758,7 +871,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                 className={`text-xs px-2 py-1 rounded transition-all duration-150 ease-out active:scale-95 ${!projectFilter ? 'bg-accent' : 'hover:bg-accent/50'}`}
               >
                 All Projects ({chats.filter(c => c.active).length})
-                <GitStateBadges dirty={gitStateSummary.total.dirty} unpushed={gitStateSummary.total.unpushed} />
+                <GitStateBadges dirty={gitStateSummary.total.dirty} unpushed={gitStateSummary.total.unpushed} agents={gitStateSummary.total.agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
               </button>
               {Object.entries(projectCounts).map(([project, count]) => (
                 <button
@@ -767,7 +880,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                   className={`text-xs px-2 py-1 rounded transition-all duration-150 ease-out active:scale-95 ${projectFilter === project ? 'bg-accent' : 'hover:bg-accent/50'}`}
                 >
                   {project} ({count})
-                  <GitStateBadges dirty={gitStateSummary.perProject[project]?.dirty ?? 0} unpushed={gitStateSummary.perProject[project]?.unpushed ?? 0} />
+                  <GitStateBadges dirty={gitStateSummary.perProject[project]?.dirty ?? 0} unpushed={gitStateSummary.perProject[project]?.unpushed ?? 0} agents={gitStateSummary.perProject[project]?.agents ?? []} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
                 </button>
               ))}
             </div>
