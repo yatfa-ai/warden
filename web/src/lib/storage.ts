@@ -28,6 +28,17 @@ export type RestoreOnStartup = 'previous' | 'empty';
 // (single column, full-width), or 'side-by-side' (single row). Pure client-side pref.
 export type PaneLayout = 'auto' | 'stacked' | 'side-by-side';
 
+// What happens to an already-open pane when its underlying agent process exits
+// (its tmux session ends): 'keep' (default = today's behavior — leave the pane as
+// a dead terminal the human closes by hand), 'dim' (mark it "exited" with an
+// overlay + reduced opacity while keeping the last output readable for review),
+// or 'auto-close' (remove the pane via the existing closePane path, once). Pure
+// client-side pref; never sent to the backend. The exit signal is chat.active
+// (the backend's authoritative tmux-session liveness), so this only reacts to a
+// genuine live→exited transition of an already-open pane — never a pane whose
+// agent never attached. See WARDEN-248.
+export type OnExitBehavior = 'keep' | 'dim' | 'auto-close';
+
 // Terminal cursor shape × blink for every agent pane. 'blink-block' (default)
 // reproduces today's exact cursor (xterm's block + cursorBlink). The 'steady-*'
 // variants stop the blink — the one piece of always-on motion WARDEN-190's
@@ -129,6 +140,11 @@ export interface UiState {
   // grid: cols = ceil(sqrt(n))), 'stacked' (single column), or 'side-by-side'
   // (single row). Pure client-side pref; never sent to the backend.
   paneLayout?: PaneLayout;
+  // What happens to an already-open pane when its agent process exits: 'keep'
+  // (default = today's behavior), 'dim' (overlay + reduced opacity, keep last
+  // output), or 'auto-close' (remove via closePane once). Pure client-side pref;
+  // never sent to the backend. See OnExitBehavior / WARDEN-248.
+  onExitBehavior?: OnExitBehavior;
   // Whether launch reopens the previous workspace ('previous') or starts empty
   // ('empty'). Pure client-side pref; never sent to the backend.
   restoreOnStartup?: RestoreOnStartup;
@@ -233,6 +249,7 @@ const DEFAULT_UI: UiState = {
   terminalColorScheme: 'auto',
   terminalCursorStyle: 'blink-block',
   theme: 'system', density: 'comfortable', paneLayout: 'auto',
+  onExitBehavior: 'keep',
   restoreOnStartup: 'previous',
   defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', customPresets: [],
   defaultSplitShell: '',
@@ -269,6 +286,7 @@ export function loadUi(): UiState {
         theme: v.theme ?? 'system',
         density: v.density === 'compact' ? 'compact' : 'comfortable',
         paneLayout: (v.paneLayout === 'stacked' || v.paneLayout === 'side-by-side') ? v.paneLayout : 'auto',
+        onExitBehavior: ['keep', 'dim', 'auto-close'].includes(v.onExitBehavior) ? v.onExitBehavior : 'keep',
         restoreOnStartup: v.restoreOnStartup === 'empty' ? 'empty' : 'previous',
         defaultNewChatPreset: presetIsValid(v.defaultNewChatPreset) ? (v.defaultNewChatPreset as string) : 'claude',
         defaultNewChatHost: typeof v.defaultNewChatHost === 'string' ? v.defaultNewChatHost : '(local)',

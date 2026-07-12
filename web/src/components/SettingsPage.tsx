@@ -16,7 +16,7 @@ import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ArrowLeft, Trash2 } from 'lucide-react';
 import { type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { type Density } from '@/lib/density';
-import { type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type CustomPreset, type PresetNameIssue, PRESET_NAME_MAX, validatePresetName, DEFAULT_TERMINAL_FONT_FAMILY } from '@/lib/storage';
+import { type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type PresetNameIssue, PRESET_NAME_MAX, validatePresetName, DEFAULT_TERMINAL_FONT_FAMILY } from '@/lib/storage';
 import { putJson } from '@/lib/api';
 import { toast } from 'sonner';
 
@@ -76,6 +76,13 @@ interface Props {
   // to the `config` state / PUT /api/config body.
   paneLayout: PaneLayout;
   setPaneLayout: (layout: PaneLayout) => void;
+  // "Pane on agent exit" behavior is likewise a pure client-side localStorage pref
+  // (NOT backend config): it controls how an already-open pane reacts when its
+  // agent process exits, applies instantly via the prop callback, and is persisted
+  // by App's saveUi effect. It must never be added to the `config` state /
+  // PUT /api/config body. See WARDEN-248.
+  onExitBehavior: OnExitBehavior;
+  setOnExitBehavior: (v: OnExitBehavior) => void;
   // "Restore workspace on startup" is likewise a pure client-side localStorage
   // pref: it gates App's workspace initializers and is persisted by App's saveUi
   // effect. It must never be added to the `config` state / PUT /api/config body.
@@ -231,7 +238,7 @@ function PresetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -836,6 +843,23 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   </Select>
                   <p className="text-xs text-muted-foreground">
                     Controls how open agent panes are arranged. "Auto grid" splits them into a near-square grid, "Stacked" stacks them in one full-width column, and "Side-by-side" lays them out in a single row. Applies instantly and is remembered across reloads.
+                  </p>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="onExitBehavior">When an agent exits</Label>
+                  <Select value={onExitBehavior} onValueChange={(v) => setOnExitBehavior(v as OnExitBehavior)}>
+                    <SelectTrigger id="onExitBehavior" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="keep">Keep pane (default)</SelectItem>
+                      <SelectItem value="dim">Dim pane</SelectItem>
+                      <SelectItem value="auto-close">Auto-close pane</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    What happens to an already-open pane when its agent process exits. "Keep pane" leaves it for you to close manually; "Dim pane" marks it exited while keeping the last output readable; "Auto-close pane" removes it for you. Applies only to panes whose agent was running — a pane that never started is left alone. Applies globally and is remembered across reloads.
                   </p>
                 </div>
 

@@ -6,7 +6,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { streamApi } from '@/lib/stream';
 import type { Chat } from '@/lib/types';
 import { findPathCandidates } from '@/lib/path-links';
-import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle } from '@/lib/storage';
+import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBehavior } from '@/lib/storage';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { StatusDot } from '@/components/StatusDot';
@@ -83,9 +83,16 @@ interface Props {
   // blink — the accessibility payoff vs WARDEN-190 — and applies live to already-
   // open panes via the [terminalCursorStyle] effect below.
   terminalCursorStyle: TerminalCursorStyle;
+  // "Pane on agent exit" behavior (WARDEN-248): what this pane does when its
+  // agent process exits. 'keep' leaves the pane untouched (today's behavior);
+  // 'dim' shows an "agent exited" overlay + reduced opacity while keeping the
+  // last output readable; 'auto-close' calls onClose() once. The action only
+  // fires on a genuine live→exited transition (chat.active true→false of a pane
+  // that was ever active), never on a pane whose agent never attached.
+  onExitBehavior: OnExitBehavior;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalTheme, terminalCursorStyle }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalTheme, terminalCursorStyle, onExitBehavior }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -109,6 +116,19 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const [viewerOpen, setViewerOpen] = useState(false);
   const [viewerPath, setViewerPath] = useState('');
   const [viewerLine, setViewerLine] = useState<number | undefined>(undefined);
+
+  // WARDEN-248: "pane on agent exit" behavior. The action fires ONLY on a genuine
+  // live→exited transition — a pane opened for an agent that never attached (the
+  // "connecting…" spinner state) is excluded by the wasEverActive guard. We key
+  // off chat.active (the backend's authoritative tmux-session liveness via the
+  // catalog/discoverHost poll) rather than the real-time 'ended' stream message:
+  // 'ended' also fires on a client-initiated detach (host/id re-attach), which
+  // would mis-close a pane that is merely re-attaching. chat.active flips on the
+  // next poll tick (auto-refresh is 60s, visibility-gated) — the documented
+  // trade-off for correctness. active===null (undiscovered/lazy) is NOT an exit.
+  const wasEverActiveRef = useRef(false);   // has this pane's agent ever been active:true?
+  const exitHandledRef = useRef(false);     // one-shot: the exit action fires once per live→exited transition
+  const [agentExited, setAgentExited] = useState(false);   // 'dim' overlay state
 
   // Defensive clamp: the global font size can briefly fall outside 8–24 while a
   // user types into the Settings field (coerced on blur). xterm must never receive
@@ -370,6 +390,39 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     }
   }, [terminalCursorStyle]);
 
+  // WARDEN-248: react to the agent process exiting per the "pane on agent exit"
+  // pref. Fires only on a genuine live→exited transition (see wasEverActiveRef
+  // above). Keyed on chat?.active so a restart (active returns true) resets the
+  // dim overlay and re-arms the one-shot so a future exit can fire again.
+  // onExitBehavior is in the deps so a Settings change is honored on the next
+  // transition; the one-shot guard (exitHandledRef) means a mid-dead pref flip
+  // never retroactively closes an already-handled pane.
+  useEffect(() => {
+    const isActive = chat?.active === true;
+    if (isActive) {
+      wasEverActiveRef.current = true;
+      // Agent is (re)started — clear prior exit state so a restarted agent reads
+      // as live again: the dim overlay clears and a future exit can re-fire.
+      exitHandledRef.current = false;
+      setAgentExited(false);
+      return;
+    }
+    // active === false of a previously-live pane = genuine exit. null (lazy) is not.
+    if (chat?.active === false && wasEverActiveRef.current && !exitHandledRef.current) {
+      exitHandledRef.current = true;
+      if (onExitBehavior === 'auto-close') {
+        onClose();
+      } else if (onExitBehavior === 'dim') {
+        setAgentExited(true);
+      }
+      // 'keep' → no-op (today's exact behavior; the regression-free baseline)
+    }
+    // onClose is intentionally omitted from deps: it is an inline callback whose
+    // identity changes every render (matching the onClearNew effect above); the
+    // one-shot ref makes the call idempotent regardless.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chat?.active, onExitBehavior]);
+
   // external search trigger from global search
   useEffect(() => {
     if (externalSearchQuery && searchRef.current) {
@@ -441,19 +494,29 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     </IconTooltip>
   );
 
+  // WARDEN-248: the 'dim' exit state — show an "agent exited" overlay + reduced
+  // opacity while keeping the last output readable. Computed from agentExited
+  // (set only on a genuine live→exited transition) AND the dim preference.
+  const dimmed = agentExited && onExitBehavior === 'dim';
+
   return (
     <>
     <ContextMenu>
       <ContextMenuTrigger asChild>
     <div onClick={onFocus}
-      className={`flex flex-col h-full w-full min-h-0 rounded-lg overflow-hidden border ${TERMINAL_BG_CLASS[terminalTheme]} transition-all duration-200 ease-in-out ${focused ? 'border-primary shadow-lg shadow-primary/20' : 'border-border'}`}>
+      className={`flex flex-col h-full w-full min-h-0 rounded-lg overflow-hidden border ${TERMINAL_BG_CLASS[terminalTheme]} transition-all duration-200 ease-in-out ${focused ? 'border-primary shadow-lg shadow-primary/20' : 'border-border'} ${dimmed ? 'opacity-60' : ''}`}>
       {/* header toolbar */}
       <div onDoubleClick={(e) => { stop(e); onToggleMax(); }}
         className="flex items-center gap-1 px-2 py-1 compact:py-0.5 bg-muted text-xs shrink-0 select-none">
+        {/* WARDEN-248: when dimmed (agent exited), the dot must agree with the
+            body's "agent exited" state — a neutral, motionless gray "Exited"
+            dot, NOT the yellow-pulsing "Connecting" dot. The 'keep' baseline is
+            intentionally untouched: it keeps today's "Connecting" dot (a
+            pre-existing UX wrinkle, out of scope here). */}
         <StatusDot
-          tone={connected ? 'green' : errored ? 'red' : 'yellow'}
-          variant={connected ? 'solid' : errored ? 'square' : 'pulse'}
-          label={connected ? 'Connected' : errored ? 'Error' : 'Connecting'}
+          tone={dimmed ? 'gray' : connected ? 'green' : errored ? 'red' : 'yellow'}
+          variant={dimmed ? 'solid' : connected ? 'solid' : errored ? 'square' : 'pulse'}
+          label={dimmed ? 'Exited' : connected ? 'Connected' : errored ? 'Error' : 'Connecting'}
         />
         <span className="truncate flex-1 font-medium">{label || id}</span>
         {hasNew && <span className="text-[9px] text-cyan-400 bg-cyan-500/10 px-1 rounded animate-pulse">new</span>}
@@ -481,10 +544,15 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       {/* terminal surface — stop the contextmenu event so right-clicks here keep the xterm
           native paste menu instead of opening the themed pane menu (see Done criterion). */}
       <div ref={wrapRef} className="flex-1 min-h-0 px-1 py-0.5 overflow-hidden relative" onContextMenu={(e) => e.stopPropagation()} onClick={() => termRef.current?.focus()}>
-        {!connected && !errored && (
+        {!connected && !errored && !dimmed && (
           <div className="absolute inset-0 flex items-center justify-center gap-2 text-[11px] text-muted-foreground pointer-events-none select-none">
             <span className="size-3 rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground animate-spin" />
             connecting…
+          </div>
+        )}
+        {dimmed && (
+          <div className="absolute inset-0 flex items-center justify-center gap-2 text-[11px] text-muted-foreground pointer-events-none select-none">
+            agent exited
           </div>
         )}
       </div>
