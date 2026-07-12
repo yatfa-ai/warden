@@ -166,13 +166,21 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       }
       if (e.code === 'KeyV') {
         e.preventDefault();
-        navigator.clipboard?.readText().then((t) => { if (t) streamApi.send({ type: 'input', id, data: t }); }).catch(() => {
+        // Route through xterm's own paste path instead of shipping raw bytes.
+        // term.paste() wraps the block in bracketed-paste markers (\e[200~ …
+        // \e[201~) exactly when the app has enabled DECSET 2004, then emits
+        // through onData → streamApi → PTY (the bridge is byte-transparent both
+        // ways, so the markers reach the agent). So a multiline paste arrives as
+        // ONE paste and is never submitted line-by-line, matching a direct paste
+        // into the same tmux session; single-line + a bare-shell app (no
+        // bracketed paste) paste raw, like today. (WARDEN-254)
+        navigator.clipboard?.readText().then((t) => { if (t) term.paste(t); }).catch(() => {
           // Electron fallback: read from a paste event
           const ta = document.createElement('textarea');
           ta.style.position = 'fixed'; ta.style.opacity = '0';
           document.body.appendChild(ta); ta.focus();
           document.execCommand('paste');
-          setTimeout(() => { if (ta.value) streamApi.send({ type: 'input', id, data: ta.value }); document.body.removeChild(ta); }, 100);
+          setTimeout(() => { if (ta.value) term.paste(ta.value); document.body.removeChild(ta); }, 100);
         });
         return false;
       }

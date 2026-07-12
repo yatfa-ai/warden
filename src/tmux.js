@@ -19,11 +19,46 @@ export async function read(chat, cfg, lines = 500) {
   return r.stdout;
 }
 
-// Send a chat message: literal text via `send-keys -l`, then a separate Enter.
-export async function send(chat, cfg, text) {
+// Send a chat message to the agent.
+//
+// Single-line text (no embedded newline): unchanged — literal text via
+// `send-keys -l`, then a separate `Enter`.
+//
+// Multiline text: delivered as a single bracketed paste so the whole block is
+// treated as one input instead of submitting line-by-line. `tmux paste-buffer -p`
+// is the canonical paste path: it wraps the text in `\e[200~ … \e[201~` ONLY when
+// the pane app has enabled bracketed paste (DECSET 2004), and sends raw newlines
+// otherwise — exactly matching a real terminal paste into the same session. A
+// single trailing `Enter` then submits the block as one message. Verified against
+// tmux 3.3a (WARDEN-254): with the app in raw mode + bracketed paste enabled,
+// the pane receives `\e[200~line1\rline2\rline3\e[201~`; with it disabled it
+// receives `line1\rline2\rline3` (raw), never the markers — so we never "fix" an
+// app that hasn't opted in.
+//
+// `deps.runTmux` is an optional test seam (production callers omit it); mirrors
+// the deps seam in ssh.js runWithPool, since node:test mock.module is unavailable
+// on Node 20 and child_process exports are non-configurable (see ssh.test.js).
+let sendSeq = 0;
+export async function send(chat, cfg, text, deps = {}) {
+  const run = deps.runTmux ?? runTmux;
   const s = sess(chat, cfg);
-  let r = await runTmux(chat, ['send-keys', '-t', s, '-l', String(text)]);
-  if (r.ok) r = await runTmux(chat, ['send-keys', '-t', s, 'Enter']);
+  const str = String(text);
+  if (!str.includes('\n')) {
+    let r = await run(chat, ['send-keys', '-t', s, '-l', str]);
+    if (r.ok) r = await run(chat, ['send-keys', '-t', s, 'Enter']);
+    if (!r.ok) throw new Error((r.stderr || '').trim() || `send failed (exit ${r.code})`);
+    return true;
+  }
+  // Multiline → bracketed paste via a per-send named buffer. The name is unique
+  // per call so two concurrent sends to the same tmux server can't clobber each
+  // other's buffer between the set-buffer and paste-buffer calls. `paste-buffer
+  // -d` deletes the buffer after pasting (cleanup on the happy path); `--` lets
+  // the data start with `-` without tmux parsing it as a flag (verified: tmux
+  // otherwise errors `set-buffer: unknown flag -f`).
+  const buf = `warden-send-${Date.now()}-${++sendSeq}`;
+  let r = await run(chat, ['set-buffer', '-b', buf, '--', str]);
+  if (r.ok) r = await run(chat, ['paste-buffer', '-p', '-d', '-b', buf, '-t', s]);
+  if (r.ok) r = await run(chat, ['send-keys', '-t', s, 'Enter']);
   if (!r.ok) throw new Error((r.stderr || '').trim() || `send failed (exit ${r.code})`);
   return true;
 }
