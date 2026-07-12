@@ -508,10 +508,15 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       {/* header toolbar */}
       <div onDoubleClick={(e) => { stop(e); onToggleMax(); }}
         className="flex items-center gap-1 px-2 py-1 compact:py-0.5 bg-muted text-xs shrink-0 select-none">
+        {/* WARDEN-248: when dimmed (agent exited), the dot must agree with the
+            body's "agent exited" state — a neutral, motionless gray "Exited"
+            dot, NOT the yellow-pulsing "Connecting" dot. The 'keep' baseline is
+            intentionally untouched: it keeps today's "Connecting" dot (a
+            pre-existing UX wrinkle, out of scope here). */}
         <StatusDot
-          tone={connected ? 'green' : errored ? 'red' : 'yellow'}
-          variant={connected ? 'solid' : errored ? 'square' : 'pulse'}
-          label={connected ? 'Connected' : errored ? 'Error' : 'Connecting'}
+          tone={dimmed ? 'gray' : connected ? 'green' : errored ? 'red' : 'yellow'}
+          variant={dimmed ? 'solid' : connected ? 'solid' : errored ? 'square' : 'pulse'}
+          label={dimmed ? 'Exited' : connected ? 'Connected' : errored ? 'Error' : 'Connecting'}
         />
         <span className="truncate flex-1 font-medium">{label || id}</span>
         {hasNew && <span className="text-[9px] text-cyan-400 bg-cyan-500/10 px-1 rounded animate-pulse">new</span>}
