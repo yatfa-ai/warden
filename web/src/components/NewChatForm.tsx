@@ -30,7 +30,11 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
   const [preset, setPreset] = useState<string>(() => initialUi.defaultNewChatPreset ?? 'claude');
   const [customPresets] = useState(() => initialUi.customPresets ?? []);
   const [session, setSession] = useState('');
-  const [cwd, setCwd] = useState('');
+  // cwd pre-fills from the persisted defaultNewChatCwd pref (WARDEN-311) so a
+  // human who always spawns into the same project doesn't re-type the path on
+  // every spawn. Lazy init runs loadUi() once on mount (matching the host/preset
+  // lazy-inits above); the value is still editable per-spawn and submit trims it.
+  const [cwd, setCwd] = useState(() => initialUi.defaultNewChatCwd ?? '');
   const [cmd, setCmd] = useState('claude --dangerously-skip-permissions');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
