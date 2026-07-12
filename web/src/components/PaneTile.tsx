@@ -15,6 +15,11 @@ import { StatusDot } from '@/components/StatusDot';
 import { FileViewer } from './FileViewer';
 import { toast } from 'sonner';
 
+// The drag payload MIME written when a pane is dragged onto a workspace tab
+// (WARDEN-108: stable pane ids as payload, never filtered array indices). The
+// workspace tab strip (WorkspaceTabs) reads this on drop to move the pane.
+export const PANE_DRAG_MIME = 'application/x-warden-pane';
+
 // Two explicit xterm theme objects with hex values derived from the app's design
 // tokens (web/src/index.css). xterm.js does not reliably parse oklch(), so we
 // pass concrete hex rather than the raw token strings (nuance #2):
@@ -601,8 +606,19 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     <div onClick={onFocus}
       className={`flex flex-col h-full w-full min-h-0 rounded-lg overflow-hidden border ${TERMINAL_BG_CLASS[terminalTheme]} transition-all duration-200 ease-in-out ${focused ? 'border-primary shadow-lg shadow-primary/20' : 'border-border'} ${dimmed ? 'opacity-60' : ''}`}>
       {/* header toolbar */}
-      <div onDoubleClick={(e) => { stop(e); onToggleMax(); }}
-        className="flex items-center gap-1 px-2 py-1 compact:py-0.5 bg-muted text-xs shrink-0 select-none">
+      {/* header toolbar — also the drag handle for moving this pane to another
+          workspace (WARDEN-256). Only the toolbar is draggable, not the terminal
+          surface, so xterm text selection / Ctrl+click is unaffected. The pane id
+          is the drag payload (WARDEN-108); dropped onto a workspace tab it moves. */}
+      <div
+        draggable
+        onDragStart={(e) => {
+          e.dataTransfer.setData(PANE_DRAG_MIME, id);
+          e.dataTransfer.effectAllowed = 'move';
+        }}
+        title="drag to another workspace · double-click to maximize"
+        onDoubleClick={(e) => { stop(e); onToggleMax(); }}
+        className="flex items-center gap-1 px-2 py-1 compact:py-0.5 bg-muted text-xs shrink-0 select-none cursor-grab active:cursor-grabbing">
         {/* WARDEN-248: when dimmed (agent exited), the dot must agree with the
             body's "agent exited" state — a neutral, motionless gray "Exited"
             dot, NOT the yellow-pulsing "Connecting" dot. The 'keep' baseline is

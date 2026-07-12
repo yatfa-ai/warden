@@ -455,21 +455,23 @@ test('the pref survives an empty-mode mount (carried by the live spread, not the
 
 console.log('\ninitialWorkspace gates the workspace on mount');
 test('"previous" restores the last-saved workspace', () => {
-  const disk = { ...loadUi(), activeTabs: ['a', 'b'], hiddenTabs: ['h'], openPanes: ['a'], focused: 'a', paneHost: { a: 'host' } };
+  const disk = { ...loadUi(), activeTabs: ['a', 'b'], hiddenTabs: ['h'], workspaces: [{ id: 'w1', name: 'Workspace 1', openPanes: ['a'], focused: 'a' }], activeWorkspaceId: 'w1', paneHost: { a: 'host' } };
   const ws = initialWorkspace(disk, 'previous');
   assert.deepEqual(ws.activeTabs, ['a', 'b']);
   assert.deepEqual(ws.hiddenTabs, ['h']);
-  assert.deepEqual(ws.openPanes, ['a']);
-  assert.equal(ws.focused, 'a');
+  assert.deepEqual(ws.workspaces, [{ id: 'w1', name: 'Workspace 1', openPanes: ['a'], focused: 'a' }]);
+  assert.equal(ws.activeWorkspaceId, 'w1');
   assert.deepEqual(ws.paneHost, { a: 'host' });
 });
-test('"empty" yields a clean slate regardless of what was saved', () => {
-  const disk = { ...loadUi(), activeTabs: ['a', 'b'], hiddenTabs: ['h'], openPanes: ['a'], focused: 'a', paneHost: { a: 'host' } };
+test('"empty" yields a clean slate: one empty workspace, blank tabs, no hosts', () => {
+  const disk = { ...loadUi(), activeTabs: ['a', 'b'], hiddenTabs: ['h'], workspaces: [{ id: 'w1', name: 'Workspace 1', openPanes: ['a'], focused: 'a' }], activeWorkspaceId: 'w1', paneHost: { a: 'host' } };
   const ws = initialWorkspace(disk, 'empty');
   assert.deepEqual(ws.activeTabs, []);
   assert.deepEqual(ws.hiddenTabs, []);
-  assert.deepEqual(ws.openPanes, []);
-  assert.equal(ws.focused, null);
+  assert.equal(ws.workspaces.length, 1, 'exactly one workspace on a clean slate');
+  assert.deepEqual(ws.workspaces[0].openPanes, [], 'empty workspace has no panes');
+  assert.equal(ws.workspaces[0].focused, null, 'empty workspace has no focus');
+  assert.equal(ws.activeWorkspaceId, ws.workspaces[0].id, 'the empty workspace is active');
   assert.deepEqual(ws.paneHost, {});
 });
 
@@ -478,43 +480,45 @@ test('empty mount persists empty live workspace WITHOUT destroying the saved wor
   reset();
   // 1) Last session (previous mode, startedEmpty=false) saved a real workspace.
   const d0 = loadUi();
-  saveUi(persistUiState({ ...d0, activeTabs: ['chat-1', 'chat-2'], openPanes: ['chat-1'], focused: 'chat-1', paneHost: { 'chat-1': 'host-a' } }, 'previous', d0, false));
+  saveUi(persistUiState({ ...d0, activeTabs: ['chat-1', 'chat-2'], workspaces: [{ id: 'w1', name: 'Workspace 1', openPanes: ['chat-1'], focused: 'chat-1' }], activeWorkspaceId: 'w1', paneHost: { 'chat-1': 'host-a' } }, 'previous', d0, false));
   assert.deepEqual(loadUi().activeTabs, ['chat-1', 'chat-2']);
 
-  // 2) A fresh launch in 'empty' mode: startedEmpty=true seeds empty live arrays
-  //    (initialWorkspace('empty')), and the saveUi effect fires on mount with
-  //    those empty arrays — the exact situation that used to wipe the workspace.
+  // 2) A fresh launch in 'empty' mode: startedEmpty=true seeds an empty live
+  //    workspace (initialWorkspace('empty')), and the saveUi effect fires on
+  //    mount with that empty workspace — the exact situation that used to wipe it.
   const d1 = loadUi();
-  const emptyLive = { ...d1, activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, paneHost: {} };
-  saveUi(persistUiState(emptyLive, 'empty', d1, true));
+  const emptyWs = initialWorkspace(d1, 'empty');
+  saveUi(persistUiState({ ...d1, activeTabs: [], hiddenTabs: [], workspaces: emptyWs.workspaces, activeWorkspaceId: emptyWs.activeWorkspaceId, paneHost: {} }, 'empty', d1, true));
 
   // 3) The persisted workspace must STILL be intact.
   const after = loadUi();
   assert.equal(after.restoreOnStartup, 'empty');
   assert.deepEqual(after.activeTabs, ['chat-1', 'chat-2'], 'activeTabs survived the empty mount');
-  assert.deepEqual(after.openPanes, ['chat-1'], 'openPanes survived the empty mount');
-  assert.equal(after.focused, 'chat-1', 'focused survived the empty mount');
+  assert.deepEqual(after.workspaces, [{ id: 'w1', name: 'Workspace 1', openPanes: ['chat-1'], focused: 'chat-1' }], 'workspaces survived the empty mount');
+  assert.equal(after.activeWorkspaceId, 'w1', 'activeWorkspaceId survived the empty mount');
   assert.deepEqual(after.paneHost, { 'chat-1': 'host-a' }, 'paneHost survived the empty mount');
 });
 test('flipping empty -> previous AFTER an empty launch does NOT wipe the saved workspace', () => {
   // Regression guard for the in-session flip data-loss bug. The live workspace is
-  // still [] from the empty mount; flipping the pref to 'previous' re-fires the
+  // still empty from the empty mount; flipping the pref to 'previous' re-fires the
   // saveUi effect. Because startedEmpty=true, persistUiState must still carry the
-  // on-disk workspace forward — NOT write the live [] under the new 'previous' mode.
+  // on-disk workspace forward — NOT write the live empty workspace under the new
+  // 'previous' mode.
   reset();
   const d0 = loadUi();
-  saveUi(persistUiState({ ...d0, activeTabs: ['A', 'B', 'C'], openPanes: ['A'], focused: 'A', paneHost: { A: 'host-a' } }, 'previous', d0, false));
+  saveUi(persistUiState({ ...d0, activeTabs: ['A', 'B', 'C'], workspaces: [{ id: 'w1', name: 'Workspace 1', openPanes: ['A'], focused: 'A' }], activeWorkspaceId: 'w1', paneHost: { A: 'host-a' } }, 'previous', d0, false));
 
-  // Empty launch, then flip back to 'previous' mid-session (live workspace still []).
+  // Empty launch, then flip back to 'previous' mid-session (live workspace still empty).
   const d1 = loadUi();
-  saveUi(persistUiState({ ...d1, activeTabs: [], openPanes: [], focused: null, paneHost: {} }, 'previous', d1, true));
+  const emptyWs = initialWorkspace(d1, 'empty');
+  saveUi(persistUiState({ ...d1, activeTabs: [], workspaces: emptyWs.workspaces, activeWorkspaceId: emptyWs.activeWorkspaceId, paneHost: {} }, 'previous', d1, true));
 
-  // The saved workspace survives the flip — criterion #4.
+  // The saved workspace survives the flip.
   const after = loadUi();
   assert.equal(after.restoreOnStartup, 'previous', 'pref persisted as previous');
   assert.deepEqual(after.activeTabs, ['A', 'B', 'C'], 'flip empty->previous preserved activeTabs');
-  assert.deepEqual(after.openPanes, ['A'], 'flip empty->previous preserved openPanes');
-  assert.equal(after.focused, 'A', 'flip empty->previous preserved focused');
+  assert.deepEqual(after.workspaces, [{ id: 'w1', name: 'Workspace 1', openPanes: ['A'], focused: 'A' }], 'flip empty->previous preserved workspaces');
+  assert.equal(after.activeWorkspaceId, 'w1', 'flip empty->previous preserved activeWorkspaceId');
   assert.deepEqual(after.paneHost, { A: 'host-a' }, 'flip empty->previous preserved paneHost');
 
   // And the next launch (now 'previous', startedEmpty=false) restores it intact.
@@ -526,27 +530,28 @@ test('a previous-started session flipping to empty then back preserves the works
   // the (still-present) live workspace legitimately. No loss in any direction.
   reset();
   const d0 = loadUi();
-  saveUi(persistUiState({ ...d0, activeTabs: ['X', 'Y'], openPanes: ['X'], focused: 'X' }, 'previous', d0, false));
+  const ws = [{ id: 'w1', name: 'Workspace 1', openPanes: ['X'], focused: 'X' }];
+  saveUi(persistUiState({ ...d0, activeTabs: ['X', 'Y'], workspaces: ws, activeWorkspaceId: 'w1' }, 'previous', d0, false));
   // previous -> empty (mid-session, startedEmpty=false): freeze on disk.
   const d1 = loadUi();
-  saveUi(persistUiState({ ...d1, activeTabs: ['X', 'Y'], openPanes: ['X'], focused: 'X' }, 'empty', d1, false));
-  assert.deepEqual(loadUi().activeTabs, ['X', 'Y'], 'workspace frozen while pref is empty');
+  saveUi(persistUiState({ ...d1, activeTabs: ['X', 'Y'], workspaces: ws, activeWorkspaceId: 'w1' }, 'empty', d1, false));
+  assert.deepEqual(loadUi().workspaces, ws, 'workspace frozen while pref is empty');
   // empty -> previous (still startedEmpty=false): live workspace is legitimate again.
   const d2 = loadUi();
-  saveUi(persistUiState({ ...d2, activeTabs: ['X', 'Y'], openPanes: ['X'], focused: 'X' }, 'previous', d2, false));
-  assert.deepEqual(loadUi().activeTabs, ['X', 'Y'], 'workspace intact after flipping back');
+  saveUi(persistUiState({ ...d2, activeTabs: ['X', 'Y'], workspaces: ws, activeWorkspaceId: 'w1' }, 'previous', d2, false));
+  assert.deepEqual(loadUi().workspaces, ws, 'workspace intact after flipping back');
 });
-test('sanity: naively persisting the live empty arrays WOULD wipe it (guard against regression)', () => {
+test('sanity: naively persisting the live empty workspace WOULD wipe it (guard against regression)', () => {
   // If persistUiState ever stopped protecting the workspace in 'empty' mode and
   // just spread the live arrays, the saved workspace would be destroyed. This
   // encodes the dangerous behavior we explicitly do NOT do, to document the risk.
   reset();
-  saveUi({ ...loadUi(), activeTabs: ['chat-1'], openPanes: ['chat-1'], focused: 'chat-1' });
-  const before = loadUi();
-  assert.deepEqual(before.activeTabs, ['chat-1']);
+  saveUi({ ...loadUi(), activeTabs: ['chat-1'], workspaces: [{ id: 'w1', name: 'Workspace 1', openPanes: ['chat-1'], focused: 'chat-1' }] });
+  assert.deepEqual(loadUi().workspaces[0].openPanes, ['chat-1']);
   // The naive (wrong) write the fix replaces:
-  saveUi({ ...loadUi(), activeTabs: [], openPanes: [], focused: null });
-  assert.deepEqual(loadUi().activeTabs, [], 'naive write wipes the workspace (this is what persistUiState prevents)');
+  const blanked = initialWorkspace(loadUi(), 'empty');
+  saveUi({ ...loadUi(), activeTabs: [], workspaces: blanked.workspaces });
+  assert.deepEqual(loadUi().workspaces[0].openPanes, [], 'naive write wipes the workspace (this is what persistUiState prevents)');
 });
 
 // Middle pane width implied by a (window, sidebar, observer, health?) layout.
@@ -799,6 +804,117 @@ test('the map survives an empty-mode mount (carried by the live spread, not the 
   const d0 = loadUi();
   saveUi(persistUiState({ ...d0, defaultNewChatCwdByHost: { 'prod-box': '/srv/app' } }, 'empty', d0, true));
   assert.deepEqual(loadUi().defaultNewChatCwdByHost, { 'prod-box': '/srv/app' });
+});
+
+// --- Multi-workspace model (WARDEN-256) ---------------------------------------
+// workspaces[] + activeWorkspaceId replace the flat openPanes/focused. activeTabs/
+// hiddenTabs stay flat (the sidebar's global working set); paneHost stays global.
+console.log('\nworkspaces round-trip through loadUi/saveUi');
+test('defaults to exactly one empty workspace (the active one) when nothing is stored', () => {
+  reset();
+  const ui = loadUi();
+  assert.ok(Array.isArray(ui.workspaces), 'workspaces is an array');
+  assert.equal(ui.workspaces.length, 1, 'exactly one default workspace');
+  assert.deepEqual(ui.workspaces[0].openPanes, [], 'default workspace has no panes');
+  assert.equal(ui.workspaces[0].focused, null, 'default workspace has no focus');
+  assert.equal(typeof ui.workspaces[0].id, 'string', 'workspace has a stable id');
+  assert.equal(ui.activeWorkspaceId, ui.workspaces[0].id, 'the default workspace is active');
+});
+test('multiple workspaces + activeWorkspaceId round-trip', () => {
+  reset();
+  const ws = [
+    { id: 'w1', name: 'Project A', openPanes: ['a', 'b'], focused: 'a' },
+    { id: 'w2', name: 'Project B', openPanes: ['c'], focused: 'c' },
+  ];
+  saveUi({ ...loadUi(), workspaces: ws, activeWorkspaceId: 'w2' });
+  const ui = loadUi();
+  assert.deepEqual(ui.workspaces, ws, 'both workspaces round-trip intact');
+  assert.equal(ui.activeWorkspaceId, 'w2', 'activeWorkspaceId round-trips');
+});
+test('activeTabs/hiddenTabs stay flat and round-trip alongside workspaces', () => {
+  reset();
+  saveUi({ ...loadUi(), activeTabs: ['x', 'y'], hiddenTabs: ['z'], workspaces: [{ id: 'w1', name: 'Workspace 1', openPanes: ['x'], focused: 'x' }] });
+  const ui = loadUi();
+  assert.deepEqual(ui.activeTabs, ['x', 'y'], 'flat activeTabs preserved');
+  assert.deepEqual(ui.hiddenTabs, ['z'], 'flat hiddenTabs preserved');
+});
+test('an activeWorkspaceId pointing at a missing workspace falls back to the first', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], workspaces: [{ id: 'w1', name: 'Workspace 1', openPanes: ['x'], focused: 'x' }, { id: 'w2', name: 'Workspace 2', openPanes: [], focused: null }], activeWorkspaceId: 'ghost' }));
+  const ui = loadUi();
+  assert.equal(ui.activeWorkspaceId, 'w1', 'dangling activeWorkspaceId coerces to the first workspace');
+});
+test('a non-array workspaces coerces to the default single workspace (defensive, no throw)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], workspaces: 'bogus' }));
+  const ui = loadUi();
+  assert.equal(ui.workspaces.length, 1, 'non-array workspaces → one default workspace');
+  assert.deepEqual(ui.workspaces[0].openPanes, []);
+});
+test('an empty workspaces array coerces to the default single workspace (never zero workspaces)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], workspaces: [] }));
+  const ui = loadUi();
+  assert.equal(ui.workspaces.length, 1, 'never leave loadUi with zero workspaces');
+  assert.deepEqual(ui.workspaces[0].openPanes, []);
+});
+test('a workspace missing a name falls back to the default name', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], workspaces: [{ id: 'w1', openPanes: ['x'], focused: 'x' }] }));
+  const ui = loadUi();
+  assert.equal(ui.workspaces[0].name, 'Workspace 1', 'missing name → default name');
+});
+test('duplicate workspace ids are de-duplicated (first wins) so lookup-by-id is unambiguous', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], workspaces: [{ id: 'dup', name: 'First', openPanes: ['x'], focused: 'x' }, { id: 'dup', name: 'Second', openPanes: ['y'], focused: 'y' }] }));
+  const ui = loadUi();
+  assert.equal(ui.workspaces.length, 2, 'both entries survive');
+  const ids = ui.workspaces.map((w) => w.id);
+  assert.equal(new Set(ids).size, 2, 'ids are now unique');
+  assert.equal(ui.workspaces[0].name, 'First', 'first occurrence keeps its id/name');
+});
+test('workspaces survive an empty-mode mount (carried forward by persistUiState, not the live spread)', () => {
+  reset();
+  // 1) Save a real workspace (previous mode) so the on-disk snapshot holds it.
+  const d0 = loadUi();
+  saveUi(persistUiState({ ...d0, workspaces: [{ id: 'w1', name: 'Workspace 1', openPanes: ['a'], focused: 'a' }], activeWorkspaceId: 'w1' }, 'previous', d0, false));
+  // 2) Empty mount: disk now has w1; the live state is the empty default workspace.
+  //    persistUiState must carry disk.workspaces forward, NOT the empty live one.
+  const d1 = loadUi();
+  assert.deepEqual(d1.workspaces, [{ id: 'w1', name: 'Workspace 1', openPanes: ['a'], focused: 'a' }], 'disk has the saved workspace');
+  const emptyWs = initialWorkspace(d1, 'empty');
+  saveUi(persistUiState({ ...d1, workspaces: emptyWs.workspaces, activeWorkspaceId: emptyWs.activeWorkspaceId }, 'empty', d1, true));
+  // 3) The saved workspace survives the empty mount.
+  const after = loadUi();
+  assert.deepEqual(after.workspaces, [{ id: 'w1', name: 'Workspace 1', openPanes: ['a'], focused: 'a' }], 'workspaces frozen on disk across an empty mount');
+  assert.equal(after.activeWorkspaceId, 'w1', 'activeWorkspaceId frozen across an empty mount');
+});
+
+console.log('\nlegacy single-workspace migration: flat openPanes/focused → one workspace (no pane lost)');
+test('a legacy flat payload (no workspaces) migrates into one workspace preserving openPanes + focused', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['a', 'b'], openPanes: ['a'], focused: 'a' }));
+  const ui = loadUi();
+  assert.equal(ui.workspaces.length, 1, 'legacy flat state → exactly one workspace');
+  assert.deepEqual(ui.workspaces[0].openPanes, ['a'], 'legacy openPanes migrated, no pane lost');
+  assert.equal(ui.workspaces[0].focused, 'a', 'legacy focused migrated');
+  assert.equal(ui.activeWorkspaceId, ui.workspaces[0].id, 'the migrated workspace is active');
+  assert.deepEqual(ui.activeTabs, ['a', 'b'], 'flat activeTabs untouched');
+});
+test('a legacy payload with no open panes migrates to one empty workspace', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['a'], openPanes: [], focused: null }));
+  const ui = loadUi();
+  assert.equal(ui.workspaces.length, 1);
+  assert.deepEqual(ui.workspaces[0].openPanes, []);
+  assert.equal(ui.workspaces[0].focused, null);
+});
+test('a legacy payload with object-style openPanes entries still migrates', () => {
+  // Older shapes stored tab objects; the legacy migration normalizes them to ids.
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: [{ id: 'a' }, { id: 'b' }], openPanes: [{ id: 'a' }], focused: 'a' }));
+  const ui = loadUi();
+  assert.deepEqual(ui.workspaces[0].openPanes, ['a'], 'object openPanes normalized to ids during migration');
 });
 
 console.log(`\n✓ STORAGE TESTS PASS (${passed})`);
