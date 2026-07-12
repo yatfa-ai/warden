@@ -1,12 +1,23 @@
-// Health classification for the agent fleet (WARDEN-245).
+// Health classification for the agent fleet.
 //
-// The single behavioral change in this ticket: a chat whose tmux session is no
-// longer alive (active === false) is CLOSED, not CRITICAL — for both kind:'tmux'
-// and kind:'yatfa', with no kind-based special-casing. CRITICAL is reserved for
-// an ALIVE-but-silent agent (no output in 30+ min). These tests lock that
-// contract end-to-end: classification, the closed group bucket, the summary
-// count/label, and the display/color helpers.
-import { describe, it } from 'node:test';
+// Two behavioral contracts are locked here:
+//  - WARDEN-245: a chat whose tmux session is no longer alive (active === false)
+//    is CLOSED, not CRITICAL — for both kind:'tmux' and kind:'yatfa', with no
+//    kind-based special-casing. CRITICAL is reserved for an ALIVE-but-silent
+//    agent (no output in 30+ min). Covers classification, the closed group
+//    bucket, the summary count/label, and the display/color helpers.
+//  - WARDEN-317: the healthy→WARNING and warning→CRITICAL boundaries are
+//    user-configurable via getHealthState's optional `thresholds` arg; defaults
+//    stay at 5/30 min so existing behavior is unchanged unless a human opts in.
+//    The IDLE branch for manual tmux sessions consumes the SAME configured
+//    warning boundary as the agent classifications (the subtle coupling flagged
+//    in the ticket — all three call sites share one configured value).
+//
+// Exact-boundary assertions (e.g. "exactly 5 min → HEALTHY via <=") mock
+// Date.now() to a FIXED instant so sub-millisecond scheduling jitter cannot flip
+// an inclusive-cutoff result. Coarse-grained tests (well inside a band) use a
+// real Date.now() and are robust without mocking.
+import { describe, it, before, after, mock } from 'node:test';
 import assert from 'node:assert';
 import {
   HealthState,
@@ -19,7 +30,23 @@ import {
 } from './health.js';
 
 const MIN = 60 * 1000;
+
+// --- mocked-time helpers (for exact-boundary assertions) ---
+const NOW = Date.UTC(2026, 6, 12, 12, 0, 0); // 2026-07-12T12:00:00Z
+// lastActivity N minutes before the mocked NOW
+const agoMin = (m) => NOW - m * MIN;
+
+// --- real-time helper (coarse, well inside a band — no mock needed) ---
 const ago = (ms) => Date.now() - ms;
+
+// A live yatfa agent (auto-discovered): active tmux session running an agent.
+const yatfaAgent = () => ({ active: true, kind: 'yatfa', isAgent: true });
+// A manual tmux session (no agent process behind it): the IDLE-branch path.
+const manualTmux = () => ({ active: true, kind: 'tmux', isAgent: false });
+
+// =====================================================================
+// WARDEN-245: dead sessions are CLOSED, not CRITICAL
+// =====================================================================
 
 describe('getHealthState — dead sessions are CLOSED, not CRITICAL (WARDEN-245)', () => {
   it('classifies a dead tmux (manual) session as CLOSED', () => {
@@ -159,5 +186,130 @@ describe('getHealthSummary — closed is counted and labelled', () => {
     const summary = getHealthSummary(groupByHealth([]));
     assert.strictEqual(summary.closed, 0);
     assert.match(summary.label, /0 closed/);
+  });
+});
+
+// =====================================================================
+// WARDEN-317: configurable attention thresholds (healthy/critical cutoffs)
+// =====================================================================
+
+describe('getHealthState (default thresholds: healthy=5min, critical=30min)', () => {
+  before(() => mock.method(Date, 'now', () => NOW));
+  after(() => mock.restoreAll());
+
+  it('classifies an agent active within the healthy window as HEALTHY', () => {
+    assert.strictEqual(getHealthState(yatfaAgent(), agoMin(4)), HealthState.HEALTHY);
+  });
+
+  it('treats exactly the healthy boundary (5 min) as HEALTHY (inclusive <=)', () => {
+    assert.strictEqual(getHealthState(yatfaAgent(), agoMin(5)), HealthState.HEALTHY);
+  });
+
+  it('classifies an agent inactive between the two boundaries as WARNING', () => {
+    assert.strictEqual(getHealthState(yatfaAgent(), agoMin(20)), HealthState.WARNING);
+  });
+
+  it('treats exactly the critical boundary (30 min) as WARNING (inclusive <=)', () => {
+    assert.strictEqual(getHealthState(yatfaAgent(), agoMin(30)), HealthState.WARNING);
+  });
+
+  it('classifies an agent inactive past the critical boundary as CRITICAL', () => {
+    assert.strictEqual(getHealthState(yatfaAgent(), agoMin(31)), HealthState.CRITICAL);
+  });
+});
+
+describe('getHealthState (custom thresholds: healthy=15min, critical=120min)', () => {
+  // The 120-min critical boundary is the acceptance-criteria scenario: a human
+  // who checks hourly raises the critical cutoff so the 30-min mark no longer
+  // spams them with critical desktop alerts.
+  const thresholds = { healthyMin: 15, warningMin: 120 };
+
+  before(() => mock.method(Date, 'now', () => NOW));
+  after(() => mock.restoreAll());
+
+  it('keeps a recently-active agent HEALTHY (10 min < raised healthy boundary)', () => {
+    assert.strictEqual(getHealthState(yatfaAgent(), agoMin(10), thresholds), HealthState.HEALTHY);
+  });
+
+  it('shows WARNING, not CRITICAL, for an agent idle 45 min under a 120-min critical boundary', () => {
+    // Acceptance criterion: idle 45 min must read WARNING (not critical).
+    assert.strictEqual(getHealthState(yatfaAgent(), agoMin(45), thresholds), HealthState.WARNING);
+  });
+
+  it('treats exactly the raised critical boundary (120 min) as WARNING (inclusive <=)', () => {
+    assert.strictEqual(getHealthState(yatfaAgent(), agoMin(120), thresholds), HealthState.WARNING);
+  });
+
+  it('shows CRITICAL for an agent idle 3h under a 120-min critical boundary', () => {
+    // Acceptance criterion: idle 3h (180 min) must read CRITICAL and alert.
+    assert.strictEqual(getHealthState(yatfaAgent(), agoMin(180), thresholds), HealthState.CRITICAL);
+  });
+});
+
+describe('getHealthState IDLE branch consumes the configured critical threshold', () => {
+  // Subtle: manual tmux sessions go IDLE past the WARNING/critical boundary.
+  // This branch must use the SAME configured warningMin as the agent path — if a
+  // worker raises the boundary in the agent classifications but leaves the IDLE
+  // branch on the old default, manual sessions go IDLE at 30 min while agents
+  // stay WARNING until the new boundary (inconsistent). These pin the coupling.
+
+  before(() => mock.method(Date, 'now', () => NOW));
+  after(() => mock.restoreAll());
+
+  it('classifies a manual tmux session idle past the DEFAULT boundary (45 min) as IDLE', () => {
+    assert.strictEqual(getHealthState(manualTmux(), agoMin(45)), HealthState.IDLE);
+  });
+
+  it('classifies a manual tmux session as WARNING (not IDLE) when idle 45 min under a RAISED 120-min boundary', () => {
+    // 45 min is past the default boundary but under the raised one → not IDLE,
+    // falls through to normal classification → WARNING. Proves the IDLE branch
+    // honors warningMin instead of a hardcoded 30-min constant.
+    assert.strictEqual(
+      getHealthState(manualTmux(), agoMin(45), { healthyMin: 15, warningMin: 120 }),
+      HealthState.WARNING,
+    );
+  });
+
+  it('classifies a manual tmux session IDLE once past the RAISED boundary (180 > 120)', () => {
+    assert.strictEqual(
+      getHealthState(manualTmux(), agoMin(180), { healthyMin: 15, warningMin: 120 }),
+      HealthState.IDLE,
+    );
+  });
+});
+
+describe('getHealthState dead/unknown paths are threshold-independent', () => {
+  // WARDEN-245 made dead → CLOSED; WARDEN-317 adds the guarantee that passing
+  // configured thresholds does NOT change that (or the unknown path) — the
+  // dead/unknown branches are decided before any threshold matters.
+  before(() => mock.method(Date, 'now', () => NOW));
+  after(() => mock.restoreAll());
+
+  it('classifies a dead session as CLOSED regardless of the configured thresholds', () => {
+    assert.strictEqual(
+      getHealthState({ active: false, kind: 'yatfa', isAgent: true }, agoMin(1)),
+      HealthState.CLOSED,
+    );
+    // even with a wildly raised boundary, dead is dead (CLOSED, never critical).
+    assert.strictEqual(
+      getHealthState(
+        { active: false, kind: 'yatfa', isAgent: true },
+        agoMin(1),
+        { healthyMin: 15, warningMin: 120 },
+      ),
+      HealthState.CLOSED,
+    );
+  });
+
+  it('classifies an undiscovered lazy chat (active: null) as UNKNOWN', () => {
+    assert.strictEqual(getHealthState({ active: null, kind: 'yatfa', isAgent: true }, null), HealthState.UNKNOWN);
+    assert.strictEqual(
+      getHealthState({ active: null, kind: 'yatfa', isAgent: true }, agoMin(999), { healthyMin: 15, warningMin: 120 }),
+      HealthState.UNKNOWN,
+    );
+  });
+
+  it('classifies a live agent with no activity timestamp as UNKNOWN', () => {
+    assert.strictEqual(getHealthState(yatfaAgent(), null), HealthState.UNKNOWN);
   });
 });

@@ -153,7 +153,10 @@ app.get('/api/health', (_req, res) => {
     // Calculate health state for each agent
     const agentsWithHealth = chats.map(chat => ({
       ...chat,
-      healthState: getHealthState(chat, chat.lastActivity)
+      healthState: getHealthState(chat, chat.lastActivity, {
+        healthyMin: cfg.healthWarningThresholdMin,
+        warningMin: cfg.healthCriticalThresholdMin,
+      })
     }));
 
     // Group by health state
@@ -363,6 +366,9 @@ app.get('/api/config', (_req, res) => res.json({
   observerConfirmMode: cfg.observerConfirmMode,
   observerAutoStart: cfg.observerAutoStart,
   observerSessionTimeout: cfg.observerSessionTimeout,
+  // Fleet health attention thresholds (minutes of inactivity)
+  healthWarningThresholdMin: cfg.healthWarningThresholdMin,
+  healthCriticalThresholdMin: cfg.healthCriticalThresholdMin,
   confirmDestructiveActions: cfg.confirmDestructiveActions,
   notifyChatOps: cfg.notifyChatOps,
   notifyErrors: cfg.notifyErrors,
@@ -380,6 +386,7 @@ app.get('/api/config', (_req, res) => res.json({
 app.put('/api/config', (req, res) => {
   const { hosts, pollIntervalMs, tmuxSession, connectTimeout,
           observerConfirmMode, observerAutoStart, observerSessionTimeout,
+          healthWarningThresholdMin, healthCriticalThresholdMin,
           confirmDestructiveActions,
           notifyChatOps, notifyErrors, notifySuccess, notifyObserver,
           showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges,
@@ -395,6 +402,17 @@ app.put('/api/config', (req, res) => {
       (typeof observerSessionTimeout === 'number' &&
        Number.isFinite(observerSessionTimeout) &&
        observerSessionTimeout > 0)) cfg.observerSessionTimeout = observerSessionTimeout;
+  // Fleet health attention thresholds — null-able OR a finite positive number of
+  // minutes (mirrors the observerSessionTimeout guard). A field not destructured
+  // here is silently stripped, so both must be present for the pref to persist.
+  if (healthWarningThresholdMin === null ||
+      (typeof healthWarningThresholdMin === 'number' &&
+       Number.isFinite(healthWarningThresholdMin) &&
+       healthWarningThresholdMin > 0)) cfg.healthWarningThresholdMin = healthWarningThresholdMin;
+  if (healthCriticalThresholdMin === null ||
+      (typeof healthCriticalThresholdMin === 'number' &&
+       Number.isFinite(healthCriticalThresholdMin) &&
+       healthCriticalThresholdMin > 0)) cfg.healthCriticalThresholdMin = healthCriticalThresholdMin;
   // Safety preference: confirm before destructive actions (force-kill, kill chat)
   if (typeof confirmDestructiveActions === 'boolean') cfg.confirmDestructiveActions = confirmDestructiveActions;
   // Notification preferences (toast categories). Only accept booleans so a

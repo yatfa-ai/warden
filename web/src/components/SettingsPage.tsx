@@ -48,6 +48,11 @@ interface ConfigData {
   observerConfirmMode: 'always' | 'auto-safe';
   observerAutoStart: boolean;
   observerSessionTimeout: number | null;
+  // Fleet health attention thresholds (minutes of inactivity). healthWarning
+  // is the healthy→WARNING boundary (default 5); healthCritical is the
+  // warning→CRITICAL boundary (default 30) which also fires desktop alerts.
+  healthWarningThresholdMin: number | null;
+  healthCriticalThresholdMin: number | null;
   confirmDestructiveActions: boolean;
   notifyChatOps: boolean;
   notifyErrors: boolean;
@@ -290,6 +295,8 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
     observerConfirmMode: 'always',
     observerAutoStart: false,
     observerSessionTimeout: 30,
+    healthWarningThresholdMin: 5,
+    healthCriticalThresholdMin: 30,
     confirmDestructiveActions: true,
     notifyChatOps: true,
     notifyErrors: true,
@@ -338,6 +345,8 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
             : 'always',
           observerAutoStart: configData.observerAutoStart || false,
           observerSessionTimeout: configData.observerSessionTimeout ?? 30,
+          healthWarningThresholdMin: configData.healthWarningThresholdMin ?? 5,
+          healthCriticalThresholdMin: configData.healthCriticalThresholdMin ?? 30,
           confirmDestructiveActions: configData.confirmDestructiveActions ?? true,
           notifyChatOps: configData.notifyChatOps ?? true,
           notifyErrors: configData.notifyErrors ?? true,
@@ -644,6 +653,57 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   </div>
                   <p className="text-xs text-muted-foreground">
                     When on, force-killing a session and killing a chat ask for confirmation. Turn off for less friction.
+                  </p>
+                </div>
+              </SettingsSection>
+
+              {/* Attention thresholds (WARDEN-317) — configurable fleet-health
+                  boundaries. The healthy→WARNING and warning→CRITICAL cutoffs
+                  were previously hardcoded at 5 / 30 min in src/health.js. They
+                  tune the same "needs attention" signal the Desktop alerts
+                  preference (WARDEN-259) reacts to, so a human who checks hourly
+                  can raise the critical boundary instead of being spammed at the
+                  fixed 30-min mark. Empty falls back to the default (5 / 30). */}
+              <SettingsSection title="Attention thresholds">
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="healthWarningThresholdMin">Warning after (minutes)</Label>
+                  <Input
+                    id="healthWarningThresholdMin"
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={config.healthWarningThresholdMin ?? ''}
+                    onChange={(e) =>
+                      setConfig({
+                        ...config,
+                        healthWarningThresholdMin: e.target.value ? parseInt(e.target.value) : null,
+                      })
+                    }
+                    placeholder="Default 5"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Minutes of agent inactivity before it needs attention (warning state). Leave empty for the default (5).
+                  </p>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="healthCriticalThresholdMin">Critical after (minutes)</Label>
+                  <Input
+                    id="healthCriticalThresholdMin"
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={config.healthCriticalThresholdMin ?? ''}
+                    onChange={(e) =>
+                      setConfig({
+                        ...config,
+                        healthCriticalThresholdMin: e.target.value ? parseInt(e.target.value) : null,
+                      })
+                    }
+                    placeholder="Default 30"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Minutes of inactivity before an agent is critical and triggers a desktop alert. Leave empty for the default (30).
                   </p>
                 </div>
               </SettingsSection>
