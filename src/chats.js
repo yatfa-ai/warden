@@ -8,7 +8,7 @@ import { loadCatalog } from './config.js';
 import { ROLES, parseContainerName, buildChat, sortChats } from './chatMeta.js';
 // Re-export for any external consumer; the canonical home is now ./chatMeta.js.
 export { ROLES, parseContainerName };
-import { isCompanionTransportEnabled, discover as discoverViaCompanion } from './companion.js';
+import { isCompanionTransportEnabled, discover as discoverViaCompanion, capturePanes as capturePanesViaCompanion } from './companion.js';
 
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 const LOCAL = '(local)';
@@ -357,6 +357,40 @@ export async function discoverHost(host, cfg) {
   return { host, chats };
 }
 
+// Build the batched, sentinel-framed capture script for one host's panes. Each
+// pane is bracketed by ___B_<key>___ / ___E_<key>___ sentinels; the tmux
+// invocation is `docker exec <container> tmux` when a container is set, else
+// bare `tmux` (so bare-tmux / manual chats still work). This is the canonical
+// framing BOTH the default runWithPool path and the Go companion
+// (companion/main.go buildCaptureScript) reproduce — extracted so the contract
+// is unit-testable in one place.
+export function buildCaptureScript(list) {
+  return list.map((c) => {
+    const t = c.container ? `docker exec ${shellQuote(c.container)} tmux` : 'tmux';
+    const s = shellQuote(c.session || c.container || 'agent');
+    return `printf '___B_${c.key}___\\n'; ${t} capture-pane -t ${s} -p -e -S -60 -E - 2>/dev/null; printf '\\n___E_${c.key}___\\n'`;
+  }).join('; ');
+}
+
+// Parse the stdout of the batched capture script into a key->content map. A
+// ___B_<key>___ line opens a pane (resetting the buffer), ___E_<key>___ closes
+// it (committing the buffered lines joined by '\n'); lines outside a block are
+// ignored. This is the SAME contract the Go companion's parseCaptureSentinels
+// implements — extracted so the host-side framing can be tested against it.
+export function parseCaptureSentinels(stdout) {
+  const out = {};
+  let cur = null;
+  const buf = [];
+  for (const ln of (stdout || '').split('\n')) {
+    const b = ln.match(/^___B_(.+)___$/);
+    if (b) { cur = b[1]; buf.length = 0; continue; }
+    const e = ln.match(/^___E_(.+)___$/);
+    if (e) { if (cur) out[cur] = buf.join('\n'); cur = null; continue; }
+    if (cur != null) buf.push(ln);
+  }
+  return out;
+}
+
 // Capture tmux pane content from multiple chats concurrently.
 // Groups by host to minimize SSH round-trips. Returns a map of chat key -> pane content.
 export async function capturePanes(chats, cfg = {}) {
@@ -371,22 +405,22 @@ export async function capturePanes(chats, cfg = {}) {
       }
       return;
     }
-    const script = list.map((c) => {
-      const t = c.container ? `docker exec ${shellQuote(c.container)} tmux` : 'tmux';
-      const s = shellQuote(c.session || c.container || 'agent');
-      return `printf '___B_${c.key}___\\n'; ${t} capture-pane -t ${s} -p -e -S -60 -E - 2>/dev/null; printf '\\n___E_${c.key}___\\n'`;
-    }).join('; ');
+    // Experimental companion transport (WARDEN-276): for REMOTE hosts, when
+    // WARDEN_COMPANION_TRANSPORT=1 is set, route capture-pane through the
+    // persistent companion channel (zero per-op ssh handshakes across the
+    // polling cadence). The default runWithPool path below is byte-for-byte
+    // unchanged and remains the default. companion-or-fail: on failure we DO
+    // NOT fall back to raw SSH — the error is surfaced and the panes map is
+    // simply empty for this host (opt out via the env var).
+    if (isCompanionTransportEnabled()) {
+      const r = await capturePanesViaCompanion(host, list, cfg);
+      if (r.ok) Object.assign(out, r.panes);
+      return;
+    }
+    const script = buildCaptureScript(list);
     const res = await runWithPool(host, script, { timeout: 15000 }, cfg);
     if (!res.ok) return;
-    let cur = null;
-    const buf = [];
-    for (const ln of res.stdout.split('\n')) {
-      const b = ln.match(/^___B_(.+)___$/);
-      if (b) { cur = b[1]; buf.length = 0; continue; }
-      const e = ln.match(/^___E_(.+)___$/);
-      if (e) { if (cur) out[cur] = buf.join('\n'); cur = null; continue; }
-      if (cur != null) buf.push(ln);
-    }
+    Object.assign(out, parseCaptureSentinels(res.stdout));
   }));
   return out;
 }
