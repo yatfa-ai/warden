@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import {
   AlertCircleIcon,
   ArrowDownIcon,
   CheckIcon,
+  CopyIcon,
   EyeIcon,
   Loader2Icon,
   PencilIcon,
@@ -15,11 +16,26 @@ import {
   UserIcon,
   XIcon,
 } from 'lucide-react';
+import {
+  AssistantRuntimeProvider,
+  ThreadPrimitive,
+  MessagePrimitive,
+  ActionBarPrimitive,
+  useExternalStoreRuntime,
+  type AppendMessage,
+  type ThreadMessageLike,
+} from '@assistant-ui/react';
 import type { ChatContextMeta, ObserveMsg } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Textarea } from '@/components/ui/textarea';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 import {
   Dialog,
   DialogClose,
@@ -31,16 +47,18 @@ import {
 } from '@/components/ui/dialog';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { useStickToBottom } from '@/lib/useStickToBottom';
+import { decideFailObserverTurn } from '@/lib/observerTurns';
 import { ObserverMarkdown } from '@/components/ObserverMarkdown';
 import { StatusDot } from '@/components/StatusDot';
 
 // One entry in the conversation timeline. Observer text is streamed: an observer
 // item is created `streaming` while the assistant is emitting, then finalized on
-// `done` (or when a tool/card interrupts). `ts` is the arrival time; replayed
-// history has no timestamp (ts = 0) and simply omits the clock.
+// `done` (or when a tool/card interrupts). `errored` marks a turn that ended in
+// an error or a dropped stream so assistant-ui surfaces a retry affordance.
+// `ts` is the arrival time; replayed history has no timestamp (ts = 0).
 type Item =
   | { id: string; kind: 'user'; text: string; ts: number }
-  | { id: string; kind: 'observer'; text: string; ts: number; streaming: boolean }
+  | { id: string; kind: 'observer'; text: string; ts: number; streaming: boolean; errored?: boolean }
   | { id: string; kind: 'tool'; name: string; arg?: string; ts: number }
   | { id: string; kind: 'meta'; text: string; tone: 'info' | 'error'; ts: number }
   | {
@@ -73,6 +91,60 @@ interface Props {
 }
 
 const MAX_COMPOSER_HEIGHT = 160; // px — must match the `max-h-40` class (10rem)
+
+// assistant-ui MessageStatus values. `running` = still emitting; `complete` with
+// reason "stop" = a turn that finished normally; `incomplete` with reason "error"
+// = a turn that failed or whose stream dropped, which surfaces a retry affordance.
+const STATUS_RUNNING: ThreadMessageLike['status'] = { type: 'running' };
+const STATUS_COMPLETE: ThreadMessageLike['status'] = { type: 'complete', reason: 'stop' };
+const STATUS_ERROR: ThreadMessageLike['status'] = { type: 'incomplete', reason: 'error' };
+
+// Map a timeline item onto assistant-ui's ThreadMessageLike. assistant-ui only
+// permits `status` on assistant-role messages, so every non-user entry (observer
+// text, tool chips, meta lines, directive/suggestion cards) maps to an assistant
+// message; the rendered appearance is chosen by `kind` in the message renderer,
+// not by role. The text content doubles as the copy payload for each message.
+function convertMessage(item: Item): ThreadMessageLike {
+  switch (item.kind) {
+    case 'user':
+      return { id: item.id, role: 'user', content: [{ type: 'text' as const, text: item.text }] };
+    case 'observer':
+      return {
+        id: item.id,
+        role: 'assistant',
+        content: [{ type: 'text' as const, text: item.text }],
+        status: item.streaming ? STATUS_RUNNING : item.errored ? STATUS_ERROR : STATUS_COMPLETE,
+      };
+    case 'tool':
+      return {
+        id: item.id,
+        role: 'assistant',
+        content: [{ type: 'text' as const, text: toolLabel(item.name) }],
+        status: STATUS_COMPLETE,
+      };
+    case 'meta':
+      return {
+        id: item.id,
+        role: 'assistant',
+        content: [{ type: 'text' as const, text: item.text }],
+        status: STATUS_COMPLETE,
+      };
+    case 'card':
+      return {
+        id: item.id,
+        role: 'assistant',
+        content: [{ type: 'text' as const, text: item.directive }],
+        status: STATUS_COMPLETE,
+      };
+    case 'suggestion':
+      return {
+        id: item.id,
+        role: 'assistant',
+        content: [{ type: 'text' as const, text: item.action }],
+        status: STATUS_COMPLETE,
+      };
+  }
+}
 
 // One observer conversation, bound to a persisted session (?sid=). History is
 // replayed on connect so a refresh/restore shows the prior conversation.
@@ -159,6 +231,34 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
     });
   }, []);
 
+  // Mark the current turn's observer message as failed (stream dropped or the
+  // backend errored) so a retry affordance surfaces on it. The shape of the
+  // failure (mark an in-flight stream vs. synthesize an empty errored turn vs.
+  // no-op) is decided by the pure decideFailObserverTurn helper — see
+  // observerTurns.ts for the failure-mode coverage.
+  const failStreamingObserver = useCallback(() => {
+    setItems((prev) => {
+      const decision = decideFailObserverTurn(prev);
+      if (decision.action === 'mark-streaming') {
+        return prev.map((it) =>
+          it.id === decision.id && it.kind === 'observer'
+            ? { ...it, streaming: false, errored: true }
+            : it,
+        );
+      }
+      if (decision.action === 'none') return prev;
+      const created: Item = {
+        id: nextId(),
+        kind: 'observer',
+        text: '',
+        ts: Date.now(),
+        streaming: false,
+        errored: true,
+      };
+      return [...prev, created];
+    });
+  }, [nextId]);
+
   const pushItem = useCallback(
     (item: Item) => {
       finalizeStreaming();
@@ -226,10 +326,14 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
       wsRef.current = null;
       setConn(false);
       setBusy(false);
-      if (!userStopped)
+      if (!userStopped) {
+        // A dropped stream mid-generation is recoverable: flag the partial
+        // observer turn for retry, then reconnect as before.
+        failStreamingObserver();
         reconnectTimeoutRef.current = setTimeout(() => {
           if (mountedRef.current) connect();
         }, 1500);
+      }
     };
     ws.onerror = (e) => {
       if (!mountedRef.current) return;
@@ -267,6 +371,9 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
           setBusy(false);
           return;
         case 'error':
+          // Flag the in-flight turn as failed (retry affordance) before the
+          // error line, then settle.
+          failStreamingObserver();
           pushItem({ id: nextId(), kind: 'meta', text: m.error, tone: 'error', ts: Date.now() });
           setBusy(false);
           return;
@@ -301,7 +408,7 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
           return;
       }
     };
-  }, [sessionId, appendObserverText, finalizeStreaming, pushItem, nextId]);
+  }, [sessionId, appendObserverText, finalizeStreaming, failStreamingObserver, pushItem, nextId]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -339,19 +446,22 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
     }
   }, [items, busy, scrollToBottom, stickIfPinned]);
 
-  const send = (text: string) => {
-    if (!wsRef.current || wsRef.current.readyState !== wsRef.current.OPEN) return;
-    setItems((p) => [...p, { id: nextId(), kind: 'user', text, ts: Date.now() }]);
-    setBusy(true);
-    forceBottomRef.current = true;
-    // Open panes are surfaced to the observer as the chats worth watching. This
-    // reads sibling pane elements (not this component's own state) and is part of
-    // the preserved functional core — it is not the composer-value DOM hack.
-    const panes = Array.from(document.querySelectorAll('[data-pane-id]'))
-      .map((el) => el.getAttribute('data-pane-id'))
-      .filter(Boolean) as string[];
-    wsRef.current.send(JSON.stringify({ type: 'user', text, panes }));
-  };
+  const send = useCallback(
+    (text: string) => {
+      if (!wsRef.current || wsRef.current.readyState !== wsRef.current.OPEN) return;
+      setItems((p) => [...p, { id: nextId(), kind: 'user', text, ts: Date.now() }]);
+      setBusy(true);
+      forceBottomRef.current = true;
+      // Open panes are surfaced to the observer as the chats worth watching. This
+      // reads sibling pane elements (not this component's own state) and is part
+      // of the preserved functional core — it is not the composer-value DOM hack.
+      const panes = Array.from(document.querySelectorAll('[data-pane-id]'))
+        .map((el) => el.getAttribute('data-pane-id'))
+        .filter(Boolean) as string[];
+      wsRef.current.send(JSON.stringify({ type: 'user', text, panes }));
+    },
+    [nextId],
+  );
 
   const submit = () => {
     const text = draft.trim();
@@ -360,33 +470,46 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
     send(text);
   };
 
-  const stop = () => {
+  const stop = useCallback(() => {
     setUserStopped(true);
     if (wsRef.current) {
       wsRef.current.close();
       setBusy(false);
       pushItem({ id: nextId(), kind: 'meta', text: 'Stopped', tone: 'info', ts: Date.now() });
     }
-  };
+  }, [pushItem, nextId]);
 
   const reconnect = () => {
     pushItem({ id: nextId(), kind: 'meta', text: 'Reconnecting…', tone: 'info', ts: Date.now() });
     connect();
   };
 
-  const decide = (requestId: string, approved: boolean, edited?: string) => {
-    wsRef.current?.send(JSON.stringify({ type: 'gate_decision', requestId, approved, edited }));
-    setItems((p) =>
-      p.map((it) =>
-        it.kind === 'card' && it.requestId === requestId
-          ? { ...it, resolved: true, result: approved ? 'sent' : 'declined' }
-          : it,
-      ),
-    );
-  };
+  const decide = useCallback(
+    (requestId: string, approved: boolean, edited?: string) => {
+      wsRef.current?.send(JSON.stringify({ type: 'gate_decision', requestId, approved, edited }));
+      setItems((p) =>
+        p.map((it) =>
+          it.kind === 'card' && it.requestId === requestId
+            ? { ...it, resolved: true, result: approved ? 'sent' : 'declined' }
+            : it,
+        ),
+      );
+    },
+    [],
+  );
 
-  const dismissSuggestion = (id: string) =>
-    setItems((p) => p.map((it) => (it.id === id && it.kind === 'suggestion' ? { ...it, dismissed: true } : it)));
+  const dismissSuggestion = useCallback(
+    (id: string) =>
+      setItems((p) => p.map((it) => (it.id === id && it.kind === 'suggestion' ? { ...it, dismissed: true } : it))),
+    [],
+  );
+
+  // Append-only regenerate: re-run the last user turn by re-sending it. No
+  // history branching (sidesteps the ExternalStoreRuntime branching limitation).
+  const regenerate = useCallback(() => {
+    const lastUser = [...items].reverse().find((it): it is Extract<Item, { kind: 'user' }> => it.kind === 'user');
+    if (lastUser) send(lastUser.text);
+  }, [items, send]);
 
   const pendingGate = items.some((it) => it.kind === 'card' && !it.resolved);
   const last = items[items.length - 1];
@@ -396,6 +519,37 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
   const showThinking = busy && !pendingGate && !lastStreamingObs;
   const showJump = !atBottom && items.length > 0;
   const canSend = conn && !busy && draft.trim().length > 0;
+
+  // assistant-ui reads the conversation from this runtime. The external-store
+  // adapter owns no state of its own — `items` (and the WS handlers above) remain
+  // the single source of truth; assistant-ui only renders it and provides the
+  // chat affordances (copy, regenerate/retry, action bar, context menu).
+  // `isRunning` is left false on purpose: the "thinking" placeholder is rendered
+  // explicitly below (matching the prior panel) rather than via assistant-ui's
+  // optimistic message, so its timing stays identical to the hand-rolled UI.
+  const runtime = useExternalStoreRuntime({
+    messages: items,
+    convertMessage,
+    isRunning: false,
+    onNew: async (message: AppendMessage) => {
+      const part = message.content[0];
+      if (part?.type === 'text' && part.text.trim()) send(part.text);
+    },
+    onReload: async () => {
+      regenerate();
+    },
+    onCancel: async () => {
+      stop();
+    },
+  });
+
+  // id → item lookup so each assistant-ui message can render its full timeline
+  // entry (card fields, suggestion state, …) straight from React state.
+  const itemsById = useMemo(() => {
+    const map = new Map<string, Item>();
+    for (const it of items) map.set(it.id, it);
+    return map;
+  }, [items]);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -423,78 +577,111 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
       </div>
 
       {/* Conversation */}
-      <div ref={rootRef} className="relative min-h-0 flex-1">
-        <ScrollArea className="h-full">
-          <div className="flex flex-col gap-3 p-3">
-            {!conn && !connectionError && (
-              <div className="flex flex-col items-center justify-center gap-2 py-10 text-muted-foreground">
-                <Loader2Icon className="size-5 animate-spin" />
-                <span className="text-xs">
-                  {loadingTimeout ? 'Taking longer than expected…' : 'Connecting to observer…'}
-                </span>
-              </div>
-            )}
-            {connectionError && !conn && (
-              <div className="flex flex-col gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-                <div className="flex items-center gap-2">
-                  <AlertCircleIcon className="size-4 shrink-0" />
-                  <span>{connectionError}</span>
-                </div>
-                <Button size="sm" variant="outline" onClick={reconnect} className="self-start">
-                  <RefreshCwIcon /> Reconnect
-                </Button>
-              </div>
-            )}
-            {conn && items.length === 0 && !busy && (
-              <div className="flex flex-col items-center justify-center gap-2 py-10 text-center">
-                <div className="rounded-full bg-muted/60 p-2.5">
-                  <EyeIcon className="size-5 text-muted-foreground/50" />
-                </div>
-                <div className="text-sm text-muted-foreground">Observer is ready</div>
-                <div className="text-xs text-muted-foreground/60">
-                  Ask what your agents are working on, or request a summary.
-                </div>
-              </div>
-            )}
+      <AssistantRuntimeProvider runtime={runtime}>
+        <ThreadPrimitive.Root className="contents">
+          <div ref={rootRef} className="relative min-h-0 flex-1">
+            <ScrollArea className="h-full">
+              <div className="flex flex-col gap-3 p-3">
+                {!conn && !connectionError && (
+                  <div className="flex flex-col items-center justify-center gap-2 py-10 text-muted-foreground">
+                    <Loader2Icon className="size-5 animate-spin" />
+                    <span className="text-xs">
+                      {loadingTimeout ? 'Taking longer than expected…' : 'Connecting to observer…'}
+                    </span>
+                  </div>
+                )}
+                {connectionError && !conn && (
+                  <div className="flex flex-col gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                    <div className="flex items-center gap-2">
+                      <AlertCircleIcon className="size-4 shrink-0" />
+                      <span>{connectionError}</span>
+                    </div>
+                    <Button size="sm" variant="outline" onClick={reconnect} className="self-start">
+                      <RefreshCwIcon /> Reconnect
+                    </Button>
+                  </div>
+                )}
+                {conn && items.length === 0 && !busy && (
+                  <div className="flex flex-col items-center justify-center gap-2 py-10 text-center">
+                    <div className="rounded-full bg-muted/60 p-2.5">
+                      <EyeIcon className="size-5 text-muted-foreground/50" />
+                    </div>
+                    <div className="text-sm text-muted-foreground">Observer is ready</div>
+                    <div className="text-xs text-muted-foreground/60">
+                      Ask what your agents are working on, or request a summary.
+                    </div>
+                  </div>
+                )}
 
-            {items.map((it) => {
-              if (it.kind === 'user') return <UserRow key={it.id} text={it.text} ts={it.ts} />;
-              if (it.kind === 'observer')
-                return <ObserverRow key={it.id} text={it.text} ts={it.ts} streaming={it.streaming} />;
-              if (it.kind === 'tool') return <ToolChip key={it.id} name={it.name} arg={it.arg} />;
-              if (it.kind === 'meta') return <MetaLine key={it.id} text={it.text} tone={it.tone} />;
-              if (it.kind === 'card')
-                return <DirectiveCard key={it.id} card={it} onApprove={decide} onEdit={setEditState} onDecline={decide} />;
-              if (it.kind === 'suggestion' && !it.dismissed)
-                return (
-                  <SuggestionCard
-                    key={it.id}
-                    suggestion={it}
-                    onFocus={(agentId) => {
-                      onFocusAgent?.(agentId);
-                      dismissSuggestion(it.id);
-                    }}
-                    onDismiss={() => dismissSuggestion(it.id)}
-                  />
-                );
-              return null;
-            })}
+                {/*
+                  assistant-ui renders each timeline entry through the render
+                  prop; the entry's appearance is selected by `kind` and reuses
+                  the exact row/card components from the hand-rolled panel.
+                */}
+                <ThreadPrimitive.Messages>
+                  {({ message }) => {
+                    const item = itemsById.get(message.id);
+                    if (!item) return null;
+                    if (item.kind === 'user')
+                      return (
+                        <UserRow key={message.id} text={item.text} ts={item.ts} />
+                      );
+                    if (item.kind === 'observer')
+                      return (
+                        <ObserverEntry
+                          key={message.id}
+                          item={item}
+                          canRegenerate={
+                            (!!message.isLast || !!item.errored) && !busy && !item.streaming && !pendingGate
+                          }
+                          onRegenerate={regenerate}
+                        />
+                      );
+                    if (item.kind === 'tool') return <ToolChip key={message.id} name={item.name} arg={item.arg} />;
+                    if (item.kind === 'meta') return <MetaLine key={message.id} text={item.text} tone={item.tone} />;
+                    if (item.kind === 'card')
+                      return (
+                        <DirectiveCard
+                          key={message.id}
+                          card={item}
+                          onApprove={decide}
+                          onEdit={setEditState}
+                          onDecline={decide}
+                        />
+                      );
+                    if (item.kind === 'suggestion' && !item.dismissed)
+                      return (
+                        <SuggestionCard
+                          key={message.id}
+                          suggestion={item}
+                          onFocus={(agentId) => {
+                            onFocusAgent?.(agentId);
+                            dismissSuggestion(item.id);
+                          }}
+                          onDismiss={() => dismissSuggestion(item.id)}
+                        />
+                      );
+                    return null;
+                  }}
+                </ThreadPrimitive.Messages>
 
-            {showThinking && <ThinkingRow />}
+                {showThinking && <ThinkingRow />}
+              </div>
+            </ScrollArea>
+
+            {showJump && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => scrollToBottom('smooth')}
+                className="absolute bottom-2 left-1/2 z-10 -translate-x-1/2 rounded-full shadow-md"
+              >
+                <ArrowDownIcon /> Jump to latest
+              </Button>
+            )}
           </div>
-        </ScrollArea>
-
-        {showJump && (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => scrollToBottom('smooth')}
-            className="absolute bottom-2 left-1/2 z-10 -translate-x-1/2 rounded-full shadow-md"
-          >
-            <ArrowDownIcon /> Jump to latest
-          </Button>
-        )}
-      </div>
+        </ThreadPrimitive.Root>
+      </AssistantRuntimeProvider>
 
       {/* Composer */}
       <div className="shrink-0 border-t p-3">
@@ -601,36 +788,109 @@ function Clock({ ts }: { ts: number }) {
 
 function UserRow({ text, ts }: { text: string; ts: number }) {
   return (
-    <div className="flex flex-row-reverse items-start gap-2">
-      <Avatar kind="user" />
-      <div className="flex min-w-0 max-w-[85%] flex-col items-end gap-1">
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span className="font-medium text-foreground/70">You</span>
-          <Clock ts={ts} />
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div className="flex flex-row-reverse items-start gap-2">
+          <Avatar kind="user" />
+          <div className="flex min-w-0 max-w-[85%] flex-col items-end gap-1">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span className="font-medium text-foreground/70">You</span>
+              <Clock ts={ts} />
+            </div>
+            <div className="whitespace-pre-wrap break-words rounded-2xl rounded-tr-sm border border-primary/20 bg-primary/10 px-3 py-2 text-sm">
+              {text}
+            </div>
+          </div>
         </div>
-        <div className="whitespace-pre-wrap break-words rounded-2xl rounded-tr-sm border border-primary/20 bg-primary/10 px-3 py-2 text-sm">
-          {text}
-        </div>
-      </div>
-    </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={() => copyText(text)}>
+          <CopyIcon /> Copy
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
-function ObserverRow({ text, ts, streaming }: { text: string; ts: number; streaming: boolean }) {
+// An observer (assistant) turn rendered through assistant-ui. MessagePrimitive
+// gives the entry hover state; ActionBarPrimitive is the standard message action
+// bar (copy + regenerate); the shadcn ContextMenu provides the right-click actions.
+function ObserverEntry({
+  item,
+  canRegenerate,
+  onRegenerate,
+}: {
+  item: Extract<Item, { kind: 'observer' }>;
+  canRegenerate: boolean;
+  onRegenerate: () => void;
+}) {
   return (
-    <div className="flex items-start gap-2">
+    <MessagePrimitive.Root className="group/msg relative flex items-start gap-2">
       <Avatar kind="observer" />
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <span className="font-medium text-foreground/70">Observer</span>
-          <Clock ts={ts} />
+          <Clock ts={item.ts} />
         </div>
-        <div className="rounded-2xl rounded-tl-sm border bg-muted/40 px-3 py-2">
-          <ObserverMarkdown>{text}</ObserverMarkdown>
-          {streaming && <span className="ml-0.5 inline-block h-3 w-0.5 animate-pulse bg-foreground/60 align-middle" />}
-        </div>
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
+            <div className="rounded-2xl rounded-tl-sm border bg-muted/40 px-3 py-2">
+              {item.text.trim() ? (
+                <ObserverMarkdown>{item.text}</ObserverMarkdown>
+              ) : item.errored ? (
+                <span className="text-sm text-destructive">Generation failed.</span>
+              ) : null}
+              {item.streaming && (
+                <span className="ml-0.5 inline-block h-3 w-0.5 animate-pulse bg-foreground/60 align-middle" />
+              )}
+            </div>
+          </ContextMenuTrigger>
+          <ContextMenuContent>
+            <ContextMenuItem onSelect={() => copyText(item.text)}>
+              <CopyIcon /> Copy
+            </ContextMenuItem>
+            {canRegenerate && (
+              <ContextMenuItem onSelect={onRegenerate}>
+                <RefreshCwIcon /> Regenerate
+              </ContextMenuItem>
+            )}
+          </ContextMenuContent>
+        </ContextMenu>
+
+        {/* Standard assistant-ui message action bar (hover/focus to reveal). */}
+        <ActionBarPrimitive.Root className="flex w-fit items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/msg:opacity-100">
+          <MessageCopyButton getText={() => item.text} />
+          {canRegenerate && (
+            <ActionBarPrimitive.Reload asChild>
+              <Button variant="ghost" size="icon-xs" aria-label="Regenerate" title="Regenerate response">
+                <RefreshCwIcon />
+              </Button>
+            </ActionBarPrimitive.Reload>
+          )}
+        </ActionBarPrimitive.Root>
       </div>
-    </div>
+    </MessagePrimitive.Root>
+  );
+}
+
+// Per-message copy control with a copied checkmark — same pattern as the code
+// block in ObserverMarkdown (clipboard may be unavailable in non-secure
+// contexts; fail silently there).
+function MessageCopyButton({ getText }: { getText: () => string }) {
+  const [copied, setCopied] = useState(false);
+  const onClick = async () => {
+    try {
+      await navigator.clipboard.writeText(getText());
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard unavailable; fail silently.
+    }
+  };
+  return (
+    <Button variant="ghost" size="icon-xs" onClick={onClick} aria-label="Copy message" title="Copy message">
+      {copied ? <CheckIcon className="text-green-500" /> : <CopyIcon />}
+    </Button>
   );
 }
 
@@ -761,6 +1021,15 @@ function SuggestionCard({
 }
 
 /* -------------------------------- helpers -------------------------------- */
+
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast.success('Copied');
+  } catch {
+    // Clipboard unavailable; fail silently.
+  }
+}
 
 const TOOL_LABELS: Record<string, string> = {
   list_chats: 'list chats',

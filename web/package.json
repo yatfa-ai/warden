@@ -7,10 +7,11 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "test": "node storage.test.mjs && node diff.test.mjs && node layout.test.mjs && node timelinePacing.test.mjs && node gitStateSummary.test.mjs && node attentionRollup.test.mjs && node utils.test.mjs && node path-links.test.mjs",
+    "test": "node storage.test.mjs && node diff.test.mjs && node layout.test.mjs && node timelinePacing.test.mjs && node gitStateSummary.test.mjs && node attentionRollup.test.mjs && node utils.test.mjs && node path-links.test.mjs && node observerTurns.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@assistant-ui/react": "^0.14.26",
     "@fontsource-variable/geist": "^5.2.9",
     "@tailwindcss/vite": "^4.3.2",
     "@xterm/addon-fit": "^0.11.0",
