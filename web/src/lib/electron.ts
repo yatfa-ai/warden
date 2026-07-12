@@ -12,12 +12,16 @@
 //   2. `npm run dev` browser → undefined (no preload).
 //   3. `node web/smoke.cjs`   → undefined (no preload).
 // Every call below gracefully no-ops when the bridge is missing, so SettingsPage
-// never needs to branch on its host. The pref's default is ON; in a browser
-// there is no OS window state to remember regardless.
+// never needs to branch on its host. Defaults differ per pref: remember-bounds
+// defaults ON (in a browser there is no OS window state to remember anyway),
+// while launch-at-login defaults OFF (consent — see WARDEN-278). Each accessor
+// resolves to its own pref's default when the bridge is absent.
 
 interface WardenWindowBridge {
   getRememberWindowBounds: () => Promise<boolean>;
   setRememberWindowBounds: (remember: boolean) => Promise<boolean>;
+  getLaunchAtLogin: () => Promise<boolean>;
+  setLaunchAtLogin: (openAtLogin: boolean) => Promise<boolean>;
 }
 
 interface WindowWithWarden extends Window {
@@ -59,5 +63,40 @@ export async function setRememberWindowBounds(remember: boolean): Promise<boolea
   } catch (e) {
     console.warn('[warden:electron] setRememberWindowBounds failed', e);
     return remember;
+  }
+}
+
+// "Launch Warden at login" — main reads/writes the OS login items via
+// app.getLoginItemSettings()/setLoginItemSettings() (no window-state.json field;
+// the OS is the source of truth, unlike remember-bounds). See WARDEN-278.
+//
+// CRITICAL DIFFERENCE from remember-bounds: this pref defaults OFF (consent —
+// auto-start modifies the OS login items), so the accessors resolve to `false`
+// (NOT `true`) when the bridge is absent. In a browser there is no OS to
+// register with regardless. Never rejects; a rejecting platform (Linux) degrades
+// to false (off) on the main side too.
+export async function getLaunchAtLogin(): Promise<boolean> {
+  const b = bridge();
+  if (!b) return false;
+  try {
+    return await b.getLaunchAtLogin();
+  } catch (e) {
+    console.warn('[warden:electron] getLaunchAtLogin failed', e);
+    return false;
+  }
+}
+
+// Write the launch-at-login flag through to main (which writes the OS login
+// items). Resolves to the OS-reported value when the bridge is present and to
+// the value passed in (so the caller's optimistic UI stays responsive) when the
+// bridge is absent. Never rejects.
+export async function setLaunchAtLogin(openAtLogin: boolean): Promise<boolean> {
+  const b = bridge();
+  if (!b) return openAtLogin;
+  try {
+    return await b.setLaunchAtLogin(openAtLogin);
+  } catch (e) {
+    console.warn('[warden:electron] setLaunchAtLogin failed', e);
+    return openAtLogin;
   }
 }

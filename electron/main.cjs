@@ -192,6 +192,33 @@ ipcMain.handle('window:set-remember-bounds', (_event, remember) => {
   return next.remember;
 });
 
+// Launch-at-login: the OS (not Warden's own file) is the source of truth, so
+// unlike remember-bounds this reads/writes app.getLoginItemSettings() directly
+// and needs no window-state.json field. Fully supported on macOS/Windows;
+// limited on Linux — both handlers are wrapped in try/catch so a rejecting
+// platform degrades to `false` (off) and never crashes. See WARDEN-278.
+ipcMain.handle('window:get-launch-at-login', () => {
+  try {
+    return app.getLoginItemSettings().openAtLogin === true;
+  } catch (e) {
+    console.warn('[warden:launch-at-login] getLoginItemSettings failed', e);
+    return false;
+  }
+});
+ipcMain.handle('window:set-launch-at-login', (_event, openAtLogin) => {
+  try {
+    app.setLoginItemSettings({ openAtLogin: openAtLogin === true });
+  } catch (e) {
+    console.warn('[warden:launch-at-login] setLoginItemSettings failed', e);
+  }
+  try {
+    return app.getLoginItemSettings().openAtLogin === true;
+  } catch (e) {
+    console.warn('[warden:launch-at-login] getLoginItemSettings failed', e);
+    return false;
+  }
+});
+
 app.whenReady().then(() => {
   // Kill any stale server from a previous run
   killStalePort();

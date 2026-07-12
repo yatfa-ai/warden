@@ -153,6 +153,12 @@ interface Props {
   // web bundle runs in all three contexts. See WARDEN-263.
   rememberWindowBounds: boolean;
   setRememberWindowBounds: (v: boolean) => void;
+  // "Launch Warden at login" — main-owned via IPC (WARDEN-278). Sits beside the
+  // remember-bounds control: both govern launch behavior. Defaults OFF (consent —
+  // auto-start modifies the OS login items), unlike remember-bounds which
+  // defaults ON. Same hasWindowBridge() gating as remember-bounds.
+  launchAtLogin: boolean;
+  setLaunchAtLogin: (v: boolean) => void;
   // Opt-in OS desktop alerts when agents need attention AND Warden is unfocused
   // (WARDEN-259). Pure client-side localStorage pref (NOT backend config): it
   // applies instantly via the prop callback (forwarded to the AttentionBadge) and
@@ -267,7 +273,7 @@ function PresetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -948,6 +954,30 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                     {hasWindowBridge()
                       ? 'Reopen the window at the same size, position, and maximize state as last time. Turn off to always start at the default size.'
                       : 'Reopen the window at the same size, position, and maximize state as last time. Applies to the desktop app only.'}
+                  </p>
+                </div>
+
+                {/* Launch Warden at login — main-owned via IPC (WARDEN-278). Sits
+                    beside the remember-bounds control: both govern launch
+                    behavior. Off by default (consent — auto-start modifies the
+                    OS login items). Same hasWindowBridge() gating as
+                    remember-bounds so dev/smoke are unaffected. */}
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      id="launchAtLogin"
+                      checked={launchAtLogin}
+                      onCheckedChange={(v) => setLaunchAtLogin(v)}
+                      disabled={!hasWindowBridge()}
+                    />
+                    <Label htmlFor="launchAtLogin" className="cursor-pointer">
+                      Launch Warden at login
+                    </Label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {hasWindowBridge()
+                      ? 'Open Warden automatically when you log in to your computer. Off by default — turn it on to skip relaunching Warden after every reboot.'
+                      : 'Open Warden automatically when you log in to your computer. Applies to the desktop app only.'}
                   </p>
                 </div>
               </SettingsSection>

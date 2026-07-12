@@ -4,7 +4,7 @@ import { postJson } from '@/lib/api';
 import { loadUi, saveUi, persistUiState, initialWorkspace, DEFAULT_TERMINAL_FONT_FAMILY, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
 import { applyTheme, listenSystemThemeChange, getEffectiveTheme, resolveTerminalTheme, type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
-import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds } from '@/lib/electron';
+import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ChatSidebar } from '@/components/ChatSidebar';
@@ -188,6 +188,15 @@ function App() {
   // the saveUi effect. Defaults to true; loads from main on mount (a no-op that
   // stays true in a plain browser where the bridge is absent). See WARDEN-263.
   const [rememberWindowBounds, setRememberWindowBoundsState] = useState(true);
+  // "Launch Warden at login" is the sibling Electron-main-owned pref: the OS
+  // (not Warden's own file) is the source of truth, read/written via the IPC
+  // bridge in electron.ts. As with remember-bounds, this React state is only a
+  // display mirror and is deliberately NOT part of UiState or the saveUi effect.
+  // Defaults to FALSE (consent — auto-start modifies the OS login items, so it
+  // is more invasive than restoring bounds); loads from main on mount (a no-op
+  // that stays false in a plain browser where the bridge is absent). See
+  // WARDEN-278.
+  const [launchAtLogin, setLaunchAtLoginState] = useState(false);
   const { prefs, reload: reloadNotificationPrefs } = useNotificationPrefs();
   // "Confirm before destructive actions" preference (default on). Gates both
   // destructive kill paths — force-kill (tmux session) and kill chat. Loaded
@@ -210,6 +219,9 @@ function App() {
     // Load the main-owned "remember window bounds" flag (no-op in a browser;
     // stays at the true default when the IPC bridge is absent). WARDEN-263.
     void getRememberWindowBounds().then(setRememberWindowBoundsState);
+    // Load the main-owned "launch at login" flag (no-op in a browser; stays at
+    // the false default when the IPC bridge is absent). WARDEN-278.
+    void getLaunchAtLogin().then(setLaunchAtLoginState);
 
     // Check for activity since last close
     const checkActivitySinceClose = async () => {
@@ -379,6 +391,15 @@ function App() {
   const setRememberWindowBounds = useCallback((v: boolean) => {
     setRememberWindowBoundsState(v);
     void persistRememberWindowBounds(v);
+  }, []);
+
+  // Mirror setter for launch-at-login: update the display state and write the OS
+  // login item through the IPC bridge. Stable identity for the same reason as
+  // setRememberWindowBounds. No-op in a browser (persist call resolves without
+  // the bridge). WARDEN-278.
+  const setLaunchAtLogin = useCallback((v: boolean) => {
+    setLaunchAtLoginState(v);
+    void persistLaunchAtLogin(v);
   }, []);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
@@ -981,6 +1002,8 @@ function App() {
           setDefaultSplitShell={setDefaultSplitShell}
           rememberWindowBounds={rememberWindowBounds}
           setRememberWindowBounds={setRememberWindowBounds}
+          launchAtLogin={launchAtLogin}
+          setLaunchAtLogin={setLaunchAtLogin}
         />
       ) : chatBrowserOpen ? (
         <OpenChatBrowserPage
