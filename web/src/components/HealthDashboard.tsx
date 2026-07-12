@@ -305,8 +305,11 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
                         (HEALTH_WIDTH). Fusing connectivity + a long hostname + a
                         rich 5-segment distribution onto one line is noisy and
                         fragile; giving the distribution line 2 the full panel
-                        width (indented under the hostname) keeps it legible even
-                        with 3-digit counts across all five states.
+                        width (indented under the hostname) keeps it legible. The
+                        distribution line itself is `flex-wrap`, so a very wide
+                        distribution (5 states, 3-digit counts) that still exceeds
+                        the panel width wraps to a third line rather than clipping
+                        — no segment is ever cut off.
 
                         Overflow handling is NOT done here — it lives in CSS. The
                         `health-fleet-scroll` class on the ScrollArea (above)
@@ -359,9 +362,14 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
                           </span>
                         </div>
                         {/* Line 2: health distribution — only non-zero states, colored to match
-                            the summary bar. Indented (pl-7) to align under the hostname. */}
+                            the summary bar. Indented (pl-7) to align under the hostname.
+                            `flex-wrap` makes the line bulletproof against overflow: if a very
+                            wide distribution (all 5 states, 3-digit counts) still exceeds the
+                            panel width, the excess segments wrap to a third line instead of
+                            being clipped. Each segment is its own flex item, so a wrapped
+                            segment stays whole (it never breaks mid-word). (WARDEN-237) */}
                         {dist.length > 0 && (
-                          <div className="flex items-center gap-1.5 min-w-0 pl-7">
+                          <div className="flex flex-wrap items-center gap-1.5 min-w-0 pl-7">
                             {dist.map(s => (
                               <span key={s} className={`text-[10px] ${HEALTH_DIST_COLOR[s]}`}>
                                 {group.counts[s]} {formatHealthState(s).toLowerCase()}
