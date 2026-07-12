@@ -12,13 +12,14 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import { load, save, loadCatalog, saveCatalog, allSshHosts, sameCatalogEntry } from './config.js';
 import * as collections from './collections.js';
-import { capturePanes, resolveChatWithRefresh, catalogChats, discoverHost } from './chats.js';
+import { capturePanes, resolveChatWithRefresh, catalogChats, discoverHost, discoverAll } from './chats.js';
 import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream } from './tmux.js';
 import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude, startConnectionPoolCleanup, validateHost } from './ssh.js';
 import { Observer } from './observer.js';
 import { hasCredentials, resolveModel } from './llm.js';
 import { listSessions, createSession, renameSession, deleteSession } from './sessions.js';
 import { appendEvent, rotateEvents, readEvents, getStatsSince } from './activity.js';
+import { buildSnapshot, diffLifecycles } from './lifecycle.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { checkHost } from './hostStatus.js';
 import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, isDetachedHead, normalizeHeadSha } from './gitStatus.js';
@@ -2329,10 +2330,72 @@ streamWss.on('connection', (ws) => {
 // Rotate old activity events on startup
 try { rotateEvents(); } catch { /* ignore */ }
 
+// --- Cross-host agent lifecycle polling -------------------------------------
+// appendEvent() is only reached from the local attach/observe path, so a remote
+// agent that starts/finishes/errors while no Warden pane is open on its host
+// leaves no trace. This periodic discoverAll() over EVERY configured host feeds
+// two snapshots into the pure diffLifecycles() (src/lifecycle.js) to emit
+// host-attributed lifecycle events on state TRANSITIONS only — so event volume
+// stays negligible against the 7-day rotation regardless of the 60s cadence.
+let lifecycleTimer = null;
+let prevSnapshot = new Map(); // id → { host, container, role, project, active, ok }
+
+const LIFECYCLE_INTERVAL_MS = 60_000;
+
+async function tickLifecycle() {
+  // No remote hosts and no catalog → discoverAll has nothing to observe. But
+  // FIRST drain any pending transitions in prevSnapshot against an empty fleet.
+  // The last agent ending (or the user removing their last configured host) can
+  // empty the catalog/hosts while prevSnapshot still tracks it; this guard would
+  // otherwise short-circuit BEFORE the diff — permanently suppressing that final
+  // agent_ended, or emitting it minutes late with a wrong timestamp once some
+  // other agent later reappears (the only thing that would un-freeze the diff).
+  // diffLifecycles(prev, ∅) emits agent_ended for every tracked chat, so draining
+  // then going dormant captures the real disappearance(s) and frees the snapshot.
+  if (!cfg.hosts.length && !loadCatalog().length) {
+    if (prevSnapshot.size > 0) {
+      for (const event of diffLifecycles(prevSnapshot, new Map())) {
+        try { appendEvent(event); } catch { /* ignore single-event write failures */ }
+      }
+      prevSnapshot = new Map();
+    }
+    return;
+  }
+  let chats, errors;
+  try {
+    ({ chats, errors } = await discoverAll(cfg.hosts, cfg));
+  } catch {
+    return; // transient discovery failure; retry next tick
+  }
+  const failingHosts = new Set((errors || []).map((e) => e.host));
+  const next = buildSnapshot(prevSnapshot, chats, failingHosts);
+
+  // First run: seed the baseline SILENTLY. An empty prevSnapshot would otherwise
+  // emit agent_started for every currently-running agent (a one-time burst).
+  if (prevSnapshot.size === 0) {
+    prevSnapshot = next;
+    return;
+  }
+
+  for (const event of diffLifecycles(prevSnapshot, next)) {
+    try { appendEvent(event); } catch { /* ignore single-event write failures */ }
+  }
+  prevSnapshot = next;
+}
+
+function startLifecyclePoll() {
+  if (lifecycleTimer) return;
+  lifecycleTimer = setInterval(tickLifecycle, LIFECYCLE_INTERVAL_MS);
+  tickLifecycle(); // seed the baseline immediately (fires once, emits nothing)
+}
+
 // Exported for HTTP-level integration tests (see src/server-hosts-status.test.js).
 // Not used by the running server — startServer() below drives the module-level
 // `server` directly.
-export { app };
+// tickLifecycle is exported so src/server-lifecycle.test.js can drive a single
+// lifecycle tick deterministically (the running server drives it off a 60s
+// setInterval via startLifecyclePoll, which is too slow for a test).
+export { app, tickLifecycle };
 
 export function startServer(port = 7421, host = '127.0.0.1') {
   server.on('error', (e) => {
@@ -2348,6 +2411,9 @@ export function startServer(port = 7421, host = '127.0.0.1') {
     console.log(`  hosts: ${cfg.hosts.join(', ')}   model: ${resolveModel()}   tmux: ${TMUX_BIN}`);
     // Start connection pool cleanup task
     startConnectionPoolCleanup();
+    // Start cross-host lifecycle polling (captures agent start/stop/error on
+    // hosts even when no Warden pane is open on them).
+    startLifecyclePoll();
     // Lazy mode: no startup SSH. Connections open on demand (per-host discover / pane read).
   });
 }
