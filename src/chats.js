@@ -13,8 +13,18 @@ import { isCompanionTransportEnabled, discover as discoverViaCompanion, captureP
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 const LOCAL = '(local)';
 
-// One SSH round-trip: list containers AND test each for the `agent` tmux session.
+// Sentinel that opens the per-container docker-stats block appended to
+// DISCOVER_SCRIPT (WARDEN-309). Picked to (a) never collide with a container name
+// (docker names can't contain '_'-runs like this and are `[A-Za-z0-9_.-]+`) and
+// (b) be unlike any discover row, so a stray sentinel line is harmlessly skipped
+// by parseDiscoverRow (single column → null). Defined once so the script emitter
+// and the splitter cannot drift.
+const STATS_SENTINEL = '___WARDEN_STATS___';
+
+// One SSH round-trip: list containers AND test each for the `agent` tmux session,
+// then ONE `docker stats --no-stream` pass for per-container CPU/memory.
 // Emits a TSV row per container:  name \t status \t cwd \t active
+// followed by a sentinel-opened docker-stats block (see STATS_SENTINEL).
 //
 // `cwd` is derived per-container INSIDE this same loop (no extra round-trip —
 // the loop already `docker exec`s each container for has-session). When the
@@ -41,6 +51,21 @@ docker ps --format '{{.Names}}\\t{{.Status}}' 2>/dev/null | while IFS=$(printf '
   [ -z "$cwd" ] && cwd=$(docker inspect "$name" --format '{{.Config.WorkingDir}}' 2>/dev/null | tr -d '\\r')
   printf '%s\\t%s\\t%s\\t%s\\n' "$name" "$status" "$cwd" "$a"
 done
+# Per-container resource usage (WARDEN-309): ONE \`docker stats --no-stream\`
+# collection for every container on this host, appended so it rides the SAME SSH
+# round-trip as the discover loop above (no extra round-trip on the click-to-
+# discover path). \`--no-stream\` takes a single sample (~1-2s) and exits rather
+# than streaming. The block is opened by a sentinel and parsed by
+# splitDiscoverOutput/parseDockerStats into a separate name→{cpuPct,memPct,
+# memUsage} map, so the tested 4-column parseDiscoverRow above is untouched.
+# \`2>/dev/null\` swallows a missing/unavailable \`docker stats\` (older host, no
+# permission) → the block is empty → chats simply omit the fields → the UI
+# renders nothing (graceful N/A). Resource capture belongs to the SSH discover
+# path ONLY — never the 10s /api/health poll, which stays cache-derived
+# (WARDEN-147), and never buildChat (shared with the companion transport,
+# WARDEN-272).
+printf '%s\\n' '${STATS_SENTINEL}'
+docker stats --no-stream --format '{{.Name}}\\t{{.CPUPerc}}\\t{{.MemPerc}}\\t{{.MemUsage}}' 2>/dev/null
 `;
 
 // Parse one TSV row emitted by DISCOVER_SCRIPT into the fields discover() needs.
@@ -61,6 +86,70 @@ export function parseDiscoverRow(line) {
   const cwd = parts.length >= 4 ? parts[parts.length - 2] : '';
   const status = parts.slice(1, parts.length >= 4 ? -2 : -1).join('\t');
   return { name, status, cwd, active };
+}
+
+// Split DISCOVER_SCRIPT stdout into the discover-row region and the docker-stats
+// region (WARDEN-309). The stats block is everything AFTER the STATS_SENTINEL
+// line; it is parsed separately by parseDockerStats so the tested 4-column
+// parseDiscoverRow never sees a stats row (which would otherwise masquerade as a
+// chat: `name\t42.30%\t15.70%\t310MiB / 2GiB` has 4 columns). If the sentinel is
+// absent (older host / `docker stats` failed / companion path), the whole stdout
+// is treated as rows and the stats block is empty → chats omit the resource
+// fields → UI renders nothing (graceful N/A). Pure (no docker, no ssh) so it is
+// unit-testable alongside parseDockerStats. See WARDEN-309.
+export function splitDiscoverOutput(stdout) {
+  const s = stdout == null ? '' : String(stdout);
+  const idx = s.indexOf(STATS_SENTINEL);
+  if (idx === -1) return { rows: s, statsBlock: '' };
+  const rows = s.slice(0, idx);
+  // Drop the remainder of the sentinel's own line (up to and including its
+  // trailing newline) so the stats block starts cleanly at the first docker-stats
+  // row rather than with a leading empty/junk line.
+  let rest = s.slice(idx + STATS_SENTINEL.length);
+  const nl = rest.indexOf('\n');
+  if (nl !== -1) rest = rest.slice(nl + 1);
+  return { rows, statsBlock: rest };
+}
+
+// Parse a single `42.30%` / `15.70%` percent field into a number (42.3), or null
+// when blank / non-numeric. Trims whitespace and strips a trailing '%'. Pure.
+function parsePercent(s) {
+  if (s == null) return null;
+  const m = String(s).trim().replace(/%$/, '').trim();
+  if (m === '') return null;
+  const n = Number(m);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Parse the stdout of `docker stats --no-stream --format
+// '{{.Name}}\t{{.CPUPerc}}\t{{.MemPerc}}\t{{.MemUsage}}'` into a
+// name → { cpuPct?, memPct?, memUsage? } map (WARDEN-309). Each line is e.g.:
+//   myproject-worker\t42.30%\t15.70%\t310.2MiB / 2GiB
+// The trailing '%' on the percent fields is stripped; non-numeric/empty values
+// are omitted from the entry. `docker stats` on older daemons prefixed names with
+// '/' (e.g. `/myproject-worker`); that leading slash is stripped here so the key
+// matches the `docker ps` name parseDiscoverRow yields. `{{.MemUsage}}` itself
+// contains ' / ' (not a tab) so it stays one field. Pure (no docker, no ssh) so
+// the parse is unit-testable in CI, which cannot run real containers — mirroring
+// parseDiscoverRow's testability. See WARDEN-309.
+export function parseDockerStats(stdout) {
+  const out = {};
+  for (const line of (stdout == null ? '' : String(stdout)).split('\n')) {
+    if (!line || !line.trim()) continue;
+    const parts = line.split('\t');
+    if (parts.length < 2) continue;
+    const name = (parts[0] || '').replace(/^\//, '').trim();
+    if (!name) continue;
+    const cpuPct = parsePercent(parts[1]);
+    const memPct = parsePercent(parts[2]);
+    const memUsage = parts.slice(3).join('\t').trim();
+    const entry = {};
+    if (cpuPct != null) entry.cpuPct = cpuPct;
+    if (memPct != null) entry.memPct = memPct;
+    if (memUsage) entry.memUsage = memUsage;
+    if (Object.keys(entry).length) out[name] = entry;
+  }
+  return out;
 }
 
 // Pin-first ordering shared by every discovery sort. Returns <0 if `a` is pinned
@@ -119,9 +208,17 @@ export async function discover(host, cfg, opts = {}, deps = {}) {
   const chats = [];
   const activeAgents = [];
 
+  // Split the docker-stats block (WARDEN-309) off the discover rows. The stats
+  // ride the SAME SSH round-trip as the discover loop but are parsed into a
+  // separate name→stats map so the tested 4-column parseDiscoverRow is never fed
+  // a stats row. An absent block (older host / `docker stats` unavailable) yields
+  // an empty map → chats simply omit cpuPct/memPct/memUsage → UI renders nothing.
+  const { rows, statsBlock } = splitDiscoverOutput(res.stdout);
+  const stats = parseDockerStats(statsBlock);
+
   // First pass: parse all agents and collect active ones (parseDiscoverRow
   // handles the name \t status \t cwd \t active layout + legacy 3-column rows).
-  for (const line of res.stdout.split('\n')) {
+  for (const line of rows.split('\n')) {
     const row = parseDiscoverRow(line);
     if (!row) continue;
     const { name, status, cwd, active } = row;
@@ -129,6 +226,18 @@ export async function discover(host, cfg, opts = {}, deps = {}) {
     // The chat literal is shared with the companion path via buildChat(), so the
     // two discovery paths cannot drift on shape (WARDEN-272 review #5).
     const chat = buildChat(host, name, status, cwd, active, session);
+
+    // Attach per-container CPU/memory from the docker-stats block (WARDEN-309).
+    // Attached HERE in discover() ONLY — NEVER in buildChat, whose literal is
+    // shared byte-for-byte with the unmerged companion transport (WARDEN-272);
+    // perturbing it breaks that shared contract. A container with no stats row
+    // (stats unavailable, or a non-yatfa container) simply omits the fields.
+    const s = stats[name];
+    if (s) {
+      if (s.cpuPct != null) chat.cpuPct = s.cpuPct;
+      if (s.memPct != null) chat.memPct = s.memPct;
+      if (s.memUsage) chat.memUsage = s.memUsage;
+    }
 
     chats.push(chat);
     if (active) {

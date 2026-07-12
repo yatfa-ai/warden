@@ -1,7 +1,7 @@
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { resolveChat, resolveChatWithRefresh, comparePinned, parseDiscoverRow, discover, capturePanes } from './chats.js';
+import { resolveChat, resolveChatWithRefresh, comparePinned, parseDiscoverRow, parseDockerStats, splitDiscoverOutput, discover, capturePanes } from './chats.js';
 import { buildChat } from './chatMeta.js';
 
 // ----------------------------- capturePanes routing -------------------------
@@ -580,6 +580,195 @@ describe('discover() default path builds chats via buildChat (refactor is a no-o
     assert.strictEqual(res.ok, false);
     assert.strictEqual(res.chats.length, 0);
     assert.ok(res.error.includes('Permission denied'));
+  });
+});
+
+// splitDiscoverOutput separates the docker-stats block (appended to DISCOVER_SCRIPT
+// behind the ___WARDEN_STATS___ sentinel, WARDEN-309) from the discover rows, so
+// the tested 4-column parseDiscoverRow never sees a stats row. Pure; CI can run it
+// with no docker/ssh. The stats block rides the same SSH round-trip but is parsed
+// by parseDockerStats (tested below) into a name→stats map.
+describe('splitDiscoverOutput (WARDEN-309)', () => {
+  it('splits rows from the stats block at the sentinel', () => {
+    const stdout = [
+      'myproject-worker\tUp 2 hours\t/work\t1',
+      '___WARDEN_STATS___',
+      'myproject-worker\t42.30%\t15.70%\t310.2MiB / 2GiB',
+    ].join('\n');
+    const { rows, statsBlock } = splitDiscoverOutput(stdout);
+    assert.strictEqual(rows, 'myproject-worker\tUp 2 hours\t/work\t1\n');
+    assert.strictEqual(statsBlock, 'myproject-worker\t42.30%\t15.70%\t310.2MiB / 2GiB');
+  });
+
+  it('excludes the sentinel line itself from the stats block', () => {
+    // The remainder of the sentinel's own line (a trailing comment, hypothetically)
+    // must NOT leak into the first stats row.
+    const stdout = 'r1\tUp\t/w\t1\n___WARDEN_STATS___\tc\na\t1%\t2%\t3MiB / 4GiB';
+    const { statsBlock } = splitDiscoverOutput(stdout);
+    assert.strictEqual(statsBlock, 'a\t1%\t2%\t3MiB / 4GiB',
+      `sentinel's own line was dropped; got:\n${JSON.stringify(statsBlock)}`);
+  });
+
+  it('returns the whole stdout as rows when the sentinel is absent (backward compat)', () => {
+    // An older host (pre-WARDEN-309 script) or the companion path emits no stats
+    // block: nothing is split off, the rows are intact, and the stats block is ''.
+    const stdout = 'a\tUp\t/w\t1\nb\tUp\t/x\t0';
+    const { rows, statsBlock } = splitDiscoverOutput(stdout);
+    assert.strictEqual(rows, stdout);
+    assert.strictEqual(statsBlock, '');
+  });
+
+  it('treats null/undefined input as empty', () => {
+    assert.deepStrictEqual(splitDiscoverOutput(undefined), { rows: '', statsBlock: '' });
+    assert.deepStrictEqual(splitDiscoverOutput(null), { rows: '', statsBlock: '' });
+  });
+});
+
+// parseDockerStats turns `docker stats --no-stream --format` TSV into a
+// name → { cpuPct?, memPct?, memUsage? } map (WARDEN-309). Discovery runs
+// `docker stats` over SSH, which CI can't do, so the parser is the unit-testable
+// seam — mirroring parseDiscoverRow's testability.
+describe('parseDockerStats (WARDEN-309)', () => {
+  it('parses a row into cpuPct / memPct / memUsage keyed by container name', () => {
+    const out = parseDockerStats('myproject-worker\t42.30%\t15.70%\t310.2MiB / 2GiB');
+    assert.deepStrictEqual(out, {
+      'myproject-worker': { cpuPct: 42.3, memPct: 15.7, memUsage: '310.2MiB / 2GiB' },
+    });
+  });
+
+  it('parses multiple rows into a map', () => {
+    const out = parseDockerStats([
+      'myproject-worker\t42.30%\t15.70%\t310.2MiB / 2GiB',
+      'myproject-researcher\t0.10%\t5.00%\t90.1MiB / 2GiB',
+    ].join('\n'));
+    assert.strictEqual(Object.keys(out).length, 2);
+    assert.strictEqual(out['myproject-worker'].cpuPct, 42.3);
+    assert.strictEqual(out['myproject-researcher'].memPct, 5);
+  });
+
+  it('strips a leading "/" from the name (docker <17 stats quirk)', () => {
+    // Older docker daemons (and some CI shims) prefix the container name with '/'.
+    // The key must match the `docker ps` name parseDiscoverRow yields (no slash).
+    const out = parseDockerStats('/myproject-worker\t10.00%\t5.00%\t100MiB / 2GiB');
+    assert.ok(out['myproject-worker'], 'key has no leading slash');
+    assert.ok(out['/myproject-worker'] === undefined, 'leading-slash key absent');
+  });
+
+  it('keeps a busy-loop CPU reading above 100% (multi-core)', () => {
+    // A container burning >1 core reads >100% CPU; the value must not be clamped.
+    const out = parseDockerStats('burner\t150.40%\t20.00%\t400MiB / 2GiB');
+    assert.strictEqual(out['burner'].cpuPct, 150.4);
+  });
+
+  it('parses integer percents and an idle 0% reading', () => {
+    const out = parseDockerStats('idle\t0.00%\t0.00%\t10MiB / 2GiB');
+    assert.strictEqual(out['idle'].cpuPct, 0);
+    assert.strictEqual(out['idle'].memPct, 0);
+    const out2 = parseDockerStats('c\t42%\t15%\t310MiB / 2GiB');
+    assert.strictEqual(out2['c'].cpuPct, 42);
+    assert.strictEqual(out2['c'].memPct, 15);
+  });
+
+  it('omits non-numeric percent fields (docker "--" placeholder) but keeps memUsage', () => {
+    // A container too new to have a sample emits "--" for the percent columns.
+    const out = parseDockerStats('fresh\t--\t--\t-- / --');
+    assert.strictEqual(out['fresh'].cpuPct, undefined, 'cpuPct dropped for "--"');
+    assert.strictEqual(out['fresh'].memPct, undefined, 'memPct dropped for "--"');
+    assert.strictEqual(out['fresh'].memUsage, '-- / --', 'memUsage kept faithfully');
+  });
+
+  it('returns {} for blank input and skips blank/short lines', () => {
+    assert.deepStrictEqual(parseDockerStats(''), {});
+    assert.deepStrictEqual(parseDockerStats(null), {});
+    assert.deepStrictEqual(parseDockerStats(undefined), {});
+    // blank lines and a name-only line are skipped, the valid row still parses
+    const out = parseDockerStats('\n\nmyproject-worker\t1.00%\t2.00%\t3MiB / 2GiB\nnameonly');
+    assert.deepStrictEqual(Object.keys(out), ['myproject-worker']);
+  });
+});
+
+// discover() attaches per-container cpuPct/memPct/memUsage from the docker-stats
+// block (WARDEN-309) onto chats AFTER buildChat returns — never inside buildChat,
+// whose literal is shared byte-for-byte with the companion transport (WARDEN-272).
+// The stats ride the same SSH round-trip (the injected runWithPool returns both the
+// rows and the sentinel-bracketed stats block in one stdout). CI can assert the
+// wiring with no real ssh/docker via the deps seam.
+describe('discover() attaches docker-stats resource fields (WARDEN-309)', () => {
+  it('attaches cpuPct/memPct/memUsage to chats whose name has a stats row', async () => {
+    const stdout = [
+      'myproject-worker\tUp 2 hours\t/work\t1',
+      'myproject-researcher\tUp 5 min\t/x\t0',
+      '___WARDEN_STATS___',
+      'myproject-worker\t42.30%\t15.70%\t310.2MiB / 2GiB',
+      'myproject-researcher\t0.10%\t5.00%\t90.1MiB / 2GiB',
+    ].join('\n');
+    const res = await discover('prod', {}, { activity: false }, {
+      isCompanionTransportEnabled: () => false,
+      runWithPool: async () => ({ ok: true, stdout }),
+    });
+    assert.strictEqual(res.ok, true);
+    const byKey = Object.fromEntries(res.chats.map((c) => [c.key, c]));
+    assert.strictEqual(byKey['myproject-worker'].cpuPct, 42.3);
+    assert.strictEqual(byKey['myproject-worker'].memPct, 15.7);
+    assert.strictEqual(byKey['myproject-worker'].memUsage, '310.2MiB / 2GiB');
+    assert.strictEqual(byKey['myproject-researcher'].cpuPct, 0.1);
+  });
+
+  it('omits resource fields entirely when there is no stats block (older host)', async () => {
+    // Pre-WARDEN-309 script output: rows only, no sentinel. Chats must match
+    // buildChat() exactly — no cpuPct/memPct/memUsage keys at all (graceful N/A).
+    const stdout = 'myproject-worker\tUp 2 hours\t/work\t1';
+    const res = await discover('prod', {}, { activity: false }, {
+      isCompanionTransportEnabled: () => false,
+      runWithPool: async () => ({ ok: true, stdout }),
+    });
+    assert.strictEqual(res.ok, true);
+    const chat = res.chats[0];
+    assert.strictEqual(chat.cpuPct, undefined);
+    assert.strictEqual(chat.memPct, undefined);
+    assert.strictEqual(chat.memUsage, undefined);
+    // And the chat is otherwise byte-identical to buildChat (the WARDEN-272 invariant).
+    assert.deepStrictEqual(
+      chat,
+      buildChat('prod', 'myproject-worker', 'Up 2 hours', '/work', true, 'agent'),
+    );
+  });
+
+  it('omits fields for a container with no matching stats row (stats row absent)', async () => {
+    // The container is discovered but `docker stats` returned no row for it
+    // (e.g. it stopped between `docker ps` and `docker stats`). It must not get
+    // another container's stats, and must not throw.
+    const stdout = [
+      'myproject-worker\tUp 2 hours\t/work\t1',
+      '___WARDEN_STATS___',
+      'some-other-container\t99.00%\t99.00%\t1GiB / 2GiB',
+    ].join('\n');
+    const res = await discover('prod', {}, { activity: false }, {
+      isCompanionTransportEnabled: () => false,
+      runWithPool: async () => ({ ok: true, stdout }),
+    });
+    const chat = res.chats[0];
+    assert.strictEqual(chat.cpuPct, undefined);
+    assert.strictEqual(chat.memUsage, undefined);
+    assert.strictEqual(res.chats.length, 1, 'stats row did NOT become a bogus chat');
+  });
+
+  it('does not let a stats row masquerade as a discover row (sentinel isolates it)', async () => {
+    // Regression guard: without the sentinel split, a stats row
+    // `name\t42.30%\t15.70%\t310MiB / 2GiB` has 4 columns and would parse as a
+    // chat (name=name, active=false, cwd=15.70%, status=42.30%). The sentinel
+    // must prevent that — only the real discover row becomes a chat.
+    const stdout = [
+      'myproject-worker\tUp 2 hours\t/work\t1',
+      '___WARDEN_STATS___',
+      'myproject-worker\t42.30%\t15.70%\t310.2MiB / 2GiB',
+    ].join('\n');
+    const res = await discover('prod', {}, { activity: false }, {
+      isCompanionTransportEnabled: () => false,
+      runWithPool: async () => ({ ok: true, stdout }),
+    });
+    assert.strictEqual(res.chats.length, 1, 'exactly one chat — the stats row did not double it');
+    assert.strictEqual(res.chats[0].cwd, '/work', 'cwd is the real discover cwd, not a percent');
   });
 });
 
