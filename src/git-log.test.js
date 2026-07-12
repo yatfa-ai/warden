@@ -59,6 +59,7 @@ let behindRepo;
 let bareOrigin;
 let aheadRepo;
 let bareOriginAhead;
+let renameRepo;
 
 function git(args, cwd) {
   const r = spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'inherit'] });
@@ -138,6 +139,21 @@ before(async () => {
     git(['commit', '-q', '-m', subject], aheadRepo);
   });
 
+  // A repo with a file renamed across commits (WARDEN-319 --follow fixture): a.txt is
+  // created in one commit, then `git mv`'d to b.txt in the next. `git log --follow --
+  // b.txt` must surface BOTH commits (the rename AND the original creation under the
+  // old name) — that cross-rename reach is the whole point of --follow, and what this
+  // fixture proves is live (without --follow, b.txt's log would show only the rename).
+  renameRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitlog-rename-'));
+  git(['init', '-q'], renameRepo);
+  git(['config', 'user.email', 'test@example.com'], renameRepo);
+  git(['config', 'user.name', 'Tester'], renameRepo);
+  fs.writeFileSync(path.join(renameRepo, 'a.txt'), '1\n');
+  git(['add', '.'], renameRepo);
+  git(['commit', '-q', '-m', 'create a.txt'], renameRepo);
+  git(['mv', 'a.txt', 'b.txt'], renameRepo);
+  git(['commit', '-q', '-m', 'rename a.txt to b.txt'], renameRepo);
+
   // Catalog with LOCAL manual chats: the git repo, the non-git dir, the behind repo,
   // and the ahead repo. Resolved by bare session id (no ':' prefix) → no host/tmux
   // discovery runs.
@@ -148,6 +164,7 @@ before(async () => {
       { host: '(local)', session: 'warden-nongit', cwd: nonGitDir, cmd: 'bash', name: 'warden-nongit' },
       { host: '(local)', session: 'warden-behind', cwd: behindRepo, cmd: 'bash', name: 'warden-behind' },
       { host: '(local)', session: 'warden-ahead', cwd: aheadRepo, cmd: 'bash', name: 'warden-ahead' },
+      { host: '(local)', session: 'warden-rename', cwd: renameRepo, cmd: 'bash', name: 'warden-rename' },
     ]),
   );
 
@@ -166,7 +183,7 @@ after(async () => {
   if (httpServer) await new Promise((r) => httpServer.close(r));
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  for (const d of [gitRepo, nonGitDir, behindRepo, bareOrigin, aheadRepo, bareOriginAhead, tempHome]) {
+  for (const d of [gitRepo, nonGitDir, behindRepo, bareOrigin, aheadRepo, bareOriginAhead, renameRepo, tempHome]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 });
@@ -382,5 +399,73 @@ describe('/api/git-log range=outgoing (ahead commits — WARDEN-252)', () => {
     const body = await res.json();
     assert.deepStrictEqual(body.commits, []);
     assert.strictEqual(body.error, null);
+  });
+});
+
+describe('/api/git-log path filter (file history — WARDEN-319)', () => {
+  it('returns exactly the commits that touched the given file (f0.txt → first commit)', async () => {
+    const res = await fetch(`${baseUrl}/api/git-log?id=warden-gitlog&path=f0.txt`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.error, null);
+    assert.ok(Array.isArray(body.commits));
+    assert.strictEqual(body.commits.length, 1);
+    assert.strictEqual(body.commits[0].subject, 'first commit');
+    assert.match(body.commits[0].hash, /^[0-9a-f]{4,}$/);
+    assert.strictEqual(body.commits[0].author, 'Tester');
+    assert.ok(typeof body.commits[0].date === 'string' && body.commits[0].date.length > 0);
+  });
+
+  it('returns exactly the commits that touched f2.txt (→ third commit)', async () => {
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-gitlog&path=f2.txt`)).json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.commits.length, 1);
+    assert.strictEqual(body.commits[0].subject, 'third commit');
+  });
+
+  it('rejects a traversal path with { commits: [], error: "invalid path" } (no 500)', async () => {
+    const res = await fetch(`${baseUrl}/api/git-log?id=warden-gitlog&path=${encodeURIComponent('../etc/passwd')}`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.deepStrictEqual(body.commits, []);
+    assert.strictEqual(body.error, 'invalid path');
+  });
+
+  it('returns { commits: [], error: null } (200, not 500) for a non-git cwd', async () => {
+    const res = await fetch(`${baseUrl}/api/git-log?id=warden-nongit&path=readme.txt`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.deepStrictEqual(body.commits, []);
+    assert.strictEqual(body.error, null);
+  });
+
+  it('ignores range when a path is present (file history is full, not incoming/outgoing)', async () => {
+    // gitRepo has NO upstream → range=incoming alone yields empty (the no-upstream
+    // case above). With a path present, rangeRev is intentionally NOT spliced, so the
+    // file's history still resolves — this is the assertion that distinguishes the
+    // correct file-history branch from a buggy one that splices rangeRev anyway.
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-gitlog&path=f0.txt&range=incoming`)).json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.commits.length, 1);
+    assert.strictEqual(body.commits[0].subject, 'first commit');
+  });
+
+  it('--follow surfaces history across a rename (b.txt reaches create + rename)', async () => {
+    // b.txt was renamed FROM a.txt; --follow must walk back through the rename so BOTH
+    // commits surface (newest first: rename, then the original create). Without
+    // --follow, b.txt's log would list only the rename commit — so length === 2 is the
+    // proof the flag is actually live on the wire.
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-rename&path=b.txt`)).json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.commits.length, 2);
+    assert.strictEqual(body.commits[0].subject, 'rename a.txt to b.txt');
+    assert.strictEqual(body.commits[1].subject, 'create a.txt');
+  });
+
+  it('absent path stays byte-for-byte today\'s behavior (HEAD-reachable log, unchanged)', async () => {
+    // No path → the existing HEAD-reachable behavior, identical to the original suite.
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-gitlog`)).json();
+    assert.strictEqual(body.commits.length, 3);
+    assert.strictEqual(body.commits[0].subject, 'third commit');
   });
 });

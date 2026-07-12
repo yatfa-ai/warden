@@ -1219,7 +1219,8 @@ const GIT_LOG_PRETTY = '%h|%s|%an|%ar';
 // Recent commit history (git log) for a chat's repo. All transports go through
 // runGit (WARDEN-235): manual-local spawnSync, manual-remote SSH, and yatfa
 // containers via `docker exec … git -C <cwd>`. A non-git or no-cwd repo yields an
-// empty list (never a 500). limit is clamped to [1, 50].
+// empty list (never a 500). limit is clamped to [1, 50]. An optional `path` filters
+// to file-history mode (git log --follow -- <path>, WARDEN-319).
 app.get('/api/git-log', async (req, res) => {
   const chatId = String(req.query.id || '');
   const limit = Math.min(Math.max(parseInt(String(req.query.limit || '5'), 10) || 5, 1), 50);
@@ -1233,8 +1234,20 @@ app.get('/api/git-log', async (req, res) => {
   // explorable ahead half (WARDEN-252). Strictly read-only — no fetch/pull/merge/checkout.
   const range = String(req.query.range || '');
   const rangeRev = range === 'incoming' ? 'HEAD..@{u}' : range === 'outgoing' ? '@{u}..HEAD' : null;
+  // Optional path filter (WARDEN-319): when present, switch to file-history mode —
+  // list every commit that touched this ONE file (`git log --follow -- <path>`),
+  // the temporal counterpart to blame. A git pathspec validated with the same
+  // isSafeRelativePath the per-file git-show route uses (WARDEN-151). Absent `path`
+  // → byte-for-byte today's behavior (existing callers send none).
+  const filePath = String(req.query.path || '').trim();
   const { chat, error } = await resolve(chatId);
   if (error) return res.status(404).json({ error });
+
+  // Reject unsafe per-file paths (absolute / traversal) before any git invocation —
+  // mirrors git-show's isSafeRelativePath guard. Bad path → empty list, never a 500.
+  if (filePath && !isSafeRelativePath(filePath)) {
+    return res.json({ commits: [], error: 'invalid path' });
+  }
 
   try {
     const cwd = gitCwd(chat);
@@ -1247,8 +1260,19 @@ app.get('/api/git-log', async (req, res) => {
     // reason (WARDEN-122). yatfa chats run this inside the container (WARDEN-235).
     // range=incoming/outgoing splices in the corresponding rev; absent → HEAD log.
     const args = ['log'];
-    if (rangeRev) args.push(rangeRev);
-    args.push(`-${limit}`, `--pretty=format:${GIT_LOG_PRETTY}`);
+    if (filePath) {
+      // File-history mode (WARDEN-319): --follow tracks the file across renames and
+      // yields every commit that touched it (newest first). incoming/outgoing is a
+      // repo-wide range concept that doesn't apply to one file's full history, so
+      // rangeRev is intentionally NOT spliced here. `--follow` must precede --pretty
+      // and the pathspec must be the single path after `--` (--follow requires exactly
+      // one pathspec); `--` terminates option parsing so a path named like a flag
+      // can't inject options — same WARDEN-122 discipline as git-show's per-file path.
+      args.push(`-${limit}`, '--follow', `--pretty=format:${GIT_LOG_PRETTY}`, '--', filePath);
+    } else {
+      if (rangeRev) args.push(rangeRev);
+      args.push(`-${limit}`, `--pretty=format:${GIT_LOG_PRETTY}`);
+    }
     const r = await runGit(chat, args, cwd);
     const raw = r.ok ? r.stdout.trim() : '';
 
