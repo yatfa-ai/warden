@@ -12,8 +12,11 @@ import {
   type HostHealthGroup,
 } from '@/lib/healthUtils';
 import { StatusDot, type StatusTone } from '@/components/StatusDot';
+import { Sparkline } from '@/components/Sparkline';
 import { Button } from '@/components/ui/button';
 import { useHostStatuses } from '@/lib/useHostStatuses';
+import { useActivitySeries } from '@/lib/useActivitySeries';
+import { buildAgentActivity, selectAgentSparkline } from '@/lib/agentSparkline';
 
 interface Props {
   onOpenChat: (id: string) => void;
@@ -101,6 +104,10 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
   // Shared /api/hosts/status poll (singleton) — fuses per-host connectivity into
   // each host section's summary line.
   const hostStatuses = useHostStatuses();
+  // Per-agent 24h activity series for the row sparklines (WARDEN-299). Fetched on
+  // its own slow ~60s cadence inside the hook — explicitly NOT part of the 10s
+  // /api/health poll below, so adding the sparklines is a no-op on the hot path.
+  const { series: activitySeries } = useActivitySeries();
 
   const fetchHealth = async () => {
     setLoading(true);
@@ -147,6 +154,30 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
     return groups;
   }, [healthData, hostStatuses]);
 
+  // Per-agent 24h activity series for the row sparklines (WARDEN-299), joined by
+  // `container`. Memoized on `activitySeries` ONLY — the 24h series refreshes on
+  // its own ~60s cadence, so the 10s /api/health tick above never recomputes it
+  // (the per-row join is a plain O(1) Map lookup in renderSparkline).
+  const agentActivity = useMemo(() => buildAgentActivity(activitySeries), [activitySeries]);
+  const bucketCount = activitySeries?.buckets.length ?? 0;
+
+  // The per-row sparkline, or null. Delegates the three cases (no container →
+  // none; container + events → real series; container + no events → idle flat
+  // baseline) to the pure selectAgentSparkline so the logic is unit-testable.
+  // Sized with spacing tokens and tightened under `.compact` to track row density.
+  const renderSparkline = (agent: Chat) => {
+    const sel = selectAgentSparkline(agent, agentActivity, bucketCount);
+    if (!sel) return null;
+    return (
+      <Sparkline
+        values={sel.values}
+        errors={sel.errors}
+        ariaLabel={sel.ariaLabel}
+        className="w-14 h-4 compact:w-12 compact:h-3.5"
+      />
+    );
+  };
+
   // One agent row, reused by both the health-state and host views. `showHost`
   // hides the per-row host tag in host mode (the section header already names
   // the host — a repeated tag would be noise).
@@ -177,6 +208,13 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
           {agent.host}
         </span>
       )}
+
+      {/* Activity sparkline (WARDEN-299). Only yatfa agents (which carry a
+          container) sparkline; manual/tmux chats render nothing. An agent with
+          events draws a bar series (error buckets tint red); an idle agent — a
+          container with zero events in the window — draws a deliberately flat
+          baseline, not a blank (criterion #1). See selectAgentSparkline. */}
+      {renderSparkline(agent)}
 
       {/* Last Activity */}
       {agent.lastActivity && (

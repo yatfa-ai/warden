@@ -121,3 +121,18 @@ export interface ActivityStats {
   error: number;
   snapshot: number;
 }
+
+/**
+ * Per-agent, per-time-bucket activity series for the Fleet Health sparklines
+ * (WARDEN-299). Returned by `GET /api/activity/series`.
+ *
+ * `buckets` is the full epoch-aligned bucket-start range across the requested
+ * window (ascending) — idle periods are zero buckets, not gaps. Each series
+ * entry's `total`/`error` arrays are parallel to `buckets` (same length, index
+ * i ↔ buckets[i]); `error` counts "something went wrong" event types.
+ */
+export interface ActivitySeries {
+  bucketMs: number;
+  buckets: number[];
+  series: Record<string, { total: number[]; error: number[] }>;
+}
