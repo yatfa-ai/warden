@@ -109,6 +109,52 @@ export async function kill(chat, cfg) {
   await runTmux(chat, ['kill-session', '-t', sess(chat, cfg)]);
 }
 
+// ---- Seamless copy (WARDEN-261) -------------------------------------------
+// On some hosts tmux has mouse mode on (`set -g mouse on` in ~/.tmux.conf), so
+// tmux grabs the mouse for its own selection and xterm never gets one — meaning
+// the pane's Ctrl/Cmd+C copy path (term.getSelection()) copies nothing. Warden
+// normalizes this with an opt-in per-host "Seamless copy" setting: when on, the
+// host's tmux mouse is disabled on attach so xterm owns the selection and the
+// standard select+copy gesture works with zero tmux knowledge.
+//
+// The `mouse` option is tmux's unified mouse toggle (since tmux 2.1, 2015).
+// `set -g mouse off` disables it server-wide for the chat's tmux (yatfa: that
+// container's tmux; bare-tmux remote: that host's shared tmux server; local:
+// this machine's tmux). `show-options -g mouse` reads the current global value
+// (`mouse on` / `mouse off`) so we can tell the user copy is impaired when they
+// have NOT opted in. Both go through runTmux, so the docker-exec prefix and SSH
+// routing are handled by the existing transport.
+
+// Parse `tmux show-options -g mouse` stdout into a tri-state: true (mouse on →
+// copy impaired), false (mouse off → copy works), or null (unreadable / unknown,
+// so the hint is never shown on a failure). Pure + exported so the tri-state
+// logic has a direct unit test (mirrors parseAheadBehind). Accepts the `-v` form
+// (`on`/`off`) and the default form (`mouse on`/`mouse off`) by taking the last
+// whitespace-separated token; anything else is null.
+export function parseMouseState(stdout) {
+  const val = String(stdout || '').trim().split(/\s+/).pop();
+  if (val === 'on') return true;
+  if (val === 'off') return false;
+  return null;
+}
+
+// Disable tmux mouse for the chat's tmux server (opt-in "Seamless copy"). Best-
+// effort: returns the runTmux result; callers swallow failures so a mouse-off
+// failure never blocks the attach. A short timeout keeps a slow/unreachable host
+// from hanging the attach.
+export async function disableMouse(chat, cfg, opts = {}) {
+  return runTmux(chat, ['set', '-g', 'mouse', 'off'], { timeout: 3000, ...opts });
+}
+
+// Read the chat's tmux global mouse state. Returns true/false/null (null when
+// the value can't be read — host down, tmux error, no server yet). Best-effort:
+// a failed read is null, which the frontend treats as "don't show the hint".
+export async function detectMouse(chat, cfg, opts = {}) {
+  const r = await runTmux(chat, ['show-options', '-g', 'mouse'], { timeout: 3000, ...opts });
+  if (!r.ok) return null;
+  return parseMouseState(r.stdout);
+}
+
 // Attach argv (for the transport helpers).
 export function attachArgs(chat, cfg) {
   return ['attach', '-t', sess(chat, cfg)];

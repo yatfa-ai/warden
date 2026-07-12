@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
-import { loadUi, saveUi, persistUiState, initialWorkspace, DEFAULT_TERMINAL_FONT_FAMILY, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
+import { loadUi, saveUi, persistUiState, initialWorkspace, DEFAULT_TERMINAL_FONT_FAMILY, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type HostOptionsMap, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
 import { applyTheme, listenSystemThemeChange, getEffectiveTheme, resolveTerminalTheme, type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
@@ -228,6 +228,13 @@ function App() {
   // UiState / saveUi. Loads from main on mount (stays false in a browser where
   // the bridge is absent). See WARDEN-330.
   const [closeToTray, setCloseToTrayState] = useState(false);
+  // WARDEN-261: per-host "Seamless copy" toggle + the per-host dismissal of the
+  // "copy may not grab selected text" hint. Both are pure client-side localStorage
+  // prefs (like terminalCursorStyle), persisted by the saveUi effect below. The
+  // toggle is sent to the backend only as the transient `seamlessCopy` attach
+  // flag (PaneTile); the dismissal never leaves the client.
+  const [hostOptions, setHostOptions] = useState<HostOptionsMap>(() => uiState.hostOptions ?? {});
+  const [copyHintDismissed, setCopyHintDismissed] = useState<Record<string, boolean>>(() => uiState.copyHintDismissed ?? {});
   const { prefs, reload: reloadNotificationPrefs } = useNotificationPrefs();
   // "Confirm before destructive actions" preference (default on). Gates both
   // destructive kill paths — force-kill (tmux session) and kill chat. Loaded
@@ -340,8 +347,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, defaultSplitShell }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, defaultSplitShell, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, defaultSplitShell, hostOptions, copyHintDismissed }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, defaultSplitShell, hostOptions, copyHintDismissed, restoreOnStartup, startedEmpty]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -457,6 +464,25 @@ function App() {
     setCloseToTrayState(v);
     void persistCloseToTray(v);
   }, []);
+
+  // WARDEN-261: toggle Seamless copy for a host (Settings → per-host). Applies
+  // on the next pane attach (PaneTile reads hostOptions[host] at attach-send
+  // time), without a Warden restart. Drops the map entry when it has no
+  // remaining options so the persisted map stays tidy.
+  const setHostSeamlessCopy = (host: string, seamlessCopy: boolean) => {
+    setHostOptions((prev) => {
+      const merged: HostOptionsMap = { ...prev };
+      const next = { ...(prev[host] ?? {}), seamlessCopy };
+      if (Object.keys(next).length) merged[host] = next;
+      else delete merged[host];
+      return merged;
+    });
+  };
+  // WARDEN-261: silence the "copy may not grab selected text" hint for a host.
+  // Per-host: dismissing once stays silenced for that host across all its panes.
+  const dismissCopyHint = (host: string) => {
+    setCopyHintDismissed((prev) => ({ ...prev, [host]: true }));
+  };
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
   // its entries in the chats list so dots update to green/red.
@@ -1070,6 +1096,8 @@ function App() {
           setLaunchAtLogin={setLaunchAtLogin}
           closeToTray={closeToTray}
           setCloseToTray={setCloseToTray}
+          hostOptions={hostOptions}
+          onSetHostSeamlessCopy={setHostSeamlessCopy}
         />
       ) : chatBrowserOpen ? (
         <OpenChatBrowserPage
@@ -1167,6 +1195,9 @@ function App() {
             copyOnSelect={copyOnSelect}
             onExitBehavior={onExitBehavior}
             showHostTags={displaySettings.showHostTags}
+            hostOptions={hostOptions}
+            copyHintDismissed={copyHintDismissed}
+            onDismissCopyHint={dismissCopyHint}
           />
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"
