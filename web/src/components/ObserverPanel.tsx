@@ -47,6 +47,7 @@ import {
 } from '@/components/ui/dialog';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { useStickToBottom } from '@/lib/useStickToBottom';
+import { decideFailObserverTurn } from '@/lib/observerTurns';
 import { ObserverMarkdown } from '@/components/ObserverMarkdown';
 import { StatusDot } from '@/components/StatusDot';
 
@@ -230,17 +231,33 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
     });
   }, []);
 
-  // Mark the current streaming observer message as failed (stream dropped or the
-  // backend errored mid-turn) so assistant-ui surfaces a retry affordance on it.
+  // Mark the current turn's observer message as failed (stream dropped or the
+  // backend errored) so a retry affordance surfaces on it. The shape of the
+  // failure (mark an in-flight stream vs. synthesize an empty errored turn vs.
+  // no-op) is decided by the pure decideFailObserverTurn helper — see
+  // observerTurns.ts for the failure-mode coverage.
   const failStreamingObserver = useCallback(() => {
     setItems((prev) => {
-      const last = prev[prev.length - 1];
-      if (last && last.kind === 'observer' && last.streaming) {
-        return [...prev.slice(0, -1), { ...last, streaming: false, errored: true }];
+      const decision = decideFailObserverTurn(prev);
+      if (decision.action === 'mark-streaming') {
+        return prev.map((it) =>
+          it.id === decision.id && it.kind === 'observer'
+            ? { ...it, streaming: false, errored: true }
+            : it,
+        );
       }
-      return prev;
+      if (decision.action === 'none') return prev;
+      const created: Item = {
+        id: nextId(),
+        kind: 'observer',
+        text: '',
+        ts: Date.now(),
+        streaming: false,
+        errored: true,
+      };
+      return [...prev, created];
     });
-  }, []);
+  }, [nextId]);
 
   const pushItem = useCallback(
     (item: Item) => {
@@ -614,7 +631,9 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
                         <ObserverEntry
                           key={message.id}
                           item={item}
-                          canRegenerate={!!message.isLast && !busy && !item.streaming && !pendingGate}
+                          canRegenerate={
+                            (!!message.isLast || !!item.errored) && !busy && !item.streaming && !pendingGate
+                          }
                           onRegenerate={regenerate}
                         />
                       );
@@ -816,7 +835,11 @@ function ObserverEntry({
         <ContextMenu>
           <ContextMenuTrigger asChild>
             <div className="rounded-2xl rounded-tl-sm border bg-muted/40 px-3 py-2">
-              <ObserverMarkdown>{item.text}</ObserverMarkdown>
+              {item.text.trim() ? (
+                <ObserverMarkdown>{item.text}</ObserverMarkdown>
+              ) : item.errored ? (
+                <span className="text-sm text-destructive">Generation failed.</span>
+              ) : null}
               {item.streaming && (
                 <span className="ml-0.5 inline-block h-3 w-0.5 animate-pulse bg-foreground/60 align-middle" />
               )}
