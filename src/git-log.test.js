@@ -41,6 +41,13 @@ const SUBJECTS = ['third commit', 'fix: handle the | pipe in subject', 'first co
 // Oldest-first here; the expected endpoint order is newest-first (bottom→top).
 const BEHIND_SUBJECTS = ['base one', 'base two', 'incoming: add feature X', 'incoming: fix bug Y'];
 
+// Commits used to build the "ahead" fixture (WARDEN-252): a base commit is pushed to
+// a bare origin (so @{u} sits at the base), then two MORE local commits are added but
+// NOT pushed. Those two unpushed commits are exactly what `git log @{u}..HEAD` must
+// surface. Oldest-first here; the expected endpoint order is newest-first (bottom→top).
+const AHEAD_BASE_SUBJECT = 'base: shared with upstream';
+const AHEAD_SUBJECTS = ['outgoing: add feature Z', 'outgoing: fix bug W'];
+
 let parseGitLogLine;
 let httpServer;
 let baseUrl;
@@ -50,6 +57,8 @@ let gitRepo;
 let nonGitDir;
 let behindRepo;
 let bareOrigin;
+let aheadRepo;
+let bareOriginAhead;
 
 function git(args, cwd) {
   const r = spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'inherit'] });
@@ -104,14 +113,41 @@ before(async () => {
   // Drop the last two commits locally → HEAD is behind @{u} by exactly those two.
   git(['reset', '--hard', 'HEAD~2'], behindRepo);
 
-  // Catalog with LOCAL manual chats: the git repo, the non-git dir, and the behind
-  // repo. Resolved by bare session id (no ':' prefix) → no host/tmux discovery runs.
+  // A repo whose HEAD is AHEAD of @{u} — the "ahead/unpushed" case (WARDEN-252).
+  // Commit a base, push it to a bare origin (→ @{u} at the base tip), then add two
+  // MORE local commits NOT pushed. HEAD is now ahead of @{u} by exactly those two —
+  // they are what `git log @{u}..HEAD` must list.
+  aheadRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitlog-ahead-'));
+  git(['init', '-q'], aheadRepo);
+  git(['config', 'user.email', 'test@example.com'], aheadRepo);
+  git(['config', 'user.name', 'Tester'], aheadRepo);
+  // Base commit, pushed — @{u} will sit here.
+  fs.writeFileSync(path.join(aheadRepo, 'base.txt'), '0\n');
+  git(['add', '.'], aheadRepo);
+  git(['commit', '-q', '-m', AHEAD_BASE_SUBJECT], aheadRepo);
+  bareOriginAhead = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitlog-bare-ahead-'));
+  git(['init', '--bare', '-q'], bareOriginAhead);
+  git(['remote', 'add', 'origin', bareOriginAhead], aheadRepo);
+  // -u sets upstream tracking so @{u} resolves; pushing HEAD is branch-name
+  // agnostic (robust to a master/main default).
+  git(['push', '-u', 'origin', 'HEAD'], aheadRepo);
+  // Two more local commits, NOT pushed → HEAD is ahead of @{u} by exactly these two.
+  AHEAD_SUBJECTS.forEach((subject, i) => {
+    fs.writeFileSync(path.join(aheadRepo, `a${i}.txt`), `${i + 1}\n`);
+    git(['add', '.'], aheadRepo);
+    git(['commit', '-q', '-m', subject], aheadRepo);
+  });
+
+  // Catalog with LOCAL manual chats: the git repo, the non-git dir, the behind repo,
+  // and the ahead repo. Resolved by bare session id (no ':' prefix) → no host/tmux
+  // discovery runs.
   fs.writeFileSync(
     path.join(wardenDir, 'chats.json'),
     JSON.stringify([
       { host: '(local)', session: 'warden-gitlog', cwd: gitRepo, cmd: 'bash', name: 'warden-gitlog' },
       { host: '(local)', session: 'warden-nongit', cwd: nonGitDir, cmd: 'bash', name: 'warden-nongit' },
       { host: '(local)', session: 'warden-behind', cwd: behindRepo, cmd: 'bash', name: 'warden-behind' },
+      { host: '(local)', session: 'warden-ahead', cwd: aheadRepo, cmd: 'bash', name: 'warden-ahead' },
     ]),
   );
 
@@ -130,7 +166,7 @@ after(async () => {
   if (httpServer) await new Promise((r) => httpServer.close(r));
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  for (const d of [gitRepo, nonGitDir, behindRepo, bareOrigin, tempHome]) {
+  for (const d of [gitRepo, nonGitDir, behindRepo, bareOrigin, aheadRepo, bareOriginAhead, tempHome]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 });
@@ -283,6 +319,65 @@ describe('/api/git-log range=incoming (behind commits — WARDEN-225)', () => {
     // non-zero with empty stdout → empty list. Mirrors parseAheadBehind's null
     // tolerance; the badge must never see a 500 here.
     const res = await fetch(`${baseUrl}/api/git-log?id=warden-gitlog&range=incoming`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.deepStrictEqual(body.commits, []);
+    assert.strictEqual(body.error, null);
+  });
+});
+
+describe('/api/git-log range=outgoing (ahead commits — WARDEN-252)', () => {
+  it('sanity: the ahead fixture is actually 2 ahead, 0 behind', () => {
+    // Confirms the fixture is in the state the cases below assume: @{u} behind HEAD
+    // by exactly two. `rev-list --left-right --count @{u}...HEAD` → "behind\tahead".
+    const ab = git(['rev-list', '--left-right', '--count', '@{u}...HEAD'], aheadRepo)
+      .stdout.toString().trim();
+    assert.strictEqual(ab, '0\t2', `expected "0\\t2" (behind=0, ahead=2), got "${ab}"`);
+  });
+
+  it('returns exactly the outgoing commits (newest first) with range=outgoing', async () => {
+    const res = await fetch(`${baseUrl}/api/git-log?id=warden-ahead&range=outgoing`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.error, null);
+    assert.ok(Array.isArray(body.commits));
+    assert.strictEqual(body.commits.length, 2);
+    // Newest first: the two commits HEAD has that @{u} doesn't (the unpushed ones).
+    assert.strictEqual(body.commits[0].subject, 'outgoing: fix bug W');
+    assert.strictEqual(body.commits[1].subject, 'outgoing: add feature Z');
+    for (const c of body.commits) {
+      assert.match(c.hash, /^[0-9a-f]{4,}$/);
+      assert.strictEqual(c.author, 'Tester');
+      assert.ok(typeof c.date === 'string' && c.date.length > 0, 'relative date must be non-empty');
+    }
+  });
+
+  it('without range=outgoing, the same repo returns HEAD-reachable commits (unchanged)', async () => {
+    // Absent range keeps today's behavior: HEAD-reachable = base + the two outgoing.
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-ahead`)).json();
+    assert.strictEqual(body.commits.length, 3);
+    assert.strictEqual(body.commits[0].subject, 'outgoing: fix bug W');
+    assert.strictEqual(body.commits[1].subject, 'outgoing: add feature Z');
+    assert.strictEqual(body.commits[2].subject, 'base: shared with upstream');
+  });
+
+  it('honors limit on the outgoing range (returns only the N newest outgoing)', async () => {
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-ahead&range=outgoing&limit=1`)).json();
+    assert.strictEqual(body.commits.length, 1);
+    assert.strictEqual(body.commits[0].subject, 'outgoing: fix bug W');
+  });
+
+  it('clamps an oversized limit to 50 on the outgoing range (no error)', async () => {
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-ahead&range=outgoing&limit=999`)).json();
+    assert.strictEqual(body.commits.length, 2); // only 2 outgoing exist
+    assert.strictEqual(body.error, null);
+  });
+
+  it('returns { commits: [], error: null } (200, not 500) when there is no upstream', async () => {
+    // gitRepo has commits but NO upstream configured → @{u} is unset → git exits
+    // non-zero with empty stdout → empty list. Mirrors the incoming no-upstream case;
+    // the badge must never see a 500 here.
+    const res = await fetch(`${baseUrl}/api/git-log?id=warden-gitlog&range=outgoing`);
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     assert.deepStrictEqual(body.commits, []);

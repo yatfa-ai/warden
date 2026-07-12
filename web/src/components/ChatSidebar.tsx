@@ -332,6 +332,15 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   // section — but the call is harmless on a non-behind repo (returns []).
   const [gitLogIncoming, setGitLogIncoming] = useState<Record<string, GitCommit[]>>({});
   const [gitLogIncomingLoading, setGitLogIncomingLoading] = useState<Record<string, boolean>>({});
+  // outgoing (ahead/unpushed) commit history per chatId — the commits HEAD has that
+  // @{u} doesn't (the "↑N unpushed" half of WARDEN-153's count, explorable per
+  // WARDEN-252). A separate cache from gitLog/gitLogIncoming so each third refreshes
+  // independently and the popover shows all three. limit 50 (not 5): the whole
+  // unpushed list is the point, and it's cached so a re-expand is instant. Only
+  // fetched when aheadCount > 0 — the badge gates the section — but the call is
+  // harmless on a non-ahead repo (returns []).
+  const [gitLogOutgoing, setGitLogOutgoing] = useState<Record<string, GitCommit[]>>({});
+  const [gitLogOutgoingLoading, setGitLogOutgoingLoading] = useState<Record<string, boolean>>({});
   // Per-file diff dialog (WARDEN-151): which chatId + path is shown in the DiffViewer.
   const [diffTarget, setDiffTarget] = useState<{ chatId: string; path: string } | null>(null);
   const { prefs } = useNotificationPrefs();
@@ -417,6 +426,23 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       setGitLogIncoming((p) => ({ ...p, [chatId]: [] }));
     } finally {
       setGitLogIncomingLoading((p) => ({ ...p, [chatId]: false }));
+    }
+  }, []);
+
+  // Fetch the outgoing (ahead/unpushed) commits — git log @{u}..HEAD — for a chat.
+  // Mirrors fetchGitLogIncoming but hits range=outgoing (WARDEN-252). Cached per
+  // chatId so a re-expand is instant; a transient failure caches [] so it won't loop.
+  const fetchGitLogOutgoing = useCallback(async (chatId: string) => {
+    setGitLogOutgoingLoading((p) => ({ ...p, [chatId]: true }));
+    try {
+      const r = await fetch(`/api/git-log?id=${encodeURIComponent(chatId)}&limit=50&range=outgoing`);
+      const j = await r.json();
+      setGitLogOutgoing((p) => ({ ...p, [chatId]: Array.isArray(j.commits) ? j.commits : [] }));
+    } catch (error) {
+      console.error('Failed to fetch outgoing git log:', error);
+      setGitLogOutgoing((p) => ({ ...p, [chatId]: [] }));
+    } finally {
+      setGitLogOutgoingLoading((p) => ({ ...p, [chatId]: false }));
     }
   }, []);
 
@@ -771,19 +797,19 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             {(visibleActive.length > 0 || idle.length > 0 || hiddenActive.length > 0) && (
               <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">● live (tmux)</div>
             )}
-            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onHide={() => onHideTab(c.key || c.id)} gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
+            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onHide={() => onHideTab(c.key || c.id)} gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
             {hiddenActive.length > 0 && (
               <>
                 <SectionToggle expanded={hiddenExpanded} onClick={() => setHiddenExpanded(!hiddenExpanded)} label={`hidden (${hiddenActive.length})`} />
                 {hiddenExpanded && hiddenActive.map((c) => (
-                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onUnhide={() => onUnhideTab(c.key || c.id)} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />
+                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onUnhide={() => onUnhideTab(c.key || c.id)} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />
                 ))}
               </>
             )}
             {idle.length > 0 && (
               <>
                 <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">idle</div>
-                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
+                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} />)}
               </>
             )}
             <div className="mt-3 mb-1 border-t border-border/50" />
@@ -952,6 +978,9 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                 incomingCommits={gitLogIncoming[id]}
                 incomingLoading={gitLogIncomingLoading[id]}
                 onFetchIncoming={() => fetchGitLogIncoming(id)}
+                outgoingCommits={gitLogOutgoing[id]}
+                outgoingLoading={gitLogOutgoingLoading[id]}
+                onFetchOutgoing={() => fetchGitLogOutgoing(id)}
                 onOpenDiff={(path) => setDiffTarget({ chatId: id, path })}
                 originalIdx={originalIdx}
                 dragIdx={dragIdx}
@@ -1158,7 +1187,7 @@ function CommitFile({ chatId, hash, file }: { chatId: string; hash: string; file
   );
 }
 
-function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, inProgress, stashCount, incomingCommits, incomingLoading, onFetchIncoming, detached, headSha, className }: {
+function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, inProgress, stashCount, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, detached, headSha, className }: {
   branch: string;
   clean: boolean | null;
   commits?: GitCommit[];
@@ -1175,6 +1204,12 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
   incomingCommits?: GitCommit[];
   incomingLoading?: boolean;
   onFetchIncoming?: () => void;
+  // WARDEN-252: the "ahead/unpushed" half — commits HEAD has that @{u} doesn't. The
+  // symmetric counterpart to incomingCommits. Lazily fetched on open when aheadCount
+  // > 0, with its own cache/loader. Display-only (mirrors the incoming row shape).
+  outgoingCommits?: GitCommit[];
+  outgoingLoading?: boolean;
+  onFetchOutgoing?: () => void;
   // WARDEN-239: HEAD is not on a branch (an agent checked out a specific commit).
   // Rendered as a distinct amber glyph + the short SHA instead of the misleading
   // literal "HEAD" branch label. ahead/behind are null on detached (no @{u}).
@@ -1265,6 +1300,7 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
       // re-hitting the endpoint.
       if (commits === undefined && !loading) onFetch?.();
       if (behindCount > 0 && incomingCommits === undefined && !incomingLoading) onFetchIncoming?.();
+      if (aheadCount > 0 && outgoingCommits === undefined && !outgoingLoading) onFetchOutgoing?.();
       if (stashN > 0 && stashList === undefined && !stashLoading) fetchStash();
     }}>
       <RadixPopover.Trigger asChild>
@@ -1299,14 +1335,15 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
               recent commits · {isDetached ? `detached${sha ? ` @ ${sha}` : ''}` : branch}
               {aheadCount > 0 && <span className="text-amber-400"> · ↑ {aheadCount} unpushed</span>}
             </span>
-            <IconTooltip label="refresh" disabled={loading || incomingLoading}>
+            <IconTooltip label="refresh" disabled={loading || incomingLoading || outgoingLoading}>
               <button
                 type="button"
-                // One ↻ refreshes BOTH halves, so a human checking for fresh incoming
-                // commits after a remote fetch doesn't have to hunt for a second button.
-                onClick={(e) => { e.stopPropagation(); onFetch?.(); if (behindCount > 0) onFetchIncoming?.(); }}
+                // One ↻ refreshes ALL halves (local recent + incoming + outgoing), so a
+                // human checking for fresh commits after a remote fetch doesn't have to
+                // hunt for a second button.
+                onClick={(e) => { e.stopPropagation(); onFetch?.(); if (behindCount > 0) onFetchIncoming?.(); if (aheadCount > 0) onFetchOutgoing?.(); }}
                 className="shrink-0 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-50"
-                disabled={loading || incomingLoading}
+                disabled={loading || incomingLoading || outgoingLoading}
               >↻</button>
             </IconTooltip>
           </div>
@@ -1355,6 +1392,38 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
             </ul>
           ) : (
             <div className="px-1 py-1 text-[10px] text-muted-foreground">no commits</div>
+          )}
+          {aheadCount > 0 && (
+            <div className="mt-1.5 border-t border-border pt-1.5">
+              <div className="mb-1 px-0.5">
+                <span className="text-[10px] font-medium text-amber-400">unpushed · ↑ {aheadCount} ahead</span>
+              </div>
+              {outgoingLoading && (!outgoingCommits || outgoingCommits.length === 0) ? (
+                <div className="flex items-center gap-1.5 px-1 py-1">
+                  <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">loading…</span>
+                </div>
+              ) : outgoingCommits && outgoingCommits.length > 0 ? (
+                <ul className="max-h-72 overflow-auto">
+                  {outgoingCommits.map((cm) => (
+                    // Display-only: matches the incoming row shape (WARDEN-252). Unlike
+                    // incoming, these commits ARE local (already in HEAD), so a per-commit
+                    // /api/git-show expand would be reliable — left for a follow-up to
+                    // keep this slice tightly mirrored on the incoming list.
+                    <li key={cm.hash} className="rounded">
+                      <div className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left" title="unpushed commit (local, not yet pushed)">
+                        <span className="shrink-0 font-mono text-[10px] text-amber-400/80">{cm.hash}</span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-[10px] text-foreground" title={cm.subject}>{cm.subject}</span>
+                          <span className="block text-[10px] text-muted-foreground">{cm.date}{cm.author ? ` · ${cm.author}` : ''}</span>
+                        </span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="px-1 py-1 text-[10px] text-muted-foreground">no unpushed commits</div>
+              )}
+            </div>
           )}
           {behindCount > 0 && (
             <div className="mt-1.5 border-t border-border pt-1.5">
@@ -1423,7 +1492,7 @@ function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behin
   );
 }
 
-function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hostStatus, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, onOpenDiff, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, isPinned, onTogglePin }: {
+function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hostStatus, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, isPinned, onTogglePin }: {
   c: Chat; open: boolean; onOpen: () => void; onKill: () => void;
   onRename: (session: string, kind: string, name: string, host?: string) => void;
   onHide?: () => void; onUnhide?: () => void; dim?: boolean;
@@ -1435,6 +1504,8 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hos
   // WARDEN-225: incoming (behind) commits + their own fetch/loader, threaded to
   // GitBranchBadge the same way the local gitLog trio is.
   incomingCommits?: GitCommit[]; incomingLoading?: boolean; onFetchIncoming?: () => void;
+  // WARDEN-252: outgoing (ahead/unpushed) commits + their own fetch/loader.
+  outgoingCommits?: GitCommit[]; outgoingLoading?: boolean; onFetchOutgoing?: () => void;
   onOpenDiff?: (path: string) => void;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
   isPinned?: boolean; onTogglePin?: () => void;
@@ -1521,6 +1592,9 @@ function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hos
                   incomingCommits={incomingCommits}
                   incomingLoading={incomingLoading}
                   onFetchIncoming={onFetchIncoming}
+                  outgoingCommits={outgoingCommits}
+                  outgoingLoading={outgoingLoading}
+                  onFetchOutgoing={onFetchOutgoing}
                   className="ml-1"
                 />
               )}
@@ -1573,7 +1647,7 @@ function hostTagOf(host: string) { return host === THIS_MACHINE ? 'local' : host
 // gating rename off double-click avoids the two-fires-before-dblclick open-then-edit jank);
 // yatfa agents are not renameable. Drag-reorder is preserved via the parent-owned
 // dragIdx/dragOverIdx pair.
-function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, onOpenDiff, canDrag, originalIdx, dragIdx, dragOverIdx, setDragIdx, setDragOverIdx, onReorder, onHide, onKill }: {
+function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, canDrag, originalIdx, dragIdx, dragOverIdx, setDragIdx, setDragOverIdx, onReorder, onHide, onKill }: {
   id: string;
   c?: Chat;
   isOpen: boolean;
@@ -1585,6 +1659,8 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showHostTags
   gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
   // WARDEN-225: incoming (behind) commits + their own fetch/loader.
   incomingCommits?: GitCommit[]; incomingLoading?: boolean; onFetchIncoming?: () => void;
+  // WARDEN-252: outgoing (ahead/unpushed) commits + their own fetch/loader.
+  outgoingCommits?: GitCommit[]; outgoingLoading?: boolean; onFetchOutgoing?: () => void;
   onOpenDiff?: (path: string) => void;
   canDrag: boolean;
   originalIdx: number;
@@ -1650,7 +1726,7 @@ function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showHostTags
         {!dead && !editing && showHostTags !== false && hostTag && <span className="text-[10px] text-muted-foreground">{hostTag}</span>}
         {!dead && !editing && showProjectBadges && c?.project && <span className="text-[10px] text-muted-foreground">{c.project}</span>}
         {!dead && !editing && (gitInfo?.branch || gitInfo?.detached) && (
-          <GitBranchBadge branch={gitInfo.branch ?? ''} chatId={id} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} ahead={gitInfo.ahead} behind={gitInfo.behind} inProgress={gitInfo.inProgress} stashCount={gitInfo.stashCount} detached={gitInfo.detached} headSha={gitInfo.headSha} incomingCommits={incomingCommits} incomingLoading={incomingLoading} onFetchIncoming={onFetchIncoming} />
+          <GitBranchBadge branch={gitInfo.branch ?? ''} chatId={id} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} ahead={gitInfo.ahead} behind={gitInfo.behind} inProgress={gitInfo.inProgress} stashCount={gitInfo.stashCount} detached={gitInfo.detached} headSha={gitInfo.headSha} incomingCommits={incomingCommits} incomingLoading={incomingLoading} onFetchIncoming={onFetchIncoming} outgoingCommits={outgoingCommits} outgoingLoading={outgoingLoading} onFetchOutgoing={onFetchOutgoing} />
         )}
         {!editing && canRename && (
           <IconTooltip label="rename"><Button variant="ghost" size="xs" className="px-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); startEdit(); }} aria-label="rename">✎</Button></IconTooltip>
