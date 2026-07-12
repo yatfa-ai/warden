@@ -135,6 +135,13 @@ function App() {
   // Pure client-side pref (like paneLayout/terminalFontSize): persisted by the
   // saveUi effect below, never sent to the backend. See WARDEN-248.
   const [onExitBehavior, setOnExitBehavior] = useState<OnExitBehavior>(() => uiState.onExitBehavior ?? 'keep');
+  // "Auto-focus new pane": whether opening/resuming/splitting a chat moves
+  // keyboard focus to the new pane (default true = today's behavior). When false
+  // the currently focused pane is preserved — xterm's native click-to-focus lets
+  // the user focus a pane on demand. Pure client-side pref (like
+  // onExitBehavior/paneLayout): persisted by the saveUi effect below, never sent
+  // to the backend. Gates the setFocused call in openChat below. See WARDEN-274.
+  const [autoFocusNewPane, setAutoFocusNewPane] = useState<boolean>(() => uiState.autoFocusNewPane ?? true);
   const [terminalFontSize, setTerminalFontSize] = useState(() => uiState.terminalFontSize ?? 14);
   // Opt-in OS desktop alerts when agents need attention and Warden is unfocused
   // (WARDEN-259). Pure client-side pref (like terminalFontSize/scrollback):
@@ -280,8 +287,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, onExitBehavior, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, defaultSplitShell }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, onExitBehavior, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, defaultSplitShell, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, defaultSplitShell }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, defaultSplitShell, restoreOnStartup, startedEmpty]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -457,15 +464,19 @@ function App() {
     return () => window.clearInterval(interval);
   }, []);
 
-  // open chat: add to active tabs + open pane + focus
+  // open chat: add to active tabs + open pane + focus. The setFocused call is
+  // gated behind autoFocusNewPane (WARDEN-274): when OFF, the tab + pane still
+  // open but the currently focused pane is preserved (click-to-focus still works
+  // via xterm's native focus). Adding autoFocusNewPane to the deps rebuilds this
+  // callback (and its callers) when the pref toggles — a rare, deliberate action.
   const openChat = useCallback((id: string) => {
     setActiveTabs((p) => p.includes(id) ? p : [...p, id]);
     setOpenPanes((p) => p.includes(id) ? p : [...p, id]);
-    setFocused(id);
+    if (autoFocusNewPane) setFocused(id);
     // remember this pane's host so a restored remote pane knows which host to discover
     const c = chatsRef.current.find((x) => (x.key || x.id) === id);
     if (c?.host) setPaneHost((p) => (p[id] === c.host ? p : { ...p, [id]: c.host }));
-  }, []);
+  }, [autoFocusNewPane]);
 
   // handle focus-agent callback from Observer suggestion cards
   const handleFocusAgent = useCallback((id: string) => {
@@ -944,6 +955,8 @@ function App() {
           setPaneLayout={setPaneLayout}
           onExitBehavior={onExitBehavior}
           setOnExitBehavior={setOnExitBehavior}
+          autoFocusNewPane={autoFocusNewPane}
+          setAutoFocusNewPane={setAutoFocusNewPane}
           restoreOnStartup={restoreOnStartup}
           setRestoreOnStartup={setRestoreOnStartup}
           terminalFontSize={terminalFontSize}

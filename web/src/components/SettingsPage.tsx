@@ -85,6 +85,14 @@ interface Props {
   // PUT /api/config body. See WARDEN-248.
   onExitBehavior: OnExitBehavior;
   setOnExitBehavior: (v: OnExitBehavior) => void;
+  // "Auto-focus new pane" is likewise a pure client-side localStorage pref (NOT
+  // backend config): it gates whether opening/resuming/splitting a chat moves
+  // keyboard focus to the new pane (default on = today's behavior). It applies
+  // instantly via the prop callback and is persisted by App's saveUi effect. It
+  // must never be added to the `config` state / PUT /api/config body. See
+  // WARDEN-274.
+  autoFocusNewPane: boolean;
+  setAutoFocusNewPane: (v: boolean) => void;
   // "Restore workspace on startup" is likewise a pure client-side localStorage
   // pref: it gates App's workspace initializers and is persisted by App's saveUi
   // effect. It must never be added to the `config` state / PUT /api/config body.
@@ -259,7 +267,7 @@ function PresetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -881,6 +889,22 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   </Select>
                   <p className="text-xs text-muted-foreground">
                     What happens to an already-open pane when its agent process exits. "Keep pane" leaves it for you to close manually; "Dim pane" marks it exited while keeping the last output readable; "Auto-close pane" removes it for you. Applies only to panes whose agent was running — a pane that never started is left alone. Applies globally and is remembered across reloads.
+                  </p>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      id="autoFocusNewPane"
+                      checked={autoFocusNewPane}
+                      onCheckedChange={(v) => setAutoFocusNewPane(v)}
+                    />
+                    <Label htmlFor="autoFocusNewPane" className="cursor-pointer">
+                      Auto-focus pane on open
+                    </Label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    When on, opening, resuming, or splitting a chat moves keyboard focus to the new pane. Turn off to keep typing where you are — click any pane to focus it instead. Applies globally and is remembered across reloads.
                   </p>
                 </div>
 

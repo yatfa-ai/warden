@@ -375,6 +375,44 @@ test('the pref survives an empty-mode mount (carried by the live spread, not the
   assert.equal(loadUi().onExitBehavior, 'auto-close');
 });
 
+console.log('\nautoFocusNewPane (true/false) round-trips through loadUi/saveUi — WARDEN-274');
+test('defaults to true when nothing is stored', () => {
+  reset();
+  assert.equal(loadUi().autoFocusNewPane, true);
+});
+test('false round-trips (the opt-out value)', () => {
+  reset();
+  saveUi({ ...loadUi(), autoFocusNewPane: false });
+  assert.equal(loadUi().autoFocusNewPane, false);
+});
+test('true round-trips', () => {
+  reset();
+  saveUi({ ...loadUi(), autoFocusNewPane: true });
+  assert.equal(loadUi().autoFocusNewPane, true);
+});
+test('only an explicit false opts out — a non-boolean value coerces back to true (defensive)', () => {
+  // Anything that is not strictly === false keeps today's focus-on-open behavior,
+  // so a corrupt/partial payload can never silently disable focus-stealing.
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], autoFocusNewPane: 42 }));
+  assert.equal(loadUi().autoFocusNewPane, true);
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], autoFocusNewPane: 'false' }));
+  assert.equal(loadUi().autoFocusNewPane, true, 'the string "false" is not the boolean false');
+});
+test('a missing field loads as true', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  assert.equal(loadUi().autoFocusNewPane, true);
+});
+test('the pref survives an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
+  // autoFocusNewPane is NOT a workspace field, so persistUiState spreads it from
+  // `live`. Confirm an empty-launch still round-trips a freshly set opt-out.
+  reset();
+  const d0 = loadUi();
+  saveUi(persistUiState({ ...d0, autoFocusNewPane: false }, 'empty', d0, true));
+  assert.equal(loadUi().autoFocusNewPane, false);
+});
+
 console.log('\ninitialWorkspace gates the workspace on mount');
 test('"previous" restores the last-saved workspace', () => {
   const disk = { ...loadUi(), activeTabs: ['a', 'b'], hiddenTabs: ['h'], openPanes: ['a'], focused: 'a', paneHost: { a: 'host' } };
