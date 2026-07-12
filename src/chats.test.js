@@ -1,6 +1,7 @@
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert';
-import { resolveChat, resolveChatWithRefresh, comparePinned, parseDiscoverRow } from './chats.js';
+import { resolveChat, resolveChatWithRefresh, comparePinned, parseDiscoverRow, discover } from './chats.js';
+import { buildChat } from './chatMeta.js';
 
 describe('resolveChat', () => {
   const mockChats = [
@@ -398,3 +399,113 @@ describe('parseDiscoverRow', () => {
     assert.strictEqual(parseDiscoverRow('a\tb'), null);                 // 2 columns
   });
 });
+
+// The guard at the top of discover() — `if (host !== LOCAL && isEnabled()) return
+// discoverViaCompanion(...)` — is the one line that decides default SSH path vs
+// companion transport. It is the highest-leverage seam in the slice and was
+// previously untested: a refactor that inverted/dropped it would have stayed
+// green. discover() takes an injectable deps seam (isCompanionTransportEnabled /
+// discoverViaCompanion / runWithPool) precisely so this wiring can be asserted
+// without real ssh. (WARDEN-272 review #3.)
+describe('discover() companion routing guard (WARDEN-272)', () => {
+  it('delegates to the companion for a REMOTE host when the opt-in is on', async () => {
+    let companionCalls = 0;
+    let runWithPoolCalls = 0;
+    const res = await discover('prod', {}, {}, {
+      isCompanionTransportEnabled: () => true,
+      discoverViaCompanion: async (host) => {
+        companionCalls++;
+        return { host, ok: true, chats: [{ key: 'companion-side' }] };
+      },
+      runWithPool: async () => { runWithPoolCalls++; return { ok: true, stdout: '' }; },
+    });
+    assert.strictEqual(companionCalls, 1, 'delegated to the companion exactly once');
+    assert.strictEqual(runWithPoolCalls, 0, 'must NOT fall through to the default runWithPool path');
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.chats[0].key, 'companion-side', 'returned the companion result');
+  });
+
+  it('does NOT delegate when the opt-in is off — the default runWithPool path runs', async () => {
+    let companionCalls = 0;
+    let runWithPoolCalls = 0;
+    const res = await discover('prod', {}, {}, {
+      isCompanionTransportEnabled: () => false,
+      discoverViaCompanion: async () => { companionCalls++; return { ok: true, chats: [] }; },
+      runWithPool: async () => { runWithPoolCalls++; return { ok: true, stdout: '' }; },
+    });
+    assert.strictEqual(companionCalls, 0, 'companion must not run without the opt-in');
+    assert.strictEqual(runWithPoolCalls, 1, 'default SSH path ran');
+    assert.strictEqual(res.ok, true);
+    assert.deepStrictEqual(res.chats, []);
+  });
+
+  it('does NOT delegate the (local) host even when the opt-in is on', async () => {
+    // The companion serves remote hosts only: a (local) host must always take the
+    // default path regardless of the env var (bootstrapping over ssh-to-self is
+    // nonsensical). The `host !== LOCAL` half of the guard is what prevents it.
+    let companionCalls = 0;
+    let runWithPoolCalls = 0;
+    await discover('(local)', {}, {}, {
+      isCompanionTransportEnabled: () => true,
+      discoverViaCompanion: async () => { companionCalls++; return { ok: true, chats: [] }; },
+      runWithPool: async () => { runWithPoolCalls++; return { ok: true, stdout: '' }; },
+    });
+    assert.strictEqual(companionCalls, 0, 'never delegate the local host to the companion');
+    assert.strictEqual(runWithPoolCalls, 1, 'local host uses the default path');
+  });
+
+  it('forwards host, cfg, and opts to the companion delegate', async () => {
+    let seen = null;
+    await discover('prod', { tmuxSession: 'custom', connectTimeout: 7 }, { activity: false }, {
+      isCompanionTransportEnabled: () => true,
+      discoverViaCompanion: async (host, cfg, opts) => { seen = { host, cfg, opts }; return { ok: true, chats: [] }; },
+      runWithPool: async () => ({ ok: true, stdout: '' }),
+    });
+    assert.strictEqual(seen.host, 'prod');
+    assert.strictEqual(seen.cfg.tmuxSession, 'custom');
+    assert.strictEqual(seen.opts.activity, false, 'opts pass through to the companion');
+  });
+});
+
+// The default SSH discover path was refactored to build chats via the shared
+// buildChat() (WARDEN-272 review #5) instead of its inline literal. This proves
+// that refactor is behavior-preserving: real DISCOVER_SCRIPT TSV output still
+// parses into the documented chat shape, byte-for-byte. (The default path must
+// remain unchanged — WARDEN-272 AC.)
+describe('discover() default path builds chats via buildChat (refactor is a no-op)', () => {
+  it('parses DISCOVER_SCRIPT rows into the shared chat shape, sorted active-first', async () => {
+    const stdout = [
+      'myproject-worker\tUp 2 hours\t/work/myproject\t1',
+      'myproject-researcher\tUp 5 min\t/work/x\t0',
+    ].join('\n');
+    let runWithPoolCalls = 0;
+    const res = await discover('prod', { connectTimeout: 10 }, { activity: false }, {
+      isCompanionTransportEnabled: () => false,
+      runWithPool: async () => { runWithPoolCalls++; return { ok: true, stdout }; },
+    });
+    assert.strictEqual(runWithPoolCalls, 1, 'default path ran runWithPool once');
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.chats.length, 2);
+    // active worker sorts first; shape identical to the shared buildChat().
+    assert.deepStrictEqual(
+      res.chats[0],
+      buildChat('prod', 'myproject-worker', 'Up 2 hours', '/work/myproject', true, 'agent'),
+    );
+    assert.strictEqual(res.chats[1].key, 'myproject-researcher');
+    assert.strictEqual(res.chats[1].active, false);
+    assert.strictEqual(res.chats[1].cwd, '/work/x');
+    assert.strictEqual(res.chats[1].isAgent, true);
+  });
+
+  it('propagates runWithPool failure as {ok:false} (default error contract intact)', async () => {
+    const res = await discover('prod', {}, { activity: false }, {
+      isCompanionTransportEnabled: () => false,
+      runWithPool: async () => ({ ok: false, code: 255, stderr: 'Permission denied (publickey).' }),
+    });
+    assert.strictEqual(res.ok, false);
+    assert.strictEqual(res.chats.length, 0);
+    assert.ok(res.error.includes('Permission denied'));
+  });
+});
+
+

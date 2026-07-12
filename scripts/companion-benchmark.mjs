@@ -28,7 +28,7 @@
 //   node scripts/companion-benchmark.mjs --host user@box --ticks 8 --hosts 3
 
 import { spawn } from 'node:child_process';
-import { SSH_BASE_OPTS, SSH_BIN, shellQuote } from '../src/ssh.js';
+import { SSH_BASE_OPTS, SSH_BIN, shellQuote, run as sshRun } from '../src/ssh.js';
 import {
   discover as companionDiscover,
   _resetChannelCacheForTests,
@@ -156,6 +156,15 @@ async function liveBenchmark(host, ticks) {
   const defaultSpawns = { val: 0 };
   const companionSpawns = { val: 0 };
   const countingSpawn = (...a) => { companionSpawns.val++; return spawn(...a); };
+  // The bootstrap PROBE runs through ssh.js `run()`, which spawns its own ssh
+  // process internally (independent of the `spawn` above). Without wrapping it,
+  // the probe's handshake is invisible to the counter and the live replay
+  // undercounts bootstrap spawns (reports 2 instead of the model's 3: probe +
+  // upload + channel). Inject a counting `run` so all three bootstrap legs are
+  // counted and the live Part 2 agrees with the Part 1 projection. (WARDEN-272
+  // review #2.)
+  const countingRun = (...a) => { companionSpawns.val++; return sshRun(...a); };
+  const companionDeps = { spawn: countingSpawn, run: countingRun };
 
   // ---- DEFAULT: N ticks, each a ControlMaster-disabled ssh discover ----
   console.log(`▶ default path: ${ticks} discover tick(s), handshake each …`);
@@ -170,13 +179,13 @@ async function liveBenchmark(host, ticks) {
   console.log(`▶ companion path: bootstrap + ${ticks} discover tick(s) over the channel …`);
   _resetChannelCacheForTests();
   const bootR = await timed(() =>
-    companionDiscover(host, { connectTimeout: 10 }, { timeout: 60000 }, { spawn: countingSpawn }));
+    companionDiscover(host, { connectTimeout: 10 }, { timeout: 60000 }, companionDeps));
   // First call bootstraps (probe + upload + channel) AND does a discover.
   console.log(`   bootstrap + 1st discover: ${bootR.ms.toFixed(0).padStart(6)} ms  ${bootR.ok ? 'ok' : `error: ${(bootR.error || '').slice(0, 80)}`}`);
   const companionSamples = [{ ms: bootR.ms, ok: bootR.ok }];
   for (let i = 1; i < ticks; i++) {
     const r = await timed(() =>
-      companionDiscover(host, { connectTimeout: 10 }, { timeout: 60000 }, { spawn: countingSpawn }));
+      companionDiscover(host, { connectTimeout: 10 }, { timeout: 60000 }, companionDeps));
     companionSamples.push(r);
     process.stdout.write(`   tick ${i + 1}/${ticks}: ${r.ms.toFixed(0).padStart(6)} ms  ${r.ok ? 'ok' : `error: ${(r.error || '').slice(0, 80)}`}\n`);
   }

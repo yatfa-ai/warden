@@ -20,6 +20,8 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
+import { Readable, Writable } from 'node:stream';
 import { spawn, spawnSync } from 'node:child_process';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -29,6 +31,7 @@ import {
   CompanionRpcError, getChannel, discover, isCompanionTransportEnabled, loadManifest,
   projectSpawnModel, _resetChannelCacheForTests,
 } from './companion.js';
+import { buildChat } from './chatMeta.js';
 
 // ------------------------------- pure seams ---------------------------------
 
@@ -72,24 +75,13 @@ describe('encodeRequest (RPC framing)', () => {
   });
 });
 
-describe('mapCompanionContainers (parity with default discover() chat shape)', () => {
-  // The exact chat literal the default chats.js discover() builds from a row
-  // {name, status, cwd, active}. The companion path MUST produce a byte-identical
-  // object (same fields, same defaults) so callers cannot tell paths apart.
-  const expectedChat = (host, name, status, cwd, active, session = 'agent') => {
-    const idx = name.lastIndexOf('-');
-    const project = idx < 0 ? name : name.slice(0, idx);
-    const role = idx < 0 ? '' : name.slice(idx + 1);
-    return {
-      id: `${host}:${name}`, key: name, kind: 'yatfa',
-      host, container: name, session,
-      project, role,
-      isAgent: ['planner', 'worker', 'reviewer', 'researcher'].includes(role),
-      active, status,
-      cwd: cwd.trim() || undefined,
-      lastActivity: null,
-    };
-  };
+describe('mapCompanionContainers (maps containers into the shared buildChat)', () => {
+  // The chat SHAPE is locked once in chatMeta.test.js (buildChat asserted against
+  // literal objects). Parity with the default discover() path is now STRUCTURAL:
+  // both src/chats.js and src/companion.js call the same buildChat(), so the two
+  // cannot drift (WARDEN-272 review #5). Here we verify only that
+  // mapCompanionContainers routes each container's fields into buildChat with the
+  // right argument order, skips nameless rows, and sorts.
 
   const host = 'prod-1';
   const cases = [
@@ -100,14 +92,14 @@ describe('mapCompanionContainers (parity with default discover() chat shape)', (
     { name: 'x-reviewer', status: 'Restarting', cwd: '/a b/c', active: true }, // cwd with spaces
   ];
 
-  it('produces byte-identical chat objects for a battery of containers', () => {
+  it('maps each container to buildChat(host, name, status, cwd, active, session)', () => {
     const containers = cases.map((c) => ({ ...c, active: c.active }));
     const chats = mapCompanionContainers(host, containers, 'agent');
     assert.strictEqual(chats.length, cases.length, 'one chat per container');
     for (const chat of chats) {
       const src = cases.find((c) => c.name === chat.key);
-      assert.deepStrictEqual(chat, expectedChat(host, src.name, src.status, src.cwd, src.active),
-        `shape mismatch for ${src.name}`);
+      assert.deepStrictEqual(chat, buildChat(host, src.name, src.status, src.cwd, src.active, 'agent'),
+        `mapping mismatch for ${src.name}`);
     }
   });
 
@@ -342,6 +334,45 @@ function fakeDeps(overrides = {}) {
   return { deps, calls };
 }
 
+// A fake ssh child for testing the DEFAULT upload/spawnChannel wiring (the legs
+// that close over deps.spawn) WITHOUT real ssh — the path the live benchmark
+// exercises. The benchmark injects a single deps.spawn wrapper for both legs, so
+// this proves they really route through it. Branches on the trailing remote arg:
+//   'bash -lc …' → upload leg: accept the piped binary on stdin, then exit 0.
+//   the companion remotePath → channel leg: speak the stdio RPC (answer ping
+//   with `version`, discover with `containers`) and stay alive.
+function fakeSpawnChildFactory(version, containers = []) {
+  return (_bin, args) => {
+    const remote = args[args.length - 1];
+    const child = new EventEmitter();
+    child.stdout = new Readable({ read() {} });
+    child.stderr = new Readable({ read() {} });
+    child.kill = () => {};
+    if (typeof remote === 'string' && remote.startsWith('bash -lc')) {
+      child.stdin = new Writable({ write(_chunk, _enc, cb) { cb(); } });
+      setImmediate(() => child.emit('exit', 0));
+    } else {
+      child.stdin = new Writable({
+        write(chunk, _enc, cb) {
+          const line = (chunk == null ? '' : chunk.toString()).trim();
+          if (line) {
+            try {
+              const req = JSON.parse(line);
+              let resp;
+              if (req.method === 'ping') resp = { id: req.id, ok: true, result: { version, methods: ['ping', 'discover'] } };
+              else if (req.method === 'discover') resp = { id: req.id, ok: true, result: { containers } };
+              else resp = { id: req.id, ok: false, error: 'unknown method' };
+              if (resp) setImmediate(() => child.stdout.push(JSON.stringify(resp) + '\n'));
+            } catch { /* ignore non-JSON */ }
+          }
+          cb();
+        },
+      });
+    }
+    return child;
+  };
+}
+
 describe('getChannel / bootstrap orchestration', () => {
   beforeEach(() => _resetChannelCacheForTests());
 
@@ -441,6 +472,57 @@ describe('getChannel / bootstrap orchestration', () => {
       return true;
     });
   });
+
+  it('a fresh bootstrap routes ALL three legs through deps.spawn/deps.run (count == 3)', async () => {
+    // Mirrors scripts/companion-benchmark.mjs's counting shape exactly: the
+    // benchmark injects ONE deps.spawn (upload + channel legs) and ONE deps.run
+    // (the probe leg, since ssh.js run() spawns internally). The probe previously
+    // bypassed the counter, so the live replay reported 2 instead of 3 and
+    // disagreed with the Part 1 projection. This locks the wiring: default upload
+    // + default spawnChannel MUST call deps.spawn, and the probe MUST call deps.run.
+    // (WARDEN-272 review #2.)
+    let runCalls = 0;
+    let spawnCalls = 0;
+    const ch = await getChannel('prod-count', {}, {
+      manifest: TEST_MANIFEST,
+      run: async () => { runCalls++; return { ok: true, stdout: 'ARCH=x86_64\nHAVE=0\n' }; },
+      spawn: (...a) => { spawnCalls++; return fakeSpawnChildFactory(TEST_VER)(...a); },
+    });
+    assert.ok(ch instanceof CompanionChannel);
+    assert.strictEqual(runCalls, 1, 'probe leg: exactly one deps.run call');
+    assert.strictEqual(spawnCalls, 2, 'upload + channel legs: exactly two deps.spawn calls');
+    assert.strictEqual(runCalls + spawnCalls, 3, 'total == Part 1 projection (probe + upload + channel = 3)');
+  });
+
+  it('concurrent getChannel for the SAME host shares one bootstrap (no leaked ssh)', async () => {
+    // Two concurrent calls for one host (e.g. the 2s monitor tick landing on a 60s
+    // lifecycle poll) must coalesce onto ONE in-flight bootstrap, not each start
+    // their own — otherwise an ssh + companion process leaks. getChannel caches
+    // the bootstrap PROMISE so the second caller awaits the first's result.
+    // (WARDEN-272 review #6.)
+    const { deps, calls } = fakeDeps();
+    const [a, b] = await Promise.all([
+      getChannel('prod-race', {}, deps),
+      getChannel('prod-race', {}, deps),
+    ]);
+    assert.strictEqual(a, b, 'both callers got the SAME channel');
+    assert.strictEqual(calls.run, 1, 'probe ran once (not twice)');
+    assert.strictEqual(calls.spawnChannel, 1, 'channel spawned once (not twice)');
+  });
+
+  it('a dead cached channel is replaced by a fresh bootstrap (self-healing)', async () => {
+    // When a channel dies (ssh process exited) the cache holds a dead channel; a
+    // later getChannel must NOT reuse it but bootstrap a fresh one. This is the
+    // fall-through branch of the cache check (a live channel vs a dead one).
+    const { deps, calls } = fakeDeps();
+    const first = await getChannel('prod-dead', {}, deps);
+    first.kill(); // mark the cached channel dead (simulates the ssh process exiting)
+    assert.ok(first.dead, 'precondition: channel is dead');
+    const second = await getChannel('prod-dead', {}, deps);
+    assert.notStrictEqual(second, first, 'got a NEW channel, not the dead one');
+    assert.ok(!second.dead, 'the new channel is alive');
+    assert.strictEqual(calls.spawnChannel, 2, 'bootstrapped a second time');
+  });
 });
 
 describe('discover() via companion (companion-or-fail)', () => {
@@ -474,7 +556,6 @@ describe('discover() via companion (companion-or-fail)', () => {
     assert.strictEqual(res.ok, false);
     assert.strictEqual(res.chats.length, 0);
     assert.ok(res.error.includes('companion'), `error should name the companion: ${res.error}`);
-    assert.ok(res.recovery === undefined || res.error.includes('WARDEN_COMPANION_TRANSPORT') || true);
     // The error must carry the actionable opt-out guidance.
     assert.ok(res.error.includes('WARDEN_COMPANION_TRANSPORT=0'),
       `bootstrap error must tell the user how to opt out: ${res.error}`);

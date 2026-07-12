@@ -22,7 +22,7 @@ import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { run as defaultRun, SSH_BASE_OPTS, SSH_BIN, shellQuote } from './ssh.js';
-import { ROLES, parseContainerName } from './chatMeta.js';
+import { buildChat, sortChats } from './chatMeta.js';
 
 const LOCAL = '(local)';
 const COMPANION_DIR = '$HOME/.warden'; // expands on the remote host
@@ -109,27 +109,20 @@ export function encodeRequest(id, method, params) {
 
 // Map a companion `discover` result (containers[]) into warden chat objects —
 // the SAME shape the default discover() path builds (chats.js), so callers can't
-// tell the two paths apart by field. `lastActivity` is null here: capturing it
-// would mean extra remote work that's out of scope for slice 1 (the activity /
-// capture-pane migration is a later slice). The default path retains it.
+// tell the two paths apart by field. Both paths build the literal via the shared
+// chatMeta.buildChat(), so parity is structural (WARDEN-272 review #5).
+// `lastActivity` is null here: capturing it would mean extra remote work that's
+// out of scope for slice 1 (the activity / capture-pane migration is a later
+// slice). The default path retains it.
 export function mapCompanionContainers(host, containers, session = 'agent') {
   const chats = [];
   for (const c of containers || []) {
     const name = c.name;
     if (!name) continue;
-    const { project, role } = parseContainerName(name);
-    chats.push({
-      id: `${host}:${name}`, key: name, kind: 'yatfa',
-      host, container: name, session,
-      project, role, isAgent: ROLES.has(role),
-      active: !!c.active, status: c.status || '',
-      cwd: (c.cwd || '').trim() || undefined,
-      lastActivity: null,
-    });
+    chats.push(buildChat(host, name, c.status, c.cwd, c.active, session));
   }
-  // Identical sort to the default discover() path: active first, then by key.
-  chats.sort((a, b) => (Number(b.active) - Number(a.active)) || a.key.localeCompare(b.key));
-  return chats;
+  // Identical ordering to the default discover() path: active first, then by key.
+  return sortChats(chats);
 }
 
 // ------------------------------- errors -------------------------------------
@@ -312,7 +305,9 @@ function streamFileToHost(host, localBinaryPath, remotePath, cfg, spawnFn) {
 const channelCache = new Map(); // host -> CompanionChannel
 
 export function _resetChannelCacheForTests() {
-  for (const ch of channelCache.values()) { try { ch.kill(); } catch { /* noop */ } }
+  for (const ch of channelCache.values()) {
+    try { if (ch && typeof ch.kill === 'function') ch.kill(); } catch { /* noop */ }
+  }
   channelCache.clear();
 }
 
@@ -402,15 +397,34 @@ async function bootstrapChannel(host, cfg, deps) {
 
 // Get the cached channel for a host, or bootstrap one. The cache is what makes
 // per-op handshake cost collapse to zero after the first op (WARDEN-272 AC #1/#5).
+//
+// Concurrent calls for the SAME host (e.g. the 2s monitor tick landing on a 60s
+// lifecycle poll for one host) coalesce onto ONE in-flight bootstrap by caching
+// the bootstrap *promise*: the second caller awaits the first's bootstrap rather
+// than starting its own, so no ssh + companion process leaks. On failure the
+// promise is dropped so a later call can retry (no cached rejection).
 export async function getChannel(host, cfg = {}, deps = {}) {
   if (host === LOCAL) {
     throw new CompanionTransportError(host, 'companion transport serves remote hosts only, not (local)');
   }
   const existing = channelCache.get(host);
-  if (existing && !existing.dead) return existing;
-  const channel = await bootstrapChannel(host, cfg, deps);
-  channelCache.set(host, channel);
-  return channel;
+  if (existing) {
+    // Reuse an in-flight bootstrap (a Promise) or a live channel. A dead channel
+    // (existing.dead) falls through to a fresh bootstrap below.
+    if (typeof existing.then === 'function') return existing; // bootstrap in flight — await it
+    if (!existing.dead) return existing;                      // live channel — reuse
+  }
+  const bootstrapPromise = bootstrapChannel(host, cfg, deps)
+    .then((channel) => {
+      channelCache.set(host, channel);
+      return channel;
+    })
+    .catch((err) => {
+      if (channelCache.get(host) === bootstrapPromise) channelCache.delete(host);
+      throw err;
+    });
+  channelCache.set(host, bootstrapPromise);
+  return bootstrapPromise;
 }
 
 // --------------------------------- discover ---------------------------------
