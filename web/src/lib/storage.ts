@@ -1,3 +1,5 @@
+import type { AgentFilter, AgentSort } from './agentFilter';
+
 // UI state persisted in localStorage.
 // activeTabs = the user's persistent working set (survives reload, pane close, host nav).
 // openPanes = which tabs have a live terminal open right now (subset of activeTabs).
@@ -152,8 +154,8 @@ export interface UiState {
   customPresets?: CustomPreset[];
   // pane id (chat key) -> host, so restored remote panes know which host to discover.
   paneHost?: Record<string, string>;
-  agentFilter?: 'all' | 'yatfa' | 'claude' | 'manual' | 'active' | 'hidden';
-  agentSort?: 'manual' | 'name' | 'host' | 'status' | 'activity';
+  agentFilter?: AgentFilter;
+  agentSort?: AgentSort;
 }
 
 // Sanitize a raw customPresets value into a valid CustomPreset[]. Defensive:
