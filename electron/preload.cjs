@@ -1,10 +1,10 @@
 // Yatfa Warden — Electron preload (CommonJS).
 //
 // The minimal, explicitly-allowlisted bridge between the renderer (web bundle)
-// and the Electron main process for OS-level window state that lives OUTSIDE
-// the renderer's localStorage (see WARDEN-263). contextBridge keeps
-// nodeIntegration off: the renderer only ever sees the two async functions
-// exposed on `window.wardenWindow`.
+// and the Electron main process for OS-level state that lives OUTSIDE the
+// renderer's localStorage (see WARDEN-263, WARDEN-278). contextBridge keeps
+// nodeIntegration off: the renderer only ever sees the async functions exposed
+// on `window.wardenWindow` (remember-bounds + launch-at-login).
 //
 // The same web bundle runs in three contexts:
 //   1. Electron desktop app  → window.wardenWindow is present (this file).
@@ -22,4 +22,9 @@ contextBridge.exposeInMainWorld('wardenWindow', {
   // Write the flag through to main (which persists it to window-state.json).
   // Returns the persisted value.
   setRememberWindowBounds: (remember) => ipcRenderer.invoke('window:set-remember-bounds', remember),
+  // "Launch Warden at login" — main reads/writes the OS login items via
+  // app.getLoginItemSettings()/setLoginItemSettings() (no window-state.json
+  // field; the OS is the source of truth). Off by default. See WARDEN-278.
+  getLaunchAtLogin: () => ipcRenderer.invoke('window:get-launch-at-login'),
+  setLaunchAtLogin: (openAtLogin) => ipcRenderer.invoke('window:set-launch-at-login', openAtLogin),
 });
