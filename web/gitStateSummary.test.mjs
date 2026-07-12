@@ -34,7 +34,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-gitstate-test-'));
 const tmpFile = join(tmpDir, 'gitStateSummary.mjs');
 writeFileSync(tmpFile, code);
-const { summarizeProjectGitState } = await import(tmpFile);
+const { summarizeProjectGitState, detectProjectFileCollisions } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -271,3 +271,155 @@ test('the dirty filter matches ±N and the ahead>0 filter matches ↑N (the popo
 });
 
 console.log(`\n✓ GIT STATE SUMMARY TESTS PASS (${passed})`);
+
+// ---------------------------------------------------------------------------
+// detectProjectFileCollisions (WARDEN-288) — the proactive cross-agent
+// file-edit collision detector behind the project chips' ⚠ badge. A collision
+// is a changed-file path that ≥2 DISTINCT active agents in the SAME project both
+// have in their uncommitted working tree. Mirrors summarizeProjectGitState's
+// population (active && project, status by key||id) and its sparse perProject +
+// union total shape. Join key is `path` only (status/conflict ignored; untracked
+// `??` paths count); a path listed twice in ONE agent's files never self-collides.
+//
+// Tiny builders so each case reads as "which agents touch which path" — `fstatus`
+// adds a changed-files list (clean defaults to false so the agent has WIP, ahead
+// to 0). `col` is the expected collision shape (path + its ordered agent keys).
+const fstatus = (files, clean = false, ahead = 0) => ({ clean, ahead, files });
+const file = (path, status = 'M') => ({ path, status });
+const ca = (key) => ({ key });
+const col = (path, keys) => ({ path, agents: keys.map(ca) });
+const detect = (chats, gitStatus) => detectProjectFileCollisions(chats, gitStatus);
+
+console.log('\nfile collisions (WARDEN-288): ≥2 agents editing the same path in a project');
+test('two agents both with src/auth.js → one colliding path carrying both agent keys', () => {
+  const r = detect(
+    [agent('a1', 'warden'), agent('a2', 'warden')],
+    { a1: fstatus([file('src/auth.js')]), a2: fstatus([file('src/auth.js')]) },
+  );
+  assert.deepEqual(r.perProject, { warden: { paths: [col('src/auth.js', ['a1', 'a2'])] } });
+  assert.deepEqual(r.total, { paths: [col('src/auth.js', ['a1', 'a2'])] });
+});
+
+test('agents appear in chats iteration order; three agents on one path', () => {
+  const r = detect(
+    [agent('a1', 'warden'), agent('a2', 'warden'), agent('a3', 'warden')],
+    { a1: fstatus([file('README.md')]), a2: fstatus([file('README.md')]), a3: fstatus([file('README.md')]) },
+  );
+  assert.deepEqual(r.perProject.warden.paths, [col('README.md', ['a1', 'a2', 'a3'])]);
+});
+
+test('disjoint files across agents → no collision (sparse, empty total)', () => {
+  const r = detect(
+    [agent('a1', 'warden'), agent('a2', 'warden')],
+    { a1: fstatus([file('src/a.js')]), a2: fstatus([file('src/b.js')]) },
+  );
+  assert.deepEqual(r.perProject, {});
+  assert.deepEqual(r.total, { paths: [] });
+});
+
+test('the same path across two DIFFERENT projects does NOT cross-trigger', () => {
+  // warden: a1 + a2 collide on src/auth.js. tinker: b1 ALONE has src/auth.js.
+  // Collisions are project-scoped, so tinker (1 agent) has none and the total
+  // carries only warden's collision.
+  const r = detect(
+    [agent('a1', 'warden'), agent('a2', 'warden'), agent('b1', 'tinker')],
+    { a1: fstatus([file('src/auth.js')]), a2: fstatus([file('src/auth.js')]), b1: fstatus([file('src/auth.js')]) },
+  );
+  assert.deepEqual(r.perProject, { warden: { paths: [col('src/auth.js', ['a1', 'a2'])] } });
+  assert.ok(!('tinker' in r.perProject));
+  assert.deepEqual(r.total, { paths: [col('src/auth.js', ['a1', 'a2'])] });
+});
+
+test('a single agent editing a file never collides (needs ≥2 distinct agents)', () => {
+  const r = detect([agent('a1', 'warden')], { a1: fstatus([file('src/auth.js')]) });
+  assert.deepEqual(r.perProject, {});
+  assert.deepEqual(r.total, { paths: [] });
+});
+
+test('files: null (detached/no-branch) is ignored — never a false collision', () => {
+  // a2 is detached/no-branch (files: null) → contributes nothing → only 1 agent
+  // on src/auth.js → no collision, even though a1 has it.
+  const r = detect(
+    [agent('a1', 'warden'), agent('a2', 'warden')],
+    { a1: fstatus([file('src/auth.js')]), a2: { clean: false, ahead: 0, files: null } },
+  );
+  assert.deepEqual(r.perProject, {});
+});
+
+test('a chat missing from gitStatus (still loading) is ignored', () => {
+  const r = detect([agent('a1', 'warden'), agent('a2', 'warden')], { a1: fstatus([file('src/auth.js')]) });
+  assert.deepEqual(r.perProject, {});
+});
+
+test('untracked (??) paths count — two agents creating the same new file collide', () => {
+  const r = detect(
+    [agent('a1', 'warden'), agent('a2', 'warden')],
+    { a1: fstatus([file('src/new.js', '??')]), a2: fstatus([file('src/new.js', '??')]) },
+  );
+  assert.deepEqual(r.perProject, { warden: { paths: [col('src/new.js', ['a1', 'a2'])] } });
+});
+
+test('a path listed twice in ONE agent\'s files does not self-collide', () => {
+  // a1 defensively has src/auth.js twice; a2 does not have it. The dedupe-by-agent
+  // rule means a1 counts once, so src/auth.js still has only 1 agent → no collision.
+  const r = detect(
+    [agent('a1', 'warden'), agent('a2', 'warden')],
+    { a1: fstatus([file('src/auth.js'), file('src/auth.js')]), a2: fstatus([file('src/other.js')]) },
+  );
+  assert.deepEqual(r.perProject, {});
+});
+
+test('multiple colliding paths in one project are all listed, in first-appearance order', () => {
+  // a1 sees auth then config; a2 sees config then auth. Path order follows FIRST
+  // appearance across chats → auth (a1) before config (a1). Both carry [a1, a2].
+  const r = detect(
+    [agent('a1', 'warden'), agent('a2', 'warden')],
+    {
+      a1: fstatus([file('src/auth.js'), file('src/config.js')]),
+      a2: fstatus([file('src/config.js'), file('src/auth.js')]),
+    },
+  );
+  assert.deepEqual(r.perProject.warden.paths, [
+    col('src/auth.js', ['a1', 'a2']),
+    col('src/config.js', ['a1', 'a2']),
+  ]);
+});
+
+test('total.paths is the union of colliding paths across projects', () => {
+  const r = detect(
+    [agent('a1', 'warden'), agent('a2', 'warden'), agent('b1', 'tinker'), agent('b2', 'tinker')],
+    {
+      a1: fstatus([file('lib/a.js')]), a2: fstatus([file('lib/a.js')]),
+      b1: fstatus([file('lib/b.js')]), b2: fstatus([file('lib/b.js')]),
+    },
+  );
+  assert.deepEqual(r.perProject.warden.paths, [col('lib/a.js', ['a1', 'a2'])]);
+  assert.deepEqual(r.perProject.tinker.paths, [col('lib/b.js', ['b1', 'b2'])]);
+  assert.deepEqual(r.total.paths, [col('lib/a.js', ['a1', 'a2']), col('lib/b.js', ['b1', 'b2'])]);
+});
+
+test('inactive / project-less chats are skipped (population matches the chips)', () => {
+  // a2 is inactive → even though it "has" the same file, only active a1 counts →
+  // 1 agent → no collision. A project-less agent is skipped the same way.
+  const r = detect(
+    [agent('a1', 'warden'), { id: 'a2', project: 'warden', active: false }, { id: 'a3', active: true }],
+    { a1: fstatus([file('src/auth.js')]), a2: fstatus([file('src/auth.js')]), a3: fstatus([file('src/auth.js')]) },
+  );
+  assert.deepEqual(r.perProject, {});
+});
+
+test('key || id resolution carries through to the collision agent keys', () => {
+  // container keys set: the contributing agents are keyed by key, not bare id,
+  // so the React layer's findChat(chats, key) lands on the right chat row.
+  const r = detect(
+    [agent('raw-1', 'warden', 'warden-worker'), agent('raw-2', 'warden', 'warden-reviewer')],
+    { 'warden-worker': fstatus([file('src/auth.js')]), 'warden-reviewer': fstatus([file('src/auth.js')]) },
+  );
+  assert.deepEqual(r.perProject.warden.paths, [col('src/auth.js', ['warden-worker', 'warden-reviewer'])]);
+});
+
+test('empty inputs are safe', () => {
+  assert.deepEqual(detect([], { a1: fstatus([file('x')]) }), { perProject: {}, total: { paths: [] } });
+});
+
+console.log(`\n✓ FILE COLLISION TESTS PASS (${passed} cumulative)`);
