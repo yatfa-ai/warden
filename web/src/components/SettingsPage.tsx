@@ -122,6 +122,14 @@ interface Props {
   // state / PUT /api/config body.
   terminalCursorStyle: TerminalCursorStyle;
   setTerminalCursorStyle: (v: TerminalCursorStyle) => void;
+  // "Copy on select" is likewise a pure client-side localStorage pref (NOT
+  // backend config): when ON, completing a text selection in a pane copies it to
+  // the clipboard immediately (no Ctrl/Cmd+C). Default OFF = today's behavior.
+  // It applies instantly via the prop callback (PaneTile's onSelectionChange
+  // handler reads the latest value live) and is persisted by App's saveUi
+  // effect. It must never be added to the `config` state / PUT /api/config body.
+  copyOnSelect: boolean;
+  setCopyOnSelect: (v: boolean) => void;
   // Default agent type + host pre-filled in the ＋ new chat form. Pure client-side
   // localStorage prefs: applied instantly via the prop callbacks and persisted by
   // App's saveUi effect. They must never be added to the `config` state /
@@ -273,7 +281,7 @@ function PresetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -845,6 +853,22 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   </Select>
                   <p className="text-xs text-muted-foreground">
                     Cursor shape and whether it blinks in terminal panes. "Steady" options stop the blink — useful if you reduce motion at the OS level (WARDEN-190 only covered page motion, not this cursor). Applies live to all open panes.
+                  </p>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      id="copyOnSelect"
+                      checked={copyOnSelect}
+                      onCheckedChange={setCopyOnSelect}
+                    />
+                    <Label htmlFor="copyOnSelect" className="cursor-pointer">
+                      Copy on select
+                    </Label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Copy agent output to the clipboard as soon as you select it (off by default). Mirrors select-to-copy in iTerm2/GNOME-Terminal/Windows Terminal — no Ctrl/Cmd+C needed. Applies live to all open panes.
                   </p>
                 </div>
 

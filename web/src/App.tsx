@@ -166,6 +166,13 @@ function App() {
   // below, applied live to all open panes via PaneTile's effect, and never sent
   // to the backend. 'blink-block' is the default (today's exact cursor).
   const [terminalCursorStyle, setTerminalCursorStyle] = useState<TerminalCursorStyle>(() => uiState.terminalCursorStyle ?? 'blink-block');
+  // "Copy on select" (WARDEN-285): when ON, completing a text selection in any
+  // agent pane copies it to the clipboard immediately (no Ctrl/Cmd+C). Default
+  // OFF = today's exact behavior. Pure client-side pref (like terminalFontSize/
+  // scrollback): persisted by the saveUi effect below, applies LIVE to all open
+  // panes (PaneTile mirrors it into a ref its selection handler reads), and is
+  // never sent to the backend.
+  const [copyOnSelect, setCopyOnSelect] = useState(() => uiState.copyOnSelect ?? false);
   // Default agent type + host pre-filled in the ＋ new chat form, plus the
   // user-defined custom presets (named quick-fill commands beyond claude/shell).
   // All pure client-side prefs (like density/terminalFontSize): persisted by the
@@ -299,8 +306,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, defaultSplitShell }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, defaultSplitShell, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, defaultSplitShell }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, customPresets, defaultSplitShell, restoreOnStartup, startedEmpty]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -992,6 +999,8 @@ function App() {
           setTerminalColorScheme={setTerminalColorScheme}
           terminalCursorStyle={terminalCursorStyle}
           setTerminalCursorStyle={setTerminalCursorStyle}
+          copyOnSelect={copyOnSelect}
+          setCopyOnSelect={setCopyOnSelect}
           defaultNewChatPreset={defaultNewChatPreset}
           setDefaultNewChatPreset={setDefaultNewChatPreset}
           defaultNewChatHost={defaultNewChatHost}
@@ -1096,6 +1105,7 @@ function App() {
             paneLayout={paneLayout}
             terminalTheme={terminalTheme}
             terminalCursorStyle={terminalCursorStyle}
+            copyOnSelect={copyOnSelect}
             onExitBehavior={onExitBehavior}
           />
         </section>
