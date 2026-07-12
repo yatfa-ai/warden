@@ -17,6 +17,7 @@ import { ArrowLeft, Trash2 } from 'lucide-react';
 import { type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { type Density } from '@/lib/density';
 import { type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type PresetNameIssue, PRESET_NAME_MAX, validatePresetName, DEFAULT_TERMINAL_FONT_FAMILY } from '@/lib/storage';
+import { hasWindowBridge } from '@/lib/electron';
 import { putJson } from '@/lib/api';
 import { toast } from 'sonner';
 
@@ -132,6 +133,17 @@ interface Props {
   // to the backend. Independent of the spawn presets above.
   defaultSplitShell: string;
   setDefaultSplitShell: (v: string) => void;
+  // "Remember window position and size" is an Electron-main-owned pref, NOT a
+  // renderer localStorage pref: OS window bounds must be readable at
+  // createWindow() time (before the renderer loads), so the flag + bounds live
+  // in main's window-state.json and are read/written through the IPC bridge
+  // (web/src/lib/electron.ts). This prop is a display mirror; main's file is the
+  // source of truth, so it is NOT part of UiState / the saveUi effect. When the
+  // bridge is absent (`npm run dev` browser, `node web/smoke.cjs`) the control
+  // renders disabled with a hint that it applies to the desktop app — the same
+  // web bundle runs in all three contexts. See WARDEN-263.
+  rememberWindowBounds: boolean;
+  setRememberWindowBounds: (v: boolean) => void;
 }
 
 /** A titled group of related settings, separated by a top border. */
@@ -238,7 +250,7 @@ function PresetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -879,6 +891,30 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   </Select>
                   <p className="text-xs text-muted-foreground">
                     Reopen the tabs and panes you had open at last close, or start every launch with a clean workspace.
+                  </p>
+                </div>
+
+                {/* Remember window bounds — main-owned via IPC (WARDEN-263). Sits
+                    beside the sibling "Restore workspace on startup" control: both
+                    govern what a fresh launch looks like (contents vs. container).
+                    Disabled with a hint when the preload bridge is absent (browser
+                    / smoke test) — the same web bundle runs in all contexts. */}
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      id="rememberWindowBounds"
+                      checked={rememberWindowBounds}
+                      onCheckedChange={(v) => setRememberWindowBounds(v)}
+                      disabled={!hasWindowBridge()}
+                    />
+                    <Label htmlFor="rememberWindowBounds" className="cursor-pointer">
+                      Remember window position and size
+                    </Label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {hasWindowBridge()
+                      ? 'Reopen the window at the same size, position, and maximize state as last time. Turn off to always start at the default size.'
+                      : 'Reopen the window at the same size, position, and maximize state as last time. Applies to the desktop app only.'}
                   </p>
                 </div>
               </SettingsSection>
