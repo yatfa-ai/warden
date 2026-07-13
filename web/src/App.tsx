@@ -254,6 +254,13 @@ function App() {
   // to defaultNewChatCwd above, then blank. Pure client-side pref like the global
   // cwd above: persisted by the saveUi effect below, never sent to the backend.
   const [defaultNewChatCwdByHost, setDefaultNewChatCwdByHost] = useState<Record<string, string>>(() => uiState.defaultNewChatCwdByHost ?? {});
+  // Per-host agent-type (preset) overrides for the ＋ new chat spawn form
+  // (WARDEN-352 — mirrors the cwd map above). Keys are host strings; a host with
+  // no entry (or one naming a since-deleted preset, dropped on load) falls
+  // through to defaultNewChatPreset, then 'claude'. Pure client-side pref like
+  // the cwd map above: persisted by the saveUi effect below, never sent to the
+  // backend.
+  const [defaultNewChatPresetByHost, setDefaultNewChatPresetByHost] = useState<Record<string, string>>(() => uiState.defaultNewChatPresetByHost ?? {});
   const [customPresets, setCustomPresets] = useState<CustomPreset[]>(() => uiState.customPresets ?? []);
   // Saved instruction snippets (WARDEN-323): a named, reusable intervention
   // library surfaced at the Broadcast dialog (insert-only) and a focused pane's
@@ -425,8 +432,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed, restoreOnStartup, startedEmpty]);
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
   // workspace, so switching clears it (WARDEN-256: maximized resets on switch).
@@ -1286,6 +1293,8 @@ function App() {
           setTimestampFormat={setTimestampFormat}
           defaultNewChatPreset={defaultNewChatPreset}
           setDefaultNewChatPreset={setDefaultNewChatPreset}
+          defaultNewChatPresetByHost={defaultNewChatPresetByHost}
+          setDefaultNewChatPresetByHost={setDefaultNewChatPresetByHost}
           defaultNewChatHost={defaultNewChatHost}
           setDefaultNewChatHost={setDefaultNewChatHost}
           defaultNewChatCwd={defaultNewChatCwd}

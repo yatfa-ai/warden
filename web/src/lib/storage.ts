@@ -390,6 +390,15 @@ export interface UiState {
   // entry (falls back to 'claude' if that preset was since deleted). Pure
   // client-side pref; never sent to the backend.
   defaultNewChatPreset?: string;
+  // Per-host default agent-type overrides for the ＋ new chat spawn form
+  // (WARDEN-352 — mirrors defaultNewChatCwdByHost from WARDEN-336). Keys are the
+  // host strings — '(local)' for local, the SSH host name for remote (matching
+  // defaultNewChatHost); values are preset names. A host with no entry (or one
+  // whose value is empty/whitespace OR names a since-deleted custom preset, both
+  // dropped on load by parsePresetByHost) falls through to defaultNewChatPreset,
+  // then 'claude' — identical to today's single-host behavior. Pure client-side
+  // pref; never sent to the backend / /api/config.
+  defaultNewChatPresetByHost?: Record<string, string>;
   defaultNewChatHost?: string;
   // Default working directory pre-filled in the ＋ new chat spawn form
   // (WARDEN-311). Blank (default) → the host's home directory (today's
@@ -533,6 +542,44 @@ function parseCwdByHost(raw: unknown): Record<string, string> {
   return out;
 }
 
+// Sanitize a raw defaultNewChatPresetByHost value (host key → preset name) into a
+// valid Record<string,string> (WARDEN-352 — mirrors parseCwdByHost). CRITICAL
+// DIFFERENCE from parseCwdByHost: cwd values are arbitrary path strings (a
+// non-empty trim is enough), but preset values are SEMANTIC names — each must be
+// a VALID preset (a built-in 'claude'/'shell' OR an existing customPresets
+// entry). A host defaulting to a since-deleted custom preset is DROPPED on load,
+// which means "inherit the global defaultNewChatPreset" — exactly mirroring how
+// the global defaultNewChatPreset itself falls back to 'claude' via presetIsValid
+// when it names a deleted preset. `isValid` is that same loadUi-scoped
+// presetIsValid closure (built-in OR in the parsed customPresets), passed in at
+// the call site where customPresets is already in scope — so a per-host value
+// naming a REAL custom preset is correctly KEPT (do not call this where
+// customPresets has not yet been parsed). Defensive: never throws (WARDEN-89) —
+// drops bad entries instead, so one corrupt entry can never seed the spawn field
+// with a dangling preset name.
+function parsePresetByHost(
+  raw: unknown,
+  isValid: (p: unknown) => boolean,
+): Record<string, string> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    if (raw !== undefined && raw !== null) {
+      // A present-but-wrong-type value is genuine corruption worth surfacing.
+      console.warn('[loadUi] defaultNewChatPresetByHost is not an object; ignoring:', raw);
+    }
+    return {};
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const key = typeof k === 'string' ? k.trim() : '';
+    const val = typeof v === 'string' ? v.trim() : '';
+    // empty key → drop; empty value → inherit global default; invalid preset
+    // (not a built-in and not in customPresets) → inherit global default.
+    if (!key || !val || !isValid(val)) continue;
+    out[key] = val;
+  }
+  return out;
+}
+
 // Sanitize a raw hostOptions value into a valid HostOptionsMap. Defensive: never
 // throws (WARDEN-89) — drops bad entries instead, so one corrupt host can never
 // blank another host's options. Keys are strings (host names); each value must
@@ -660,7 +707,7 @@ const DEFAULT_UI: UiState = {
   onExitBehavior: 'keep',
   autoFocusNewPane: true,
   restoreOnStartup: 'previous',
-  defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', customPresets: [], snippets: STARTER_SNIPPETS, defaultNewChatCwd: '', defaultNewChatCwdByHost: {},
+  defaultNewChatPreset: 'claude', defaultNewChatPresetByHost: {}, defaultNewChatHost: '(local)', customPresets: [], snippets: STARTER_SNIPPETS, defaultNewChatCwd: '', defaultNewChatCwdByHost: {},
   defaultSplitShell: '',
   paneHost: {}, agentFilter: 'all', agentSort: 'manual',
   hostOptions: {}, copyHintDismissed: {},
@@ -740,6 +787,14 @@ export function loadUi(): UiState {
         autoFocusNewPane: v.autoFocusNewPane !== false,
         restoreOnStartup: v.restoreOnStartup === 'empty' ? 'empty' : 'previous',
         defaultNewChatPreset: presetIsValid(v.defaultNewChatPreset) ? (v.defaultNewChatPreset as string) : 'claude',
+        // Per-host preset overrides (WARDEN-352): same drop-bad-entries discipline
+        // as the cwd map above, but stricter — each value must additionally be a
+        // VALID preset (built-in OR a customPresets entry) or it is dropped on
+        // load (→ inherit the global default), so a since-deleted custom preset
+        // can never seed the agent-type field with a dangling name. presetIsValid
+        // (which closes over the just-parsed customPresets) is passed in so real
+        // custom presets are kept.
+        defaultNewChatPresetByHost: parsePresetByHost(v.defaultNewChatPresetByHost, presetIsValid),
         defaultNewChatHost: typeof v.defaultNewChatHost === 'string' ? v.defaultNewChatHost : '(local)',
         // Trim on load so stray whitespace never becomes the seeded cwd path;
         // blank is the meaningful "host home directory" value (today's behavior).

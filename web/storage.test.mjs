@@ -1203,4 +1203,78 @@ test('trims before validating (matches load-time normalization)', () => {
   assert.equal(validateSnippetName('  Run tests  ', [{ name: 'Run tests', text: 'r' }]), 'duplicate');
 });
 
+console.log('\ndefaultNewChatPresetByHost (per-host preset overrides) round-trips through loadUi/saveUi — WARDEN-352');
+test('defaults to {} when nothing is stored', () => {
+  reset();
+  assert.deepEqual(loadUi().defaultNewChatPresetByHost, {});
+});
+test('a valid host→preset map round-trips (a custom preset present in the same payload is kept)', () => {
+  reset();
+  // 'codex' is a custom preset in the SAME payload → kept; built-ins always kept.
+  saveUi({ ...loadUi(), customPresets: [{ name: 'codex', cmd: 'codex' }], defaultNewChatPresetByHost: { 'gpu-box': 'codex', '(local)': 'claude' } });
+  assert.deepEqual(loadUi().defaultNewChatPresetByHost, { 'gpu-box': 'codex', '(local)': 'claude' });
+});
+test('an empty map round-trips as {} (clearing all overrides persists nothing)', () => {
+  reset();
+  saveUi({ ...loadUi(), customPresets: [{ name: 'codex', cmd: 'codex' }], defaultNewChatPresetByHost: {} });
+  assert.deepEqual(loadUi().defaultNewChatPresetByHost, {});
+});
+test('a non-object coerces to {} (defensive, no throw)', () => {
+  reset();
+  // A string is not a plain map → {}.
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPresetByHost: 'bogus' }));
+  assert.deepEqual(loadUi().defaultNewChatPresetByHost, {});
+  // An array is an object but NOT a plain map → {}.
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPresetByHost: [['gpu-box', 'codex']] }));
+  assert.deepEqual(loadUi().defaultNewChatPresetByHost, {});
+  // A number → {}.
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPresetByHost: 42 }));
+  assert.deepEqual(loadUi().defaultNewChatPresetByHost, {});
+});
+test('a per-host value naming a custom preset NOT in the stored customPresets is DROPPED (falls back to global at read time — the key correctness behavior)', () => {
+  reset();
+  // 'codex' is not a built-in and NOT in the (empty) customPresets → dropped.
+  // 'claude' is a built-in → kept.
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [], defaultNewChatPresetByHost: { 'gpu-box': 'codex', '(local)': 'claude' } }));
+  assert.deepEqual(loadUi().defaultNewChatPresetByHost, { '(local)': 'claude' });
+});
+test('a per-host value of a reserved built-in (claude/shell) is kept with no custom presets', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [], defaultNewChatPresetByHost: { 'gpu-box': 'shell', '(local)': 'claude' } }));
+  assert.deepEqual(loadUi().defaultNewChatPresetByHost, { 'gpu-box': 'shell', '(local)': 'claude' });
+});
+test('entries with non-string values are dropped (never seed the agent-type field with a non-name)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPresetByHost: { '(local)': 'claude', 'num': 42, 'obj': { x: 1 }, 'arr': [1] } }));
+  assert.deepEqual(loadUi().defaultNewChatPresetByHost, { '(local)': 'claude' });
+});
+test('entries with empty/whitespace values are dropped (empty override = use the global default, never persists as a blank)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPresetByHost: { '(local)': 'claude', 'blank': '', 'ws': '   ', 'tab': '\t' } }));
+  assert.deepEqual(loadUi().defaultNewChatPresetByHost, { '(local)': 'claude' });
+});
+test('entries with an empty-string key are dropped', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPresetByHost: { '': 'claude', '(local)': 'claude' } }));
+  assert.deepEqual(loadUi().defaultNewChatPresetByHost, { '(local)': 'claude' });
+});
+test('values are trimmed on load (matching defaultNewChatPreset)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPresetByHost: { '(local)': '  claude  ' } }));
+  assert.deepEqual(loadUi().defaultNewChatPresetByHost, { '(local)': 'claude' });
+});
+test('a missing field loads as {}', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  assert.deepEqual(loadUi().defaultNewChatPresetByHost, {});
+});
+test('the map survives an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
+  // defaultNewChatPresetByHost is NOT a workspace field, so persistUiState spreads
+  // it from `live`. Confirm an empty-launch still round-trips a freshly set map.
+  reset();
+  const d0 = loadUi();
+  saveUi(persistUiState({ ...d0, customPresets: [{ name: 'codex', cmd: 'codex' }], defaultNewChatPresetByHost: { 'gpu-box': 'codex' } }, 'empty', d0, true));
+  assert.deepEqual(loadUi().defaultNewChatPresetByHost, { 'gpu-box': 'codex' });
+});
+
 console.log(`\n✓ STORAGE TESTS PASS (${passed})`);
