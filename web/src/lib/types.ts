@@ -15,6 +15,14 @@ export interface Chat {
   status?: string;
   lastActivity?: number;  // Timestamp of last activity (ms since epoch)
   healthState?: string;  // Health state (healthy, warning, critical, idle, unknown)
+  // Per-container resource usage from `docker stats` (WARDEN-309). Captured in the
+  // SSH discover() path only (rides the existing discover round-trip), cache-carried
+  // into /api/health (zero SSH on the 10s poll). Optional → chats without them
+  // (bare-tmux/manual agents, hosts whose docker stats failed, companion path)
+  // are unaffected.
+  cpuPct?: number;     // e.g. 42.3 (percent, no trailing %)
+  memPct?: number;     // e.g. 15.7 (percent)
+  memUsage?: string;   // e.g. "310.2MiB / 2GiB" (used / total display string)
 }
 
 export interface HealthData {

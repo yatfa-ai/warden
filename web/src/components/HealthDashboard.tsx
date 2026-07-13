@@ -54,6 +54,52 @@ function ago(ms: number) {
   return `${Math.floor(s / 86400)}d`;
 }
 
+// Compact "used" portion of a docker-stats MemUsage string like
+// "310.2MiB / 2GiB" → "310.2MiB" (everything before the first ' / '). Returns ''
+// when there's nothing to show, including docker's `--` placeholder (emitted for
+// a container too new to have a sample) so a fresh container renders no chip
+// rather than a confusing `--`. (WARDEN-309)
+function memUsedShort(memUsage?: string): string {
+  if (!memUsage) return '';
+  const used = memUsage.split('/')[0].trim();
+  if (!used || /^[-\s]*$/.test(used)) return '';
+  return used;
+}
+
+// Color a resource reading so a runaway (CPU- or memory-burning) agent pops in a
+// dense fleet. CPU% is host-wide — on an N-core host one fully-burned core reads
+// ~100/N — so the bands are heuristic; memory is not diluted and is the stronger
+// leak/OOM signal. Reuses the file's existing text-yellow-500 / text-red-500
+// palette. Elevated = CPU OR mem ≥ 80 (amber); ≥ 90 (red). (WARDEN-309)
+function resourceTone(cpuPct?: number, memPct?: number): string {
+  const cpu = cpuPct ?? 0;
+  const mem = memPct ?? 0;
+  if (cpu >= 90 || mem >= 90) return 'text-red-500';
+  if (cpu >= 80 || mem >= 80) return 'text-yellow-500';
+  return 'text-muted-foreground';
+}
+
+// Inline chip label: "42% · 310.2MiB" (rounded CPU% · used memory). Each part is
+// included only when present, so a chat with only cpuPct still renders "42%".
+// (WARDEN-309)
+function resourceLabel(agent: Chat): string {
+  const parts: string[] = [];
+  if (agent.cpuPct != null) parts.push(`${Math.round(agent.cpuPct)}%`);
+  const used = memUsedShort(agent.memUsage);
+  if (used) parts.push(used);
+  return parts.join(' · ');
+}
+
+// Full tooltip text for the resource chip: precise CPU%, mem%, and the raw
+// used / total string. (WARDEN-309)
+function resourceTitle(agent: Chat): string {
+  const parts: string[] = [];
+  if (agent.cpuPct != null) parts.push(`CPU ${agent.cpuPct.toFixed(1)}%`);
+  if (agent.memPct != null) parts.push(`Mem ${agent.memPct.toFixed(1)}%`);
+  if (agent.memUsage) parts.push(agent.memUsage);
+  return parts.join(' · ');
+}
+
 // Rank a health state by its display order (healthy → unknown). Used to keep a
 // host's agents in the same health-dot order the health-state view uses.
 function healthRank(state: HealthStateValue): number {
@@ -90,6 +136,28 @@ function HealthDot({ state }: { state: HealthStateValue }) {
       tone={healthTone(state)}
       label={formatHealthState(state)}
     />
+  );
+}
+
+/**
+ * Per-agent resource chip (CPU% · memory used) from `docker stats` (WARDEN-309).
+ * Rendered ONLY when the chat carries a resource field — i.e. a yatfa docker
+ * agent on a host whose `docker stats` succeeded. Bare-tmux/manual agents and
+ * hosts whose stats failed render nothing (graceful N/A). Elevated usage
+ * (CPU or mem ≥ 80%) is amber/red so a runaway is visible at a glance in a
+ * 50-row fleet. `tabular-nums` keeps the digits equal-width so the chip doesn't
+ * jitter as the numbers tick on refresh.
+ */
+function ResourceChip({ agent }: { agent: Chat }) {
+  const label = resourceLabel(agent);
+  if (!label) return null;
+  return (
+    <span
+      className={`text-[10px] tabular-nums ${resourceTone(agent.cpuPct, agent.memPct)}`}
+      title={resourceTitle(agent)}
+    >
+      {label}
+    </span>
   );
 }
 
@@ -222,6 +290,11 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
           {ago(agent.lastActivity)} ago
         </span>
       )}
+
+      {/* Resource usage (WARDEN-309): per-agent CPU% / memory from `docker stats`,
+          cache-carried from discover (zero SSH on this 10s poll). Renders nothing
+          when the chat has no resource fields. */}
+      <ResourceChip agent={agent} />
     </button>
   );
 
