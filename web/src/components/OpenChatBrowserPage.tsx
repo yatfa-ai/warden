@@ -11,7 +11,8 @@ import type { Chat } from '@/lib/types';
 // page render identical labels (no drift in chat names between the two surfaces).
 import { THIS_MACHINE, basename, displayName, hostTagOf } from '@/lib/chatDisplay';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
-import type { ClaudeSession, SessionSearchResult } from './ChatSidebar';
+import { formatTokens } from '@/lib/formatTokens';
+import type { ClaudeSession, SessionSearchResult, TokenUsage } from './ChatSidebar';
 
 // Loading placeholder for a session row (two skeleton bars). Local to this page —
 // presentational and unlikely to drift from the sidebar's variant in a meaningful way.
@@ -50,6 +51,7 @@ interface DiscoverItem {
   openId?: string;       // live: chat key/id to openChat
   resume?: { id: string; description: string; cwd: string; host: string }; // history: resume params
   snippet?: string;      // content-match snippet (full-content search only)
+  tokenUsage?: TokenUsage | null; // history: per-session LLM token total (WARDEN-367)
 }
 
 function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFormat }: { it: DiscoverItem; resumingId: string | null; onOpen: () => void; onResume: () => void; onView: () => void; timestampFormat: TimestampFormat; }) {
@@ -73,6 +75,11 @@ function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFo
         {it.snippet ? <div className="px-1 truncate text-[10px] text-muted-foreground/80 italic" title={it.snippet}>{it.snippet}</div> : null}
       </div>
       {it.time ? <span className="text-[10px] text-muted-foreground shrink-0">{formatTimestamp(it.time, timestampFormat)}</span> : null}
+      {it.tokenUsage?.total ? (
+        <IconTooltip label="Total tokens this session consumed (input + output + cache). Model-agnostic — not dollar cost.">
+          <span className="text-[10px] text-amber-500/80 shrink-0 tabular-nums">{formatTokens(it.tokenUsage.total)}</span>
+        </IconTooltip>
+      ) : null}
       <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span>
       <IconTooltip label="view transcript (read-only)">
         <Button variant="ghost" size="icon-xs" onClick={onView} aria-label="View transcript" className="text-muted-foreground hover:text-foreground">
@@ -125,6 +132,10 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
   // the button.
   const [hasMoreSessions, setHasMoreSessions] = useState(false);
   const [loadingMoreSessions, setLoadingMoreSessions] = useState(false);
+  // Sort the history list by token usage (heaviest first) so the sessions that
+  // burned the most tokens surface to the top — the flagship "which session
+  // spent the most?" question. Off by default (recency first). (WARDEN-367.)
+  const [sortUsage, setSortUsage] = useState(false);
 
   // Load persisted host selection once.
   useEffect(() => { setSelected(loadDiscoverHosts()); }, []);
@@ -177,6 +188,29 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
     for (const c of chats) if (c.active && c.host) set.add(c.host);
     return Array.from(set);
   }, [chats]);
+
+  // Fleet token usage over the LOADED window (everything fetched so far, growing
+  // as the user clicks "load more"). Summed client-side from the per-row
+  // tokenUsage the backend attaches, so it always reflects exactly what's on
+  // screen — not just one page. The server's per-page `totals` mirrors page 1;
+  // this memo is the honest "visible window" total the summary shows. Labeled
+  // as the window (not all-history) because pagination means older sessions load
+  // on demand. (WARDEN-367.)
+  const fleetTotals = useMemo(() => {
+    let total = 0;
+    const byHost: Record<string, number> = {};
+    for (const s of allSessions) {
+      const t = s.tokenUsage?.total;
+      if (!t) continue;
+      total += t;
+      byHost[s.host] = (byHost[s.host] || 0) + t;
+    }
+    const breakdown = Object.entries(byHost)
+      .sort((a, b) => b[1] - a[1])
+      .map(([h, t]) => `${h === THIS_MACHINE ? 'this machine' : h}: ${formatTokens(t)}`)
+      .join('\n');
+    return { total, hostCount: Object.keys(byHost).length, breakdown };
+  }, [allSessions]);
 
   // Resolved selection: persisted → usual hosts → all hosts.
   const effective = useMemo(() => {
@@ -268,10 +302,13 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
     // History source: full-content search results when a query is present
     // (reaches sessions OUTSIDE the top-40 by what was discussed), else the
     // instant top-40 list. Either way, dedupe against live resume sessions.
+    // Per-session tokenUsage flows through only from the All Sessions list —
+    // content-search results don't carry it (so a searched row shows no badge,
+    // which is honest, not a regression). (WARDEN-367.)
     const q = query.trim();
-    const history: { id: string; host: string; cwd: string; summary: string; mtime: number; snippet?: string }[] = q
+    const history: { id: string; host: string; cwd: string; summary: string; mtime: number; snippet?: string; tokenUsage?: TokenUsage | null }[] = q
       ? contentResults.map((r) => ({ id: r.sessionId, host: r.host, cwd: r.cwd, summary: r.summary, mtime: r.mtime, snippet: r.snippet }))
-      : allSessions.map((s) => ({ id: s.id, host: s.host, cwd: s.cwd, summary: s.summary, mtime: s.mtime }));
+      : allSessions.map((s) => ({ id: s.id, host: s.host, cwd: s.cwd, summary: s.summary, mtime: s.mtime, tokenUsage: s.tokenUsage }));
     for (const s of history) {
       if (!sel.has(s.host)) continue;
       if (liveResumeSid8.has(s.id.slice(0, 8))) continue; // already shown as live
@@ -279,13 +316,24 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
         id: 'hist:' + s.host + ':' + s.id, kind: 'history',
         label: s.summary || `${basename(s.cwd) || 'session'} · ${hostTagOf(s.host)}`,
         hostTag: hostTagOf(s.host), sub: `${hostTagOf(s.host)} · ${basename(s.cwd)}`,
-        time: s.mtime, snippet: s.snippet,
+        time: s.mtime, snippet: s.snippet, tokenUsage: s.tokenUsage,
         resume: { id: s.id, description: s.summary, cwd: s.cwd, host: s.host },
       });
     }
-    out.sort((a, b) => b.time - a.time);
+    // Recency by default; when sortUsage is on, heavier token usage floats up
+    // (rows without usage sink but keep recency order as the tiebreak). Live
+    // sessions carry no tokenUsage, so under usage-sort they sit among the
+    // zero-usage rows by recency — an explicit trade for "heaviest first".
+    if (sortUsage) {
+      out.sort((a, b) => {
+        const d = (b.tokenUsage?.total || 0) - (a.tokenUsage?.total || 0);
+        return d !== 0 ? d : b.time - a.time;
+      });
+    } else {
+      out.sort((a, b) => b.time - a.time);
+    }
     return out;
-  }, [effective, chats, allSessions, contentResults, query]);
+  }, [effective, chats, allSessions, contentResults, query, sortUsage]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -317,6 +365,17 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
         <span className="text-xs text-muted-foreground truncate">
           One merged list across your hosts — live tmux sessions and Claude history. Search finds sessions by what was discussed in them, not just their title.
         </span>
+        {fleetTotals.total > 0 && (
+          <IconTooltip side="bottom" label={
+            <span className="whitespace-pre-line">
+              {`Token usage across the loaded session window (model-agnostic — not dollar cost).\n\n${fleetTotals.breakdown || '(no per-host data)'}`}
+            </span>
+          }>
+            <span className="ml-auto shrink-0 text-[11px] text-amber-500/90 tabular-nums font-medium">
+              ☁ {formatTokens(fleetTotals.total)} tok · {fleetTotals.hostCount} host{fleetTotals.hostCount === 1 ? '' : 's'}
+            </span>
+          </IconTooltip>
+        )}
       </header>
 
       {/* Pinned controls: host multiselect chips + search. The list scrolls
@@ -340,7 +399,18 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
               );
             })}
           </div>
-          <Input placeholder="Search live + history sessions…" value={query} onChange={(e) => setQuery(e.target.value)} className="text-xs" />
+          <div className="flex gap-1.5 items-center">
+            <Input placeholder="Search live + history sessions…" value={query} onChange={(e) => setQuery(e.target.value)} className="text-xs flex-1" />
+            <Button
+              size="xs"
+              variant={sortUsage ? 'secondary' : 'outline'}
+              onClick={() => setSortUsage((v) => !v)}
+              title="Sort by token usage (heaviest first)"
+              className="shrink-0"
+            >
+              usage
+            </Button>
+          </div>
         </div>
       </div>
 

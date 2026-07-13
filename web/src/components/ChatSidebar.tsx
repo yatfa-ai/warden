@@ -19,6 +19,7 @@ import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { loadUi, saveUi, RECENTLY_CLOSED_PREVIEW, type Snippet, type RecentlyClosedEntry } from '@/lib/storage';
 import { THIS_MACHINE, basename, chatType, displayName } from '@/lib/chatDisplay';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
+import { formatTokens } from '@/lib/formatTokens';
 import {
   matchesAgentFilter, sortChats, findChat,
   type AgentFilter, type AgentSort,
@@ -35,7 +36,7 @@ import { computeTagsInUse, filterSessionsByTags, addTag, removeTag } from '@/lib
 
 // Back-compat re-export: OpenChatBrowserPage.tsx imports these types from
 // './ChatSidebar' — keep that path stable so it needs no change (WARDEN-315).
-export type { ClaudeSession, SessionSearchResult } from './sidebar/types';
+export type { ClaudeSession, SessionSearchResult, TokenUsage } from './sidebar/types';
 
 interface Props {
   chats: Chat[];
@@ -763,6 +764,12 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
     const idle = sortedHostChats.filter((c) => !c.active);
     const info = hostSessions[H] || {};
     const sessions = info.sessions || [];
+    // Per-host token total over the LOADED sessions for this host (up to the
+    // fetch limit). The single-host resume list has no cross-host "totals"
+    // field (that lives on /api/claude-sessions-all), so this is summed from the
+    // per-row tokenUsage the backend now attaches. Honest as this host's visible
+    // window, not a fleet total. (WARDEN-367.)
+    const hostTokenTotal = sessions.reduce((acc, s) => acc + (s.tokenUsage?.total || 0), 0);
     // WARDEN-342: tagsInUse + visibleSessions are computed at the top level (hooks
     // can't live in this conditional branch) and are already scoped to this host.
     const openFromHost = (key: string) => { onOpenChat(key); setView({ kind: 'root' }); };
@@ -806,7 +813,14 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
                 ⚠ claude not found on {LABEL[H] || H} — install it to resume sessions here.
               </div>
             )}
-            <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-cyan-500/80 font-semibold">☁ sessions (history — click to resume)</div>
+            <div className="px-2 pt-1 pb-1 flex items-baseline gap-2">
+              <div className="text-[10px] uppercase tracking-wider text-cyan-500/80 font-semibold">☁ sessions (history — click to resume)</div>
+              {hostTokenTotal > 0 && (
+                <span className="text-[10px] text-muted-foreground/70 truncate" title="Total tokens across this host's loaded session history (model-agnostic).">
+                  {formatTokens(hostTokenTotal)} tok
+                </span>
+              )}
+            </div>
             <SessionTagFilterRow tagsInUse={tagsInUse} active={activeTagFilters} onToggle={toggleTagFilter} onClear={() => setActiveTagFilters(new Set())} />
             {visibleSessions.slice(0, 12).map((s) => {
               const running = hostChats.some((c) => c.key === `resume-${s.id.slice(0, 8)}`);
@@ -841,7 +855,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
                         {running && <span className="ml-1 text-green-400">● live</span>}
                       </span>
                       <span className="text-[10px] text-muted-foreground truncate">
-                        {isLoading ? <Skeleton className="h-2.5 w-1/2 inline-block" /> : `${formatTimestamp(s.mtime, timestampFormat)} · ${basename(s.cwd)}`}
+                        {isLoading ? <Skeleton className="h-2.5 w-1/2 inline-block" /> : `${formatTimestamp(s.mtime, timestampFormat)} · ${basename(s.cwd)}${s.tokenUsage?.total ? ` · ${formatTokens(s.tokenUsage.total)}` : ''}`}
                       </span>
                     </button>
                     <SessionTagChips tags={sTags} onAdd={(tag) => addSessionTag(s.id, tag)} onRemove={(tag) => removeSessionTag(s.id, tag)} />

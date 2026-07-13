@@ -34,8 +34,11 @@ import { mergeAndPaginateSessions } from './server.js';
 // --- helpers for the unit tests -------------------------------------------------
 
 // One session row as the per-host fetchers produce it (most-recent-first within a host).
-function row(id, mtime, cwd = '/x') {
-  return { id, cwd, summary: '', mtime };
+// tokenUsage is optional (matches the additive contract — pre-WARDEN-367 rows omit it).
+function row(id, mtime, cwd = '/x', tokenUsage = undefined) {
+  return tokenUsage === undefined
+    ? { id, cwd, summary: '', mtime }
+    : { id, cwd, summary: '', mtime, tokenUsage };
 }
 
 // One host bucket: { host, sessions }.
@@ -130,6 +133,53 @@ describe('mergeAndPaginateSessions — pure cross-host merge + pagination', () =
     assert.deepStrictEqual(sessions, []);
     assert.strictEqual(hasMore, false);
   });
+
+  // ---- token-usage totals (WARDEN-367) ---------------------------------------
+
+  it('totals: per-host subtotals roll up to the grand total over the returned page', () => {
+    const buckets = [
+      bucket('a', [
+        row('a1', 100, '/x', { input: 10, output: 1, cacheCreation: 0, cacheRead: 2, total: 13 }),
+        row('a2', 80, '/x', { input: 5, output: 0, cacheCreation: 0, cacheRead: 0, total: 5 }),
+      ]),
+      bucket('b', [
+        row('b1', 90, '/x', { input: 100, output: 4, cacheCreation: 1, cacheRead: 8, total: 113 }),
+        row('b2', 70, '/x', null), // no usage → contributes nothing
+      ]),
+    ];
+    const { sessions, totals } = mergeAndPaginateSessions(buckets, 0, 4);
+    // Grand total over the page = 13 + 5 + 113 (b2's null skipped).
+    assert.strictEqual(totals.grand.total, 131);
+    assert.strictEqual(totals.byHost.a.total, 18, 'host a = 13 + 5');
+    assert.strictEqual(totals.byHost.b.total, 113, 'host b = 113 (b2 null skipped)');
+    // Per-host subtotals MUST sum to the grand total over the page.
+    const hostSum = Object.values(totals.byHost).reduce((acc, h) => acc + h.total, 0);
+    assert.strictEqual(hostSum, totals.grand.total, 'per-host subtotals roll up to grand');
+    // tokenUsage survives the cross-host merge onto each returned row.
+    assert.strictEqual(sessions.find((s) => s.id === 'a1').tokenUsage.total, 13);
+    assert.strictEqual(sessions.find((s) => s.id === 'b2').tokenUsage, null);
+  });
+
+  it('totals covers only the returned window, not every fetched row', () => {
+    // 3 sessions but page size 1 → totals reflects only the single returned row.
+    const buckets = [bucket('a', [
+      row('a1', 100, '/x', { input: 10, output: 0, cacheCreation: 0, cacheRead: 0, total: 10 }),
+      row('a2', 80, '/x', { input: 50, output: 0, cacheCreation: 0, cacheRead: 0, total: 50 }),
+      row('a3', 60, '/x', { input: 90, output: 0, cacheCreation: 0, cacheRead: 0, total: 90 }),
+    ])];
+    const { totals } = mergeAndPaginateSessions(buckets, 0, 1);
+    assert.strictEqual(totals.grand.total, 10, 'only the newest (returned) session counts');
+  });
+
+  it('totals is additive: present on the return but ignored by pre-WARDEN-367 callers', () => {
+    // A caller that destructures only { sessions, hasMore } is unaffected by the
+    // new totals field — proves the shape change is purely additive.
+    const { sessions, hasMore } = mergeAndPaginateSessions(
+      [bucket('a', [row('a1', 1, '/x', { input: 1, output: 0, cacheCreation: 0, cacheRead: 0, total: 1 })])], 0, 40,
+    );
+    assert.strictEqual(sessions.length, 1);
+    assert.strictEqual(hasMore, false);
+  });
 });
 
 // --- HTTP integration test against the real Express app ------------------------
@@ -184,13 +234,17 @@ describe('/api/claude-sessions-all HTTP endpoint (real Express app from server.j
     try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best-effort */ }
   });
 
-  it('responds 200 + { sessions: [...], hasMore } (hasMore is now part of the contract)', async () => {
+  it('responds 200 + { sessions: [...], hasMore, totals } (additive WARDEN-367 contract)', async () => {
     const res = await fetch(`${baseUrl}/api/claude-sessions-all`);
     assert.strictEqual(res.status, 200);
     assert.strictEqual(res.headers.get('content-type'), 'application/json; charset=utf-8');
     const body = await res.json();
     assert.ok(Array.isArray(body.sessions), 'body must be { sessions: [...] }');
     assert.strictEqual(typeof body.hasMore, 'boolean', 'hasMore must be a boolean');
+    // totals is additive (WARDEN-367): always an object, zero grand when no usage.
+    assert.ok(body.totals && typeof body.totals === 'object', 'totals must be present');
+    assert.strictEqual(body.totals.grand.total, 0, 'seeded sessions have no usage → 0');
+    assert.ok(body.totals.byHost && typeof body.totals.byHost === 'object');
   });
 
   it('default page returns the newest 40 and flags more (page 1 == old global cap, now not a hard ceiling)', async () => {
@@ -241,5 +295,94 @@ describe('/api/claude-sessions-all HTTP endpoint (real Express app from server.j
     assert.strictEqual(body.hasMore, true);
     const neg = await (await fetch(`${baseUrl}/api/claude-sessions-all?offset=-5&limit=-3`)).json();
     assert.ok(neg.sessions.length >= 1 && neg.sessions.length <= 40, 'clamped to >=1 page size, offset >=0');
+  });
+});
+
+// --- token-usage end-to-end on the LOCAL path (WARDEN-367) ---------------------
+//
+// Seeds real assistant `message.usage` records into the temp archive and asserts
+// the LOCAL full-file read surfaces correct per-session tokenUsage on BOTH
+// endpoints + a non-zero fleet total — proving the data already on disk is wired
+// through, and that a no-usage session degrades to tokenUsage null (no 500).
+// SSH is unavailable in CI so the remote path is covered by the unit tests over
+// the pure helper + the validated grep+awk pipeline (see server-session-tokens).
+
+function seedUsageSession(tempHome, id, turns, mtimeSec) {
+  const projDir = path.join(tempHome, '.claude', 'projects', 'tokproj');
+  fs.mkdirSync(projDir, { recursive: true });
+  const lines = [{ cwd: `/repo/${id}` }, ...turns];
+  const file = path.join(projDir, `${id}.jsonl`);
+  fs.writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  fs.utimesSync(file, mtimeSec, mtimeSec);
+}
+
+describe('/api/claude-sessions(+all) token usage — LOCAL full-file read (WARDEN-367)', () => {
+  let httpServer;
+  let baseUrl;
+  let originalHome;
+  let tempHome;
+
+  before(async () => {
+    originalHome = process.env.HOME;
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-session-tokens-'));
+    process.env.HOME = tempHome;
+    const wardenDir = path.join(tempHome, '.yatfa-warden');
+    fs.mkdirSync(wardenDir, { recursive: true });
+    fs.writeFileSync(path.join(wardenDir, 'config.json'), JSON.stringify({ hosts: [] }));
+
+    const usage = (i, o, cc, cr) => ({ type: 'assistant', message: { role: 'assistant', usage: { input_tokens: i, output_tokens: o, cache_creation_input_tokens: cc, cache_read_input_tokens: cr } } });
+    // sess-a: 110/5/2/3 = 120 total (two turns). newest.
+    seedUsageSession(tempHome, 'sess-a', [usage(10, 5, 2, 3), usage(100, 0, 0, 0)], 3000);
+    // sess-b: cache-heavy, 195529/63632/0/5320192 = 5579353 total.
+    seedUsageSession(tempHome, 'sess-b', [usage(195529, 63632, 0, 5320192)], 2000);
+    // sess-c: NO usage (a user-only conversation) → tokenUsage null, never a 500.
+    seedUsageSession(tempHome, 'sess-c', [{ type: 'user', message: { role: 'user', content: 'just talking' } }], 1000);
+
+    const { app } = await import('./server.js');
+    httpServer = app.listen(0, '127.0.0.1');
+    await new Promise((resolve, reject) => {
+      httpServer.once('listening', resolve);
+      httpServer.once('error', reject);
+    });
+    baseUrl = `http://127.0.0.1:${httpServer.address().port}`;
+  });
+
+  after(async () => {
+    if (httpServer) await new Promise((r) => httpServer.close(r));
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  it('/api/claude-sessions attaches tokenUsage per session (null for no-usage)', async () => {
+    const body = await (await fetch(`${baseUrl}/api/claude-sessions?host=(local)`)).json();
+    const byId = Object.fromEntries(body.sessions.map((s) => [s.id, s]));
+    assert.deepStrictEqual(byId['sess-a'].tokenUsage, { input: 110, output: 5, cacheCreation: 2, cacheRead: 3, total: 120 });
+    assert.strictEqual(byId['sess-b'].tokenUsage.total, 5579353, 'cache-heavy total matches the raw usage sum');
+    assert.strictEqual(byId['sess-c'].tokenUsage, null, 'no-usage session → null (no badge, no error)');
+  });
+
+  it('/api/claude-sessions-all returns a non-zero fleet total over the window + per-host split', async () => {
+    const body = await (await fetch(`${baseUrl}/api/claude-sessions-all?offset=0&limit=40`)).json();
+    // Grand = 120 + 5579353 (sess-c null skipped).
+    assert.strictEqual(body.totals.grand.total, 5579473);
+    assert.ok(body.totals.byHost['(local)'], 'the local host bucket carries its subtotal');
+    assert.strictEqual(body.totals.byHost['(local)'].total, 5579473);
+    // Per-host subtotals roll up to grand.
+    const hostSum = Object.values(body.totals.byHost).reduce((acc, h) => acc + h.total, 0);
+    assert.strictEqual(hostSum, body.totals.grand.total);
+    // The cache-heavy session surfaces first under usage-sort is a frontend concern;
+    // here we just confirm both usage-bearing sessions are in the returned page.
+    const ids = body.sessions.map((s) => s.id);
+    assert.ok(ids.includes('sess-a') && ids.includes('sess-b') && ids.includes('sess-c'));
+  });
+
+  it('a no-usage session never causes a 500 (graceful-empty contract)', async () => {
+    const res = await fetch(`${baseUrl}/api/claude-sessions-all`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    const c = body.sessions.find((s) => s.id === 'sess-c');
+    assert.ok(c, 'no-usage session is still listed');
+    assert.strictEqual(c.tokenUsage, null);
   });
 });
