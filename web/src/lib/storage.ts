@@ -178,6 +178,14 @@ export interface UiState {
   // remains editable per-spawn. Pure client-side pref; never sent to the
   // backend / /api/config.
   defaultNewChatCwd?: string;
+  // Per-host default working directory overrides for the ＋ new chat spawn form
+  // (WARDEN-336). Keys are the host strings — '(local)' for local, the SSH host
+  // name for remote (matching defaultNewChatHost); values are cwd paths. A host
+  // with no entry (or an empty/whitespace value, dropped on load) falls through
+  // to defaultNewChatCwd, then blank — identical to today's single-host
+  // behavior. Sanitized on load by parseCwdByHost. Pure client-side pref; never
+  // sent to the backend / /api/config.
+  defaultNewChatCwdByHost?: Record<string, string>;
   // Default shell launched by the pane-grid ＋ split button (WARDEN-223). A
   // non-empty value (e.g. 'zsh', 'pwsh') is the `cmd` every split spawns; blank
   // (default) means "no explicit shell" — the host launches its own login shell
@@ -223,6 +231,34 @@ function parseCustomPresets(raw: unknown): CustomPreset[] {
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({ name, cmd });
+  }
+  return out;
+}
+
+// Sanitize a raw defaultNewChatCwdByHost value (host key → default cwd) into a
+// valid Record<string,string>. Defensive: never throws on malformed input
+// (WARDEN-89) — it drops bad entries instead, so one corrupt/blank entry can
+// never blank the spawn cwd field. Modeled on parseCustomPresets (and explicitly
+// NOT on the looser paneHost loader, which does not coerce values): each entry
+// requires a non-empty trimmed-string KEY and a trimmed-string VALUE, and
+// entries whose value is empty/whitespace are dropped — an empty override means
+// "use the global defaultNewChatCwd" and so must never persist as a blank that
+// could seed the spawn field empty. Values are trimmed, matching
+// defaultNewChatCwd's own load-time trim (line ~331).
+function parseCwdByHost(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    if (raw !== undefined && raw !== null) {
+      // A present-but-wrong-type value is genuine corruption worth surfacing.
+      console.warn('[loadUi] defaultNewChatCwdByHost is not an object; ignoring:', raw);
+    }
+    return {};
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const key = typeof k === 'string' ? k.trim() : '';
+    const val = typeof v === 'string' ? v.trim() : '';
+    if (!key || !val) continue; // empty key → drop; empty value → inherit global default
+    out[key] = val;
   }
   return out;
 }
@@ -278,7 +314,7 @@ const DEFAULT_UI: UiState = {
   onExitBehavior: 'keep',
   autoFocusNewPane: true,
   restoreOnStartup: 'previous',
-  defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', customPresets: [], defaultNewChatCwd: '',
+  defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', customPresets: [], defaultNewChatCwd: '', defaultNewChatCwdByHost: {},
   defaultSplitShell: '',
   paneHost: {}, agentFilter: 'all', agentSort: 'manual',
 };
@@ -329,6 +365,10 @@ export function loadUi(): UiState {
         // Trim on load so stray whitespace never becomes the seeded cwd path;
         // blank is the meaningful "host home directory" value (today's behavior).
         defaultNewChatCwd: typeof v.defaultNewChatCwd === 'string' ? v.defaultNewChatCwd.trim() : '',
+        // Per-host cwd overrides: a stricter string→string sanitizer than
+        // paneHost's loose pass — a corrupt/blank entry must never seed the
+        // spawn field empty. Empty values drop ("use the global default").
+        defaultNewChatCwdByHost: parseCwdByHost(v.defaultNewChatCwdByHost),
         // Trim on load so stray whitespace never becomes the spawned shell name;
         // blank is the meaningful "auto-detect host login shell" value.
         defaultSplitShell: typeof v.defaultSplitShell === 'string' ? v.defaultSplitShell.trim() : '',

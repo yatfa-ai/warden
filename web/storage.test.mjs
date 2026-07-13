@@ -740,4 +740,65 @@ test('the pref survives an empty-mode mount (carried by the live spread, not the
   assert.equal(loadUi().defaultSplitShell, 'pwsh');
 });
 
+console.log('\ndefaultNewChatCwdByHost (per-host cwd overrides) round-trips through loadUi/saveUi — WARDEN-336');
+test('defaults to {} when nothing is stored', () => {
+  reset();
+  assert.deepEqual(loadUi().defaultNewChatCwdByHost, {});
+});
+test('a valid host→cwd map round-trips', () => {
+  reset();
+  saveUi({ ...loadUi(), defaultNewChatCwdByHost: { 'prod-box': '/srv/app', '(local)': '~/projects/warden' } });
+  assert.deepEqual(loadUi().defaultNewChatCwdByHost, { 'prod-box': '/srv/app', '(local)': '~/projects/warden' });
+});
+test('an empty map round-trips as {} (clearing all overrides persists nothing)', () => {
+  reset();
+  saveUi({ ...loadUi(), defaultNewChatCwdByHost: {} });
+  assert.deepEqual(loadUi().defaultNewChatCwdByHost, {});
+});
+test('a non-object coerces to {} (defensive, no throw)', () => {
+  reset();
+  // A string is not a plain map → {}.
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: 'bogus' }));
+  assert.deepEqual(loadUi().defaultNewChatCwdByHost, {});
+  // An array is an object but NOT a plain map → {}.
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: [['prod-box', '/srv/app']] }));
+  assert.deepEqual(loadUi().defaultNewChatCwdByHost, {});
+  // A number → {}.
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: 42 }));
+  assert.deepEqual(loadUi().defaultNewChatCwdByHost, {});
+});
+test('entries with non-string values are dropped (never seed the spawn field with a non-path)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: { 'prod-box': '/srv/app', 'num': 42, 'obj': { x: 1 }, 'arr': [1] } }));
+  assert.deepEqual(loadUi().defaultNewChatCwdByHost, { 'prod-box': '/srv/app' });
+});
+test('entries with empty/whitespace values are dropped (empty override = use the global default, never persists as a blank)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: { 'prod-box': '/srv/app', 'blank': '', 'ws': '   ', 'tab': '\t' } }));
+  assert.deepEqual(loadUi().defaultNewChatCwdByHost, { 'prod-box': '/srv/app' });
+});
+test('entries with an empty-string key are dropped', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: { '': '/srv/app', 'prod-box': '/srv/app' } }));
+  assert.deepEqual(loadUi().defaultNewChatCwdByHost, { 'prod-box': '/srv/app' });
+});
+test('values are trimmed on load (matching defaultNewChatCwd)', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: { 'prod-box': '  /srv/app  ' } }));
+  assert.deepEqual(loadUi().defaultNewChatCwdByHost, { 'prod-box': '/srv/app' });
+});
+test('a missing field loads as {}', () => {
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  assert.deepEqual(loadUi().defaultNewChatCwdByHost, {});
+});
+test('the map survives an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
+  // defaultNewChatCwdByHost is NOT a workspace field, so persistUiState spreads it
+  // from `live`. Confirm an empty-launch still round-trips a freshly set map.
+  reset();
+  const d0 = loadUi();
+  saveUi(persistUiState({ ...d0, defaultNewChatCwdByHost: { 'prod-box': '/srv/app' } }, 'empty', d0, true));
+  assert.deepEqual(loadUi().defaultNewChatCwdByHost, { 'prod-box': '/srv/app' });
+});
+
 console.log(`\n✓ STORAGE TESTS PASS (${passed})`);

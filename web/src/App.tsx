@@ -185,6 +185,11 @@ function App() {
   // client-side pref (like the new-chat host above): persisted by the saveUi
   // effect below, never sent to the backend.
   const [defaultNewChatCwd, setDefaultNewChatCwd] = useState(() => uiState.defaultNewChatCwd ?? '');
+  // Per-host cwd overrides for the ＋ new chat spawn form (WARDEN-336). Keys are
+  // host strings ('(local)' / SSH host name); a host with no entry falls through
+  // to defaultNewChatCwd above, then blank. Pure client-side pref like the global
+  // cwd above: persisted by the saveUi effect below, never sent to the backend.
+  const [defaultNewChatCwdByHost, setDefaultNewChatCwdByHost] = useState<Record<string, string>>(() => uiState.defaultNewChatCwdByHost ?? {});
   const [customPresets, setCustomPresets] = useState<CustomPreset[]>(() => uiState.customPresets ?? []);
   // Default shell launched by the pane-grid ＋ split button (WARDEN-223). Blank
   // means "no explicit shell" → the host launches its own login shell. Pure
@@ -318,8 +323,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, customPresets, defaultSplitShell }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, customPresets, defaultSplitShell, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, defaultSplitShell }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, defaultSplitShell, restoreOnStartup, startedEmpty]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -1025,6 +1030,8 @@ function App() {
           setDefaultNewChatHost={setDefaultNewChatHost}
           defaultNewChatCwd={defaultNewChatCwd}
           setDefaultNewChatCwd={setDefaultNewChatCwd}
+          defaultNewChatCwdByHost={defaultNewChatCwdByHost}
+          setDefaultNewChatCwdByHost={setDefaultNewChatCwdByHost}
           customPresets={customPresets}
           setCustomPresets={setCustomPresets}
           defaultSplitShell={defaultSplitShell}

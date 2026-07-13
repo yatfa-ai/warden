@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Input } from '@/components/ui/input';
@@ -20,6 +20,17 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
   // so loadUi() runs once on mount — not on every render/keystroke — matching
   // App.tsx's lazy-init pattern for client prefs.
   const [initialUi] = useState(() => loadUi());
+  // Resolve the default cwd for a given host: a per-host override
+  // (defaultNewChatCwdByHost) wins, falling back to the global defaultNewChatCwd,
+  // then blank (the host's home directory). A host with no override falls through
+  // to today's exact behavior — WARDEN-336 extends WARDEN-311's single global
+  // default to a per-host map. Used to (re-)seed the cwd field on mount, on host
+  // change, and after submit. Memoized: it depends only on the mount-once
+  // initialUi (stable), so it has a stable identity and is safe in effect deps.
+  const cwdFor = useCallback(
+    (h: string) => initialUi.defaultNewChatCwdByHost?.[h] ?? initialUi.defaultNewChatCwd ?? '',
+    [initialUi],
+  );
   const [open, setOpen] = useState(false);
   const [sshHosts, setSshHosts] = useState<string[]>([]);
   const [claudePath, setClaudePath] = useState('claude');
@@ -30,11 +41,12 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
   const [preset, setPreset] = useState<string>(() => initialUi.defaultNewChatPreset ?? 'claude');
   const [customPresets] = useState(() => initialUi.customPresets ?? []);
   const [session, setSession] = useState('');
-  // cwd pre-fills from the persisted defaultNewChatCwd pref (WARDEN-311) so a
-  // human who always spawns into the same project doesn't re-type the path on
-  // every spawn. Lazy init runs loadUi() once on mount (matching the host/preset
-  // lazy-inits above); the value is still editable per-spawn and submit trims it.
-  const [cwd, setCwd] = useState(() => initialUi.defaultNewChatCwd ?? '');
+  // cwd pre-fills HOST-AWARE (WARDEN-336): the default for the INITIAL host
+  // (the saved defaultNewChatHost), resolved via cwdFor so a per-host override
+  // seeds the field immediately on first open. Lazy init runs loadUi() once on
+  // mount (matching the host/preset lazy-inits above); the value is still
+  // editable per-spawn, submit trims it, and switching host re-seeds it (below).
+  const [cwd, setCwd] = useState(() => cwdFor(initialUi.defaultNewChatHost ?? THIS_MACHINE));
   const [cmd, setCmd] = useState('claude --dangerously-skip-permissions');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
@@ -48,13 +60,23 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
         setSshHosts(hosts);
         // Graceful fallback: a stored default host that's no longer configured
         // (removed from SSH hosts / no longer detected) must never leave a
-        // dangling/empty option — drop back to local. Functional update keeps
-        // `host` out of this effect's deps so it doesn't re-fetch on change.
-        setHost((cur) => (cur !== THIS_MACHINE && !hosts.includes(cur) ? THIS_MACHINE : cur));
+        // dangling/empty option — drop back to local, and re-seed cwd to local's
+        // default so the field never shows the removed host's path. Functional
+        // update keeps `host` out of this effect's deps so it doesn't re-fetch on
+        // change (cwdFor is stable, listed below, so it never triggers a refetch).
+        // setCwd inside the updater is safe: cwdFor(THIS_MACHINE) is deterministic,
+        // so a StrictMode double-invoke just re-sets the same value.
+        setHost((cur) => {
+          if (cur !== THIS_MACHINE && !hosts.includes(cur)) {
+            setCwd(cwdFor(THIS_MACHINE));
+            return THIS_MACHINE;
+          }
+          return cur;
+        });
       })
       .catch((error) => console.error('[ssh-hosts] Failed:', error));
     fetch('/api/this-session').then((r) => r.json()).then((t) => { if (t.claudePath) setClaudePath(t.claudePath); }).catch((error) => console.error('[this-session] Failed:', error));
-  }, [open]);
+  }, [open, cwdFor]);
 
   useEffect(() => {
     if (!open) return;
@@ -83,13 +105,14 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
         host, session: sess, cwd: cwd.trim(), cmd: cmd.trim(),
       });
       if (!result.ok) { setErr(result.error || 'spawn failed'); setBusy(false); return; }
-      // Reset session (per-spawn) and re-seed cwd from the persisted default
-      // (WARDEN-311). NewChatForm is always-mounted, so the lazy useState
-      // initializer above runs only once per session — clearing cwd to '' here
-      // would empty the field for every spawn after the first. Re-seed from the
-      // default so the path pre-fills every open; a per-spawn edit correctly
+      // Reset session (per-spawn) and re-seed cwd host-aware (WARDEN-336): the
+      // default for the CURRENTLY-SELECTED host, not just the global default.
+      // NewChatForm is always-mounted, so the lazy useState initializer above
+      // runs only once per session — clearing cwd to '' here would empty the
+      // field for every spawn after the first. Re-seed via cwdFor so the path
+      // pre-fills every open for the selected host; a per-spawn edit correctly
       // does NOT persist (it's a default, not the last-used value).
-      setOpen(false); setSession(''); setCwd(initialUi.defaultNewChatCwd ?? '');
+      setOpen(false); setSession(''); setCwd(cwdFor(host));
       onSpawned(result.data!.chat);
     } catch (e: unknown) { setErr(e instanceof Error ? e.message : String(e)); }
     setBusy(false);
@@ -101,7 +124,7 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
 
   return (
     <form onSubmit={submit} className="flex flex-col gap-1 p-2 border-b bg-muted/40">
-      <select value={host} onChange={(e) => setHost(e.target.value)} className="bg-background border rounded px-1.5 py-1 text-[11px]">
+      <select value={host} onChange={(e) => { const h = e.target.value; setHost(h); setCwd(cwdFor(h)); }} className="bg-background border rounded px-1.5 py-1 text-[11px]">
         <option value={THIS_MACHINE}>this machine (direct)</option>
         {sshHosts.map((h) => <option key={h} value={h}>{h} (tmux)</option>)}
       </select>
