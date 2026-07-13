@@ -421,17 +421,37 @@
  */
 
 /*
- * xterm terminal surface — match the active theme's background (WARDEN-255 QA fix).
+ * xterm terminal surface — follow the RESOLVED TERMINAL PALETTE, not the chrome (WARDEN-255).
  *
  * xterm's bundled stylesheet pins `.xterm .xterm-viewport { background-color: #000 }`,
  * and with no webgl/canvas addon loaded the DOM renderer does NOT paint the
- * theme's `background` onto the viewport element. So every terminal pane renders
- * pure black regardless of the active theme — which on the two LIGHT themes makes
- * the shell prompt invisible (black foreground on a black viewport). The theme
- * object DOES reach xterm (foreground/cursor already track it); only the viewport
- * background is lost. Each theme defines its CSS `--background` to EQUAL its
- * `xterm.background` hex by construction (see themes.ts), so driving the surface
- * from that token makes the pane background match the active theme.
+ * theme's `background` onto the viewport element. So a CSS rule must drive the
+ * surface. The question is WHICH color: the chrome `--background`, or the resolved
+ * TERMINAL palette's background.
+ *
+ * It must be the terminal palette. PaneTile resolves the terminal color-scheme
+ * override (`auto`/`dark`/`light`) down to a concrete named-theme id and looks up
+ * its `XtermPalette`; BOTH the viewport (this rule, via `--terminal-background`)
+ * AND the xterm text palette (`term.options.theme = terminalPalette`) derive from
+ * that SAME object — so viewport and text can never decouple. PaneTile sets
+ * `--terminal-background` inline on the `.xterm` host element from
+ * `terminalPalette.background`.
+ *
+ *   - `auto`  → terminalPalette == the active theme. Each theme's CSS `--background`
+ *               EQUALS its `xterm.background` hex by construction (asserted in
+ *               selection-contrast.test.mjs), so `--terminal-background` ==
+ *               chrome `--background` here — the verified-fixed auto case is
+ *               unchanged.
+ *   - `dark`  → GitHub Dark palette (bg #0d1117, light text) → dark viewport + light text.
+ *   - `light` → GitHub Light palette (bg #ffffff, dark text) → light viewport + dark text.
+ *
+ * The prior fix pointed this rule at chrome `--background` while the text palette
+ * still followed the override — so override≠chrome (e.g. a light app forcing a
+ * dark terminal) put light text on a light viewport: an INVISIBLE prompt. Driving
+ * the surface from the terminal palette fixes both override directions while
+ * leaving `auto` identical. The `var(--background)` fallback only fires if the
+ * inline token is ever unset (defensive — e.g. an xterm instance not hosted by
+ * PaneTile), preserving the old behavior in that case.
  *
  * `!important` + UNLAYERED is deliberate, not a smell: xterm.css is an unlayered
  * third-party stylesheet that loads AFTER index.css (see main.tsx), and the DOM
@@ -441,7 +461,7 @@
  */
 .xterm .xterm-viewport,
 .xterm .xterm {
-  background-color: var(--background) !important;
+  background-color: var(--terminal-background, var(--background)) !important;
 }
 
 @layer base {

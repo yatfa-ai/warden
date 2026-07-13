@@ -772,8 +772,19 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
         </div>
       )}
       {/* terminal surface — stop the contextmenu event so right-clicks here keep the xterm
-          native paste menu instead of opening the themed pane menu (see Done criterion). */}
-      <div ref={wrapRef} className="flex-1 min-h-0 px-1 py-0.5 overflow-hidden relative" onContextMenu={(e) => e.stopPropagation()} onClick={() => termRef.current?.focus()}>
+          native paste menu instead of opening the themed pane menu (see Done criterion).
+
+          --terminal-background (WARDEN-255 QA rework): the xterm viewport background is
+          driven from THIS token (see the `.xterm .xterm-viewport` rule in index.css), not
+          from the chrome `--background`. Both the viewport AND the xterm text palette derive
+          from the SAME `terminalPalette` object, so they stay coherent whether the terminal
+          color-scheme override is `auto` (== active theme → --terminal-background ==
+          chrome --background), `dark` (→ GitHub Dark palette), or `light` (→ GitHub Light
+          palette). The prior fix pointed the viewport at chrome `--background` while the text
+          palette followed the override — so override≠chrome decoupled them into an invisible
+          terminal (light text on a light viewport, etc.). Setting the token on the xterm host
+          (this element) makes it inherit to `.xterm` / `.xterm-viewport`. */}
+      <div ref={wrapRef} style={{ '--terminal-background': terminalPalette.background } as React.CSSProperties} className="flex-1 min-h-0 px-1 py-0.5 overflow-hidden relative" onContextMenu={(e) => e.stopPropagation()} onClick={() => termRef.current?.focus()}>
         {phase === 'connecting' && (
           <div className="absolute inset-0 flex items-center justify-center gap-2 text-[11px] text-muted-foreground pointer-events-none select-none">
             <span className="size-3 rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground animate-spin" />

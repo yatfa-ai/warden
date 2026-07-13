@@ -31,9 +31,14 @@
 //
 // It also guards the xterm terminal-surface rule (criterion 7): the DOM renderer
 // doesn't paint theme.background onto `.xterm-viewport`, so a CSS rule drives it
-// from var(--background) — without it every terminal pane is black and light-theme
-// prompts are invisible. Asserted here (rule ships + !important) for the same
-// "verified, not asserted" reason as the selection contrast above.
+// from var(--terminal-background) — the RESOLVED TERMINAL palette's background
+// (set inline by PaneTile from terminalPalette.background), NOT the chrome
+// --background, so the viewport stays coherent with the xterm text palette in
+// every override mode (auto/dark/light). Without the rule every terminal pane is
+// black; with chrome-only, override≠chrome decouples viewport from text and the
+// prompt goes invisible (the QA regression). Asserted here (rule ships +
+// !important + auto-coherence invariant + per-theme text readability) for the
+// same "verified, not asserted" reason as the selection contrast above.
 //
 // Run: node selection-contrast.test.mjs   (or: npm test, from web/)
 import { transformWithOxc } from 'vite';
@@ -175,26 +180,64 @@ test(':root selection tokens equal the default theme (' + DEFAULT_THEME_ID + ') 
   assert.equal(blocks.root['--selection-foreground'], def['--selection-foreground'], ':root --selection-foreground must mirror the default theme');
 });
 
-console.log('\nxterm terminal surface tracks the active theme background (criterion 7 — QA fix)');
-test('a .xterm-viewport rule ships in index.css driving background from var(--background)', () => {
+console.log('\nxterm terminal surface follows the RESOLVED TERMINAL palette (criterion 7 — QA rework)');
+test('a .xterm-viewport rule ships driving background from var(--terminal-background)', () => {
   // The DOM renderer (no webgl/canvas addon) does not paint theme.background onto
-  // the viewport element, so a CSS rule must drive the surface from the token.
-  // Without it every terminal pane renders pure black and the two LIGHT themes
-  // have an invisible (black-on-black) shell prompt. Each theme's --background
-  // equals its xterm.background hex by construction, so the token IS the right
-  // color. This guards the rule against accidental removal.
-  const rule = /\.xterm-viewport[^{]*\{[^}]*background-color:\s*var\(--background\)/;
-  assert.ok(rule.test(css), '.xterm-viewport must set background-color: var(--background) so the pane matches the active theme');
+  // the viewport element, so a CSS rule must drive the surface. It must read the
+  // RESOLVED TERMINAL palette's background (--terminal-background, set inline by
+  // PaneTile from terminalPalette.background) — NOT the chrome --background — so
+  // the viewport stays coherent with the xterm text palette when the terminal
+  // color-scheme override (dark/light) opposes the chrome theme. var(--background)
+  // is the defensive fallback only. Guards the rule + the primary token against
+  // accidental removal or reversion to chrome-only (the regression QA rejected:
+  // light text on a light viewport when override≠chrome).
+  const rule = /\.xterm-viewport[^{]*\{[^}]*background-color:\s*var\(--terminal-background\b/;
+  assert.ok(rule.test(css), '.xterm-viewport must set background-color: var(--terminal-background, ...) so the viewport follows the resolved terminal palette');
 });
-test('the xterm-viewport rule is fortified (!important) to override xterm.css\'s #000 default', () => {
+test('the xterm-viewport rule is fortified (!important) with a var(--background) fallback', () => {
   // xterm.css pins `.xterm .xterm-viewport { background-color: #000 }` UNLAYERED
   // and loads AFTER index.css (main.tsx), and the DOM renderer may inject an
   // inline background — so neither the @layer cascade, source order, nor plain
-  // specificity can reliably reach it. !important is the load-bearing override;
-  // pinning it here stops a future "specificity should suffice" cleanup from
-  // silently re-breaking light-theme terminals.
-  const rule = /\.xterm-viewport[^{]*\{[^}]*background-color:\s*var\(--background\)\s*!important/;
-  assert.ok(rule.test(css), '.xterm-viewport rule must use !important to beat xterm.css (unlayered, loads later, may be inline)');
+  // specificity can reliably reach it. !important is the load-bearing override.
+  // The var(--background) fallback preserves the old chrome-driven behavior for
+  // any xterm instance not hosted by PaneTile (which always sets the inline token).
+  const rule = /\.xterm-viewport[^{]*\{[^}]*var\(--terminal-background,\s*var\(--background\)\)\s*!important/;
+  assert.ok(rule.test(css), '.xterm-viewport rule must use var(--terminal-background, var(--background)) !important to beat xterm.css and stay coherent with the override');
 });
+
+console.log('\nauto coherence: each theme\'s xterm.background EQUALS its CSS --background');
+for (const t of THEMES) {
+  test(`${t.id}: xterm.background == CSS --background (so auto override == chrome background)`, () => {
+    // In `auto` the terminal palette is the active theme's, and the viewport reads
+    // --terminal-background (== xterm.background) while the chrome reads --background.
+    // For the verified-fixed auto case to stay identical to the chrome-driven
+    // behavior, these two MUST be the same color. A theme whose CSS --background
+    // drifts from its xterm.background would make auto mode show a viewport that
+    // disagrees with the chrome — the exact seam this rework eliminates. Normalized
+    // via parseHex so a #fff/#ffffff or case difference is not a false fail.
+    const cssBg = blocks[t.id]['--background'];
+    assert.equal(typeof cssBg, 'string', `${t.id}: CSS --background is defined`);
+    assert.deepEqual(parseHex(t.xterm.background), parseHex(cssBg), `${t.id}: xterm.background ${t.xterm.background} must equal CSS --background ${cssBg}`);
+  });
+}
+
+console.log('\nterminal text is readable on the terminal viewport in EVERY theme (override coherence)');
+for (const t of THEMES) {
+  test(`${t.id}: xterm.foreground vs xterm.background >= 4.5:1 (terminal prompt readable)`, () => {
+    // The QA regression: when the terminal color-scheme override (dark/light) opposes
+    // the chrome, the viewport follows --terminal-background AND the text follows
+    // xterm.foreground — BOTH from the SAME palette object, so this contrast ratio is
+    // what decides whether the prompt is readable. The prior fix let the viewport
+    // follow chrome --background while text followed the override, collapsing this
+    // ratio to ~1.2:1 (invisible). Asserting it per theme guards every override
+    // direction: dark override resolves to github-dark, light to github-light, auto
+    // to the active theme — all covered by iterating the roster.
+    const ratio = contrastRatio(t.xterm.foreground, t.xterm.background);
+    assert.ok(
+      ratio >= TEXT_AA,
+      `${t.id}: terminal text ${t.xterm.foreground} on viewport ${t.xterm.background} = ${ratio.toFixed(2)}:1, need >= ${TEXT_AA} (readable prompt in every override mode)`,
+    );
+  });
+}
 
 console.log(`\n✓ SELECTION CONTRAST TESTS PASS (${passed})`);
