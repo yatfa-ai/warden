@@ -31,6 +31,8 @@ import { GitStateBadges, GitCollisionBadge } from './sidebar/GitBadges';
 import { ChatRow, OpenedChatRow, ChatRowSkeleton, SessionRowSkeleton } from './sidebar/ChatRows';
 import { AgentFilterSortControls } from './sidebar/AgentFilterSortControls';
 import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/SidebarBits';
+import { SessionTagChips, SessionTagFilterRow } from './sidebar/SessionTags';
+import { computeTagsInUse, filterSessionsByTags, addTag, removeTag } from '@/lib/sessionTags';
 
 // Back-compat re-export: OpenChatBrowserPage.tsx imports these types from
 // './ChatSidebar' — keep that path stable so it needs no change (WARDEN-315).
@@ -87,6 +89,11 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [pinnedChatIds, setPinnedChatIds] = useState<Set<string>>(new Set());
   // WARDEN-305: per-agent notes — id → short human annotation (mirrors pins).
   const [agentNotes, setAgentNotes] = useState<Record<string, string>>({});
+  // WARDEN-342: per-past-session tags — claude-session id → short reusable labels
+  // (local sidecar). activeTagFilters scopes the ☁ sessions list to sessions bearing
+  // any of the selected tags (union semantics).
+  const [sessionTags, setSessionTags] = useState<Record<string, string[]>>({});
+  const [activeTagFilters, setActiveTagFilters] = useState<Set<string>>(new Set());
   const [projectFilter, setProjectFilter] = useState<string | null>(null);
   const [hostSessions, setHostSessions] = useState<Record<string, { sessions: ClaudeSession[]; claudeAvailable?: boolean }>>({});
   const [loadingHost, setLoadingHost] = useState<string | null>(null);
@@ -256,8 +263,18 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
         console.error('[agent-notes] Failed:', error);
       }
     };
+    const fetchSessionTags = async () => {
+      try {
+        const r = await fetch('/api/session-tags');
+        const j = await r.json();
+        setSessionTags(j.sessionTags || {});
+      } catch (error) {
+        console.error('[session-tags] Failed:', error);
+      }
+    };
     fetchPins();
     fetchNotes();
+    fetchSessionTags();
   }, []);
 
   // Toggle a chat's pinned state and persist it
@@ -300,6 +317,43 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     }
   };
 
+  // WARDEN-342: set a past session's tags and persist the whole list (local sidecar
+  // keyed by claude-session id). The server cleans/dedupes/caps; on success we mirror
+  // its returned list into local state (and drop the key when it's empty).
+  const updateSessionTags = async (id: string, tags: string[]) => {
+    try {
+      const r = await fetch('/api/session-tags', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, tags }),
+      });
+      if (r.ok) {
+        const j = await r.json();
+        setSessionTags((prev) => {
+          const next = { ...prev };
+          if (Array.isArray(j.tags) && j.tags.length) next[id] = j.tags;
+          else delete next[id];
+          return next;
+        });
+      }
+    } catch (error) {
+      console.error('[session-tags-save] Failed:', error);
+    }
+  };
+  const addSessionTag = (id: string, tag: string) => {
+    updateSessionTags(id, addTag(sessionTags[id] || [], tag));
+  };
+  const removeSessionTag = (id: string, tag: string) => {
+    updateSessionTags(id, removeTag(sessionTags[id] || [], tag));
+  };
+  const toggleTagFilter = (tag: string) => {
+    setActiveTagFilters((prev) => {
+      const next = new Set(prev);
+      if (next.has(tag)) next.delete(tag); else next.add(tag);
+      return next;
+    });
+  };
+
   // --- Multi-select broadcast (WARDEN-292) -------------------------------------
   // A broadcast is a chat operation (it types into agent tmux sessions), so its
   // result toast is gated on the same pref as kill/resume/rename (notifyChatOps)
@@ -330,6 +384,22 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     () => (selectedIds.size === 0 ? [] : chats.filter((c) => selectedIds.has(c.key || c.id))),
     [chats, selectedIds],
   );
+
+  // WARDEN-342: host-view tag surfaces. These memos MUST live at the top level (not
+  // inside the `view.kind === 'host'` branch) — hooks can't be called conditionally,
+  // and the host branch is a conditional return. Guard on view.kind inside the body.
+  // The pure query/mutation logic lives in @/lib/sessionTags (unit-tested there):
+  // computeTagsInUse hides orphans (a tag on a vanished session is never shown) and
+  // filterSessionsByTags applies the active-filter union. Deps are all stable refs
+  // (view/hostSessions only change on navigation/fetch), so the memos hold in-view.
+  const tagsInUse = useMemo(() => {
+    if (view.kind !== 'host') return [];
+    return computeTagsInUse(hostSessions[view.host]?.sessions || [], sessionTags);
+  }, [view, hostSessions, sessionTags]);
+  const visibleSessions = useMemo(() => {
+    if (view.kind !== 'host') return [];
+    return filterSessionsByTags(hostSessions[view.host]?.sessions || [], sessionTags, activeTagFilters);
+  }, [view, hostSessions, sessionTags, activeTagFilters]);
 
   // Fan the message out to every selected agent via the existing per-target
   // /api/send path (server.js:182 → sendPane → tmux send-keys), then summarize.
@@ -709,6 +779,8 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     const hiddenActive = active.filter((c) => hiddenTabs.includes(c.key || c.id));
     const info = hostSessions[H] || {};
     const sessions = info.sessions || [];
+    // WARDEN-342: tagsInUse + visibleSessions are computed at the top level (hooks
+    // can't live in this conditional branch) and are already scoped to this host.
     const openFromHost = (key: string) => { onOpenChat(key); setView({ kind: 'root' }); };
     return (
       <div className="flex flex-col h-full min-h-0 animate-in slide-in-from-right-2 duration-150">
@@ -759,9 +831,11 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
               </div>
             )}
             <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-cyan-500/80 font-semibold">☁ sessions (history — click to resume)</div>
-            {sessions.slice(0, 12).map((s) => {
+            <SessionTagFilterRow tagsInUse={tagsInUse} active={activeTagFilters} onToggle={toggleTagFilter} onClear={() => setActiveTagFilters(new Set())} />
+            {visibleSessions.slice(0, 12).map((s) => {
               const running = hostChats.some((c) => c.key === `resume-${s.id.slice(0, 8)}`);
               const isLoading = resumingSessionId === s.id;
+              const sTags = sessionTags[s.id] || [];
               return (
                 <IconTooltip
                   key={s.id}
@@ -773,26 +847,37 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                     </span>
                   }
                 >
-                  <button
-                    onClick={() => { handleResume(s.id, s.summary, s.cwd, H); setView({ kind: 'root' }); }}
-                    disabled={isLoading}
-                    className="flex flex-col gap-0.5 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-                  >
-                    <span className="truncate">
-                      {isLoading ? (
-                        <Skeleton className="h-3 w-3/4 inline-block" />
-                      ) : (
-                        s.summary || <span className="text-muted-foreground">(no summary)</span>
-                      )}
-                      {running && <span className="ml-1 text-green-400">● live</span>}
-                    </span>
-                    <span className="text-[10px] text-muted-foreground truncate">
-                      {isLoading ? <Skeleton className="h-2.5 w-1/2 inline-block" /> : `${formatTimestamp(s.mtime, timestampFormat)} · ${basename(s.cwd)}`}
-                    </span>
-                  </button>
+                  {/* Row container (group) holds the resume <button> + tag chips as
+                      SIBLINGS, not nested — nested interactive elements are invalid
+                      HTML. `group` reveals the "+ tag" affordance on hover. */}
+                  <div className={`group flex flex-col gap-0.5 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs transition-all duration-150 ease-out hover:bg-accent ${isLoading ? 'opacity-50' : ''}`}>
+                    <button
+                      onClick={() => { handleResume(s.id, s.summary, s.cwd, H); setView({ kind: 'root' }); }}
+                      disabled={isLoading}
+                      className="flex flex-col gap-0.5 text-left active:bg-accent/80 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded-md"
+                    >
+                      <span className="truncate">
+                        {isLoading ? (
+                          <Skeleton className="h-3 w-3/4 inline-block" />
+                        ) : (
+                          s.summary || <span className="text-muted-foreground">(no summary)</span>
+                        )}
+                        {running && <span className="ml-1 text-green-400">● live</span>}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground truncate">
+                        {isLoading ? <Skeleton className="h-2.5 w-1/2 inline-block" /> : `${formatTimestamp(s.mtime, timestampFormat)} · ${basename(s.cwd)}`}
+                      </span>
+                    </button>
+                    <SessionTagChips tags={sTags} onAdd={(tag) => addSessionTag(s.id, tag)} onRemove={(tag) => removeSessionTag(s.id, tag)} />
+                  </div>
                 </IconTooltip>
               );
             })}
+            {visibleSessions.length === 0 && activeTagFilters.size > 0 && (
+              <div className="mx-1 my-1 px-2 py-1.5 text-[11px] text-muted-foreground">
+                no sessions match the selected tag{activeTagFilters.size > 1 ? 's' : ''} — <button className="underline hover:text-foreground" onClick={() => setActiveTagFilters(new Set())}>clear filter</button>
+              </div>
+            )}
             {sortedHostChats.length === 0 && sessions.length === 0 && loadingHost !== H && (
               <EmptyState type="nothing-here" message={hostChats.length === 0 ? undefined : 'no agents match the current filter'} />
             )}

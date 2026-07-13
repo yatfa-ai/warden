@@ -461,6 +461,38 @@ app.put('/api/agent-notes', (req, res) => {
   res.json({ ok: true, notes: cfg.agentNotes });
 });
 
+// Session tags — short reusable labels a human puts on a past Claude session so the
+// ☁ sessions list can be filtered (e.g. #shipped, #needs-review). A local sidecar
+// keyed by claude-session id (mirrors /api/agent-notes' id→value map): tags are
+// NEVER written into Claude's transcript files. WARDEN-342. Orphan handling is the
+// frontend's job — a tag on a session that later vanishes is ignored, never throws
+// (same leniency cfg.pins/cfg.agentNotes already imply for vanished chats).
+app.get('/api/session-tags', (_req, res) => res.json({ sessionTags: cfg.sessionTags || {} }));
+app.put('/api/session-tags', (req, res) => {
+  const { id, tags } = req.body;
+  if (typeof id !== 'string' || !id.trim()) return res.status(400).json({ error: 'id must be a non-empty string' });
+  if (!Array.isArray(tags)) return res.status(400).json({ error: 'tags must be an array' });
+  // Coerce to trimmed strings, cap per-tag length, drop empties + duplicates, cap
+  // the per-session count. Mirrors the caps the rest of the config surface uses.
+  const MAX_TAG_LEN = 40;
+  const MAX_TAGS_PER_SESSION = 8;
+  const seen = new Set();
+  const cleaned = tags
+    .map((t) => (typeof t === 'string' ? t : String(t ?? '')))
+    .map((t) => t.trim().slice(0, MAX_TAG_LEN))
+    .filter((t) => {
+      if (!t || seen.has(t.toLowerCase())) return false;
+      seen.add(t.toLowerCase());
+      return true;
+    })
+    .slice(0, MAX_TAGS_PER_SESSION);
+  if (!cfg.sessionTags || typeof cfg.sessionTags !== 'object' || Array.isArray(cfg.sessionTags)) cfg.sessionTags = {};
+  if (cleaned.length) cfg.sessionTags[id] = cleaned;
+  else delete cfg.sessionTags[id]; // empty cleaned list → remove the key entirely
+  save(cfg);
+  res.json({ ok: true, id, tags: cleaned });
+});
+
 app.get('/api/this-session', (_req, res) => res.json({
   sessionId: process.env.CLAUDE_CODE_SESSION_ID || null,
   claudePath: process.env.CLAUDE_CODE_EXECPATH || null,
