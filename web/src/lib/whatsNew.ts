@@ -8,14 +8,23 @@
 // logic that turns the already-fetched git-log + git-status data into a
 // since-filtered summary + a glanceable "unreviewed progress" signal.
 //
-// ZERO backend changes (acceptance criterion #4): every input is data the
-// sidebar already fetches via the existing read-only endpoints —
-//   • /api/git-log   → `commits` (recent history, `{ hash, subject, author, date }`)
+// ZERO NEW endpoints (acceptance criterion #4): every input is data the sidebar
+// already fetches via the existing read-only endpoints —
+//   • /api/git-log   → `commits` (recent history, `{ hash, subject, author, date, epoch }`)
 //   • /api/git-status → `changedFileCount` (|files|) + `stashCount`
-// The `since` filter is applied CLIENT-SIDE here, exactly as the ticket specifies
-// ("filter the existing /api/git-log result by lastSeen client-side"). A server
-// `since` param is the documented future optimization if client-side filtering of
-// large logs ever proves slow — not needed for v1.
+// The since-filter needs an EXACT timestamp to compare against lastSeen. The
+// original v1 tried to do this with zero backend changes by parsing git's
+// coarse relative `%ar` ("1 hour ago") — but %ar floors to a whole unit and
+// DRIFTS as the commit ages, so an already-seen commit flips back to "new" an
+// hour later (false-positive flicker — the WARDEN-356 review's blocker). The
+// string has already lost the precision, so there is no correct client-side
+// fix from %ar alone. The fix is a single one-field backend addition: `%ct`
+// (committer date, UNIX seconds) appended to GIT_LOG_PRETTY (src/server.js),
+// threaded through parseGitLogLine → GitCommit → WhatsNewCommit as `epoch`.
+// This is the documented tension with "v1 = zero backend changes" — correctness
+// wins, and the cost is one read-only field (still no mutating op). The since
+// filter is then exact: `commit.epoch*1000 >= lastSeen`. A server `since` param
+// remains the documented future optimization for very large logs — not needed now.
 //
 // Pure (no React import) so it is unit-testable directly via node, mirroring
 // gitStateSummary.ts / agentFilter.ts (extracted "so it's testable without a
@@ -27,16 +36,31 @@
 // string (the same `String(Date.now())` shape `warden:lastClose` writes).
 export const LAST_SEEN_PREFIX = 'warden:lastSeen:';
 
+// How many recent commits the what's-new fetch asks /api/git-log for. The marker
+// COUNTS commits newer than lastSeen, so the fetch must return enough to capture
+// everything that landed since the last visit — a rare visitor gone days could
+// have dozens. 50 matches the existing incoming/outgoing fetches
+// (fetchGitLogIncoming/Outgoing), so a visited agent's recent-commits popover and
+// its what's-new marker see the same window. If even 50 all-new commits come back
+// (the fetch is capped server-side at 50), the summary reports `truncated` and the
+// marker renders "✦50+" rather than silently understating progress — the
+// WARDEN-356 review's "count capped at 5" fix.
+export const WHATS_NEW_FETCH_LIMIT = 50;
+
 // A commit row from /api/git-log (matches sidebar/types.ts GitCommit). Defined
 // locally rather than imported from the React-layer types so this helper stays
 // decoupled and testable with plain objects — the same decoupling
 // gitStateSummary.ts relies on. `date` is git's relative `%ar` string
-// ("2 hours ago", "3 days ago", …) — NOT an epoch; parseRelativeDate converts it.
+// ("2 hours ago") for DISPLAY in the popover. `epoch` is the EXACT committer
+// timestamp (git %ct, UNIX SECONDS) the since-filter compares against — it's
+// optional only so a stale pre-%ct cache entry degrades (treated as "can't prove
+// it's new" → excluded, never a false positive). The filter never parses `date`.
 export interface WhatsNewCommit {
   hash: string;
   subject: string;
   author: string;
   date: string;
+  epoch?: number;
 }
 
 // Read the per-agent last-visit epoch (ms). Returns null when the agent was
@@ -80,9 +104,15 @@ const RELATIVE_UNIT_MS: Record<string, number> = {
 // Parse a git `%ar` relative-date string ("2 hours ago", "3 days ago",
 // "1 year, 2 months ago", …) into an epoch-ms instant, relative to `now`.
 // Returns null when the string carries no recognized unit — git's %ar is
-// English/locale-dependent, and a future/odd locale string may not match; the
-// caller treats null as "unknown age" and (per the "don't miss progress" rule)
-// surfaces such commits rather than hiding them.
+// English/locale-dependent, and a future/odd locale string may not match.
+//
+// RETAINED AS A UTILITY (WARDEN-356 review): the since-filter previously used
+// this, but %ar floors to a whole unit and drifts as a commit ages — so an
+// already-seen commit would flip back to "new" an hour later (false-positive
+// flicker). The filter now compares the EXACT %ct epoch instead (see
+// summarizeWhatsNew). This parser is kept (and tested) for any future caller
+// that wants a best-effort parsed age from a relative string; it is NOT used by
+// the new-since filter, and must not be — %ar has already lost the precision.
 //
 // Handles the singular+plural forms and git's compound "N years, M months ago".
 // Each matched `(\d+) (unit)s?` contributes `now - count*unitMs`; multiple
@@ -118,52 +148,73 @@ export interface WhatsNewInput {
   // (the summary then reports zero new commits — can't claim unseen progress
   // from data we don't have).
   commits?: WhatsNewCommit[];
-  // The per-agent last-visit epoch (getLastSeen). 0 = never visited: the summary
+  // The per-agent last-visit epoch-ms (getLastSeen). 0 = never visited: the summary
   // still computes (for the popover) but hasUnreviewedProgress gates on null.
   since: number;
-  // The current wall clock, used to resolve relative dates. Passed in (not read
-  // via Date.now) so the function is pure and deterministic under test.
-  now: number;
   // Current working-tree change count (|gitStatus.files|) — current state, NOT
   // since-filtered (the ticket's "Current working-tree changes"). Shown in the
   // summary line as context alongside the since-filtered commit count.
   changedFileCount?: number;
   // Current stash count (gitStatus.stashCount) — current state, shown as context.
   stashCount?: number | null;
+  // The cap the caller fetched `commits` with (default WHATS_NEW_FETCH_LIMIT=50).
+  // Used only to detect truncation — when every fetched commit is new AND we hit
+  // this cap, there may be more new commits beyond it, so the summary reports
+  // `truncated` and the marker renders "✦N+". Not used for the filter itself.
+  fetchLimit?: number;
 }
 
 export interface WhatsNewSummary {
-  // Commits that landed since the last visit: either provably (parsed date >
-  // since) or conservatively (a date git's %ar couldn't parse — treated as new
-  // so potential progress is never silently hidden; the safe failure mode for a
-  // "don't miss it" signal). Ordered as /api/git-log returns them (newest-first).
+  // Commits that landed since the last visit: `commit.epoch*1000 >= since` using
+  // the EXACT %ct epoch. Ordered as /api/git-log returns them (newest-first).
+  // A commit whose epoch is missing (stale pre-%ct cache) is EXCLUDED — we can't
+  // prove it's new, and the old "conservative include" rule is exactly what cried
+  // wolf, so it's retired. The next fetch (seconds later) brings the epoch.
   newCommits: WhatsNewCommit[];
   // Current working-tree change count (unchanged from input; 0 when unknown).
   changedFileCount: number;
   // Current stash count (unchanged from input; 0 when unknown/null).
   stashCount: number;
+  // True iff EVERY fetched commit is new AND the fetch hit its cap — meaning the
+  // new-commits count may understate (more could exist beyond the cap). The
+  // marker then renders "✦N+" and the summary line "N+ new commits" so progress
+  // is never silently understated. False whenever the new/old boundary was found
+  // within the fetched window (the count is then exact).
+  truncated: boolean;
 }
 
 // Turn the already-fetched git data into a since-filtered summary. Pure: given
-// the same { commits, since, now, changedFileCount, stashCount } it always
-// returns the same summary. The two judgment calls are (1) a commit counts as
-// "new" iff the agent has been visited (since > 0) AND its date is either
-// unparseable (conservative include) or parsed to AFTER since, and (2) an agent
-// never visited (since === 0) has no "new since" — newCommits stays empty.
+// the same { commits, since, changedFileCount, stashCount, fetchLimit } it always
+// returns the same summary. The comparison is the EXACT %ct epoch vs lastSeen
+// (both resolved to ms) — not git's coarse %ar, which drifts and mislabels. A
+// commit counts as "new" iff the agent has been visited (since > 0) AND its
+// epoch is present AND `epoch*1000 >= since` (>= so a commit landing the exact
+// visit-second is surfaced, never dropped at the boundary). An agent never
+// visited (since === 0) has no "new since" — newCommits stays empty.
 export function summarizeWhatsNew(input: WhatsNewInput): WhatsNewSummary {
   const commits = input.commits ?? [];
+  const fetchLimit = input.fetchLimit ?? WHATS_NEW_FETCH_LIMIT;
   const newCommits: WhatsNewCommit[] = [];
   for (const cm of commits) {
     if (input.since <= 0) continue; // never visited → nothing is "since"
-    const epoch = parseRelativeDate(cm.date, input.now);
-    if (epoch === null || epoch > input.since) {
+    // epoch is %ct (seconds); since is ms. Compare in ms. Missing epoch → can't
+    // prove new → skip (never a false positive; the old conservative-include is retired).
+    if (typeof cm.epoch === 'number' && Number.isFinite(cm.epoch) && cm.epoch * 1000 >= input.since) {
       newCommits.push(cm);
     }
   }
+  // Truncation: every fetched commit is new AND we hit the fetch cap → there may
+  // be more beyond the window. When newCommits < commits.length, the new/old
+  // boundary was found inside the window, so the count is exact (not truncated).
+  const truncated =
+    newCommits.length > 0 &&
+    newCommits.length === commits.length &&
+    commits.length >= fetchLimit;
   return {
     newCommits,
     changedFileCount: typeof input.changedFileCount === 'number' ? input.changedFileCount : 0,
     stashCount: typeof input.stashCount === 'number' && Number.isFinite(input.stashCount) ? input.stashCount : 0,
+    truncated,
   };
 }
 
@@ -171,11 +222,15 @@ export function summarizeWhatsNew(input: WhatsNewInput): WhatsNewSummary {
 // (the ticket's example shape). Only the segments that are non-zero render, so a
 // quiet agent shows "" rather than "0 new commits · 0 changed files · 0 stashes"
 // — an empty string is the summary's "nothing new" signal (the marker is hidden
-// separately by hasUnreviewedProgress). Pluralization is exact per segment.
+// separately by hasUnreviewedProgress). Pluralization is exact per segment. When
+// `truncated` is set (the fetch hit its cap with all-new commits), the commit
+// count renders "N+" so progress is never silently understated.
 export function formatWhatsNewLine(s: WhatsNewSummary): string {
   const parts: string[] = [];
   if (s.newCommits.length > 0) {
-    parts.push(`${s.newCommits.length} new commit${s.newCommits.length === 1 ? '' : 's'}`);
+    const n = s.newCommits.length;
+    const suffix = s.truncated ? '+' : '';
+    parts.push(`${n}${suffix} new commit${n === 1 && !s.truncated ? '' : 's'}`);
   }
   if (s.changedFileCount > 0) {
     parts.push(`${s.changedFileCount} changed file${s.changedFileCount === 1 ? '' : 's'}`);

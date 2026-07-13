@@ -1253,23 +1253,51 @@ app.get('/api/git-status', async (req, res) => {
   }
 });
 
-// Parse one `--pretty=format:%h|%s|%an|%ar` line into { hash, subject, author, date }.
-// The hash is the first field (never contains '|') and the relative date is the last
-// (also never contains '|'); the subject sits between them and MAY contain '|' (a commit
-// message like "merge a | b"). So we peel the hash off the front and the date off the back,
-// then split the middle on its LAST '|' (author is assumed pipe-free). Exported for tests.
+// Parse one `--pretty=format:%h|%s|%an|%ar|%ct` line into
+// { hash, subject, author, date, epoch }. Field order:
+//   hash | subject | author | relative-date(%ar) | committer-epoch(%ct)
+// hash/author/date/epoch are pipe-free (epoch is a bare UNIX-second integer); the
+// subject sits between hash and author and MAY contain '|' (a commit message like
+// "merge a | b"). So peel the hash off the front and peel epoch/date/author off the
+// BACK (each on its own last '|'), leaving whatever remains as the subject. `epoch`
+// is the EXACT committer timestamp (git %ct, seconds) — the precise field the
+// frontend's per-agent "What's new since" since-filter compares against lastSeen
+// (WARDEN-356). It's a Number when the field parses as an integer, else null (a
+// degraded/partial line from an older caller) — never a string, so the comparison
+// is numeric. Exported for tests.
 export function parseGitLogLine(line) {
   const firstPipe = line.indexOf('|');
-  if (firstPipe === -1) return { hash: line, subject: '', author: '', date: '' };
+  if (firstPipe === -1) return { hash: line, subject: '', author: '', date: '', epoch: null };
   const hash = line.slice(0, firstPipe);
-  const tail = line.slice(firstPipe + 1);
-  const lastPipe = tail.lastIndexOf('|');
-  if (lastPipe === -1) return { hash, subject: tail, author: '', date: '' };
-  const date = tail.slice(lastPipe + 1);
-  const mid = tail.slice(0, lastPipe);
-  const midPipe = mid.lastIndexOf('|');
-  if (midPipe === -1) return { hash, subject: mid, author: '', date };
-  return { hash, subject: mid.slice(0, midPipe), author: mid.slice(midPipe + 1), date };
+  const tail = line.slice(firstPipe + 1); // subject|author|date|epoch (subject may contain |)
+  // Peel the three trailing pipe-free fields (epoch, date, author) off the back, one
+  // lastIndexOf('|') at a time. Each peel returns null when no '|' remains — meaning
+  // the leftover string IS that field and there are no fields further left.
+  const peel = (s) => {
+    const i = s.lastIndexOf('|');
+    return i === -1 ? null : { val: s.slice(i + 1), rest: s.slice(0, i) };
+  };
+  // epoch (committer UNIX ts) — last field.
+  const e = peel(tail);
+  if (!e) return { hash, subject: tail, author: '', date: '', epoch: null };
+  const epochRaw = e.val;
+  // date (relative %ar) — second-to-last.
+  const d = peel(e.rest);
+  if (!d) return { hash, subject: '', author: '', date: e.rest, epoch: toEpoch(epochRaw) };
+  const date = d.val;
+  // author — third-to-last.
+  const a = peel(d.rest);
+  if (!a) return { hash, subject: '', author: d.rest, date, epoch: toEpoch(epochRaw) };
+  return { hash, subject: a.rest, author: a.val, date, epoch: toEpoch(epochRaw) };
+}
+
+// Parse git's %ct (committer date, UNIX seconds) into a Number, or null when the
+// field is absent/non-numeric (a degraded line). %ct is always an integer from git;
+// the null path only covers partial/test inputs. Centralized so parseGitLogLine's
+// peeling stays readable.
+function toEpoch(raw) {
+  const n = Number(raw);
+  return Number.isFinite(n) && raw.trim() !== '' && /^[0-9]+$/.test(raw.trim()) ? n : null;
 }
 
 // Parse `git show --name-status --pretty=format: <hash>` output into [{ path, status }].
@@ -1298,11 +1326,15 @@ export function parseGitShowNameStatus(output) {
 }
 
 // The `--pretty=format:` used by /api/git-log: short hash | subject | author |
-// relative date. Named (not inlined) so the field order is documented at a glance
-// and grep-able. The '|' separators are passed as ONE argv element to runGit (no
-// shell on the LOCAL branch) and shellQuote'd on the remote branch, so they're
-// argument characters — never read as shell pipes (the WARDEN-122 quoting lesson).
-const GIT_LOG_PRETTY = '%h|%s|%an|%ar';
+// relative date | committer epoch. Named (not inlined) so the field order is
+// documented at a glance and grep-able. The '|' separators are passed as ONE argv
+// element to runGit (no shell on the LOCAL branch) and shellQuote'd on the remote
+// branch, so they're argument characters — never read as shell pipes (the
+// WARDEN-122 quoting lesson). The trailing `%ct` (committer date, UNIX seconds)
+// gives the frontend's per-agent "What's new since" filter an EXACT timestamp to
+// compare against lastSeen (WARDEN-356) — the relative `%ar` is coarse and would
+// mislabel already-seen commits as new as it ages, so the filter must use `%ct`.
+const GIT_LOG_PRETTY = '%h|%s|%an|%ar|%ct';
 
 // Recent commit history (git log) for a chat's repo. All transports go through
 // runGit (WARDEN-235): manual-local spawnSync, manual-remote SSH, and yatfa
@@ -1341,7 +1373,8 @@ app.get('/api/git-log', async (req, res) => {
     const cwd = gitCwd(chat);
     if (!cwd) return res.json({ commits: [], error: 'no cwd' });
 
-    // short hash | subject | author | relative date (GIT_LOG_PRETTY). runGit passes
+    // short hash | subject | author | relative date | committer epoch (GIT_LOG_PRETTY).
+    // runGit passes
     // --pretty (and the range rev) as a single argv element (no shell on the LOCAL
     // branch) so the '|' separators can't be read as pipes and the @{u}..HEAD range
     // stays brace-expansion-safe; the remote branch shellQuotes each arg for the same

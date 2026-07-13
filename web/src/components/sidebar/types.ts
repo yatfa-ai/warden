@@ -1,8 +1,11 @@
 // Shared types for the sidebar subsystem, extracted from ChatSidebar.tsx
 // (WARDEN-315). Pure structural move — no behavior change.
 
-// One row from /api/git-log (a parsed %h|%s|%an|%ar git log line).
-export type GitCommit = { hash: string; subject: string; author: string; date: string };
+// One row from /api/git-log (a parsed %h|%s|%an|%ar|%ct git log line). `epoch`
+// is git's %ct (committer date, UNIX seconds) — the exact timestamp the per-agent
+// "What's new since" since-filter compares against lastSeen (WARDEN-356).
+// Optional so a stale pre-%ct cache entry degrades safely.
+export type GitCommit = { hash: string; subject: string; author: string; date: string; epoch?: number };
 
 // One row from /api/git-stash (a parsed %gd|%s|%cr `git stash list` line) — the
 // lazy detail behind the eager `stashCount` in /api/git-status. Read-only.

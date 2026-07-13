@@ -32,9 +32,11 @@ function computeWhatsNew(chatId: string, commits: GitCommit[] | undefined, gitIn
   const summary = summarizeWhatsNew({
     commits,
     since: since ?? 0,
-    now: Date.now(),
     changedFileCount: gitInfo?.files?.length,
     stashCount: gitInfo?.stashCount,
+    // `truncated` only needs the default WHATS_NEW_FETCH_LIMIT, which is also the
+    // limit the ChatSidebar what's-new fetch uses — so the truncation signal stays
+    // honest without threading a second number through the row props.
   });
   return { since, summary, show: hasUnreviewedProgress(since, summary) };
 }
@@ -344,7 +346,7 @@ export function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showH
   const hasFiles = !dead && gitInfo?.clean === false && gitInfo.files && gitInfo.files.length > 0;
   // WARDEN-356: per-agent "What's new since your last visit" marker — only
   // meaningful for a live chat (a dead tab has no live git state to advance).
-  const whatsNew = !dead && c ? computeWhatsNew(c.key || c.id, gitCommits, gitInfo) : { since: null, summary: summarizeWhatsNew({ since: 0, now: 0 }), show: false };
+  const whatsNew = !dead && c ? computeWhatsNew(c.key || c.id, gitCommits, gitInfo) : { since: null, summary: summarizeWhatsNew({ since: 0 }), show: false };
 
   return (
     <ContextMenu>

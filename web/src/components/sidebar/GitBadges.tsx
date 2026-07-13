@@ -833,7 +833,7 @@ function WhatsNewPopoverContent({ summary, files, onOpenDiff }: {
       {summary.newCommits.length > 0 && (
         <div className="mb-1">
           <div className="px-0.5 pb-0.5 text-[10px] uppercase tracking-wider text-muted-foreground/70">
-            ● new commits · {summary.newCommits.length}
+            ● new commits · {summary.newCommits.length}{summary.truncated ? '+' : ''}
           </div>
           <ul className="max-h-60 overflow-auto">
             {summary.newCommits.map((cm) => (
@@ -894,7 +894,10 @@ export function WhatsNewMarker({ summary, since, files, onOpenDiff }: {
   const count = summary.newCommits.length;
   // Gate: never visited, or visited but nothing new → render nothing.
   if (since === null || count === 0) return null;
-  const title = `${count} commit${count === 1 ? '' : 's'} since your last visit — click to review`;
+  // "+" when truncated: the fetch hit its cap with all-new commits, so there may
+  // be more beyond the window — never silently understate "what you missed."
+  const plus = summary.truncated ? '+' : '';
+  const title = `${count}${plus} commit${count === 1 && !summary.truncated ? '' : 's'} since your last visit — click to review`;
   return (
     <RadixPopover.Root open={open} onOpenChange={setOpen}>
       <RadixPopover.Trigger asChild>
@@ -908,7 +911,7 @@ export function WhatsNewMarker({ summary, since, files, onOpenDiff }: {
           title={title}
           className="ml-1 inline-flex items-center text-[10px] text-indigo-400 hover:text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 px-1 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary transition-colors duration-150"
         >
-          ✦{count}
+          ✦{count}{plus}
         </button>
       </RadixPopover.Trigger>
       <RadixPopover.Portal>
