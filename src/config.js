@@ -19,6 +19,16 @@ const DEFAULTS = {
   observerConfirmMode: 'always',  // 'always' | 'auto-safe' - whether to auto-approve read-only directives
   observerAutoStart: false,       // boolean - whether to auto-start observer on first connection
   observerSessionTimeout: 30,     // minutes - auto-stop observer after inactivity, null to disable
+  // Fleet health attention thresholds (minutes of inactivity).
+  // healthWarningThresholdMin maps to the healthy→WARNING boundary: once an
+  // agent has been inactive this long it needs attention (WARNING). Must be <=
+  // the critical threshold or WARNING collapses. Default 5 = today's behavior.
+  healthWarningThresholdMin: 5,
+  // healthCriticalThresholdMin maps to the warning→CRITICAL boundary: at this
+  // much inactivity an agent is CRITICAL (and fires a desktop alert). ALSO
+  // drives the IDLE branch for manual tmux sessions, so all three
+  // getHealthState call sites consume the same configured value. Default 30.
+  healthCriticalThresholdMin: 30,
   // Safety
   confirmDestructiveActions: true, // boolean - confirm before destructive kills (force-kill tmux session, kill chat)
   notifyChatOps: true,           // chat operations (session kill, chat kill, resume, rename)

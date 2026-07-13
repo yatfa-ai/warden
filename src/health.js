@@ -1,6 +1,7 @@
 // Health tracking for agent fleet.
 // Classifies agents into health states based on activity timestamps and tmux status.
-// Health states:
+// Health states (at DEFAULT thresholds; the boundaries are user-configurable via
+// cfg.healthWarningThresholdMin / cfg.healthCriticalThresholdMin):
 //   - HEALTHY: output in last 5 minutes
 //   - WARNING: no output in 5-30 minutes
 //   - CRITICAL: no output in 30+ minutes (alive but silent) — a DEAD session is
@@ -12,8 +13,8 @@
 //     kind-based special-casing. (WARDEN-245)
 //   - UNKNOWN: undiscovered (lazy) chat — active is null/undefined.
 
-const HEALTHY_THRESHOLD_MS = 5 * 60 * 1000;  // 5 minutes
-const WARNING_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
+const HEALTHY_DEFAULT_MIN = 5;   // minutes — default healthy→WARNING boundary
+const WARNING_DEFAULT_MIN = 30; // minutes — default warning→CRITICAL boundary
 
 /**
  * Health states for an agent
@@ -31,9 +32,18 @@ export const HealthState = {
  * Get health state for an agent based on activity and status
  * @param {Object} agent - Agent object from discoverAll
  * @param {number} lastActivity - Timestamp of last activity (ms since epoch)
+ * @param {{healthyMin?: number, warningMin?: number}} [thresholds] - Configurable
+ *   inactivity cutoffs in MINUTES. `healthyMin` is the healthy→WARNING boundary
+ *   (default 5); `warningMin` is the warning→CRITICAL boundary (default 30) and
+ *   ALSO drives the manual-tmux IDLE branch. Both fall back to today's constants
+ *   when absent so callers that omit the arg are unaffected.
  * @returns {string} Health state
  */
-export function getHealthState(agent, lastActivity) {
+export function getHealthState(agent, lastActivity, thresholds = {}) {
+  // Configurable boundaries (minutes → ms). Defaults preserve today's behavior.
+  const healthyMs = (thresholds.healthyMin ?? HEALTHY_DEFAULT_MIN) * 60 * 1000;
+  const warningMs = (thresholds.warningMin ?? WARNING_DEFAULT_MIN) * 60 * 1000;
+
   // Undiscovered (lazy) chats: active is null/undefined — not dead, just unknown.
   if (agent.active == null) {
     return HealthState.UNKNOWN;
@@ -46,10 +56,12 @@ export function getHealthState(agent, lastActivity) {
     return HealthState.CLOSED;
   }
 
-  // Manual sessions with no recent activity are IDLE, not WARNING
+  // Manual sessions with no recent activity are IDLE, not WARNING. Consumes the
+  // SAME configured warning boundary as the agent classification below so a
+  // raised critical threshold keeps manual-tmux classification consistent.
   if (agent.kind === 'tmux' && !agent.isAgent) {
     const timeSinceActivity = lastActivity ? Date.now() - lastActivity : Infinity;
-    if (timeSinceActivity > WARNING_THRESHOLD_MS) {
+    if (timeSinceActivity > warningMs) {
       return HealthState.IDLE;
     }
   }
@@ -61,10 +73,10 @@ export function getHealthState(agent, lastActivity) {
 
   const timeSinceActivity = Date.now() - lastActivity;
 
-  // Classify based on time since last activity
-  if (timeSinceActivity <= HEALTHY_THRESHOLD_MS) {
+  // Classify based on time since last activity (uses configured thresholds)
+  if (timeSinceActivity <= healthyMs) {
     return HealthState.HEALTHY;
-  } else if (timeSinceActivity <= WARNING_THRESHOLD_MS) {
+  } else if (timeSinceActivity <= warningMs) {
     return HealthState.WARNING;
   } else {
     return HealthState.CRITICAL;
