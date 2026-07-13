@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { ObserverPanel } from './ObserverPanel';
 import { ActivityTimeline } from './ActivityTimeline';
+import { DirectiveHistory } from './DirectiveHistory';
 import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { EmptyState } from './EmptyState';
@@ -13,7 +14,7 @@ import type { Chat, SessionMeta } from '@/lib/types';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
 
 interface Props {
-  externalViewMode?: 'sessions' | 'activity' | null;
+  externalViewMode?: 'sessions' | 'activity' | 'directives' | null;
   onFocusAgent?: (id: string) => void;
   // The currently-focused chat pane, used to bind a new observer session to
   // the agent the user is looking at ("observe this agent").
@@ -43,7 +44,7 @@ export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onRe
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [openIds, setOpenIds] = useState<string[]>(() => loadObs().openIds);
   const [activeId, setActiveId] = useState<string | null>(() => loadObs().activeId);
-  const [viewMode, setViewMode] = useState<'sessions' | 'activity'>(() => loadObs().viewMode || 'sessions');
+  const [viewMode, setViewMode] = useState<'sessions' | 'activity' | 'directives'>(() => loadObs().viewMode || 'sessions');
   const [booted, setBooted] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingTimeout, setLoadingTimeout] = useState(false);
@@ -272,6 +273,12 @@ export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onRe
           >
             Activity
           </button>
+          <button
+            onClick={() => setViewMode('directives')}
+            className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap shrink-0 transition-all duration-150 ease-out active:scale-95 ${viewMode === 'directives' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50'}`}
+          >
+            Directives
+          </button>
         </div>
         {viewMode === 'sessions' && (
           <div className="flex items-center gap-0.5">
@@ -336,6 +343,13 @@ export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onRe
       {viewMode === 'activity' && (
         <div className="flex-1 min-h-0">
           <ActivityTimeline timestampFormat={timestampFormat} />
+        </div>
+      )}
+
+      {/* Directives view — read-only history of every directive that reached an agent */}
+      {viewMode === 'directives' && (
+        <div className="flex-1 min-h-0">
+          <DirectiveHistory timestampFormat={timestampFormat} />
         </div>
       )}
     </div>

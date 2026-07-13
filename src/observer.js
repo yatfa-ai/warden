@@ -15,6 +15,11 @@ import { getSession, saveMessages, appendTranscript } from './sessions.js';
 // here unchanged — summarize_chats / read_chats / alert_changes still classify panes
 // with the exact same logic. stripAnsi + inferGoal are also used directly below.
 import { classifyPane, stripAnsi, inferGoal } from './agentState.js';
+// WARDEN-359: log a directive_sent activity event at the moment a directive actually
+// reaches an agent (covers BOTH the human-approved gate path AND auto-safe early-approve
+// sends, which previously had no activity record at all). Imported here because
+// logDirective (below) is the single point every confirmed send flows through.
+import { appendEvent } from './activity.js';
 
 const LOCAL = '(local)';
 
@@ -156,6 +161,61 @@ function logDirective(chat, text) {
   const ts = new Date().toISOString();
   const entry = `${header}\n## ${ts} → ${chat.container}@${chat.host} (${chat.role || 'agent'})\n\n${text}\n`;
   fs.appendFileSync(DIRECTIVES_LOG, entry);
+}
+
+// Read directives.md back into structured records — the inverse of `logDirective`.
+// Mirrors activity.js readEvents' graceful-empty contract: a missing or empty
+// file returns [] and never throws, and malformed blocks are skipped with a warn
+// (matching activity.js:52). The parser anchors a block header on its leading ISO
+// timestamp (`## <ts> → …`) so a directive body that happens to contain a `## `
+// markdown line is never mistaken for a new block. Results are newest-first.
+//
+// `agent`/`host` filter by container/host (the ActivityTimeline agent/host
+// filters use the same fields); `limit` caps the count.
+export function readDirectives({ agent, host, limit } = {}) {
+  if (!fs.existsSync(DIRECTIVES_LOG)) return [];
+  const content = fs.readFileSync(DIRECTIVES_LOG, 'utf8');
+  if (!content.trim()) return [];
+
+  // Header authored by logDirective: `## <ISO ts> → <container>@<host> (<role>)`.
+  // `<ts>` is `\S+` (ISO timestamps carry no spaces); `host` is `[^ ]+` (hosts
+  // carry no spaces); the role is always present (logDirective defaults 'agent').
+  const HEADER = /^## (\S+) → (.+)@([^ ]+) \(([^)]+)\)$/;
+  const directives = [];
+  let cur = null;
+  for (const line of content.split('\n')) {
+    // Skip the first-write file header line (not a directive block).
+    if (line.startsWith('# Yatfa Warden directives log')) continue;
+    const m = HEADER.exec(line);
+    if (m) {
+      if (cur) directives.push(cur);
+      cur = { timestamp: m[1], container: m[2], host: m[3], role: m[4] || 'agent', _lines: [] };
+    } else if (cur) {
+      cur._lines.push(line);
+    } else {
+      // Non-header, non-directive content before any block: ignore.
+    }
+  }
+  if (cur) directives.push(cur);
+
+  const out = [];
+  for (const d of directives) {
+    const text = d._lines.join('\n').replace(/^\n+/, '').replace(/\n+$/, '');
+    if (!d.timestamp || !new Date(d.timestamp).getTime()) {
+      // Malformed/unparseable timestamp — warn and skip rather than surface junk.
+      console.warn(`[directives] Malformed block skipped (bad timestamp): ${d.timestamp}`);
+      continue;
+    }
+    out.push({ timestamp: d.timestamp, container: d.container, host: d.host, role: d.role, text });
+  }
+
+  out.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+  let result = out;
+  if (agent) result = result.filter((d) => d.container === agent);
+  if (host) result = result.filter((d) => d.host === host);
+  if (limit && result.length > limit) result = result.slice(0, limit);
+  return result;
 }
 
 // Resolve `absTarget` (an absolute path built lexically under the data dir) to
@@ -1162,6 +1222,13 @@ export class Observer {
       try {
         await sendPane(chat, this.cfg, text);
         logDirective(chat, text);
+        // Record the *sent* directive in the activity log. This is the single
+        // point that proves the directive actually reached an agent, so it
+        // captures BOTH paths: gated human-approve AND auto-safe auto-send
+        // (which skips the directive_proposed gate entirely). The Activity
+        // banner/timeline count `directive_sent` (not `directive_proposed`) so
+        // rejected directives are no longer miscounted as sent.
+        appendEvent({ type: 'directive_sent', container: chat.container, host: chat.host, role: chat.role, directive: text });
         return { sent: true, to: `${chat.container}@${chat.host}`, chars: text.length };
       } catch (e) { return { error: e.message }; }
     }

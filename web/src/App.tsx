@@ -163,7 +163,7 @@ function App() {
   const [streamConn, setStreamConn] = useState(false);
   const [activitySinceClose, setActivitySinceClose] = useState<any>(null);
   const [showActivityBanner, setShowActivityBanner] = useState(false);
-  const [externalViewMode, setExternalViewMode] = useState<'sessions' | 'activity' | null>(null);
+  const [externalViewMode, setExternalViewMode] = useState<'sessions' | 'activity' | 'directives' | null>(null);
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
   const [externalSearchQuery, setExternalSearchQuery] = useState<{ paneId: string; query: string } | null>(null);
 
@@ -1198,8 +1198,8 @@ function App() {
           <div className="flex items-center gap-3 text-sm">
             <span className="font-medium text-blue-900 dark:text-blue-100">While you were away:</span>
             <span className="text-blue-700 dark:text-blue-300">
-              {activitySinceClose.directive_proposed > 0 && (
-                <span className="mr-3">{activitySinceClose.directive_proposed} directive{activitySinceClose.directive_proposed !== 1 ? 's' : ''} sent</span>
+              {activitySinceClose.directive_sent > 0 && (
+                <span className="mr-3">{activitySinceClose.directive_sent} directive{activitySinceClose.directive_sent !== 1 ? 's' : ''} sent</span>
               )}
               {activitySinceClose.attached > 0 && (
                 <span className="mr-3">{activitySinceClose.attached} session{activitySinceClose.attached !== 1 ? 's' : ''} attached</span>

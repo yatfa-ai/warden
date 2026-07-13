@@ -120,7 +120,7 @@ export interface Collection {
 export interface ActivityEvent {
   timestamp: string;
   type:
-    | 'directive_proposed' | 'attached' | 'ended' | 'error' | 'snapshot'
+    | 'directive_proposed' | 'directive_sent' | 'directive_rejected' | 'attached' | 'ended' | 'error' | 'snapshot'
     // Cross-host lifecycle transitions (server-side periodic poll; see src/lifecycle.js).
     // `active` reflects the `agent` tmux session being alive, not output recency.
     | 'agent_started' | 'agent_ended'           // container appeared / disappeared
@@ -141,10 +141,26 @@ export interface ActivityEvent {
 export interface ActivityStats {
   total: number;
   directive_proposed: number;
+  directive_sent: number;
+  directive_rejected: number;
   attached: number;
   ended: number;
   error: number;
   snapshot: number;
+}
+
+/**
+ * A directive that reached an agent — the structured view of one
+ * `directives.md` block (written by observer.js logDirective, read back by the
+ * GET /api/directives endpoint). `text` is the FULL directive body (possibly
+ * multi-line); `container@host` (+ `role`) is the target.
+ */
+export interface Directive {
+  timestamp: string;
+  container: string;
+  host: string;
+  role: string;
+  text: string;
 }
 
 /**

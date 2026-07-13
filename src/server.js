@@ -16,7 +16,7 @@ import { capturePanes, resolveChatWithRefresh, catalogChats, discoverHost, disco
 import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream, disableMouse, detectMouse, probeSession } from './tmux.js';
 import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude, startConnectionPoolCleanup, validateHost } from './ssh.js';
 import { classifyProbe } from './sessionRecovery.js';
-import { Observer } from './observer.js';
+import { Observer, readDirectives } from './observer.js';
 import { hasCredentials, resolveModel } from './llm.js';
 import { listSessions, createSession, renameSession, deleteSession } from './sessions.js';
 import { appendEvent, rotateEvents, readEvents, getStatsSince, getSeriesSince } from './activity.js';
@@ -316,6 +316,22 @@ app.get('/api/activity/series', (req, res) => {
 });
 
 app.get('/api/ssh-hosts', (_req, res) => res.json({ hosts: allSshHosts(), configured: cfg.hosts }));
+
+// Directive history — reads the append-only directives.md back as structured
+// records (the inverse of observer.js logDirective). Mirrors /api/activity's
+// graceful-empty contract: a missing/empty file yields { directives: [] } and
+// never a 500. `agent`/`limit` are optional filters (agent = container, the
+// same field ActivityTimeline's agent filter uses). Newest-first.
+app.get('/api/directives', (req, res) => {
+  try {
+    const agent = req.query.agent ? String(req.query.agent) : undefined;
+    const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : undefined;
+    const directives = readDirectives({ agent, limit });
+    res.json({ directives });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // Host health check endpoint
 app.get('/api/hosts/health', async (req, res) => {
@@ -2507,7 +2523,11 @@ wss.on('connection', (ws, req) => {
       const requestId = String(++reqCounter);
       send({ type: 'directive_proposed', requestId, container: chat.container, host: chat.host, role: chat.role, directive });
       appendEvent({ type: 'directive_proposed', container: chat.container, host: chat.host, role: chat.role, directive });
-      return new Promise((resolveDecision) => pending.set(requestId, resolveDecision));
+      // Stash the directive meta alongside the resolver so the gate_decision
+      // handler can append a `directive_rejected` event (approved sends are
+      // recorded in observer.js at logDirective, which also covers auto-safe).
+      const meta = { directive, container: chat.container, host: chat.host, role: chat.role };
+      return new Promise((resolveDecision) => pending.set(requestId, { resolve: resolveDecision, meta }));
     },
   });
   send({ type: 'history', name: obs.name, items: obs.serializeForUi(), chatContext: obs.getChatContext() });
@@ -2524,11 +2544,17 @@ wss.on('connection', (ws, req) => {
         appendEvent({ type: 'error', error: e.message });
       }
     } else if (msg.type === 'gate_decision') {
-      const r = pending.get(msg.requestId);
-      if (r) { pending.delete(msg.requestId); r({ approved: !!msg.approved, edited: msg.edited }); }
+      const entry = pending.get(msg.requestId);
+      if (entry) {
+        pending.delete(msg.requestId);
+        entry.resolve({ approved: !!msg.approved, edited: msg.edited });
+        // A human rejection is distinct from an approved send — record it so the
+        // timeline can show rejected directives separately from sent ones.
+        if (!msg.approved) appendEvent({ type: 'directive_rejected', ...entry.meta });
+      }
     }
   });
-  ws.on('close', () => { for (const [, r] of pending) r({ approved: false }); });
+  ws.on('close', () => { for (const [, entry] of pending) entry.resolve({ approved: false }); });
 });
 
 // Pane stream WS: live PTY attach (interactive) + monitor snapshots. tmux is the

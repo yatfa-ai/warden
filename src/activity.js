@@ -109,6 +109,8 @@ export function getStatsSince(after) {
   const stats = {
     total: events.length,
     directive_proposed: 0,
+    directive_sent: 0,
+    directive_rejected: 0,
     attached: 0,
     ended: 0,
     error: 0,
