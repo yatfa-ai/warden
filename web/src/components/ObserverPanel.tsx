@@ -88,6 +88,11 @@ type Item =
 interface Props {
   sessionId: string;
   onFocusAgent?: (id: string) => void;
+  // WARDEN-332 — bumped on every incoming observer WS event (any message on this
+  // session's conversation). Drives the parent ObserverTabs' idle-timeout: a
+  // session the agent is actively producing output to is never idle. Read through
+  // a ref inside the memoized `connect` so adding it never resubscribes the WS.
+  onActivity?: () => void;
 }
 
 const MAX_COMPOSER_HEIGHT = 160; // px — must match the `max-h-40` class (10rem)
@@ -148,7 +153,7 @@ function convertMessage(item: Item): ThreadMessageLike {
 
 // One observer conversation, bound to a persisted session (?sid=). History is
 // replayed on connect so a refresh/restore shows the prior conversation.
-export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
+export function ObserverPanel({ sessionId, onFocusAgent, onActivity }: Props) {
   const [items, setItems] = useState<Item[]>([]);
   const [busy, setBusy] = useState(false);
   const [conn, setConn] = useState(false);
@@ -191,6 +196,14 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
   useEffect(() => {
     notifyObserverRef.current = prefs.notifyObserver;
   }, [prefs.notifyObserver]);
+  // WARDEN-332 — latest onActivity, read inside the memoized `connect` callback
+  // (which lists only stable deps so the WS is never resubscribed on a preference
+  // or prop change). The parent passes a per-session closure; updating the ref on
+  // each render is cheap and keeps the WS firing the freshest activity bump.
+  const onActivityRef = useRef(onActivity);
+  useEffect(() => {
+    onActivityRef.current = onActivity;
+  }, [onActivity]);
 
   const nextId = useCallback(() => `m${++idCounter.current}`, []);
   const { rootRef, atBottom, scrollToBottom, stickIfPinned } = useStickToBottom();
@@ -342,6 +355,9 @@ export function ObserverPanel({ sessionId, onFocusAgent }: Props) {
     };
     ws.onmessage = (e) => {
       if (!mountedRef.current) return;
+      // WARDEN-332 — any incoming observer event counts as activity for the
+      // parent's idle-timeout (token streams, tool calls, gate prompts, …).
+      onActivityRef.current?.();
       const m: ObserveMsg = JSON.parse(e.data);
       switch (m.type) {
         case 'history':
