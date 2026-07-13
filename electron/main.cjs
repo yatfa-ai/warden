@@ -198,9 +198,24 @@ function createWindow() {
 
   // Cache the persisted close-to-tray flag for the close intercept (avoids a
   // sync fs read on every close attempt) and, when ON, create the tray icon so
-  // the first window close hides to tray. WARDEN-330.
-  closeToTray = closeToTrayIsActive(saved);
-  if (closeToTray) createTray();
+  // the first window close hides to tray. Only arm the intercept when the tray
+  // actually attaches — otherwise the next close would hide the window with no
+  // tray to restore it (stranded window). This mirrors the set handler's
+  // refuse-on-failure self-heal (the 'window:set-close-to-tray' handler below).
+  // A launch-time failure requires the platform to have degraded between a
+  // successful toggle and this launch (e.g. an AppIndicator/SNI drop, a removed
+  // build/icon.png, or a headless/Xvfb run); when it happens, self-heal the
+  // persisted value to false so the next launch doesn't re-attempt and re-strand
+  // (keeps cache == file == Settings display == behavior == false). WARDEN-330.
+  const persistedCloseToTray = closeToTrayIsActive(saved);
+  if (persistedCloseToTray) {
+    closeToTray = createTray();
+    if (!closeToTray) {
+      saveWindowState(withCloseToTray(loadWindowState(), false));
+    }
+  } else {
+    closeToTray = false;
+  }
 }
 
 // --- Close-to-tray tray icon + menu (WARDEN-330) -------------------------------
