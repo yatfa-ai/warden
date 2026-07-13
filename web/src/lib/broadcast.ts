@@ -11,6 +11,8 @@
 // transpile-to-temp-`.mjs` + dynamic-`import()` harness (see broadcast.test.mjs),
 // matching chatDisplay.test.mjs / gitStateSummary.test.mjs.
 
+import { summarizeFanout } from './fanout';
+
 /** Outcome of one agent's /api/send: either ok, or not-ok with a reason. */
 export interface SendOutcome { ok: boolean; error?: string }
 
@@ -43,21 +45,11 @@ export function summarizeBroadcast(
   ids: string[],
   nameOf: (id: string) => string,
 ): BroadcastSummary {
-  const failed: BroadcastFailure[] = [];
-  let sent = 0;
-  results.forEach((res, i) => {
-    const id = ids[i];
-    if (res.status === 'fulfilled' && res.value?.ok) {
-      sent += 1;
-    } else {
-      const error =
-        res.status === 'rejected'
-          ? (res.reason instanceof Error ? res.reason.message : String(res.reason ?? 'unknown error'))
-          : (res.value?.error || 'send failed');
-      failed.push({ id, name: nameOf(id) ?? id, error });
-    }
-  });
-  return { total: results.length, sent, failed };
+  // The allSettled→summary accounting is shared with batch-kill via
+  // summarizeFanout (WARDEN-328); only the field name (`succeeded` → `sent`) and
+  // the reason-less-failure fallback ("send failed") are broadcast-specific.
+  const { total, succeeded, failed } = summarizeFanout(results, ids, nameOf, 'send failed');
+  return { total, sent: succeeded, failed };
 }
 
 /** Toast variant for a broadcast summary — success only when every agent got it. */

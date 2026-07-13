@@ -1,19 +1,20 @@
-// Tests for the pure broadcast-send helpers in src/lib/broadcast.ts (WARDEN-292).
+// Tests for the pure batch-kill helpers in src/lib/kill.ts (WARDEN-328).
 //
-// The fan-out itself (Promise.allSettled over /api/send) lives in ChatSidebar
+// The fan-out itself (Promise.allSettled over /api/kill) lives in ChatSidebar
 // because it touches fetch + toast + selection state. These tests cover the
-// extracted pure seam — the sent/failed accounting (summarizeBroadcast) and the
-// result-toast copy (formatBroadcastToast) — so the fiddly "fulfilled-but-!ok is
-// still a failure" + "rejection reads reason.message" logic has real coverage.
+// extracted pure seam — the stopped/failed accounting (summarizeKill, which
+// delegates the shared reducer to summarizeFanout in ./fanout.ts) and the
+// result-toast copy (formatKillToast) — so the fiddly "fulfilled-but-!ok is
+// still a failure" + "rejection reads reason.message" + "kill failed fallback"
+// logic has real coverage.
 //
-// broadcast.ts has one runtime value import (summarizeFanout from ./fanout),
-// and fanout.ts is `import type`-free at runtime — so Vite's OXC transform emits
+// kill.ts has one runtime value import (summarizeFanout from ./fanout), and
+// fanout.ts is `import type`-free at runtime — so Vite's OXC transform emits
 // clean ESM JS for both, and the same transpile-to-temp-`.mjs` + dynamic
-// `import()` harness used by chatDisplay.test.mjs / gitStateSummary.test.mjs
-// loads the REAL modules (broadcast + its fanout dependency) rather than a
-// hand-rolled re-implementation.
+// `import()` harness used by broadcast.test.mjs loads the REAL modules (kill +
+// its fanout dependency) rather than a hand-rolled re-implementation.
 //
-// Run: node broadcast.test.mjs   (from web/)
+// Run: node kill.test.mjs   (from web/)
 import { transformWithOxc } from 'vite';
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -24,25 +25,25 @@ import assert from 'node:assert/strict';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const libDir = resolve(__dirname, 'src/lib');
 
-// --- Load the REAL broadcast.ts + its fanout.ts dependency (TS -> ESM via OXC)
-// broadcast.ts imports summarizeFanout from ./fanout, so transpile BOTH and
-// rewrite broadcast's source import to point at the transpiled fanout.mjs in
-// the temp dir.
+// --- Load the REAL kill.ts + its fanout.ts dependency (TS -> ESM via OXC) -----
+// kill.ts imports summarizeFanout from ./fanout, so transpile BOTH and rewrite
+// kill's source import to point at the transpiled fanout.mjs in the temp dir.
 const fanoutSrc = readFileSync(join(libDir, 'fanout.ts'), 'utf8');
 const { code: fanoutCode } = await transformWithOxc(fanoutSrc, join(libDir, 'fanout.ts'), {});
-const tmpDir = mkdtempSync(join(tmpdir(), 'warden-broadcast-test-'));
+const tmpDir = mkdtempSync(join(tmpdir(), 'warden-kill-test-'));
 const fanoutFile = join(tmpDir, 'fanout.mjs');
 writeFileSync(fanoutFile, fanoutCode);
 
 // Rewrite the ./fanout import on the SOURCE string before transform so the
 // relative specifier resolves from the temp dir (transformWithOxc keeps import
 // specifiers as-is).
-const broadcastSrc = readFileSync(join(libDir, 'broadcast.ts'), 'utf8')
+const killSrc = readFileSync(join(libDir, 'kill.ts'), 'utf8')
   .replace(/from ['"]\.\/fanout['"]/, 'from "./fanout.mjs"');
-const { code } = await transformWithOxc(broadcastSrc, join(libDir, 'broadcast.ts'), {});
-const tmpFile = join(tmpDir, 'broadcast.mjs');
-writeFileSync(tmpFile, code);
-const { summarizeBroadcast, formatBroadcastToast } = await import(tmpFile);
+const { code: killCode } = await transformWithOxc(killSrc, join(libDir, 'kill.ts'), {});
+const killFile = join(tmpDir, 'kill.mjs');
+writeFileSync(killFile, killCode);
+
+const { summarizeKill, formatKillToast } = await import(killFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -60,112 +61,112 @@ const fail = (error) => fulfilled({ ok: false, error });
 const nameOf = (id) => ({ a: 'agent-a', b: 'agent-b', c: 'agent-c' }[id] || id);
 
 // ---------------------------------------------------------------------------
-console.log('\nsummarizeBroadcast — sent/failed accounting');
+console.log('\nsummarizeKill — stopped/failed accounting');
 // ---------------------------------------------------------------------------
-test('all succeed → sent=N, no failures', () => {
-  const s = summarizeBroadcast([ok, ok, ok], ['a', 'b', 'c'], nameOf);
+test('all succeed → stopped=N, no failures', () => {
+  const s = summarizeKill([ok, ok, ok], ['a', 'b', 'c'], nameOf);
   assert.equal(s.total, 3);
-  assert.equal(s.sent, 3);
+  assert.equal(s.stopped, 3);
   assert.deepEqual(s.failed, []);
 });
-test('a fulfilled {ok:false} is a FAILURE (the 404/500 shape), not a sent', () => {
-  const s = summarizeBroadcast([ok, fail('session not found'), ok], ['a', 'b', 'c'], nameOf);
-  assert.equal(s.sent, 2);
+test('a fulfilled {ok:false} is a FAILURE (the 404 shape), not a stopped', () => {
+  const s = summarizeKill([ok, fail('session not found'), ok], ['a', 'b', 'c'], nameOf);
+  assert.equal(s.stopped, 2);
   assert.equal(s.failed.length, 1);
   assert.deepEqual(s.failed[0], { id: 'b', name: 'agent-b', error: 'session not found' });
 });
 test('a rejected promise reads reason.message (a network throw)', () => {
-  const s = summarizeBroadcast([rejected(new Error('network down'))], ['a'], nameOf);
-  assert.equal(s.sent, 0);
+  const s = summarizeKill([rejected(new Error('network down'))], ['a'], nameOf);
+  assert.equal(s.stopped, 0);
   assert.equal(s.failed.length, 1);
   assert.equal(s.failed[0].error, 'network down');
   assert.equal(s.failed[0].name, 'agent-a');
 });
 test('a rejected non-Error reason stringifies (does not print [object Object])', () => {
-  const s = summarizeBroadcast([rejected('boom')], ['a'], nameOf);
+  const s = summarizeKill([rejected('boom')], ['a'], nameOf);
   assert.equal(s.failed[0].error, 'boom');
   assert.equal(s.failed[0].name, 'agent-a');
 });
 test('a rejected undefined reason falls back to a readable string', () => {
-  const s = summarizeBroadcast([rejected(undefined)], ['a'], nameOf);
+  const s = summarizeKill([rejected(undefined)], ['a'], nameOf);
   assert.equal(s.failed[0].error, 'unknown error');
 });
-test('a fulfilled {ok:false} with no error string falls back to "send failed"', () => {
-  const s = summarizeBroadcast([fulfilled({ ok: false })], ['a'], nameOf);
-  assert.equal(s.failed[0].error, 'send failed');
+test('a fulfilled {ok:false} with no error string falls back to "kill failed"', () => {
+  const s = summarizeKill([fulfilled({ ok: false })], ['a'], nameOf);
+  assert.equal(s.failed[0].error, 'kill failed');
 });
-test('partial failure does NOT abort siblings: 1 ok + 2 fail → sent=1, failed=2', () => {
+test('partial failure does NOT abort siblings: 1 ok + 2 fail → stopped=1, failed=2', () => {
   // The allSettled contract guarantees every promise is represented — this
   // asserts the reducer reports all of them rather than short-circuiting.
-  const s = summarizeBroadcast(
+  const s = summarizeKill(
     [ok, fail('down'), rejected(new Error('timeout'))],
     ['a', 'b', 'c'],
     nameOf,
   );
   assert.equal(s.total, 3);
-  assert.equal(s.sent, 1);
+  assert.equal(s.stopped, 1);
   assert.equal(s.failed.length, 2);
   assert.deepEqual(s.failed.map((f) => f.id), ['b', 'c']);
 });
 test('order is preserved: results[i] ↔ ids[i] (allSettled ordering)', () => {
-  const s = summarizeBroadcast([fail('e1'), ok, fail('e3')], ['a', 'b', 'c'], nameOf);
+  const s = summarizeKill([fail('e1'), ok, fail('e3')], ['a', 'b', 'c'], nameOf);
   assert.deepEqual(s.failed.map((f) => f.id), ['a', 'c']);
-  assert.equal(s.sent, 1);
+  assert.equal(s.stopped, 1);
 });
 test('an id with no name mapping falls back to the raw id', () => {
   // nameOf returns undefined (no mapping) → the failure's name is the raw id,
   // never "undefined", so a dead/unknown target is still identifiable.
-  const s = summarizeBroadcast([fail('x')], ['unknown-id'], () => undefined);
+  const s = summarizeKill([fail('x')], ['unknown-id'], () => undefined);
   assert.equal(s.failed[0].name, 'unknown-id');
 });
 test('empty input → empty summary (no agents selected)', () => {
-  const s = summarizeBroadcast([], [], nameOf);
+  const s = summarizeKill([], [], nameOf);
   assert.equal(s.total, 0);
-  assert.equal(s.sent, 0);
+  assert.equal(s.stopped, 0);
   assert.deepEqual(s.failed, []);
 });
 
 // ---------------------------------------------------------------------------
-console.log('\nformatBroadcastToast — result copy');
+console.log('\nformatKillToast — result copy');
 // ---------------------------------------------------------------------------
-test('all sent → success variant, singular "agent"', () => {
-  const t = formatBroadcastToast({ total: 1, sent: 1, failed: [] });
+test('all stopped → success variant, singular "agent"', () => {
+  const t = formatKillToast({ total: 1, stopped: 1, failed: [] });
   assert.equal(t.variant, 'success');
-  assert.equal(t.title, 'Sent to 1 agent');
+  assert.equal(t.title, 'Stopped 1 agent');
   assert.equal(t.description, undefined);
 });
-test('all sent → success variant, plural "agents"', () => {
-  const t = formatBroadcastToast({ total: 3, sent: 3, failed: [] });
+test('all stopped → success variant, plural "agents"', () => {
+  const t = formatKillToast({ total: 3, stopped: 3, failed: [] });
   assert.equal(t.variant, 'success');
-  assert.equal(t.title, 'Sent to 3 agents');
+  assert.equal(t.title, 'Stopped 3 agents');
 });
 test('partial failure → error variant, N/M title + per-agent description', () => {
-  const t = formatBroadcastToast({
+  const t = formatKillToast({
     total: 3,
-    sent: 2,
+    stopped: 2,
     failed: [{ id: 'b', name: 'agent-b', error: 'session not found' }],
   });
   assert.equal(t.variant, 'error');
-  assert.equal(t.title, 'Sent to 2 of 3 agents — 1 failed');
+  assert.equal(t.title, 'Stopped 2 of 3 agents — 1 failed');
   assert.equal(t.description, 'agent-b: session not found');
 });
-test('total failure → error variant, "Failed to reach N of M" title', () => {
-  const t = formatBroadcastToast({
+test('total failure → error variant, "Failed to stop N of M" title', () => {
+  const t = formatKillToast({
     total: 2,
-    sent: 0,
+    stopped: 0,
     failed: [
       { id: 'a', name: 'agent-a', error: 'network down' },
       { id: 'b', name: 'agent-b', error: 'timeout' },
     ],
   });
   assert.equal(t.variant, 'error');
-  assert.equal(t.title, 'Failed to reach 2 of 2 agents');
+  assert.equal(t.title, 'Failed to stop 2 of 2 agents');
   assert.equal(t.description, 'agent-a: network down\nagent-b: timeout');
 });
-test('description lists every failure (one per line) for a partial send', () => {
-  const t = formatBroadcastToast({
+test('description lists every failure (one per line) for a partial stop', () => {
+  const t = formatKillToast({
     total: 4,
-    sent: 2,
+    stopped: 2,
     failed: [
       { id: 'a', name: 'agent-a', error: 'e1' },
       { id: 'b', name: 'agent-b', error: 'e2' },
@@ -174,4 +175,4 @@ test('description lists every failure (one per line) for a partial send', () => 
   assert.equal(t.description, 'agent-a: e1\nagent-b: e2');
 });
 
-console.log(`\n✓ BROADCAST TESTS PASS (${passed})`);
+console.log(`\n✓ KILL TESTS PASS (${passed})`);

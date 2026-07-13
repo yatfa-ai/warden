@@ -11,7 +11,9 @@ import { NewChatForm } from './NewChatForm';
 import { CollectionsSection } from './CollectionsSection';
 import { CreateCollectionDialog } from './CreateCollectionDialog';
 import { BroadcastDialog } from './BroadcastDialog';
+import { KillDialog } from './KillDialog';
 import { summarizeBroadcast, formatBroadcastToast } from '@/lib/broadcast';
+import { summarizeKill, formatKillToast } from '@/lib/kill';
 import { DiffViewer } from './DiffViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { loadUi, saveUi } from '@/lib/storage';
@@ -27,7 +29,7 @@ import type { GitCommit, GitFile, ClaudeSession } from './sidebar/types';
 import { GitStateBadges, GitCollisionBadge } from './sidebar/GitBadges';
 import { ChatRow, OpenedChatRow, ChatRowSkeleton, SessionRowSkeleton } from './sidebar/ChatRows';
 import { AgentFilterSortControls } from './sidebar/AgentFilterSortControls';
-import { UpdatedAgo, SectionToggle, BroadcastActionBar } from './sidebar/SidebarBits';
+import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/SidebarBits';
 
 // Back-compat re-export: OpenChatBrowserPage.tsx imports these types from
 // './ChatSidebar' — keep that path stable so it needs no change (WARDEN-315).
@@ -121,6 +123,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   // root active-tabs working set) is intentionally excluded.
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [broadcastOpen, setBroadcastOpen] = useState(false);
+  const [killOpen, setKillOpen] = useState(false);
 
   // Extract project counts from active agents
   const projectCounts = chats.reduce((acc, c) => {
@@ -339,6 +342,65 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     return summary;
   };
 
+  // Fan a KILL out to every selected agent via the existing per-target /api/kill
+  // path (server.js → killTmux + catalog forget), then summarize. This is the
+  // batch analogue of handleBroadcastSend and of App.tsx's per-row performKill
+  // — but deliberately its OWN fan-out (NOT N calls to the per-row onKill): the
+  // per-row path drives a single killTarget confirm slot and an optimistic-per-
+  // id UI built for one id, so batching it races the slot and clobbers the wrong
+  // dialog. Here, Promise.allSettled (not Promise.all) means a partial failure —
+  // one host unreachable, one session already dead — is reported per-agent and
+  // does NOT abort the other kills. Never throws: failure is encoded in the
+  // summary. Returns the summary so the KillDialog can close on completion.
+  const handleKillSelected = async () => {
+    const ids = Array.from(selectedIds);
+    const results = await Promise.allSettled(
+      ids.map((id) =>
+        fetch('/api/kill', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id }),
+        }).then(async (r) =>
+          r.ok
+            ? { ok: true }
+            : { ok: false, error: (await r.json().catch(() => ({}))).error || `HTTP ${r.status}` },
+        ),
+      ),
+    );
+    const nameOf = (id: string) => {
+      const c = findChat(chats, id);
+      return c ? displayName(c) : id;
+    };
+    const summary = summarizeKill(results, ids, nameOf);
+    const outcome = formatKillToast(summary);
+    if (prefs.notifyChatOps) {
+      if (outcome.variant === 'success') {
+        toast.success(outcome.title);
+      } else {
+        // whitespace-pre-line so the per-agent failure list (joined with \n in
+        // formatKillToast) renders one failure per line instead of collapsing.
+        toast.error(outcome.title, { description: <span className="whitespace-pre-line">{outcome.description}</span> });
+      }
+    }
+    // Reconcile rows after the fan-out: re-read the catalog (manual tmux chats
+    // are forgotten server-side) AND re-discover each unique host so yatfa
+    // (auto-discovered) agents reflect the dead tmux session immediately rather
+    // than waiting for the 60s poll — mirroring performKill's refresh() +
+    // discoverHost(host) per kill, deduped across the batch's hosts. Stale ids
+    // (an agent that died between selecting and killing) resolve to no host and
+    // are simply absent here, but were still killed-at above and reported as a
+    // per-agent failure rather than silently dropped.
+    onRefresh();
+    const hosts = new Set<string>();
+    selectedChats.forEach((c) => { if (c.host) hosts.add(c.host); });
+    hosts.forEach((h) => onDiscoverHost(h));
+    // The kill's intent is discharged — clear the selection regardless of
+    // outcome. Failed targets remain visible in the toast; the human can
+    // re-select and retry if needed.
+    setSelectedIds(new Set());
+    return summary;
+  };
+
   const enterHost = (host: string) => {
     const status = hostStatuses[host];
     if (status?.status === 'offline') {
@@ -547,11 +609,12 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           </div>
         </ScrollArea>
         {selectedIds.size > 0 && (
-          <BroadcastActionBar
+          <SelectionActionBar
             count={selectedIds.size}
             onSelectAll={() => selectAll(agents.map((c) => c.key || c.id))}
             onClear={clearSelection}
             onSend={() => setBroadcastOpen(true)}
+            onKill={() => setKillOpen(true)}
           />
         )}
         {/* Rendered in each view's own return because host/collection are
@@ -563,6 +626,12 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           onOpenChange={setBroadcastOpen}
           targets={selectedChats}
           onSend={handleBroadcastSend}
+        />
+        <KillDialog
+          open={killOpen}
+          onOpenChange={setKillOpen}
+          targets={selectedChats}
+          onKill={handleKillSelected}
         />
       </div>
     );
@@ -674,11 +743,12 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           </div>
         </ScrollArea>
         {selectedIds.size > 0 && (
-          <BroadcastActionBar
+          <SelectionActionBar
             count={selectedIds.size}
             onSelectAll={() => selectAll(sortedHostChats.map((c) => c.key || c.id))}
             onClear={clearSelection}
             onSend={() => setBroadcastOpen(true)}
+            onKill={() => setKillOpen(true)}
           />
         )}
         <BroadcastDialog
@@ -686,6 +756,12 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           onOpenChange={setBroadcastOpen}
           targets={selectedChats}
           onSend={handleBroadcastSend}
+        />
+        <KillDialog
+          open={killOpen}
+          onOpenChange={setKillOpen}
+          targets={selectedChats}
+          onKill={handleKillSelected}
         />
       </div>
     );
@@ -871,6 +947,12 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
         onOpenChange={setBroadcastOpen}
         targets={selectedChats}
         onSend={handleBroadcastSend}
+      />
+      <KillDialog
+        open={killOpen}
+        onOpenChange={setKillOpen}
+        targets={selectedChats}
+        onKill={handleKillSelected}
       />
     </div>
   );
