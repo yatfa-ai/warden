@@ -7,6 +7,7 @@ import { streamApi } from '@/lib/stream';
 import type { Chat } from '@/lib/types';
 import { findPathCandidates } from '@/lib/path-links';
 import { hostTagOf } from '@/lib/chatDisplay';
+import { hostKeyOf, attachEffectDeps } from '@/lib/paneAttach';
 import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBehavior, type HostOptionsMap } from '@/lib/storage';
 import { PANE_DRAG_MIME } from '@/lib/dnd';
 import { getThemeById, type ThemeId } from '@/lib/themes';
@@ -154,10 +155,11 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const [phase, setPhase] = useState<Phase>('connecting');
   // Mirror phase into a ref so the elapsed-seconds interval (attach effect) can
   // stop itself the instant we leave 'connecting'. The interval closure can't
-  // read `phase` directly (the attach effect's deps are [id, host, retryNonce],
-  // not phase, so the closure would be stale); without this ref the 1s interval
-  // keeps calling setElapsed forever once a dead/unreachable panel is showing,
-  // re-rendering the pane every second for as long as it's left open.
+  // read `phase` directly (the attach effect's deps are [id, retryNonce] — see
+  // attachEffectDeps — not phase, so the closure would be stale); without this
+  // ref the 1s interval keeps calling setElapsed forever once a dead/unreachable
+  // panel is showing, re-rendering the pane every second for as long as it's
+  // left open.
   const phaseRef = useRef<Phase>('connecting');
   useEffect(() => { phaseRef.current = phase; }, [phase]);
   // Seconds elapsed since the current attach attempt began — shown while
@@ -196,19 +198,31 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const wasEverActiveRef = useRef(false);   // has this pane's agent ever been active:true?
   const exitHandledRef = useRef(false);     // one-shot: the exit action fires once per live→exited transition
   const [agentExited, setAgentExited] = useState(false);   // 'dim' overlay state
-  // WARDEN-261: this pane's host key — the chat's host ('(local)' or an SSH
-  // alias), falling back to the restore hint then '(local)'. Used to look up the
-  // Seamless-copy toggle and to key the per-host hint dismissal.
-  const hostKey = chat?.host || host || '(local)';
+  // WARDEN-261 / WARDEN-365: this pane's host key — the chat's host ('(local)' or
+  // an SSH alias), falling back to the restore hint then '(local)'. Used to look
+  // up the Seamless-copy toggle and to key the per-host hint dismissal. Derived
+  // via hostKeyOf (the shared, unit-tested seam) so the derivation and its
+  // "send-time only, never a dep" contract live in one place.
+  const hostKey = hostKeyOf(chat, host);
   // WARDEN-261: tmux mouse state for this pane's host. Set true when the backend
   // pushes a `mouse_state` notice after attach (mouse is ON → copy impaired).
   // Drives the dismissible hint; false/unknown → no hint.
   const [mouseOn, setMouseOn] = useState(false);
-  // Latest hostOptions read via ref so the attach effect (deps [id, host]) sends
-  // the current seamlessCopy value WITHOUT adding hostOptions to its deps — a
-  // Settings toggle must apply on the next attach, never re-attach an open pane.
+  // WARDEN-365: host, hostKey, and hostOptions are all INPUTS to the attach
+  // message, not TRIGGERS — mirrored into refs and read at send-time so the
+  // attach effect's deps stay [id, retryNonce] (attachEffectDeps). A parent
+  // re-render, a transient chats.find() miss (which flips hostKey), or a
+  // Seamless-copy toggle therefore never tears down + re-binds a live PTY — the
+  // 0.1.11 regression was hostKey (and the latent host) sitting in the deps.
+  // hostOptions already followed this pattern (WARDEN-261); host/hostKey now do
+  // too. Assigned during render, the same latest-value mirror pattern as
+  // copyOnSelectRef above / activeTabsRef in App.tsx.
   const hostOptionsRef = useRef(hostOptions);
   hostOptionsRef.current = hostOptions;
+  const hostRef = useRef(host);
+  hostRef.current = host;
+  const hostKeyRef = useRef(hostKey);
+  hostKeyRef.current = hostKey;
 
   // Defensive clamp: the global font size can briefly fall outside 8–24 while a
   // user types into the Settings field (coerced on blur). xterm must never receive
@@ -471,14 +485,24 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     setElapsed(0);
     setMouseOn(false);
     try { fitRef.current?.fit(); } catch {}
+    // WARDEN-365: read host + hostKey from REFS at send-time, not from the
+    // render-scoped props. The effect's deps are [id, retryNonce] (see
+    // attachEffectDeps below) — host, hostKey, cols/rows, and seamlessCopy are
+    // INPUTS to the attach message, not TRIGGERS. Reading them via refs means a
+    // parent re-render, a transient chats.find() miss (hostKey flips), or a
+    // Seamless-copy toggle NEVER tears down + re-binds a live PTY — the 0.1.11
+    // regression. Mirrors hostOptionsRef. The first attach reads whatever
+    // host/hostKey are current at mount (paneHost is persisted for restored
+    // panes and set by openChat before a freshly-opened pane mounts), so the
+    // single attach binds the correct host.
+    const sendHost = hostRef.current;
+    const sendHostKey = hostKeyRef.current;
     // WARDEN-261: tell the backend whether to disable tmux mouse for this host
     // (Seamless copy). Read from the ref so a Settings toggle applies on the NEXT
     // attach — hostOptions is deliberately NOT a dep, so toggling never re-
-    // attaches (kills/recreates the PTY of) an already-open pane. Keyed by
-    // `hostKey` so the toggle and the per-host hint dismissal always resolve to
-    // the same host for this pane.
-    const seamlessCopy = !!hostOptionsRef.current[hostKey]?.seamlessCopy;
-    streamApi.send({ type: 'attach', id, host, cols: term?.cols ?? 100, rows: term?.rows ?? 30, seamlessCopy });
+    // attaches (kills/recreates the PTY of) an already-open pane.
+    const seamlessCopy = !!hostOptionsRef.current[sendHostKey]?.seamlessCopy;
+    streamApi.send({ type: 'attach', id, host: sendHost, cols: term?.cols ?? 100, rows: term?.rows ?? 30, seamlessCopy });
 
     // Elapsed-seconds counter so a slow host reads as "connecting… Ns". Stops
     // itself once we leave 'connecting' (probe settled, watchdog fired, or a
@@ -502,11 +526,16 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       clearTimeout(watchdog);
       streamApi.send({ type: 'detach', id });
     };
-    // retryNonce lets recovery actions (Retry / Re-spawn) re-run the attach.
-    // `hostKey` is the pane's host identity (stable string — only changes when
-    // the actual host changes, never on a Seamless-copy toggle), so listing it
-    // never re-attaches on a pref change. hostOptions stays out on purpose.
-  }, [id, host, hostKey, retryNonce]);
+    // WARDEN-365: attach is idempotent for a given pane identity — `id` is the
+    // unique, stable pane identity and the only legitimate re-attach trigger;
+    // `retryNonce` covers explicit Retry / Re-spawn. host/hostKey are passed in
+    // (the effect's render-time context) but, by contract, attachEffectDeps
+    // returns ONLY [id, retryNonce] — so a hostKey flip (transient chats.find()
+    // miss) or a host change never re-fires this effect. The deps are routed
+    // through attachEffectDeps (not an inline literal) so the "single attach per
+    // pane lifetime" contract is unit-tested and cannot be silently re-widened.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- non-literal by design; attachEffectDeps is the unit-tested contract (WARDEN-365).
+  }, attachEffectDeps({ id, retryNonce, host, hostKey }));
 
   // clear "new" badge on focus
   useEffect(() => { if (focused && hasNew) onClearNew(); }, [focused]);
