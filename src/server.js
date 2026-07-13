@@ -404,6 +404,23 @@ app.put('/api/pins', (req, res) => {
   res.json({ ok: true, pins });
 });
 
+// Agent notes — a short, human-authored per-chat annotation (mirrors /api/pins,
+// but id→note instead of an id list). Keyed by chat id, so it works for every
+// chat including un-renameable yatfa agents (rename is identity-only and 404s
+// for yatfa chats). WARDEN-89: validate input, never 500 on bad shapes.
+app.get('/api/agent-notes', (_req, res) => res.json({ notes: cfg.agentNotes || {} }));
+app.put('/api/agent-notes', (req, res) => {
+  const { id, note } = req.body;
+  if (typeof id !== 'string' || !id.trim()) return res.status(400).json({ error: 'id must be a non-empty string' });
+  if (typeof note !== 'string') return res.status(400).json({ error: 'note must be a string' });
+  const value = note.trim().slice(0, 200); // mirror rename/collection name caps
+  if (!cfg.agentNotes || typeof cfg.agentNotes !== 'object' || Array.isArray(cfg.agentNotes)) cfg.agentNotes = {};
+  if (value) cfg.agentNotes[id] = value;
+  else delete cfg.agentNotes[id]; // empty/blank note → remove the key entirely
+  save(cfg);
+  res.json({ ok: true, notes: cfg.agentNotes });
+});
+
 app.get('/api/this-session', (_req, res) => res.json({
   sessionId: process.env.CLAUDE_CODE_SESSION_ID || null,
   claudePath: process.env.CLAUDE_CODE_EXECPATH || null,

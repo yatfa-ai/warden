@@ -43,7 +43,7 @@ export function SessionRowSkeleton() {
   );
 }
 
-export function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hostStatus, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, isPinned, onTogglePin, selected, onToggleSelect, selectionActive }: {
+export function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hostStatus, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, isPinned, onTogglePin, selected, onToggleSelect, selectionActive, note, onSetNote }: {
   c: Chat; open: boolean; onOpen: () => void; onKill: () => void;
   onRename: (session: string, kind: string, name: string, host?: string) => void;
   onHide?: () => void; onUnhide?: () => void; dim?: boolean;
@@ -67,11 +67,21 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, d
   // checkbox is hover/focus-only (mirrors the pin/hide/kill hover-button pattern
   // at line ~1542) to keep the default fleet list uncluttered.
   selected?: boolean; onToggleSelect?: () => void; selectionActive?: boolean;
+  // WARDEN-305: per-agent note (id-keyed, persists across restart via /api/agent-notes).
+  note?: string; onSetNote?: (text: string) => void;
 }) {
   const isUser = c.kind === 'tmux';
   const canRename = isUser;
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(c.name || c.key || c.id);
+  // WARDEN-305: inline note editor state (independent of rename's editing/val).
+  const [noteEditing, setNoteEditing] = useState(false);
+  const [noteVal, setNoteVal] = useState('');
+  const commitNote = () => {
+    setNoteEditing(false);
+    const v = noteVal.trim();
+    if (onSetNote && v !== (note || '')) onSetNote(v);
+  };
   const type = chatType(c);
   const typeColor = TYPE_COLOR[type] || 'text-violet-400';
   const hostTag = isUser ? (c.host === '(local)' ? 'local' : (c.host || '')) : null;
@@ -184,6 +194,14 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, d
               ))}
             </div>
           )}
+          {/* WARDEN-305: per-agent note — muted one-line subtext under the name,
+              or an inline editor when noteEditing. Mirrors the files block above
+              (a block child of the truncate span → renders on its own line). */}
+          {noteEditing ? (
+            <Input autoFocus value={noteVal} onClick={(e) => e.stopPropagation()} onChange={(e) => setNoteVal(e.target.value)} onBlur={commitNote} onKeyDown={(e) => { if (e.key === 'Enter') commitNote(); if (e.key === 'Escape') setNoteEditing(false); }} placeholder="add a note…" maxLength={200} className="block mt-0.5 h-5 w-full text-[10px] px-1 text-muted-foreground" />
+          ) : note ? (
+            <span className="block mt-0.5 truncate text-[10px] italic text-muted-foreground/80" title={note}>{note}</span>
+          ) : null}
         </span>
       )}
       {!editing && onTogglePin && (
@@ -194,6 +212,21 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, d
           >
             📌
           </button>
+        </IconTooltip>
+      )}
+      {/* WARDEN-305: per-agent note affordance — mirrors the 📌 pin button, but built
+          on shadcn <Button> per WARDEN-68 (Rule 1 + Rule 2): no raw <button>. */}
+      {!editing && onSetNote && (
+        <IconTooltip label={note ? 'edit note' : 'add note'}>
+          <Button
+            variant="ghost"
+            size="xs"
+            className={`px-0.5 ${note ? 'text-yellow-600' : 'text-muted-foreground hover:text-foreground'} ${isUser ? 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100' : ''}`}
+            onClick={(e) => { e.stopPropagation(); setNoteVal(note || ''); setNoteEditing(true); }}
+            aria-label={note ? 'edit note' : 'add note'}
+          >
+            🗒
+          </Button>
         </IconTooltip>
       )}
       {isUser && !editing && (
@@ -224,7 +257,7 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, d
 // gating rename off double-click avoids the two-fires-before-dblclick open-then-edit jank);
 // yatfa agents are not renameable. Drag-reorder is preserved via the parent-owned
 // dragIdx/dragOverIdx pair.
-export function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, canDrag, originalIdx, dragIdx, dragOverIdx, setDragIdx, setDragOverIdx, onReorder, onHide, onKill }: {
+export function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, canDrag, originalIdx, dragIdx, dragOverIdx, setDragIdx, setDragOverIdx, onReorder, onHide, onKill, note, onSetNote }: {
   id: string;
   c?: Chat;
   isOpen: boolean;
@@ -246,6 +279,9 @@ export function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showH
   onReorder: (from: number, to: number) => void;
   onHide?: () => void;
   onKill?: () => void;
+  // WARDEN-305: per-agent note (mirrors pins; keyed by chat id).
+  note?: string;
+  onSetNote?: (text: string) => void;
 }) {
   const type = c ? chatType(c) : '?';
   const hostTag = c ? hostTagOf(c.host) : '';
@@ -253,6 +289,14 @@ export function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showH
   const canRename = !!c && c.kind === 'tmux';
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(() => (c ? displayName(c) : id));
+  // WARDEN-305: inline note editor state (independent of rename).
+  const [noteEditing, setNoteEditing] = useState(false);
+  const [noteVal, setNoteVal] = useState('');
+  const commitNote = () => {
+    setNoteEditing(false);
+    const v = noteVal.trim();
+    if (onSetNote && v !== (note || '')) onSetNote(v);
+  };
 
   const startEdit = () => { setVal(c ? displayName(c) : id); setEditing(true); };
   const commit = () => {
@@ -315,10 +359,23 @@ export function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showH
           {gitInfo.files.map((file, i) => (<GitChangedFile key={file.path + '-' + i} file={file} onOpen={onOpenDiff} />))}
         </div>
       )}
+      {/* WARDEN-305: per-agent note — muted one-line subtext under the name, or an
+          inline editor when noteEditing. Wrapping div is block-level so its
+          auto-width accounts for ml-6 and the Input's w-full can't overflow. */}
+      {(noteEditing || note) && (
+        <div className="ml-6 min-w-0">
+          {noteEditing ? (
+            <Input autoFocus value={noteVal} onClick={(e) => e.stopPropagation()} onChange={(e) => setNoteVal(e.target.value)} onBlur={commitNote} onKeyDown={(e) => { if (e.key === 'Enter') commitNote(); if (e.key === 'Escape') setNoteEditing(false); }} placeholder="add a note…" maxLength={200} className="h-5 text-[10px] px-1 text-muted-foreground" />
+          ) : (
+            <span className="block truncate text-[10px] italic text-muted-foreground/80" title={note}>🗒 {note}</span>
+          )}
+        </div>
+      )}
     </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
         <ContextMenuItem onSelect={() => onOpen()}>Open</ContextMenuItem>
+        {onSetNote && <ContextMenuItem onSelect={() => { setNoteVal(note || ''); setNoteEditing(true); }}>{note ? 'Edit note' : 'Add note'}</ContextMenuItem>}
         {!dead && onHide && <ContextMenuItem onSelect={() => onHide()}>Hide</ContextMenuItem>}
         {!dead && onKill && (
           <ContextMenuItem onSelect={() => onKill()}>
