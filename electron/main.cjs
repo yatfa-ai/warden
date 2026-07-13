@@ -235,11 +235,25 @@ function buildTrayMenu() {
 }
 
 function createTray() {
-  if (tray) return; // idempotent — never stack two icons
-  tray = new Tray(path.join(__dirname, '..', 'build', 'icon.png'));
-  tray.setToolTip('Yatfa Warden');
-  tray.setContextMenu(buildTrayMenu());
-  tray.on('click', () => showMainWindow());
+  if (tray) return true; // idempotent — never stack two icons
+  // Mirror launch-at-login's graceful degradation (WARDEN-278): wrap the
+  // platform call so an unsupported desktop, misconfigured AppIndicator/SNI,
+  // bad image decode, or headless env can't throw out of the IPC handler or
+  // createWindow — a throw at launch would boot-loop (the pref is persisted ON).
+  // Returns whether the tray attached; the set handler refuses + keeps the flag
+  // OFF on failure so the window is never hidden with no tray to restore it.
+  // WARDEN-330.
+  try {
+    tray = new Tray(path.join(__dirname, '..', 'build', 'icon.png'));
+    tray.setToolTip('Yatfa Warden');
+    tray.setContextMenu(buildTrayMenu());
+    tray.on('click', () => showMainWindow());
+    return true;
+  } catch (e) {
+    console.warn('[warden:close-to-tray] Tray creation failed', e);
+    tray = null;
+    return false;
+  }
 }
 
 function destroyTray() {
@@ -297,10 +311,23 @@ ipcMain.handle('window:get-close-to-tray', () => {
   return closeToTray === true;
 });
 ipcMain.handle('window:set-close-to-tray', (_event, on) => {
+  if (on === true) {
+    // Attach the tray BEFORE flipping the flag / persisting. If the platform
+    // rejects the tray (createTray returns false), refuse the toggle: keep the
+    // flag + persisted state OFF and return false. This mirrors launch-at-login
+    // (WARDEN-278) and prevents stranding the window (hidden on next close with
+    // no tray to restore it) and poisoning the next launch with a persisted-ON
+    // but no-tray state. WARDEN-330.
+    if (!createTray()) {
+      closeToTray = false;
+      saveWindowState(withCloseToTray(loadWindowState(), false));
+      return false;
+    }
+  } else {
+    destroyTray();
+  }
   closeToTray = on === true;
   saveWindowState(withCloseToTray(loadWindowState(), closeToTray));
-  if (closeToTray) createTray();
-  else destroyTray();
   return closeToTray;
 });
 
