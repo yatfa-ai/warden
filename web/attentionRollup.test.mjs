@@ -44,7 +44,10 @@ const test = (name, fn) => {
 const agent = (id, extra = {}) => ({ id, key: id, name: id, ...extra });
 const health = (groups) => ({ groups: { healthy: [], warning: [], critical: [], idle: [], unknown: [], ...groups } });
 const stats = (s) => ({ total: 0, directive_proposed: 0, attached: 0, ended: 0, error: 0, ...s });
-const roll = (h, s) => buildAttentionRollup(h ?? null, s ?? null);
+// A pane-state row as /api/agent-states returns it.
+const stateRow = (id, state, extra = {}) => ({ id, key: id, name: id, state, ...extra });
+// agentStates defaults to null (the pre-WARDEN-344 two-arg call shape still works).
+const roll = (h, s, a, opts) => buildAttentionRollup(h ?? null, s ?? null, a ?? null, opts);
 
 console.log('\nzero state → hidden (total 0, empty buckets)');
 test('all-healthy fleet + no activity → total 0', () => {
@@ -152,6 +155,86 @@ test('EMPTY_ATTENTION_ROLLUP has total 0 and empty arrays', () => {
   assert.equal(EMPTY_ATTENTION_ROLLUP.total, 0);
   assert.deepEqual(EMPTY_ATTENTION_ROLLUP.critical, []);
   assert.deepEqual(EMPTY_ATTENTION_ROLLUP.warning, []);
+  assert.deepEqual(EMPTY_ATTENTION_ROLLUP.stuck, []);
+  assert.deepEqual(EMPTY_ATTENTION_ROLLUP.waiting, []);
+});
+
+console.log('\npane-state buckets (WARDEN-344): stuck/erroring/waiting/blocked fold into the rollup');
+test('the two-arg call shape still works (no agentStates) — backward compatible', () => {
+  const r = buildAttentionRollup(health({ critical: [agent('c1')] }), stats());
+  assert.equal(r.total, 1);
+  assert.deepEqual(r.stuck, []);
+  assert.deepEqual(r.waiting, []);
+});
+test('a stuck agent → total 1 and a stuck bucket row', () => {
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck')]);
+  assert.equal(r.total, 1);
+  assert.equal(r.stuck.length, 1);
+  assert.equal(r.stuck[0].id, 's1');
+});
+test('each pane state lands in its own bucket', () => {
+  const r = roll(health(), stats(), [
+    stateRow('s1', 'stuck'), stateRow('e1', 'erroring'),
+    stateRow('w1', 'waiting'), stateRow('b1', 'blocked'),
+  ]);
+  assert.equal(r.stuck.length, 1);
+  assert.equal(r.erroring.length, 1);
+  assert.equal(r.waiting.length, 1);
+  assert.equal(r.blocked.length, 1);
+  assert.equal(r.total, 4);
+});
+test('capture_failed rows are NOT counted (already surfaced as CRITICAL/CLOSED by /api/health)', () => {
+  const r = roll(health(), stats(), [stateRow('d1', 'capture_failed')]);
+  assert.equal(r.total, 0, 'capture_failed is not an attention bucket');
+  assert.deepEqual(r.stuck, []);
+});
+test('active/idle rows are NOT counted (no attention needed)', () => {
+  const r = roll(health(), stats(), [stateRow('a1', 'active'), stateRow('i1', 'idle')]);
+  assert.equal(r.total, 0);
+});
+test('stuck/erroring contribute to total ALONGSIDE critical/warning/directives/errors', () => {
+  const r = roll(
+    health({ critical: [agent('c1')], warning: [agent('w1')] }),
+    stats({ directive_proposed: 2, error: 1 }),
+    [stateRow('s1', 'stuck'), stateRow('e1', 'erroring')],
+  );
+  assert.equal(r.total, 1 + 1 + 2 + 1 + 1 + 1);
+});
+test('null agentStates degrades to empty buckets (no crash)', () => {
+  const r = roll(health({ critical: [agent('c1')] }), stats(), null);
+  assert.equal(r.total, 1);
+  assert.deepEqual(r.stuck, []);
+});
+test('stuck/erroring rows carry their signal for the badge detail row', () => {
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck', { signal: 'repeating line' })]);
+  assert.equal(r.stuck[0].signal, 'repeating line');
+});
+
+console.log('\nper-state toggle (WARDEN-344): a silenced state contributes neither rows nor total');
+test('silencing "waiting" drops it from the bucket and the total', () => {
+  const r = roll(health(), stats(),
+    [stateRow('w1', 'waiting'), stateRow('e1', 'erroring')],
+    { enabledStates: { waiting: false } });
+  assert.equal(r.waiting.length, 0, 'waiting silenced → empty bucket');
+  assert.equal(r.erroring.length, 1, 'erroring still surfaces');
+  assert.equal(r.total, 1, 'only erroring counts');
+});
+test('silencing "waiting" keeps "erroring" (a noisy waiting does not mask errors)', () => {
+  const r = roll(health(), stats(),
+    [stateRow('w1', 'waiting'), stateRow('e1', 'erroring')],
+    { enabledStates: { waiting: false, erroring: true } });
+  assert.equal(r.total, 1);
+});
+test('omitting enabledStates surfaces every state (default ON)', () => {
+  const r = roll(health(), stats(), [stateRow('w1', 'waiting')]);
+  assert.equal(r.waiting.length, 1);
+  assert.equal(r.total, 1);
+});
+test('enabledStates does not touch the inactivity buckets (critical/warning unaffected)', () => {
+  const r = roll(health({ critical: [agent('c1')] }), stats(), [],
+    { enabledStates: { stuck: false, erroring: false, waiting: false, blocked: false } });
+  assert.equal(r.critical.length, 1);
+  assert.equal(r.total, 1);
 });
 
 console.log(`\n✓ ATTENTION ROLLUP TESTS PASS (${passed})`);

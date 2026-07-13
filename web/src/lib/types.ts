@@ -161,3 +161,49 @@ export interface ActivitySeries {
   buckets: number[];
   series: Record<string, { total: number[]; error: number[] }>;
 }
+
+/**
+ * A single agent's classified pane state, from `GET /api/agent-states` (WARDEN-344).
+ *
+ * `/api/health` is purely inactivity-based (HEALTHY/WARNING/CRITICAL by time since
+ * last output), so an agent ACTIVELY emitting a repeating loop, a stack trace, or a
+ * "press enter" prompt reads HEALTHY. This is the rich pane-content signal that fills
+ * that gap: each open agent's `state` (active/idle/stuck/erroring/blocked/waiting, or
+ * `capture_failed` when its host was unreachable) plus the `signal` line that
+ * triggered it. `capture_failed` is NOT folded into the attention rollup — an
+ * unreachable host is already surfaced as CRITICAL/CLOSED by /api/health, so counting
+ * it here would double-count the same condition.
+ */
+export interface AgentStateRow {
+  id: string;
+  key?: string;
+  host?: string;
+  project?: string;
+  role?: string;
+  name?: string;
+  state: string;
+  /** The line that triggered the state (the repeating line / matched prompt). */
+  signal?: string | null;
+  /** True when the pane's host could not be captured (flagged, not dropped). */
+  captureError?: boolean;
+}
+
+/** Response shape of `GET /api/agent-states` (WARDEN-344). */
+export interface AgentStatesData {
+  agents: AgentStateRow[];
+  total: number;
+  timestamp: number;
+}
+
+/**
+ * Minimal shape an AttentionBadge row needs to render + deep-link into a pane. Both
+ * `Chat` (from /api/health's critical/warning groups) and `AgentStateRow` (from
+ * /api/agent-states) structurally satisfy it, so the badge's AgentRow accepts either.
+ */
+export interface AttentionAgent {
+  id: string;
+  key?: string;
+  name?: string;
+  role?: string;
+  host?: string;
+}

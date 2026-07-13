@@ -10,6 +10,11 @@ import { run, shellQuote } from './ssh.js';
 import { read as readPane, send as sendPane } from './tmux.js';
 import { complete } from './llm.js';
 import { getSession, saveMessages, appendTranscript } from './sessions.js';
+// The pane-state classifier was extracted into agentState.js (WARDEN-344) so the
+// proactive attention surfaces can reach it without this Observer's LLM. Re-imported
+// here unchanged — summarize_chats / read_chats / alert_changes still classify panes
+// with the exact same logic. stripAnsi + inferGoal are also used directly below.
+import { classifyPane, stripAnsi, inferGoal } from './agentState.js';
 
 const LOCAL = '(local)';
 
@@ -269,79 +274,10 @@ export function writeReportFile(dataDir, relPath, content, opts = {}) {
   };
 }
 
-// Strip ANSI escape sequences (tmux `capture-pane -e` keeps them) and stray
-// carriage returns so classification reads clean text, not color/cursor noise.
-// Handles CSI (SGR colors, cursor moves), OSC (titles), and lone escape bytes.
-function stripAnsi(s) {
-  return String(s)
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC sequences (title etc.)
-    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')          // CSI sequences (colors, cursor)
-    .replace(/\x1b[@-Z\\-_]/g, '')                       // other single-char escape sequences
-    .replace(/\r/g, '');
-}
-
-// Classification regexes — reused/extended from analyze_agents & suggest_next_actions
-// (WARDEN-74: regex over LLM). BLOCKED is coordination/dependency language only; the
-// bare "waiting for" fragment is intentionally NOT matched, so human-input panes reach
-// the WAITING branch (waiting = human input, blocked = other agents/deps).
-const SUMM_ERROR_RE = /error|failed|exception|traceback|panic|fatal/i;
-const SUMM_WAITING_RE = /please|respond|continue\?|input|press enter|waiting for user/i;
-const SUMM_BLOCKED_RE = /blocked by|blocked on|depends on|waiting for (?:the |an |a )?(?:agent|worker|planner|reviewer|researcher|dependency|approval)/i;
-const SUMM_ACTIVE_RE = /running|processing|building|installing|downloading|executing|working on|implement/i;
-const SUMM_TICKET_RE = /\b([A-Z][A-Z0-9]{1,}-\d+|#\d{2,})\b/;
-
-// Classify CLEANED pane text into the structured per-agent fields summarize_chats
-// promises per entry (WARDEN-165 criterion #2): state, errors, lastAction,
-// currentStep, goal. All inference is regex-based — no LLM call.
-function classifyPane(clean, c) {
-  const allLines = clean.split('\n');
-  const nonEmpty = allLines.map(l => l.trimEnd()).filter(l => l.trim().length > 0);
-
-  // Stuck: the last 3 lines repeat the previous 3 (repeating-output loop).
-  const last3 = allLines.slice(-3).join('\n');
-  const prev3 = allLines.slice(-6, -3).join('\n');
-  const stuck = last3.length > 50 && last3 === prev3;
-
-  const errors = nonEmpty
-    .filter(l => SUMM_ERROR_RE.test(l))
-    .slice(-3)
-    .map(l => l.trim().slice(0, 200));
-
-  const lastAction = nonEmpty.length ? nonEmpty[nonEmpty.length - 1].trim().slice(0, 200) : null;
-
-  // Order mirrors suggest_next_actions: erroring > stuck > blocked > waiting > active.
-  let state;
-  if (SUMM_ERROR_RE.test(clean)) state = 'erroring';
-  else if (stuck) state = 'stuck';
-  else if (SUMM_BLOCKED_RE.test(clean)) state = 'blocked';
-  else if (SUMM_WAITING_RE.test(clean)) state = 'waiting';
-  else if (SUMM_ACTIVE_RE.test(clean) && c.active) state = 'active';
-  else state = 'idle';
-
-  const stepMatch = clean.match(/\b(?:running|building|installing|testing|compiling|deploying|starting|executing|processing|analyzing|reviewing|implementing|fixing|refactoring)\b[^\n]{0,80}/i);
-  const currentStep = stepMatch ? stepMatch[0].trim().slice(0, 160) : lastAction;
-
-  return {
-    state,
-    errors,
-    lastAction,
-    currentStep,
-    goal: inferGoal(clean, c),
-  };
-}
-
-// Best-effort goal inference from pane content (regex only). Returns null only if
-// nothing at all can be inferred — otherwise prefers an explicit ticket reference,
-// then an action phrase, then a role/project fallback.
-function inferGoal(clean, c) {
-  const ticket = clean.match(SUMM_TICKET_RE);
-  if (ticket) return ticket[1];
-  const action = clean.match(/\b(?:working on|implementing|fixing|building|refactoring|reviewing|investigating)\b[^\n]{0,80}/i);
-  if (action) return action[0].trim().slice(0, 120);
-  if (c && c.role && c.project) return `${c.role} on ${c.project}`;
-  if (c && c.role) return c.role;
-  return null;
-}
+// Pane-state classification (classifyPane), the SUMM_* regexes, stripAnsi, and
+// inferGoal now live in agentState.js (WARDEN-344) — imported above. They were
+// lifted out verbatim so the HTTP layer's /api/agent-states endpoint can reuse the
+// exact same detector the Observer summarize_chats tool uses, with no duplication.
 
 // ---------------- change-aware state cache (WARDEN-166) ----------------
 //

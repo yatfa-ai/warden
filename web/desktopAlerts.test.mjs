@@ -41,15 +41,22 @@ const test = (name, fn) => {
 };
 
 // Builder: hand-roll an AttentionRollup exactly as buildAttentionRollup would —
-// total is always the sum of the four buckets, so the cases read as "which
-// attention" not a wall of literals with hand-maintained totals.
+// total is always the sum of the eight buckets, so the cases read as "which
+// attention" not a wall of literals with hand-maintained totals. The four pane-state
+// buckets (WARDEN-344) default to empty arrays like the real rollup guarantees.
 const agent = (id) => ({ id, key: id, name: id });
 const roll = (b = {}) => {
   const critical = b.critical ?? [];
   const warning = b.warning ?? [];
+  const stuck = b.stuck ?? [];
+  const erroring = b.erroring ?? [];
+  const waiting = b.waiting ?? [];
+  const blocked = b.blocked ?? [];
   const directives = b.directives ?? 0;
   const errors = b.errors ?? 0;
-  return { critical, warning, directives, errors, total: critical.length + warning.length + directives + errors };
+  const total = critical.length + warning.length + stuck.length + erroring.length +
+    waiting.length + blocked.length + directives + errors;
+  return { critical, warning, stuck, erroring, waiting, blocked, directives, errors, total };
 };
 
 console.log('\nshouldFireAlert: fires ONLY on a genuine total increase');
@@ -116,6 +123,44 @@ test('only errors → just the error bucket', () => {
 });
 test('only a warning → singular label', () => {
   assert.equal(formatAlertMessage(roll({ warning: [agent('w1')] })).body, '1 warning');
+});
+
+console.log('\nformatAlertMessage: pane-state buckets (WARDEN-344) name stuck/erroring/waiting/blocked');
+test('a stuck agent appears in the body as "stuck"', () => {
+  assert.equal(formatAlertMessage(roll({ stuck: [agent('s1')] })).body, '1 stuck');
+});
+test('an erroring agent appears in the body as "erroring"', () => {
+  assert.equal(formatAlertMessage(roll({ erroring: [agent('e1')] })).body, '1 erroring');
+});
+test('a waiting agent appears in the body as "waiting"', () => {
+  assert.equal(formatAlertMessage(roll({ waiting: [agent('w1'), agent('w2')] })).body, '2 waiting');
+});
+test('a blocked agent appears in the body as "blocked"', () => {
+  assert.equal(formatAlertMessage(roll({ blocked: [agent('b1')] })).body, '1 blocked');
+});
+test('red pane states sort before amber in the body (critical, stuck, erroring, warning, waiting, blocked)', () => {
+  const r = roll({
+    critical: [agent('c1')], stuck: [agent('s1')], erroring: [agent('e1')],
+    warning: [agent('w1')], waiting: [agent('w1')], blocked: [agent('b1')],
+  });
+  assert.equal(formatAlertMessage(r).body, '1 critical · 1 stuck · 1 erroring · 1 warning · 1 waiting · 1 blocked');
+});
+
+console.log('\nshouldFireAlert: a pane flipping to a stuck/erroring/waiting state raises the total → fires');
+test('a pane newly stuck (0 → 1) fires', () => {
+  assert.equal(shouldFireAlert(roll(), roll({ stuck: [agent('s1')] })), true);
+});
+test('a pane newly erroring fires', () => {
+  assert.equal(shouldFireAlert(roll(), roll({ erroring: [agent('e1')] })), true);
+});
+test('a pane newly waiting fires', () => {
+  assert.equal(shouldFireAlert(roll(), roll({ waiting: [agent('w1')] })), true);
+});
+test('a persistent stuck condition (1 → 1) does NOT repeat', () => {
+  assert.equal(shouldFireAlert(roll({ stuck: [agent('s1')] }), roll({ stuck: [agent('s1')] })), false);
+});
+test('a stuck pane recovering (1 → 0) does NOT fire', () => {
+  assert.equal(shouldFireAlert(roll({ stuck: [agent('s1')] }), roll()), false);
 });
 
 console.log(`\n✓ DESKTOP ALERTS TESTS PASS (${passed})`);

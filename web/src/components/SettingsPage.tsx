@@ -220,6 +220,11 @@ interface Props {
   // next pane attach (no restart).
   hostOptions: HostOptionsMap;
   onSetHostSeamlessCopy: (host: string, seamlessCopy: boolean) => void;
+  // Per-state Attention toggle (WARDEN-344): which pane states raise the badge +
+  // desktop alert. Pure client-side localStorage pref (same channel/persistence as
+  // attentionDesktopAlerts); never added to the backend `config`.
+  attentionStates: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean };
+  setAttentionStates: (v: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean }) => void;
 }
 
 /** A titled group of related settings. In the master-detail layout only one
@@ -343,7 +348,7 @@ function PresetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, timestampFormat, setTimestampFormat, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin, closeToTray, setCloseToTray, hostOptions, onSetHostSeamlessCopy }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, attentionStates, setAttentionStates, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, timestampFormat, setTimestampFormat, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin, closeToTray, setCloseToTray, hostOptions, onSetHostSeamlessCopy }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -1534,7 +1539,37 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                     </Label>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    Show an OS notification when an agent goes critical/warning or a new directive/error lands while you’re in another app. Clicking it focuses Warden. Your OS will ask for permission when you turn this on.
+                    Show an OS notification when an agent needs attention — critical/warning, a newly stuck/erroring/waiting/blocked pane, or a new directive/error — while you’re in another app. Clicking it focuses Warden. Your OS will ask for permission when you turn this on.
+                  </p>
+                </div>
+
+                {/* Per-state toggle (WARDEN-344): which pane states raise the
+                    Attention badge + desktop alert. Each defaults ON; a human can
+                    silence a noisy "waiting" without losing "erroring". Same
+                    client-side channel/persistence as the master toggle above. */}
+                <div className="flex flex-col gap-2">
+                  <div className="flex flex-wrap gap-x-4 gap-y-2">
+                    {([
+                      { k: 'erroring', label: 'Erroring', hint: 'errors / stack traces' },
+                      { k: 'stuck', label: 'Stuck', hint: 'repeating-output loops' },
+                      { k: 'waiting', label: 'Waiting on you', hint: 'human-input prompts' },
+                      { k: 'blocked', label: 'Blocked', hint: 'coordination / dependency' },
+                    ] as const).map(({ k, label, hint }) => (
+                      <div key={k} className="flex items-center gap-2">
+                        <Switch
+                          id={`attention-state-${k}`}
+                          checked={attentionStates[k] !== false}
+                          onCheckedChange={(v) => setAttentionStates({ ...attentionStates, [k]: v })}
+                        />
+                        <Label htmlFor={`attention-state-${k}`} className="cursor-pointer leading-tight">
+                          {label}
+                          <span className="block text-[10px] text-muted-foreground font-normal">{hint}</span>
+                        </Label>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Which agent pane states raise the Attention badge (and desktop alert). Turn a noisy one off without losing the others.
                   </p>
                 </div>
               </SettingsSection>
