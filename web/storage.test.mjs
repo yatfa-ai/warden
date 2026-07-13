@@ -40,7 +40,7 @@ const tmpDir = mkdtempSync(join(tmpdir(), 'warden-storage-test-'));
 writeFileSync(join(tmpDir, 'themes.mjs'), themesCode);
 const tmpFile = join(tmpDir, 'storage.mjs');
 writeFileSync(tmpFile, storageCode.replaceAll('@/lib/themes', './themes.mjs'));
-const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, mergeRecentlyClosed, RECENTLY_CLOSED_CAP, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, validateSnippetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, SNIPPET_MAX_COUNT, STARTER_SNIPPETS, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, SIDEBAR_MIN, SIDEBAR_MAX, OBSERVER_MIN, OBSERVER_MAX, PANE_MIN, HEALTH_WIDTH } = await import(tmpFile);
+const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, mergeRecentlyClosed, RECENTLY_CLOSED_CAP, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, validateSnippetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, SNIPPET_MAX_COUNT, STARTER_SNIPPETS, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, SIDEBAR_MIN, SIDEBAR_MAX, OBSERVER_MIN, OBSERVER_MAX, PANE_MIN, HEALTH_WIDTH, resetUiPrefsPreservingWorkspace } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -1275,6 +1275,203 @@ test('the map survives an empty-mode mount (carried by the live spread, not the 
   const d0 = loadUi();
   saveUi(persistUiState({ ...d0, customPresets: [{ name: 'codex', cmd: 'codex' }], defaultNewChatPresetByHost: { 'gpu-box': 'codex' } }, 'empty', d0, true));
   assert.deepEqual(loadUi().defaultNewChatPresetByHost, { 'gpu-box': 'codex' });
+});
+
+// --- resetUiPrefsPreservingWorkspace — workspace-preserving reset (WARDEN-346) -
+// A fully over-tuned UiState: EVERY pref AND every workspace/layout field set to
+// a NON-default value, so the reset tests below prove the transformation both
+// changes the prefs (not a tautology — the input really was tuned) and keeps the
+// workspace (not just because it happened to already be default).
+const overTunedLive = () => {
+  const live = loadUi();
+  const wsId = live.activeWorkspaceId;
+  return {
+    ...live,
+    // prefs (all non-default → must reset to DEFAULT_UI)
+    theme: 'dark',
+    density: 'compact',
+    paneLayout: 'stacked',
+    onExitBehavior: 'auto-close',
+    autoFocusNewPane: false,
+    restoreOnStartup: 'empty',
+    timestampFormat: 'absolute',
+    terminalFontSize: 20,
+    attentionDesktopAlerts: true,
+    attentionStates: { stuck: false, erroring: false, waiting: false, blocked: false },
+    alertCritical: false, alertWarning: false, alertDirective: false, alertError: false,
+    mutedAlertKeys: ['mute-1'],
+    watchedChats: ['watch-1'],
+    terminalScrollback: 5000,
+    terminalFontFamily: '"Hack Nerd Font", ui-monospace, monospace',
+    terminalColorScheme: 'dark',
+    terminalCursorStyle: 'steady-bar',
+    copyOnSelect: true,
+    defaultNewChatPreset: 'shell',
+    defaultNewChatPresetByHost: { 'host-a': 'shell' },
+    defaultNewChatHost: 'prod-box',
+    defaultNewChatCwd: '~/projects/warden',
+    defaultNewChatCwdByHost: { 'host-a': '/srv' },
+    customPresets: [{ name: 'codex', cmd: 'codex' }],
+    snippets: [{ name: 'custom-snippet', text: 'do the thing' }],
+    defaultSplitShell: 'zsh',
+    hostOptions: { 'host-a': { seamlessCopy: true } },
+    copyHintDismissed: { 'host-a': true },
+    agentFilter: 'filtering',
+    agentSort: 'recent',
+    // workspace + layout (all non-default → must be PRESERVED). WARDEN-372 moved
+    // the open panes + focus into per-workspace WorkspacePaneSet objects under
+    // `workspaces` (+ activeWorkspaceId); paneHost stayed global. Seed a
+    // non-default, multi-workspace set so the "survives reset" assertion is not
+    // a tautology (the input really differs from the single-empty-workspace
+    // default).
+    workspaces: [
+      { id: wsId, name: 'Tuned workspace', openPanes: ['chat-1', 'chat-2'], focused: 'chat-2', recentlyClosed: [] },
+      { id: 'ws-extra', name: 'Extra', openPanes: ['chat-3'], focused: 'chat-3', recentlyClosed: [] },
+    ],
+    activeWorkspaceId: wsId,
+    paneHost: { 'chat-1': 'host-a', 'chat-2': 'host-b', 'chat-3': 'host-c' },
+    sidebarCollapsed: true,
+    observerCollapsed: true,
+    healthCollapsed: false,
+    sidebarWidth: 300,
+    observerWidth: 500,
+  };
+};
+
+console.log('\nresetUiPrefsPreservingWorkspace snaps prefs to defaults while preserving the workspace — WARDEN-346');
+
+test('every pref field of resetUiPrefsPreservingWorkspace(live) equals DEFAULT_UI\'s value', () => {
+  reset();
+  const live = overTunedLive();
+  // Guard: the input prefs really were non-default (else the test is tautological
+  // — a reset that returns defaults from default input proves nothing).
+  assert.equal(live.theme, 'dark');
+  assert.equal(live.density, 'compact');
+  assert.notEqual(live.terminalFontFamily, '');
+  assert.equal(live.copyOnSelect, true);
+  assert.deepEqual(live.customPresets, [{ name: 'codex', cmd: 'codex' }]);
+  assert.equal(live.restoreOnStartup, 'empty');
+  assert.equal(live.timestampFormat, 'absolute');
+  assert.equal(live.alertCritical, false);
+  assert.deepEqual(live.mutedAlertKeys, ['mute-1']);
+  assert.deepEqual(live.snippets, [{ name: 'custom-snippet', text: 'do the thing' }]);
+
+  const r = resetUiPrefsPreservingWorkspace(live);
+  // Every pref snaps to its DEFAULT_UI value.
+  assert.equal(r.theme, 'system');
+  assert.equal(r.density, 'comfortable');
+  assert.equal(r.paneLayout, 'auto');
+  assert.equal(r.onExitBehavior, 'keep');
+  assert.equal(r.autoFocusNewPane, true);
+  assert.equal(r.restoreOnStartup, 'previous');
+  assert.equal(r.terminalFontSize, 14);
+  assert.equal(r.attentionDesktopAlerts, false);
+  assert.equal(r.terminalScrollback, 10000);
+  assert.equal(r.terminalFontFamily, '', 'DEFAULT_UI sentinel (App coerces to the stack for live state)');
+  assert.equal(r.terminalColorScheme, 'auto');
+  assert.equal(r.terminalCursorStyle, 'blink-block');
+  assert.equal(r.copyOnSelect, false);
+  assert.equal(r.defaultNewChatPreset, 'claude');
+  assert.equal(r.defaultNewChatHost, '(local)');
+  assert.equal(r.defaultNewChatCwd, '');
+  assert.deepEqual(r.customPresets, []);
+  assert.equal(r.defaultSplitShell, '');
+  // Prefs added by tickets that landed after WARDEN-346 branched reset too.
+  assert.equal(r.timestampFormat, 'relative');
+  assert.deepEqual(r.attentionStates, { stuck: true, erroring: true, waiting: true, blocked: true });
+  assert.equal(r.alertCritical, true);
+  assert.equal(r.alertWarning, true);
+  assert.equal(r.alertDirective, true);
+  assert.equal(r.alertError, true);
+  assert.deepEqual(r.mutedAlertKeys, []);
+  assert.deepEqual(r.watchedChats, []);
+  assert.deepEqual(r.defaultNewChatPresetByHost, {});
+  assert.deepEqual(r.defaultNewChatCwdByHost, {});
+  assert.deepEqual(r.snippets, STARTER_SNIPPETS);
+  assert.deepEqual(r.hostOptions, {});
+  assert.deepEqual(r.copyHintDismissed, {});
+  // agentFilter/agentSort are in DEFAULT_UI; the helper resets them too.
+  assert.equal(r.agentFilter, 'all');
+  assert.equal(r.agentSort, 'manual');
+});
+
+test('the workspace + panel-layout fields are copied from live (the workspace survives)', () => {
+  reset();
+  const live = overTunedLive();
+  const r = resetUiPrefsPreservingWorkspace(live);
+  // Workspace model (WARDEN-372): the full workspaces array + active id + global
+  // paneHost are preserved verbatim — the open panes/focus inside each workspace
+  // survive, and a multi-workspace set is kept whole.
+  assert.equal(r.workspaces.length, 2);
+  assert.equal(r.activeWorkspaceId, live.activeWorkspaceId);
+  assert.equal(r.workspaces[0].name, 'Tuned workspace');
+  assert.deepEqual(r.workspaces[0].openPanes, ['chat-1', 'chat-2']);
+  assert.equal(r.workspaces[0].focused, 'chat-2');
+  assert.equal(r.workspaces[1].id, 'ws-extra');
+  assert.deepEqual(r.workspaces[1].openPanes, ['chat-3']);
+  assert.deepEqual(r.paneHost, { 'chat-1': 'host-a', 'chat-2': 'host-b', 'chat-3': 'host-c' });
+  // Panel layout (collapse state + widths) is preserved too.
+  assert.equal(r.sidebarCollapsed, true);
+  assert.equal(r.observerCollapsed, true);
+  assert.equal(r.healthCollapsed, false);
+  assert.equal(r.sidebarWidth, 300);
+  assert.equal(r.observerWidth, 500);
+});
+
+test('round-trip: saveUi(resetUiPrefsPreservingWorkspace(live)) then loadUi() yields DEFAULT prefs + preserved workspace', () => {
+  reset();
+  const live = overTunedLive();
+  saveUi(resetUiPrefsPreservingWorkspace(live));
+  const after = loadUi();
+  // Prefs are the defaults, read back through the full loadUi coercion path.
+  assert.equal(after.theme, 'system');
+  assert.equal(after.density, 'comfortable');
+  assert.equal(after.paneLayout, 'auto');
+  assert.equal(after.onExitBehavior, 'keep');
+  assert.equal(after.autoFocusNewPane, true);
+  assert.equal(after.restoreOnStartup, 'previous');
+  assert.equal(after.terminalFontSize, 14);
+  assert.equal(after.attentionDesktopAlerts, false);
+  assert.equal(after.terminalScrollback, 10000);
+  assert.equal(after.terminalFontFamily, '');
+  assert.equal(after.terminalColorScheme, 'auto');
+  assert.equal(after.terminalCursorStyle, 'blink-block');
+  assert.equal(after.copyOnSelect, false);
+  assert.equal(after.defaultNewChatPreset, 'claude');
+  assert.equal(after.defaultNewChatHost, '(local)');
+  assert.equal(after.defaultNewChatCwd, '');
+  assert.deepEqual(after.customPresets, []);
+  assert.equal(after.defaultSplitShell, '');
+  // Prefs added after WARDEN-346 round-trip to their defaults through loadUi too.
+  assert.equal(after.timestampFormat, 'relative');
+  assert.deepEqual(after.attentionStates, { stuck: true, erroring: true, waiting: true, blocked: true });
+  assert.deepEqual(after.mutedAlertKeys, []);
+  assert.deepEqual(after.watchedChats, []);
+  assert.deepEqual(after.hostOptions, {});
+  assert.deepEqual(after.snippets, STARTER_SNIPPETS);
+  // Workspace + layout survive the same reload — the core "reset is
+  // non-destructive to the open session" invariant. WARDEN-372 model: the
+  // workspaces array (each workspace's openPanes/focus) + active id + global
+  // paneHost read back through loadUi's parse path intact.
+  assert.equal(after.workspaces.length, 2);
+  assert.equal(after.activeWorkspaceId, live.activeWorkspaceId);
+  assert.deepEqual(after.workspaces[0].openPanes, ['chat-1', 'chat-2']);
+  assert.equal(after.workspaces[0].focused, 'chat-2');
+  assert.deepEqual(after.workspaces[1].openPanes, ['chat-3']);
+  assert.deepEqual(after.paneHost, { 'chat-1': 'host-a', 'chat-2': 'host-b', 'chat-3': 'host-c' });
+  assert.equal(after.sidebarCollapsed, true);
+  assert.equal(after.observerCollapsed, true);
+  assert.equal(after.healthCollapsed, false);
+  assert.equal(after.sidebarWidth, 300);
+  assert.equal(after.observerWidth, 500);
+});
+
+test('the helper is pure — it does not mutate the input live object', () => {
+  reset();
+  const live = overTunedLive();
+  const snapshot = JSON.parse(JSON.stringify(live));
+  resetUiPrefsPreservingWorkspace(live);
+  assert.deepEqual(live, snapshot, 'input live object is unchanged');
 });
 
 console.log(`\n✓ STORAGE TESTS PASS (${passed})`);

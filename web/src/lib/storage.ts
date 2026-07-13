@@ -1082,6 +1082,45 @@ export function persistUiState(
   return { ...live, restoreOnStartup };
 }
 
+// Reset every UI PREF to its DEFAULT_UI value while copying the WORKSPACE +
+// panel-layout fields from `live`. Pure (no localStorage): the App callback
+// (resetUiPrefsToDefaults) applies it via the pref setters, and the existing
+// saveUi effect persists the result via persistUiState. This is the single
+// non-destructive "Reset preferences to defaults" path: appearance/terminal/
+// new-chat/behavior prefs snap to defaults while the open workspace (tabs,
+// panes, focus, host map) AND panel layout (collapse state + widths) survive.
+//
+// The preserved fields are exactly the WORKSPACE + LAYOUT set (mirroring the
+// setters App's reset callback does NOT call): workspaces, activeWorkspaceId,
+// paneHost, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth,
+// observerWidth. (WARDEN-372 folded the former flat activeTabs/hiddenTabs/
+// openPanes/focused working set into `workspaces`/`activeWorkspaceId`; paneHost
+// stayed global.) Everything else in DEFAULT_UI is a PREF and gets the default —
+// including agentFilter/agentSort (a pre-existing App saveUi-effect inconsistency
+// leaves those unpersisted, but the helper resets them for completeness so the
+// object is a true DEFAULT_UI base).
+//
+// NOTE on terminalFontFamily: DEFAULT_UI.terminalFontFamily is '' (the "blank
+// means default stack" sentinel), so this helper returns '' for it — correct
+// for the persisted shape. App's reset callback separately coerces '' to
+// DEFAULT_TERMINAL_FONT_FAMILY for the LIVE React state so the Settings
+// font-select shows "System default" instead of "Custom…" until reload; see
+// the App callback's own nuance comment.
+export function resetUiPrefsPreservingWorkspace(live: UiState): UiState {
+  return {
+    ...DEFAULT_UI,
+    // Preserve the workspace + panel-layout fields from `live` (do NOT reset).
+    workspaces: live.workspaces,
+    activeWorkspaceId: live.activeWorkspaceId,
+    paneHost: live.paneHost,
+    sidebarCollapsed: live.sidebarCollapsed,
+    observerCollapsed: live.observerCollapsed,
+    healthCollapsed: live.healthCollapsed,
+    sidebarWidth: live.sidebarWidth,
+    observerWidth: live.observerWidth,
+  };
+}
+
 // Observer tabs
 const OBS_KEY = 'warden:observer:v1';
 const OBS_PREFIX = 'warden:observer';

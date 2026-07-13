@@ -16,6 +16,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { ArrowLeft, Trash2 } from 'lucide-react';
 import { type Theme, type TerminalColorScheme, THEMES } from '@/lib/theme';
 import { type Density } from '@/lib/density';
@@ -261,6 +262,12 @@ interface Props {
   // attentionDesktopAlerts); never added to the backend `config`.
   attentionStates: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean };
   setAttentionStates: (v: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean }) => void;
+  // Reset every client-side UI PREF (appearance, terminal, new-chat, behavior)
+  // to its DEFAULT_UI value while preserving the open workspace (tabs/panes/
+  // focus/host map) and panel layout (collapse state + widths). Confirm-gated
+  // by this page's danger-zone control; the callback is App-owned and stable.
+  // Pure client-side: never touches the backend / config.json. See WARDEN-346.
+  resetUiPrefsToDefaults: () => void;
 }
 
 /** A titled group of related settings. In the master-detail layout only one
@@ -481,7 +488,7 @@ function SnippetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, attentionStates, setAttentionStates, alertCritical, setAlertCritical, alertWarning, setAlertWarning, alertDirective, setAlertDirective, alertError, setAlertError, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, timestampFormat, setTimestampFormat, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatPresetByHost, setDefaultNewChatPresetByHost, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, snippets, setSnippets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin, closeToTray, setCloseToTray, hostOptions, onSetHostSeamlessCopy }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, attentionStates, setAttentionStates, alertCritical, setAlertCritical, alertWarning, setAlertWarning, alertDirective, setAlertDirective, alertError, setAlertError, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, timestampFormat, setTimestampFormat, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatPresetByHost, setDefaultNewChatPresetByHost, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, snippets, setSnippets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin, closeToTray, setCloseToTray, hostOptions, onSetHostSeamlessCopy, resetUiPrefsToDefaults }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -508,6 +515,11 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
   const [availableHosts, setAvailableHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  // "Reset preferences to defaults" confirm dialog (danger-zone). Always gated
+  // by the confirm — it is a rare, destructive-to-prefs action worth the
+  // friction regardless of the confirmDestructiveActions kill-toggle (that
+  // toggle is about chat/session kills, not about reverting your own tuning).
+  const [resetPrefsOpen, setResetPrefsOpen] = useState(false);
 
   // Observer auth token — write-only (WARDEN-350). GET /api/config returns only
   // a masked indicator (authTokenSet + optional last-4); there is no cleartext
@@ -625,6 +637,16 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
   };
 
   const availableHostsToAdd = availableHosts.filter((h) => !config.hosts.includes(h));
+
+  // Confirm the workspace-preserving prefs reset: applies the App callback
+  // (which snaps every pref to its default and lets the saveUi effect persist
+  // it), closes the dialog, and toasts. The workspace (tabs/panes/focus) and
+  // panel layout are untouched by design.
+  const confirmResetPrefs = () => {
+    resetUiPrefsToDefaults();
+    setResetPrefsOpen(false);
+    toast.success('Preferences reset to defaults');
+  };
 
   // --- Custom spawn-preset management (create / rename / delete) -------------
   // All pure client-side: edits apply instantly via setCustomPresets and are
@@ -2073,6 +2095,30 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   </div>
                 </div>
               </SettingsSection>
+
+              {/* Danger zone — workspace-preserving reset of all client-side UI
+                  prefs. The ONLY non-destructive way to revert an over-tuned
+                  setup: appearance/terminal/new-chat/behavior prefs snap to
+                  their defaults while open tabs, panes, focus, and panel layout
+                  survive. Pure client-side (no backend / config.json write).
+                  Always confirm-gated: a rare, hard-to-undo en-masse revert is
+                  worth the friction even with the destructive-confirm toggle
+                  off (that toggle governs chat/session kills, not this). */}
+              <SettingsSection title="Reset">
+                <div className="flex flex-col gap-3 rounded-md border border-destructive/30 p-3">
+                  <div className="flex flex-col gap-1">
+                    <span className="text-sm font-medium">Reset preferences to defaults</span>
+                    <span className="text-xs text-muted-foreground">
+                      Resets all appearance, terminal, new-chat, and behavior preferences to their defaults. Your open tabs, panes, focus, and panel layout are preserved.
+                    </span>
+                  </div>
+                  <div>
+                    <Button variant="destructive" size="sm" onClick={() => setResetPrefsOpen(true)}>
+                      Reset preferences to defaults
+                    </Button>
+                  </div>
+                </div>
+              </SettingsSection>
                 </>
               )}
             </div>
@@ -2088,6 +2134,17 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
           {saving ? 'Saving…' : 'Save'}
         </Button>
       </footer>
+
+      <ConfirmDialog
+        open={resetPrefsOpen}
+        onOpenChange={(o) => { if (!o) setResetPrefsOpen(false); }}
+        title="Reset preferences to defaults?"
+        description="Resets all appearance, terminal, new-chat, and behavior preferences to their defaults. Your open tabs, panes, focus, and panel layout are preserved."
+        confirmLabel="Reset"
+        cancelLabel="Cancel"
+        destructive
+        onConfirm={confirmResetPrefs}
+      />
     </div>
   );
 }
