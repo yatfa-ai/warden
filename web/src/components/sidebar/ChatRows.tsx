@@ -80,7 +80,7 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
   incomingCommits?: GitCommit[]; incomingLoading?: boolean; onFetchIncoming?: () => void;
   // WARDEN-252: outgoing (ahead/unpushed) commits + their own fetch/loader.
   outgoingCommits?: GitCommit[]; outgoingLoading?: boolean; onFetchOutgoing?: () => void;
-  onOpenDiff?: (path: string) => void;
+  onOpenDiff?: (path: string, staged?: boolean) => void;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
   isPinned?: boolean; onTogglePin?: () => void;
   // WARDEN-292: multi-select for broadcast. `selected` is this row's membership
@@ -305,7 +305,7 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
   incomingCommits?: GitCommit[]; incomingLoading?: boolean; onFetchIncoming?: () => void;
   // WARDEN-252: outgoing (ahead/unpushed) commits + their own fetch/loader.
   outgoingCommits?: GitCommit[]; outgoingLoading?: boolean; onFetchOutgoing?: () => void;
-  onOpenDiff?: (path: string) => void;
+  onOpenDiff?: (path: string, staged?: boolean) => void;
   onKill?: () => void;
   // WARDEN-305: per-agent note (mirrors pins; keyed by chat id).
   note?: string;

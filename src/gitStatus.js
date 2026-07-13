@@ -33,8 +33,16 @@
  * through to the generic-gray row. The field is additive — existing consumers
  * that destructure `{ path, status }` ignore it.
  *
+ * In addition, the raw porcelain X/Y columns are exposed verbatim as `staged`
+ * (X — the index/staged status) and `worktree` (Y — the worktree/unstaged
+ * status), each a single character where a space means "no change in that slot".
+ * `.trim()`-collapsing the status code destroys the position — "M " (staged) and
+ * " M" (unstaged) both yield `status:"M"` — so the two columns are what let a
+ * renderer tell a STAGED-for-commit file apart from unstaged WIP (WARDEN-369).
+ * Both fields are additive alongside `status`, which is kept for backward compat.
+ *
  * @param {string|Buffer|undefined} output - Raw stdout from `git status --porcelain`.
- * @returns {Array<{path: string, status: string, conflict: boolean}>} Changed files, or `[]` when clean.
+ * @returns {Array<{path: string, status: string, staged: string, worktree: string, conflict: boolean}>} Changed files, or `[]` when clean.
  */
 // The unmerged (conflict) XY codes from `git status --porcelain` v1. For an
 // unmerged path git sets BOTH columns — at least one 'U' (unmerged), or the
@@ -150,7 +158,23 @@ export function parseGitStatusPorcelain(output) {
     .map((line) => {
       const statusCode = line.substring(0, 2).trim();
       const filePath = line.substring(3).trim();
-      return { path: filePath, status: statusCode || '??', conflict: isConflictStatus(statusCode) };
+      // Preserve the porcelain X/Y position so a STAGED-for-commit file is no longer
+      // indistinguishable from an unstaged WIP file (WARDEN-369). `status` is the
+      // collapsed/trimmed code existing consumers already read (kept verbatim for
+      // backward compat); `staged`/`worktree` are the raw single columns:
+      //   X = line.charAt(0) = index/staged status  (' ' = nothing staged)
+      //   Y = line.charAt(1) = worktree/unstaged status (' ' = clean worktree)
+      // charAt — not the trimmed substring — is what keeps the position: "M " and
+      // " M" both collapse to status "M", but staged 'M'/' ' vs ' '/'M' differ.
+      // This is a DIFFERENT trim than the whole-blob `.trim()` pitfall above: the
+      // line is already split out, so charAt reads each line's own columns safely.
+      return {
+        path: filePath,
+        status: statusCode || '??',
+        staged: line.charAt(0),
+        worktree: line.charAt(1),
+        conflict: isConflictStatus(statusCode),
+      };
     })
     .filter((f) => f.path.length > 0);
 }

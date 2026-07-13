@@ -14,11 +14,15 @@ import { classifyDiffLine, DIFF_LINE_CLASS } from '@/lib/diff';
 interface DiffViewerProps {
   chatId: string;
   filePath: string;
+  // WARDEN-369: when true, fetch `git diff --cached` (index-vs-HEAD = exactly what
+  // will be committed) instead of the combined worktree-vs-HEAD diff. Set when a
+  // STAGED file in the dirty-file list is clicked.
+  staged?: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-export function DiffViewer({ chatId, filePath, open, onOpenChange }: DiffViewerProps) {
+export function DiffViewer({ chatId, filePath, staged, open, onOpenChange }: DiffViewerProps) {
   const [diff, setDiff] = useState<string | null>(null);
   const [untracked, setUntracked] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -39,7 +43,8 @@ export function DiffViewer({ chatId, filePath, open, onOpenChange }: DiffViewerP
       setDiff(null);
       setUntracked(false);
       try {
-        const response = await fetch(`/api/git-diff?id=${encodeURIComponent(chatId)}&path=${encodeURIComponent(filePath)}`);
+        const url = `/api/git-diff?id=${encodeURIComponent(chatId)}&path=${encodeURIComponent(filePath)}${staged ? '&staged=1' : ''}`;
+        const response = await fetch(url);
 
         if (!response.ok) {
           const data = await response.json();
@@ -61,7 +66,7 @@ export function DiffViewer({ chatId, filePath, open, onOpenChange }: DiffViewerP
 
     fetchDiff();
     return () => { cancelled = true; };
-  }, [chatId, filePath, open]);
+  }, [chatId, filePath, staged, open]);
 
   const empty = !loading && !error && diff !== null && diff.length === 0;
 
@@ -72,6 +77,11 @@ export function DiffViewer({ chatId, filePath, open, onOpenChange }: DiffViewerP
           <DialogTitle className="flex items-center gap-2">
             <FileIcon className="w-4 h-4 shrink-0" />
             <span className="truncate">{filePath}</span>
+            {staged && (
+              <span className="shrink-0 rounded bg-green-500/15 px-1.5 py-px text-[10px] font-medium text-green-400" title="staged-only diff — exactly what will be committed (git diff --cached)">
+                staged
+              </span>
+            )}
           </DialogTitle>
         </DialogHeader>
 

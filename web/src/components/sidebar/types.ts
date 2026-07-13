@@ -17,4 +17,25 @@ export interface ClaudeSession { id: string; cwd: string; summary: string; mtime
 // matched the query, across hosts — incl. sessions outside the top-40 list).
 export interface SessionSearchResult { host: string; sessionId: string; cwd: string; summary: string; snippet: string; mtime: number }
 
-export interface GitFile { path: string; status: string; conflict?: boolean }
+// One changed file from /api/git-status (parsed from a porcelain v1 `XY <path>`
+// line) or /api/git-show (a `--name-status` letter for a committed file).
+//
+// `status` is the collapsed/trimmed porcelain code existing consumers read (e.g.
+// "M", "A", "D", "??", "MM"); for committed files it is a single `--name-status`
+// letter (M/A/D/R/C) and the X/Y fields are absent.
+//
+// `staged` / `worktree` are the raw porcelain X/Y columns (WARDEN-369) — present
+// ONLY for working-tree files from /api/git-status: X = index/staged status,
+// Y = worktree/unstaged status, each a single character (' ' = no change in that
+// slot, '?' = untracked). The position is what lets a renderer tell a
+// STAGED-for-commit file apart from unstaged WIP (both collapse to status:"M"),
+// and is what the staged-only diff path keys on (clicking a staged file opens
+// `git diff --cached`). Absent for committed files, where the legacy M/A/D color
+// map is used instead.
+export interface GitFile {
+  path: string;
+  status: string;
+  staged?: string;
+  worktree?: string;
+  conflict?: boolean;
+}

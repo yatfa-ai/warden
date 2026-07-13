@@ -1555,8 +1555,15 @@ export function capDiff(diff) {
 // single-quoted POSIX token spliced in bare — same WARDEN-122 quoting discipline as
 // read-file/git-log. The `--` before the path stops option parsing so a path named
 // like a flag can't inject options.
-export function buildGitDiffScript(cwd, filePath) {
-  return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; RESOLVED_CWD="$(cd "$CWD" && pwd -P)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -m -- "$FILE" 2>/dev/null)" || RESOLVED="$RESOLVED_CWD/$FILE"; case "$RESOLVED" in "$RESOLVED_CWD"/*|"$RESOLVED_CWD") ;; *) echo "ERROR path must be within working directory"; exit 1 ;; esac; git diff HEAD -- "$FILE" 2>/dev/null`;
+//
+// `staged` (WARDEN-369) swaps `git diff HEAD` for `git diff --cached` so clicking a
+// STAGED file shows exactly what will be committed (the index-vs-HEAD diff) rather
+// than the combined worktree-vs-HEAD diff. `git diff --cached` is strictly read-only
+// (NOT in the forbidden mutating-ops set — see the read-only contract comment above
+// /api/git-diff), so this stays within Warden's by-design read-only contract.
+export function buildGitDiffScript(cwd, filePath, staged) {
+  const diffCmd = staged ? 'git diff --cached' : 'git diff HEAD';
+  return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; RESOLVED_CWD="$(cd "$CWD" && pwd -P)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -m -- "$FILE" 2>/dev/null)" || RESOLVED="$RESOLVED_CWD/$FILE"; case "$RESOLVED" in "$RESOLVED_CWD"/*|"$RESOLVED_CWD") ;; *) echo "ERROR path must be within working directory"; exit 1 ;; esac; ${diffCmd} -- "$FILE" 2>/dev/null`;
 }
 
 // Is a cwd-relative `filePath` contained within `cwd`? Mirrors /api/read-file's guard,
@@ -1584,19 +1591,24 @@ export function isPathWithinCwd(cwd, filePath) {
 // so it's disambiguated with `git ls-files --error-unmatch` (exits non-zero for a
 // path git doesn't track) — letting the UI say "untracked" instead of "no changes".
 // Output is capped at GIT_DIFF_MAX_BYTES to protect the server. Exported for tests.
-export function getLocalGitDiff(cwd, filePath) {
+//
+// `staged` (WARDEN-369) runs `git diff --cached` (index-vs-HEAD, exactly what will
+// be committed) instead of `git diff HEAD` (combined staged+unstaged). Read-only.
+export function getLocalGitDiff(cwd, filePath, staged) {
   if (!isPathWithinCwd(cwd, filePath)) {
     return { error: 'path must be within working directory', status: 403 };
   }
 
-  const result = runLocalGit(['diff', 'HEAD', '--', filePath], cwd);
+  const result = runLocalGit(staged ? ['diff', '--cached', '--', filePath] : ['diff', 'HEAD', '--', filePath], cwd);
   let diff = capDiff(result.stdout ? result.stdout.toString() : '');
 
   if (diff.length === 0) {
     // Empty diff is ambiguous: a clean tracked file vs an untracked ('??') file HEAD
     // has no record of. `git ls-files --error-unmatch` exits non-zero for a path git
     // doesn't track. (Containment above already guaranteed the path is within cwd, so
-    // a non-zero exit here means untracked, not "outside repo".)
+    // a non-zero exit here means untracked, not "outside repo".) For staged mode an
+    // empty diff means "nothing staged for this path" — the file is tracked, so this
+    // check returns tracked and the empty diff flows through unchanged.
     const tracked = runLocalGit(['ls-files', '--error-unmatch', '--', filePath], cwd);
     if (tracked.status !== 0) return { diff: null, untracked: true };
   }
@@ -1612,8 +1624,8 @@ export function getLocalGitDiff(cwd, filePath) {
 // so the `cd <cwd>` + `realpath` resolve where the repo actually is. The remote
 // untracked check is a second runInContext (only when the diff is empty) so the
 // common case stays a single round-trip. See WARDEN-235.
-async function getDeliveredGitDiff(chat, cwd, filePath) {
-  const script = buildGitDiffScript(cwd, filePath);
+async function getDeliveredGitDiff(chat, cwd, filePath, staged) {
+  const script = buildGitDiffScript(cwd, filePath, staged);
   const r = await runInContext(chat, script);
   if (!r.ok) {
     const out = `${r.stdout || ''}${r.stderr || ''}`;
@@ -1640,10 +1652,15 @@ async function getDeliveredGitDiff(chat, cwd, filePath) {
 }
 
 // GET /api/git-diff?id=<chatId>&path=<file> — unified diff of one file vs HEAD.
+//   ?staged=1 — diff the INDEX vs HEAD instead (exactly what will be committed),
+//               so clicking a staged file shows its staged-only diff, not the
+//               combined worktree-vs-HEAD diff (WARDEN-369). `git diff --cached`
+//               is strictly read-only (see the contract comment below).
 // Response: { diff: string|null, untracked: boolean, path, error }
 app.get('/api/git-diff', async (req, res) => {
   const filePath = String(req.query.path || '').trim();
   if (!filePath) return res.status(400).json({ diff: null, untracked: false, path: '', error: 'path is required' });
+  const staged = String(req.query.staged || '') === '1';
 
   const { chat, error } = await resolve(String(req.query.id || ''));
   if (error) return res.status(404).json({ diff: null, untracked: false, path: filePath, error });
@@ -1657,8 +1674,8 @@ app.get('/api/git-diff', async (req, res) => {
     // — runs the diff in-context via docker-exec/ssh (getDeliveredGitDiff), so the
     // realpath containment + git diff resolve where the repo actually lives.
     const result = (!chat.container && chat.host === LOCAL)
-      ? getLocalGitDiff(cwd, filePath)
-      : await getDeliveredGitDiff(chat, cwd, filePath);
+      ? getLocalGitDiff(cwd, filePath, staged)
+      : await getDeliveredGitDiff(chat, cwd, filePath, staged);
 
     if (result.status) return res.status(result.status).json({ diff: null, untracked: false, path: filePath, error: result.error });
     if (result.error) return res.json({ diff: null, untracked: false, path: filePath, error: result.error });
