@@ -5,6 +5,7 @@ import { loadUi, saveUi, persistUiState, initialWorkspace, DEFAULT_TERMINAL_FONT
 import { applyTheme, listenSystemThemeChange, getEffectiveTheme, resolveTerminalTheme, type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
+import { stampLastSeen } from '@/lib/whatsNew';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
@@ -365,6 +366,19 @@ function App() {
     if (focused) setNewActivity((prev) => { if (!prev.has(focused)) return prev; const n = new Set(prev); n.delete(focused); return n; });
   }, [focused]);
 
+  // Per-agent "lastSeen" stamp (WARDEN-356): the moment a pane is focused is the
+  // moment the human is looking at THAT agent — so it's the natural point to
+  // reset its per-agent catch-up clock. Mirrors the fleet-wide warden:lastClose
+  // stamp (written on close, read on the "While you were away" banner): same
+  // String(Date.now()) shape, but keyed per chatId so the "What's new since"
+  // marker + view answer "what did THIS agent change since I was last here?"
+  // rather than "since the whole app closed." Opening the pane (openChat below)
+  // stamps too, so a visit counts even when autoFocusNewPane is OFF (open without
+  // focus). localStorage-only — never sent to the backend, matching lastClose.
+  useEffect(() => {
+    if (focused) stampLastSeen(focused);
+  }, [focused]);
+
   // apply theme on mount and when theme changes
   useEffect(() => {
     // Apply theme immediately
@@ -635,6 +649,14 @@ function App() {
   // deliberate action.
   const openChat = useCallback((id: string) => {
     setActiveTabs((p) => p.includes(id) ? p : [...p, id]);
+    // WARDEN-356: opening the pane counts as a visit to THIS agent — reset its
+    // per-agent lastSeen so the "What's new since" marker reflects work landed
+    // after THIS open. Stamped before the workspace search below so a visit
+    // counts whether the pane is newly opened OR switched-to from another
+    // workspace. When autoFocusNewPane is ON the focus effect also stamps
+    // (idempotent — both write Date.now()); this line guarantees the stamp
+    // happens even when opening doesn't steal focus (autoFocusNewPane OFF).
+    stampLastSeen(id);
     // remember this pane's host so a restored remote pane knows which host to discover
     const c = chatsRef.current.find((x) => (x.key || x.id) === id);
     if (c?.host) setPaneHost((p) => (p[id] === c.host ? p : { ...p, [id]: c.host }));

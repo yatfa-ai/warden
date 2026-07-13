@@ -24,6 +24,7 @@ import {
   type AgentFilter, type AgentSort,
 } from '@/lib/agentFilter';
 import { summarizeProjectGitState, detectProjectFileCollisions } from '@/lib/gitStateSummary';
+import { getLastSeen } from '@/lib/whatsNew';
 import type { Chat, Collection } from '@/lib/types';
 import { StatusDot } from '@/components/StatusDot';
 import type { GitCommit, GitFile, ClaudeSession } from './sidebar/types';
@@ -499,6 +500,24 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       if (c) fetchGitStatus(id);
     });
   }, [chats, activeTabs, fetchGitStatus]);
+
+  // WARDEN-356: keep recent git-log fresh for chats the human has VISITED so the
+  // per-agent "What's new since your last visit" marker reflects commits landed
+  // since the last open/focus. Bounded to visited chats only (getLastSeen !==
+  // null) — the marker is irrelevant for a never-visited chat, so unvisited
+  // agents pay no extra fetch (their git-log still loads lazily when the
+  // GitBranchBadge popover opens, as before). Reuses the existing fetchGitLog +
+  // /api/git-log endpoint (read-only) — no new endpoint, no backend change. The
+  // re-fetch cadence mirrors fetchGitStatus (every catalog refresh) so the
+  // marker stays current; the documented future optimization is a server `since`
+  // param if this client-side filtering ever proves costly for large fleets.
+  useEffect(() => {
+    activeTabs.forEach((id) => {
+      if (getLastSeen(id) === null) return;
+      const c = findChat(chats, id);
+      if (c) fetchGitLog(id);
+    });
+  }, [chats, activeTabs, fetchGitLog]);
 
   const handleSpawned = (chat: Chat) => { onRefresh(); onOpenChat(chat.key || chat.id); setView({ kind: 'root' }); };
   const hosts = [THIS_MACHINE, ...sshHosts];

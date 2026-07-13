@@ -17,7 +17,27 @@ import { chatType, displayName, hostTagOf } from '@/lib/chatDisplay';
 import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
 import type { Chat } from '@/lib/types';
 import type { GitCommit, GitFile } from './types';
-import { GitBranchBadge, GitChangedFile } from './GitBadges';
+import { GitBranchBadge, GitChangedFile, WhatsNewMarker } from './GitBadges';
+import { getLastSeen, summarizeWhatsNew, hasUnreviewedProgress } from '@/lib/whatsNew';
+
+// Compute the per-agent "What's new since your last visit" summary for a row
+// (WARDEN-356) from the git-log + git-status data the row already holds, plus
+// the client-side lastSeen timestamp App stamps on pane open/focus. Pure-ish
+// (reads localStorage + the clock, both cheap) and recomputed each render — so
+// it stays fresh as ChatSidebar refetches git-log/git-status on poll. Returns
+// the raw `since` (null when never visited, so hasUnreviewedProgress can gate)
+// alongside the summary. Shared by ChatRow + OpenedChatRow to avoid divergence.
+function computeWhatsNew(chatId: string, commits: GitCommit[] | undefined, gitInfo: { files?: GitFile[]; stashCount?: number | null } | undefined) {
+  const since = getLastSeen(chatId);
+  const summary = summarizeWhatsNew({
+    commits,
+    since: since ?? 0,
+    now: Date.now(),
+    changedFileCount: gitInfo?.files?.length,
+    stashCount: gitInfo?.stashCount,
+  });
+  return { since, summary, show: hasUnreviewedProgress(since, summary) };
+}
 
 const TYPE_COLOR: Record<string, string> = {
   resume: 'text-cyan-400', claude: 'text-green-400', shell: 'text-yellow-400',
@@ -90,6 +110,9 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, d
   // "unreachable" state instead of the ambiguous idle/undiscovered gray dot.
   // Driven by the shared 30s host-status poll, so it self-clears on recovery.
   const hostOffline = hostStatus === 'offline';
+  // WARDEN-356: per-agent "What's new since your last visit" marker — computed
+  // from the git-log + git-status this row already receives (+ App's lastSeen).
+  const whatsNew = computeWhatsNew(c.key || c.id, gitCommits, gitInfo);
   const commit = () => {
     const v = val.trim();
     if (v && v !== (c.name || c.key)) {
@@ -185,6 +208,14 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, d
                   outgoingLoading={outgoingLoading}
                   onFetchOutgoing={onFetchOutgoing}
                   className="ml-1"
+                />
+              )}
+              {whatsNew.show && (
+                <WhatsNewMarker
+                  summary={whatsNew.summary}
+                  since={whatsNew.since}
+                  files={gitInfo?.files}
+                  onOpenDiff={onOpenDiff}
                 />
               )}
             </>
@@ -311,6 +342,9 @@ export function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showH
   };
 
   const hasFiles = !dead && gitInfo?.clean === false && gitInfo.files && gitInfo.files.length > 0;
+  // WARDEN-356: per-agent "What's new since your last visit" marker — only
+  // meaningful for a live chat (a dead tab has no live git state to advance).
+  const whatsNew = !dead && c ? computeWhatsNew(c.key || c.id, gitCommits, gitInfo) : { since: null, summary: summarizeWhatsNew({ since: 0, now: 0 }), show: false };
 
   return (
     <ContextMenu>
@@ -353,6 +387,9 @@ export function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showH
         {!dead && !editing && showProjectBadges && c?.project && <span className="text-[10px] text-muted-foreground">{c.project}</span>}
         {!dead && !editing && (gitInfo?.branch || gitInfo?.detached) && (
           <GitBranchBadge branch={gitInfo.branch ?? ''} chatId={id} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} ahead={gitInfo.ahead} behind={gitInfo.behind} inProgress={gitInfo.inProgress} stashCount={gitInfo.stashCount} detached={gitInfo.detached} headSha={gitInfo.headSha} upstream={gitInfo.upstream} incomingCommits={incomingCommits} incomingLoading={incomingLoading} onFetchIncoming={onFetchIncoming} outgoingCommits={outgoingCommits} outgoingLoading={outgoingLoading} onFetchOutgoing={onFetchOutgoing} />
+        )}
+        {!dead && !editing && whatsNew.show && (
+          <WhatsNewMarker summary={whatsNew.summary} since={whatsNew.since} files={gitInfo?.files} onOpenDiff={onOpenDiff} />
         )}
         {!editing && canRename && (
           <IconTooltip label="rename"><Button variant="ghost" size="xs" className="px-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); startEdit(); }} aria-label="rename">✎</Button></IconTooltip>
