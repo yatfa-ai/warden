@@ -6,8 +6,11 @@
 import { useState } from 'react';
 import { Popover as RadixPopover } from 'radix-ui';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
+import { GitCompare } from 'lucide-react';
 import { DiffBlock } from '@/components/DiffBlock';
+import { CollisionCompareDialog } from '../CollisionCompareDialog';
 import { cn } from '@/lib/utils';
 import { findChat } from '@/lib/agentFilter';
 import { displayName } from '@/lib/chatDisplay';
@@ -236,10 +239,17 @@ export function GitCollisionBadge({ collisions, chats, gitStatus, onOpenChat, sh
   showProject?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  // The path + contributors scoped to the "Compare edits" dialog (WARDEN-321): set
+  // by the per-path Compare action below, null while the dialog is closed. Lives
+  // in the badge (not its parent) so the change stays minimal — the badge already
+  // owns its popover `open` state and has collisions/chats/gitStatus/onOpenChat in
+  // hand, which is everything the dialog needs.
+  const [compareTarget, setCompareTarget] = useState<{ path: string; agents: FileCollision['agents'] } | null>(null);
   const count = collisions.length;
   if (count <= 0) return null;
   const title = `${count} file${count === 1 ? '' : 's'} edited by 2+ agents — click to list`;
   return (
+    <>
     <RadixPopover.Root open={open} onOpenChange={setOpen}>
       <RadixPopover.Trigger asChild>
         {/* role="button" <span> (not a nested <button>): the chip is already a
@@ -290,6 +300,24 @@ export function GitCollisionBadge({ collisions, chats, gitStatus, onOpenChat, sh
                       <span className="ml-auto shrink-0 text-[10px] text-muted-foreground" title={project}>{project}</span>
                     )}
                   </div>
+                  {/* The resolution layer (WARDEN-321): open the per-path compare
+                      dialog showing each agent's uncommitted diff stacked. A real
+                      shadcn <Button> — the header row above is plain, so there's no
+                      nested-interactive issue (the chip and the popover trigger are
+                      the only buttons/role=button in play) — per WARDEN-68.
+                      stopPropagation + close the popover so the dialog takes focus,
+                      mirroring the per-agent rows' setOpen(false) + jump discipline. */}
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    onClick={(e) => { e.stopPropagation(); setOpen(false); setCompareTarget({ path: col.path, agents: col.agents }); }}
+                    className="ml-1 mb-0.5 text-muted-foreground hover:text-foreground"
+                    aria-label={`compare each agent's uncommitted edits to ${col.path}`}
+                    title={`compare each agent's uncommitted edits to ${col.path}`}
+                  >
+                    <GitCompare />
+                    Compare edits
+                  </Button>
                   <ul>
                     {col.agents.map((a) => {
                       const c = findChat(chats, a.key);
@@ -330,6 +358,19 @@ export function GitCollisionBadge({ collisions, chats, gitStatus, onOpenChat, sh
         </RadixPopover.Content>
       </RadixPopover.Portal>
     </RadixPopover.Root>
+      {/* Scoped to the path + contributors selected by the Compare action above.
+          Rendered as a sibling of the popover (not inside it) so Radix's Dialog
+          portal stacks cleanly above the already-dismissed popover. */}
+      <CollisionCompareDialog
+        open={!!compareTarget}
+        onOpenChange={(o) => { if (!o) setCompareTarget(null); }}
+        path={compareTarget?.path ?? ''}
+        agents={compareTarget?.agents ?? []}
+        chats={chats}
+        gitStatus={gitStatus}
+        onOpenChat={onOpenChat}
+      />
+    </>
   );
 }
 
