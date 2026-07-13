@@ -45,19 +45,20 @@ export function SectionToggle({ expanded, onClick, label, title }: {
 }
 
 /**
- * The contextual action bar for multi-select broadcast (WARDEN-292). Appears at
- * the foot of a fleet view only when ≥1 agent is selected, showing the live
- * count and the three selection actions: select-all (within the current visible
- * list), clear, and "Send to N…" (which opens the confirm-and-send dialog —
- * nothing is sent until the dialog's explicit Confirm). Built on shadcn <Button>
- * per the WARDEN-68 quality bar. shrink-0 so it stays pinned at the bottom while
+ * The contextual action bar for multi-select (WARDEN-292 broadcast + WARDEN-328
+ * batch kill). Appears at the foot of a fleet view only when ≥1 agent is
+ * selected, showing the live count and the selection actions: select-all
+ * (within the current visible list), clear, "Send to N…" (confirm-and-send),
+ * and "Kill N…" (confirm-and-stop, destructive). Built on shadcn <Button> per
+ * the WARDEN-68 quality bar. shrink-0 so it stays pinned at the bottom while
  * the fleet list scrolls above it.
  */
-export function BroadcastActionBar({ count, onSelectAll, onClear, onSend }: {
+export function SelectionActionBar({ count, onSelectAll, onClear, onSend, onKill }: {
   count: number;
   onSelectAll: () => void;
   onClear: () => void;
   onSend: () => void;
+  onKill: () => void;
 }) {
   return (
     <div className="flex items-center gap-1.5 px-2 py-1.5 border-t shrink-0 bg-accent/40">
@@ -66,6 +67,7 @@ export function BroadcastActionBar({ count, onSelectAll, onClear, onSend }: {
         <Button variant="ghost" size="xs" onClick={onSelectAll} title="select every agent in this list">All</Button>
         <Button variant="ghost" size="xs" onClick={onClear} title="clear the selection">Clear</Button>
         <Button size="xs" onClick={onSend}>Send to {count}…</Button>
+        <Button variant="destructive" size="xs" onClick={onKill} title="stop each selected agent's tmux session">Kill {count}…</Button>
       </div>
     </div>
   );
