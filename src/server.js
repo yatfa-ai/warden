@@ -48,6 +48,27 @@ if (fs.existsSync(DIST)) {
 
 // chat cache + resolver
 let cache = [];
+
+// Carry a chat's last-known lastActivity forward across a cache refresh
+// (WARDEN-245). Activity is captured for LIVE sessions only; when a session goes
+// inactive the fresh discover yields lastActivity === null, and a cache replace
+// would wipe the value the closed chat needs for Fleet Health recency ordering.
+// This fills any nextChat.lastActivity that is null/undefined with the prior
+// cached value for the same id (catalog chats additionally hydrate from the
+// persisted entry in chats.js; this covers yatfa chats, which have no catalog,
+// and is belt-and-suspenders for catalog chats too). Pure / no ssh.
+function retainLastActivity(prevCache, nextChats) {
+  if (!prevCache.length) return nextChats;
+  const prev = new Map();
+  for (const c of prevCache) {
+    if (c.lastActivity != null) prev.set(c.id, c.lastActivity);
+  }
+  if (!prev.size) return nextChats;
+  return nextChats.map((c) =>
+    (c.lastActivity == null && prev.has(c.id)) ? { ...c, lastActivity: prev.get(c.id) } : c
+  );
+}
+
 async function resolve(id) {
   const result = await resolveChatWithRefresh(id, cache, async () => {
     // Lazy mode: never do a full fleet discoverAll. Seed cache from disk (instant, zero
@@ -60,7 +81,7 @@ async function resolve(id) {
       const hostHint = id.slice(0, colon);
       if (hostHint === LOCAL || cfg.hosts.includes(hostHint)) {
         const { chats } = await discoverHost(hostHint, cfg);
-        cache = [...cache.filter((c) => c.host !== hostHint), ...chats];
+        cache = [...cache.filter((c) => c.host !== hostHint), ...retainLastActivity(cache, chats)];
       }
     } else if (cfg.hosts.length) {
       // Bare name (e.g. a restored yatfa tab like "yatfa-worker") with no host hint.
@@ -68,7 +89,7 @@ async function resolve(id) {
       // start. Demand-driven + cached: runs at most once per unresolved bare name.
       const settled = await Promise.allSettled(cfg.hosts.map((h) => discoverHost(h, cfg)));
       const found = settled.filter((r) => r.status === 'fulfilled').flatMap((r) => r.value.chats);
-      cache = [...cache.filter((c) => !cfg.hosts.includes(c.host)), ...found];
+      cache = [...cache.filter((c) => !cfg.hosts.includes(c.host)), ...retainLastActivity(cache, found)];
     }
     return { chats: cache, errors: [] };
   });
@@ -104,7 +125,7 @@ app.get('/api/chats', (_req, res) => {
   // Refresh catalog (disk) chats in the cache but KEEP any lazily-discovered yatfa chats,
   // so already-open remote panes keep streaming across list refreshes.
   const yatfa = cache.filter((c) => c.kind === 'yatfa');
-  cache = [...yatfa, ...chats];
+  cache = [...yatfa, ...retainLastActivity(cache, chats)];
   res.json({ chats, errors });
 });
 
@@ -115,7 +136,7 @@ app.get('/api/discover', async (req, res) => {
   if (!host) return res.status(400).json({ error: 'missing ?host=' });
   try {
     const { chats } = await discoverHost(host, cfg);
-    cache = [...cache.filter((c) => c.host !== host), ...chats];
+    cache = [...cache.filter((c) => c.host !== host), ...retainLastActivity(cache, chats)];
     res.json({ host, chats });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -2310,7 +2331,7 @@ streamWss.on('connection', (ws) => {
       if (m.host && !cache.some((c) => c.key === m.id || c.id === m.id)) {
         try {
           const { chats } = await discoverHost(String(m.host), cfg);
-          cache = [...cache.filter((c) => c.host !== m.host), ...chats];
+          cache = [...cache.filter((c) => c.host !== m.host), ...retainLastActivity(cache, chats)];
         } catch { /* fall through; resolve() still has a locate fallback */ }
       }
       const r = await resolve(String(m.id));

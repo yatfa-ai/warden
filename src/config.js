@@ -89,6 +89,26 @@ export function saveCatalog(list) {
   fs.writeFileSync(catalogPath, JSON.stringify(list, null, 2) + '\n');
 }
 
+// Stamp a catalog entry's last-known activity timestamp (WARDEN-245). A closed
+// chat keeps a usable lastActivity for recency ordering only if the value
+// survives the chat going inactive; lastActivity is captured for LIVE sessions
+// alone, so we persist it on the catalog entry while the chat is alive. Only
+// writes when the new value is FRESHER than the stored one (so a 60s re-discover
+// of an unchanged pane does not thrash disk), and only for an entry that exists.
+// `lastActivity` is ms-since-epoch. Returns true iff the catalog was updated.
+export function stampCatalogActivity(host, session, lastActivity) {
+  if (lastActivity == null || !Number.isFinite(lastActivity)) return false;
+  const catalog = loadCatalog();
+  const entry = catalog.find((c) => sameCatalogEntry(c, host, session));
+  if (!entry) return false;
+  if (!entry.lastActivity || entry.lastActivity < lastActivity) {
+    entry.lastActivity = lastActivity;
+    saveCatalog(catalog);
+    return true;
+  }
+  return false;
+}
+
 // Parse ~/.ssh/config Host aliases (best-effort, no dep). Used for completion /
 // validation — discovery only scans cfg.hosts.
 export function allSshHosts() {
