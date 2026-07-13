@@ -8,6 +8,7 @@ import { EmptyState } from './EmptyState';
 import { loadObs, saveObs } from '@/lib/storage';
 import { postJson } from '@/lib/api';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
+import { hasBoundSession, selectIdleTabs, IDLE_TICK_MS } from '@/lib/observerLifecycle';
 import type { Chat, SessionMeta } from '@/lib/types';
 
 interface Props {
@@ -18,12 +19,22 @@ interface Props {
   focusedChat?: Chat | null;
   // Called when a resumed observer session should reconnect to its bound chat.
   onReconnectChat?: (chatKey: string, host?: string | null) => void;
+  // WARDEN-332 — the two preference-driven observer lifecycle behaviors. Both
+  // are persisted (server.js / config.js) and flow App → /api/config → here.
+  // observerAutoStart: when true, focusing a chat spawns+opens a bound observer
+  //   session with no manual "observe" click. Default false = today's manual
+  //   behavior, unchanged.
+  // observerSessionTimeout: auto-close an observer tab idle past N minutes. null
+  //   disables auto-close. Default 30 (see config.js) — a genuine, intended
+  //   behavior change for every fresh install, NOT a regression to "fix".
+  observerAutoStart?: boolean;
+  observerSessionTimeout?: number | null;
 }
 
 // Manages persisted observer sessions as tabs. Every open tab keeps its own
 // ObserverPanel (and WS) mounted; inactive ones are display:none so their
 // conversations stay live. Open tabs + active tab persist in localStorage.
-export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onReconnectChat }: Props = {}) {
+export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout }: Props = {}) {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [openIds, setOpenIds] = useState<string[]>(() => loadObs().openIds);
   const [activeId, setActiveId] = useState<string | null>(() => loadObs().activeId);
@@ -38,6 +49,26 @@ export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onRe
   // ref always holds the latest prefs without changing callback identity.
   const prefsRef = useRef(prefs);
   useEffect(() => { prefsRef.current = prefs; }, [prefs]);
+
+  // WARDEN-332 — latest snapshots read inside memoized callbacks / minimal-dep
+  // effects, mirroring the prefsRef idiom (adding these to a callback's deps
+  // would either retrigger boot/refresh or reschedule the idle interval on every
+  // state/preference change). Each ref tracks the freshest value only.
+  const sessionsRef = useRef(sessions);
+  useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
+  const openIdsRef = useRef(openIds);
+  useEffect(() => { openIdsRef.current = openIds; }, [openIds]);
+  const sessionTimeoutRef = useRef(observerSessionTimeout);
+  useEffect(() => { sessionTimeoutRef.current = observerSessionTimeout; }, [observerSessionTimeout]);
+
+  // Last-activity timestamp (ms) per open session id. The activity signal is
+  // INCOMING OBSERVER WS EVENTS — bumped from ObserverPanel's ws.onmessage (a
+  // session the agent is actively writing to is never idle), plus seeded once
+  // when a tab is opened. See lib/observerLifecycle.ts for the idle selection.
+  const lastActivityRef = useRef<Record<string, number>>({});
+  const bumpActivity = useCallback((id: string) => {
+    lastActivityRef.current[id] = Date.now();
+  }, []);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -150,6 +181,66 @@ export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onRe
     }
   }, [externalViewMode, viewMode]);
 
+  // WARDEN-332 — Behavior 1: auto-start an observer session for the focused chat.
+  // When observerAutoStart is on and a chat becomes focused, spawn+open a bound
+  // observer session with no manual "observe" click. Guards, in order:
+  //  - booted (sessions loaded so dedup is meaningful);
+  //  - observerAutoStart (off ⇒ today's fully-manual behavior, unchanged);
+  //  - a focused chat with a usable key;
+  //  - autoStartedRef: each chatKey is attempted AT MOST ONCE per mount, so this
+  //    never re-fires on re-renders or when the pref is toggled back on;
+  //  - hasBoundSession: skip (still mark attempted) if a session is already bound
+  //    to this chatKey — covers a manual binding made before auto-start.
+  // The effect keys on `focusedKey` identity (not the chat object, which is
+  // recreated on every poll) so it only fires when the focused chat actually
+  // changes; observerAutoStart is a dep so flipping it on while a chat is focused
+  // spawns for it. focusedChat is read through a ref to avoid stale closures.
+  const autoStartedRef = useRef<Set<string>>(new Set());
+  const focusedChatRef = useRef(focusedChat);
+  useEffect(() => { focusedChatRef.current = focusedChat; }, [focusedChat]);
+  const focusedKey = focusedChat?.key || focusedChat?.id || null;
+  useEffect(() => {
+    if (!booted || !observerAutoStart || !focusedKey) return;
+    if (autoStartedRef.current.has(focusedKey)) return;
+    autoStartedRef.current.add(focusedKey);
+    if (hasBoundSession(sessionsRef.current, focusedKey)) return;
+    void createNew(focusedChatRef.current);
+  }, [booted, observerAutoStart, focusedKey, createNew]);
+
+  // WARDEN-332 — Behavior 2a: seed every open tab with a last-activity timestamp
+  // so the idle selector always has a signal. A tab with no timestamp is treated
+  // as active and never reaped (fail-safe); newly-opened and boot-restored tabs
+  // both get "now" (a fresh lease on restore, rather than reaping stale tabs the
+  // instant warden reopens). The ref is mutated in place — no re-render needed.
+  useEffect(() => {
+    const now = Date.now();
+    for (const id of openIds) {
+      if (lastActivityRef.current[id] == null) lastActivityRef.current[id] = now;
+    }
+  }, [openIds]);
+
+  // WARDEN-332 — Behavior 2b: periodic idle-close tick. Every IDLE_TICK_MS (~60s),
+  // close any open tab whose last activity exceeds observerSessionTimeout minutes.
+  // selectIdleTabs returns [] for null/<=0 timeout, so a disabled pref makes this
+  // a no-op. The latest timeout/openIds/activity are read through refs so the
+  // interval is scheduled once and is not torn down on every state/pref change.
+  // Closes are batched inline rather than calling closeTab(id) in a loop: closeTab
+  // assumes single-id semantics and would mis-pick the next active tab when
+  // several ids go idle in the same tick (its activeId repair reads a stale
+  // openIds snapshot across batched calls).
+  useEffect(() => {
+    if (!booted) return;
+    const tick = () => {
+      const idle = selectIdleTabs(openIdsRef.current, lastActivityRef.current, sessionTimeoutRef.current, Date.now());
+      if (idle.length === 0) return;
+      const idleSet = new Set(idle);
+      setOpenIds((p) => p.filter((x) => !idleSet.has(x)));
+      setActiveId((a) => (a && idleSet.has(a) ? (openIdsRef.current.find((x) => !idleSet.has(x)) || null) : a));
+    };
+    const handle = setInterval(tick, IDLE_TICK_MS);
+    return () => clearInterval(handle);
+  }, [booted]);
+
   const closeTab = (id: string) => {
     setOpenIds((p) => p.filter((x) => x !== id));
     setActiveId((a) => (a === id ? (openIds.find((x) => x !== id) || null) : a));
@@ -229,7 +320,7 @@ export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onRe
           <div className="flex-1 min-h-0">
             {openIds.map((id) => (
               <div key={id} className={activeId === id ? 'h-full' : 'hidden'}>
-                <ObserverPanel sessionId={id} onFocusAgent={onFocusAgent} />
+                <ObserverPanel sessionId={id} onFocusAgent={onFocusAgent} onActivity={() => bumpActivity(id)} />
               </div>
             ))}
           </div>

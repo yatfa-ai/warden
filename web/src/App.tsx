@@ -216,6 +216,13 @@ function App() {
   // here because the forceKill/requestKill callbacks below read it eagerly via
   // their dependency arrays.
   const [confirmDestructiveActions, setConfirmDestructiveActions] = useState(true);
+  // WARDEN-332 — the two observer lifecycle preferences (auto-start + session
+  // auto-stop). Initialized to the config.js defaults (false / 30) and refreshed
+  // from /api/config below; passed to ObserverTabs so a Settings save applies
+  // without a reload. observerSessionTimeout may be null (user cleared the field)
+  // → disabled (never auto-close).
+  const [observerAutoStart, setObserverAutoStart] = useState(false);
+  const [observerSessionTimeout, setObserverSessionTimeout] = useState<number | null>(30);
 
   useEffect(() => {
     streamApi.onOpen = () => setStreamConn(true);
@@ -381,6 +388,12 @@ function App() {
         hideOfflineHosts: cfg.hideOfflineHosts ?? false,
       });
       setConfirmDestructiveActions(cfg.confirmDestructiveActions ?? true);
+      // WARDEN-332 — observer lifecycle prefs. observerSessionTimeout is null OR
+      // a finite positive number (server.js:373-376); `?? null` preserves an
+      // explicit null (disabled) and coalesces an absent field to null (fail-safe
+      // — never auto-close when the value is unknown). A fresh install returns 30.
+      setObserverAutoStart(cfg.observerAutoStart ?? false);
+      setObserverSessionTimeout(cfg.observerSessionTimeout ?? null);
     } catch (e) {
       console.error('Failed to refresh config preferences:', e);
     }
@@ -1125,7 +1138,7 @@ function App() {
             title="Drag to resize observer panel"
           />
           <ErrorBoundary>
-            <ObserverTabs externalViewMode={externalViewMode} onFocusAgent={handleFocusAgent} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} />
+            <ObserverTabs externalViewMode={externalViewMode} onFocusAgent={handleFocusAgent} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} />
           </ErrorBoundary>
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden"
