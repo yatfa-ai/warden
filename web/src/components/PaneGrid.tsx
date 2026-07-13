@@ -75,6 +75,11 @@ function colsFor(n: number) { return n <= 1 ? 1 : Math.ceil(Math.sqrt(n)); }
 export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalTheme, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags }: Props) {
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
+  // WARDEN-334: the 1-based line a grep result selected, fed to FileViewer's
+  // existing `line` prop (WARDEN-227) so the viewer scrolls to + highlights that
+  // row. `undefined` (manual path-entry open) ⇒ the viewer opens at the top
+  // (its line-jump effect early-returns on typeof line !== 'number').
+  const [fileLine, setFileLine] = useState<number | undefined>(undefined);
   const [fileInput, setFileInput] = useState('');
   const [fileInputError, setFileInputError] = useState('');
   const [filePromptOpen, setFilePromptOpen] = useState(false);
@@ -102,6 +107,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
     // Clear error and open the file
     setFileInputError('');
     setFilePath(trimmedInput);
+    setFileLine(undefined); // manual path-entry has no line → open at top (WARDEN-334)
     setFileOpen(true);
     setFilePromptOpen(false); // Close the path-entry Dialog
     setFileInput(''); // Clear file input to prevent both dialogs from showing
@@ -273,10 +279,14 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
         <FileViewer
           chatId={focusedChat.id}
           filePath={filePath}
+          line={fileLine}
           open={fileOpen}
           onOpenChange={(open) => {
             setFileOpen(open);
-            if (!open) setFilePath(''); // Clear file path when dialog closes
+            if (!open) {
+              setFilePath(''); // Clear file path when dialog closes
+              setFileLine(undefined); // and the grep-selected line (WARDEN-334)
+            }
           }}
         />
       )}
@@ -289,7 +299,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
           cwd={focusedChat.cwd}
           open={searchOpen}
           onOpenChange={setSearchOpen}
-          onSelectFile={(file) => { setFilePath(file); setFileOpen(true); }}
+          onSelectFile={(file, line) => { setFilePath(file); setFileLine(line); setFileOpen(true); }}
         />
       )}
 

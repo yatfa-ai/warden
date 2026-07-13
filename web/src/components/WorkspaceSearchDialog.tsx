@@ -22,7 +22,10 @@ interface Props {
   cwd?: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onSelectFile: (file: string) => void;
+  // WARDEN-334: the line is threaded through so the FileViewer can scroll to +
+  // highlight the matching row (its existing WARDEN-227 `line` prop) instead of
+  // opening the file at the top. Optional so non-grep callers keep the (file)-only shape.
+  onSelectFile: (file: string, line?: number) => void;
 }
 
 // WARDEN-68 (UI std: don't add raw interactive elements): a NATIVE <button> is
@@ -33,11 +36,11 @@ interface Props {
 // accessible choice over GlobalSearchDialog's `<div onClick>`. The kit has no
 // Command/cmdk list primitive to reach for instead, so the raw element is
 // contained here in its own component rather than inlined in the results map.
-function SearchResultRow({ result, onSelect }: { result: SearchResult; onSelect: (file: string) => void }) {
+function SearchResultRow({ result, onSelect }: { result: SearchResult; onSelect: (file: string, line?: number) => void }) {
   return (
     <button
       type="button"
-      onClick={() => onSelect(result.file)}
+      onClick={() => onSelect(result.file, result.line)}
       className="flex flex-col w-full text-left mb-1 p-2 rounded hover:bg-accent transition-colors"
     >
       <span className="text-xs text-muted-foreground font-mono truncate">{result.file}:{result.line}</span>
@@ -105,8 +108,8 @@ export function WorkspaceSearchDialog({ chatId, cwd, open, onOpenChange, onSelec
     }
   };
 
-  const handleSelect = (file: string) => {
-    onSelectFile(file);
+  const handleSelect = (file: string, line?: number) => {
+    onSelectFile(file, line);
     onOpenChange(false);
   };
 
