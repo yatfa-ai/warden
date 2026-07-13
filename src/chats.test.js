@@ -1,7 +1,10 @@
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { resolveChat, resolveChatWithRefresh, comparePinned, parseDiscoverRow, parseDockerStats, splitDiscoverOutput, discover, capturePanes } from './chats.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { resolveChat, resolveChatWithRefresh, comparePinned, parseDiscoverRow, parseDockerStats, splitDiscoverOutput, discover, capturePanes, DISCOVER_SCRIPT } from './chats.js';
 import { buildChat } from './chatMeta.js';
 
 // ----------------------------- capturePanes routing -------------------------
@@ -16,6 +19,14 @@ const TMUX_BIN = 'tmux';
 function tmuxAvailable() {
   const r = spawnSync(TMUX_BIN, ['-V'], { encoding: 'utf8' });
   return r.status === 0 || (r.stdout && /^tmux\s+\d/i.test(r.stdout));
+}
+// bash is needed to execute DISCOVER_SCRIPT against a stub `docker` in the
+// WARDEN-309 graceful-stats-failure test below. Present on Linux/macOS and via
+// MSYS2/git-bash on Windows; the test is skipped where absent.
+const BASH_BIN = process.platform === 'win32' ? 'bash.exe' : 'bash';
+function bashAvailable() {
+  const r = spawnSync(BASH_BIN, ['-lc', 'echo ok'], { encoding: 'utf8' });
+  return r.status === 0 && (r.stdout || '').trim() === 'ok';
 }
 function uniqueSession() {
   return `warden-test-${process.pid}-${Math.floor(Number(process.hrtime.bigint() % 100000n))}`;
@@ -769,6 +780,103 @@ describe('discover() attaches docker-stats resource fields (WARDEN-309)', () => 
     });
     assert.strictEqual(res.chats.length, 1, 'exactly one chat — the stats row did not double it');
     assert.strictEqual(res.chats[0].cwd, '/work', 'cwd is the real discover cwd, not a percent');
+  });
+});
+
+// ---------------- WARDEN-309 graceful stats-failure regression (criterion #3) ---
+// The blocking bug review #2 caught: `docker stats` is the LAST command in
+// DISCOVER_SCRIPT, and run() derives `ok` from the script's exit code
+// (`ok: code === 0`, ssh.js). If `docker stats` exits non-zero (older host, no
+// permission, daemon hiccup, or a timeout sampling CPU on a loaded 50-container
+// host — the exact scale WARDEN-309 targets) and that exit code propagates, the
+// WHOLE script exits non-zero → run() ok:false → discover() returns chats:[] →
+// every agent on that host vanishes. The opposite of the ticket's "graceful N/A"
+// (criterion #3). `2>/dev/null` swallows only the stderr MESSAGE; the trailing
+// `|| true` is what neutralizes the EXIT code.
+//
+// The mock-only discover() tests above hand-supply `{ok:true}` and so are
+// structurally blind to this — a mock can't know that `|| true` flips ok. Two
+// guards here close that gap:
+//   1) A pure, always-on assertion that the `docker stats` command is fault-
+//      tolerant — red the moment someone drops `|| true`, no bash required.
+//   2) An end-to-end run that ACTUALLY EXECUTES DISCOVER_SCRIPT against a stub
+//      `docker` whose `stats` subcommand exits 1, wired through discover()'s
+//      runWithPool seam (mirroring run()'s ok:code===0 contract). Red without
+//      `|| true` (script exits 1 → ok:false → chats:[]), green with it (script
+//      exits 0 → ok:true → chat survives, no resource fields). Gated on bash.
+describe('discover() survives a failed docker stats (graceful N/A, WARDEN-309 #3)', () => {
+  it('the docker stats command in DISCOVER_SCRIPT is fault-tolerant (|| true)', () => {
+    // Pure guard: a `docker stats` failure must not be able to own the script's
+    // exit code. If this fails, someone dropped `|| true` and a stats failure on
+    // a loaded host will silently blank every agent on that host from Fleet Health.
+    // Match the COMMAND line (trimmed, starts with `docker stats`), not a comment
+    // that merely mentions it.
+    const statsLine = DISCOVER_SCRIPT.split('\n').map((l) => l.trim()).find((l) => l.startsWith('docker stats --no-stream'));
+    assert.ok(statsLine, 'DISCOVER_SCRIPT invokes `docker stats --no-stream`');
+    assert.match(statsLine, /\|\|\s*true/,
+      '`docker stats` must be followed by `|| true` so a non-zero exit cannot abort the whole discover script (run() ok:code===0 → discover chats:[])');
+  });
+
+  (bashAvailable() ? it : it.skip)('still returns ok:true with the chat (and no resource fields) when docker stats exits non-zero', async () => {
+    // Drive the REAL failure path end-to-end: execute DISCOVER_SCRIPT against a
+    // stub `docker` whose `stats` exits 1, via discover()'s runWithPool seam
+    // (which mirrors run()'s ok:code===0 contract exactly). This is the test the
+    // mock-only suites cannot express — only executing the script observes that
+    // `|| true` flips the exit code, and therefore ok, and therefore whether the
+    // chat survives.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-309-'));
+    try {
+      // Stub `docker`: ps/exec/inspect succeed so the chat row is produced; stats
+      // FAILS — the divergence criterion #3 targets. `docker exec ... tmux
+      // has-session` is driven via the `exec` subcommand (made to fail, so the
+      // row reads active=0 and cwd falls back to `docker inspect`'s WorkingDir).
+      const stub = [
+        '#!/usr/bin/env bash',
+        'case "$1" in',
+        "  ps) printf 'myproject-worker\\tUp 2 hours\\n' ;;",
+        '  exec) exit 1 ;;',
+        "  inspect) printf '/work' ;;",
+        '  stats) exit 1 ;;',
+        '  *) exit 0 ;;',
+        'esac',
+        '',
+      ].join('\n');
+      fs.writeFileSync(path.join(tmp, 'docker'), stub, { mode: 0o755 });
+
+      const res = await discover('prod', {}, { activity: false }, {
+        isCompanionTransportEnabled: () => false,
+        runWithPool: async () => {
+          // Execute the REAL script with the stub `docker` first on PATH. We use
+          // `bash -c` (not -lc): a login shell sources the profile and clobbers
+          // PATH, hiding the stub; the login shell is only SSH's PATH-loading
+          // mechanism, not part of the exit-code invariant under test, which is
+          // identical under `bash -c`.
+          const r = spawnSync(BASH_BIN, ['-c', DISCOVER_SCRIPT], {
+            encoding: 'utf8',
+            env: { ...process.env, PATH: `${tmp}:${process.env.PATH || ''}` },
+          });
+          // Mirror ssh.js run()'s contract: ok is the script's exit code === 0.
+          return { ok: (r.status ?? -1) === 0, code: r.status ?? -1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+        },
+      });
+
+      assert.strictEqual(res.ok, true,
+        'discover() stays ok:true — a docker stats failure must NOT abort discovery (the script must exit 0 via `|| true`)');
+      assert.strictEqual(res.chats.length, 1,
+        'the chat row survives — a stats failure is graceful N/A, not host-wide data loss');
+      const chat = res.chats[0];
+      assert.strictEqual(chat.cpuPct, undefined, 'no stats row → no cpuPct');
+      assert.strictEqual(chat.memPct, undefined, 'no stats row → no memPct');
+      assert.strictEqual(chat.memUsage, undefined, 'no stats row → no memUsage');
+      // And the chat is otherwise byte-identical to buildChat (the WARDEN-272
+      // invariant — resource fields are attached in discover(), never in buildChat).
+      assert.deepStrictEqual(
+        chat,
+        buildChat('prod', 'myproject-worker', 'Up 2 hours', '/work', false, 'agent'),
+      );
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
 

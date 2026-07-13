@@ -14,11 +14,13 @@ const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 const LOCAL = '(local)';
 
 // Sentinel that opens the per-container docker-stats block appended to
-// DISCOVER_SCRIPT (WARDEN-309). Picked to (a) never collide with a container name
-// (docker names can't contain '_'-runs like this and are `[A-Za-z0-9_.-]+`) and
-// (b) be unlike any discover row, so a stray sentinel line is harmlessly skipped
-// by parseDiscoverRow (single column → null). Defined once so the script emitter
-// and the splitter cannot drift.
+// DISCOVER_SCRIPT (WARDEN-309). Picked to (a) never collide with a container
+// name: docker names must START with [a-zA-Z0-9] (regex `/?[a-zA-Z0-9][a-zA-Z0-9_.-]+`),
+// so a LEADING underscore — `___WARDEN_STATS___` — is an illegal container name,
+// even though underscores are legal later in a name. (The leading `_` is the
+// guard, not an underscore-run per se.) And (b) it is unlike any discover row,
+// so a stray sentinel line is harmlessly skipped by parseDiscoverRow (single
+// column → null). Defined once so the script emitter and the splitter cannot drift.
 const STATS_SENTINEL = '___WARDEN_STATS___';
 
 // One SSH round-trip: list containers AND test each for the `agent` tmux session,
@@ -54,18 +56,24 @@ done
 # Per-container resource usage (WARDEN-309): ONE \`docker stats --no-stream\`
 # collection for every container on this host, appended so it rides the SAME SSH
 # round-trip as the discover loop above (no extra round-trip on the click-to-
-# discover path). \`--no-stream\` takes a single sample (~1-2s) and exits rather
-# than streaming. The block is opened by a sentinel and parsed by
-# splitDiscoverOutput/parseDockerStats into a separate name→{cpuPct,memPct,
+# discover path). \`--no-stream\` takes a single sample (~1-2s per host — added to
+# every discover incl. the 60s engaged-host refresh; acceptable per WARDEN-309)
+# and exits rather than streaming. The block is opened by a sentinel and parsed
+# by splitDiscoverOutput/parseDockerStats into a separate name→{cpuPct,memPct,
 # memUsage} map, so the tested 4-column parseDiscoverRow above is untouched.
-# \`2>/dev/null\` swallows a missing/unavailable \`docker stats\` (older host, no
-# permission) → the block is empty → chats simply omit the fields → the UI
-# renders nothing (graceful N/A). Resource capture belongs to the SSH discover
-# path ONLY — never the 10s /api/health poll, which stays cache-derived
-# (WARDEN-147), and never buildChat (shared with the companion transport,
-# WARDEN-272).
+# \`2>/dev/null\` swallows the stderr MESSAGE of a missing/unavailable
+# \`docker stats\` (older host, no permission, daemon hiccup) — but it does NOT
+# touch its EXIT code, and since this is the LAST command in the script, a non-
+# zero exit would become the script's exit code → run() ok:false (ssh.js:356) →
+# discover() returns chats:[] → EVERY agent on the host vanishes. The trailing
+# \`|| true\` is what neutralizes that exit code, so a stats failure yields an
+# EMPTY stats block → parseDockerStats returns {} → chats simply omit the
+# fields → the UI renders nothing (graceful N/A, success criterion #3).
+# Resource capture belongs to the SSH discover path ONLY — never the 10s
+# /api/health poll, which stays cache-derived (WARDEN-147), and never buildChat
+# (shared with the companion transport, WARDEN-272).
 printf '%s\\n' '${STATS_SENTINEL}'
-docker stats --no-stream --format '{{.Name}}\\t{{.CPUPerc}}\\t{{.MemPerc}}\\t{{.MemUsage}}' 2>/dev/null
+docker stats --no-stream --format '{{.Name}}\\t{{.CPUPerc}}\\t{{.MemPerc}}\\t{{.MemUsage}}' 2>/dev/null || true
 `;
 
 // Parse one TSV row emitted by DISCOVER_SCRIPT into the fields discover() needs.
@@ -92,11 +100,15 @@ export function parseDiscoverRow(line) {
 // region (WARDEN-309). The stats block is everything AFTER the STATS_SENTINEL
 // line; it is parsed separately by parseDockerStats so the tested 4-column
 // parseDiscoverRow never sees a stats row (which would otherwise masquerade as a
-// chat: `name\t42.30%\t15.70%\t310MiB / 2GiB` has 4 columns). If the sentinel is
-// absent (older host / `docker stats` failed / companion path), the whole stdout
-// is treated as rows and the stats block is empty → chats omit the resource
-// fields → UI renders nothing (graceful N/A). Pure (no docker, no ssh) so it is
-// unit-testable alongside parseDockerStats. See WARDEN-309.
+// chat: `name\t42.30%\t15.70%\t310MiB / 2GiB` has 4 columns). The sentinel is
+// printed BEFORE `docker stats` runs, so even when `docker stats` fails the
+// sentinel is present and the block after it is simply empty → empty map → chats
+// omit the fields → UI renders nothing (graceful N/A). (The trailing `|| true` on
+// `docker stats` keeps that failure from aborting the whole script — see
+// DISCOVER_SCRIPT.) If the sentinel is ABSENT entirely (companion path, or a
+// pre-stats script failure that already made discover() return ok:false), the
+// whole stdout is treated as rows. Pure (no docker, no ssh) so it is unit-
+// testable alongside parseDockerStats. See WARDEN-309.
 export function splitDiscoverOutput(stdout) {
   const s = stdout == null ? '' : String(stdout);
   const idx = s.indexOf(STATS_SENTINEL);
