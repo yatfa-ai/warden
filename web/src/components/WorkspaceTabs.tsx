@@ -14,7 +14,10 @@ interface Props {
   onRename: (id: string, name: string) => void;
   onClose: (id: string) => void;
   // Drop a dragged pane onto an existing workspace tab → move it there.
-  onDropPane: (workspaceId: string, paneId: string) => void;
+  // The dropped pane id leads — matching movePaneToWorkspace(paneId, targetId)
+  // and onDropPaneNew(paneId) — so the prop wires straight through with no
+  // arg-order adapter (which is exactly what caused the prior swap bug).
+  onDropPane: (paneId: string, workspaceId: string) => void;
   // Drop a dragged pane onto the ＋ button → new workspace containing it.
   onDropPaneNew: (paneId: string) => void;
   className?: string;
@@ -67,7 +70,7 @@ export function WorkspaceTabs({ workspaces, activeWorkspaceId, onSelect, onCreat
     e.preventDefault();
     setDragOverId(null);
     const paneId = paneIdFrom(e);
-    if (paneId) onDropPane(id, paneId);
+    if (paneId) onDropPane(paneId, id);
   };
   const onNewDragOver = (e: React.DragEvent) => {
     if (!e.dataTransfer.types.includes(PANE_DRAG_MIME)) return;
