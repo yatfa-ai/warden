@@ -119,6 +119,32 @@ export function normalizeHealthState(state: string | undefined): HealthStateValu
   return validStates[state.toLowerCase()] ?? HealthState.UNKNOWN;
 }
 
+// ---- Resource load coloring (shared by per-agent + per-host surfaces) ----
+
+/**
+ * Color a resource reading so a runaway (CPU- or memory-burning) agent — or, at
+ * the host level (WARDEN-361), an overloaded host — pops in a dense fleet.
+ *
+ * CPU% is host-wide — on an N-core host one fully-burned core reads ~100/N — so
+ * the bands are heuristic; memory is NOT diluted across cores and is the
+ * stronger leak/OOM signal. A single band definition colors every resource
+ * surface the same way: the per-agent ResourceChip in HealthDashboard
+ * (WARDEN-309), the rolled-up host header line, and the ＋ new-chat picker
+ * annotation (WARDEN-361). Elevated = CPU OR mem ≥ 80 (amber); ≥ 90 (red).
+ *
+ * Pure (no imports) so it loads standalone under the OXC test harness and can be
+ * unit-tested like the host helpers below. Pass `undefined` (per-agent chip, field
+ * absent) OR `null` (host roll-up, no agent had stats) for a missing reading and
+ * it is treated as 0 (never trips a band on its own).
+ */
+export function resourceTone(cpuPct?: number | null, memPct?: number | null): string {
+  const cpu = cpuPct ?? 0;
+  const mem = memPct ?? 0;
+  if (cpu >= 90 || mem >= 90) return 'text-red-500';
+  if (cpu >= 80 || mem >= 80) return 'text-yellow-500';
+  return 'text-muted-foreground';
+}
+
 // ---- Host grouping (Fleet Health Dashboard "Group by: Host" — WARDEN-237) ----
 
 /** Per-host connectivity, as returned by /api/hosts/status. */
@@ -198,4 +224,63 @@ export function compareHostGroups(
   if (a.host < b.host) return -1;                                        // stable name tiebreak
   if (a.host > b.host) return 1;
   return 0;
+}
+
+// ---- Per-host resource load roll-up (WARDEN-361) ----
+
+/**
+ * Rolled-up resource load for one host's agents (WARDEN-361). `agentCount` is
+ * every agent on the host (the denominator); `avgCpu` / `memPct` are null when
+ * none of those agents carry docker-stats data.
+ */
+export interface HostLoadSummary {
+  agentCount: number;
+  /** Mean of the present cpuPct values, or null if no agent has stats. */
+  avgCpu: number | null;
+  /** Max memPct across agents, or null if no agent has stats. */
+  memPct: number | null;
+}
+
+/**
+ * Roll one host's agents up to a single resource-load summary, so a fleet
+ * manager can spot an overloaded host WITHOUT expanding rows or mentally summing
+ * N per-agent chips — surfaced in the Fleet Health "Group by: Host" header and
+ * the ＋ new-chat host picker (WARDEN-361), on top of the per-agent capture from
+ * WARDEN-309 already cache-carried into /api/health.
+ *
+ * Aggregate semantics (chosen, not arbitrary):
+ *   - avgCpu = MEAN of present cpuPct values. CPU% is host-wide (a fully-burned
+ *     core on an N-core host reads ~100/N), so the mean is a fair "how busy is
+ *     this host's fleet" reading.
+ *   - memPct = MAX (deliberately not mean) of present memPct values. Memory is
+ *     the strong leak/OOM signal and is not diluted; a single memory-hogging
+ *     container is the actionable thing a human must see. Averaging would hide
+ *     the hog — 8 agents averaging ~11% mem masks the one container at 95% that
+ *     is about to OOM the host. Max surfaces it.
+ *
+ * Both aggregates are null when NO agent on the host carries docker-stats data
+ * (bare-tmux/manual agents, non-yatfa containers, hosts whose stats failed), so
+ * the caller renders exactly nothing — matching ResourceChip's graceful-N/A
+ * pattern (fields simply absent, no broken chips).
+ *
+ * Pure (no React, no fetch), unit-tested alongside groupByHost / compareHostGroups.
+ */
+export function summarizeHostLoad(agents: Chat[]): HostLoadSummary {
+  let cpuSum = 0;
+  let cpuN = 0;
+  let memMax: number | null = null;
+  for (const a of agents) {
+    if (a.cpuPct != null) {
+      cpuSum += a.cpuPct;
+      cpuN += 1;
+    }
+    if (a.memPct != null && (memMax === null || a.memPct > memMax)) {
+      memMax = a.memPct;
+    }
+  }
+  return {
+    agentCount: agents.length,
+    avgCpu: cpuN > 0 ? cpuSum / cpuN : null,
+    memPct: memMax,
+  };
 }

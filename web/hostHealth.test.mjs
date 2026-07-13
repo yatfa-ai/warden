@@ -29,7 +29,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-hostHealth-test-'));
 const tmpFile = join(tmpDir, 'healthUtils.mjs');
 writeFileSync(tmpFile, code);
-const { groupByHost, compareHostGroups } = await import(tmpFile);
+const { groupByHost, compareHostGroups, summarizeHostLoad, resourceTone } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -55,7 +55,10 @@ test('one host -> one group with a correct tally', () => {
   assert.equal(groups.length, 1);
   assert.equal(groups[0].host, '(local)');
   assert.equal(groups[0].agents.length, 3);
-  assert.deepEqual(groups[0].counts, { healthy: 2, warning: 0, critical: 1, idle: 0, unknown: 0 });
+  // `closed` has been part of HostHealthCounts since WARDEN-245; the tally
+  // always carries it (here 0). Asserted explicitly so a future state addition
+  // doesn't silently drop out of the expected shape.
+  assert.deepEqual(groups[0].counts, { healthy: 2, warning: 0, critical: 1, idle: 0, closed: 0, unknown: 0 });
 });
 
 console.log('\ngroupByHost: multi-host separation');
@@ -156,6 +159,130 @@ test('offline host outranks unknown-connectivity host even when the unknown one 
   const offlineOnly = (h) => (h === 'down' ? 'offline' : undefined);
   const sorted = [unknownHost, offlineHost].sort((a, b) => compareHostGroups(a, b, offlineOnly));
   assert.deepEqual(sorted.map((g) => g.host), ['down', 'mystery']);
+});
+
+// --- summarizeHostLoad: per-host CPU/mem roll-up (WARDEN-361) ---
+// avgCpu = MEAN of present cpuPct; memPct = MAX of present memPct; both null when
+// no agent carries docker-stats; agentCount is every agent (the denominator).
+
+console.log('\nsummarizeHostLoad: empty / no-stats hosts degrade to null aggregates');
+test('no agents -> zero count, null cpu/mem', () => {
+  assert.deepEqual(summarizeHostLoad([]), { agentCount: 0, avgCpu: null, memPct: null });
+});
+test('agents present but none carry stats -> null cpu/mem, count still totals', () => {
+  // Bare-tmux / non-yatfa / stats-failed agents: render nothing downstream.
+  const out = summarizeHostLoad([agent('a1'), agent('a2'), agent('a3')]);
+  assert.equal(out.agentCount, 3);
+  assert.equal(out.avgCpu, null);
+  assert.equal(out.memPct, null);
+});
+
+console.log('\nsummarizeHostLoad: cpu is the MEAN of present values');
+test('cpu average across agents with stats', () => {
+  const out = summarizeHostLoad([
+    agent('a1', { cpuPct: 40 }),
+    agent('a2', { cpuPct: 60 }),
+    agent('a3', { cpuPct: 20 }),
+  ]);
+  assert.equal(out.agentCount, 3);
+  assert.equal(out.avgCpu, 40); // (40 + 60 + 20) / 3
+});
+test('cpu average ignores agents without a cpuPct (denominator = agents WITH stats)', () => {
+  // A host where only 2 of 5 agents report cpu: the mean is over the 2, not the 5.
+  const out = summarizeHostLoad([
+    agent('a1', { cpuPct: 50 }),
+    agent('a2', { cpuPct: 70 }),
+    agent('a3'),
+    agent('a4'),
+    agent('a5'),
+  ]);
+  assert.equal(out.agentCount, 5);
+  assert.equal(out.avgCpu, 60); // (50 + 70) / 2 — the 3 stats-less agents do not drag the mean
+});
+
+console.log('\nsummarizeHostLoad: mem is the MAX (not mean) — a single hog must surface');
+test('mem is the max across agents (a memory hog is not averaged away)', () => {
+  // 8 agents each at ~11% would average to ~11% — masking the one at 95% that OOMs.
+  const out = summarizeHostLoad([
+    agent('a1', { memPct: 11 }),
+    agent('a2', { memPct: 12 }),
+    agent('a3', { memPct: 95 }), // the actionable hog
+    agent('a4', { memPct: 10 }),
+  ]);
+  assert.equal(out.memPct, 95);
+});
+test('mem max ignores agents without memPct', () => {
+  const out = summarizeHostLoad([
+    agent('a1', { memPct: 30 }),
+    agent('a2'), // no mem data
+    agent('a3', { memPct: 88 }),
+  ]);
+  assert.equal(out.memPct, 88);
+});
+test('cpu mean + mem max computed independently from a mixed host', () => {
+  const out = summarizeHostLoad([
+    agent('a1', { cpuPct: 10, memPct: 20 }),
+    agent('a2', { cpuPct: 30, memPct: 80 }),
+    agent('a3', { cpuPct: 50, memPct: 40 }),
+    agent('a4'), // bare-tmux — no stats at all
+  ]);
+  assert.equal(out.agentCount, 4);
+  assert.equal(out.avgCpu, 30); // (10 + 30 + 50) / 3
+  assert.equal(out.memPct, 80); // max(20, 80, 40)
+});
+test('only-cpu host: mem null, cpu averaged', () => {
+  const out = summarizeHostLoad([agent('a1', { cpuPct: 25 }), agent('a2', { cpuPct: 75 })]);
+  assert.equal(out.avgCpu, 50);
+  assert.equal(out.memPct, null);
+});
+test('only-mem host: cpu null, mem maxed', () => {
+  const out = summarizeHostLoad([agent('a1', { memPct: 33 }), agent('a2', { memPct: 77 })]);
+  assert.equal(out.avgCpu, null);
+  assert.equal(out.memPct, 77);
+});
+
+console.log('\nsummarizeHostLoad: rolls up via groupByHost (mirrors the picker / header path)');
+test('groupByHost + summarizeHostLoad yields one summary per host', () => {
+  // The exact composition NewChatForm + HealthDashboard use: group, then summarize.
+  const groups = groupByHost([
+    agent('a1', { host: 'gpu-1', cpuPct: 90, memPct: 95 }),
+    agent('a2', { host: 'gpu-1', cpuPct: 10, memPct: 5 }),
+    agent('a3', { host: 'build', cpuPct: 40, memPct: 40 }),
+  ]);
+  const byHost = Object.fromEntries(groups.map((g) => [g.host, summarizeHostLoad(g.agents)]));
+  assert.equal(byHost['gpu-1'].avgCpu, 50);  // (90 + 10) / 2
+  assert.equal(byHost['gpu-1'].memPct, 95);  // max — the hog
+  assert.equal(byHost['build'].avgCpu, 40);
+  assert.equal(byHost['build'].memPct, 40);
+});
+
+// --- resourceTone: shared bands (WARDEN-309 per-agent + WARDEN-361 per-host) ---
+// CPU OR mem >= 90 -> red; >= 80 -> amber (yellow); else muted. Missing = treated 0.
+
+console.log('\nresourceTone: shared band definition (per-agent + per-host)');
+test('mem >= 90 is red even when cpu is low', () => {
+  assert.equal(resourceTone(5, 92), 'text-red-500');
+});
+test('cpu >= 90 is red even when mem is low', () => {
+  assert.equal(resourceTone(95, 5), 'text-red-500');
+});
+test('mem >= 80 (but < 90) is amber', () => {
+  assert.equal(resourceTone(5, 85), 'text-yellow-500');
+});
+test('cpu >= 80 (but < 90) is amber', () => {
+  assert.equal(resourceTone(82, 5), 'text-yellow-500');
+});
+test('both below 80 is muted', () => {
+  assert.equal(resourceTone(40, 50), 'text-muted-foreground');
+});
+test('missing fields default to 0 — never trip a band on their own', () => {
+  assert.equal(resourceTone(undefined, undefined), 'text-muted-foreground');
+  assert.equal(resourceTone(undefined, 95), 'text-red-500');
+  assert.equal(resourceTone(88, undefined), 'text-yellow-500');
+});
+test('90 is inclusive (red), 80 is inclusive (amber)', () => {
+  assert.equal(resourceTone(90, 0), 'text-red-500');
+  assert.equal(resourceTone(0, 80), 'text-yellow-500');
 });
 
 console.log(`\n${passed} passed`);

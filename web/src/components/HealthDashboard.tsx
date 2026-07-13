@@ -8,6 +8,8 @@ import {
   normalizeHealthState,
   groupByHost,
   compareHostGroups,
+  resourceTone,
+  summarizeHostLoad,
   type HealthStateValue,
   type HostHealthGroup,
 } from '@/lib/healthUtils';
@@ -73,18 +75,9 @@ function memUsedShort(memUsage?: string): string {
   return used;
 }
 
-// Color a resource reading so a runaway (CPU- or memory-burning) agent pops in a
-// dense fleet. CPU% is host-wide — on an N-core host one fully-burned core reads
-// ~100/N — so the bands are heuristic; memory is not diluted and is the stronger
-// leak/OOM signal. Reuses the file's existing text-yellow-500 / text-red-500
-// palette. Elevated = CPU OR mem ≥ 80 (amber); ≥ 90 (red). (WARDEN-309)
-function resourceTone(cpuPct?: number, memPct?: number): string {
-  const cpu = cpuPct ?? 0;
-  const mem = memPct ?? 0;
-  if (cpu >= 90 || mem >= 90) return 'text-red-500';
-  if (cpu >= 80 || mem >= 80) return 'text-yellow-500';
-  return 'text-muted-foreground';
-}
+// resourceTone() moved to healthUtils (WARDEN-361) so the single band definition
+// also colors the per-host aggregate load line (renderHostLoad) and the ＋ new-chat
+// picker annotation. Elevated = CPU OR mem ≥ 80 (amber); ≥ 90 (red). (WARDEN-309)
 
 // Inline chip label: "42% · 310.2MiB" (rounded CPU% · used memory). Each part is
 // included only when present, so a chat with only cpuPct still renders "42%".
@@ -467,6 +460,14 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat }: Props)
                   const collapsed = !!collapsedHosts[group.host];
                   const dist = HEALTH_SECTION_ORDER.filter(s => group.counts[s] > 0);
                   const hostLabel = group.host === '(local)' ? 'local' : group.host;
+                  // Per-host rolled-up CPU/mem (WARDEN-361): mean cpu, MAX mem, or
+                  // null when no agent carries docker-stats. Rendered in the line-2
+                  // distribution area so an overloaded host (≥90% mem) is red and
+                  // identifiable WITHOUT expanding rows or scanning per-agent chips.
+                  // agentCount already sits on line 1, so this only shows cpu/mem.
+                  const load = summarizeHostLoad(group.agents);
+                  const hasLoad = load.avgCpu != null || load.memPct != null;
+                  const loadTitle = `Host load: ${load.avgCpu != null ? `${load.avgCpu.toFixed(0)}% avg CPU` : 'no CPU data'} · ${load.memPct != null ? `${load.memPct.toFixed(0)}% max mem` : 'no mem data'} (across ${load.agentCount} agent${load.agentCount !== 1 ? 's' : ''})`;
 
                   return (
                     <div key={group.host} className="flex flex-col gap-1 min-w-0">
@@ -535,20 +536,38 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat }: Props)
                             {group.agents.length} agent{group.agents.length !== 1 ? 's' : ''}
                           </span>
                         </div>
-                        {/* Line 2: health distribution — only non-zero states, colored to match
-                            the summary bar. Indented (pl-7) to align under the hostname.
+                        {/* Line 2: health distribution + rolled-up resource load (WARDEN-361).
+                            Only non-zero health states are shown, colored to match the summary
+                            bar. The trailing resource segment reuses resourceTone bands (≥80
+                            amber, ≥90 red) so a host whose agents collectively sit at ≥90% mem
+                            is red here too. Indented (pl-7) to align under the hostname.
                             `flex-wrap` makes the line bulletproof against overflow: if a very
-                            wide distribution (all 5 states, 3-digit counts) still exceeds the
-                            panel width, the excess segments wrap to a third line instead of
-                            being clipped. Each segment is its own flex item, so a wrapped
-                            segment stays whole (it never breaks mid-word). (WARDEN-237) */}
-                        {dist.length > 0 && (
+                            wide distribution (all 5 states, 3-digit counts) + the load segment
+                            still exceeds the panel width, the excess wraps to a third line
+                            instead of being clipped. Each segment is its own flex item, so a
+                            wrapped segment stays whole (it never breaks mid-word). (WARDEN-237) */}
+                        {(dist.length > 0 || hasLoad) && (
                           <div className="flex flex-wrap items-center gap-1.5 min-w-0 pl-7">
                             {dist.map(s => (
                               <span key={s} className={`text-[10px] ${HEALTH_DIST_COLOR[s]}`}>
                                 {group.counts[s]} {formatHealthState(s).toLowerCase()}
                               </span>
                             ))}
+                            {/* Per-host resource aggregate (WARDEN-361): "41% cpu · 87% mem",
+                                mean cpu · MAX mem across the host's agents. Colored by resourceTone
+                                so ≥90% mem reads red. Rendered ONLY when at least one agent carries
+                                docker-stats (graceful N/A — a bare-tmux / stats-less host renders
+                                nothing, exactly as today). `tabular-nums` keeps the digits steady. */}
+                            {hasLoad && (
+                              <span
+                                className={`text-[10px] tabular-nums ${resourceTone(load.avgCpu, load.memPct)}`}
+                                title={loadTitle}
+                              >
+                                {load.avgCpu != null && `${Math.round(load.avgCpu)}% cpu`}
+                                {load.avgCpu != null && load.memPct != null && ' · '}
+                                {load.memPct != null && `${Math.round(load.memPct)}% mem`}
+                              </span>
+                            )}
                           </div>
                         )}
                       </Button>
