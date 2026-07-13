@@ -32,6 +32,7 @@ export interface HealthData {
     warning: Chat[];
     critical: Chat[];
     idle: Chat[];
+    closed: Chat[];
     unknown: Chat[];
   };
   summary: {
@@ -39,6 +40,7 @@ export interface HealthData {
     warning: number;
     critical: number;
     idle: number;
+    closed: number;
     total: number;
     label: string;
   };

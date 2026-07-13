@@ -4,7 +4,7 @@
 // Both share one shape; tmux.js switches between docker-exec and bare tmux by
 // whether `container` is set, and uses `session` for the tmux target.
 import { run, runWithPool, runLocalTmux, shellQuote } from './ssh.js';
-import { loadCatalog } from './config.js';
+import { loadCatalog, stampCatalogActivity } from './config.js';
 import { ROLES, parseContainerName, buildChat, sortChats } from './chatMeta.js';
 // Re-export for any external consumer; the canonical home is now ./chatMeta.js.
 export { ROLES, parseContainerName };
@@ -303,8 +303,11 @@ async function discoverManual(host, entries, cfg) {
     }
   }
 
-  // First pass: create result objects and identify active sessions
-  const result = entries.map(e => ({ ...e, active: !!activeMap[e.session], lastActivity: null }));
+  // First pass: create result objects and identify active sessions.
+  // Inactive sessions hydrate lastActivity from the persisted catalog entry so a
+  // chat that just went dead still carries a usable last-known-activity for
+  // recency ordering in Fleet Health (WARDEN-245).
+  const result = entries.map(e => ({ ...e, active: !!activeMap[e.session], lastActivity: e.lastActivity ?? null }));
   const activeEntries = result.filter(e => e.active);
 
   // Second pass: capture activity timestamps concurrently for all active sessions
@@ -319,6 +322,9 @@ async function discoverManual(host, entries, cfg) {
                 const date = new Date(timestampMatch[1]);
                 if (!isNaN(date.getTime())) {
                   entry.lastActivity = date.getTime();
+                  // Persist while alive so the value survives the chat later going
+                  // inactive AND a warden restart (WARDEN-245).
+                  stampCatalogActivity(host, entry.session, entry.lastActivity);
                 }
               }
             }
@@ -355,14 +361,16 @@ export async function discoverAll(hosts, cfg, opts = {}) {
         actives = (await discoverManual(host, entries, cfg)).map((e) => ({ e, active: e.active }));
       }
 
-      // Create result objects first
+      // Create result objects first. Inactive catalog chats hydrate lastActivity
+      // from the persisted entry so a just-dead chat keeps a usable last-known
+      // activity for Fleet Health recency ordering (WARDEN-245).
       const resultObjects = actives.map(({ e, active }) => ({
         id: `${host}:${e.session}`, key: e.session, kind: 'tmux',
         host, container: null, session: e.session,
         project: host === LOCAL ? 'local' : 'manual', role: 'claude', name: e.name || e.session,
         cwd: e.cwd, cmd: e.cmd,
         active, status: active ? 'running' : 'idle',
-        lastActivity: null,
+        lastActivity: e.lastActivity ?? null,
       }));
 
       // Capture activity timestamps concurrently for active local sessions.
@@ -379,6 +387,9 @@ export async function discoverAll(hosts, cfg, opts = {}) {
                     const date = new Date(timestampMatch[1]);
                     if (!isNaN(date.getTime())) {
                       obj.lastActivity = date.getTime();
+                      // Persist while alive so lastActivity survives the chat going
+                      // inactive and a warden restart (WARDEN-245).
+                      stampCatalogActivity(host, obj.session, obj.lastActivity);
                     }
                   }
                 }
@@ -407,7 +418,10 @@ export async function discoverAll(hosts, cfg, opts = {}) {
 
 // Build the chat object for a catalog/manual entry. `active` may be true | false | null
 // (null = undiscovered, in lazy mode). Single source of truth for the tmux-catalog shape
-// (mirrors the inline build in discoverAll above).
+// (mirrors the inline build in discoverAll above). `lastActivity` is the LIVE-captured
+// value (null for inactive/undiscovered chats); when it is null we fall back to the
+// entry's persisted last-known activity so a dead chat still orders by recency in
+// Fleet Health and survives a warden restart (WARDEN-245).
 function toCatalogChat(host, entry, active, lastActivity) {
   return {
     id: `${host}:${entry.session}`, key: entry.session, kind: 'tmux',
@@ -416,7 +430,7 @@ function toCatalogChat(host, entry, active, lastActivity) {
     name: entry.name || entry.session, cwd: entry.cwd, cmd: entry.cmd,
     active,
     status: active == null ? 'unknown' : (active ? 'running' : 'idle'),
-    lastActivity: lastActivity ?? null,
+    lastActivity: lastActivity ?? entry.lastActivity ?? null,
   };
 }
 
@@ -453,7 +467,15 @@ export async function discoverHost(host, cfg) {
         .then((r) => {
           if (r.ok && r.stdout.trim()) {
             const m = r.stdout.match(/\[?(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2})\]?/);
-            if (m) { const d = new Date(m[1]); if (!isNaN(d.getTime())) o.lastActivity = d.getTime(); }
+            if (m) {
+              const d = new Date(m[1]);
+              if (!isNaN(d.getTime())) {
+                o.lastActivity = d.getTime();
+                // Persist while alive so lastActivity survives the chat going
+                // inactive and a warden restart (WARDEN-245).
+                stampCatalogActivity(LOCAL, o.session, o.lastActivity);
+              }
+            }
           }
         }).catch(() => {})
     ));

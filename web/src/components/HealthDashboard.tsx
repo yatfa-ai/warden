@@ -23,13 +23,17 @@ interface Props {
   onClose: () => void;
 }
 
-const HEALTH_SECTION_ORDER = ['healthy', 'warning', 'critical', 'idle', 'unknown'] as const;
+// Closed sits between idle and unknown: a dead session is non-critical and less
+// actionable than an idle (potentially waking) one, so it sinks toward the tail.
+// (WARDEN-245)
+const HEALTH_SECTION_ORDER = ['healthy', 'warning', 'critical', 'idle', 'closed', 'unknown'] as const;
 
 const SECTION_LABELS: Record<string, { title: string; color: string; icon: string }> = {
   healthy: { title: 'Healthy Agents', color: 'text-green-500', icon: '●' },
   warning: { title: 'Warning Agents', color: 'text-yellow-500', icon: '◐' },
   critical: { title: 'Critical Agents', color: 'text-red-500', icon: '●' },
   idle: { title: 'Idle Sessions', color: 'text-gray-500', icon: '○' },
+  closed: { title: 'Closed Sessions', color: 'text-gray-500', icon: '■' },
   unknown: { title: 'Unknown Status', color: 'text-muted-foreground', icon: '·' }
 };
 
@@ -41,8 +45,15 @@ const HEALTH_DIST_COLOR: Record<HealthStateValue, string> = {
   [HealthState.WARNING]: 'text-yellow-500',
   [HealthState.CRITICAL]: 'text-red-500',
   [HealthState.IDLE]: 'text-gray-500',
+  [HealthState.CLOSED]: 'text-gray-500',
   [HealthState.UNKNOWN]: 'text-muted-foreground',
 };
+
+// The Closed section is bounded so dead catalog sessions can no longer flood the
+// panel: 5 rows collapsed, 20 expanded max, with the true total always visible
+// so the cap is never silent. (WARDEN-245)
+const CLOSED_COLLAPSED_LIMIT = 5;
+const CLOSED_EXPANDED_LIMIT = 20;
 
 type GroupMode = 'health' | 'host';
 
@@ -118,9 +129,22 @@ function healthTone(state: HealthStateValue): StatusTone {
       return 'red';
     case HealthState.IDLE:
       return 'gray';
+    case HealthState.CLOSED:
+      // Same gray family as idle; the distinct glyph (■ vs ○) carries the
+      // state under grayscale / CVD (WCAG 1.4.1). (WARDEN-245)
+      return 'gray';
     default:
       return 'muted';
   }
+}
+
+// Most-recent last-known activity first, for ordering the bounded Closed section.
+// Chats with no retained lastActivity sink to the bottom (stable among ties).
+// (WARDEN-245)
+function byRecencyDesc(a: Chat, b: Chat): number {
+  const av = a.lastActivity ?? -Infinity;
+  const bv = b.lastActivity ?? -Infinity;
+  return bv - av;
 }
 
 /**
@@ -169,6 +193,10 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
   // is unchanged unless a human opts into the per-host view (WARDEN-237).
   const [groupBy, setGroupBy] = useState<GroupMode>('health');
   const [collapsedHosts, setCollapsedHosts] = useState<Record<string, boolean>>({});
+  // Closed-section expansion (WARDEN-245): collapsed shows the 5 most-recent dead
+  // sessions; expanded shows up to 20. The true total is always surfaced so the
+  // cap is never silent.
+  const [closedExpanded, setClosedExpanded] = useState(false);
   // Shared /api/hosts/status poll (singleton) — fuses per-host connectivity into
   // each host section's summary line.
   const hostStatuses = useHostStatuses();
@@ -350,6 +378,7 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
             <span className="text-yellow-500">{healthData.summary.warning} warning</span>
             <span className="text-red-500">{healthData.summary.critical} critical</span>
             <span className="text-gray-500">{healthData.summary.idle} idle</span>
+            <span className="text-gray-500">{healthData.summary.closed} closed</span>
           </div>
         </div>
       )}
@@ -381,6 +410,20 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
                 const sectionInfo = SECTION_LABELS[section];
                 const count = agents.length;
 
+                // Closed section is bounded + recency-ordered (WARDEN-245): dead
+                // catalog sessions no longer flood the panel. Sort most-recent
+                // last-known activity first; cap 5 collapsed / 20 expanded. The
+                // total (count, in the header) is always shown so the cap is
+                // never silent, and a "...and M more" note surfaces the 20-cap.
+                const isClosed = section === 'closed';
+                const ordered = isClosed ? [...agents].sort(byRecencyDesc) : agents;
+                const limit = isClosed
+                  ? (closedExpanded ? CLOSED_EXPANDED_LIMIT : CLOSED_COLLAPSED_LIMIT)
+                  : agents.length;
+                const shown = isClosed ? ordered.slice(0, limit) : ordered;
+                const hiddenBeyondCap = isClosed ? count - shown.length : 0;
+                const showToggle = isClosed && count > CLOSED_COLLAPSED_LIMIT;
+
                 return (
                   <div key={section} className="flex flex-col gap-1">
                     {/* Section Header */}
@@ -390,8 +433,32 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
 
                     {/* Agent List */}
                     <div className="flex flex-col gap-0.5">
-                      {agents.map(agent => renderAgent(agent, true))}
+                      {shown.map(agent => renderAgent(agent, true))}
                     </div>
+
+                    {/* Closed-section expansion toggle (WARDEN-245). Collapsed →
+                        "show more (N total)"; expanded → "show less". The label
+                        always carries the true total so the cap is never silent. */}
+                    {showToggle && (
+                      <button
+                        type="button"
+                        onClick={() => setClosedExpanded(v => !v)}
+                        className="self-start px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
+                        aria-expanded={closedExpanded}
+                      >
+                        {closedExpanded
+                          ? 'show less'
+                          : `show more (${count} total)`}
+                      </button>
+                    )}
+
+                    {/* When expanded but the total exceeds the 20-row hard cap,
+                        surface the remainder so the cap is explicit, not silent. */}
+                    {isClosed && closedExpanded && hiddenBeyondCap > 0 && (
+                      <div className="px-2 text-[10px] text-muted-foreground/70">
+                        …and {hiddenBeyondCap} more (showing {shown.length} of {count})
+                      </div>
+                    )}
                   </div>
                 );
               })

@@ -3,8 +3,14 @@
 // Health states:
 //   - HEALTHY: output in last 5 minutes
 //   - WARNING: no output in 5-30 minutes
-//   - CRITICAL: no output in 30+ minutes or dead tmux
+//   - CRITICAL: no output in 30+ minutes (alive but silent) — a DEAD session is
+//     never critical, it is CLOSED (see below).
 //   - IDLE: manual session with no recent activity (different from WARNING)
+//   - CLOSED: the tmux session is no longer alive (active === false). A closed
+//     chat is not a failing agent; CRITICAL means "alive but silent 30+ min".
+//     Both kind:'tmux' and kind:'yatfa' classify the same way here — no
+//     kind-based special-casing. (WARDEN-245)
+//   - UNKNOWN: undiscovered (lazy) chat — active is null/undefined.
 
 const HEALTHY_THRESHOLD_MS = 5 * 60 * 1000;  // 5 minutes
 const WARNING_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
@@ -17,6 +23,7 @@ export const HealthState = {
   WARNING: 'warning',
   CRITICAL: 'critical',
   IDLE: 'idle',
+  CLOSED: 'closed',
   UNKNOWN: 'unknown'
 };
 
@@ -31,9 +38,12 @@ export function getHealthState(agent, lastActivity) {
   if (agent.active == null) {
     return HealthState.UNKNOWN;
   }
-  // If agent is not active (tmux session dead), it's critical
+  // A chat whose tmux session is no longer alive is CLOSED — not critical. This
+  // applies to both kind:'tmux' and kind:'yatfa' (a dead session is a dead
+  // session regardless of how it was spawned). CRITICAL is reserved for an
+  // ALIVE-but-silent agent (time-based rule below). (WARDEN-245)
   if (!agent.active) {
-    return HealthState.CRITICAL;
+    return HealthState.CLOSED;
   }
 
   // Manual sessions with no recent activity are IDLE, not WARNING
@@ -76,6 +86,11 @@ export function getHealthColor(state) {
       return 'text-red-400';
     case HealthState.IDLE:
       return 'text-gray-400';
+    case HealthState.CLOSED:
+      // Gray, one shade darker than IDLE (gray-400) so a closed (dead) session
+      // reads as "more final" than an idle (waiting) one, while staying in the
+      // neutral gray family. The distinct glyph (■ vs ○) is the WCAG lever.
+      return 'text-gray-500';
     default:
       return 'text-muted-foreground';
   }
@@ -96,6 +111,8 @@ export function getHealthBgColor(state) {
       return 'bg-red-500';
     case HealthState.IDLE:
       return 'bg-gray-500';
+    case HealthState.CLOSED:
+      return 'bg-gray-600';
     default:
       return 'bg-muted-foreground';
   }
@@ -116,6 +133,8 @@ export function formatHealthState(state) {
       return 'Critical';
     case HealthState.IDLE:
       return 'Idle';
+    case HealthState.CLOSED:
+      return 'Closed';
     default:
       return 'Unknown';
   }
@@ -132,6 +151,7 @@ export function groupByHealth(agents) {
     warning: [],
     critical: [],
     idle: [],
+    closed: [],
     unknown: []
   };
 
@@ -155,15 +175,17 @@ export function getHealthSummary(groups) {
   const warning = groups.warning?.length || 0;
   const critical = groups.critical?.length || 0;
   const idle = groups.idle?.length || 0;
-  const total = healthy + warning + critical + idle;
+  const closed = groups.closed?.length || 0;
+  const total = healthy + warning + critical + idle + closed;
 
-  const label = `${healthy} healthy · ${warning} warning · ${critical} critical · ${idle} idle`;
+  const label = `${healthy} healthy · ${warning} warning · ${critical} critical · ${idle} idle · ${closed} closed`;
 
   return {
     healthy,
     warning,
     critical,
     idle,
+    closed,
     total,
     label
   };

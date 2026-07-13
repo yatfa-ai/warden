@@ -7,6 +7,7 @@ export const HealthState = {
   WARNING: 'warning',
   CRITICAL: 'critical',
   IDLE: 'idle',
+  CLOSED: 'closed',
   UNKNOWN: 'unknown'
 } as const;
 
@@ -25,6 +26,11 @@ export function getHealthColor(state: HealthStateValue): string {
       return 'text-red-400';
     case HealthState.IDLE:
       return 'text-gray-400';
+    case HealthState.CLOSED:
+      // One shade darker than IDLE (gray-400): a closed (dead) session reads as
+      // "more final" than an idle (waiting) one, while staying in the neutral gray
+      // family. The distinct glyph (■ vs ○) is the non-color WCAG lever.
+      return 'text-gray-500';
     default:
       return 'text-muted-foreground';
   }
@@ -43,6 +49,8 @@ export function getHealthBgColor(state: HealthStateValue): string {
       return 'bg-red-500';
     case HealthState.IDLE:
       return 'bg-gray-500';
+    case HealthState.CLOSED:
+      return 'bg-gray-600';
     default:
       return 'bg-muted-foreground';
   }
@@ -61,6 +69,8 @@ export function formatHealthState(state: HealthStateValue): string {
       return 'Critical';
     case HealthState.IDLE:
       return 'Idle';
+    case HealthState.CLOSED:
+      return 'Closed';
     default:
       return 'Unknown';
   }
@@ -70,6 +80,8 @@ export function formatHealthState(state: HealthStateValue): string {
  * Get health state icon/indicator — a non-color cue used alongside color so
  * state survives grayscale / color-vision deficiency (WCAG 1.4.1).
  * Each glyph is distinct (healthy `✓` vs critical `✕`, unlike the old `●`/`●`).
+ * Closed uses `■` (a filled block = stopped/terminated), distinct from idle's
+ * open `○` (waiting). (WARDEN-245)
  */
 export function getHealthIcon(state: HealthStateValue): string {
   switch (state) {
@@ -81,6 +93,8 @@ export function getHealthIcon(state: HealthStateValue): string {
       return '✕';
     case HealthState.IDLE:
       return '○';
+    case HealthState.CLOSED:
+      return '■';
     default:
       return '·';
   }
@@ -99,6 +113,7 @@ export function normalizeHealthState(state: string | undefined): HealthStateValu
     warning: HealthState.WARNING,
     critical: HealthState.CRITICAL,
     idle: HealthState.IDLE,
+    closed: HealthState.CLOSED,
     unknown: HealthState.UNKNOWN,
   };
   return validStates[state.toLowerCase()] ?? HealthState.UNKNOWN;
@@ -120,6 +135,7 @@ export interface HostHealthCounts {
   warning: number;
   critical: number;
   idle: number;
+  closed: number;
   unknown: number;
 }
 
@@ -130,7 +146,7 @@ export interface HostHealthGroup {
   counts: HostHealthCounts;
 }
 
-const EMPTY_COUNTS: HostHealthCounts = { healthy: 0, warning: 0, critical: 0, idle: 0, unknown: 0 };
+const EMPTY_COUNTS: HostHealthCounts = { healthy: 0, warning: 0, critical: 0, idle: 0, closed: 0, unknown: 0 };
 
 /**
  * Bucket agents by host and tally each health state per host.
