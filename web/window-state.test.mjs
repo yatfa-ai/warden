@@ -19,11 +19,13 @@ const {
   MIN_HEIGHT,
   parseWindowState,
   rememberIsActive,
+  closeToTrayIsActive,
   boundsIntersectAnyDisplay,
   resolveInitialBounds,
   captureBounds,
   captureMaximized,
   withRemember,
+  withCloseToTray,
 } = require('../electron/window-state.cjs');
 
 let passed = 0;
@@ -57,12 +59,23 @@ test('missing required width/height → null', () => {
   assert.equal(parseWindowState(JSON.stringify({ width: 1000 })), null);
 });
 test('a valid state round-trips with numeric fields', () => {
-  const s = parseWindowState(JSON.stringify({ remember: true, x: 100, y: 50, width: 1200, height: 800, maximized: true }));
-  assert.deepEqual(s, { remember: true, x: 100, y: 50, width: 1200, height: 800, maximized: true });
+  const s = parseWindowState(JSON.stringify({ remember: true, closeToTray: true, x: 100, y: 50, width: 1200, height: 800, maximized: true }));
+  assert.deepEqual(s, { remember: true, closeToTray: true, x: 100, y: 50, width: 1200, height: 800, maximized: true });
 });
 test('remember defaults to true when absent (toggle default ON)', () => {
   const s = parseWindowState(JSON.stringify({ width: 1200, height: 800 }));
   assert.equal(s.remember, true);
+});
+test('closeToTray defaults to false when absent (opt-in default OFF, WARDEN-330)', () => {
+  const s = parseWindowState(JSON.stringify({ width: 1200, height: 800 }));
+  assert.equal(s.closeToTray, false);
+  // a stale file from before the feature cannot surprise-hide on close
+  assert.equal(parseWindowState(JSON.stringify({ width: 1200, height: 800, remember: true })).closeToTray, false);
+});
+test('only an explicit true enables closeToTray (strict)', () => {
+  assert.equal(parseWindowState(JSON.stringify({ width: 1200, height: 800, closeToTray: true })).closeToTray, true);
+  assert.equal(parseWindowState(JSON.stringify({ width: 1200, height: 800, closeToTray: 'yes' })).closeToTray, false);
+  assert.equal(parseWindowState(JSON.stringify({ width: 1200, height: 800, closeToTray: 1 })).closeToTray, false);
 });
 test('only an explicit false disables remember', () => {
   assert.equal(parseWindowState(JSON.stringify({ width: 1200, height: 800, remember: false })).remember, false);
@@ -92,6 +105,19 @@ test('remember false → inactive', () => {
 });
 test('absent remember → active (default ON)', () => {
   assert.equal(rememberIsActive({ width: 1, height: 1 }), true);
+});
+
+console.log('\ncloseToTrayIsActive — opt-in default OFF (WARDEN-330)');
+test('no saved state → inactive (default OFF)', () => {
+  assert.equal(closeToTrayIsActive(null), false);
+  assert.equal(closeToTrayIsActive(undefined), false);
+});
+test('closeToTray true → active', () => {
+  assert.equal(closeToTrayIsActive({ remember: true, closeToTray: true, width: 1, height: 1 }), true);
+});
+test('closeToTray false/absent → inactive', () => {
+  assert.equal(closeToTrayIsActive({ remember: true, closeToTray: false, width: 1, height: 1 }), false);
+  assert.equal(closeToTrayIsActive({ remember: true, width: 1, height: 1 }), false);
 });
 
 console.log('\nboundsIntersectAnyDisplay — off-screen detection');
@@ -171,7 +197,7 @@ test('remember off → null (nothing persisted)', () => {
 });
 test('no prior state + remember default ON → captures (fresh install starts remembering)', () => {
   const r = captureBounds(null, { x: 20, y: 20, width: 1100, height: 750 }, false);
-  assert.deepEqual(r, { remember: true, x: 20, y: 20, width: 1100, height: 750, maximized: false });
+  assert.deepEqual(r, { remember: true, closeToTray: false, x: 20, y: 20, width: 1100, height: 750, maximized: false });
 });
 test('maximized → null (so un-maximize restores the LAST normal bounds, not full-screen)', () => {
   const prev = { remember: true, x: 10, y: 10, width: 1000, height: 700, maximized: true };
@@ -180,7 +206,13 @@ test('maximized → null (so un-maximize restores the LAST normal bounds, not fu
 test('normal state → captures current bounds, force maximized:false (reopen non-maximized)', () => {
   const prev = { remember: true, x: 10, y: 10, width: 1000, height: 700, maximized: true };
   const r = captureBounds(prev, { x: 30, y: 30, width: 1200, height: 800 }, false);
-  assert.deepEqual(r, { remember: true, x: 30, y: 30, width: 1200, height: 800, maximized: false });
+  assert.deepEqual(r, { remember: true, closeToTray: false, x: 30, y: 30, width: 1200, height: 800, maximized: false });
+});
+test('preserves an active closeToTray flag through a bounds capture (WARDEN-330)', () => {
+  // A resize must NOT wipe closeToTray — both live in the same window-state.json.
+  const prev = { remember: true, closeToTray: true, x: 10, y: 10, width: 1000, height: 700, maximized: false };
+  const r = captureBounds(prev, { x: 30, y: 30, width: 1200, height: 800 }, false);
+  assert.equal(r.closeToTray, true);
 });
 test('null liveBounds → null (defensive)', () => {
   assert.equal(captureBounds(null, null, false), null);
@@ -194,7 +226,11 @@ test('remember off → null', () => {
 test('maximize flips the flag AND preserves the last normal bounds', () => {
   const prev = { remember: true, x: 200, y: 150, width: 1200, height: 800, maximized: false };
   const r = captureMaximized(prev, true);
-  assert.deepEqual(r, { remember: true, x: 200, y: 150, width: 1200, height: 800, maximized: true });
+  assert.deepEqual(r, { remember: true, closeToTray: false, x: 200, y: 150, width: 1200, height: 800, maximized: true });
+});
+test('preserves an active closeToTray flag through a maximize capture (WARDEN-330)', () => {
+  const prev = { remember: true, closeToTray: true, x: 200, y: 150, width: 1200, height: 800, maximized: false };
+  assert.equal(captureMaximized(prev, true).closeToTray, true);
 });
 test('unmaximize clears the flag, bounds preserved', () => {
   const prev = { remember: true, x: 200, y: 150, width: 1200, height: 800, maximized: true };
@@ -223,7 +259,12 @@ test('re-enabling flips the flag back', () => {
 });
 test('no prior state → default bounds, remember set to requested value', () => {
   const r = withRemember(null, true);
-  assert.deepEqual(r, { remember: true, x: undefined, y: undefined, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT, maximized: false });
+  assert.deepEqual(r, { remember: true, closeToTray: false, x: undefined, y: undefined, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT, maximized: false });
+});
+test('preserves an active closeToTray flag when toggling remember (WARDEN-330)', () => {
+  // Toggling remember-bounds must not wipe the independent close-to-tray flag.
+  const prev = { remember: true, closeToTray: true, x: 200, y: 150, width: 1200, height: 800, maximized: false };
+  assert.equal(withRemember(prev, false).closeToTray, true);
 });
 test('strict boolean contract: only `true` enables, everything else is false', () => {
   // The renderer's Switch always sends a real boolean, and main.cjs coerces
@@ -235,6 +276,38 @@ test('strict boolean contract: only `true` enables, everything else is false', (
   assert.equal(withRemember(null, false).remember, false);
   assert.equal(withRemember(null, 'yes').remember, false);
   assert.equal(withRemember(null, 0).remember, false);
+});
+
+console.log('\nwithCloseToTray — the IPC set toggle (WARDEN-330, preserve bounds/remember)');
+test('enabling sets closeToTray:true and keeps the captured bounds + remember', () => {
+  const prev = { remember: true, closeToTray: false, x: 200, y: 150, width: 1200, height: 800, maximized: false };
+  const r = withCloseToTray(prev, true);
+  assert.equal(r.closeToTray, true);
+  assert.equal(r.remember, true, 'remember preserved');
+  assert.equal(r.x, 200, 'bounds preserved');
+  assert.equal(r.width, 1200);
+});
+test('disabling flips the flag back while keeping bounds', () => {
+  const prev = { remember: true, closeToTray: true, x: 200, y: 150, width: 1200, height: 800, maximized: true };
+  const r = withCloseToTray(prev, false);
+  assert.equal(r.closeToTray, false);
+  assert.equal(r.x, 200, 'bounds preserved through the toggle');
+  assert.equal(r.maximized, true);
+});
+test('toggling closeToTray preserves an explicitly-disabled remember flag', () => {
+  // closeToTray and remember are independent — turning one on must not revive the other.
+  const prev = { remember: false, closeToTray: false, x: 200, y: 150, width: 1200, height: 800, maximized: false };
+  assert.equal(withCloseToTray(prev, true).remember, false);
+});
+test('no prior state → default bounds, closeToTray set to requested value', () => {
+  const r = withCloseToTray(null, true);
+  assert.deepEqual(r, { remember: true, closeToTray: true, x: undefined, y: undefined, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT, maximized: false });
+});
+test('strict boolean contract: only `true` enables, everything else is false', () => {
+  assert.equal(withCloseToTray(null, true).closeToTray, true);
+  assert.equal(withCloseToTray(null, false).closeToTray, false);
+  assert.equal(withCloseToTray(null, 'yes').closeToTray, false);
+  assert.equal(withCloseToTray(null, 1).closeToTray, false);
 });
 
 console.log('\nfull lifecycle: resize → move → maximize → close → relaunch (criterion 1)');

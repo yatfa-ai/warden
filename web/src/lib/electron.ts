@@ -14,7 +14,9 @@
 // Every call below gracefully no-ops when the bridge is missing, so SettingsPage
 // never needs to branch on its host. Defaults differ per pref: remember-bounds
 // defaults ON (in a browser there is no OS window state to remember anyway),
-// while launch-at-login defaults OFF (consent — see WARDEN-278). Each accessor
+// while launch-at-login and close-to-tray default OFF (consent — auto-start
+// modifies the OS login items; close-to-tray changes what the close button
+// does; see WARDEN-278, WARDEN-330). Each accessor
 // resolves to its own pref's default when the bridge is absent.
 
 interface WardenWindowBridge {
@@ -22,6 +24,8 @@ interface WardenWindowBridge {
   setRememberWindowBounds: (remember: boolean) => Promise<boolean>;
   getLaunchAtLogin: () => Promise<boolean>;
   setLaunchAtLogin: (openAtLogin: boolean) => Promise<boolean>;
+  getCloseToTray: () => Promise<boolean>;
+  setCloseToTray: (on: boolean) => Promise<boolean>;
 }
 
 interface WindowWithWarden extends Window {
@@ -98,5 +102,36 @@ export async function setLaunchAtLogin(openAtLogin: boolean): Promise<boolean> {
   } catch (e) {
     console.warn('[warden:electron] setLaunchAtLogin failed', e);
     return openAtLogin;
+  }
+}
+
+// "Close to tray" — main persists this to window-state.json and attaches/
+// detaches a Tray icon (no OS API for "hide on close"; the file is the source of
+// truth, unlike launch-at-login). See WARDEN-330.
+//
+// Like launch-at-login this pref defaults OFF (consent — changing what the close
+// button does is surprising, and in a browser there is no window to hide
+// anyway), so the accessors resolve to `false` when the bridge is absent. The
+// setter creates/destroys the tray on the main side; it resolves to the
+// persisted value (the value passed in when the bridge is absent). Never rejects.
+export async function getCloseToTray(): Promise<boolean> {
+  const b = bridge();
+  if (!b) return false;
+  try {
+    return await b.getCloseToTray();
+  } catch (e) {
+    console.warn('[warden:electron] getCloseToTray failed', e);
+    return false;
+  }
+}
+
+export async function setCloseToTray(on: boolean): Promise<boolean> {
+  const b = bridge();
+  if (!b) return on;
+  try {
+    return await b.setCloseToTray(on);
+  } catch (e) {
+    console.warn('[warden:electron] setCloseToTray failed', e);
+    return on;
   }
 }

@@ -10,7 +10,10 @@
 // (screen.getAllDisplays, win.getBounds/isMaximized, fs) to these decisions.
 //
 // State shape persisted to window-state.json:
-//   { remember: boolean, x?, y?, width: number, height: number, maximized: boolean }
+//   { remember: boolean, closeToTray: boolean, x?, y?, width: number, height: number, maximized: boolean }
+// `remember` defaults ON (only an explicit false disables); `closeToTray` defaults
+// OFF (opt-in — closing the window is a consent-surprising behavior change, so
+// it must never activate without an explicit toggle, mirroring launch-at-login).
 // x/y are omitted until the first normal-state bounds capture (getBounds always
 // has them, so once captured they are always present).
 
@@ -32,8 +35,11 @@ function defaultBounds() {
 // object. Malformed/missing/non-object input → null, NEVER throws (WARDEN-89
 // spirit). `remember` defaults to true when absent (the Settings toggle defaults
 // to ON; only an explicit `false` disables), so a bounds file written before the
-// toggle existed still applies. width/height are required — without a usable
-// size there is nothing to restore.
+// toggle existed still applies. `closeToTray` defaults to false when absent (the
+// opt-in close-to-tray pref — WARDEN-330 — must never activate without an
+// explicit toggle, so a stale file from before the feature cannot hide-to-tray
+// on close). width/height are required — without a usable size there is nothing
+// to restore.
 function parseWindowState(raw) {
   let v;
   try {
@@ -45,6 +51,7 @@ function parseWindowState(raw) {
   if (typeof v.width !== 'number' || typeof v.height !== 'number') return null;
   return {
     remember: v.remember !== false,
+    closeToTray: v.closeToTray === true,
     x: typeof v.x === 'number' ? v.x : undefined,
     y: typeof v.y === 'number' ? v.y : undefined,
     width: v.width,
@@ -59,6 +66,15 @@ function parseWindowState(raw) {
 function rememberIsActive(prev) {
   if (!prev) return true;
   return prev.remember !== false;
+}
+
+// True when the opt-in "close to tray" pref is active (WARDEN-330). Defaults OFF
+// — no saved state (and any non-true value) is inactive, mirroring the launch-
+// at-login consent default. Only an explicit closeToTray:true activates, so a
+// stale file from before the feature cannot surprise-hide the window on close.
+function closeToTrayIsActive(prev) {
+  if (!prev) return false;
+  return prev.closeToTray === true;
 }
 
 // Pure geometry: does `bounds` {x,y,width,height} overlap ANY current display's
@@ -120,6 +136,7 @@ function captureBounds(prev, liveBounds, isMaximized) {
   // min-floor clamp lives in resolveInitialBounds (restore time) for saved state.
   return {
     remember: true,
+    closeToTray: closeToTrayIsActive(prev),
     x: liveBounds.x,
     y: liveBounds.y,
     width: liveBounds.width,
@@ -135,6 +152,7 @@ function captureMaximized(prev, isMaximized) {
   if (!rememberIsActive(prev)) return null;
   return {
     remember: true,
+    closeToTray: closeToTrayIsActive(prev),
     x: prev && typeof prev.x === 'number' ? prev.x : undefined,
     y: prev && typeof prev.y === 'number' ? prev.y : undefined,
     width: prev && typeof prev.width === 'number' ? prev.width : DEFAULT_WIDTH,
@@ -146,11 +164,30 @@ function captureMaximized(prev, isMaximized) {
 // Return the state to persist when the user toggles the preference, flipping
 // `remember` while preserving any previously-captured bounds (so re-enabling
 // after disabling reapplies the last arrangement, subject to the on-screen
-// clamp at createWindow time).
+// clamp at createWindow time). Preserves the independent `closeToTray` flag so
+// toggling remember-bounds cannot wipe close-to-tray (and vice versa).
 function withRemember(prev, remember) {
   const base = prev || {};
   return {
     remember: remember === true,
+    closeToTray: closeToTrayIsActive(base),
+    x: typeof base.x === 'number' ? base.x : undefined,
+    y: typeof base.y === 'number' ? base.y : undefined,
+    width: typeof base.width === 'number' ? base.width : DEFAULT_WIDTH,
+    height: typeof base.height === 'number' ? base.height : DEFAULT_HEIGHT,
+    maximized: base.maximized === true,
+  };
+}
+
+// Return the state to persist when the user toggles close-to-tray (WARDEN-330),
+// flipping the flag while preserving the `remember` flag and any captured
+// bounds (so disabling close-to-tray never drops the remembered arrangement).
+// Mirrors withRemember's shape contract.
+function withCloseToTray(prev, closeToTray) {
+  const base = prev || {};
+  return {
+    remember: base.remember !== false,
+    closeToTray: closeToTray === true,
     x: typeof base.x === 'number' ? base.x : undefined,
     y: typeof base.y === 'number' ? base.y : undefined,
     width: typeof base.width === 'number' ? base.width : DEFAULT_WIDTH,
@@ -167,9 +204,11 @@ module.exports = {
   defaultBounds,
   parseWindowState,
   rememberIsActive,
+  closeToTrayIsActive,
   boundsIntersectAnyDisplay,
   resolveInitialBounds,
   captureBounds,
   captureMaximized,
   withRemember,
+  withCloseToTray,
 };
