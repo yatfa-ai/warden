@@ -2632,22 +2632,32 @@ streamWss.on('connection', (ws) => {
         return;
       }
       // WARDEN-365 (defense-in-depth): bind a per-attach `entry` object and gate
-      // onData/onExit on identity (`attaches.get(m.id) === entry`) so a killed
-      // prior PTY can never clobber or pollute a freshly-bound one. A detach→
-      // attach (legitimate Retry, or the client's attach-lifecycle) kills the
-      // prior PTY and binds a new one under the SAME id; node-pty's kill() is
-      // async, so the prior PTY's onExit (and any trailing onData) can fire
-      // AFTER the new PTY is bound. Without this guard, that late onExit would
-      // `attaches.delete(m.id)` the NEW entry → the new PTY is orphaned (input/
-      // resize dropped, a later detach can't kill it) and a spurious 'ended' is
-      // sent — reproducing the duplicate/dropped-text corruption. This also
-      // contains the rare concurrent-attach race (two attaches passing the
-      // `attaches.has` guard before either sets): the second set wins, the first
-      // PTY's data is dropped and it can't delete the live entry.
+      // the ENTIRE onData/onExit body on identity (`attaches.get(m.id) === entry`)
+      // so a killed prior PTY can never clobber or pollute a freshly-bound one. A
+      // detach→attach (legitimate Retry, or the client's attach-lifecycle) kills
+      // the prior PTY and binds a new one under the SAME id; node-pty's kill() is
+      // async, so the prior PTY's onExit (and any trailing onData) can fire AFTER
+      // the new PTY is bound. If that late onExit were allowed through it would
+      // BOTH `attaches.delete(m.id)` the NEW entry (orphaning it: input/resize
+      // dropped, a later detach can't kill it) AND send a spurious 'ended' —
+      // landing a healthy, just-re-attached pane on the session_dead recovery
+      // panel, reproducing the intermittent race-shaped corruption this ticket
+      // fixes. The early `return` on identity mismatch suppresses the whole body,
+      // so a killed PTY's late exit is fully silent (no delete, no 'ended', no
+      // event) whether or not a new PTY has rebound the id — the client initiated
+      // that kill, so it is not a "session ended" the client needs to hear about.
+      // This also contains the rare concurrent-attach race (two attaches passing
+      // the `attaches.has` guard before either sets): the second set wins, the
+      // first PTY's data is dropped and its onExit can't touch the live entry.
       const entry = { pty, chat };
       attaches.set(m.id, entry);
       pty.onData((d) => { if (attaches.get(m.id) === entry) send({ type: 'pty', id: m.id, data: d }); });
-      pty.onExit(({ exitCode }) => { if (attaches.get(m.id) === entry) attaches.delete(m.id); send({ type: 'ended', id: m.id, code: exitCode }); appendEvent({ type: 'ended', id: m.id, code: exitCode, host: chat.host, container: chat.container }); });
+      pty.onExit(({ exitCode }) => {
+        if (attaches.get(m.id) !== entry) return; // stale — killed prior PTY; this exit is not the live session ending
+        attaches.delete(m.id);
+        send({ type: 'ended', id: m.id, code: exitCode });
+        appendEvent({ type: 'ended', id: m.id, code: exitCode, host: chat.host, container: chat.container });
+      });
       try { await resize(chat, cfg, cols, rows); } catch { /* noop */ }
       send({ type: 'attached', id: m.id });
       appendEvent({ type: 'attached', id: m.id, host: chat.host, container: chat.container });
@@ -2759,7 +2769,10 @@ function startLifecyclePoll() {
 // tickLifecycle is exported so src/server-lifecycle.test.js can drive a single
 // lifecycle tick deterministically (the running server drives it off a 60s
 // setInterval via startLifecyclePoll, which is too slow for a test).
-export { app, tickLifecycle };
+// `server` is exported so stream-lifecycle tests (src/server-stream-reattach.test.js)
+// can listen the SAME http server that streamWss's upgrade handler is bound to —
+// app.listen() would create a different server with no WS routing.
+export { app, tickLifecycle, server };
 
 export function startServer(port = 7421, host = '127.0.0.1') {
   server.on('error', (e) => {
