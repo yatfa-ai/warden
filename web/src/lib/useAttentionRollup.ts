@@ -26,7 +26,13 @@ import {
   type AttentionRollup,
   type AttentionRollupOptions,
 } from '@/lib/attentionRollup';
-import { shouldFireAlert, fireAttentionNotification } from '@/lib/desktopAlerts';
+import {
+  shouldFireAlert,
+  fireAttentionNotification,
+  applySeverityPrefs,
+  ATTENTION_SEVERITY_DEFAULTS,
+  type AttentionSeverityPrefs,
+} from '@/lib/desktopAlerts';
 import type { HealthData, ActivityStats, AgentStateRow, AgentStatesData } from '@/lib/types';
 
 // Recent-error / recent-directive window. ActivityStats counts raw events in the
@@ -42,6 +48,10 @@ export const ATTENTION_RECENT_WINDOW_MS = 15 * 60 * 1000;
 const HEALTH_POLL_MS = 10_000;
 const AGENT_STATE_POLL_MS = 30_000;
 
+// A stable empty array default for `mutedAlertKeys` so the memoized Set and the
+// effect dep list stay reference-stable when no caller passes a mute set.
+const EMPTY_MUTED_KEYS: readonly string[] = [];
+
 export interface AttentionRollupState {
   rollup: AttentionRollup;
   /** True only during the very first fetch (before any data has arrived). */
@@ -52,17 +62,29 @@ export function useAttentionRollup(
   attentionDesktopAlerts = false,
   openPanes: string[] = [],
   enabledStates?: AttentionRollupOptions['enabledStates'],
+  severityPrefs: AttentionSeverityPrefs = ATTENTION_SEVERITY_DEFAULTS,
+  mutedAlertKeys: readonly string[] = EMPTY_MUTED_KEYS,
 ): AttentionRollupState {
   const [health, setHealth] = useState<HealthData | null>(null);
   const [stats, setStats] = useState<ActivityStats | null>(null);
   const [agentStates, setAgentStates] = useState<AgentStateRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [agentStatesLoaded, setAgentStatesLoaded] = useState(false);
-  // The previous rollup, for the desktop-alert increase detector below. Tracked
-  // in refs (not state) so updating them never triggers a re-render.
-  const prevRef = useRef<AttentionRollup | null>(null);
+  // The previous ROUTABLE sub-rollup (severity + per-agent-mute filtered), for the
+  // desktop-alert increase detector below. Tracked in a ref (not state) so updating
+  // it never triggers a re-render. We compare the FILTERED view — not the raw rollup
+  // — so an increase in ONLY a disabled/muted bucket (raw total up, routable total
+  // unchanged) does NOT fire (WARDEN-364). With defaults (every bucket on, no mutes)
+  // the routable view is content-identical to the raw view, so this is behavior-
+  // preserving. (WARDEN-344 tracked the raw rollup here; WARDEN-364 reroutes the
+  // comparison through the filtered view while keeping the baseline-priming guard.)
+  const prevRoutableRef = useRef<AttentionRollup | null>(null);
   // Whether the first real rollup has been observed (the desktop-alert baseline).
   const primedRef = useRef(false);
+  // Memoize the mute set so its reference is stable across renders unless the
+  // underlying muted-key array actually changes — keeping the gate effect's dep
+  // list quiet on unrelated re-renders (popover open/close, etc.).
+  const mutedSet = useMemo(() => new Set(mutedAlertKeys), [mutedAlertKeys]);
 
   // Refs so the interval closures read the LIVE open-panes set without the interval
   // being rebuilt on every openPanes change (which would reset the 10s health cadence).
@@ -153,8 +175,15 @@ export function useAttentionRollup(
   // unfocused (WARDEN-259). The always-on AttentionBadge already covers the in-app
   // case, so a desktop alert while looking at Warden is pure noise — hence the hidden
   // guard. shouldFireAlert returns true ONLY on a total increase, so a persistent
-  // condition never repeats and a recovery never fires. prevRef always advances (even
-  // when we don't fire) so the next comparison is against the last rollup.
+  // condition never repeats and a recovery never fires. prevRoutableRef always
+  // advances (even when we don't fire) so the next comparison is against the last
+  // ROUTABLE rollup, not a stale one. No-op entirely when the master toggle is off.
+  //
+  // WARDEN-364: the decision runs over the ROUTABLE sub-rollup (severity prefs +
+  // per-agent mute applied), so an increase in only a disabled/muted bucket fires
+  // nothing while still appearing in the in-app badge (which consumes the raw
+  // rollup). The visibility-gate relaxation in the poll effects above stays keyed
+  // on the MASTER toggle only — the sub-toggles never add polling.
   //
   // Baseline priming: the FIRST rollup observed after both initial fetches land
   // becomes the baseline (no fire) — so pre-existing attention at launch/reload does
@@ -163,19 +192,20 @@ export function useAttentionRollup(
   // that raises total → fires.
   useEffect(() => {
     if (loading || !agentStatesLoaded) return;
+    const routable = applySeverityPrefs(rollup, severityPrefs, mutedSet);
     if (!primedRef.current) {
       primedRef.current = true;
-      prevRef.current = rollup;
+      prevRoutableRef.current = routable;
       return;
     }
-    const prev = prevRef.current;
-    prevRef.current = rollup;
+    const prev = prevRoutableRef.current;
+    prevRoutableRef.current = routable;
     if (!attentionDesktopAlerts) return;
     if (document.visibilityState === 'visible') return;
-    if (shouldFireAlert(prev, rollup)) {
-      fireAttentionNotification(rollup);
+    if (shouldFireAlert(prev, routable)) {
+      fireAttentionNotification(routable);
     }
-  }, [rollup, attentionDesktopAlerts, loading, agentStatesLoaded]);
+  }, [rollup, attentionDesktopAlerts, loading, agentStatesLoaded, severityPrefs, mutedSet]);
 
   return { rollup, loading };
 }

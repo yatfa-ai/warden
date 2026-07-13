@@ -207,6 +207,24 @@ function App() {
   // waiting/blocked) raise the badge + desktop alert. Each defaults ON; persisted by
   // the saveUi effect below and forwarded to the AttentionBadge's useAttentionRollup.
   const [attentionStates, setAttentionStates] = useState(() => uiState.attentionStates ?? { stuck: true, erroring: true, waiting: true, blocked: true });
+  // WARDEN-364 — per-severity routing + per-agent mute for the desktop-alert
+  // channel, layered on the `attentionDesktopAlerts` master switch above. The
+  // master gates the whole channel; these route WHICH buckets/agents escalate.
+  // Defaults all-on + empty mute set = behavior-preserving. Pure client-side
+  // prefs (like attentionDesktopAlerts): persisted by the saveUi effect below,
+  // forwarded to SettingsPage (toggles) and AttentionBadge (mute affordance +
+  // routing into useAttentionRollup). Never sent to the backend.
+  const [alertCritical, setAlertCritical] = useState(() => uiState.alertCritical ?? true);
+  const [alertWarning, setAlertWarning] = useState(() => uiState.alertWarning ?? true);
+  const [alertDirective, setAlertDirective] = useState(() => uiState.alertDirective ?? true);
+  const [alertError, setAlertError] = useState(() => uiState.alertError ?? true);
+  const [mutedAlertKeys, setMutedAlertKeys] = useState<string[]>(() => uiState.mutedAlertKeys ?? []);
+  // Toggle a chat key in the desktop-alert mute set. A muted agent driving a
+  // critical/warning increase fires no OS notification but still appears in the
+  // in-app AttentionBadge (which consumes the unfiltered rollup).
+  const toggleMuteAlertKey = useCallback((key: string) => {
+    setMutedAlertKeys((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  }, []);
   const [terminalScrollback, setTerminalScrollback] = useState(() => uiState.terminalScrollback ?? 10000);
   // Terminal font family: the CSS font-family value every agent pane renders.
   // '' / absent / blank → DEFAULT_TERMINAL_FONT_FAMILY (today's exact stack) so
@@ -432,8 +450,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed, restoreOnStartup, startedEmpty]);
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
   // workspace, so switching clears it (WARDEN-256: maximized resets on switch).
@@ -1279,6 +1297,14 @@ function App() {
           setAttentionDesktopAlerts={setAttentionDesktopAlerts}
           attentionStates={attentionStates}
           setAttentionStates={setAttentionStates}
+          alertCritical={alertCritical}
+          setAlertCritical={setAlertCritical}
+          alertWarning={alertWarning}
+          setAlertWarning={setAlertWarning}
+          alertDirective={alertDirective}
+          setAlertDirective={setAlertDirective}
+          alertError={alertError}
+          setAlertError={setAlertError}
           terminalScrollback={terminalScrollback}
           setTerminalScrollback={setTerminalScrollback}
           terminalFontFamily={terminalFontFamily}
@@ -1357,7 +1383,7 @@ function App() {
             label={streamConn ? 'Connected' : 'Disconnected'}
             className="transition-colors duration-300 ease-in-out"
           />
-          <AttentionBadge onOpenChat={openChat} onOpenActivity={openActivityTab} attentionDesktopAlerts={attentionDesktopAlerts} openPanes={openPanes} attentionStates={attentionStates} />
+          <AttentionBadge onOpenChat={openChat} onOpenActivity={openActivityTab} attentionDesktopAlerts={attentionDesktopAlerts} openPanes={openPanes} attentionStates={attentionStates} alertCritical={alertCritical} alertWarning={alertWarning} alertDirective={alertDirective} alertError={alertError} mutedAlertKeys={mutedAlertKeys} onToggleMuteAlertKey={toggleMuteAlertKey} />
           <IconTooltip label="global search (Ctrl+Shift+F)" side="bottom"><button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⌕</button></IconTooltip>
           <IconTooltip label="toggle health panel" side="bottom"><button onClick={() => setHealthCollapsed(!healthCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{healthCollapsed ? '◂' : '▸'} Health</button></IconTooltip>
           <IconTooltip label="toggle observer" side="bottom"><button onClick={() => setObserverCollapsed(!observerCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>
