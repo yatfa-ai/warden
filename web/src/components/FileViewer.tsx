@@ -12,7 +12,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { DiffBlock } from './DiffBlock';
 import { MarkdownBody } from './MarkdownBody';
 import { tokenizeCode, languageFromPath, type Leaf } from '@/lib/highlight';
-import { Loader2Icon, FileIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon } from 'lucide-react';
+import { Loader2Icon, FileIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon } from 'lucide-react';
 import { timeAgo } from '@/lib/utils';
 
 interface FileViewerProps {
@@ -63,6 +63,19 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
 
+  // View file at a historical commit (WARDEN-354): the snapshot leg of the
+  // temporal trio, opened from HistoryContent's per-commit "view file at this
+  // commit" affordance. `viewAtCommit` holds the commit whose full blob is on
+  // screen (null = not viewing a snapshot). The blob fetch owns its own
+  // loading/error/content state, separate from the current-file fetch — and a
+  // per-hash cache so re-viewing a commit is instant (mirrors BlameHash's
+  // `fetched` flag).
+  const [viewAtCommit, setViewAtCommit] = useState<HistoryCommit | null>(null);
+  const [blobContent, setBlobContent] = useState<string | null>(null);
+  const [blobLoading, setBlobLoading] = useState(false);
+  const [blobError, setBlobError] = useState<string | null>(null);
+  const blobCache = useRef<Map<string, { content: string | null; error: string | null }>>(new Map());
+
   // Rendered ⇄ Source view mode for markdown files (WARDEN-266). Only the plain
   // view branch (!annotate && !hasLine) honors it; line-jump and blame views stay
   // source-based regardless. Defaults to rendered so opening a README shows docs.
@@ -79,6 +92,11 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
       setCommits(null);
       setHistoryError(null);
       setViewMode('rendered'); // start each markdown open rendered (avoid stale source mode)
+      setViewAtCommit(null); // clear any at-commit snapshot (avoid stale blob for a prior file)
+      setBlobContent(null);
+      setBlobError(null);
+      setBlobLoading(false);
+      blobCache.current.clear();
       return;
     }
 
@@ -170,6 +188,51 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
     return () => { cancelled = true; };
   }, [open, history, chatId, filePath]);
 
+  // Fetch the file's full blob at the selected historical commit (WARDEN-354).
+  // Mirrors the blame/history fetches: gates the success path on response.ok so a
+  // 4xx/5xx (e.g. unknown chat → 404) surfaces as an error, not silent success
+  // (WARDEN-89). A per-hash cache makes re-viewing a commit instant — the
+  // endpoint is read-only and stable for a given (chat, file, hash), so a cached
+  // result never goes stale within a dialog session.
+  useEffect(() => {
+    if (!open || !viewAtCommit) return;
+    const key = `${chatId}:${filePath}:${viewAtCommit.hash}`;
+    const cached = blobCache.current.get(key);
+    if (cached) {
+      setBlobContent(cached.content);
+      setBlobError(cached.error);
+      setBlobLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setBlobLoading(true);
+    setBlobError(null);
+    setBlobContent(null);
+    const fetchBlob = async () => {
+      let content: string | null = null;
+      let error: string | null = null;
+      try {
+        const r = await fetch(`/api/git-cat-file?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(viewAtCommit.hash)}&path=${encodeURIComponent(filePath)}`);
+        const j = await r.json().catch(() => ({}));
+        content = typeof j.content === 'string' ? j.content : null;
+        error = j.error || (r.ok ? null : `Failed to load file at commit (${r.status})`);
+      } catch (e) {
+        error = e instanceof Error ? e.message : 'Failed to load file at commit';
+      }
+      if (cancelled) return;
+      blobCache.current.set(key, { content, error });
+      setBlobContent(content);
+      setBlobError(error);
+      setBlobLoading(false);
+    };
+    fetchBlob();
+    return () => { cancelled = true; };
+  }, [open, viewAtCommit, chatId, filePath]);
+
+  // The at-commit snapshot belongs to the open file's history — clear it when the
+  // file changes so a stale blob (for a commit of a prior file) is never shown.
+  useEffect(() => { setViewAtCommit(null); }, [chatId, filePath]);
+
   // When a target line is requested and the content has rendered, scroll that line
   // to the center of the viewport so the user lands on the relevant location. rAF
   // guarantees the per-line DOM is committed before we measure/scroll it. Re-runs
@@ -239,6 +302,7 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
                   setHistory((h) => {
                     const next = !h;
                     if (next) setAnnotate(false); // history + annotate are exclusive view modes
+                    else setViewAtCommit(null); // leaving history → drop any at-commit snapshot
                     return next;
                   });
                 }}
@@ -256,7 +320,7 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
                 onClick={() => {
                   setAnnotate((a) => {
                     const next = !a;
-                    if (next) setHistory(false); // history + annotate are exclusive view modes
+                    if (next) { setHistory(false); setViewAtCommit(null); } // annotate forces history off → drop any snapshot
                     return next;
                   });
                 }}
@@ -272,6 +336,19 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
 
         <ScrollArea className="h-[60vh] w-full rounded-md border bg-muted/50">
           <div className="p-4">
+            {viewAtCommit ? (
+              <CommitBlobView
+                commit={viewAtCommit}
+                filePath={filePath}
+                content={blobContent}
+                loading={blobLoading}
+                error={blobError}
+                viewMode={viewMode}
+                isMarkdown={isMarkdown}
+                onBack={() => setViewAtCommit(null)}
+              />
+            ) : (
+              <>
             {loading && (
               <div className="flex items-center justify-center gap-2 py-8 text-muted-foreground">
                 <Loader2Icon className="w-5 h-5 animate-spin" />
@@ -340,6 +417,7 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
                 historyError={historyError}
                 chatId={chatId}
                 filePath={filePath}
+                onViewAtCommit={setViewAtCommit}
               />
             )}
 
@@ -347,6 +425,8 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
               <div className="flex items-center justify-center py-8 text-muted-foreground">
                 No content
               </div>
+            )}
+              </>
             )}
           </div>
         </ScrollArea>
@@ -546,16 +626,18 @@ function BlameHash({ chatId, filePath, hash, summary, author, dateLabel }: {
 
 // The history view (WARDEN-319): the temporal counterpart to blame. One row per commit
 // that touched this file (git log --follow -- <path>), newest first, each explorable
-// to its per-file diff via the shared BlameHash popover. Where blame shows the LATEST
-// commit per line (spatial), history shows the FULL commit sequence (temporal) — so a
-// human never needs `git log -- <path>` in a terminal. Owns its own loading/error/
-// empty states, mirroring AnnotatedContent's shape.
-function HistoryContent({ commits, historyLoading, historyError, chatId, filePath }: {
+// to its per-file diff via the shared BlameHash popover AND to its full-file snapshot
+// via the "view file at this commit" affordance (WARDEN-354). Where blame shows the
+// LATEST commit per line (spatial), history shows the FULL commit sequence (temporal)
+// — so a human never needs `git log -- <path>` in a terminal. Owns its own loading/
+// error/empty states, mirroring AnnotatedContent's shape.
+function HistoryContent({ commits, historyLoading, historyError, chatId, filePath, onViewAtCommit }: {
   commits: HistoryCommit[] | null;
   historyLoading: boolean;
   historyError: string | null;
   chatId: string;
   filePath: string;
+  onViewAtCommit: (c: HistoryCommit) => void;
 }) {
   const hasCommits = !!commits && commits.length > 0;
 
@@ -579,13 +661,113 @@ function HistoryContent({ commits, historyLoading, historyError, chatId, filePat
       {!historyLoading && !historyError && hasCommits && (
         <div className="flex flex-col divide-y divide-border/40">
           {commits.map((c, i) => (
-            <div key={`${c.hash}-${i}`} className="flex items-center gap-2 py-1.5">
+            <div key={`${c.hash}-${i}`} className="group/hcommit flex items-center gap-2 py-1.5">
               <BlameHash chatId={chatId} filePath={filePath} hash={c.hash} summary={c.subject} author={c.author} dateLabel={c.date} />
+              <Button
+                variant="ghost"
+                size="xs"
+                className="h-auto shrink-0 px-1 text-muted-foreground/60 opacity-60 hover:text-foreground group-hover/hcommit:opacity-100"
+                title="view the full file as it existed at this commit"
+                aria-label={`view full file at commit ${c.hash.slice(0, 8)}`}
+                onClick={(e) => { e.stopPropagation(); onViewAtCommit(c); }}
+              >
+                <EyeIcon className="w-3.5 h-3.5" />
+              </Button>
               <span className="min-w-0 flex-1 truncate text-foreground" title={c.subject}>{c.subject}</span>
               <span className="shrink-0 max-w-[8rem] truncate text-muted-foreground/70" title={c.author}>{c.author}</span>
               <span className="shrink-0 text-muted-foreground/60">{c.date}</span>
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The file's full content at a historical commit (WARDEN-354): the snapshot leg
+// of the temporal trio (blame = per-line provenance, history = commit sequence +
+// diff, this = full file state at a commit). Opened from HistoryContent's per-
+// commit "view file at this commit" affordance; renders the blob with the
+// FileViewer's EXISTING primitives — tokenizeCode + HighlightedLine for source,
+// MarkdownBody for rendered markdown (honoring the shared viewMode) — so a
+// historical file reads identically to the current one. The amber banner stamps
+// which commit/version is on screen so the human never mistakes a snapshot for
+// the working tree, with a back control to return to the commit list.
+// Presentational: the fetch + per-hash cache (instant re-open, mirroring
+// BlameHash's `fetched` flag) live in FileViewer and are passed in here.
+function CommitBlobView({ commit, filePath, content, loading, error, viewMode, isMarkdown, onBack }: {
+  commit: HistoryCommit;
+  filePath: string;
+  content: string | null;
+  loading: boolean;
+  error: string | null;
+  viewMode: 'rendered' | 'source';
+  isMarkdown: boolean;
+  onBack: () => void;
+}) {
+  const shortHash = commit.hash.slice(0, 8);
+  // Source highlighting for the snapshot, mirroring the plain view's useMemo so
+  // the blob is tokenized once into per-line leaves (one DOM row per source line).
+  const lang = useMemo(() => languageFromPath(filePath), [filePath]);
+  const tokenLines = useMemo(
+    () => (lang && content ? tokenizeCode(content, lang) : null),
+    [content, lang],
+  );
+
+  return (
+    <div className="text-sm">
+      {/* orientation banner: makes clear this is a historical snapshot, not the
+          working tree, with a back control to return to the commit list. */}
+      <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-xs">
+        <Button
+          variant="ghost"
+          size="xs"
+          className="h-auto shrink-0 px-1 text-amber-300 hover:text-amber-200"
+          onClick={onBack}
+          title="Back to commit history"
+        >
+          ← Back
+        </Button>
+        <span className="shrink-0 font-mono text-amber-300/90">{shortHash}</span>
+        <span className="min-w-0 flex-1 truncate text-foreground" title={commit.subject}>{commit.subject || '(no summary)'}</span>
+        <span className="shrink-0 max-w-[8rem] truncate text-muted-foreground/70" title={commit.author}>{commit.author}</span>
+        <span className="shrink-0 text-muted-foreground/60">{commit.date}</span>
+      </div>
+      <div className="mb-2 text-[11px] text-muted-foreground/70">
+        Viewing <span className="font-mono text-foreground/80">{filePath}</span> as it existed at this commit
+      </div>
+      {loading && (
+        <div className="flex items-center gap-1.5 py-8 text-muted-foreground">
+          <Loader2Icon className="w-4 h-4 animate-spin" />
+          <span>Loading file at commit…</span>
+        </div>
+      )}
+      {!loading && error && (
+        <div className="flex items-center gap-2 py-8 text-red-400">
+          <AlertCircleIcon className="w-4 h-4" />
+          <span>{error}</span>
+        </div>
+      )}
+      {!loading && !error && content !== null && (
+        isMarkdown && viewMode === 'rendered' ? (
+          <div className="flex flex-col gap-2 text-sm leading-relaxed">
+            <MarkdownBody>{content}</MarkdownBody>
+          </div>
+        ) : (
+          <pre className="text-sm font-mono whitespace-pre-wrap break-words">
+            {tokenLines ? (
+              tokenLines.map((line, i) => (
+                <div key={i}><HighlightedLine leaves={line} /></div>
+              ))
+            ) : (
+              content
+            )}
+          </pre>
+        )
+      )}
+      {!loading && !error && content === null && (
+        <div className="flex items-center justify-center py-8 text-muted-foreground">
+          No content at this commit
         </div>
       )}
     </div>
