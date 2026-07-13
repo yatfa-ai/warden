@@ -20,6 +20,7 @@ import { type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type 
 import { hasWindowBridge } from '@/lib/electron';
 import { requestAlertPermission } from '@/lib/desktopAlerts';
 import { putJson } from '@/lib/api';
+import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 
 // Curated common monospace fonts for the "Terminal font family" control. Each
@@ -195,15 +196,32 @@ interface Props {
   setAttentionDesktopAlerts: (v: boolean) => void;
 }
 
-/** A titled group of related settings, separated by a top border. */
-function SettingsSection({ title, children }: { title: string; children: ReactNode }) {
+/** A titled group of related settings. In the master-detail layout only one
+ *  section is visible at a time, so it no longer needs inter-section borders. */
+function SettingsSection({ title, children, className }: { title: string; children: ReactNode; className?: string }) {
   return (
-    <section className="flex flex-col gap-3 pt-6 border-t first:pt-0 first:border-t-0">
+    <section className={cn('flex flex-col gap-3', className)}>
       <h2 className="text-sm font-medium text-foreground">{title}</h2>
       {children}
     </section>
   );
 }
+
+/** The settings section nav entries: a left rail on wide screens, a dropdown on
+ *  narrow ones. Order is the display order; the first entry is active by default.
+ *  The `id` doubles as the active-section discriminator — each SettingsSection
+ *  below hides itself unless its id matches `activeSection`. */
+const SETTINGS_SECTIONS = [
+  { id: 'hosts', label: 'Hosts & Connection' },
+  { id: 'observer', label: 'Observer Preferences' },
+  { id: 'safety', label: 'Safety' },
+  { id: 'attention', label: 'Attention thresholds' },
+  { id: 'display', label: 'Display' },
+  { id: 'appearance', label: 'Appearance' },
+  { id: 'newchats', label: 'New Chats' },
+  { id: 'notifications', label: 'Notifications' },
+] as const;
+type SectionId = (typeof SETTINGS_SECTIONS)[number]['id'];
 
 /**
  * One editable custom preset row: an inline name field (committed on blur/Enter,
@@ -325,6 +343,11 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
   const [availableHosts, setAvailableHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+
+  // Active section in the master-detail nav. The first section is selected by
+  // default; switching shows only that section, so there's no cross-section
+  // page-level scroll. Persisting across visits is intentionally not done.
+  const [activeSection, setActiveSection] = useState<SectionId>('hosts');
 
   // Terminal font family Select: a curated font, or "Custom…" which reveals a
   // free-text input for any installed CSS font (e.g. a Nerd Font for glyphs).
@@ -513,14 +536,55 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
         </span>
       </header>
 
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        <div className="mx-auto max-w-3xl px-4 py-6 flex flex-col gap-6">
-          {loading ? (
-            <div className="py-8 text-center text-sm text-muted-foreground">Loading configuration…</div>
-          ) : (
-            <>
+      <div className="flex flex-1 min-h-0">
+        {/* Section nav rail — wide screens (md+). A VS Code-style master-detail
+            left rail: pick a section, see only that section in the content pane. */}
+        <nav aria-label="Settings sections" className="hidden w-56 shrink-0 flex-col gap-1 overflow-y-auto border-r p-2 md:flex">
+          {SETTINGS_SECTIONS.map((s) => (
+            <Button
+              key={s.id}
+              variant="ghost"
+              size="sm"
+              className={cn(
+                'w-full justify-start',
+                activeSection === s.id && 'bg-accent font-medium text-accent-foreground hover:bg-accent hover:text-accent-foreground',
+              )}
+              onClick={() => setActiveSection(s.id)}
+              aria-current={activeSection === s.id ? 'page' : undefined}
+            >
+              {s.label}
+            </Button>
+          ))}
+        </nav>
+        <main className="flex min-w-0 min-h-0 flex-1 flex-col">
+          {/* Compact section picker — narrow screens (<md). The rail would crowd
+              content below ~768px, so it collapses to a dropdown here. Same
+              `activeSection` state as the rail; the two never show at once. */}
+          <div className="shrink-0 border-b px-4 pb-3 pt-4 md:hidden">
+            <Select value={activeSection} onValueChange={(v) => setActiveSection(v as SectionId)}>
+              <SelectTrigger className="w-full" aria-label="Settings section">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {SETTINGS_SECTIONS.map((s) => (
+                  <SelectItem key={s.id} value={s.id}>
+                    {s.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          {/* Content pane — scrolls the ACTIVE section only (no cross-section
+              page scroll). Left-aligned with a readable cap so wide screens use
+              the horizontal space via nav+pane, not a centered narrow column. */}
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            <div className="flex max-w-4xl flex-col gap-6 px-4 py-6 md:px-6">
+              {loading ? (
+                <div className="py-8 text-center text-sm text-muted-foreground">Loading configuration…</div>
+              ) : (
+                <>
               {/* Hosts & Connection */}
-              <SettingsSection title="Hosts & Connection">
+              <SettingsSection title="Hosts & Connection" className={cn(activeSection !== 'hosts' && 'hidden')}>
                 {/* Host Management */}
                 <div className="flex flex-col gap-2">
                   <Label>Configured Hosts</Label>
@@ -607,7 +671,7 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
               </SettingsSection>
 
               {/* Observer Preferences */}
-              <SettingsSection title="Observer Preferences">
+              <SettingsSection title="Observer Preferences" className={cn(activeSection !== 'observer' && 'hidden')}>
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="observerConfirmMode">Directive Confirmation</Label>
                   <Select
@@ -666,7 +730,7 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
               </SettingsSection>
 
               {/* Safety */}
-              <SettingsSection title="Safety">
+              <SettingsSection title="Safety" className={cn(activeSection !== 'safety' && 'hidden')}>
                 <div className="flex flex-col gap-2">
                   <div className="flex items-center gap-2">
                     <Checkbox
@@ -693,7 +757,7 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   preference (WARDEN-259) reacts to, so a human who checks hourly
                   can raise the critical boundary instead of being spammed at the
                   fixed 30-min mark. Empty falls back to the default (5 / 30). */}
-              <SettingsSection title="Attention thresholds">
+              <SettingsSection title="Attention thresholds" className={cn(activeSection !== 'attention' && 'hidden')}>
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="healthWarningThresholdMin">Warning after (minutes)</Label>
                   <Input
@@ -738,7 +802,7 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
               </SettingsSection>
 
               {/* Display */}
-              <SettingsSection title="Display">
+              <SettingsSection title="Display" className={cn(activeSection !== 'display' && 'hidden')}>
                 <div className="flex items-center gap-2">
                   <Checkbox
                     id="showHostTags"
@@ -802,7 +866,7 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
               </SettingsSection>
 
               {/* Appearance — client-side look preferences */}
-              <SettingsSection title="Appearance">
+              <SettingsSection title="Appearance" className={cn(activeSection !== 'appearance' && 'hidden')}>
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="terminalFontSize">Terminal font size</Label>
                   <Input
@@ -1096,7 +1160,7 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
               </SettingsSection>
 
               {/* New Chats — client-side default agent type + host for the ＋ new spawn form */}
-              <SettingsSection title="New Chats">
+              <SettingsSection title="New Chats" className={cn(activeSection !== 'newchats' && 'hidden')}>
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="defaultNewChatPreset">Default agent type</Label>
                   <Select
@@ -1286,7 +1350,7 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
               </SettingsSection>
 
               {/* Notifications */}
-              <SettingsSection title="Notifications">
+              <SettingsSection title="Notifications" className={cn(activeSection !== 'notifications' && 'hidden')}>
                 <div className="flex flex-col gap-2">
                   <div className="flex items-center gap-2">
                     <Switch
@@ -1374,9 +1438,11 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   </p>
                 </div>
               </SettingsSection>
-            </>
-          )}
-        </div>
+                </>
+              )}
+            </div>
+          </div>
+        </main>
       </div>
 
       <footer className="flex items-center justify-end gap-2 px-4 h-14 border-t shrink-0">
