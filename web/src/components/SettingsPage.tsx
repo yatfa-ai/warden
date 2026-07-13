@@ -150,6 +150,13 @@ interface Props {
   // to the backend.
   defaultNewChatCwd: string;
   setDefaultNewChatCwd: (v: string) => void;
+  // Per-host cwd overrides for the ＋ new chat spawn form (WARDEN-336). Keys are
+  // host strings ('(local)' / SSH host name); a host with no entry (or an empty
+  // value, dropped on load) falls through to defaultNewChatCwd above, then blank.
+  // Pure client-side localStorage pref, persisted by App's saveUi effect; never
+  // sent to the backend.
+  defaultNewChatCwdByHost: Record<string, string>;
+  setDefaultNewChatCwdByHost: (v: Record<string, string>) => void;
   // User-defined spawn presets (named quick-fill commands beyond claude/shell).
   // Pure client-side localStorage pref, persisted by App's saveUi effect; never
   // sent to the backend.
@@ -292,7 +299,7 @@ function PresetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -474,6 +481,22 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
   const deletePreset = (name: string) => {
     setCustomPresets(customPresets.filter((p) => p.name !== name));
     if (defaultNewChatPreset === name) setDefaultNewChatPreset('claude');
+  };
+
+  // Write a per-host cwd override (WARDEN-336). An empty/whitespace value means
+  // "inherit the global defaultNewChatCwd" — drop the key entirely so it never
+  // persists as a blank that cwdFor would return instead of falling through to
+  // the global default. (The load-time sanitizer drops blanks too; this keeps
+  // the live state in the same sanitized shape between saves.) Keys are the same
+  // host strings the spawn form uses ('(local)' / SSH host name).
+  const setHostCwd = (host: string, value: string) => {
+    const next = { ...defaultNewChatCwdByHost };
+    if (value.trim() === '') {
+      delete next[host];
+    } else {
+      next[host] = value;
+    }
+    setDefaultNewChatCwdByHost(next);
   };
 
   return (
@@ -1214,12 +1237,13 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   </p>
                 </div>
 
-                {/* Default working directory (WARDEN-311): the cwd pre-filled in
-                    the ＋ new chat spawn form. Blank → the host's home directory
-                    (today's behavior); the seeded value is still editable
-                    per-spawn in the form. */}
+                {/* Default working directory (WARDEN-311): the GLOBAL cwd fallback
+                    pre-filled in the ＋ new chat spawn form. Blank → the host's
+                    home directory (today's behavior); the seeded value is still
+                    editable per-spawn in the form. WARDEN-336 adds per-host
+                    overrides below — a host with its own value wins over this. */}
                 <div className="flex flex-col gap-2">
-                  <Label htmlFor="defaultNewChatCwd">Default working directory</Label>
+                  <Label htmlFor="defaultNewChatCwd">Default working directory (fallback for any host without its own)</Label>
                   <Input
                     id="defaultNewChatCwd"
                     value={defaultNewChatCwd}
@@ -1227,8 +1251,37 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                     placeholder="auto (home directory)"
                   />
                   <p className="text-xs text-muted-foreground">
-                    Working directory pre-filled in the ＋ new chat spawn form. Enter a path like <code className="bg-muted px-1 rounded">~/projects/warden</code>; leave blank to start each chat in the host's home directory (today's behavior). Editable per-spawn.
+                    Working directory pre-filled in the ＋ new chat spawn form. Enter a path like <code className="bg-muted px-1 rounded">~/projects/warden</code>; leave blank to start each chat in the host's home directory (today's behavior). Editable per-spawn. Set a per-host override below to use a different directory on a specific host.
                   </p>
+                </div>
+
+                {/* Per-host working directory overrides (WARDEN-336): one input per
+                    configured host. A filesystem path is inherently host-specific,
+                    so a single global cwd breaks the moment there is a second host.
+                    Leave a host blank to inherit the global default above. Keys are
+                    the same host strings the spawn form uses ('(local)' / SSH host). */}
+                <div className="flex flex-col gap-2">
+                  <Label>Working directory per host</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Override the default working directory for a specific host when spawning. Leave a host blank to use the global default above.
+                  </p>
+                  <div className="flex flex-col gap-2 rounded-md border bg-muted/30 p-2">
+                    {[{ key: '(local)', label: 'this machine (local)' }, ...availableHosts.map((h) => ({ key: h, label: h }))].map(({ key, label }) => {
+                      const safeId = `defaultNewChatCwdByHost-${key.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+                      return (
+                        <div className="flex flex-col gap-1" key={`cwdByHost-${key}`}>
+                          <Label htmlFor={safeId} className="text-xs font-normal text-muted-foreground">{label}</Label>
+                          <Input
+                            id={safeId}
+                            value={defaultNewChatCwdByHost[key] ?? ''}
+                            onChange={(e) => setHostCwd(key, e.target.value)}
+                            placeholder="auto (home directory)"
+                            className="h-8"
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               </SettingsSection>
 
