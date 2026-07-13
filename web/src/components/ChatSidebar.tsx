@@ -17,7 +17,8 @@ import { summarizeKill, formatKillToast } from '@/lib/kill';
 import { DiffViewer } from './DiffViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { loadUi, saveUi } from '@/lib/storage';
-import { THIS_MACHINE, ago, basename, chatType, displayName } from '@/lib/chatDisplay';
+import { THIS_MACHINE, basename, chatType, displayName } from '@/lib/chatDisplay';
+import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import {
   matchesAgentFilter, compareChats, sortChats, findChat,
   type AgentFilter, type AgentSort,
@@ -66,11 +67,14 @@ interface Props {
   // Host connectivity statuses (polled at the App level so they stay live while
   // the full-page browser view — which replaces this sidebar — is open).
   hostStatuses: Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }>;
+  // Timestamp format pref (WARDEN-213): routes every sidebar time display through
+  // the shared formatTimestamp helper. Pure client-side localStorage pref.
+  timestampFormat: TimestampFormat;
 }
 
 const LABEL: Record<string, string> = { '(local)': 'this machine' };
 
-export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses }: Props) {
+export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
   const [offlineExpanded, setOfflineExpanded] = useState(false);
@@ -761,7 +765,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                       {running && <span className="ml-1 text-green-400">● live</span>}
                     </span>
                     <span className="text-[10px] text-muted-foreground truncate">
-                      {isLoading ? <Skeleton className="h-2.5 w-1/2 inline-block" /> : `${ago(s.mtime)} · ${basename(s.cwd)}`}
+                      {isLoading ? <Skeleton className="h-2.5 w-1/2 inline-block" /> : `${formatTimestamp(s.mtime, timestampFormat)} · ${basename(s.cwd)}`}
                     </span>
                   </button>
                 </IconTooltip>
@@ -834,7 +838,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           onSortChange={setAgentSort}
         />
         <Badge variant="secondary" className="text-xs @max-[18rem]:hidden">{sortedTabs.length}</Badge>
-        <span className="@max-[20rem]:hidden"><UpdatedAgo at={lastRefreshAt} /></span>
+        <span className="@max-[20rem]:hidden"><UpdatedAgo at={lastRefreshAt} timestampFormat={timestampFormat} /></span>
         <button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={onRefresh} disabled={loading} title="refresh">
           {loading ? <Skeleton className="h-3 w-3" /> : '↻'}
         </button>
@@ -921,6 +925,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                 onReorder={onReorder}
                 note={c ? agentNotes[c.id] : undefined}
                 onSetNote={c ? (text: string) => setNote(c.id, text) : undefined}
+                timestampFormat={timestampFormat}
               />
             );
           })}

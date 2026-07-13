@@ -3,19 +3,19 @@
 
 import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
-import { ago } from '@/lib/chatDisplay';
+import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 
 // Subtle "updated Xs ago" affordance next to the sidebar ↻ button, signalling
 // the agent list is live. Re-renders only itself each second (not the whole
 // sidebar) so the relative time visibly advances between auto-refresh ticks.
-export function UpdatedAgo({ at }: { at?: number | null }) {
+export function UpdatedAgo({ at, timestampFormat }: { at?: number | null; timestampFormat: TimestampFormat }) {
   const [, setTick] = useState(0);
   useEffect(() => {
     const id = setInterval(() => setTick((n) => n + 1), 1000);
     return () => clearInterval(id);
   }, []);
   if (!at) return null;
-  return <span className="text-[10px] text-muted-foreground tabular-nums">{ago(at)} ago</span>;
+  return <span className="text-[10px] text-muted-foreground tabular-nums">{formatTimestamp(at, timestampFormat, { withSuffix: true })}</span>;
 }
 
 /**

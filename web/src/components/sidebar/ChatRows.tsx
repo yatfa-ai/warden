@@ -13,7 +13,8 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator,
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { StatusDot } from '@/components/StatusDot';
 import { cn } from '@/lib/utils';
-import { chatType, displayName, hostTagOf, ago } from '@/lib/chatDisplay';
+import { chatType, displayName, hostTagOf } from '@/lib/chatDisplay';
+import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
 import type { Chat } from '@/lib/types';
 import type { GitCommit, GitFile } from './types';
 import { GitBranchBadge, GitChangedFile } from './GitBadges';
@@ -257,7 +258,7 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, d
 // gating rename off double-click avoids the two-fires-before-dblclick open-then-edit jank);
 // yatfa agents are not renameable. Drag-reorder is preserved via the parent-owned
 // dragIdx/dragOverIdx pair.
-export function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, canDrag, originalIdx, dragIdx, dragOverIdx, setDragIdx, setDragOverIdx, onReorder, onHide, onKill, note, onSetNote }: {
+export function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, canDrag, originalIdx, dragIdx, dragOverIdx, setDragIdx, setDragOverIdx, onReorder, onHide, onKill, note, onSetNote, timestampFormat }: {
   id: string;
   c?: Chat;
   isOpen: boolean;
@@ -282,6 +283,9 @@ export function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showH
   // WARDEN-305: per-agent note (mirrors pins; keyed by chat id).
   note?: string;
   onSetNote?: (text: string) => void;
+  // Timestamp format pref (WARDEN-213): routes the last-activity time + its
+  // hover tooltip through the shared formatTimestamp / formatAbsoluteFull helpers.
+  timestampFormat: TimestampFormat;
 }) {
   const type = c ? chatType(c) : '?';
   const hostTag = c ? hostTagOf(c.host) : '';
@@ -341,7 +345,7 @@ export function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showH
           </span>
         )}
         {!dead && !editing && !!c?.lastActivity && (
-          <span className="text-[10px] text-muted-foreground shrink-0" title={new Date(c.lastActivity).toLocaleString()}>{ago(c.lastActivity)}</span>
+          <span className="text-[10px] text-muted-foreground shrink-0" title={formatAbsoluteFull(c.lastActivity)}>{formatTimestamp(c.lastActivity, timestampFormat)}</span>
         )}
         {!dead && !editing && showTypeBadges !== false && <span className={`text-[10px] ${TYPE_COLOR[type] || ''}`}>{type}</span>}
         {!dead && !editing && showHostTags !== false && hostTag && <span className="text-[10px] text-muted-foreground">{hostTag}</span>}

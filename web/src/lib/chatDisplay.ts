@@ -6,15 +6,6 @@ import type { Chat } from '@/lib/types';
 // browser page, so both agree on which host is "this machine".
 export const THIS_MACHINE = '(local)';
 
-// Relative time formatter (e.g. "3m", "2h", "5d").
-export function ago(ms: number) {
-  const s = Math.floor((Date.now() - ms) / 1000);
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h`;
-  return `${Math.floor(s / 86400)}d`;
-}
-
 // Basename of a path, normalizing both POSIX and Windows separators.
 export function basename(p: string) { return (p || '').replace(/[\\/]+/g, '/').replace(/\/$/, '').split('/').pop() || p; }
 

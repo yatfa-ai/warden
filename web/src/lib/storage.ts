@@ -1,4 +1,5 @@
 import type { AgentFilter, AgentSort } from './agentFilter';
+import type { TimestampFormat } from './formatTimestamp';
 
 // UI state persisted in localStorage.
 // activeTabs = the user's persistent working set (survives reload, pane close, host nav).
@@ -145,6 +146,11 @@ export interface UiState {
   // Pure client-side pref (like terminalFontSize/scrollback); never sent to the
   // backend. See WARDEN-285.
   copyOnSelect?: boolean;
+  // How timestamps render across the dashboard: 'relative' (default = today's
+  // "2m"/"3h" buckets) or 'absolute' (clock time "2:13 PM"). Pure client-side
+  // pref (like density/copyOnSelect); persisted by App's saveUi effect, never
+  // sent to the backend / /api/config. See WARDEN-213.
+  timestampFormat?: TimestampFormat;
   theme?: 'light' | 'dark' | 'system';
   // UI density: 'comfortable' (default = today's spacing) or 'compact' (tighter
   // rows/headers/gaps so more agents fit per screen). Pure client-side pref.
@@ -310,6 +316,7 @@ const DEFAULT_UI: UiState = {
   terminalColorScheme: 'auto',
   terminalCursorStyle: 'blink-block',
   copyOnSelect: false,
+  timestampFormat: 'relative',
   theme: 'system', density: 'comfortable', paneLayout: 'auto',
   onExitBehavior: 'keep',
   autoFocusNewPane: true,
@@ -352,6 +359,10 @@ export function loadUi(): UiState {
         // Opt-in: only an explicitly-stored `true` enables it. Anything else
         // (missing / false / wrong type) stays OFF — the conservative default.
         copyOnSelect: v.copyOnSelect === true,
+        // Only an explicit 'absolute' opts into clock time; absent/unknown/wrong-
+        // type stays 'relative' (today's "2m ago" buckets) — the conservative
+        // default that minimizes disruption across every timestamp surface.
+        timestampFormat: v.timestampFormat === 'absolute' ? 'absolute' : 'relative',
         theme: v.theme ?? 'system',
         density: v.density === 'compact' ? 'compact' : 'comfortable',
         paneLayout: (v.paneLayout === 'stacked' || v.paneLayout === 'side-by-side') ? v.paneLayout : 'auto',

@@ -13,6 +13,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { EyeIcon, AlertCircleIcon } from 'lucide-react';
 import { ObserverMarkdown } from './ObserverMarkdown';
 import { cn } from '@/lib/utils';
+import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 
 // A single transcript message from GET /api/claude-session (one JSONL line mapped
 // through the server's extractTranscriptMessage: role + human text + timestamp).
@@ -23,6 +24,9 @@ interface SessionTranscriptViewerProps {
   onOpenChange: (open: boolean) => void;
   // The session to read. null keeps the dialog closed without firing a fetch.
   session: { id: string; host: string; label: string } | null;
+  // Timestamp format pref (WARDEN-213): routes each message's time through the
+  // shared formatTimestamp helper.
+  timestampFormat: TimestampFormat;
 }
 
 // Read-only transcript viewer for any past Claude session (WARDEN-233). Opens from
@@ -30,7 +34,7 @@ interface SessionTranscriptViewerProps {
 // (text via ObserverMarkdown) — a plain fetch, no process is spawned. Mirrors the
 // DiffViewer/FileViewer shape (Dialog + ScrollArea + loading/error/empty/ready),
 // since a capped transcript is bounded read-only content, not an unbounded surface.
-export function SessionTranscriptViewer({ open, onOpenChange, session }: SessionTranscriptViewerProps) {
+export function SessionTranscriptViewer({ open, onOpenChange, session, timestampFormat }: SessionTranscriptViewerProps) {
   const [status, setStatus] = useState<'loading' | 'ready' | 'error' | 'empty'>('loading');
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
   const [cwd, setCwd] = useState('');
@@ -135,7 +139,7 @@ export function SessionTranscriptViewer({ open, onOpenChange, session }: Session
                   </div>
                 )}
                 {messages.map((m, i) => (
-                  <MessageBubble key={i} message={m} />
+                  <MessageBubble key={i} message={m} timestampFormat={timestampFormat} />
                 ))}
               </>
             )}
@@ -150,7 +154,7 @@ export function SessionTranscriptViewer({ open, onOpenChange, session }: Session
   );
 }
 
-function MessageBubble({ message }: { message: TranscriptMessage }) {
+function MessageBubble({ message, timestampFormat }: { message: TranscriptMessage; timestampFormat: TimestampFormat }) {
   const isUser = message.role === 'user';
   return (
     <div className={cn('flex', isUser ? 'justify-end' : 'justify-start')}>
@@ -160,7 +164,7 @@ function MessageBubble({ message }: { message: TranscriptMessage }) {
       )}>
         <div className="mb-1 flex items-center gap-2">
           <span className="text-xs font-medium text-muted-foreground">{isUser ? 'You' : 'Assistant'}</span>
-          {message.ts && <span className="text-xs text-muted-foreground/70">{formatTs(message.ts)}</span>}
+          {message.ts && <span className="text-xs text-muted-foreground/70">{formatTs(message.ts, timestampFormat)}</span>}
         </div>
         <ObserverMarkdown>{message.text}</ObserverMarkdown>
       </div>
@@ -168,9 +172,9 @@ function MessageBubble({ message }: { message: TranscriptMessage }) {
   );
 }
 
-// ISO-ish timestamp → short local string; fall back to the raw value if it isn't a
-// real date so we never drop information.
-function formatTs(ts: string): string {
+// ISO-ish timestamp → formatted per the Timestamp format pref; fall back to the
+// raw value if it isn't a real date so we never drop information.
+function formatTs(ts: string, timestampFormat: TimestampFormat): string {
   const d = new Date(ts);
-  return Number.isNaN(d.getTime()) ? ts : d.toLocaleString();
+  return Number.isNaN(d.getTime()) ? ts : formatTimestamp(d, timestampFormat);
 }

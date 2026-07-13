@@ -4,6 +4,7 @@ import { postJson } from '@/lib/api';
 import { loadUi, saveUi, persistUiState, initialWorkspace, DEFAULT_TERMINAL_FONT_FAMILY, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
 import { applyTheme, listenSystemThemeChange, getEffectiveTheme, resolveTerminalTheme, type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
+import { type TimestampFormat } from '@/lib/formatTimestamp';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
@@ -173,6 +174,12 @@ function App() {
   // panes (PaneTile mirrors it into a ref its selection handler reads), and is
   // never sent to the backend.
   const [copyOnSelect, setCopyOnSelect] = useState(() => uiState.copyOnSelect ?? false);
+  // Timestamp format (WARDEN-213): how every timestamp surface reads — 'relative'
+  // (default = "2m"/"3h" buckets) or 'absolute' (clock time). Pure client-side
+  // pref (like copyOnSelect/density): persisted by the saveUi effect below,
+  // threaded to every timestamp display via the shared formatTimestamp helper,
+  // and never sent to the backend.
+  const [timestampFormat, setTimestampFormat] = useState<TimestampFormat>(() => uiState.timestampFormat ?? 'relative');
   // Default agent type + host pre-filled in the ＋ new chat form, plus the
   // user-defined custom presets (named quick-fill commands beyond claude/shell).
   // All pure client-side prefs (like density/terminalFontSize): persisted by the
@@ -333,8 +340,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, defaultSplitShell }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, defaultSplitShell, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, defaultSplitShell }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, defaultSplitShell, restoreOnStartup, startedEmpty]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -1043,6 +1050,8 @@ function App() {
           setTerminalCursorStyle={setTerminalCursorStyle}
           copyOnSelect={copyOnSelect}
           setCopyOnSelect={setCopyOnSelect}
+          timestampFormat={timestampFormat}
+          setTimestampFormat={setTimestampFormat}
           defaultNewChatPreset={defaultNewChatPreset}
           setDefaultNewChatPreset={setDefaultNewChatPreset}
           defaultNewChatHost={defaultNewChatHost}
@@ -1071,6 +1080,7 @@ function App() {
           onResume={resumeSession}
           onDiscoverHost={discoverHost}
           hostStatuses={hostStatuses}
+          timestampFormat={timestampFormat}
         />
       ) : (
         <>
@@ -1126,6 +1136,7 @@ function App() {
               hideOfflineHosts={displaySettings.hideOfflineHosts}
               onOpenChatBrowser={() => setChatBrowserOpen(true)}
               hostStatuses={hostStatuses}
+              timestampFormat={timestampFormat}
             />
           </ErrorBoundary>
         </section>
@@ -1166,7 +1177,7 @@ function App() {
             title="Drag to resize observer panel"
           />
           <ErrorBoundary>
-            <ObserverTabs externalViewMode={externalViewMode} onFocusAgent={handleFocusAgent} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} />
+            <ObserverTabs externalViewMode={externalViewMode} onFocusAgent={handleFocusAgent} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} timestampFormat={timestampFormat} />
           </ErrorBoundary>
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden"
@@ -1174,6 +1185,7 @@ function App() {
           <HealthDashboard
             onOpenChat={openChat}
             onClose={() => setHealthCollapsed(true)}
+            timestampFormat={timestampFormat}
           />
         </section>
       </main>

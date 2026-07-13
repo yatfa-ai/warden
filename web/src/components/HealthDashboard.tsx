@@ -13,6 +13,7 @@ import {
 } from '@/lib/healthUtils';
 import { StatusDot, type StatusTone } from '@/components/StatusDot';
 import { Sparkline } from '@/components/Sparkline';
+import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { Button } from '@/components/ui/button';
 import { useHostStatuses } from '@/lib/useHostStatuses';
 import { useActivitySeries } from '@/lib/useActivitySeries';
@@ -21,6 +22,9 @@ import { buildAgentActivity, selectAgentSparkline } from '@/lib/agentSparkline';
 interface Props {
   onOpenChat: (id: string) => void;
   onClose: () => void;
+  // Timestamp format pref (WARDEN-213): routes the fleet last-activity + "Last
+  // updated" times through the shared formatTimestamp helper. Pure client-side.
+  timestampFormat: TimestampFormat;
 }
 
 // Closed sits between idle and unknown: a dead session is non-critical and less
@@ -56,14 +60,6 @@ const CLOSED_COLLAPSED_LIMIT = 5;
 const CLOSED_EXPANDED_LIMIT = 20;
 
 type GroupMode = 'health' | 'host';
-
-function ago(ms: number) {
-  const s = Math.floor((Date.now() - ms) / 1000);
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h`;
-  return `${Math.floor(s / 86400)}d`;
-}
 
 // Compact "used" portion of a docker-stats MemUsage string like
 // "310.2MiB / 2GiB" → "310.2MiB" (everything before the first ' / '). Returns ''
@@ -185,7 +181,7 @@ function ResourceChip({ agent }: { agent: Chat }) {
   );
 }
 
-export function HealthDashboard({ onOpenChat, onClose }: Props) {
+export function HealthDashboard({ onOpenChat, onClose, timestampFormat }: Props) {
   const [healthData, setHealthData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -315,7 +311,7 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
       {/* Last Activity */}
       {agent.lastActivity && (
         <span className="text-[10px] text-muted-foreground">
-          {ago(agent.lastActivity)} ago
+          {formatTimestamp(agent.lastActivity, timestampFormat, { withSuffix: true })}
         </span>
       )}
 
@@ -575,7 +571,7 @@ export function HealthDashboard({ onOpenChat, onClose }: Props) {
       {/* Timestamp */}
       {healthData && (
         <div className="px-3 py-1 border-t text-[10px] text-muted-foreground text-center">
-          Last updated: {new Date(healthData.timestamp).toLocaleTimeString()}
+          Last updated: {formatTimestamp(healthData.timestamp, timestampFormat)}
         </div>
       )}
     </div>

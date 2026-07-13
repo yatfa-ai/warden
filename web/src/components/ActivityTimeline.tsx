@@ -3,8 +3,9 @@ import type { ActivityEvent } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { useLiveTimeline } from '@/lib/useLiveTimeline';
 import { formatUpdatedAgo } from '@/lib/timelinePacing';
+import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 
-export function ActivityTimeline() {
+export function ActivityTimeline({ timestampFormat }: { timestampFormat: TimestampFormat }) {
   const [filtered, setFiltered] = useState<ActivityEvent[]>([]);
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [agentFilter, setAgentFilter] = useState<string>('all');
@@ -87,21 +88,6 @@ export function ActivityTimeline() {
   }, []);
 
   const grouped = groupedEvents(filtered);
-
-  const formatTime = (timestamp: string) => {
-    const date = new Date(timestamp);
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  };
-
-  const formatDate = (timestamp: string) => {
-    const date = new Date(timestamp);
-    const now = new Date();
-    const isToday = date.toDateString() === now.toDateString();
-    if (isToday) {
-      return `Today, ${formatTime(timestamp)}`;
-    }
-    return `${date.toLocaleDateString()} ${formatTime(timestamp)}`;
-  };
 
   const renderEvent = (event: ActivityEvent) => {
     const typeColors = {
@@ -200,7 +186,7 @@ export function ActivityTimeline() {
             <span className={`text-xs font-semibold uppercase ${typeColors[event.type] || 'text-muted-foreground'}`}>
               {event.type.replace('_', ' ')}
             </span>
-            <span className="text-xs text-muted-foreground">{formatDate(event.timestamp)}</span>
+            <span className="text-xs text-muted-foreground">{formatTimestamp(event.timestamp, timestampFormat)}</span>
             {event.host && (
               <span className="text-xs font-mono text-muted-foreground bg-muted px-1 rounded">{event.host}</span>
             )}
