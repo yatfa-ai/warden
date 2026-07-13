@@ -20,6 +20,8 @@ import { spawnSync } from 'node:child_process';
  *     Covers the success criteria:
  *       - known hash → touched files [{path,status}] (+ rename reported as new path)
  *       - per-file diff (?path=) → non-empty patch string
+ *       - hash reachable from a tracking ref but NOT from HEAD → files + diff (WARDEN-348:
+ *         the "incoming · ↓N" premise — git show is reachability-driven, not HEAD-driven)
  *       - non-git cwd → { files: [], diff: null, error: null } (200, NOT a 500)
  *       - valid-format unknown hash → empty files, 200
  *       - malformed hash → { files: [], error: 'invalid hash' } (200)
@@ -39,9 +41,14 @@ let baseUrl;
 let originalHome;
 let tempHome;
 let gitRepo;
+let incomingRepo;
 let nonGitDir;
 let headHash; // hash of the most recent commit (rename b, add c)
 let addHash;  // hash of the initial commit (add a)
+// Hash of a commit reachable from a remote-tracking ref (refs/remotes/origin/main,
+// what @{u} resolves to) but NOT an ancestor of HEAD — a genuine "incoming · ↓N"
+// commit. Locks WARDEN-348: git show serves it without a pull.
+let behindHash;
 
 function git(args, cwd) {
   const r = spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'inherit'] });
@@ -86,6 +93,32 @@ before(async () => {
   nonGitDir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitshow-nongit-'));
   fs.writeFileSync(path.join(nonGitDir, 'readme.txt'), 'not a repo\n');
 
+  // A second repo mirroring the "behind upstream" scenario (WARDEN-348): HEAD sits at
+  // a base commit while a remote-tracking ref (refs/remotes/origin/main — exactly what
+  // @{u} resolves to) points at a LATER commit NOT reachable from HEAD. That later
+  // commit is an "incoming · ↓1" commit: an already-fetched local object. This locks
+  // the corrected premise — git show serves it (files + diff) WITHOUT a pull, because
+  // reachability from the tracking ref is sufficient and HEAD-membership is NOT what
+  // makes git show reliable. If a future "is it in HEAD?" guard is bolted onto the
+  // handler, the incoming expand in GitBadges would silently break and this test fails.
+  incomingRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitshow-incoming-'));
+  git(['init', '-q'], incomingRepo);
+  git(['config', 'user.email', 'test@example.com'], incomingRepo);
+  git(['config', 'user.name', 'Tester'], incomingRepo);
+  fs.writeFileSync(path.join(incomingRepo, 'a.txt'), 'a content\n');
+  git(['add', '.'], incomingRepo);
+  git(['commit', '-q', '-m', 'add a'], incomingRepo);
+  const incomingBase = git(['rev-parse', 'HEAD'], incomingRepo).stdout.toString().trim();
+  fs.writeFileSync(path.join(incomingRepo, 'b.txt'), 'b content\n');
+  git(['add', '.'], incomingRepo);
+  git(['commit', '-q', '-m', 'add b'], incomingRepo);
+  const incomingTip = git(['rev-parse', 'HEAD'], incomingRepo).stdout.toString().trim();
+  behindHash = git(['rev-parse', '--short', 'HEAD'], incomingRepo).stdout.toString().trim();
+  // Point the upstream tracking ref at "add b", then rewind HEAD/main to "add a": now
+  // "add b" is reachable from the tracking ref but NOT an ancestor of HEAD.
+  git(['update-ref', 'refs/remotes/origin/main', incomingTip], incomingRepo);
+  git(['reset', '--hard', incomingBase], incomingRepo);
+
   // Catalog with two LOCAL manual chats: one in the git repo, one in the non-git dir.
   // Resolved by bare session id (no ':' prefix) → no host/tmux discovery runs.
   fs.writeFileSync(
@@ -93,6 +126,7 @@ before(async () => {
     JSON.stringify([
       { host: '(local)', session: 'warden-gitshow', cwd: gitRepo, cmd: 'bash', name: 'warden-gitshow' },
       { host: '(local)', session: 'warden-nongit', cwd: nonGitDir, cmd: 'bash', name: 'warden-nongit' },
+      { host: '(local)', session: 'warden-incoming', cwd: incomingRepo, cmd: 'bash', name: 'warden-incoming' },
     ]),
   );
 
@@ -111,7 +145,7 @@ after(async () => {
   if (httpServer) await new Promise((r) => httpServer.close(r));
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  for (const d of [gitRepo, nonGitDir, tempHome]) {
+  for (const d of [gitRepo, incomingRepo, nonGitDir, tempHome]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 });
@@ -181,6 +215,27 @@ describe('/api/git-show HTTP endpoint (real Express app from server.js)', () => 
     assert.strictEqual(body.error, null);
     assert.ok(typeof body.diff === 'string' && body.diff.length > 0, 'diff must be a non-empty string');
     assert.ok(body.diff.includes('+c1'), 'diff should show the added line(s)');
+  });
+
+  it('serves a commit reachable from a tracking ref but NOT from HEAD (incoming/behind, WARDEN-348)', async () => {
+    // The corrected premise lock-in: an "incoming · ↓N" commit is reachable from @{u}
+    // (a LOCAL remote-tracking ref) but is NOT an ancestor of HEAD. git show must still
+    // serve its files + per-file diff WITHOUT a pull — reachability, not HEAD-membership,
+    // is what git show needs. (The repo's HEAD is at "add a"; behindHash is "add b",
+    // reachable only from refs/remotes/origin/main.) If a future HEAD-membership guard
+    // regresses the handler, both assertions below fail.
+    const filesRes = await fetch(`${baseUrl}/api/git-show?id=warden-incoming&hash=${behindHash}`);
+    assert.strictEqual(filesRes.status, 200);
+    const filesBody = await filesRes.json();
+    assert.strictEqual(filesBody.error, null);
+    assert.deepStrictEqual(filesBody.files, [{ status: 'A', path: 'b.txt' }]);
+
+    const diffRes = await fetch(`${baseUrl}/api/git-show?id=warden-incoming&hash=${behindHash}&path=${encodeURIComponent('b.txt')}`);
+    assert.strictEqual(diffRes.status, 200);
+    const diffBody = await diffRes.json();
+    assert.strictEqual(diffBody.error, null);
+    assert.ok(typeof diffBody.diff === 'string' && diffBody.diff.length > 0, 'diff must be a non-empty string');
+    assert.ok(diffBody.diff.includes('+b content'), 'diff should show the added line');
   });
 
   it('returns { files: [], diff: null, error: null } (200, not 500) for a non-git cwd', async () => {

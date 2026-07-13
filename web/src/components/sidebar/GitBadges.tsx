@@ -448,15 +448,18 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   stashCount?: number | null;
   // WARDEN-225: the "behind" half — commits @{u} has that HEAD doesn't. Lazily
   // fetched on open when behindCount > 0, with its own cache/loader so it refreshes
-  // independently of the local recent-commits list. Display-only (no pull/expand).
+  // independently of the local recent-commits list. Explorable (WARDEN-348): each row
+  // expands to its changed files + per-file diff via /api/git-show — these are local
+  // objects reachable from the upstream remote-tracking ref (@{u}), so git show serves
+  // them without a pull.
   incomingCommits?: GitCommit[];
   incomingLoading?: boolean;
   onFetchIncoming?: () => void;
   // WARDEN-252: the "ahead/unpushed" half — commits HEAD has that @{u} doesn't. The
   // symmetric counterpart to incomingCommits. Lazily fetched on open when aheadCount
-  // > 0, with its own cache/loader. Explorable (WARDEN-303): these commits ARE local
-  // (already in HEAD), so each row expands to its changed files + per-file diff via
-  // /api/git-show — unlike incoming, which stays display-only.
+  // > 0, with its own cache/loader. Explorable (WARDEN-303): each row expands to its
+  // changed files + per-file diff via /api/git-show. Both halves are explorable —
+  // outgoing commits are reachable from HEAD, incoming from @{u} (WARDEN-348).
   outgoingCommits?: GitCommit[];
   outgoingLoading?: boolean;
   onFetchOutgoing?: () => void;
@@ -674,10 +677,13 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
               ) : outgoingCommits && outgoingCommits.length > 0 ? (
                 <ul className="max-h-72 overflow-auto">
                   {outgoingCommits.map((cm) => (
-                    // Explorable (WARDEN-303): unlike the incoming list below, these
-                    // commits ARE local (already in HEAD), so a per-commit /api/git-show
-                    // expand is reliable. Mirrors the recent-commits row above, diverging
-                    // only in the amber hash color to match this list's "unpushed" styling.
+                    // Explorable (WARDEN-303): each row expands to its changed files +
+                    // per-file diff via /api/git-show — these commits are local objects
+                    // reachable from HEAD. The incoming list below is explorable too
+                    // (WARDEN-348): reachability from @{u}'s remote-tracking ref — not
+                    // HEAD-membership — is what makes git show reliable there. Mirrors
+                    // the recent-commits row above, diverging only in the amber hash
+                    // color to match this list's "unpushed" styling.
                     <li key={cm.hash} className="rounded">
                       <div
                         role="button"
@@ -731,16 +737,45 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
               ) : incomingCommits && incomingCommits.length > 0 ? (
                 <ul className="max-h-72 overflow-auto">
                   {incomingCommits.map((cm) => (
-                    // Display-only: an incoming commit isn't pulled locally yet, so a
-                    // per-commit /api/git-show would be unreliable — no expand in v1.
+                    // Explorable (WARDEN-348): an incoming commit is reachable from
+                    // the branch's upstream remote-tracking ref (@{u}, a LOCAL object
+                    // updated by the last git fetch), so a per-commit /api/git-show is
+                    // reliable WITHOUT a pull — reachability, not HEAD-membership, is
+                    // what git show needs. Mirrors the unpushed/outgoing rows above,
+                    // diverging only in the blue hash color to match this list's styling.
                     <li key={cm.hash} className="rounded">
-                      <div className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left" title="incoming commit (not yet pulled)">
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        aria-expanded={expandedHash === cm.hash}
+                        aria-label={`inspect files changed by commit ${cm.hash}`}
+                        onClick={(e) => { e.stopPropagation(); toggleCommit(cm.hash); }}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleCommit(cm.hash); } }}
+                        title="incoming commit (behind upstream, already fetched) — click to inspect the files this commit changed"
+                        className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+                      >
                         <span className="shrink-0 font-mono text-[10px] text-blue-400/80">{cm.hash}</span>
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-[10px] text-foreground" title={cm.subject}>{cm.subject}</span>
                           <span className="block text-[10px] text-muted-foreground">{cm.date}{cm.author ? ` · ${cm.author}` : ''}</span>
                         </span>
+                        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{expandedHash === cm.hash ? '▾' : '▸'}</span>
                       </div>
+                      {expandedHash === cm.hash && (
+                        <div className="pb-1 pl-1">
+                          {showLoading[cm.hash] && !showCache[cm.hash] ? (
+                            <div className="px-1 text-[10px] text-muted-foreground">loading files…</div>
+                          ) : (showCache[cm.hash]?.files?.length ?? 0) > 0 ? (
+                            <div className="flex flex-col gap-0.5">
+                              {showCache[cm.hash]!.files!.map((f) => (
+                                <CommitFile key={f.path} chatId={chatId} hash={cm.hash} file={f} />
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="px-1 text-[10px] text-muted-foreground">{showCache[cm.hash]?.error ? 'failed to load' : 'no files'}</div>
+                          )}
+                        </div>
+                      )}
                     </li>
                   ))}
                 </ul>
