@@ -172,6 +172,12 @@ export interface UiState {
   // client-side pref; never sent to the backend.
   defaultNewChatPreset?: string;
   defaultNewChatHost?: string;
+  // Default working directory pre-filled in the ＋ new chat spawn form
+  // (WARDEN-311). Blank (default) → the host's home directory (today's
+  // behavior); a path like '~/projects/warden' is seeded into the cwd field and
+  // remains editable per-spawn. Pure client-side pref; never sent to the
+  // backend / /api/config.
+  defaultNewChatCwd?: string;
   // Default shell launched by the pane-grid ＋ split button (WARDEN-223). A
   // non-empty value (e.g. 'zsh', 'pwsh') is the `cmd` every split spawns; blank
   // (default) means "no explicit shell" — the host launches its own login shell
@@ -272,7 +278,7 @@ const DEFAULT_UI: UiState = {
   onExitBehavior: 'keep',
   autoFocusNewPane: true,
   restoreOnStartup: 'previous',
-  defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', customPresets: [],
+  defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', customPresets: [], defaultNewChatCwd: '',
   defaultSplitShell: '',
   paneHost: {}, agentFilter: 'all', agentSort: 'manual',
 };
@@ -320,6 +326,9 @@ export function loadUi(): UiState {
         restoreOnStartup: v.restoreOnStartup === 'empty' ? 'empty' : 'previous',
         defaultNewChatPreset: presetIsValid(v.defaultNewChatPreset) ? (v.defaultNewChatPreset as string) : 'claude',
         defaultNewChatHost: typeof v.defaultNewChatHost === 'string' ? v.defaultNewChatHost : '(local)',
+        // Trim on load so stray whitespace never becomes the seeded cwd path;
+        // blank is the meaningful "host home directory" value (today's behavior).
+        defaultNewChatCwd: typeof v.defaultNewChatCwd === 'string' ? v.defaultNewChatCwd.trim() : '',
         // Trim on load so stray whitespace never becomes the spawned shell name;
         // blank is the meaningful "auto-detect host login shell" value.
         defaultSplitShell: typeof v.defaultSplitShell === 'string' ? v.defaultSplitShell.trim() : '',

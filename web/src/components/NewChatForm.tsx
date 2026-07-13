@@ -30,7 +30,11 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
   const [preset, setPreset] = useState<string>(() => initialUi.defaultNewChatPreset ?? 'claude');
   const [customPresets] = useState(() => initialUi.customPresets ?? []);
   const [session, setSession] = useState('');
-  const [cwd, setCwd] = useState('');
+  // cwd pre-fills from the persisted defaultNewChatCwd pref (WARDEN-311) so a
+  // human who always spawns into the same project doesn't re-type the path on
+  // every spawn. Lazy init runs loadUi() once on mount (matching the host/preset
+  // lazy-inits above); the value is still editable per-spawn and submit trims it.
+  const [cwd, setCwd] = useState(() => initialUi.defaultNewChatCwd ?? '');
   const [cmd, setCmd] = useState('claude --dangerously-skip-permissions');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
@@ -79,7 +83,13 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
         host, session: sess, cwd: cwd.trim(), cmd: cmd.trim(),
       });
       if (!result.ok) { setErr(result.error || 'spawn failed'); setBusy(false); return; }
-      setOpen(false); setSession(''); setCwd('');
+      // Reset session (per-spawn) and re-seed cwd from the persisted default
+      // (WARDEN-311). NewChatForm is always-mounted, so the lazy useState
+      // initializer above runs only once per session — clearing cwd to '' here
+      // would empty the field for every spawn after the first. Re-seed from the
+      // default so the path pre-fills every open; a per-spawn edit correctly
+      // does NOT persist (it's a default, not the last-used value).
+      setOpen(false); setSession(''); setCwd(initialUi.defaultNewChatCwd ?? '');
       onSpawned(result.data!.chat);
     } catch (e: unknown) { setErr(e instanceof Error ? e.message : String(e)); }
     setBusy(false);

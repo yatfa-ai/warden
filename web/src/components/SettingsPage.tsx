@@ -139,6 +139,12 @@ interface Props {
   setDefaultNewChatPreset: (v: string) => void;
   defaultNewChatHost: string;
   setDefaultNewChatHost: (v: string) => void;
+  // Default working directory pre-filled in the ＋ new chat spawn form
+  // (WARDEN-311). Blank → the host's home directory (today's behavior). Pure
+  // client-side localStorage pref, persisted by App's saveUi effect; never sent
+  // to the backend.
+  defaultNewChatCwd: string;
+  setDefaultNewChatCwd: (v: string) => void;
   // User-defined spawn presets (named quick-fill commands beyond claude/shell).
   // Pure client-side localStorage pref, persisted by App's saveUi effect; never
   // sent to the backend.
@@ -281,7 +287,7 @@ function PresetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -1145,6 +1151,23 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   />
                   <p className="text-xs text-muted-foreground">
                     Shell launched by the ＋ split button next to a pane, on that pane's host at its working directory. Enter a name like <code className="bg-muted px-1 rounded">zsh</code> or <code className="bg-muted px-1 rounded">pwsh</code>; leave blank to use each host's default login shell.
+                  </p>
+                </div>
+
+                {/* Default working directory (WARDEN-311): the cwd pre-filled in
+                    the ＋ new chat spawn form. Blank → the host's home directory
+                    (today's behavior); the seeded value is still editable
+                    per-spawn in the form. */}
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="defaultNewChatCwd">Default working directory</Label>
+                  <Input
+                    id="defaultNewChatCwd"
+                    value={defaultNewChatCwd}
+                    onChange={(e) => setDefaultNewChatCwd(e.target.value)}
+                    placeholder="auto (home directory)"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Working directory pre-filled in the ＋ new chat spawn form. Enter a path like <code className="bg-muted px-1 rounded">~/projects/warden</code>; leave blank to start each chat in the host's home directory (today's behavior). Editable per-spawn.
                   </p>
                 </div>
               </SettingsSection>
