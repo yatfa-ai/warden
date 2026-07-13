@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, isConflictStatus, isDetachedHead, normalizeHeadSha, buildDockerGitArgv } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, isConflictStatus, isDetachedHead, normalizeHeadSha, parseUpstream, buildDockerGitArgv } from './gitStatus.js';
 
 describe('parseGitStatusPorcelain', () => {
   it('parses the most common case: unstaged modification as the FIRST file', () => {
@@ -311,6 +311,63 @@ describe('parseAheadBehind', () => {
 
   it('tolerates leading/trailing whitespace', () => {
     assert.deepEqual(parseAheadBehind('  2\t5  '), { ahead: 5, behind: 2 });
+  });
+});
+
+describe('parseUpstream', () => {
+  // `git rev-parse --abbrev-ref @{u}` prints the short upstream name (e.g.
+  // origin/feature) + exit 0 when one is configured, and exits non-zero with
+  // empty stdout when HEAD has no upstream. We surface the trimmed name on
+  // success and null for empty/non-zero — the only signal that distinguishes a
+  // never-pushed branch from a synced 0/0 one (both → ahead/behind nulls)
+  // (WARDEN-243).
+
+  it('trims a normal short upstream name on its own line', () => {
+    assert.equal(parseUpstream('origin/feature\n'), 'origin/feature');
+  });
+
+  it('trims a longer multi-segment upstream', () => {
+    assert.equal(parseUpstream('origin/release/v1.2\n'), 'origin/release/v1.2');
+  });
+
+  it('trims surrounding whitespace', () => {
+    assert.equal(parseUpstream('  origin/main  \n'), 'origin/main');
+  });
+
+  it('returns null for a non-zero exit code', () => {
+    // No upstream / detached HEAD / non-git cwd → rev-parse errors (exit 128).
+    assert.equal(parseUpstream('', 128), null);
+    assert.equal(parseUpstream('origin/feature\n', 1), null);
+  });
+
+  it('returns null for empty / whitespace-only output on a successful exit', () => {
+    assert.equal(parseUpstream('', 0), null);
+    assert.equal(parseUpstream('   \n', 0), null);
+  });
+
+  it('returns null for empty output with no exit code (the route .ok-gated call)', () => {
+    // The route calls parseUpstream(upR.ok ? upR.stdout : '') — when there's no
+    // upstream, upR.ok is false so '' is passed (no exit code). That must null.
+    assert.equal(parseUpstream(''), null);
+  });
+
+  it('trusts the output when no exit code is supplied', () => {
+    // The remote run() path encodes exit-0 in its .ok flag, so the helper is
+    // called with just stdout — it must not null a valid upstream name.
+    assert.equal(parseUpstream('origin/main\n'), 'origin/main');
+  });
+
+  it('handles undefined / null input without throwing', () => {
+    assert.equal(parseUpstream(undefined), null);
+    assert.equal(parseUpstream(null), null);
+  });
+
+  it('accepts a Buffer input', () => {
+    assert.equal(parseUpstream(Buffer.from('origin/feature\n')), 'origin/feature');
+  });
+
+  it('tolerates CRLF line endings (e.g. over SSH)', () => {
+    assert.equal(parseUpstream('origin/feature\r\n'), 'origin/feature');
   });
 });
 

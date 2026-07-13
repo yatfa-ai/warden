@@ -434,7 +434,7 @@ function CommitFile({ chatId, hash, file }: { chatId: string; hash: string; file
 // to document.body via Radix Popover so it isn't clipped by the `truncate` name span
 // this badge sits inside (in ChatRow). stopPropagation on clicks keeps it from also
 // opening the chat pane (mirrors the other inline buttons in these rows).
-export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, inProgress, stashCount, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, detached, headSha, className }: {
+export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, inProgress, stashCount, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, detached, headSha, upstream, className }: {
   branch: string;
   clean: boolean | null;
   commits?: GitCommit[];
@@ -464,6 +464,13 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   // literal "HEAD" branch label. ahead/behind are null on detached (no @{u}).
   detached?: boolean;
   headSha?: string | null;
+  // WARDEN-243: the short upstream tracking branch (e.g. origin/feature), or null
+  // when HEAD has no upstream — a named branch never `push -u`'d. ahead/behind are
+  // null either way (no @{u}), so without this a non-tracking branch is a bare
+  // cyan label indistinguishable from a synced 0/0 branch. When null (and not
+  // detached) the badge renders a distinct muted "no remote" marker so the
+  // durability risk (local-only work, no remote backup) is visible at a glance.
+  upstream?: string | null;
   className?: string;
 }) {
   const aheadCount = typeof ahead === 'number' ? ahead : 0;
@@ -480,9 +487,20 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   // ↑/↓ markers naturally don't render.
   const isDetached = detached === true;
   const sha = typeof headSha === 'string' ? headSha.trim() : '';
+  // WARDEN-243: a named branch with NO upstream tracking (never `push -u`'d) is
+  // local-only work with no remote backup — a durability risk a human glancing at
+  // the badge needs to see. Distinct from a synced 0/0 branch (which HAS an
+  // upstream): ahead/behind are null in BOTH cases, so the upstream name is the
+  // only signal. Excluded for detached HEAD (branch === 'HEAD', rendered as its
+  // own amber glyph by WARDEN-239 — a detached HEAD has no @{u} by definition).
+  const noUpstream = !isDetached && !!branch && branch !== 'HEAD' && !upstream;
   const titleParts = isDetached
     ? [`detached HEAD${sha ? ` @ ${sha}` : ''}`, 'commits not on a branch; at risk if reflog expires']
     : [branch];
+  if (!isDetached && branch && branch !== 'HEAD') {
+    if (upstream) titleParts.push(`tracking ${upstream}`);
+    else titleParts.push('no remote tracking — local-only, not backed up');
+  }
   if (operation) titleParts.push(`${operation} in progress`);
   if (clean === false) titleParts.push('uncommitted changes');
   if (stashN > 0) titleParts.push(`${stashN} stashed`);
@@ -567,6 +585,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
             </>
           ) : branch}
           {clean === false && <span className="text-yellow-400">±</span>}
+          {noUpstream && <span className="text-muted-foreground" title="no remote tracking — local-only work, not backed up remotely">🔒</span>}
           {aheadCount > 0 && <span className="text-amber-400">↑{aheadCount}</span>}
           {behindCount > 0 && <span className="text-blue-400">↓{behindCount}</span>}
           {stashN > 0 && <span className="text-fuchsia-400" title={`${stashN} stashed`}>🗄{stashN}</span>}

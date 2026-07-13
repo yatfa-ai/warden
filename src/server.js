@@ -23,7 +23,7 @@ import { appendEvent, rotateEvents, readEvents, getStatsSince, getSeriesSince } 
 import { buildSnapshot, diffLifecycles } from './lifecycle.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { checkHost } from './hostStatus.js';
-import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, isDetachedHead, normalizeHeadSha, buildDockerGitArgv } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, isDetachedHead, normalizeHeadSha, parseUpstream, buildDockerGitArgv } from './gitStatus.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = load();
@@ -1158,7 +1158,7 @@ app.get('/api/git-status', async (req, res) => {
 
   try {
     const cwd = gitCwd(chat);
-    if (!cwd) return res.json({ branch: null, detached: false, headSha: null, clean: null, cwd: '', ahead: null, behind: null, inProgress: { operation: null }, stashCount: null, files: null, error: 'no cwd' });
+    if (!cwd) return res.json({ branch: null, detached: false, headSha: null, clean: null, cwd: '', ahead: null, behind: null, upstream: null, inProgress: { operation: null }, stashCount: null, files: null, error: 'no cwd' });
 
     // branch / status / ahead-behind / detached / stash all run via runGit: argv
     // (no shell) for the LOCAL transports, ssh for the remote ones — and for yatfa
@@ -1181,6 +1181,20 @@ app.get('/api/git-status', async (req, res) => {
     // upstream, detached HEAD, non-git cwd) → empty stdout → nulls. See parseAheadBehind.
     const abR = await runGit(chat, ['rev-list', '--left-right', '--count', '@{u}...HEAD'], cwd);
     const { ahead, behind } = parseAheadBehind(abR.ok ? abR.stdout : '');
+
+    // Upstream tracking branch (WARDEN-243). `git rev-parse --abbrev-ref @{u}`
+    // prints the short upstream name (e.g. origin/feature) + exit 0 when one is
+    // configured, and exits non-zero with empty stdout when HEAD has NO upstream
+    // — a named branch never `push -u`'d. ahead/behind alone can't tell that
+    // branch from a synced 0/0 one (both → nulls with no @{u}), so without this
+    // a never-pushed branch renders as a bare cyan label indistinguishable from
+    // in-sync: a durability risk (local-only work, no remote backup) a human
+    // needs to see at a glance. Same `@{u}` rev spec + runGit transport as the
+    // ahead/behind call above (so it lights up for yatfa containers too,
+    // WARDEN-235) and shellQuote'd on the remote branch inside runGit (the
+    // WARDEN-122 brace-expansion lesson — `@{u}` must not reach a shell bare).
+    const upR = await runGit(chat, ['rev-parse', '--abbrev-ref', '@{u}'], cwd);
+    const upstream = parseUpstream(upR.ok ? upR.stdout : '');
 
     // Detached-HEAD detection (WARDEN-239). `git symbolic-ref -q HEAD` exits
     // non-zero iff HEAD is detached (it prints refs/heads/<name> + exit 0 when on
@@ -1223,13 +1237,19 @@ app.get('/api/git-status', async (req, res) => {
       cwd,
       ahead: branch ? ahead : null,
       behind: branch ? behind : null,
+      // upstream: the short tracking branch name (e.g. origin/feature), or null
+      // when HEAD has no upstream — gated on `branch` like ahead/behind so a
+      // detached HEAD / non-git cwd reads null (WARDEN-243). ahead/behind are
+      // already null there, so this is what lets the badge tell a never-pushed
+      // branch from a synced 0/0 one.
+      upstream: branch ? upstream : null,
       inProgress: { operation: branch ? inProgressOp : null },
       stashCount: branch ? stashCount : null,
       files: branch ? files : null,
       error: null,
     });
   } catch (e) {
-    res.json({ branch: null, detached: false, headSha: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, inProgress: { operation: null }, stashCount: null, files: null, error: e.message });
+    res.json({ branch: null, detached: false, headSha: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, upstream: null, inProgress: { operation: null }, stashCount: null, files: null, error: e.message });
   }
 });
 
