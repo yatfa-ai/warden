@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
-import { loadUi, saveUi, persistUiState, initialWorkspace, DEFAULT_TERMINAL_FONT_FAMILY, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type HostOptionsMap, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
+import { loadUi, saveUi, persistUiState, initialWorkspace, DEFAULT_TERMINAL_FONT_FAMILY, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type HostOptionsMap, type WorkspacePaneSet, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
 import { applyTheme, listenSystemThemeChange, getEffectiveTheme, resolveTerminalTheme, type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
@@ -10,6 +10,7 @@ import type { Chat } from '@/lib/types';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ChatSidebar } from '@/components/ChatSidebar';
 import { PaneGrid } from '@/components/PaneGrid';
+import { WorkspaceTabs } from '@/components/WorkspaceTabs';
 import { ObserverTabs } from '@/components/ObserverTabs';
 import { SettingsPage } from '@/components/SettingsPage';
 import { OpenChatBrowserPage } from '@/components/OpenChatBrowserPage';
@@ -61,17 +62,70 @@ function App() {
   const initWs = initialWorkspace(uiState, uiState.restoreOnStartup ?? 'previous');
   const [activeTabs, setActiveTabs] = useState<string[]>(() => initWs.activeTabs);
   const [hiddenTabs, setHiddenTabs] = useState<string[]>(() => initWs.hiddenTabs);
-  const [openPanes, setOpenPanes] = useState<string[]>(() => initWs.openPanes);
-  const [focused, setFocused] = useState<string | null>(() => initWs.focused);
+  // Multi-workspace (WARDEN-256): openPanes/focused now live INSIDE per-workspace
+  // pane-sets. The active workspace's panes are what render in the grid; switching
+  // activeWorkspaceId swaps the grid instantly. activeTabs/hiddenTabs stay flat +
+  // global (the sidebar's working set); paneHost stays global.
+  const [workspaces, setWorkspaces] = useState<WorkspacePaneSet[]>(() => initWs.workspaces);
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>(() => initWs.activeWorkspaceId);
   const [paneHost, setPaneHost] = useState<Record<string, string>>(() => initWs.paneHost);
   const chatsRef = useRef(chats);
   useEffect(() => { chatsRef.current = chats; }, [chats]);
-  // Mirrors of the active-tab/pane state, read synchronously inside optimistic
-  // callbacks (e.g. performKill's rollback) to capture a pre-mutation snapshot
-  // without widening those callbacks' dependency arrays.
+  // The active workspace's pane-set, derived every render. Falls back to the
+  // first workspace if activeWorkspaceId ever dangles (defensive — loadUi/init
+  // keep it valid, but a corrupt mid-session state must still render something).
+  const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId) ?? workspaces[0] ?? null;
+  const openPanes: string[] = activeWorkspace?.openPanes ?? [];
+  const focused: string | null = activeWorkspace?.focused ?? null;
+  // Mirrors read synchronously inside stable callbacks (performKill's rollback,
+  // openChat's cross-workspace dedup) without widening their dependency arrays.
   const activeTabsRef = useRef(activeTabs); activeTabsRef.current = activeTabs;
   const hiddenTabsRef = useRef(hiddenTabs); hiddenTabsRef.current = hiddenTabs;
   const openPanesRef = useRef(openPanes); openPanesRef.current = openPanes;
+  const focusedRef = useRef(focused); focusedRef.current = focused;
+  const workspacesRef = useRef(workspaces); workspacesRef.current = workspaces;
+  const activeWorkspaceIdRef = useRef(activeWorkspaceId); activeWorkspaceIdRef.current = activeWorkspaceId;
+
+  // openPanes/focused now live inside the active workspace. These stable shims
+  // keep every existing call site working (functional updates for openPanes,
+  // value-or-fn for focused) while routing each change through the active
+  // workspace. They read activeWorkspaceId via the ref (not a dep), so their
+  // identity is stable ([] deps) — consumers like closePane that list no deps
+  // still target the CURRENTLY active workspace, not the one at first render.
+  const updateActiveWorkspace = useCallback(
+    (fn: (w: WorkspacePaneSet) => WorkspacePaneSet) => {
+      const aid = activeWorkspaceIdRef.current;
+      setWorkspaces((prev) => {
+        if (prev.length === 0) return prev;
+        const idx = prev.findIndex((w) => w.id === aid);
+        const target = idx >= 0 ? idx : 0;
+        const updated = fn(prev[target]);
+        if (updated === prev[target]) return prev;
+        const copy = [...prev];
+        copy[target] = updated;
+        return copy;
+      });
+    },
+    [],
+  );
+  const setOpenPanes = useCallback(
+    (updater: string[] | ((p: string[]) => string[])) => {
+      updateActiveWorkspace((w) => {
+        const next = typeof updater === 'function' ? updater(w.openPanes) : updater;
+        return next === w.openPanes ? w : { ...w, openPanes: next };
+      });
+    },
+    [updateActiveWorkspace],
+  );
+  const setFocused = useCallback(
+    (value: string | null | ((f: string | null) => string | null)) => {
+      updateActiveWorkspace((w) => {
+        const next = typeof value === 'function' ? value(w.focused) : value;
+        return next === w.focused ? w : { ...w, focused: next };
+      });
+    },
+    [updateActiveWorkspace],
+  );
   // In-flight optimistic mutations. The catalog merge in applyCatalog() would
   // otherwise re-introduce a just-killed chat or revert a just-renamed name from
   // the on-disk catalog while that op's server round-trip is still pending (the
@@ -111,8 +165,6 @@ function App() {
   const [externalViewMode, setExternalViewMode] = useState<'sessions' | 'activity' | null>(null);
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
   const [externalSearchQuery, setExternalSearchQuery] = useState<{ paneId: string; query: string } | null>(null);
-  const focusedRef = useRef(focused);
-  focusedRef.current = focused;
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(uiState.sidebarCollapsed);
   const [observerCollapsed, setObserverCollapsed] = useState(uiState.observerCollapsed);
@@ -347,8 +399,12 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, defaultSplitShell, hostOptions, copyHintDismissed }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [activeTabs, hiddenTabs, openPanes, focused, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, defaultSplitShell, hostOptions, copyHintDismissed, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ activeTabs, hiddenTabs, workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, defaultSplitShell, hostOptions, copyHintDismissed }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [activeTabs, hiddenTabs, workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, defaultSplitShell, hostOptions, copyHintDismissed, restoreOnStartup, startedEmpty]);
+
+  // Reset maximized when switching workspaces: a maximized pane belongs to its
+  // workspace, so switching clears it (WARDEN-256: maximized resets on switch).
+  useEffect(() => { setMaximized(null); }, [activeWorkspaceId]);
 
   // keyboard shortcut for global search
   useEffect(() => {
@@ -567,19 +623,33 @@ function App() {
     return () => window.clearInterval(interval);
   }, []);
 
-  // open chat: add to active tabs + open pane + focus. The setFocused call is
-  // gated behind autoFocusNewPane (WARDEN-274): when OFF, the tab + pane still
-  // open but the currently focused pane is preserved (click-to-focus still works
-  // via xterm's native focus). Adding autoFocusNewPane to the deps rebuilds this
-  // callback (and its callers) when the pref toggles — a rare, deliberate action.
+  // open chat: add to active tabs + open pane + focus. The dedup point for the
+  // multi-workspace model (WARDEN-256): a pane lives in at most one workspace, so
+  // if `id` is already a pane in some workspace we switch there + focus it instead
+  // of duplicating it in the active workspace. activeTabs is flat/global (sidebar),
+  // so it is always kept in sync regardless of which workspace owns the pane. The
+  // focus calls are gated behind autoFocusNewPane (WARDEN-274): when OFF, the tab +
+  // pane still open but the currently focused pane is preserved (click-to-focus
+  // still works via xterm's native focus). Adding autoFocusNewPane to the deps
+  // rebuilds this callback (and its callers) when the pref toggles — a rare,
+  // deliberate action.
   const openChat = useCallback((id: string) => {
     setActiveTabs((p) => p.includes(id) ? p : [...p, id]);
-    setOpenPanes((p) => p.includes(id) ? p : [...p, id]);
-    if (autoFocusNewPane) setFocused(id);
     // remember this pane's host so a restored remote pane knows which host to discover
     const c = chatsRef.current.find((x) => (x.key || x.id) === id);
     if (c?.host) setPaneHost((p) => (p[id] === c.host ? p : { ...p, [id]: c.host }));
-  }, [autoFocusNewPane]);
+    // Search EVERY workspace for an existing pane with this id. If it's already
+    // open elsewhere, switch to that workspace + focus it (no duplicate pane).
+    const owner = workspacesRef.current.find((w) => w.openPanes.includes(id));
+    if (owner) {
+      if (owner.id !== activeWorkspaceIdRef.current) setActiveWorkspaceId(owner.id);
+      if (autoFocusNewPane) setWorkspaces((prev) => prev.map((w) => (w.id === owner.id && w.focused !== id ? { ...w, focused: id } : w)));
+      return;
+    }
+    // Otherwise add to the active workspace + focus it.
+    setOpenPanes((p) => p.includes(id) ? p : [...p, id]);
+    if (autoFocusNewPane) setFocused(id);
+  }, [autoFocusNewPane, setOpenPanes, setFocused]);
 
   // handle focus-agent callback from Observer suggestion cards
   const handleFocusAgent = useCallback((id: string) => {
@@ -633,14 +703,14 @@ function App() {
   const closePane = useCallback((id: string) => {
     setOpenPanes((p) => p.filter((x) => x !== id));
     setFocused((f) => (f === id ? null : f));
-  }, []);
+  }, [setOpenPanes, setFocused]);
   // remove from active: tab gone + pane gone
   const removeActive = useCallback((id: string) => {
     setActiveTabs((p) => p.filter((x) => x !== id));
     setHiddenTabs((p) => p.filter((x) => x !== id));
     setOpenPanes((p) => p.filter((x) => x !== id));
     setFocused((f) => (f === id ? null : f));
-  }, []);
+  }, [setOpenPanes, setFocused]);
   const reorderTabs = useCallback((from: number, to: number) => {
     setActiveTabs((p) => {
       const n = [...p];
@@ -653,7 +723,7 @@ function App() {
     setHiddenTabs((p) => p.includes(id) ? p : [...p, id]);
     setOpenPanes((p) => p.filter((x) => x !== id));
     setFocused((f) => (f === id ? null : f));
-  }, []);
+  }, [setOpenPanes, setFocused]);
   const unhideTab = useCallback((id: string) => {
     setHiddenTabs((p) => p.filter((x) => x !== id));
   }, []);
@@ -767,7 +837,7 @@ function App() {
       rollback();
       if (prefs.notifyChatOps) toast.error(`Failed to kill chat: ${error instanceof Error ? error.message : String(error)}`);
     }
-  }, [refresh, discoverHost, removeActive, prefs.notifyChatOps]);
+  }, [refresh, discoverHost, removeActive, setOpenPanes, setFocused, prefs.notifyChatOps]);
 
   const requestKill = useCallback((id: string) => {
     if (confirmDestructiveActions) {
@@ -858,18 +928,95 @@ function App() {
     setExternalViewMode('activity');
   }, []);
 
+  // Focus a pane from global search / observer — routed through openChat so a
+  // pane already open in another workspace switches there instead of duplicating.
   const handleFocusPane = useCallback((id: string) => {
-    setFocused(id);
-    setActiveTabs((p) => p.includes(id) ? p : [...p, id]);
-    setOpenPanes((p) => p.includes(id) ? p : [...p, id]);
-  }, []);
+    openChat(id);
+  }, [openChat]);
 
   const handleJumpToMatch = useCallback((id: string, query: string) => {
-    setFocused(id);
-    setActiveTabs((p) => p.includes(id) ? p : [...p, id]);
-    setOpenPanes((p) => p.includes(id) ? p : [...p, id]);
+    openChat(id);
     setExternalSearchQuery({ paneId: id, query });
+  }, [openChat]);
+
+  // --- Multi-workspace operations (WARDEN-256) --------------------------------
+  // Switching is instant and remembers the focused pane per workspace (focused
+  // lives inside each workspace). Each op keeps ≥1 workspace and dedups pane ids
+  // across workspaces. Underlying chats/tmux sessions are never affected by a
+  // move — only which workspace's grid the pane renders in.
+  const selectWorkspace = useCallback((id: string) => {
+    setActiveWorkspaceId(id);
   }, []);
+
+  // Create a new workspace, optionally seeded with a moved pane. Default name
+  // "Workspace N" where N is the new count; renameable via the tab strip.
+  const createWorkspace = useCallback((seedPaneId?: string) => {
+    const id = globalThis.crypto?.randomUUID?.() ?? `ws-${Math.random().toString(36).slice(2)}`;
+    setWorkspaces((prev) => [...prev, { id, name: `Workspace ${prev.length + 1}`, openPanes: seedPaneId ? [seedPaneId] : [], focused: seedPaneId ?? null }]);
+    setActiveWorkspaceId(id);
+    return id;
+  }, []);
+
+  const renameWorkspace = useCallback((id: string, name: string) => {
+    const trimmed = name.trim();
+    setWorkspaces((prev) => prev.map((w) => (w.id === id ? { ...w, name: trimmed || w.name } : w)));
+  }, []);
+
+  // Move a pane to an existing workspace (drag a pane tile onto a workspace tab):
+  // remove from its current workspace, add to the target, switch to the target.
+  const movePaneToWorkspace = useCallback((paneId: string, targetWorkspaceId: string) => {
+    setWorkspaces((prev) => {
+      const target = prev.find((w) => w.id === targetWorkspaceId);
+      if (!target) return prev;
+      return prev.map((w) => {
+        if (w.id === targetWorkspaceId) {
+          if (w.openPanes.includes(paneId)) return w; // already there
+          return { ...w, openPanes: [...w.openPanes, paneId], focused: paneId };
+        }
+        if (w.openPanes.includes(paneId)) {
+          const remaining = w.openPanes.filter((x) => x !== paneId);
+          return { ...w, openPanes: remaining, focused: w.focused === paneId ? (remaining[0] ?? null) : w.focused };
+        }
+        return w;
+      });
+    });
+    setActiveWorkspaceId(targetWorkspaceId);
+  }, []);
+
+  // Drop a pane on the ＋ button → new workspace containing it, then switch.
+  // Mirrors movePaneToWorkspace's source-focus handling: when the dragged pane
+  // was the focused one, fall back to the source workspace's first remaining
+  // pane (not null) so that workspace never shows a visible-but-unfocused pane.
+  const movePaneToNewWorkspace = useCallback((paneId: string) => {
+    setWorkspaces((prev) => prev.map((w) => {
+      if (!w.openPanes.includes(paneId)) return w;
+      const remaining = w.openPanes.filter((x) => x !== paneId);
+      return { ...w, openPanes: remaining, focused: w.focused === paneId ? (remaining[0] ?? null) : w.focused };
+    }));
+    createWorkspace(paneId);
+  }, [createWorkspace]);
+
+  // Close a workspace: removes its panes from the grid only; the chats stay in
+  // the sidebar catalog and can be reopened. At least one workspace always
+  // remains. Gated by a confirm dialog (requestCloseWorkspace opens it). The
+  // active-id switch is computed from the ref OUTSIDE the workspaces updater so
+  // that updater stays pure (no setState-in-updater side effect).
+  const closeWorkspace = useCallback((id: string) => {
+    const remaining = workspacesRef.current.filter((w) => w.id !== id);
+    if (!remaining.length) return; // never drop below one workspace
+    setWorkspaces(remaining);
+    if (activeWorkspaceIdRef.current === id) setActiveWorkspaceId(remaining[0].id);
+  }, []);
+
+  const [workspaceCloseTarget, setWorkspaceCloseTarget] = useState<string | null>(null);
+  const requestCloseWorkspace = useCallback((id: string) => setWorkspaceCloseTarget(id), []);
+  const confirmCloseWorkspace = useCallback(() => {
+    const id = workspaceCloseTarget;
+    setWorkspaceCloseTarget(null);
+    if (id) closeWorkspace(id);
+  }, [workspaceCloseTarget, closeWorkspace]);
+  const cancelCloseWorkspace = useCallback(() => setWorkspaceCloseTarget(null), []);
+
   const openPaneSet = new Set(openPanes);
   const tiles = openPanes.map((id) => ({ id }));
   // Resolved terminal surface color. 'auto' defers to the OS-resolved effective
@@ -1120,20 +1267,38 @@ function App() {
         <>
       <header className="flex items-center gap-3 px-3 h-11 border-b shrink-0">
         <IconTooltip label="toggle sidebar" side="bottom"><button onClick={() => setSidebarCollapsed(!sidebarCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{sidebarCollapsed ? '▸' : '◂'}</button></IconTooltip>
-        <span className="font-semibold tracking-wide">Yatfa Warden</span>
-        <span className="text-xs text-muted-foreground">{activeTabs.length} active · {openPanes.length} open</span>
-        <span className="flex-1" />
-        <StatusDot
-          tone={streamConn ? 'green' : 'red'}
-          variant={streamConn ? 'solid' : 'ring'}
-          label={streamConn ? 'Connected' : 'Disconnected'}
-          className="transition-colors duration-300 ease-in-out"
+        <span className="font-semibold tracking-wide shrink-0">Yatfa Warden</span>
+        <span className="text-xs text-muted-foreground shrink-0 whitespace-nowrap">{activeTabs.length} active · {openPanes.length} open</span>
+        {/* Workspace tab strip (WARDEN-256) — the flexible, bounded middle region.
+            min-w-0 + overflow-x-auto let it absorb remaining width and scroll its
+            tabs internally so it can never push the right-side control cluster
+            (below) off-screen at the default width. */}
+        <WorkspaceTabs
+          workspaces={workspaces}
+          activeWorkspaceId={activeWorkspaceId}
+          onSelect={selectWorkspace}
+          onCreate={() => createWorkspace()}
+          onRename={renameWorkspace}
+          onClose={requestCloseWorkspace}
+          onDropPane={movePaneToWorkspace}
+          onDropPaneNew={movePaneToNewWorkspace}
+          className="flex-1 min-w-0"
         />
-        <AttentionBadge onOpenChat={openChat} onOpenActivity={openActivityTab} attentionDesktopAlerts={attentionDesktopAlerts} />
-        <IconTooltip label="global search (Ctrl+Shift+F)" side="bottom"><button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⌕</button></IconTooltip>
-        <IconTooltip label="toggle health panel" side="bottom"><button onClick={() => setHealthCollapsed(!healthCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{healthCollapsed ? '◂' : '▸'} Health</button></IconTooltip>
-        <IconTooltip label="toggle observer" side="bottom"><button onClick={() => setObserverCollapsed(!observerCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>
-        <IconTooltip label="settings" side="bottom"><button onClick={() => setSettingsOpen(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⚙</button></IconTooltip>
+        {/* Right-side control cluster — shrink-0 so the tab region yields first
+            and this whole cluster stays fully visible at the default width. */}
+        <div className="flex items-center gap-3 shrink-0">
+          <StatusDot
+            tone={streamConn ? 'green' : 'red'}
+            variant={streamConn ? 'solid' : 'ring'}
+            label={streamConn ? 'Connected' : 'Disconnected'}
+            className="transition-colors duration-300 ease-in-out"
+          />
+          <AttentionBadge onOpenChat={openChat} onOpenActivity={openActivityTab} attentionDesktopAlerts={attentionDesktopAlerts} />
+          <IconTooltip label="global search (Ctrl+Shift+F)" side="bottom"><button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⌕</button></IconTooltip>
+          <IconTooltip label="toggle health panel" side="bottom"><button onClick={() => setHealthCollapsed(!healthCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{healthCollapsed ? '◂' : '▸'} Health</button></IconTooltip>
+          <IconTooltip label="toggle observer" side="bottom"><button onClick={() => setObserverCollapsed(!observerCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>
+          <IconTooltip label="settings" side="bottom"><button onClick={() => setSettingsOpen(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⚙</button></IconTooltip>
+        </div>
       </header>
       <main className="flex flex-1 min-h-0">
         <section className="border-r min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"
@@ -1255,6 +1420,16 @@ function App() {
         cancelLabel="Cancel"
         destructive
         onConfirm={confirmForceKill}
+      />
+      <ConfirmDialog
+        open={workspaceCloseTarget !== null}
+        onOpenChange={(o) => { if (!o) cancelCloseWorkspace(); }}
+        title="Close workspace?"
+        description="Closing a workspace removes its panes from the grid only — the chats stay in the sidebar and can be reopened."
+        confirmLabel="Close workspace"
+        cancelLabel="Cancel"
+        destructive
+        onConfirm={confirmCloseWorkspace}
       />
     </div>
   );

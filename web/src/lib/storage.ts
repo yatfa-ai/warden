@@ -3,7 +3,11 @@ import type { TimestampFormat } from './formatTimestamp';
 
 // UI state persisted in localStorage.
 // activeTabs = the user's persistent working set (survives reload, pane close, host nav).
-// openPanes = which tabs have a live terminal open right now (subset of activeTabs).
+//   (Flat + global — the sidebar's working set, unchanged by WARDEN-256.)
+// workspaces = the browser-tab-style project pane-sets the user switches between;
+//   each owns its own openPanes + focused. activeWorkspaceId picks the one whose
+//   panes render in the grid. A pane lives in at most one workspace (openChat
+//   dedups across workspaces). paneHost stays global (keyed by pane id).
 //
 // NOTE on durability (WARDEN-181): localStorage persists across a normal restart
 // inside the OS-default userData dir. Reads below go through readVersioned() so a
@@ -118,11 +122,51 @@ export function validatePresetName(
   return null;
 }
 
+// A named workspace: one browser-tab-style project pane-set. Owns its openPanes
+// (the pane ids with a live terminal in the grid when this workspace is active)
+// and its focused pane. `id` is a stable UUID (never an array index) so drag-
+// and-drop payloads identify a workspace unambiguously (WARDEN-108). `name` is
+// the user-editable tab label. Pure client-side pref; never sent to the backend.
+export interface WorkspacePaneSet {
+  id: string;
+  name: string;
+  openPanes: string[];
+  focused: string | null;
+}
+
+// Default name for the first / migrated workspace. New workspaces created via
+// the ＋ button get "Workspace N" by the caller (App knows the live count).
+export const DEFAULT_WORKSPACE_NAME = 'Workspace 1';
+
+// Generate a workspace id. crypto.randomUUID() is available in every target
+// (modern browsers + Node ≥19, including the storage test harness which loads
+// this module in Node). Used at load/parse/create time only — never on the hot
+// render path.
+function genWorkspaceId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `ws-${Math.random().toString(36).slice(2)}-${Date.now()}`;
+}
+
+// Construct a workspace. Centralizes the id + shape so DEFAULT_UI, load-time
+// migration, and parseWorkspace all agree on one factory.
+function makeWorkspace(
+  name: string,
+  openPanes: string[] = [],
+  focused: string | null = null,
+  id: string = genWorkspaceId(),
+): WorkspacePaneSet {
+  return { id, name, openPanes, focused };
+}
+
 export interface UiState {
   activeTabs: string[];
   hiddenTabs: string[];
-  openPanes: string[];
-  focused: string | null;
+  // Browser-tab-style project pane-sets (WARDEN-256). Each workspace owns its own
+  // openPanes + focused; switching the active workspace swaps the pane grid. A
+  // pane id lives in at most one workspace's openPanes (openChat dedups across
+  // them). activeTabs/hiddenTabs stay flat + global (the sidebar's working set,
+  // unchanged); paneHost stays global (keyed by pane id).
+  workspaces: WorkspacePaneSet[];
+  activeWorkspaceId: string | null;
   sidebarCollapsed: boolean;
   observerCollapsed: boolean;
   healthCollapsed?: boolean;
@@ -324,6 +368,40 @@ function parseDismissedMap(raw: unknown): Record<string, boolean> {
   return out;
 }
 
+// Sanitize a raw workspaces value into a valid, id-unique WorkspacePaneSet[].
+// Defensive: never throws on malformed input (WARDEN-89) — drops/replaces bad
+// entries instead, so one corrupt workspace can never blank the pane grid.
+//   - non-array / empty → [] (the caller migrates from legacy flat fields or
+//     seeds a default, so this never leaves loadUi with zero workspaces).
+//   - each entry: id coerced to a fresh UUID if missing/duplicate; name trimmed
+//     with a fallback; openPanes filtered to strings; focused kept only if a
+//     string (a focused id not in openPanes is left as-is — harmless, the grid
+//     derives from openPanes).
+// Id UNIQUENESS is enforced (first occurrence wins; duplicates get fresh ids)
+// so active-workspace lookup-by-id is always unambiguous.
+function parseWorkspaces(raw: unknown): WorkspacePaneSet[] {
+  if (!Array.isArray(raw)) {
+    if (raw !== undefined && raw !== null) {
+      console.warn('[loadUi] workspaces is not an array; ignoring:', raw);
+    }
+    return [];
+  }
+  const seenIds = new Set<string>();
+  const out: WorkspacePaneSet[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const e = entry as Record<string, unknown>;
+    let id = typeof e.id === 'string' && e.id ? e.id : genWorkspaceId();
+    if (seenIds.has(id)) id = genWorkspaceId();
+    seenIds.add(id);
+    const name = typeof e.name === 'string' && e.name.trim() ? e.name.trim() : DEFAULT_WORKSPACE_NAME;
+    const openPanes = Array.isArray(e.openPanes) ? e.openPanes.filter((p: unknown): p is string => typeof p === 'string') : [];
+    const focused = typeof e.focused === 'string' ? e.focused : null;
+    out.push({ id, name, openPanes, focused });
+  }
+  return out;
+}
+
 // Version-tolerant read: prefer the current key, but if it is absent, walk down
 // to older versioned (and finally unversioned) keys and promote the newest
 // surviving payload up to the current key. This guarantees a key-version bump
@@ -362,8 +440,12 @@ function readVersioned(prefix: string, version: number): string | null {
 
 // The defaults returned when nothing valid is stored. Centralized so the load
 // fallback and every "missing field" coercion agree on one set of values.
+// The default owns exactly one empty workspace (the active one).
+const DEFAULT_WORKSPACE = makeWorkspace(DEFAULT_WORKSPACE_NAME);
 const DEFAULT_UI: UiState = {
-  activeTabs: [], hiddenTabs: [], openPanes: [], focused: null,
+  activeTabs: [], hiddenTabs: [],
+  workspaces: [DEFAULT_WORKSPACE],
+  activeWorkspaceId: DEFAULT_WORKSPACE.id,
   sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true,
   sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14,
   attentionDesktopAlerts: false,
@@ -394,11 +476,28 @@ export function loadUi(): UiState {
           (BUILTIN_PRESETS as readonly string[]).includes(p) ||
           customPresets.some((c) => c.name === p)
         );
+      // Workspaces: parse the new model, migrating legacy single-workspace state
+      // (flat openPanes/focused) forward on first load so no open pane is lost.
+      let workspaces = parseWorkspaces(v.workspaces);
+      if (!workspaces.length) {
+        // Legacy migration (WARDEN-256): workspaces absent → synthesize ONE
+        // workspace from the prior flat openPanes/focused. paneHost stays global.
+        const legacyOpen = Array.isArray(v.openPanes)
+          ? v.openPanes.map((t: any) => typeof t === 'string' ? t : t.id).filter((s: any): s is string => typeof s === 'string')
+          : [];
+        const legacyFocused = typeof v.focused === 'string' ? v.focused : null;
+        workspaces = [makeWorkspace(DEFAULT_WORKSPACE_NAME, legacyOpen, legacyFocused)];
+      }
+      // activeWorkspaceId must point at a real workspace; fall back to the first.
+      const activeWorkspaceId =
+        typeof v.activeWorkspaceId === 'string' && workspaces.some((w) => w.id === v.activeWorkspaceId)
+          ? v.activeWorkspaceId
+          : workspaces[0].id;
       return {
         activeTabs: v.activeTabs.map((t: any) => typeof t === 'string' ? t : t.id),
         hiddenTabs: Array.isArray(v.hiddenTabs) ? v.hiddenTabs : [],
-        openPanes: Array.isArray(v.openPanes) ? v.openPanes.map((t: any) => typeof t === 'string' ? t : t.id) : [],
-        focused: v.focused ?? null,
+        workspaces,
+        activeWorkspaceId,
         sidebarCollapsed: v.sidebarCollapsed ?? false,
         observerCollapsed: v.observerCollapsed ?? false,
         healthCollapsed: v.healthCollapsed ?? true,
@@ -565,29 +664,33 @@ export function clampLayoutWidths(
   return { sidebar, observer };
 }
 
-// The workspace fields that the "Restore workspace on startup" pref gates. These
-// are what an 'empty' launch must blank and what 'previous' must restore. paneHost
-// is required here: initialWorkspace always returns a concrete object for it.
+// The fields that the "Restore workspace on startup" pref gates. These are what
+// an 'empty' launch must blank and what 'previous' must restore. paneHost is
+// required here: initialWorkspace always returns a concrete object for it. The
+// pane-set (openPanes/focused) now lives inside `workspaces` + `activeWorkspaceId`
+// (WARDEN-256); activeTabs/hiddenTabs stay flat + global.
 type Workspace = {
   activeTabs: string[];
   hiddenTabs: string[];
-  openPanes: string[];
-  focused: string | null;
+  workspaces: WorkspacePaneSet[];
+  activeWorkspaceId: string;
   paneHost: Record<string, string>;
 };
 
 // Workspace to seed React state with on mount, honoring the pref. 'previous'
 // restores the last-saved workspace (today's behavior); 'empty' hands back a
-// clean slate regardless of what was open at last close. Pure: no localStorage.
+// clean slate regardless of what was open at last close — one empty workspace,
+// the active one. Pure: no localStorage.
 export function initialWorkspace(disk: UiState, restoreOnStartup: RestoreOnStartup): Workspace {
   if (restoreOnStartup === 'empty') {
-    return { activeTabs: [], hiddenTabs: [], openPanes: [], focused: null, paneHost: {} };
+    const ws = makeWorkspace(DEFAULT_WORKSPACE_NAME);
+    return { activeTabs: [], hiddenTabs: [], workspaces: [ws], activeWorkspaceId: ws.id, paneHost: {} };
   }
   return {
     activeTabs: disk.activeTabs,
     hiddenTabs: disk.hiddenTabs,
-    openPanes: disk.openPanes,
-    focused: disk.focused,
+    workspaces: disk.workspaces,
+    activeWorkspaceId: disk.activeWorkspaceId ?? disk.workspaces[0]?.id ?? '',
     paneHost: disk.paneHost ?? {},
   };
 }
@@ -613,8 +716,8 @@ export function persistUiState(
       ...live,
       activeTabs: disk.activeTabs,
       hiddenTabs: disk.hiddenTabs,
-      openPanes: disk.openPanes,
-      focused: disk.focused,
+      workspaces: disk.workspaces,
+      activeWorkspaceId: disk.activeWorkspaceId,
       paneHost: disk.paneHost,
       restoreOnStartup,
     };
