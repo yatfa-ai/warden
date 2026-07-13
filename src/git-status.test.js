@@ -38,6 +38,9 @@ let mergeRepo;
 let nonGitDir;
 let detachedRepo;
 let detachedShortSha;
+let noUpstreamRepo;
+let trackingRepo;
+let bareRemote;
 let buildInProgressScript;
 
 function git(args, cwd) {
@@ -119,6 +122,49 @@ before(async () => {
   detachedShortSha = git(['rev-parse', '--short', 'HEAD'], detachedRepo).stdout.toString().trim();
   assert.ok(detachedShortSha, 'expected a short SHA for the detached repo');
 
+  // ---- noUpstreamRepo: a named branch with NO upstream (never `push -u`'d) —
+  // the exact gap WARDEN-243 closes. ahead/behind are null (no @{u}), and
+  // without the `upstream` field this branch would render as a bare cyan label
+  // indistinguishable from a synced 0/0 branch. `git checkout -b feature` with
+  // NO `-u` and NO push leaves 'feature' untracked.
+  noUpstreamRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitstatus-noupstream-'));
+  git(['init', '-q'], noUpstreamRepo);
+  git(['config', 'user.email', 'test@example.com'], noUpstreamRepo);
+  git(['config', 'user.name', 'Tester'], noUpstreamRepo);
+  fs.writeFileSync(path.join(noUpstreamRepo, 'n.txt'), 'n\n');
+  git(['add', '.'], noUpstreamRepo);
+  git(['commit', '-q', '-m', 'init'], noUpstreamRepo);
+  git(['checkout', '-q', '-b', 'feature'], noUpstreamRepo); // NO -u, NO push
+  // Sanity: @{u} must genuinely be unset (rev-parse non-zero). The git() helper
+  // throws on non-zero, so probe with a raw spawnSync.
+  const noUpProbe = spawnSync('git', ['rev-parse', '--abbrev-ref', '@{u}'], {
+    cwd: noUpstreamRepo, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  assert.notStrictEqual(noUpProbe.status, 0, 'noUpstreamRepo must have no upstream');
+
+  // ---- trackingRepo: a named branch WITH an upstream (a bare remote + `git
+  // push -u origin feature`) so 'feature' tracks origin/feature — the control
+  // case proving a synced 0/0 branch reports the short upstream name (and is
+  // NOT misread as no-upstream).
+  trackingRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitstatus-tracking-'));
+  git(['init', '-q'], trackingRepo);
+  git(['config', 'user.email', 'test@example.com'], trackingRepo);
+  git(['config', 'user.name', 'Tester'], trackingRepo);
+  fs.writeFileSync(path.join(trackingRepo, 't.txt'), 't\n');
+  git(['add', '.'], trackingRepo);
+  git(['commit', '-q', '-m', 'init'], trackingRepo);
+  git(['checkout', '-q', '-b', 'feature'], trackingRepo);
+  bareRemote = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitstatus-remote-'));
+  git(['init', '--bare', '-q', bareRemote], bareRemote);
+  git(['remote', 'add', 'origin', bareRemote], trackingRepo);
+  git(['push', '-q', '-u', 'origin', 'feature'], trackingRepo);
+  // Sanity: @{u} must resolve to origin/feature.
+  assert.strictEqual(
+    git(['rev-parse', '--abbrev-ref', '@{u}'], trackingRepo).stdout.toString().trim(),
+    'origin/feature',
+    'trackingRepo feature must track origin/feature',
+  );
+
   // Catalog with LOCAL manual chats, resolved by bare session id (no ':'
   // prefix) so no host/tmux discovery runs.
   fs.writeFileSync(
@@ -128,6 +174,8 @@ before(async () => {
       { host: '(local)', session: 'warden-merge', cwd: mergeRepo, cmd: 'bash', name: 'warden-merge' },
       { host: '(local)', session: 'warden-nongit', cwd: nonGitDir, cmd: 'bash', name: 'warden-nongit' },
       { host: '(local)', session: 'warden-detached', cwd: detachedRepo, cmd: 'bash', name: 'warden-detached' },
+      { host: '(local)', session: 'warden-noupstream', cwd: noUpstreamRepo, cmd: 'bash', name: 'warden-noupstream' },
+      { host: '(local)', session: 'warden-tracking', cwd: trackingRepo, cmd: 'bash', name: 'warden-tracking' },
     ]),
   );
 
@@ -146,7 +194,7 @@ after(async () => {
   if (httpServer) await new Promise((r) => httpServer.close(r));
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  for (const d of [cleanRepo, mergeRepo, nonGitDir, detachedRepo, tempHome]) {
+  for (const d of [cleanRepo, mergeRepo, nonGitDir, detachedRepo, noUpstreamRepo, trackingRepo, bareRemote, tempHome]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 });
@@ -249,6 +297,67 @@ describe('/api/git-status detached-HEAD detection (real Express app)', () => {
     assert.ok((body.files || []).some((f) => f.path === 'd.txt'), 'd.txt must surface as a changed file');
     // Restore so sibling tests aren't affected.
     git(['checkout', '-q', '--', 'd.txt'], detachedRepo);
+  });
+});
+
+describe('/api/git-status upstream tracking (real Express app)', () => {
+  // Covers WARDEN-243 acceptance criteria for the LOCAL spawnSync path:
+  //   - a named branch with NO upstream (never `push -u`'d) → upstream === null
+  //     — distinct from a synced 0/0 branch, which HAS an upstream. ahead/behind
+  //     are null in BOTH cases, so `upstream` is the only signal that separates
+  //     "local-only, not backed up" from "in sync".
+  //   - a named branch WITH upstream → upstream === 'origin/feature'.
+  //   - the branch ? gate keeps non-git / detached HEAD at upstream === null.
+  // The remote (SSH) path uses the same `git rev-parse --abbrev-ref @{u}` via
+  // runGit; driving a real SSH host in CI is out of scope.
+
+  it('reports upstream null for a named branch with no upstream (never push -u)', async () => {
+    const res = await fetch(`${baseUrl}/api/git-status?id=warden-noupstream`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.branch, 'feature');
+    // The headline assertion: no upstream → null (NOT undefined, NOT a string).
+    assert.strictEqual(body.upstream, null);
+    // ahead/behind are null too (no @{u}) — the exact collision that makes
+    // `upstream` necessary: without it this branch is indistinguishable from a
+    // synced 0/0 branch.
+    assert.strictEqual(body.ahead, null);
+    assert.strictEqual(body.behind, null);
+    // A normal named branch is NOT detached.
+    assert.strictEqual(body.detached, false);
+  });
+
+  it('reports upstream "origin/feature" for a tracking branch (push -u)', async () => {
+    const res = await fetch(`${baseUrl}/api/git-status?id=warden-tracking`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.branch, 'feature');
+    // The headline assertion: the short upstream name is surfaced (NOT null).
+    assert.strictEqual(body.upstream, 'origin/feature');
+    // A tracking branch with nothing to push/pull → 0/0 (NOT null) — proving
+    // this is the "synced" state a non-tracking branch must NOT be confused with.
+    assert.strictEqual(body.ahead, 0);
+    assert.strictEqual(body.behind, 0);
+    assert.strictEqual(body.detached, false);
+  });
+
+  it('keeps the branch gate so a non-git cwd reports upstream null', async () => {
+    const body = await (await fetch(`${baseUrl}/api/git-status?id=warden-nongit`)).json();
+    assert.strictEqual(body.branch, null);
+    // The catch-fallback / no-cwd / non-git shape always carries upstream:null
+    // so the response contract is consistent (no undefined leaking to the UI).
+    assert.strictEqual(body.upstream, null);
+  });
+
+  it('keeps the branch gate so a detached HEAD reports upstream null', async () => {
+    // A detached HEAD has no @{u} by definition → upstream null. This slice
+    // gates its marker on `branch !== 'HEAD'`, leaving detached rendering to
+    // WARDEN-239; the two states stay disjoint regardless.
+    const body = await (await fetch(`${baseUrl}/api/git-status?id=warden-detached`)).json();
+    assert.strictEqual(body.detached, true);
+    assert.strictEqual(body.upstream, null);
   });
 });
 

@@ -86,7 +86,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [projectFilter, setProjectFilter] = useState<string | null>(null);
   const [hostSessions, setHostSessions] = useState<Record<string, { sessions: ClaudeSession[]; claudeAvailable?: boolean }>>({});
   const [loadingHost, setLoadingHost] = useState<string | null>(null);
-  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; detached?: boolean; headSha?: string | null; clean: boolean | null; cwd: string; files?: GitFile[]; ahead?: number | null; behind?: number | null; inProgress?: { operation: string | null }; stashCount?: number | null }>>({});
+  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; detached?: boolean; headSha?: string | null; clean: boolean | null; cwd: string; files?: GitFile[]; ahead?: number | null; behind?: number | null; upstream?: string | null; inProgress?: { operation: string | null }; stashCount?: number | null }>>({});
   // recent commit history (git log) per chatId — cached so re-expanding the badge is instant
   const [gitLog, setGitLog] = useState<Record<string, GitCommit[]>>({});
   const [gitLogLoading, setGitLogLoading] = useState<Record<string, boolean>>({});
@@ -173,7 +173,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       const r = await fetch(`/api/git-status?id=${encodeURIComponent(chatId)}`);
       const j = await r.json();
       if (j.branch) {
-        setGitStatus((p) => ({ ...p, [chatId]: { branch: j.branch, detached: j.detached, headSha: j.headSha, clean: j.clean, cwd: j.cwd, files: j.files, ahead: j.ahead, behind: j.behind, inProgress: j.inProgress, stashCount: j.stashCount } }));
+        setGitStatus((p) => ({ ...p, [chatId]: { branch: j.branch, detached: j.detached, headSha: j.headSha, clean: j.clean, cwd: j.cwd, files: j.files, ahead: j.ahead, behind: j.behind, upstream: j.upstream, inProgress: j.inProgress, stashCount: j.stashCount } }));
       }
     } catch (error) {
       // Git status is non-critical, so just log it without showing a toast

@@ -111,6 +111,36 @@ export function normalizeHeadSha(output, exitCode) {
   return sha || null;
 }
 
+/**
+ * Normalize `git rev-parse --abbrev-ref @{u}` output into the short upstream
+ * name (e.g. `origin/main`), or `null` when there is no upstream.
+ *
+ * `@{u}` is git's upstream rev spec (the same one `parseAheadBehind`'s
+ * `@{u}...HEAD` range uses). `git rev-parse --abbrev-ref @{u}` prints the short
+ * tracking branch name + exit 0 when one is configured, and exits non-zero with
+ * empty stdout when HEAD has NO upstream — a named branch that was never
+ * `push -u`'d (an agent ran `git checkout -b feature` with no `-u`), a detached
+ * HEAD, or a non-git cwd. We surface the trimmed short name on success and
+ * `null` for empty/non-zero, mirroring `normalizeHeadSha`'s tolerance of missing
+ * input (the optional `exitCode` lets a caller pass the raw exit status; when
+ * omitted the output is trusted, like `parseAheadBehind`).
+ *
+ * This exists because ahead/behind alone CANNOT tell a non-tracking branch from
+ * a synced one: both yield `{ahead:null, behind:null}` (no `@{u}` → nulls), so
+ * without the upstream name a never-pushed branch renders as a bare cyan label
+ * indistinguishable from in-sync — a durability risk (local-only work, no remote
+ * backup) a human glancing at the badge needs to see (WARDEN-243).
+ *
+ * @param {string|Buffer|undefined} output - Raw stdout from `git rev-parse --abbrev-ref @{u}`.
+ * @param {number|null|undefined} [exitCode] - exit status; when omitted/unknown the output is trusted.
+ * @returns {string | null}
+ */
+export function parseUpstream(output, exitCode) {
+  if (exitCode !== undefined && exitCode !== 0) return null;
+  const name = (output ?? '').toString().trim();
+  return name || null;
+}
+
 export function parseGitStatusPorcelain(output) {
   const raw = (output ?? '').toString();
   return raw
