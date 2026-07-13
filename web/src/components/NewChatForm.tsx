@@ -83,7 +83,13 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
         host, session: sess, cwd: cwd.trim(), cmd: cmd.trim(),
       });
       if (!result.ok) { setErr(result.error || 'spawn failed'); setBusy(false); return; }
-      setOpen(false); setSession(''); setCwd('');
+      // Reset session (per-spawn) and re-seed cwd from the persisted default
+      // (WARDEN-311). NewChatForm is always-mounted, so the lazy useState
+      // initializer above runs only once per session — clearing cwd to '' here
+      // would empty the field for every spawn after the first. Re-seed from the
+      // default so the path pre-fills every open; a per-spawn edit correctly
+      // does NOT persist (it's a default, not the last-used value).
+      setOpen(false); setSession(''); setCwd(initialUi.defaultNewChatCwd ?? '');
       onSpawned(result.data!.chat);
     } catch (e: unknown) { setErr(e instanceof Error ? e.message : String(e)); }
     setBusy(false);
