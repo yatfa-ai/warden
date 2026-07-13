@@ -12,7 +12,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { DiffBlock } from './DiffBlock';
 import { MarkdownBody } from './MarkdownBody';
 import { tokenizeCode, languageFromPath, type Leaf } from '@/lib/highlight';
-import { Loader2Icon, FileIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon } from 'lucide-react';
+import { Loader2Icon, FileIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon } from 'lucide-react';
 import { timeAgo } from '@/lib/utils';
 
 interface FileViewerProps {
@@ -30,6 +30,13 @@ interface FileViewerProps {
 // passed whole to /api/git-show on click so the commit resolves unambiguously.
 type BlameLine = { line: number; hash: string; author: string; date: string; summary: string };
 
+// One row from /api/git-log with a `path` filter (file history, WARDEN-319). `date` is
+// the relative %ar string straight from git ("2 days ago") — displayed VERBATIM, not
+// re-relativized through timeAgo, matching the sibling git-log commit lists in
+// ChatSidebar (the only other consumer of this route). `hash` is %h (abbreviated);
+// git-show accepts abbreviated hashes, so it resolves unambiguously on click.
+type HistoryCommit = { hash: string; subject: string; author: string; date: string };
+
 export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileViewerProps) {
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -45,6 +52,17 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
   const [blameError, setBlameError] = useState<string | null>(null);
   const [blameLoading, setBlameLoading] = useState(false);
 
+  // History (file commit timeline) state — the temporal counterpart to blame
+  // (WARDEN-319). Separate from the file-content fetch for the same reason annotate
+  // is: toggling history shouldn't refetch the (already-shown) file. History is
+  // fetched ONCE when the toggle turns on (or the file/chat changes). History and
+  // annotate are mutually exclusive view modes (the toggles clear each other) so the
+  // body never has to reconcile two alternate layouts at once.
+  const [history, setHistory] = useState(false);
+  const [commits, setCommits] = useState<HistoryCommit[] | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
   // Rendered ⇄ Source view mode for markdown files (WARDEN-266). Only the plain
   // view branch (!annotate && !hasLine) honors it; line-jump and blame views stay
   // source-based regardless. Defaults to rendered so opening a README shows docs.
@@ -57,6 +75,9 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
       setAnnotate(false); // start each open fresh (avoid stale blame for a prior file)
       setBlame(null);
       setBlameError(null);
+      setHistory(false); // likewise reset file-history (avoid stale commits for a prior file)
+      setCommits(null);
+      setHistoryError(null);
       setViewMode('rendered'); // start each markdown open rendered (avoid stale source mode)
       return;
     }
@@ -117,6 +138,37 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
     fetchBlame();
     return () => { cancelled = true; };
   }, [open, annotate, chatId, filePath]);
+
+  // Fetch the file's commit history only while in history view-mode. Mirrors the blame
+  // fetch above: gates the success path on response.ok so a 4xx/5xx (e.g. unknown chat
+  // → 404) surfaces as an error, not silent success (WARDEN-89). The `path` query
+  // flips /api/git-log into file-history mode (git log --follow -- <path>), so this
+  // lists every commit that touched the open file, across renames.
+  useEffect(() => {
+    if (!open || !history) return;
+    let cancelled = false;
+    const fetchHistory = async () => {
+      setHistoryLoading(true);
+      setHistoryError(null);
+      try {
+        const r = await fetch(`/api/git-log?id=${encodeURIComponent(chatId)}&path=${encodeURIComponent(filePath)}&limit=20`);
+        if (!r.ok) {
+          if (!cancelled) setHistoryError(`Failed to load history (${r.status})`);
+          return;
+        }
+        const j = await r.json();
+        if (cancelled) return;
+        setCommits(Array.isArray(j.commits) ? j.commits : []);
+        setHistoryError(j.error || null);
+      } catch (e) {
+        if (!cancelled) setHistoryError(e instanceof Error ? e.message : 'Failed to load history');
+      } finally {
+        if (!cancelled) setHistoryLoading(false);
+      }
+    };
+    fetchHistory();
+    return () => { cancelled = true; };
+  }, [open, history, chatId, filePath]);
 
   // When a target line is requested and the content has rendered, scroll that line
   // to the center of the viewport so the user lands on the relevant location. rAF
@@ -180,10 +232,34 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
               )}
               <Button
                 type="button"
+                variant={history ? 'default' : 'outline'}
+                size="sm"
+                className="h-7 shrink-0 gap-1.5 text-xs"
+                onClick={() => {
+                  setHistory((h) => {
+                    const next = !h;
+                    if (next) setAnnotate(false); // history + annotate are exclusive view modes
+                    return next;
+                  });
+                }}
+                title={history ? 'Hide file commit history' : 'Show commit history for this file (every commit that touched it, across renames)'}
+                aria-pressed={history}
+              >
+                <HistoryIcon className="w-3.5 h-3.5" />
+                History
+              </Button>
+              <Button
+                type="button"
                 variant={annotate ? 'default' : 'outline'}
                 size="sm"
                 className="h-7 shrink-0 gap-1.5 text-xs"
-                onClick={() => setAnnotate((a) => !a)}
+                onClick={() => {
+                  setAnnotate((a) => {
+                    const next = !a;
+                    if (next) setHistory(false); // history + annotate are exclusive view modes
+                    return next;
+                  });
+                }}
                 title={annotate ? 'Hide per-line git blame' : 'Show per-line git blame (which commit last touched each line)'}
                 aria-pressed={annotate}
               >
@@ -210,7 +286,7 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
               </div>
             )}
 
-            {!loading && !error && content !== null && !annotate && !hasLine && (
+            {!loading && !error && content !== null && !annotate && !history && !hasLine && (
               isMarkdown && viewMode === 'rendered' ? (
                 <div className="flex flex-col gap-2 text-sm leading-relaxed">
                   <MarkdownBody>{content}</MarkdownBody>
@@ -228,7 +304,7 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
               )
             )}
 
-            {!loading && !error && content !== null && !annotate && hasLine && (
+            {!loading && !error && content !== null && !annotate && !history && hasLine && (
               <div className="text-sm font-mono">
                 {content.split('\n').map((text, i) => {
                   const n = i + 1;
@@ -252,6 +328,16 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
                 blame={blame}
                 blameLoading={blameLoading}
                 blameError={blameError}
+                chatId={chatId}
+                filePath={filePath}
+              />
+            )}
+
+            {!loading && !error && content !== null && history && (
+              <HistoryContent
+                commits={commits}
+                historyLoading={historyLoading}
+                historyError={historyError}
                 chatId={chatId}
                 filePath={filePath}
               />
@@ -361,7 +447,7 @@ function AnnotatedContent({ content, blame, blameLoading, blameError, chatId, fi
             <div className="flex w-56 shrink-0 items-center gap-1.5 text-xs leading-5">
               {b && atBoundary ? (
                 <>
-                  <BlameHash chatId={chatId} filePath={filePath} blame={b} />
+                  <BlameHash chatId={chatId} filePath={filePath} hash={b.hash} summary={b.summary} author={b.author} dateLabel={timeAgo(b.date)} />
                   <span className="min-w-0 truncate text-cyan-300/60" title={b.author}>{b.author}</span>
                   <span className="ml-auto shrink-0 text-muted-foreground/60" title={b.date}>{timeAgo(b.date)}</span>
                 </>
@@ -377,11 +463,25 @@ function AnnotatedContent({ content, blame, blameLoading, blameError, chatId, fi
   );
 }
 
-// A clickable blame hash. Opens a popover that fetches what that commit did to THIS
+// A clickable commit hash. Opens a popover that fetches what that commit did to THIS
 // file (the per-file `git show` diff, ?hash&path) and renders it via DiffBlock — the
-// same committed-diff inspector as the sidebar's expanded commit (WARDEN-180). Owns
-// its fetch state so a re-open is instant. Mirrors CommitFile's self-contained shape.
-function BlameHash({ chatId, filePath, blame }: { chatId: string; filePath: string; blame: BlameLine }) {
+// same committed-diff inspector as the sidebar's expanded commit (WARDEN-180). Shared
+// by the annotate (blame) gutter and the history commit list (WARDEN-319): both need
+// a per-file-commit diff inspector, so this owns the fetch+render once. Owns its fetch
+// state so a re-open is instant. Mirrors CommitFile's self-contained shape.
+//
+// `dateLabel` is the ALREADY-formatted display date — formatting stays the caller's job
+// because the two callers carry dates in different shapes: blame has author-time ISO
+// (caller passes timeAgo(iso)), history has git's relative %ar text (caller passes it
+// verbatim). Either way the popover just stamps it next to the author.
+function BlameHash({ chatId, filePath, hash, summary, author, dateLabel }: {
+  chatId: string;
+  filePath: string;
+  hash: string;
+  summary: string;
+  author: string;
+  dateLabel: string;
+}) {
   const [open, setOpen] = useState(false);
   const [diff, setDiff] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -392,7 +492,7 @@ function BlameHash({ chatId, filePath, blame }: { chatId: string; filePath: stri
     if (!next || fetched) return;
     setLoading(true);
     try {
-      const r = await fetch(`/api/git-show?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(blame.hash)}&path=${encodeURIComponent(filePath)}`);
+      const r = await fetch(`/api/git-show?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(hash)}&path=${encodeURIComponent(filePath)}`);
       if (!r.ok) { setDiff(null); return; }
       const j = await r.json();
       setDiff(typeof j.diff === 'string' ? j.diff : null);
@@ -404,7 +504,7 @@ function BlameHash({ chatId, filePath, blame }: { chatId: string; filePath: stri
     }
   };
 
-  const shortHash = blame.hash.slice(0, 8);
+  const shortHash = hash.slice(0, 8);
 
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
@@ -428,9 +528,9 @@ function BlameHash({ chatId, filePath, blame }: { chatId: string; filePath: stri
         <div className="mb-1 px-0.5">
           <div className="flex items-center gap-1.5">
             <span className="shrink-0 font-mono text-[10px] text-cyan-400/80">{shortHash}</span>
-            <span className="min-w-0 flex-1 truncate text-[10px] text-foreground" title={blame.summary}>{blame.summary || '(no summary)'}</span>
+            <span className="min-w-0 flex-1 truncate text-[10px] text-foreground" title={summary}>{summary || '(no summary)'}</span>
           </div>
-          <div className="truncate text-[10px] text-muted-foreground">{blame.author}{blame.date ? ` · ${timeAgo(blame.date)}` : ''}</div>
+          <div className="truncate text-[10px] text-muted-foreground">{author}{dateLabel ? ` · ${dateLabel}` : ''}</div>
         </div>
         {loading ? (
           <div className="px-1 text-[10px] text-muted-foreground">loading diff…</div>
@@ -441,5 +541,53 @@ function BlameHash({ chatId, filePath, blame }: { chatId: string; filePath: stri
         )}
       </PopoverContent>
     </Popover>
+  );
+}
+
+// The history view (WARDEN-319): the temporal counterpart to blame. One row per commit
+// that touched this file (git log --follow -- <path>), newest first, each explorable
+// to its per-file diff via the shared BlameHash popover. Where blame shows the LATEST
+// commit per line (spatial), history shows the FULL commit sequence (temporal) — so a
+// human never needs `git log -- <path>` in a terminal. Owns its own loading/error/
+// empty states, mirroring AnnotatedContent's shape.
+function HistoryContent({ commits, historyLoading, historyError, chatId, filePath }: {
+  commits: HistoryCommit[] | null;
+  historyLoading: boolean;
+  historyError: string | null;
+  chatId: string;
+  filePath: string;
+}) {
+  const hasCommits = !!commits && commits.length > 0;
+
+  return (
+    <div className="text-sm">
+      {historyLoading && (
+        <div className="flex items-center gap-1.5 py-2 text-xs text-muted-foreground">
+          <Loader2Icon className="w-3.5 h-3.5 animate-spin" />
+          <span>Loading history…</span>
+        </div>
+      )}
+      {!historyLoading && !historyError && !hasCommits && (
+        <div className="py-2 text-xs text-muted-foreground">No git history for this file.</div>
+      )}
+      {!historyLoading && historyError && (
+        <div className="flex items-center gap-1.5 py-2 text-xs text-red-400">
+          <AlertCircleIcon className="w-3.5 h-3.5" />
+          <span>{historyError}</span>
+        </div>
+      )}
+      {!historyLoading && !historyError && hasCommits && (
+        <div className="flex flex-col divide-y divide-border/40">
+          {commits.map((c, i) => (
+            <div key={`${c.hash}-${i}`} className="flex items-center gap-2 py-1.5">
+              <BlameHash chatId={chatId} filePath={filePath} hash={c.hash} summary={c.subject} author={c.author} dateLabel={c.date} />
+              <span className="min-w-0 flex-1 truncate text-foreground" title={c.subject}>{c.subject}</span>
+              <span className="shrink-0 max-w-[8rem] truncate text-muted-foreground/70" title={c.author}>{c.author}</span>
+              <span className="shrink-0 text-muted-foreground/60">{c.date}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
