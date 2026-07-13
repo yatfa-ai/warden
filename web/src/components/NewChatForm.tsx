@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { postJson } from '@/lib/api';
 import { loadUi } from '@/lib/storage';
 import type { Chat } from '@/lib/types';
@@ -124,10 +125,25 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
 
   return (
     <form onSubmit={submit} className="flex flex-col gap-1 p-2 border-b bg-muted/40">
-      <select value={host} onChange={(e) => { const h = e.target.value; setHost(h); setCwd(cwdFor(h)); }} className="bg-background border rounded px-1.5 py-1 text-[11px]">
-        <option value={THIS_MACHINE}>this machine (direct)</option>
-        {sshHosts.map((h) => <option key={h} value={h}>{h} (tmux)</option>)}
-      </select>
+      <Select
+        value={host}
+        onValueChange={(h) => {
+          setHost(h);
+          setCwd(cwdFor(h));
+        }}
+      >
+        <SelectTrigger className="h-7 w-full text-[11px]">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={THIS_MACHINE}>this machine (direct)</SelectItem>
+          {sshHosts.map((h) => (
+            <SelectItem key={h} value={h}>
+              {h} (tmux)
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
       <div className="flex flex-wrap gap-1">
         <Button size="sm" type="button" variant={preset === 'claude' ? 'default' : 'outline'} className="h-6 text-[11px] flex-1" onClick={() => setPreset('claude')}>claude</Button>
         <Button size="sm" type="button" variant={preset === 'shell' ? 'default' : 'outline'} className="h-6 text-[11px] flex-1" onClick={() => setPreset('shell')}>shell</Button>
