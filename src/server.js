@@ -2631,9 +2631,23 @@ streamWss.on('connection', (ws) => {
         appendEvent({ type: 'error', error: String((e && e.message) || e), context: 'attach', id: m.id, host: chat.host, container: chat.container });
         return;
       }
-      attaches.set(m.id, { pty, chat });
-      pty.onData((d) => send({ type: 'pty', id: m.id, data: d }));
-      pty.onExit(({ exitCode }) => { attaches.delete(m.id); send({ type: 'ended', id: m.id, code: exitCode }); appendEvent({ type: 'ended', id: m.id, code: exitCode, host: chat.host, container: chat.container }); });
+      // WARDEN-365 (defense-in-depth): bind a per-attach `entry` object and gate
+      // onData/onExit on identity (`attaches.get(m.id) === entry`) so a killed
+      // prior PTY can never clobber or pollute a freshly-bound one. A detach→
+      // attach (legitimate Retry, or the client's attach-lifecycle) kills the
+      // prior PTY and binds a new one under the SAME id; node-pty's kill() is
+      // async, so the prior PTY's onExit (and any trailing onData) can fire
+      // AFTER the new PTY is bound. Without this guard, that late onExit would
+      // `attaches.delete(m.id)` the NEW entry → the new PTY is orphaned (input/
+      // resize dropped, a later detach can't kill it) and a spurious 'ended' is
+      // sent — reproducing the duplicate/dropped-text corruption. This also
+      // contains the rare concurrent-attach race (two attaches passing the
+      // `attaches.has` guard before either sets): the second set wins, the first
+      // PTY's data is dropped and it can't delete the live entry.
+      const entry = { pty, chat };
+      attaches.set(m.id, entry);
+      pty.onData((d) => { if (attaches.get(m.id) === entry) send({ type: 'pty', id: m.id, data: d }); });
+      pty.onExit(({ exitCode }) => { if (attaches.get(m.id) === entry) attaches.delete(m.id); send({ type: 'ended', id: m.id, code: exitCode }); appendEvent({ type: 'ended', id: m.id, code: exitCode, host: chat.host, container: chat.container }); });
       try { await resize(chat, cfg, cols, rows); } catch { /* noop */ }
       send({ type: 'attached', id: m.id });
       appendEvent({ type: 'attached', id: m.id, host: chat.host, container: chat.container });
