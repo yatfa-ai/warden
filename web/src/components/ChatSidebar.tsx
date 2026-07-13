@@ -606,7 +606,29 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             style={{ backgroundColor: C.metadata?.color || '#6366f1' }}
           />
           <span className="text-xs font-medium flex-1 truncate">{C.name}</span>
-          <span className="text-[10px] text-muted-foreground">{agents.length}</span>
+          {/* WARDEN-338: one-click broadcast to the whole collection. Resolves the
+              collection's live membership (the same `agents` array the list renders,
+              so the target set is byte-for-byte what the action bar's "All" button
+              selects) and opens BroadcastDialog pre-targeted at exactly those agents.
+              Nothing sends until the dialog's Confirm (the safety gate). Disabled when
+              the collection has no matching agents — no zero-target confirm dialog. */}
+          <Button
+            type="button"
+            size="xs"
+            variant="secondary"
+            disabled={agents.length === 0}
+            onClick={() => {
+              selectAll(agents.map((c) => c.key || c.id));
+              setBroadcastOpen(true);
+            }}
+            title={
+              agents.length === 0
+                ? 'no agents in this collection to broadcast to'
+                : `Broadcast to all ${agents.length} agent${agents.length === 1 ? '' : 's'}`
+            }
+          >
+            Broadcast {agents.length}
+          </Button>
         </div>
         <ScrollArea className="flex-1 min-h-0">
           <div className="p-1.5 flex flex-col gap-0.5">
