@@ -1,6 +1,6 @@
 // Yatfa Warden — Electron main process (CommonJS).
 // Spawns the backend server (ESM) as a child process, then opens a window.
-const { app, BrowserWindow, dialog, screen, ipcMain } = require('electron');
+const { app, BrowserWindow, dialog, screen, ipcMain, Tray, Menu } = require('electron');
 const { fork, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -13,7 +13,9 @@ const {
   captureBounds,
   captureMaximized,
   rememberIsActive,
+  closeToTrayIsActive,
   withRemember,
+  withCloseToTray,
   parseWindowState,
   MIN_WIDTH,
   MIN_HEIGHT,
@@ -24,6 +26,15 @@ const HOST = '127.0.0.1';
 
 let serverProcess = null;
 let win = null;
+// Close-to-tray (WARDEN-330): when ON, closing the window hides it to a tray
+// icon instead of quitting, so the backend (and renderer-side desktop alerts)
+// keep running. `isQuitting` distinguishes a REAL quit (tray Quit / Cmd+Q /
+// OS shutdown) from the X-button hide so the close intercept lets real quits
+// proceed and tears the backend down. `closeToTray` is the live cached flag
+// (mirror of the persisted window-state.json value); `tray` is the Tray icon.
+let isQuitting = false;
+let closeToTray = false;
+let tray = null;
 
 // Kill anything occupying the port (stale server from a previous run)
 function killStalePort() {
@@ -128,8 +139,14 @@ function attachWindowStateCapture(window) {
   window.on('maximize', () => flushMaximizedCapture(window, true));
   window.on('unmaximize', () => flushMaximizedCapture(window, false));
   // Flush any pending debounced capture on close so the last arrangement is
-  // durable even if the app is closed mid-debounce.
-  window.on('close', () => {
+  // durable even if the app is closed mid-debounce. When close-to-tray is ON
+  // and this is not a real quit (isQuitting), intercept the close: hide the
+  // window to the tray instead of destroying it. Hiding (not closing) keeps
+  // both the renderer (desktop alerts) and the backend alive — and since the
+  // window still exists, window-all-closed never fires, so the default quit
+  // path is naturally bypassed. WARDEN-330.
+  window.on('close', (e) => {
+    if (closeToTray && !isQuitting) { e.preventDefault(); window.hide(); return; }
     if (captureTimer) { clearTimeout(captureTimer); captureTimer = null; }
     flushBoundsCapture(window);
   });
@@ -178,6 +195,86 @@ function createWindow() {
   win.loadURL(`http://${HOST}:${PORT}/?_t=${Date.now()}`);
   attachWindowStateCapture(win);
   win.on('closed', () => { win = null; });
+
+  // Cache the persisted close-to-tray flag for the close intercept (avoids a
+  // sync fs read on every close attempt) and, when ON, create the tray icon so
+  // the first window close hides to tray. Only arm the intercept when the tray
+  // actually attaches — otherwise the next close would hide the window with no
+  // tray to restore it (stranded window). This mirrors the set handler's
+  // refuse-on-failure self-heal (the 'window:set-close-to-tray' handler below).
+  // A launch-time failure requires the platform to have degraded between a
+  // successful toggle and this launch (e.g. an AppIndicator/SNI drop, a removed
+  // build/icon.png, or a headless/Xvfb run); when it happens, self-heal the
+  // persisted value to false so the next launch doesn't re-attempt and re-strand
+  // (keeps cache == file == Settings display == behavior == false). WARDEN-330.
+  const persistedCloseToTray = closeToTrayIsActive(saved);
+  if (persistedCloseToTray) {
+    closeToTray = createTray();
+    if (!closeToTray) {
+      saveWindowState(withCloseToTray(loadWindowState(), false));
+    }
+  } else {
+    closeToTray = false;
+  }
+}
+
+// --- Close-to-tray tray icon + menu (WARDEN-330) -------------------------------
+// A persistent system-tray icon shown only while the pref is ON. Click (or the
+// "Show" menu item) restores a hidden window; "Quit" sets isQuitting before
+// app.quit() so the close intercept lets the quit through and before-quit tears
+// the backend down. The tray lives for the app session; it is created/destroyed
+// by createTray/destroyTray as the pref is toggled.
+function showMainWindow() {
+  if (win && !win.isDestroyed()) {
+    win.show();
+    win.focus();
+  }
+}
+
+function buildTrayMenu() {
+  return Menu.buildFromTemplate([
+    { label: 'Show', click: () => showMainWindow() },
+    { type: 'separator' },
+    {
+      label: 'Quit',
+      click: () => {
+        // Set isQuitting BEFORE app.quit() so (a) the window close intercept
+        // (fired as app.quit() closes windows) lets the close proceed instead
+        // of hiding to tray, and (b) before-quit's cleanup() tears the backend
+        // down on a real quit. Mirrors the isQuitting flag set in before-quit.
+        isQuitting = true;
+        app.quit();
+      },
+    },
+  ]);
+}
+
+function createTray() {
+  if (tray) return true; // idempotent — never stack two icons
+  // Mirror launch-at-login's graceful degradation (WARDEN-278): wrap the
+  // platform call so an unsupported desktop, misconfigured AppIndicator/SNI,
+  // bad image decode, or headless env can't throw out of the IPC handler or
+  // createWindow — a throw at launch would boot-loop (the pref is persisted ON).
+  // Returns whether the tray attached; the set handler refuses + keeps the flag
+  // OFF on failure so the window is never hidden with no tray to restore it.
+  // WARDEN-330.
+  try {
+    tray = new Tray(path.join(__dirname, '..', 'build', 'icon.png'));
+    tray.setToolTip('Yatfa Warden');
+    tray.setContextMenu(buildTrayMenu());
+    tray.on('click', () => showMainWindow());
+    return true;
+  } catch (e) {
+    console.warn('[warden:close-to-tray] Tray creation failed', e);
+    tray = null;
+    return false;
+  }
+}
+
+function destroyTray() {
+  if (!tray) return;
+  tray.destroy();
+  tray = null;
 }
 
 // IPC bridge (preload.cjs exposes these to the renderer as window.wardenWindow).
@@ -219,6 +316,36 @@ ipcMain.handle('window:set-launch-at-login', (_event, openAtLogin) => {
   }
 });
 
+// Close-to-tray (WARDEN-330): persisted in window-state.json (the simpler fit —
+// there is no OS API for "hide on close"). Unlike launch-at-login the source of
+// truth is Warden's own file, so the get handler returns the cached live flag
+// (the same value the close intercept uses — initialized from the persisted file
+// at createWindow and updated atomically with the file on set), guaranteeing the
+// Settings toggle reflects the behavior the close button will actually have.
+ipcMain.handle('window:get-close-to-tray', () => {
+  return closeToTray === true;
+});
+ipcMain.handle('window:set-close-to-tray', (_event, on) => {
+  if (on === true) {
+    // Attach the tray BEFORE flipping the flag / persisting. If the platform
+    // rejects the tray (createTray returns false), refuse the toggle: keep the
+    // flag + persisted state OFF and return false. This mirrors launch-at-login
+    // (WARDEN-278) and prevents stranding the window (hidden on next close with
+    // no tray to restore it) and poisoning the next launch with a persisted-ON
+    // but no-tray state. WARDEN-330.
+    if (!createTray()) {
+      closeToTray = false;
+      saveWindowState(withCloseToTray(loadWindowState(), false));
+      return false;
+    }
+  } else {
+    destroyTray();
+  }
+  closeToTray = on === true;
+  saveWindowState(withCloseToTray(loadWindowState(), closeToTray));
+  return closeToTray;
+});
+
 app.whenReady().then(() => {
   // Kill any stale server from a previous run
   killStalePort();
@@ -251,6 +378,12 @@ function cleanup() {
 
 app.on('window-all-closed', () => { cleanup(); app.quit(); });
 app.on('before-quit', () => {
+  // Mark a real quit BEFORE the window close events fire (app.quit() runs
+  // before-quit, then closes each window) so the close-to-tray intercept does
+  // not hide the window and block the quit. Covers every real-quit path — tray
+  // Quit, Cmd+Q / Alt+F4→quit, OS logout/shutdown — not just the tray menu.
+  // WARDEN-330.
+  isQuitting = true;
   // Flush any pending bounds capture as a safety net (the window 'close' handler
   // already flushes; this covers an app.quit() that bypasses per-window close).
   if (win && !win.isDestroyed()) {

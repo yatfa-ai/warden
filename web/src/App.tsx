@@ -4,7 +4,7 @@ import { postJson } from '@/lib/api';
 import { loadUi, saveUi, persistUiState, initialWorkspace, DEFAULT_TERMINAL_FONT_FAMILY, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
 import { applyTheme, listenSystemThemeChange, getEffectiveTheme, resolveTerminalTheme, type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
-import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin } from '@/lib/electron';
+import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ChatSidebar } from '@/components/ChatSidebar';
@@ -214,6 +214,13 @@ function App() {
   // that stays false in a plain browser where the bridge is absent). See
   // WARDEN-278.
   const [launchAtLogin, setLaunchAtLoginState] = useState(false);
+  // "Close to tray" preference (default OFF, opt-in). When ON, closing the
+  // window hides it to a system-tray icon instead of quitting, keeping the
+  // backend (and renderer-side desktop alerts) alive while the window is closed.
+  // Same display-mirror / write-through pattern as launch-at-login — NOT part of
+  // UiState / saveUi. Loads from main on mount (stays false in a browser where
+  // the bridge is absent). See WARDEN-330.
+  const [closeToTray, setCloseToTrayState] = useState(false);
   const { prefs, reload: reloadNotificationPrefs } = useNotificationPrefs();
   // "Confirm before destructive actions" preference (default on). Gates both
   // destructive kill paths — force-kill (tmux session) and kill chat. Loaded
@@ -246,6 +253,9 @@ function App() {
     // Load the main-owned "launch at login" flag (no-op in a browser; stays at
     // the false default when the IPC bridge is absent). WARDEN-278.
     void getLaunchAtLogin().then(setLaunchAtLoginState);
+    // Load the main-owned "close to tray" flag (no-op in a browser; stays at the
+    // false default when the IPC bridge is absent). WARDEN-330.
+    void getCloseToTray().then(setCloseToTrayState);
 
     // Check for activity since last close
     const checkActivitySinceClose = async () => {
@@ -430,6 +440,15 @@ function App() {
   const setLaunchAtLogin = useCallback((v: boolean) => {
     setLaunchAtLoginState(v);
     void persistLaunchAtLogin(v);
+  }, []);
+
+  // Mirror setter for close-to-tray: update the display state and write the
+  // persisted flag (plus attach/detach the tray) through the IPC bridge. Stable
+  // identity for the same reason as setLaunchAtLogin. No-op in a browser.
+  // WARDEN-330.
+  const setCloseToTray = useCallback((v: boolean) => {
+    setCloseToTrayState(v);
+    void persistCloseToTray(v);
   }, []);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
@@ -1040,6 +1059,8 @@ function App() {
           setRememberWindowBounds={setRememberWindowBounds}
           launchAtLogin={launchAtLogin}
           setLaunchAtLogin={setLaunchAtLogin}
+          closeToTray={closeToTray}
+          setCloseToTray={setCloseToTray}
         />
       ) : chatBrowserOpen ? (
         <OpenChatBrowserPage

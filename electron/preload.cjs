@@ -27,4 +27,10 @@ contextBridge.exposeInMainWorld('wardenWindow', {
   // field; the OS is the source of truth). Off by default. See WARDEN-278.
   getLaunchAtLogin: () => ipcRenderer.invoke('window:get-launch-at-login'),
   setLaunchAtLogin: (openAtLogin) => ipcRenderer.invoke('window:set-launch-at-login', openAtLogin),
+  // "Close to tray" — main persists this to window-state.json and attaches/
+  // detaches the Tray icon. When ON, closing the window hides it to the tray
+  // (backend + desktop alerts stay alive) instead of quitting. Off by default
+  // (opt-in). See WARDEN-330.
+  getCloseToTray: () => ipcRenderer.invoke('window:get-close-to-tray'),
+  setCloseToTray: (on) => ipcRenderer.invoke('window:set-close-to-tray', on),
 });

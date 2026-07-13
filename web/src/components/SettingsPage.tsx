@@ -185,6 +185,13 @@ interface Props {
   // defaults ON. Same hasWindowBridge() gating as remember-bounds.
   launchAtLogin: boolean;
   setLaunchAtLogin: (v: boolean) => void;
+  // "Close to tray" — main-owned via IPC (WARDEN-330). Sits beside the launch-
+  // at-login control: both govern what happens when the app/window closes.
+  // Defaults OFF (opt-in): when ON, closing the window hides it to a tray icon
+  // so the backend + desktop alerts keep running instead of quitting. Same
+  // hasWindowBridge() gating as the sibling controls.
+  closeToTray: boolean;
+  setCloseToTray: (v: boolean) => void;
   // Opt-in OS desktop alerts when agents need attention AND Warden is unfocused
   // (WARDEN-259). Pure client-side localStorage pref (NOT backend config): it
   // applies instantly via the prop callback (forwarded to the AttentionBadge) and
@@ -299,7 +306,7 @@ function PresetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin, closeToTray, setCloseToTray }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -1091,6 +1098,32 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                     {hasWindowBridge()
                       ? 'Open Warden automatically when you log in to your computer. Off by default — turn it on to skip relaunching Warden after every reboot.'
                       : 'Open Warden automatically when you log in to your computer. Applies to the desktop app only.'}
+                  </p>
+                </div>
+
+                {/* Close to tray — main-owned via IPC (WARDEN-330). Sits beside
+                    the launch-at-login control: both govern close/launch
+                    behavior. Off by default (opt-in — changing what the close
+                    button does is surprising). When ON, the backend and desktop
+                    attention alerts keep running while the window is hidden, so
+                    it pairs naturally with launch-at-login + desktop alerts.
+                    Same hasWindowBridge() gating as the sibling controls. */}
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      id="closeToTray"
+                      checked={closeToTray}
+                      onCheckedChange={(v) => setCloseToTray(v)}
+                      disabled={!hasWindowBridge()}
+                    />
+                    <Label htmlFor="closeToTray" className="cursor-pointer">
+                      Close to tray
+                    </Label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {hasWindowBridge()
+                      ? 'Keep Warden running in the system tray when you close the window — the backend and desktop alerts stay active. Click the tray icon to show the window, or use its menu to quit.'
+                      : 'Keep Warden running in the system tray when you close the window. Applies to the desktop app only.'}
                   </p>
                 </div>
               </SettingsSection>
