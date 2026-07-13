@@ -189,43 +189,55 @@ after(async () => {
 });
 
 describe('parseGitLogLine', () => {
-  it('parses a normal %h|%s|%an|%ar line', () => {
-    assert.deepStrictEqual(parseGitLogLine('abc1234|fix: thing|John Doe|2 days ago'), {
-      hash: 'abc1234', subject: 'fix: thing', author: 'John Doe', date: '2 days ago',
+  it('parses a normal %h|%s|%an|%ar|%ct line (epoch is the trailing UNIX seconds)', () => {
+    assert.deepStrictEqual(parseGitLogLine('abc1234|fix: thing|John Doe|2 days ago|1700000000'), {
+      hash: 'abc1234', subject: 'fix: thing', author: 'John Doe', date: '2 days ago', epoch: 1700000000,
     });
   });
 
   it('keeps a literal "|" inside the subject', () => {
-    const out = parseGitLogLine('def5678|fix: handle a | b in subject|Jane|3 hours ago');
+    const out = parseGitLogLine('def5678|fix: handle a | b in subject|Jane|3 hours ago|1700000001');
     assert.strictEqual(out.hash, 'def5678');
     assert.strictEqual(out.subject, 'fix: handle a | b in subject');
     assert.strictEqual(out.author, 'Jane');
     assert.strictEqual(out.date, '3 hours ago');
+    assert.strictEqual(out.epoch, 1700000001);
   });
 
   it('handles multiple "|" inside the subject', () => {
-    const out = parseGitLogLine('bbb2222|merge feat | fix | docs|Sam|5 minutes ago');
+    const out = parseGitLogLine('bbb2222|merge feat | fix | docs|Sam|5 minutes ago|1700000002');
     assert.strictEqual(out.subject, 'merge feat | fix | docs');
     assert.strictEqual(out.author, 'Sam');
     assert.strictEqual(out.date, '5 minutes ago');
+    assert.strictEqual(out.epoch, 1700000002);
   });
 
   it('handles an empty subject (%s is empty)', () => {
-    assert.deepStrictEqual(parseGitLogLine('aaa1111||Bob|1 day ago'), {
-      hash: 'aaa1111', subject: '', author: 'Bob', date: '1 day ago',
+    assert.deepStrictEqual(parseGitLogLine('aaa1111||Bob|1 day ago|1700000003'), {
+      hash: 'aaa1111', subject: '', author: 'Bob', date: '1 day ago', epoch: 1700000003,
     });
   });
 
-  it('handles a malformed line with no author/date separators', () => {
+  it('handles a malformed line with no author/date/epoch separators', () => {
     assert.deepStrictEqual(parseGitLogLine('xyz9999|just a subject no author/date'), {
-      hash: 'xyz9999', subject: 'just a subject no author/date', author: '', date: '',
+      hash: 'xyz9999', subject: 'just a subject no author/date', author: '', date: '', epoch: null,
     });
   });
 
   it('handles a line with no separators at all', () => {
     assert.deepStrictEqual(parseGitLogLine('lonelyhash'), {
-      hash: 'lonelyhash', subject: '', author: '', date: '',
+      hash: 'lonelyhash', subject: '', author: '', date: '', epoch: null,
     });
+  });
+
+  it('returns epoch null when the trailing field is non-numeric (degraded)', () => {
+    // A partial/legacy line that somehow lacks a real %ct — epoch must be null,
+    // never NaN, so the frontend's numeric since-filter degrades safely.
+    const out = parseGitLogLine('ccc3333|fix: thing|Jane|2 days ago|not-a-number');
+    assert.strictEqual(out.subject, 'fix: thing');
+    assert.strictEqual(out.author, 'Jane');
+    assert.strictEqual(out.date, '2 days ago');
+    assert.strictEqual(out.epoch, null);
   });
 });
 
@@ -243,6 +255,9 @@ describe('/api/git-log HTTP endpoint (real Express app from server.js)', () => {
       assert.match(c.hash, /^[0-9a-f]{4,}$/);
       assert.ok(typeof c.date === 'string' && c.date.length > 0, 'relative date must be non-empty');
       assert.strictEqual(c.author, 'Tester');
+      // WARDEN-356: every real commit carries an exact %ct epoch (UNIX seconds) — a
+      // positive integer, NOT a string, so the frontend's since-filter compares numerically.
+      assert.ok(typeof c.epoch === 'number' && c.epoch > 0, 'epoch (%ct) must be a positive number');
     }
   });
 
@@ -307,6 +322,7 @@ describe('/api/git-log range=incoming (behind commits — WARDEN-225)', () => {
       assert.match(c.hash, /^[0-9a-f]{4,}$/);
       assert.strictEqual(c.author, 'Tester');
       assert.ok(typeof c.date === 'string' && c.date.length > 0, 'relative date must be non-empty');
+      assert.ok(typeof c.epoch === 'number' && c.epoch > 0, 'epoch (%ct) must be a positive number');
     }
   });
 
@@ -366,6 +382,7 @@ describe('/api/git-log range=outgoing (ahead commits — WARDEN-252)', () => {
       assert.match(c.hash, /^[0-9a-f]{4,}$/);
       assert.strictEqual(c.author, 'Tester');
       assert.ok(typeof c.date === 'string' && c.date.length > 0, 'relative date must be non-empty');
+      assert.ok(typeof c.epoch === 'number' && c.epoch > 0, 'epoch (%ct) must be a positive number');
     }
   });
 

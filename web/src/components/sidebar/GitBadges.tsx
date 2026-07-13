@@ -15,6 +15,7 @@ import { cn } from '@/lib/utils';
 import { findChat } from '@/lib/agentFilter';
 import { displayName } from '@/lib/chatDisplay';
 import { type ProjectGitAgent, type FileCollision } from '@/lib/gitStateSummary';
+import { formatWhatsNewLine, type WhatsNewSummary } from '@/lib/whatsNew';
 import type { Chat } from '@/lib/types';
 import type { GitCommit, GitFile, GitStash } from './types';
 
@@ -780,6 +781,141 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
             </div>
           )}
         </RadixPopover.Content>
+      </RadixPopover.Portal>
+    </RadixPopover.Root>
+  );
+}
+
+// ---- Per-agent "What's new since you last looked" (WARDEN-356) --------------
+//
+// The marker + catch-up popover for the rare-visitor human: a glanceable indigo
+// pill on a sidebar row when commits have landed on THIS agent since the human
+// last visited it — the one-glance answer to "which of my agents shipped work I
+// haven't seen?" Clicking opens the "What's new since your last visit" popover
+// (the catch-up view) listing the new commits + current working-tree changes +
+// stash, with a one-glance summary line ("3 new commits · 7 changed files ·
+// 1 stash"). No new fetch — it renders from the git-log + git-status data the
+// row already holds.
+//
+// Visually DISTINCT from the other sidebar signals by design (AC #2):
+//   • stuck / erroring (WARDEN-343) → red ⚠ op in GitBranchBadge
+//   • new terminal output            → cyan "new" pill in PaneTile
+//   • currently dirty / unpushed     → the ± ↑ ↓ badges (current state)
+// This is a SINCE-signal ("commits landed since YOUR last visit"), not a state-
+// signal, so it clears the moment the pane is opened/focused again (App re-stamps
+// lastSeen). Indigo is unused by any git badge, so the marker can't be mistaken
+// for one of them.
+
+/**
+ * The catch-up popover: the new commits + current working-tree changes + stash,
+ * behind a one-glance summary line. Reuses GitChangedFile so each changed-file
+ * row opens the per-file DiffViewer exactly like the inline list does. Rendered
+ * portaled via Radix so it isn't clipped by the row's `truncate` name span.
+ */
+function WhatsNewPopoverContent({ summary, files, onOpenDiff }: {
+  summary: WhatsNewSummary;
+  files?: GitFile[];
+  onOpenDiff?: (path: string) => void;
+}) {
+  const line = formatWhatsNewLine(summary);
+  const hasFiles = (files?.length ?? 0) > 0;
+  return (
+    <RadixPopover.Content
+      sideOffset={4}
+      align="start"
+      onClick={(e) => e.stopPropagation()}
+      className="z-50 min-w-64 max-w-80 rounded-md border border-border bg-popover p-1.5 text-popover-foreground shadow-lg outline-none data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0"
+    >
+      <div className="mb-1 px-0.5">
+        <span className="text-[10px] font-medium text-indigo-400">What's new since your last visit</span>
+        {line && <div className="text-[10px] text-muted-foreground">{line}</div>}
+      </div>
+      {summary.newCommits.length > 0 && (
+        <div className="mb-1">
+          <div className="px-0.5 pb-0.5 text-[10px] uppercase tracking-wider text-muted-foreground/70">
+            ● new commits · {summary.newCommits.length}{summary.truncated ? '+' : ''}
+          </div>
+          <ul className="max-h-60 overflow-auto">
+            {summary.newCommits.map((cm) => (
+              // Display-only (like the incoming list in GitBranchBadge): the
+              // commit is already in HEAD, but the per-commit /api/git-show expand
+              // is intentionally omitted from the catch-up view to keep it a
+              // one-glance summary — the GitBranchBadge popover remains the place
+              // to drill into a commit's files.
+              <li key={cm.hash} className="rounded px-1 py-0.5 text-left">
+                <div className="flex items-center gap-1.5">
+                  <span className="shrink-0 font-mono text-[10px] text-indigo-400/80">{cm.hash}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[10px] text-foreground" title={cm.subject}>{cm.subject}</span>
+                    <span className="block text-[10px] text-muted-foreground">{cm.date}{cm.author ? ` · ${cm.author}` : ''}</span>
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {hasFiles && files && (
+        <div className={summary.newCommits.length > 0 ? 'mt-1 border-t border-border pt-1' : ''}>
+          <div className="px-0.5 pb-0.5 text-[10px] uppercase tracking-wider text-muted-foreground/70">
+            ± working-tree changes · {files.length}
+          </div>
+          <div className="flex flex-col gap-0.5">
+            {files.map((file, i) => (
+              <GitChangedFile key={file.path + '-' + i} file={file} onOpen={onOpenDiff} />
+            ))}
+          </div>
+        </div>
+      )}
+      {summary.stashCount > 0 && (
+        <div className="mt-1 border-t border-border pt-1 px-0.5">
+          <span className="text-[10px] text-fuchsia-400">🗄 {summary.stashCount} stash{summary.stashCount === 1 ? '' : 'es'} shelved</span>
+        </div>
+      )}
+    </RadixPopover.Content>
+  );
+}
+
+/**
+ * The per-agent unreviewed-progress marker. A subtle indigo "✦N" pill; clicking
+ * opens the WhatsNewPopoverContent catch-up view. Renders nothing when there's
+ * no progress since the last visit (the caller passes the precomputed summary +
+ * `since`; this double-checks the gate so a stale call site can't paint a "0").
+ */
+export function WhatsNewMarker({ summary, since, files, onOpenDiff }: {
+  summary: WhatsNewSummary;
+  // The raw lastSeen epoch (null = never visited). Used both to gate visibility
+  // and to anchor the tooltip's "since your last visit" framing.
+  since: number | null;
+  files?: GitFile[];
+  onOpenDiff?: (path: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const count = summary.newCommits.length;
+  // Gate: never visited, or visited but nothing new → render nothing.
+  if (since === null || count === 0) return null;
+  // "+" when truncated: the fetch hit its cap with all-new commits, so there may
+  // be more beyond the window — never silently understate "what you missed."
+  const plus = summary.truncated ? '+' : '';
+  const title = `${count}${plus} commit${count === 1 && !summary.truncated ? '' : 's'} since your last visit — click to review`;
+  return (
+    <RadixPopover.Root open={open} onOpenChange={setOpen}>
+      <RadixPopover.Trigger asChild>
+        {/* A real <button> (the row is role="button"); stopPropagation so opening
+            the popover does not also open the chat pane — mirrors GitBranchBadge. */}
+        <button
+          type="button"
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
+          aria-label={title}
+          title={title}
+          className="ml-1 inline-flex items-center text-[10px] text-indigo-400 hover:text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 px-1 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary transition-colors duration-150"
+        >
+          ✦{count}{plus}
+        </button>
+      </RadixPopover.Trigger>
+      <RadixPopover.Portal>
+        <WhatsNewPopoverContent summary={summary} files={files} onOpenDiff={onOpenDiff} />
       </RadixPopover.Portal>
     </RadixPopover.Root>
   );

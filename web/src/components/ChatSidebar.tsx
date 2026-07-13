@@ -24,6 +24,7 @@ import {
   type AgentFilter, type AgentSort,
 } from '@/lib/agentFilter';
 import { summarizeProjectGitState, detectProjectFileCollisions } from '@/lib/gitStateSummary';
+import { getLastSeen, WHATS_NEW_FETCH_LIMIT } from '@/lib/whatsNew';
 import type { Chat, Collection } from '@/lib/types';
 import { StatusDot } from '@/components/StatusDot';
 import type { GitCommit, GitFile, ClaudeSession } from './sidebar/types';
@@ -194,10 +195,16 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
 
   // Fetch recent commits for a chat. Results (even an empty list) are cached per chatId
   // so re-expanding the badge doesn't refetch; the badge's refresh affordance re-runs this.
-  const fetchGitLog = useCallback(async (chatId: string) => {
+  // `limit` defaults to WHATS_NEW_FETCH_LIMIT (50) so the cached window is wide enough for
+  // the per-agent "What's new since" marker to count every commit that landed since the
+  // last visit (a rare visitor can have dozens) — matching the incoming/outgoing fetches.
+  // The GitBranchBadge popover renders this same cache in a scrollable list, so showing
+  // up to 50 recent commits (vs the old 5) is a benign superset, not a regression, and the
+  // marker's count + truncation signal stay honest (WARDEN-356 review: "count capped at 5").
+  const fetchGitLog = useCallback(async (chatId: string, limit: number = WHATS_NEW_FETCH_LIMIT) => {
     setGitLogLoading((p) => ({ ...p, [chatId]: true }));
     try {
-      const r = await fetch(`/api/git-log?id=${encodeURIComponent(chatId)}&limit=5`);
+      const r = await fetch(`/api/git-log?id=${encodeURIComponent(chatId)}&limit=${limit}`);
       const j = await r.json();
       setGitLog((p) => ({ ...p, [chatId]: Array.isArray(j.commits) ? j.commits : [] }));
     } catch (error) {
@@ -569,6 +576,27 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       if (c) fetchGitStatus(id);
     });
   }, [chats, activeTabs, fetchGitStatus]);
+
+  // WARDEN-356: keep recent git-log fresh for chats the human has VISITED so the
+  // per-agent "What's new since your last visit" marker reflects commits landed
+  // since the last open/focus. Bounded to visited chats only (getLastSeen !==
+  // null) — the marker is irrelevant for a never-visited chat, so unvisited
+  // agents pay no extra fetch (their git-log still loads lazily when the
+  // GitBranchBadge popover opens, as before). Reuses the existing fetchGitLog +
+  // /api/git-log endpoint (read-only) — no new endpoint. The fetch uses
+  // WHATS_NEW_FETCH_LIMIT (50, fetchGitLog's default) so the marker's count is
+  // accurate up to 50 and reports "✦50+" (truncated) beyond — the WARDEN-356
+  // review's "count silently capped at 5" fix. The re-fetch cadence mirrors
+  // fetchGitStatus (every catalog refresh) so the marker stays current; the
+  // documented future optimization is a server `since` param if this client-side
+  // filtering ever proves costly for large fleets.
+  useEffect(() => {
+    activeTabs.forEach((id) => {
+      if (getLastSeen(id) === null) return;
+      const c = findChat(chats, id);
+      if (c) fetchGitLog(id);
+    });
+  }, [chats, activeTabs, fetchGitLog]);
 
   const handleSpawned = (chat: Chat) => { onRefresh(); onOpenChat(chat.key || chat.id); setView({ kind: 'root' }); };
   const hosts = [THIS_MACHINE, ...sshHosts];
