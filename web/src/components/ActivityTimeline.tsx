@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { ActivityEvent } from '@/lib/types';
 import { Button } from '@/components/ui/button';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useLiveTimeline } from '@/lib/useLiveTimeline';
 import { formatUpdatedAgo } from '@/lib/timelinePacing';
 
@@ -28,10 +29,13 @@ export function ActivityTimeline() {
     return () => clearInterval(id);
   }, []);
 
-  // Extract unique values for filters
+  // Extract unique values for filters. The type-guard filters (`: x is string`)
+  // are runtime-identical to `.filter(Boolean)` but narrow the element type to
+  // `string` — Radix SelectItem requires a non-empty `string` value, whereas the
+  // native <option> tolerated `string | undefined`.
   const allTypes = Array.from(new Set(events.map((e) => e.type)));
-  const allAgents = Array.from(new Set(events.map((e) => e.container).filter(Boolean)));
-  const allHosts = Array.from(new Set(events.map((e) => e.host).filter(Boolean)));
+  const allAgents = Array.from(new Set(events.map((e) => e.container).filter((c): c is string => Boolean(c))));
+  const allHosts = Array.from(new Set(events.map((e) => e.host).filter((h): h is string => Boolean(h))));
 
   // Apply filters
   useEffect(() => {
@@ -239,55 +243,59 @@ export function ActivityTimeline() {
 
         {/* Filters */}
         <div className="flex items-center gap-2 flex-wrap">
-          <select
-            value={typeFilter}
-            onChange={(e) => setTypeFilter(e.target.value)}
-            className="text-xs bg-muted border-0 rounded px-2 py-1"
-          >
-            <option value="all">All Types</option>
-            {allTypes.map((t) => (
-              <option key={t} value={t}>
-                {t.replace('_', ' ')}
-              </option>
-            ))}
-          </select>
+          <Select value={typeFilter} onValueChange={setTypeFilter}>
+            <SelectTrigger className="h-7 w-auto text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Types</SelectItem>
+              {allTypes.map((t) => (
+                <SelectItem key={t} value={t}>
+                  {t.replace('_', ' ')}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
 
-          <select
-            value={hostFilter}
-            onChange={(e) => setHostFilter(e.target.value)}
-            className="text-xs bg-muted border-0 rounded px-2 py-1"
-          >
-            <option value="all">All Hosts</option>
-            {allHosts.map((h) => (
-              <option key={h} value={h}>
-                {h}
-              </option>
-            ))}
-          </select>
+          <Select value={hostFilter} onValueChange={setHostFilter}>
+            <SelectTrigger className="h-7 w-auto text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Hosts</SelectItem>
+              {allHosts.map((h) => (
+                <SelectItem key={h} value={h}>
+                  {h}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
 
-          <select
-            value={agentFilter}
-            onChange={(e) => setAgentFilter(e.target.value)}
-            className="text-xs bg-muted border-0 rounded px-2 py-1"
-          >
-            <option value="all">All Agents</option>
-            {allAgents.map((a) => (
-              <option key={a} value={a}>
-                {a}
-              </option>
-            ))}
-          </select>
+          <Select value={agentFilter} onValueChange={setAgentFilter}>
+            <SelectTrigger className="h-7 w-auto text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Agents</SelectItem>
+              {allAgents.map((a) => (
+                <SelectItem key={a} value={a}>
+                  {a}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
 
-          <select
-            value={String(limit)}
-            onChange={(e) => setLimit(parseInt(e.target.value, 10))}
-            className="text-xs bg-muted border-0 rounded px-2 py-1"
-          >
-            <option value="50">Last 50</option>
-            <option value="100">Last 100</option>
-            <option value="500">Last 500</option>
-            <option value="1000">Last 1000</option>
-          </select>
+          <Select value={String(limit)} onValueChange={(v) => setLimit(parseInt(v, 10))}>
+            <SelectTrigger className="h-7 w-auto text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="50">Last 50</SelectItem>
+              <SelectItem value="100">Last 100</SelectItem>
+              <SelectItem value="500">Last 500</SelectItem>
+              <SelectItem value="1000">Last 1000</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
 
         {/* Stats */}
