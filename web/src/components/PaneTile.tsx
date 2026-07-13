@@ -13,6 +13,8 @@ import { Button } from '@/components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { StatusDot } from '@/components/StatusDot';
 import { FileViewer } from './FileViewer';
+import { postJson } from '@/lib/api';
+import { CircleOffIcon, PowerIcon, RefreshCwIcon, SquareTerminalIcon, WifiOffIcon, XIcon } from 'lucide-react';
 import { toast } from 'sonner';
 
 // Two explicit xterm theme objects with hex values derived from the app's design
@@ -133,17 +135,48 @@ interface Props {
   // copy is off, the hint shows — unless this host was dismissed.
   copyHintDismissed: Record<string, boolean>;
   onDismissCopyHint: (host: string) => void;
+  // WARDEN-231: a new chat was spawned from this pane's recovery panel (open-
+  // shell or re-spawn). App refreshes the chat list and opens/focuses the new
+  // pane; the dead pane is replaced/closed.
+  onSpawned: (chat: Chat) => void;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalTheme, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, hostOptions, copyHintDismissed, onDismissCopyHint }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalTheme, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, hostOptions, copyHintDismissed, onDismissCopyHint, onSpawned }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const searchRef = useRef<SearchAddon | null>(null);
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [connected, setConnected] = useState(false);
-  const [errored, setErrored] = useState(false);
+
+  // Attach lifecycle as a phase state machine (WARDEN-231). The old
+  // `connected`/`errored` booleans couldn't represent "session dead" or "host
+  // unreachable", so a dead session flipped back to the connecting spinner with
+  // no escape and spun forever. Phases:
+  //   connecting        — probe/attach in flight; shows spinner + elapsed time.
+  //   connected         — live PTY attached; terminal visible.
+  //   session_dead      — host up but the tmux session is gone; recovery panel.
+  //   host_unreachable  — SSH can't deliver (or 15s watchdog fired with no
+  //                       attach); unresponsive panel.
+  //   error             — resolve/attach threw; minimal error panel.
+  type Phase = 'connecting' | 'connected' | 'session_dead' | 'host_unreachable' | 'error';
+  const [phase, setPhase] = useState<Phase>('connecting');
+  // Mirror phase into a ref so the elapsed-seconds interval (attach effect) can
+  // stop itself the instant we leave 'connecting'. The interval closure can't
+  // read `phase` directly (the attach effect's deps are [id, host, retryNonce],
+  // not phase, so the closure would be stale); without this ref the 1s interval
+  // keeps calling setElapsed forever once a dead/unreachable panel is showing,
+  // re-rendering the pane every second for as long as it's left open.
+  const phaseRef = useRef<Phase>('connecting');
+  useEffect(() => { phaseRef.current = phase; }, [phase]);
+  // Seconds elapsed since the current attach attempt began — shown while
+  // connecting so a slow/unresponsive host reads as "connecting… Ns", not a
+  // static spinner. Reset on each attach.
+  const [elapsed, setElapsed] = useState(0);
+  // Bumped to re-trigger the attach effect from a recovery action (Retry /
+  // Re-spawn) without changing id/host.
+  const [retryNonce, setRetryNonce] = useState(0);
+  const [busy, setBusy] = useState(false);
   const [downloading, setDownloading] = useState(false);
 
   // WARDEN-227: in-terminal clickable file paths.
@@ -411,10 +444,20 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   useEffect(() => {
     return streamApi.on(id, (m) => {
       const term = termRef.current; if (!term) return;
-      if (m.type === 'pty') { term.write(m.data); setConnected(true); setErrored(false); }
-      else if (m.type === 'attached') { setConnected(true); setErrored(false); }
-      else if (m.type === 'ended') setConnected(false);
-      else if (m.type === 'attach_error') { term.write('\r\n[error: ' + m.error + ']\r\n'); setConnected(false); setErrored(true); }
+      if (m.type === 'pty') { term.write(m.data); setPhase('connected'); }
+      else if (m.type === 'attached') { setPhase('connected'); }
+      else if (m.type === 'session_dead') { setPhase('session_dead'); }
+      else if (m.type === 'host_unreachable') { setPhase('host_unreachable'); }
+      else if (m.type === 'ended') {
+        // The live PTY ended. If it never produced data, the session was dead on
+        // attach (the probe missed it, or it died the instant we attached) →
+        // route to the recovery panel instead of re-spinning the connecting
+        // spinner forever (WARDEN-231). If we HAD been live, the session has now
+        // gone away → the recovery panel is still the right landing place. A
+        // later session_dead/host_unreachable/error state is left untouched.
+        setPhase((p) => (p === 'connecting' || p === 'connected' ? 'session_dead' : p));
+      }
+      else if (m.type === 'attach_error') { term.write('\r\n[error: ' + m.error + ']\r\n'); setPhase('error'); }
       // WARDEN-261: backend reports this host's tmux has mouse ON (copy impaired)
       // and Seamless copy is off → show the dismissible hint. Only sent when
       // mouse is on, so arrival implies impairment.
@@ -423,8 +466,11 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   }, [id]);
 
   useEffect(() => {
-    const term = termRef.current; if (!term) return;
-    setConnected(false); setErrored(false); setMouseOn(false);
+    const term = termRef.current;
+    // Fresh attach attempt: reset the phase machine + per-attempt bookkeeping.
+    setPhase('connecting');
+    setElapsed(0);
+    setMouseOn(false);
     try { fitRef.current?.fit(); } catch {}
     // WARDEN-261: tell the backend whether to disable tmux mouse for this host
     // (Seamless copy). Read from the ref so a Settings toggle applies on the NEXT
@@ -433,12 +479,35 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     // `hostKey` so the toggle and the per-host hint dismissal always resolve to
     // the same host for this pane.
     const seamlessCopy = !!hostOptionsRef.current[hostKey]?.seamlessCopy;
-    streamApi.send({ type: 'attach', id, host, cols: term.cols, rows: term.rows, seamlessCopy });
-    return () => { streamApi.send({ type: 'detach', id }); };
-    // `hostKey` is the pane's host identity (stable string — only changes when the
-    // actual host changes, never on a Seamless-copy toggle), so listing it never
-    // re-attaches on a pref change. hostOptions stays out on purpose (see above).
-  }, [id, host, hostKey]);
+    streamApi.send({ type: 'attach', id, host, cols: term?.cols ?? 100, rows: term?.rows ?? 30, seamlessCopy });
+
+    // Elapsed-seconds counter so a slow host reads as "connecting… Ns". Stops
+    // itself once we leave 'connecting' (probe settled, watchdog fired, or a
+    // session_dead/host_unreachable arrived) so a dead pane left open doesn't
+    // re-render every second forever — elapsed is only shown while connecting.
+    let secs = 0;
+    const elapsedTimer = setInterval(() => {
+      if (phaseRef.current !== 'connecting') { clearInterval(elapsedTimer); return; }
+      secs += 1; setElapsed(secs);
+    }, 1000);
+    // 15s watchdog (mirrors the Observer panel's hard-timeout pattern): if the
+    // server is silent and we're still connecting — e.g. an unresponsive host
+    // where the probe hangs longer than its own bound — surface an explicit
+    // "host is unresponsive" panel with a Close, never an infinite spinner.
+    const watchdog = setTimeout(() => {
+      setPhase((p) => (p === 'connecting' ? 'host_unreachable' : p));
+    }, 15000);
+
+    return () => {
+      clearInterval(elapsedTimer);
+      clearTimeout(watchdog);
+      streamApi.send({ type: 'detach', id });
+    };
+    // retryNonce lets recovery actions (Retry / Re-spawn) re-run the attach.
+    // `hostKey` is the pane's host identity (stable string — only changes when
+    // the actual host changes, never on a Seamless-copy toggle), so listing it
+    // never re-attaches on a pref change. hostOptions stays out on purpose.
+  }, [id, host, hostKey, retryNonce]);
 
   // clear "new" badge on focus
   useEffect(() => { if (focused && hasNew) onClearNew(); }, [focused]);
@@ -570,6 +639,43 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     }
   };
 
+  // Re-run the attach effect (Retry / after Re-spawn) by bumping its nonce dep.
+  const retryAttach = () => setRetryNonce((n) => n + 1);
+
+  // [Open shell here]: spawn a host shell at the chat's cwd, OUTSIDE any docker
+  // container, via the same /api/spawn path NewChatForm uses. Pass an explicit
+  // `bash` cmd — an empty cmd would default to `claude` (server.js), not a shell.
+  // On success the new shell chat is opened (replacing this dead pane) and this
+  // pane closes.
+  const openShell = async () => {
+    if (!chat || busy) return;
+    setBusy(true);
+    const shellSession = `shell-${Math.random().toString(36).slice(2, 8)}`;
+    const res = await postJson<{ chat: Chat }>('/api/spawn', {
+      host: chat.host,
+      cwd: chat.cwd || '',
+      cmd: 'bash',
+      session: shellSession,
+      name: `shell @ ${chat.host === '(local)' ? 'local' : chat.host}`,
+    });
+    setBusy(false);
+    if (!res.ok || !res.data) { toast.error(res.error || 'Failed to open shell'); return; }
+    onSpawned(res.data.chat);
+    onClose();
+  };
+
+  // [Re-spawn agent]: recreate this chat's tmux session by re-running its own
+  // command, then re-attach. Only offered for chats warden owns (kind:'tmux'
+  // with a cmd); yatfa chats are externally managed and have no cmd.
+  const respawn = async () => {
+    if (!chat || busy) return;
+    setBusy(true);
+    const res = await postJson('/api/respawn', { id });
+    setBusy(false);
+    if (!res.ok) { toast.error(res.error || 'Failed to re-spawn agent'); return; }
+    retryAttach();
+  };
+
   const stop = (e: React.MouseEvent) => e.stopPropagation();
   const Btn = ({ children, onClick, title, active, disabled }: { children: React.ReactNode; onClick: () => void; title: string; active?: boolean; disabled?: boolean }) => (
     <IconTooltip label={title} side="bottom" disabled={disabled}>
@@ -609,9 +715,9 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
             intentionally untouched: it keeps today's "Connecting" dot (a
             pre-existing UX wrinkle, out of scope here). */}
         <StatusDot
-          tone={dimmed ? 'gray' : connected ? 'green' : errored ? 'red' : 'yellow'}
-          variant={dimmed ? 'solid' : connected ? 'solid' : errored ? 'square' : 'pulse'}
-          label={dimmed ? 'Exited' : connected ? 'Connected' : errored ? 'Error' : 'Connecting'}
+          tone={dimmed ? 'gray' : phase === 'connected' ? 'green' : (phase === 'connecting') ? 'yellow' : 'red'}
+          variant={dimmed ? 'solid' : phase === 'connected' ? 'solid' : (phase === 'connecting' ? 'pulse' : 'square')}
+          label={dimmed ? 'Exited' : phase === 'connected' ? 'Connected' : phase === 'connecting' ? 'Connecting' : phase === 'session_dead' ? 'Session ended' : phase === 'host_unreachable' ? 'Unresponsive' : 'Error'}
         />
         <span className="truncate flex-1 font-medium">
           {label || id}
@@ -657,16 +763,52 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       {/* terminal surface — stop the contextmenu event so right-clicks here keep the xterm
           native paste menu instead of opening the themed pane menu (see Done criterion). */}
       <div ref={wrapRef} className="flex-1 min-h-0 px-1 py-0.5 overflow-hidden relative" onContextMenu={(e) => e.stopPropagation()} onClick={() => termRef.current?.focus()}>
-        {!connected && !errored && !dimmed && (
+        {phase === 'connecting' && (
           <div className="absolute inset-0 flex items-center justify-center gap-2 text-[11px] text-muted-foreground pointer-events-none select-none">
             <span className="size-3 rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground animate-spin" />
-            connecting…
+            connecting{elapsed > 0 ? `… ${elapsed}s` : '…'}
           </div>
         )}
-        {dimmed && (
+        {dimmed && phase === 'connected' && (
           <div className="absolute inset-0 flex items-center justify-center gap-2 text-[11px] text-muted-foreground pointer-events-none select-none">
             agent exited
           </div>
+        )}
+        {phase === 'session_dead' && (
+          <RecoveryPanel
+            title="Agent session not found"
+            description="This chat's tmux session is gone, but the host is reachable. Open a shell here, re-spawn the agent, or close the pane."
+            icon={<CircleOffIcon className="size-5" />}
+            chat={chat}
+            busy={busy}
+            onOpenShell={openShell}
+            onRespawn={respawn}
+            onClose={onClose}
+          />
+        )}
+        {phase === 'host_unreachable' && (
+          <RecoveryPanel
+            title="Host is unresponsive"
+            description={elapsed > 0 ? `Couldn't reach the host after ${elapsed}s. The SSH connection may be down or hanging.` : "Couldn't reach the host. The SSH connection may be down or hanging."}
+            icon={<WifiOffIcon className="size-5" />}
+            chat={chat}
+            busy={busy}
+            variant="unresponsive"
+            onRetry={retryAttach}
+            onClose={onClose}
+          />
+        )}
+        {phase === 'error' && (
+          <RecoveryPanel
+            title="Couldn't attach"
+            description="The session could not be attached. Close the pane or retry."
+            icon={<CircleOffIcon className="size-5" />}
+            chat={chat}
+            busy={busy}
+            variant="unresponsive"
+            onRetry={retryAttach}
+            onClose={onClose}
+          />
         )}
       </div>
     </div>
@@ -696,5 +838,75 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
         />
       )}
     </>
+  );
+}
+
+// In-pane recovery / unresponsive overlay (WARDEN-231). Replaces the infinite
+// "connecting" spinner for a dead or unreachable session with an explicit
+// message and user-controllable actions. Uses shadcn Button + lucide icons, no
+// magic-number sizes or inline styles (UI standards WARDEN-68). Two variants:
+//   recovery    — session dead, host up: [Open shell here], [Re-spawn agent]
+//                 (only when the chat carries a respawnable cmd), [Close].
+//   unresponsive— host unreachable / attach error: [Retry], [Close].
+function RecoveryPanel({
+  title,
+  description,
+  icon,
+  chat,
+  busy,
+  variant = 'recovery',
+  onOpenShell,
+  onRespawn,
+  onRetry,
+  onClose,
+}: {
+  title: string;
+  description: string;
+  icon: React.ReactNode;
+  chat?: Chat | null;
+  busy: boolean;
+  variant?: 'recovery' | 'unresponsive';
+  onOpenShell?: () => void;
+  onRespawn?: () => void;
+  onRetry?: () => void;
+  onClose: () => void;
+}) {
+  // Re-spawn is offered only for chats warden owns (manual/spawned kind:'tmux'
+  // with a stored cmd); yatfa chats are externally managed and carry no cmd.
+  const respawnable = chat?.kind === 'tmux' && Boolean(chat?.cmd);
+  return (
+    <div
+      className="absolute inset-0 z-10 flex items-center justify-center bg-background/80 p-4 text-center backdrop-blur-sm"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="flex w-full max-w-sm flex-col items-center gap-3">
+        <div className="flex size-9 items-center justify-center rounded-full bg-muted text-muted-foreground">
+          {icon}
+        </div>
+        <div className="text-sm font-medium text-foreground">{title}</div>
+        <p className="text-xs text-muted-foreground">{description}</p>
+        <div className="flex flex-wrap items-center justify-center gap-2">
+          {variant === 'recovery' ? (
+            <>
+              <Button size="sm" onClick={onOpenShell} disabled={busy || !chat}>
+                <SquareTerminalIcon /> Open shell here
+              </Button>
+              {respawnable && (
+                <Button size="sm" variant="outline" onClick={onRespawn} disabled={busy}>
+                  <PowerIcon /> Re-spawn agent
+                </Button>
+              )}
+            </>
+          ) : (
+            <Button size="sm" onClick={onRetry} disabled={busy}>
+              <RefreshCwIcon /> Retry
+            </Button>
+          )}
+          <Button size="sm" variant="ghost" onClick={onClose} disabled={busy}>
+            <XIcon /> Close
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }

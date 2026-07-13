@@ -76,6 +76,21 @@ export async function hasSession(chat, cfg) {
   return r.ok;
 }
 
+// Bounded liveness probe (WARDEN-231). Runs `has-session` with a timeout and
+// returns the RAW {ok, code, stdout, stderr} result — unlike hasSession() which
+// collapses it to a boolean. The raw result is what lets the server tell three
+// cases apart:
+//   ok                → the session exists; attach normally.
+//   !ok && !transport → the session is absent but the host answered (tmux exits
+//                       non-zero, e.g. "can't find session") → session_dead.
+//   !ok && transport  → SSH never delivered the command (refused/timed-out/
+//                       wedged ControlMaster) or the probe timed out → host_unreachable.
+// `timeout` bounds both the remote (SIGKILL on the ssh child) and the local
+// (spawnSync SIGTERM) path so a wedged host can never hang the probe forever.
+export async function probeSession(chat, cfg, { timeout = 8000 } = {}) {
+  return runTmux(chat, ['has-session', '-t', sess(chat, cfg)], { timeout });
+}
+
 // Set window-size latest so tmux follows whichever client is active (Warden's
 // ConPTY SIGWINCH propagates through ssh → tmux automatically). Don't use
 // `manual` — it locks the window and prevents other clients from resizing.

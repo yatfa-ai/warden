@@ -57,7 +57,14 @@ export type StreamMsg =
   // Seamless copy is NOT enabled for that host — i.e. the pane's standard
   // select+copy is impaired. Lets the pane show a dismissible hint. Only sent
   // when mouse is on (off/unknown → no message), so its arrival implies mouseOn.
-  | { type: 'mouse_state'; id: string; mouseOn: boolean };
+  | { type: 'mouse_state'; id: string; mouseOn: boolean }
+  // WARDEN-231: the bounded pre-attach probe classified this pane's session.
+  // session_dead = host reachable but the tmux session is absent (recovery panel
+  // with Open shell / Re-spawn / Close); host_unreachable = SSH can't deliver
+  // (elapsed-then-unresponsive panel with Retry / Close). Distinct from
+  // attach_error (a thrown attach) so the frontend branches correctly.
+  | { type: 'session_dead'; id: string }
+  | { type: 'host_unreachable'; id: string };
 
 export type StreamReq =
   | { type: 'monitor'; id: string }

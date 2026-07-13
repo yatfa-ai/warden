@@ -34,6 +34,7 @@ interface Props {
   // ＋ split (WARDEN-223): spawn a host shell pane derived from the focused
   // pane (same host + cwd). App owns the spawn; PaneGrid only fires it.
   onSplitShell?: () => void;
+  onSpawned: (chat: Chat) => void;
   externalSearchQuery?: { paneId: string; query: string } | null;
   onToggleSidebar?: () => void;
   onToggleObserver?: () => void;
@@ -78,7 +79,7 @@ interface Props {
 
 function colsFor(n: number) { return n <= 1 ? 1 : Math.ceil(Math.sqrt(n)); }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalTheme, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, hostOptions, copyHintDismissed, onDismissCopyHint }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalTheme, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, hostOptions, copyHintDismissed, onDismissCopyHint }: Props) {
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
   // WARDEN-334: the 1-based line a grep result selected, fed to FileViewer's
@@ -275,6 +276,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     hostOptions={hostOptions}
                     copyHintDismissed={copyHintDismissed}
                     onDismissCopyHint={onDismissCopyHint}
+                    onSpawned={onSpawned}
                   />
                 </div>
               );
