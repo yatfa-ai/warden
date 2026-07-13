@@ -8,13 +8,15 @@ import { Checkbox } from '@/components/ui/checkbox';
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ArrowLeft, Trash2 } from 'lucide-react';
-import { type Theme, type TerminalColorScheme } from '@/lib/theme';
+import { type Theme, type TerminalColorScheme, THEMES } from '@/lib/theme';
 import { type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
 import { type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type PresetNameIssue, type HostOptionsMap, PRESET_NAME_MAX, validatePresetName, DEFAULT_TERMINAL_FONT_FAMILY } from '@/lib/storage';
@@ -1002,19 +1004,29 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                 </div>
 
                 <div className="flex flex-col gap-2">
-                  <Label htmlFor="theme">Color Scheme</Label>
+                  <Label htmlFor="theme">Theme</Label>
                   <Select value={theme} onValueChange={(v) => setTheme(v as Theme)}>
                     <SelectTrigger id="theme" className="w-full">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="system">System (follow OS preference)</SelectItem>
-                      <SelectItem value="light">Light</SelectItem>
-                      <SelectItem value="dark">Dark</SelectItem>
+                      <SelectItem value="system">System (follow OS)</SelectItem>
+                      <SelectGroup>
+                        <SelectLabel>Light</SelectLabel>
+                        {THEMES.filter((t) => t.mode === 'light').map((t) => (
+                          <SelectItem key={t.id} value={t.id}>{t.label}</SelectItem>
+                        ))}
+                      </SelectGroup>
+                      <SelectGroup>
+                        <SelectLabel>Dark</SelectLabel>
+                        {THEMES.filter((t) => t.mode === 'dark').map((t) => (
+                          <SelectItem key={t.id} value={t.id}>{t.label}</SelectItem>
+                        ))}
+                      </SelectGroup>
                     </SelectContent>
                   </Select>
                   <p className="text-xs text-muted-foreground">
-                    Choose how Warden appears. "System" automatically switches between light and dark based on your OS settings.
+                    A complete color theme for the whole app and every terminal pane. "System" follows your OS (GitHub Light ↔ GitHub Dark); any named theme applies live and is remembered across reloads.
                   </p>
                 </div>
 
@@ -1031,7 +1043,7 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                     </SelectContent>
                   </Select>
                   <p className="text-xs text-muted-foreground">
-                    How terminal panes are colored. "Match app theme" follows the Color Scheme above (including System); "Always dark/light" forces it regardless of the rest of the UI. Applies live to open panes.
+                    How terminal panes are colored. "Match app theme" follows the Theme above (including System); "Always dark/light" forces the terminal to GitHub Dark / GitHub Light regardless of the rest of the UI. Applies live to open panes.
                   </p>
                 </div>
 

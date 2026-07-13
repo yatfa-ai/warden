@@ -49,73 +49,419 @@
     --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+/*
+ * Named-theme token blocks (WARDEN-255).
+ *
+ * Each theme is a complete shadcn token set drawn from an established
+ * open-source palette (MIT/ISC), authored here under a `[data-theme="<id>"]`
+ * selector. `applyTheme()` (web/src/lib/theme.ts) sets that attribute on
+ * `<html>` from the persisted preference and toggles `.dark` from the theme's
+ * inherent mode — so every block is self-contained (a theme brings ALL the
+ * tokens the app already uses, never a hand-rolled magic color), and Tailwind's
+ * `dark:` variant keeps working alongside it.
+ *
+ * `:root` carries the DEFAULT theme's tokens (GitHub Dark — the app default) so
+ * the very first paint, before applyTheme runs, is already correct for the
+ * common case; the matching `[data-theme="github-dark"]` block below is the
+ * single source of truth and `:root` mirrors it for FOUC avoidance only.
+ *
+ * Selection contrast (the WARDEN-143 bug) is fixed structurally: `::selection`
+ * (in @layer base below) now reads a DEDICATED `--selection` /
+ * `--selection-foreground` pair, decoupled from the button brand color
+ * (`--primary`/`--primary-foreground`, whose contrast is tuned for buttons, not
+ * for a selection highlight). Every theme defines that pair so the selection
+ * background is visibly distinct against the neutral page background AND its text
+ * passes WCAG AA against the selection background — in every theme, light and
+ * dark. The `selection-contrast.test.mjs` suite asserts both ratios against these
+ * shipped values, so "passes WCAG AA" is verified, not asserted.
+ *
+ * Palette sources (published hex): GitHub Primer, VS Code Light+/Dark+,
+ * Catppuccin Mocha, Dracula, Nord, Atom One Dark.
+ */
+
+/* --- Default (mirrors GitHub Dark so the pre-JS paint matches the app default) */
 :root {
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.145 0 0);
-    --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
-    --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.205 0 0);
-    --primary-foreground: oklch(0.985 0 0);
-    --secondary: oklch(0.97 0 0);
-    --secondary-foreground: oklch(0.205 0 0);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
-    --accent: oklch(0.97 0 0);
-    --accent-foreground: oklch(0.205 0 0);
-    --destructive: oklch(0.577 0.245 27.325);
-    --border: oklch(0.922 0 0);
-    --input: oklch(0.922 0 0);
-    --ring: oklch(0.708 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
     --radius: 0.625rem;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: oklch(0.205 0 0);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
-    --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.708 0 0);
+    --background: #0d1117;
+    --selection: #1f6feb;
+    --selection-foreground: #ffffff;
+    --foreground: #e6edf3;
+    --card: #161b22;
+    --card-foreground: #e6edf3;
+    --popover: #161b22;
+    --popover-foreground: #e6edf3;
+    --primary: #2f81f7;
+    --primary-foreground: #ffffff;
+    --secondary: #21262d;
+    --secondary-foreground: #e6edf3;
+    --muted: #161b22;
+    --muted-foreground: #8b949e;
+    --accent: #21262d;
+    --accent-foreground: #e6edf3;
+    --destructive: #f85149;
+    --border: #30363d;
+    --input: #30363d;
+    --ring: #1f6feb;
+    --chart-1: #2f81f7;
+    --chart-2: #3fb950;
+    --chart-3: #d29922;
+    --chart-4: #a371f7;
+    --chart-5: #f85149;
+    --sidebar: #010409;
+    --sidebar-foreground: #e6edf3;
+    --sidebar-primary: #2f81f7;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: #21262d;
+    --sidebar-accent-foreground: #e6edf3;
+    --sidebar-border: #30363d;
+    --sidebar-ring: #2f81f7;
 }
 
-.dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
+/* --- GitHub Light (Primer) -------------------------------------------------- */
+[data-theme="github-light"] {
+    --background: #ffffff;
+    --selection: #0969da;
+    --selection-foreground: #ffffff;
+    --foreground: #1f2328;
+    --card: #ffffff;
+    --card-foreground: #1f2328;
+    --popover: #ffffff;
+    --popover-foreground: #1f2328;
+    --primary: #0969da;
+    --primary-foreground: #ffffff;
+    --secondary: #eaeef2;
+    --secondary-foreground: #1f2328;
+    --muted: #f6f8fa;
+    --muted-foreground: #656d76;
+    --accent: #f6f8fa;
+    --accent-foreground: #1f2328;
+    --destructive: #cf222e;
+    --border: #d0d7de;
+    --input: #d0d7de;
+    --ring: #0969da;
+    --chart-1: #0969da;
+    --chart-2: #1a7f37;
+    --chart-3: #bf8700;
+    --chart-4: #8250df;
+    --chart-5: #cf222e;
+    --sidebar: #f6f8fa;
+    --sidebar-foreground: #1f2328;
+    --sidebar-primary: #0969da;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: #eaeef2;
+    --sidebar-accent-foreground: #1f2328;
+    --sidebar-border: #d0d7de;
+    --sidebar-ring: #0969da;
+}
+
+/* --- Light+ (VS Code) ------------------------------------------------------- */
+[data-theme="vscode-light"] {
+    --background: #ffffff;
+    --selection: #007acc;
+    --selection-foreground: #ffffff;
+    --foreground: #333333;
+    --card: #f3f3f3;
+    --card-foreground: #333333;
+    --popover: #ffffff;
+    --popover-foreground: #333333;
+    --primary: #007acc;
+    --primary-foreground: #ffffff;
+    --secondary: #e8e8e8;
+    --secondary-foreground: #333333;
+    --muted: #f3f3f3;
+    --muted-foreground: #6a6a6a;
+    --accent: #e8e8e8;
+    --accent-foreground: #333333;
+    --destructive: #f14c4c;
+    --border: #cecece;
+    --input: #cecece;
+    --ring: #007acc;
+    --chart-1: #007acc;
+    --chart-2: #16825d;
+    --chart-3: #b58900;
+    --chart-4: #9b1888;
+    --chart-5: #aa3731;
+    --sidebar: #f3f3f3;
+    --sidebar-foreground: #333333;
+    --sidebar-primary: #007acc;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: #e8e8e8;
+    --sidebar-accent-foreground: #333333;
+    --sidebar-border: #cecece;
+    --sidebar-ring: #007acc;
+}
+
+/* --- GitHub Dark (Primer) --------------------------------------------------- */
+[data-theme="github-dark"] {
+    --background: #0d1117;
+    --selection: #1f6feb;
+    --selection-foreground: #ffffff;
+    --foreground: #e6edf3;
+    --card: #161b22;
+    --card-foreground: #e6edf3;
+    --popover: #161b22;
+    --popover-foreground: #e6edf3;
+    --primary: #2f81f7;
+    --primary-foreground: #ffffff;
+    --secondary: #21262d;
+    --secondary-foreground: #e6edf3;
+    --muted: #161b22;
+    --muted-foreground: #8b949e;
+    --accent: #21262d;
+    --accent-foreground: #e6edf3;
+    --destructive: #f85149;
+    --border: #30363d;
+    --input: #30363d;
+    --ring: #1f6feb;
+    --chart-1: #2f81f7;
+    --chart-2: #3fb950;
+    --chart-3: #d29922;
+    --chart-4: #a371f7;
+    --chart-5: #f85149;
+    --sidebar: #010409;
+    --sidebar-foreground: #e6edf3;
+    --sidebar-primary: #2f81f7;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: #21262d;
+    --sidebar-accent-foreground: #e6edf3;
+    --sidebar-border: #30363d;
+    --sidebar-ring: #2f81f7;
+}
+
+/* --- Dark+ (VS Code) -------------------------------------------------------- */
+[data-theme="vscode-dark"] {
+    --background: #1e1e1e;
+    --selection: #1177bb;
+    --selection-foreground: #ffffff;
+    --foreground: #d4d4d4;
+    --card: #252526;
+    --card-foreground: #d4d4d4;
+    --popover: #252526;
+    --popover-foreground: #d4d4d4;
+    --primary: #0e639c;
+    --primary-foreground: #ffffff;
+    --secondary: #2a2d2e;
+    --secondary-foreground: #d4d4d4;
+    --muted: #2d2d30;
+    --muted-foreground: #858585;
+    --accent: #2a2d2e;
+    --accent-foreground: #d4d4d4;
+    --destructive: #f14c4c;
+    --border: #3c3c3c;
+    --input: #3c3c3c;
+    --ring: #007acc;
+    --chart-1: #569cd6;
+    --chart-2: #6a9955;
+    --chart-3: #dcdcaa;
+    --chart-4: #c586c0;
+    --chart-5: #f44747;
+    --sidebar: #252526;
+    --sidebar-foreground: #d4d4d4;
+    --sidebar-primary: #0e639c;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: #2a2d2e;
+    --sidebar-accent-foreground: #d4d4d4;
+    --sidebar-border: #3c3c3c;
+    --sidebar-ring: #007acc;
+}
+
+/* --- Catppuccin Mocha ------------------------------------------------------- */
+[data-theme="catppuccin-mocha"] {
+    --background: #1e1e2e;
+    --selection: #cba6f7;
+    --selection-foreground: #1e1e2e;
+    --foreground: #cdd6f4;
+    --card: #181825;
+    --card-foreground: #cdd6f4;
+    --popover: #181825;
+    --popover-foreground: #cdd6f4;
+    --primary: #cba6f7;
+    --primary-foreground: #1e1e2e;
+    --secondary: #313244;
+    --secondary-foreground: #cdd6f4;
+    --muted: #313244;
+    --muted-foreground: #a6adc8;
+    --accent: #313244;
+    --accent-foreground: #cdd6f4;
+    --destructive: #f38ba8;
+    --border: #313244;
+    --input: #45475a;
+    --ring: #cba6f7;
+    --chart-1: #cba6f7;
+    --chart-2: #a6e3a1;
+    --chart-3: #f9e2af;
+    --chart-4: #89b4fa;
+    --chart-5: #f38ba8;
+    --sidebar: #181825;
+    --sidebar-foreground: #cdd6f4;
+    --sidebar-primary: #cba6f7;
+    --sidebar-primary-foreground: #1e1e2e;
+    --sidebar-accent: #313244;
+    --sidebar-accent-foreground: #cdd6f4;
+    --sidebar-border: #313244;
+    --sidebar-ring: #cba6f7;
+}
+
+/* --- Dracula ---------------------------------------------------------------- */
+[data-theme="dracula"] {
+    --background: #282a36;
+    --selection: #bd93f9;
+    --selection-foreground: #282a36;
+    --foreground: #f8f8f2;
+    --card: #21222c;
+    --card-foreground: #f8f8f2;
+    --popover: #21222c;
+    --popover-foreground: #f8f8f2;
+    --primary: #bd93f9;
+    --primary-foreground: #282a36;
+    --secondary: #44475a;
+    --secondary-foreground: #f8f8f2;
+    --muted: #44475a;
+    --muted-foreground: #6272a4;
+    --accent: #44475a;
+    --accent-foreground: #f8f8f2;
+    --destructive: #ff5555;
+    --border: #44475a;
+    --input: #6272a4;
+    --ring: #bd93f9;
+    --chart-1: #bd93f9;
+    --chart-2: #50fa7b;
+    --chart-3: #f1fa8c;
+    --chart-4: #8be9fd;
+    --chart-5: #ff5555;
+    --sidebar: #21222c;
+    --sidebar-foreground: #f8f8f2;
+    --sidebar-primary: #bd93f9;
+    --sidebar-primary-foreground: #282a36;
+    --sidebar-accent: #44475a;
+    --sidebar-accent-foreground: #f8f8f2;
+    --sidebar-border: #44475a;
+    --sidebar-ring: #bd93f9;
+}
+
+/* --- Nord ------------------------------------------------------------------- */
+[data-theme="nord"] {
+    --background: #2e3440;
+    --selection: #88c0d0;
+    --selection-foreground: #2e3440;
+    --foreground: #d8dee9;
+    --card: #3b4252;
+    --card-foreground: #d8dee9;
+    --popover: #3b4252;
+    --popover-foreground: #d8dee9;
+    --primary: #88c0d0;
+    --primary-foreground: #2e3440;
+    --secondary: #3b4252;
+    --secondary-foreground: #d8dee9;
+    --muted: #3b4252;
+    --muted-foreground: #81a1c1;
+    --accent: #3b4252;
+    --accent-foreground: #d8dee9;
+    --destructive: #bf616a;
+    --border: #3b4252;
+    --input: #434c5e;
+    --ring: #88c0d0;
+    --chart-1: #88c0d0;
+    --chart-2: #a3be8c;
+    --chart-3: #ebcb8b;
+    --chart-4: #5e81ac;
+    --chart-5: #bf616a;
+    --sidebar: #2e3440;
+    --sidebar-foreground: #d8dee9;
+    --sidebar-primary: #88c0d0;
+    --sidebar-primary-foreground: #2e3440;
+    --sidebar-accent: #3b4252;
+    --sidebar-accent-foreground: #d8dee9;
+    --sidebar-border: #3b4252;
+    --sidebar-ring: #88c0d0;
+}
+
+/* --- One Dark (Atom) -------------------------------------------------------- */
+[data-theme="one-dark"] {
+    --background: #282c34;
+    --selection: #61afef;
+    --selection-foreground: #282c34;
+    --foreground: #abb2bf;
+    --card: #21252b;
+    --card-foreground: #abb2bf;
+    --popover: #21252b;
+    --popover-foreground: #abb2bf;
+    --primary: #61afef;
+    --primary-foreground: #282c34;
+    --secondary: #2c313a;
+    --secondary-foreground: #abb2bf;
+    --muted: #2c313a;
+    --muted-foreground: #5c6370;
+    --accent: #2c313a;
+    --accent-foreground: #abb2bf;
+    --destructive: #e06c75;
+    --border: #3b4048;
+    --input: #3b4048;
+    --ring: #61afef;
+    --chart-1: #61afef;
+    --chart-2: #98c379;
+    --chart-3: #e5c07b;
+    --chart-4: #c678dd;
+    --chart-5: #e06c75;
+    --sidebar: #21252b;
+    --sidebar-foreground: #abb2bf;
+    --sidebar-primary: #61afef;
+    --sidebar-primary-foreground: #282c34;
+    --sidebar-accent: #2c313a;
+    --sidebar-accent-foreground: #abb2bf;
+    --sidebar-border: #3b4048;
+    --sidebar-ring: #61afef;
+}
+
+/*
+ * `.dark` is now PURELY a Tailwind-variant signal (set by applyTheme alongside
+ * data-theme from the active theme's mode). Token VALUES come exclusively from
+ * the `[data-theme]` blocks above, so this class carries no tokens of its own —
+ * it only feeds `@custom-variant dark (&:is(.dark *))` and `dark:` utilities.
+ */
+
+/*
+ * xterm terminal surface — follow the RESOLVED TERMINAL PALETTE, not the chrome (WARDEN-255).
+ *
+ * xterm's bundled stylesheet pins `.xterm .xterm-viewport { background-color: #000 }`,
+ * and with no webgl/canvas addon loaded the DOM renderer does NOT paint the
+ * theme's `background` onto the viewport element. So a CSS rule must drive the
+ * surface. The question is WHICH color: the chrome `--background`, or the resolved
+ * TERMINAL palette's background.
+ *
+ * It must be the terminal palette. PaneTile resolves the terminal color-scheme
+ * override (`auto`/`dark`/`light`) down to a concrete named-theme id and looks up
+ * its `XtermPalette`; BOTH the viewport (this rule, via `--terminal-background`)
+ * AND the xterm text palette (`term.options.theme = terminalPalette`) derive from
+ * that SAME object — so viewport and text can never decouple. PaneTile sets
+ * `--terminal-background` inline on the `.xterm` host element from
+ * `terminalPalette.background`.
+ *
+ *   - `auto`  → terminalPalette == the active theme. Each theme's CSS `--background`
+ *               EQUALS its `xterm.background` hex by construction (asserted in
+ *               selection-contrast.test.mjs), so `--terminal-background` ==
+ *               chrome `--background` here — the verified-fixed auto case is
+ *               unchanged.
+ *   - `dark`  → GitHub Dark palette (bg #0d1117, light text) → dark viewport + light text.
+ *   - `light` → GitHub Light palette (bg #ffffff, dark text) → light viewport + dark text.
+ *
+ * The prior fix pointed this rule at chrome `--background` while the text palette
+ * still followed the override — so override≠chrome (e.g. a light app forcing a
+ * dark terminal) put light text on a light viewport: an INVISIBLE prompt. Driving
+ * the surface from the terminal palette fixes both override directions while
+ * leaving `auto` identical. The `var(--background)` fallback only fires if the
+ * inline token is ever unset (defensive — e.g. an xterm instance not hosted by
+ * PaneTile), preserving the old behavior in that case.
+ *
+ * `!important` + UNLAYERED is deliberate, not a smell: xterm.css is an unlayered
+ * third-party stylesheet that loads AFTER index.css (see main.tsx), and the DOM
+ * renderer may inject an inline background — so neither the @layer cascade, nor
+ * source order, nor plain specificity can reliably override the library default.
+ * This is a targeted override of a single third-party rule.
+ */
+.xterm .xterm-viewport,
+.xterm .xterm {
+  background-color: var(--terminal-background, var(--background)) !important;
 }
 
 @layer base {
@@ -187,18 +533,30 @@
   /*
    * Themed text selection.
    *
-   * Replaces the OS-default (often jarring blue) highlight with monochrome theme
-   * tokens. This theme has no brand hue, so accent tokens give a deliberate
-   * dark/near-black highlight in dark mode that also adapts cleanly to light.
+   * Replaces the OS-default (often jarring blue) highlight with the active
+   * theme's dedicated selection pair. The selection fix (WARDEN-143 →
+   * WARDEN-255): the old rule read `--accent`/`--accent-foreground`, and in the
+   * hand-rolled dark palette `--accent` sat a hair above the page background
+   * while the selection text equaled normal text — selection was nearly
+   * invisible. The first named-theme pass reused the button brand pair
+   * (`--primary`/`--primary-foreground`), but that pair is contrast-tuned for
+   * buttons, not a selection highlight, and it MISSED the WCAG AA bar in two
+   * themes (the default GitHub Dark among them). So selection now has its OWN
+   * token pair, tuned per theme so:
+   *   - the selected text contrasts with the selection background ≥ 4.5:1
+   *     (WCAG 2.x AA for normal text), AND
+   *   - the selection background contrasts with the page `--background` ≥ 3:1
+   *     (the distinctness bar so the highlight is clearly visible).
+   * Both ratios are asserted in `selection-contrast.test.mjs` for every theme.
    * (xterm disables user-select on the terminal, so it is unaffected.)
    */
   ::selection {
-    background-color: var(--accent);
-    color: var(--accent-foreground);
+    background-color: var(--selection);
+    color: var(--selection-foreground);
   }
   ::-moz-selection {
-    background-color: var(--accent);
-    color: var(--accent-foreground);
+    background-color: var(--selection);
+    color: var(--selection-foreground);
   }
 }
 

@@ -15,6 +15,8 @@ import type { TimestampFormat } from './formatTimestamp';
 // user's data — the newest surviving payload is promoted forward to the current
 // key instead. Persistence errors are surfaced via console.warn rather than
 // swallowed (WARDEN-89), so a quota/serialization failure is never silent.
+import { normalizeThemePref, type ThemePref } from '@/lib/themes';
+
 const KEY = 'warden:ui:v2';
 const KEY_PREFIX = 'warden:ui';
 const KEY_VERSION = 2;
@@ -206,7 +208,12 @@ export interface UiState {
   // pref (like density/copyOnSelect); persisted by App's saveUi effect, never
   // sent to the backend / /api/config. See WARDEN-213.
   timestampFormat?: TimestampFormat;
-  theme?: 'light' | 'dark' | 'system';
+  // App theme: either a concrete named-theme id (e.g. 'github-dark',
+  // 'dracula') or 'system' to follow the OS. Default 'system'. Backward
+  // compatible: a legacy stored 'light'/'dark'/'system' value migrates on load
+  // to the closest named theme (via normalizeThemePref), so an upgrade never
+  // crashes. Pure client-side pref; never sent to the backend / /api/config.
+  theme?: ThemePref;
   // UI density: 'comfortable' (default = today's spacing) or 'compact' (tighter
   // rows/headers/gaps so more agents fit per screen). Pure client-side pref.
   density?: 'comfortable' | 'compact';
@@ -518,7 +525,7 @@ export function loadUi(): UiState {
         // type stays 'relative' (today's "2m ago" buckets) — the conservative
         // default that minimizes disruption across every timestamp surface.
         timestampFormat: v.timestampFormat === 'absolute' ? 'absolute' : 'relative',
-        theme: v.theme ?? 'system',
+        theme: normalizeThemePref(v.theme),
         density: v.density === 'compact' ? 'compact' : 'comfortable',
         paneLayout: (v.paneLayout === 'stacked' || v.paneLayout === 'side-by-side') ? v.paneLayout : 'auto',
         onExitBehavior: ['keep', 'dim', 'auto-close'].includes(v.onExitBehavior) ? v.onExitBehavior : 'keep',

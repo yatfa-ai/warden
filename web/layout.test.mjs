@@ -42,11 +42,18 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const storagePath = resolve(__dirname, 'src/lib/storage.ts');
 
 // --- Load the REAL storage.ts (TS -> ESM via the OXC transform Vite bundles) --
-const src = readFileSync(storagePath, 'utf8');
-const { code } = await transformWithOxc(src, storagePath, {});
+// storage.ts imports normalizeThemePref from @/lib/themes (WARDEN-255), so
+// transpile that dependency too and rewrite the bare specifier to a relative
+// path Node can resolve from the tmp dir.
+const themesPath = resolve(__dirname, 'src/lib/themes.ts');
+const storageSrc = readFileSync(storagePath, 'utf8');
+const themesSrc = readFileSync(themesPath, 'utf8');
+const { code } = await transformWithOxc(storageSrc, storagePath, {});
+const { code: themesCode } = await transformWithOxc(themesSrc, themesPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-layout-test-'));
+writeFileSync(join(tmpDir, 'themes.mjs'), themesCode);
 const tmpFile = join(tmpDir, 'storage.mjs');
-writeFileSync(tmpFile, code);
+writeFileSync(tmpFile, code.replaceAll('@/lib/themes', './themes.mjs'));
 const {
   clampLayoutWidths,
   clampSidebarWidth,

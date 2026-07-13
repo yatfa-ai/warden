@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Terminal, type ITheme } from '@xterm/xterm';
+import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
@@ -9,6 +9,7 @@ import { findPathCandidates } from '@/lib/path-links';
 import { hostTagOf } from '@/lib/chatDisplay';
 import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBehavior, type HostOptionsMap } from '@/lib/storage';
 import { PANE_DRAG_MIME } from '@/lib/dnd';
+import { getThemeById, type ThemeId } from '@/lib/themes';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Button } from '@/components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
@@ -18,25 +19,14 @@ import { postJson } from '@/lib/api';
 import { CircleOffIcon, PowerIcon, RefreshCwIcon, SquareTerminalIcon, WifiOffIcon, XIcon } from 'lucide-react';
 import { toast } from 'sonner';
 
-// Two explicit xterm theme objects with hex values derived from the app's design
-// tokens (web/src/index.css). xterm.js does not reliably parse oklch(), so we
-// pass concrete hex rather than the raw token strings (nuance #2):
-//   light : --background oklch(1 0 0) #ffffff  /  --foreground oklch(0.145 0 0) #0a0a0a
-//   dark  : pure black (preserves the shipped dark terminal look + matches the
-//           bg-black container so there is no seam in the padding gap)  /
-//           --foreground oklch(0.985 0 0) #fafafa.
-// The ANSI 16-color palette is left at xterm defaults so colored program output
-// (red errors, green success, …) is unchanged; only the surface bg/fg/cursor +
-// a subtle selection highlight are themed to match.
-const TERMINAL_THEMES: Record<'light' | 'dark', ITheme> = {
-  light: { background: '#ffffff', foreground: '#0a0a0a', cursor: '#0a0a0a', cursorAccent: '#ffffff', selectionBackground: 'rgba(10, 10, 10, 0.15)' },
-  dark: { background: '#000000', foreground: '#fafafa', cursor: '#fafafa', cursorAccent: '#000000', selectionBackground: 'rgba(250, 250, 250, 0.20)' },
-};
-
-// Container background that wraps the xterm canvas. Must match the canvas
-// background above so the px-1/py-0.5 padding gap around the terminal never shows
-// a different color.
-const TERMINAL_BG_CLASS: Record<'light' | 'dark', string> = { light: 'bg-white', dark: 'bg-black' };
+// The xterm surface palette is now driven by the active NAMED THEME's registry
+// entry (web/src/lib/themes.ts) — one palette per theme instead of a hardcoded
+// light/dark pair. xterm.js does not reliably parse oklch() (or CSS variables),
+// so each theme ships concrete hex for bg/fg/cursor/cursorAccent/selection; the
+// registry's XtermPalette field names match xterm's ITheme so the object is
+// passed straight through. The ANSI 16-color palette stays at xterm defaults so
+// colored program output (red errors, green success, …) is unchanged; only the
+// surface bg/fg/cursor + a subtle selection highlight are themed to match.
 
 // The open-on-click modifier matches VSCode: Cmd on macOS, Ctrl everywhere else.
 const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPod|Pad/i.test(navigator.platform || navigator.userAgent || '');
@@ -95,11 +85,11 @@ interface Props {
   // (App already guarantees non-empty, but we guard here too so a pane never
   // goes blank). Settings-only: no in-pane control, unlike font size.
   fontFamily: string;
-  // Resolved terminal surface color (App resolves the terminalColorScheme pref +
-  // the effective app theme down to a concrete value here). Drives the xterm
-  // `theme` option + the container background, and re-themes already-open panes
-  // live via the [terminalTheme] effect below.
-  terminalTheme: 'light' | 'dark';
+  // Resolved terminal theme id (App resolves the terminalColorScheme pref + the
+  // active theme down to a concrete named-theme id here). Drives the xterm
+  // `theme` option (looked up from the registry) + the container background, and
+  // re-themes already-open panes live via the [terminalThemeId] effect below.
+  terminalThemeId: ThemeId;
   // Terminal cursor shape × blink (blink/steady × block/underline/bar). Drives
   // the xterm `cursorStyle` + `cursorBlink` options. A 'steady-*' value stops the
   // blink — the accessibility payoff vs WARDEN-190 — and applies live to already-
@@ -142,7 +132,7 @@ interface Props {
   onSpawned: (chat: Chat) => void;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalTheme, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, hostOptions, copyHintDismissed, onDismissCopyHint, onSpawned }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, hostOptions, copyHintDismissed, onDismissCopyHint, onSpawned }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -247,6 +237,14 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const copyOnSelectRef = useRef(copyOnSelect);
   copyOnSelectRef.current = copyOnSelect;
 
+  // The xterm palette + container background for this pane's resolved terminal
+  // theme, looked up from the named-theme registry (one palette per theme). The
+  // fallback to the GitHub Dark palette only fires for an unknown id (a programming
+  // error) so the pane is never left palette-less. Recomputed each render so a
+  // theme change (or an OS flip under "System") re-themes the pane live via the
+  // [terminalThemeId] effect below.
+  const terminalPalette = getThemeById(terminalThemeId)?.xterm ?? getThemeById('github-dark')!.xterm;
+
   useEffect(() => {
     const term = new Terminal({
       fontFamily: safeFontFamily,
@@ -254,7 +252,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       cursorBlink: CURSOR_OPTIONS[terminalCursorStyle].cursorBlink,
       cursorStyle: CURSOR_OPTIONS[terminalCursorStyle].cursorStyle,
       allowProposedApi: true,
-      theme: TERMINAL_THEMES[terminalTheme],
+      theme: terminalPalette,
     });
     const fit = new FitAddon();
     const search = new SearchAddon();
@@ -520,20 +518,20 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // covers the cases where xterm does accept the live change.
   useEffect(() => { if (termRef.current) { termRef.current.options.fontSize = safeFontSize; termRef.current.options.scrollback = safeScrollback; termRef.current.options.fontFamily = safeFontFamily; try { fitRef.current?.fit(); } catch {} } }, [safeFontSize, safeScrollback, safeFontFamily]);
 
-  // terminal theme (App-resolved terminalColorScheme + effective theme) — re-theme
+  // terminal theme (App-resolved terminalColorScheme + active theme) — re-theme
   // already-open panes live without a reopen, mirroring the font-size/scrollback
   // live effect. Fires on mount (initial paint already happened via the ctor, but
-  // this also covers the first render) and whenever the resolved color changes —
-  // including a manual Color Scheme toggle, the Terminal color scheme pref, or an
-  // OS theme flip while Color Scheme = "Match app theme" (App tracks an
-  // effectiveTheme React state so the prop actually changes here).
-  useEffect(() => { if (termRef.current) { termRef.current.options.theme = TERMINAL_THEMES[terminalTheme]; try { fitRef.current?.fit(); } catch {} } }, [terminalTheme]);
+  // this also covers the first render) and whenever the resolved theme id changes
+  // — including a manual theme pick, the Terminal color scheme pref, or an OS
+  // theme flip while the app theme = "System" (App tracks a resolvedThemeId
+  // React state so the prop actually changes here).
+  useEffect(() => { if (termRef.current) { termRef.current.options.theme = terminalPalette; try { fitRef.current?.fit(); } catch {} } }, [terminalPalette]);
 
   // cursor style + blink — live-update already-open panes so a `steady-*`
   // selection stops the blink immediately. This is the accessibility payoff vs
   // WARDEN-190, whose reduced-motion work was CSS + scroll only and never reached
   // xterm's independently-timed cursor blink. The constructor seeds the value at
-  // mount; this effect mirrors the [terminalTheme] live option update above so a
+  // mount; this effect mirrors the [terminalThemeId] live option update above so a
   // mid-session change applies without a reopen (and newly-opened panes honor it
   // from the constructor).
   useEffect(() => {
@@ -706,7 +704,8 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     <ContextMenu>
       <ContextMenuTrigger asChild>
     <div onClick={onFocus}
-      className={`flex flex-col h-full w-full min-h-0 rounded-lg overflow-hidden border ${TERMINAL_BG_CLASS[terminalTheme]} transition-all duration-200 ease-in-out ${focused ? 'border-primary shadow-lg shadow-primary/20' : 'border-border'} ${dimmed ? 'opacity-60' : ''}`}>
+      style={{ backgroundColor: terminalPalette.background }}
+      className={`flex flex-col h-full w-full min-h-0 rounded-lg overflow-hidden border transition-all duration-200 ease-in-out ${focused ? 'border-primary shadow-lg shadow-primary/20' : 'border-border'} ${dimmed ? 'opacity-60' : ''}`}>
       {/* header toolbar */}
       {/* header toolbar — also the drag handle for moving this pane to another
           workspace (WARDEN-256). Only the toolbar is draggable, not the terminal
@@ -773,8 +772,19 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
         </div>
       )}
       {/* terminal surface — stop the contextmenu event so right-clicks here keep the xterm
-          native paste menu instead of opening the themed pane menu (see Done criterion). */}
-      <div ref={wrapRef} className="flex-1 min-h-0 px-1 py-0.5 overflow-hidden relative" onContextMenu={(e) => e.stopPropagation()} onClick={() => termRef.current?.focus()}>
+          native paste menu instead of opening the themed pane menu (see Done criterion).
+
+          --terminal-background (WARDEN-255 QA rework): the xterm viewport background is
+          driven from THIS token (see the `.xterm .xterm-viewport` rule in index.css), not
+          from the chrome `--background`. Both the viewport AND the xterm text palette derive
+          from the SAME `terminalPalette` object, so they stay coherent whether the terminal
+          color-scheme override is `auto` (== active theme → --terminal-background ==
+          chrome --background), `dark` (→ GitHub Dark palette), or `light` (→ GitHub Light
+          palette). The prior fix pointed the viewport at chrome `--background` while the text
+          palette followed the override — so override≠chrome decoupled them into an invisible
+          terminal (light text on a light viewport, etc.). Setting the token on the xterm host
+          (this element) makes it inherit to `.xterm` / `.xterm-viewport`. */}
+      <div ref={wrapRef} style={{ '--terminal-background': terminalPalette.background } as React.CSSProperties} className="flex-1 min-h-0 px-1 py-0.5 overflow-hidden relative" onContextMenu={(e) => e.stopPropagation()} onClick={() => termRef.current?.focus()}>
         {phase === 'connecting' && (
           <div className="absolute inset-0 flex items-center justify-center gap-2 text-[11px] text-muted-foreground pointer-events-none select-none">
             <span className="size-3 rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground animate-spin" />

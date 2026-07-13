@@ -16,6 +16,7 @@ import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import type { Chat } from '@/lib/types';
 import type { PaneLayout, TerminalCursorStyle, OnExitBehavior, HostOptionsMap } from '@/lib/storage';
+import type { ThemeId } from '@/lib/theme';
 
 export interface OpenTile { id: string }
 
@@ -45,11 +46,11 @@ interface Props {
   // PaneTile — App owns the value (and the empty → default fallback).
   fontFamily: string;
   paneLayout: PaneLayout;
-  // Resolved terminal surface color (App resolves terminalColorScheme +
-  // effectiveTheme down to a concrete 'light' | 'dark' here). Pure pass-through
-  // to PaneTile — App owns the resolution so an OS theme flip can re-theme open
-  // panes live without PaneGrid knowing about the scheme pref.
-  terminalTheme: 'light' | 'dark';
+  // Resolved terminal theme id (App resolves terminalColorScheme + the active
+  // theme down to a concrete named-theme id here). Pure pass-through to PaneTile
+  // — App owns the resolution so an OS theme flip can re-theme open panes live
+  // without PaneGrid knowing about the scheme pref.
+  terminalThemeId: ThemeId;
   // Terminal cursor shape × blink (blink/steady × block/underline/bar). Pure
   // pass-through to PaneTile; App owns the state so a Settings change live-
   // updates every open pane.
@@ -79,7 +80,7 @@ interface Props {
 
 function colsFor(n: number) { return n <= 1 ? 1 : Math.ceil(Math.sqrt(n)); }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalTheme, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, hostOptions, copyHintDismissed, onDismissCopyHint }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, hostOptions, copyHintDismissed, onDismissCopyHint }: Props) {
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
   // WARDEN-334: the 1-based line a grep result selected, fed to FileViewer's
@@ -268,7 +269,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     fontSize={fontSize} onFontSizeChange={onFontSizeChange}
                     scrollback={scrollback}
                     fontFamily={fontFamily}
-                    terminalTheme={terminalTheme}
+                    terminalThemeId={terminalThemeId}
                     terminalCursorStyle={terminalCursorStyle}
                     copyOnSelect={copyOnSelect}
                     onExitBehavior={onExitBehavior}
