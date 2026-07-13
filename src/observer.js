@@ -1338,7 +1338,7 @@ export class Observer {
     if (this.sid) appendTranscript(this.sid, 'user', userText);
     let finalText = '';
     for (let i = 0; i < 8; i++) {
-      const resp = await complete({ system: SYSTEM, messages: this.messages, tools: TOOLS, max_tokens: 2048 });
+      const resp = await complete({ system: SYSTEM, messages: this.messages, tools: TOOLS, max_tokens: this.cfg.llm?.maxTokens ?? 2048 });
       const content = resp.content || [];
       this.messages.push({ role: 'assistant', content });
       const toolUses = content.filter((b) => b.type === 'tool_use');

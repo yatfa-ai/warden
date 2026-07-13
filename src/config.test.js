@@ -99,3 +99,34 @@ describe('config confirm-before-destructive-actions preference', () => {
     assert.strictEqual(cfg.confirmDestructiveActions, true);
   });
 });
+
+// WARDEN-350: the server-side cfg carries an `llm` key so the /api/config
+// round-trip has a stable shape. It must be an EMPTY object by default — llm.js
+// owns its own fallbacks ('glm-5.2' / 'https://api.anthropic.com' / 2048) and a
+// default authToken or model must NEVER be invented here.
+describe('config llm (Observer model — WARDEN-350)', () => {
+  afterEach(() => {
+    mock.restoreAll();
+  });
+
+  it('exposes an empty llm object by default (no invented credentials)', () => {
+    mock.method(fs, 'readFileSync', () => {
+      throw new Error('ENOENT: config.json does not exist');
+    });
+    const cfg = load();
+    assert.ok(cfg.llm && typeof cfg.llm === 'object', 'llm key must exist');
+    assert.ok(!Array.isArray(cfg.llm), 'llm must be an object, not an array');
+    assert.deepStrictEqual(cfg.llm, {}, 'llm defaults to empty — no default authToken/model');
+  });
+
+  it('preserves a user-configured llm object through load()', () => {
+    mock.method(fs, 'readFileSync', () => JSON.stringify({
+      llm: { model: 'glm-5.2', baseUrl: 'https://gateway.example.com', maxTokens: 4096, authToken: 'sk-tok' },
+    }));
+    const cfg = load();
+    assert.strictEqual(cfg.llm.model, 'glm-5.2');
+    assert.strictEqual(cfg.llm.baseUrl, 'https://gateway.example.com');
+    assert.strictEqual(cfg.llm.maxTokens, 4096);
+    assert.strictEqual(cfg.llm.authToken, 'sk-tok');
+  });
+});

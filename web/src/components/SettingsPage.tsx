@@ -50,6 +50,15 @@ interface ConfigData {
   observerConfirmMode: 'always' | 'auto-safe';
   observerAutoStart: boolean;
   observerSessionTimeout: number | null;
+  // Observer model/provider (WARDEN-350). Round-tripped through /api/config.
+  // The auth token is write-only — GET never returns cleartext (only a masked
+  // authTokenSet/authTokenTail indicator), so it is NOT part of this state; it
+  // lives in separate write-only state and is sent on save only when typed.
+  llm: {
+    model: string;
+    baseUrl: string;
+    maxTokens: number | null;
+  };
   // Fleet health attention thresholds (minutes of inactivity). healthWarning
   // is the healthy→WARNING boundary (default 5); healthCritical is the
   // warning→CRITICAL boundary (default 30) which also fires desktop alerts.
@@ -350,6 +359,7 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
     observerConfirmMode: 'always',
     observerAutoStart: false,
     observerSessionTimeout: 30,
+    llm: { model: '', baseUrl: '', maxTokens: null },
     healthWarningThresholdMin: 5,
     healthCriticalThresholdMin: 30,
     confirmDestructiveActions: true,
@@ -367,6 +377,15 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
   const [availableHosts, setAvailableHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+
+  // Observer auth token — write-only (WARDEN-350). GET /api/config returns only
+  // a masked indicator (authTokenSet + optional last-4); there is no cleartext
+  // to seed into the password input, so it stays empty until the human types a
+  // new token. On save it is sent ONLY when non-empty; an untouched field is
+  // omitted so the backend no-clobbers the stored secret.
+  const [observerAuthTokenSet, setObserverAuthTokenSet] = useState(false);
+  const [observerAuthTokenTail, setObserverAuthTokenTail] = useState<string | null>(null);
+  const [observerAuthTokenInput, setObserverAuthTokenInput] = useState('');
 
   // Active section in the master-detail nav. The first section is selected by
   // default; switching shows only that section, so there's no cross-section
@@ -405,6 +424,11 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
             : 'always',
           observerAutoStart: configData.observerAutoStart || false,
           observerSessionTimeout: configData.observerSessionTimeout ?? 30,
+          llm: {
+            model: configData.llm?.model ?? '',
+            baseUrl: configData.llm?.baseUrl ?? '',
+            maxTokens: typeof configData.llm?.maxTokens === 'number' ? configData.llm.maxTokens : null,
+          },
           healthWarningThresholdMin: configData.healthWarningThresholdMin ?? 5,
           healthCriticalThresholdMin: configData.healthCriticalThresholdMin ?? 30,
           confirmDestructiveActions: configData.confirmDestructiveActions ?? true,
@@ -420,6 +444,8 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
           hideOfflineHosts: configData.hideOfflineHosts ?? false,
         });
         setAvailableHosts(hostsData.hosts || []);
+        setObserverAuthTokenSet(Boolean(configData.llm?.authTokenSet));
+        setObserverAuthTokenTail(configData.llm?.authTokenTail ?? null);
       })
       .catch((err) => {
         console.error('Failed to load config:', err);
@@ -446,7 +472,14 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
   const handleSave = async () => {
     setSaving(true);
     try {
-      const { ok, error } = await putJson('/api/config', config);
+      // The auth token is write-only: GET never returns cleartext, so the
+      // password field is empty until the human types a new one. Send the typed
+      // value only when non-empty; omit it on an untouched field so the backend
+      // no-clobbers the stored secret. model/baseUrl/maxTokens round-trip.
+      const llm: { model: string; baseUrl: string; maxTokens: number | null; authToken?: string } = { ...config.llm };
+      const token = observerAuthTokenInput.trim();
+      if (token) llm.authToken = token;
+      const { ok, error } = await putJson('/api/config', { ...config, llm });
       if (!ok) {
         throw new Error(error || 'Failed to save configuration');
       }
@@ -772,6 +805,74 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   <p className="text-xs text-muted-foreground">
                     Automatically stop Observer after N minutes of inactivity. Leave empty to disable.
                   </p>
+                </div>
+
+                {/* Observer model/provider (WARDEN-350) — configure the Observer's
+                    LLM from the UI instead of hand-editing ~/.yatfa-warden/config.json
+                    or exporting shell env vars. Applies live: the next Observer call
+                    re-reads model/baseUrl/token via llm.js's per-call resolvers and
+                    reads maxTokens from the live cfg ref, with NO app restart. The
+                    auth token is write-only (never seeded from GET; sent only when
+                    typed so the stored secret survives an unchanged save). */}
+                <div className="flex flex-col gap-3 rounded-md border bg-muted/30 p-3">
+                  <div className="text-xs font-medium text-foreground">Observer model</div>
+                  <div className="flex flex-col gap-2">
+                    <Label htmlFor="observerModel">Model</Label>
+                    <Input
+                      id="observerModel"
+                      value={config.llm.model}
+                      onChange={(e) => setConfig({ ...config, llm: { ...config.llm, model: e.target.value } })}
+                      placeholder="glm-5.2"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      The model id the Observer uses. A trailing context tag like <code className="bg-muted px-1 rounded">[1m]</code> is stripped automatically. Falls back to the WARDEN_MODEL env var, then the default (glm-5.2).
+                    </p>
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <Label htmlFor="observerBaseUrl">Base URL</Label>
+                    <Input
+                      id="observerBaseUrl"
+                      value={config.llm.baseUrl}
+                      onChange={(e) => setConfig({ ...config, llm: { ...config.llm, baseUrl: e.target.value } })}
+                      placeholder="https://api.anthropic.com"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Anthropic-Messages-compatible endpoint. Leave blank for the default (https://api.anthropic.com) or an ANTHROPIC_BASE_URL env var.
+                    </p>
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <Label htmlFor="observerAuthToken">Auth token</Label>
+                    <Input
+                      id="observerAuthToken"
+                      type="password"
+                      value={observerAuthTokenInput}
+                      onChange={(e) => setObserverAuthTokenInput(e.target.value)}
+                      placeholder={observerAuthTokenSet ? `••••• set${observerAuthTokenTail ? ` (…${observerAuthTokenTail})` : ''}` : 'Not set'}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {observerAuthTokenSet
+                        ? `A token is saved${observerAuthTokenTail ? ` (ends …${observerAuthTokenTail})` : ''}. Type a new one to replace it; leave blank to keep the saved token.`
+                        : 'No token saved here. Enter one to authenticate the Observer, or leave blank to keep using env / config-file credentials.'}
+                    </p>
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <Label htmlFor="observerMaxTokens">Max output tokens</Label>
+                    <Input
+                      id="observerMaxTokens"
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={config.llm.maxTokens ?? ''}
+                      onChange={(e) => {
+                        const n = parseInt(e.target.value, 10);
+                        setConfig({ ...config, llm: { ...config.llm, maxTokens: e.target.value === '' || Number.isNaN(n) ? null : n } });
+                      }}
+                      placeholder="2048 (default)"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Maximum tokens the Observer model may generate per call. Leave empty for the default (2048).
+                    </p>
+                  </div>
                 </div>
               </SettingsSection>
 

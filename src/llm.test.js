@@ -5,12 +5,16 @@ import os from 'node:os';
 import path from 'node:path';
 
 // llm.js resolves credentials/model from process.env + config files under
-// os.homedir() AT MODULE-LOAD time (TOKEN, BASE) — captured in closures — while
-// resolveModel() re-reads process.env on every call. To test both branches
-// deterministically we re-evaluate the module source through a *unique* data:
-// URL (so the ES module cache is bypassed and module-level code re-runs) with a
-// controlled HOME + env. This isolates us from the host's real
-// ~/.claude/settings.json and ~/.yatfa-warden/config.json.
+// os.homedir() PER CALL — resolveModel / resolveBase / resolveToken re-read
+// ~/.yatfa-warden/config.json and ~/.claude/settings.json on every invocation
+// (WARDEN-350), so a config write from /api/config takes effect on the next
+// Observer call WITHOUT an app restart. To test this deterministically we
+// re-evaluate the module source through a *unique* data: URL (bypassing the ES
+// module cache) and keep a controlled HOME + env active across the resolve
+// calls — the env is restored after each test by the top-level afterEach. This
+// isolates us from the host's real ~/.claude/settings.json and
+// ~/.yatfa-warden/config.json, and lets a test rewrite config.json between two
+// resolve calls to assert the live re-read.
 
 const LLMSRC = fs.readFileSync(new URL('./llm.js', import.meta.url), 'utf8');
 
@@ -21,29 +25,39 @@ const ENV_KEYS = [
 ];
 
 let loadCounter = 0;
+let savedEnv = null;
 
-// Re-evaluate llm.js fresh. `env` is active during module-level eval (so it
-// drives TOKEN/BASE). `homeDir` redirects os.homedir() so config files are read
-// from a controlled location. All controlled env keys are restored afterwards.
+// Re-evaluate llm.js fresh with a controlled HOME + env that STAYS active after
+// this returns (per-call resolution reads os.homedir()/process.env at call
+// time, so the env must outlive the import). `env` drives env-var resolution;
+// `homeDir` redirects os.homedir() so config files are read from a controlled
+// location. The top-level afterEach restores the saved env after each test.
 async function loadFresh({ env = {}, homeDir } = {}) {
-  const saved = {};
-  for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
+  savedEnv = {};
+  for (const k of ENV_KEYS) { savedEnv[k] = process.env[k]; delete process.env[k]; }
   if (homeDir) process.env.HOME = homeDir;
   for (const [k, v] of Object.entries(env)) process.env[k] = v;
-  try {
-    // A unique leading comment => a unique data: URL => the loader cannot reuse
-    // a cached module instance => module-level code (TOKEN/BASE/config reads)
-    // re-runs against the env we just set.
-    const unique = `/* load-${loadCounter++} */\n${LLMSRC}`;
-    const dataUrl = 'data:text/javascript;base64,' + Buffer.from(unique, 'utf8').toString('base64');
-    return await import(dataUrl);
-  } finally {
-    for (const k of ENV_KEYS) {
-      if (saved[k] === undefined) delete process.env[k];
-      else process.env[k] = saved[k];
-    }
-  }
+  // A unique leading comment => a unique data: URL => the loader cannot reuse a
+  // cached module instance => a fresh module per test. (Per-call resolution
+  // means module-level code no longer reads config, but the fresh import still
+  // guarantees an unmodified instance — and lets loadFresh own the env window.)
+  const unique = `/* load-${loadCounter++} */\n${LLMSRC}`;
+  const dataUrl = 'data:text/javascript;base64,' + Buffer.from(unique, 'utf8').toString('base64');
+  return import(dataUrl);
 }
+
+// Restore the env snapshot taken by the last loadFresh. Runs after every test so
+// a controlled HOME / token / model var never leaks into the next one. Per-call
+// resolution means loadFresh can't restore in a finally — the resolve calls
+// happen after it returns — so cleanup moves here.
+afterEach(() => {
+  if (!savedEnv) return;
+  for (const k of ENV_KEYS) {
+    if (savedEnv[k] === undefined) delete process.env[k];
+    else process.env[k] = savedEnv[k];
+  }
+  savedEnv = null;
+});
 
 // An empty home directory with no config files — guarantees no credentials or
 // model leak in from the host when we only want to exercise env resolution.
@@ -77,19 +91,6 @@ function fetchSequence(responses) {
 }
 
 describe('resolveModel', () => {
-  const MODEL_KEYS = ['WARDEN_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_MODEL'];
-  let saved;
-  beforeEach(() => {
-    saved = {};
-    for (const k of MODEL_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
-  });
-  afterEach(() => {
-    for (const k of MODEL_KEYS) {
-      if (saved[k] === undefined) delete process.env[k];
-      else process.env[k] = saved[k];
-    }
-  });
-
   describe('context-tag stripping', () => {
     it('strips a trailing [1m] context tag (glm-5.2[1m] -> glm-5.2)', async () => {
       const m = await loadFresh({ homeDir: EMPTY_HOME });
@@ -493,5 +494,49 @@ describe('complete', () => {
         },
       );
     });
+  });
+});
+
+// WARDEN-350: the whole feature exists because llm.js used to freeze BASE/TOKEN/
+// model at module load, so a Settings save was dead-until-restart. These pin the
+// fix — a config.json rewrite between two resolve calls (same module instance,
+// no re-import) is visible on the second call.
+describe('per-call resolution (live config re-read — WARDEN-350)', () => {
+  it('resolveModel reflects a config.json model change after module load (no restart)', async () => {
+    const home = makeHome({ llm: { model: 'first-model[1m]' } });
+    const m = await loadFresh({ homeDir: home });
+    assert.strictEqual(m.resolveModel(), 'first-model');
+    // Rewrite config.json on disk — a subsequent resolve must see the new model
+    // WITHOUT re-importing the module. (Under the old module-load resolution this
+    // would still return 'first-model'.)
+    fs.writeFileSync(path.join(home, '.yatfa-warden', 'config.json'), JSON.stringify({ llm: { model: 'second-model[1m]' } }));
+    assert.strictEqual(m.resolveModel(), 'second-model');
+  });
+
+  it('hasCredentials / resolveToken reflect a config.json token change after module load', async () => {
+    const home = makeHome({ llm: { authToken: 'first-token' } });
+    const m = await loadFresh({ homeDir: home });
+    assert.strictEqual(m.resolveToken(), 'first-token');
+    assert.strictEqual(m.hasCredentials(), true);
+    // Remove the token from config.json — the next call must see it gone.
+    fs.writeFileSync(path.join(home, '.yatfa-warden', 'config.json'), JSON.stringify({ llm: {} }));
+    assert.strictEqual(m.resolveToken(), '');
+    assert.strictEqual(m.hasCredentials(), false);
+  });
+
+  it('resolveBase reflects a config.json baseUrl change after module load (no restart)', async () => {
+    const home = makeHome({ llm: { baseUrl: 'https://first.example.com' } });
+    const m = await loadFresh({ homeDir: home });
+    assert.strictEqual(m.resolveBase(), 'https://first.example.com');
+    fs.writeFileSync(path.join(home, '.yatfa-warden', 'config.json'), JSON.stringify({ llm: { baseUrl: 'https://second.example.com' } }));
+    assert.strictEqual(m.resolveBase(), 'https://second.example.com');
+  });
+
+  it('resolveModel falls back to the default when config.json loses the llm key', async () => {
+    const home = makeHome({ llm: { model: 'configured-model' } });
+    const m = await loadFresh({ homeDir: home });
+    assert.strictEqual(m.resolveModel(), 'configured-model');
+    fs.writeFileSync(path.join(home, '.yatfa-warden', 'config.json'), JSON.stringify({ hosts: [] }));
+    assert.strictEqual(m.resolveModel(), 'glm-5.2');
   });
 });

@@ -19,6 +19,11 @@ const DEFAULTS = {
   observerConfirmMode: 'always',  // 'always' | 'auto-safe' - whether to auto-approve read-only directives
   observerAutoStart: false,       // boolean - whether to auto-start observer on first connection
   observerSessionTimeout: 30,     // minutes - auto-stop observer after inactivity, null to disable
+  // Observer LLM provider/model (WARDEN-350). Empty object by design — llm.js
+  // owns its own fallbacks ('glm-5.2' / 'https://api.anthropic.com' / 2048
+  // max_tokens); never invent a default authToken or model here. Populated via
+  // Settings → PUT /api/config and read live by llm.js's per-call resolvers.
+  llm: {},
   // Fleet health attention thresholds (minutes of inactivity).
   // healthWarningThresholdMin maps to the healthy→WARNING boundary: once an
   // agent has been inactive this long it needs attention (WARNING). Must be <=
