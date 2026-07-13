@@ -14,6 +14,7 @@ const DEFAULTS = {
   connectTimeout: 10,
   pollIntervalMs: 1500,
   pins: [],             // chat ids to surface first in listings / UI
+  agentNotes: {},       // id → short human note (mirrors pins; works for un-renameable yatfa agents)
   // Observer settings
   observerConfirmMode: 'always',  // 'always' | 'auto-safe' - whether to auto-approve read-only directives
   observerAutoStart: false,       // boolean - whether to auto-start observer on first connection
