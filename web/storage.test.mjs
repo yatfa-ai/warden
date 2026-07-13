@@ -40,7 +40,7 @@ const tmpDir = mkdtempSync(join(tmpdir(), 'warden-storage-test-'));
 writeFileSync(join(tmpDir, 'themes.mjs'), themesCode);
 const tmpFile = join(tmpDir, 'storage.mjs');
 writeFileSync(tmpFile, storageCode.replaceAll('@/lib/themes', './themes.mjs'));
-const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, SIDEBAR_MIN, SIDEBAR_MAX, OBSERVER_MIN, OBSERVER_MAX, PANE_MIN, HEALTH_WIDTH } = await import(tmpFile);
+const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, validateSnippetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, SNIPPET_MAX_COUNT, STARTER_SNIPPETS, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, SIDEBAR_MIN, SIDEBAR_MAX, OBSERVER_MIN, OBSERVER_MAX, PANE_MIN, HEALTH_WIDTH } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -67,12 +67,12 @@ test('"previous" round-trips', () => {
 });
 test('a stored non-"empty" value coerces back to "previous" on load (defensive)', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], restoreOnStartup: 'bogus' }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], restoreOnStartup: 'bogus' }));
   assert.equal(loadUi().restoreOnStartup, 'previous');
 });
 test('a missing field loads as "previous"', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
   assert.equal(loadUi().restoreOnStartup, 'previous');
 });
 
@@ -92,19 +92,19 @@ test('shell preset + a remote host round-trip', () => {
 });
 test('an out-of-allow-set preset coerces back to "claude" on load (defensive)', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPreset: 'bogus', defaultNewChatHost: 'prod-box' }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultNewChatPreset: 'bogus', defaultNewChatHost: 'prod-box' }));
   const ui = loadUi();
   assert.equal(ui.defaultNewChatPreset, 'claude');
   assert.equal(ui.defaultNewChatHost, 'prod-box', 'host is unaffected by preset coercion');
 });
 test('a non-string host coerces back to "(local)" on load (defensive)', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatHost: 42 }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultNewChatHost: 42 }));
   assert.equal(loadUi().defaultNewChatHost, '(local)');
 });
 test('missing fields load as the defaults', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
   const ui = loadUi();
   assert.equal(ui.defaultNewChatPreset, 'claude');
   assert.equal(ui.defaultNewChatHost, '(local)');
@@ -132,22 +132,22 @@ test('valid presets round-trip', () => {
 });
 test('a non-array customPresets coerces to [] (defensive, no throw)', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: 'bogus' }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], customPresets: 'bogus' }));
   assert.deepEqual(loadUi().customPresets, []);
 });
 test('entries missing name or cmd are dropped (never blank the spawn command)', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: 'ok', cmd: 'ok' }, { name: 'nocmd' }, { cmd: 'noname' }, {}] }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: 'ok', cmd: 'ok' }, { name: 'nocmd' }, { cmd: 'noname' }, {}] }));
   assert.deepEqual(loadUi().customPresets, [{ name: 'ok', cmd: 'ok' }]);
 });
 test('reserved built-in names (claude/shell) are rejected as custom presets', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: 'claude', cmd: 'whatever' }, { name: 'shell', cmd: 'bash' }, { name: 'codex', cmd: 'codex' }] }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: 'claude', cmd: 'whatever' }, { name: 'shell', cmd: 'bash' }, { name: 'codex', cmd: 'codex' }] }));
   assert.deepEqual(loadUi().customPresets, [{ name: 'codex', cmd: 'codex' }]);
 });
 test('reserved built-in names are rejected CASE-INSENSITIVELY (no "Claude"/"Shell" near-collision)', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: 'Claude', cmd: 'whatever' }, { name: 'SHELL', cmd: 'bash' }, { name: 'ShElL', cmd: 'zsh' }, { name: 'codex', cmd: 'codex' }] }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: 'Claude', cmd: 'whatever' }, { name: 'SHELL', cmd: 'bash' }, { name: 'ShElL', cmd: 'zsh' }, { name: 'codex', cmd: 'codex' }] }));
   // Every case variant of a built-in is dropped, matching the case-insensitive dedup.
   assert.deepEqual(loadUi().customPresets, [{ name: 'codex', cmd: 'codex' }]);
 });
@@ -155,18 +155,18 @@ test('the name length cap is exactly PRESET_NAME_MAX (boundary: N ok, N+1 droppe
   reset();
   const exact = 'x'.repeat(PRESET_NAME_MAX);
   const tooLong = 'x'.repeat(PRESET_NAME_MAX + 1);
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: exact, cmd: 'a' }, { name: tooLong, cmd: 'b' }] }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: exact, cmd: 'a' }, { name: tooLong, cmd: 'b' }] }));
   assert.deepEqual(loadUi().customPresets, [{ name: exact, cmd: 'a' }]);
 });
 test('duplicate names are de-duplicated (case-insensitive, first wins)', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: 'Codex', cmd: 'codex' }, { name: 'codex', cmd: 'codex2' }] }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: 'Codex', cmd: 'codex' }, { name: 'codex', cmd: 'codex2' }] }));
   assert.deepEqual(loadUi().customPresets, [{ name: 'Codex', cmd: 'codex' }]);
 });
 test('names over 32 chars are dropped', () => {
   reset();
   const long = 'x'.repeat(33);
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: long, cmd: 'cmd' }, { name: 'ok', cmd: 'ok' }] }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], customPresets: [{ name: long, cmd: 'cmd' }, { name: 'ok', cmd: 'ok' }] }));
   assert.deepEqual(loadUi().customPresets, [{ name: 'ok', cmd: 'ok' }]);
 });
 
@@ -224,18 +224,18 @@ test('a custom preset name can be the default and round-trips', () => {
 });
 test('a default naming a since-deleted preset falls back to claude (criterion e)', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], customPresets: [], defaultNewChatPreset: 'codex' }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], customPresets: [], defaultNewChatPreset: 'codex' }));
   // codex is not in the (empty) custom list → must not dangle
   assert.equal(loadUi().defaultNewChatPreset, 'claude');
 });
 test('built-in claude/shell defaults remain valid', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPreset: 'shell' }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultNewChatPreset: 'shell' }));
   assert.equal(loadUi().defaultNewChatPreset, 'shell');
 });
 test('a stored non-string preset coerces back to claude (defensive)', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatPreset: 42 }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultNewChatPreset: 42 }));
   assert.equal(loadUi().defaultNewChatPreset, 'claude');
 });
 test('custom presets survive an empty-mode mount (criterion c)', () => {
@@ -269,12 +269,12 @@ test('"auto" round-trips', () => {
 });
 test('a stored invalid value coerces back to "auto" on load (defensive)', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], paneLayout: 'diagonal' }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], paneLayout: 'diagonal' }));
   assert.equal(loadUi().paneLayout, 'auto');
 });
 test('a missing field loads as "auto"', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
   assert.equal(loadUi().paneLayout, 'auto');
 });
 
@@ -292,12 +292,12 @@ test('"dark" and "light" round-trip', () => {
 });
 test('an out-of-allow-set value coerces back to "auto" on load (defensive)', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], terminalColorScheme: 'bogus' }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], terminalColorScheme: 'bogus' }));
   assert.equal(loadUi().terminalColorScheme, 'auto');
 });
 test('a missing field loads as "auto"', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
   assert.equal(loadUi().terminalColorScheme, 'auto');
 });
 test('the pref survives an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
@@ -324,12 +324,12 @@ test('all six values round-trip', () => {
 });
 test('an out-of-allow-set value coerces back to "blink-block" on load (defensive)', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], terminalCursorStyle: 'diagonal' }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], terminalCursorStyle: 'diagonal' }));
   assert.equal(loadUi().terminalCursorStyle, 'blink-block');
 });
 test('a missing field loads as "blink-block"', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
   assert.equal(loadUi().terminalCursorStyle, 'blink-block');
 });
 test('the pref survives an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
@@ -358,18 +358,18 @@ test('false round-trips (stays off)', () => {
 });
 test('only an explicitly-stored true enables it — missing stays false (opt-in)', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
   assert.equal(loadUi().copyOnSelect, false);
 });
 test('a non-boolean coerces back to false on load (defensive)', () => {
   // copyOnSelect === true is the only gate, so a truthy-but-not-true value
   // (1, "true", {}) must NOT enable it. This is the conservative default.
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], copyOnSelect: 1 }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], copyOnSelect: 1 }));
   assert.equal(loadUi().copyOnSelect, false);
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], copyOnSelect: 'true' }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], copyOnSelect: 'true' }));
   assert.equal(loadUi().copyOnSelect, false);
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], copyOnSelect: {} }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], copyOnSelect: {} }));
   assert.equal(loadUi().copyOnSelect, false);
 });
 test('the pref survives an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
@@ -400,17 +400,17 @@ test('"keep" round-trips', () => {
 });
 test('an out-of-allow-set value coerces back to "keep" on load (defensive)', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], onExitBehavior: 'destroy' }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], onExitBehavior: 'destroy' }));
   assert.equal(loadUi().onExitBehavior, 'keep');
 });
 test('a non-string value coerces back to "keep" on load (defensive)', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], onExitBehavior: 42 }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], onExitBehavior: 42 }));
   assert.equal(loadUi().onExitBehavior, 'keep');
 });
 test('a missing field loads as "keep"', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
   assert.equal(loadUi().onExitBehavior, 'keep');
 });
 test('the pref survives an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
@@ -441,14 +441,14 @@ test('only an explicit false opts out — a non-boolean value coerces back to tr
   // Anything that is not strictly === false keeps today's focus-on-open behavior,
   // so a corrupt/partial payload can never silently disable focus-stealing.
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], autoFocusNewPane: 42 }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], autoFocusNewPane: 42 }));
   assert.equal(loadUi().autoFocusNewPane, true);
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], autoFocusNewPane: 'false' }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], autoFocusNewPane: 'false' }));
   assert.equal(loadUi().autoFocusNewPane, true, 'the string "false" is not the boolean false');
 });
 test('a missing field loads as true', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
   assert.equal(loadUi().autoFocusNewPane, true);
 });
 test('the pref survives an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
@@ -639,9 +639,9 @@ test('clampLayoutWidths preserves the floors at the 900px window with health col
 // key and the old key is cleared — not merely that load returned a value.
 console.log('\nreadVersioned key-migration guard promotes old payloads forward');
 
-test('UI data under an older versioned key (v1) is promoted forward to v2 on load', () => {
+test('UI data under an older versioned key (v1) is promoted forward to v3 on load', () => {
   reset();
-  // Only the older key exists; the current key (v2) is absent. theme:'dark' is a
+  // Only the older key exists; the current key (v3) is absent. theme:'dark' is a
   // legacy mode literal — it survives the KEY migration and is normalized to the
   // GitHub Dark theme id (WARDEN-255) on the same load.
   mem.set('warden:ui:v1', JSON.stringify({ activeTabs: ['chat-a'], theme: 'dark', density: 'compact' }));
@@ -650,16 +650,33 @@ test('UI data under an older versioned key (v1) is promoted forward to v2 on loa
   assert.deepEqual(ui.activeTabs, ['chat-a']);
   assert.equal(ui.theme, 'github-dark', 'legacy dark pref migrated to GitHub Dark');
   assert.equal(ui.density, 'compact');
-  // The payload physically migrated forward: v2 now holds it, v1 is cleared.
-  assert.ok(mem.has('warden:ui:v2'), 'payload promoted to the current key');
+  // The payload physically migrated forward: v3 now holds it, v1 is cleared.
+  assert.ok(mem.has('warden:ui:v3'), 'payload promoted to the current key');
   assert.ok(!mem.has('warden:ui:v1'), 'old key removed after promotion');
 });
 
-test('UI data under the current key (v2) is read as-is and triggers no migration', () => {
+test('UI data under the prior versioned key (v2) is promoted forward to v3 on load (WARDEN-323 bump)', () => {
+  // The real upgrade path: an existing install has its data under v2. Bumping
+  // KEY_VERSION to 3 must promote that payload forward with NO data loss — the
+  // user's workspace + prefs survive — and physically migrate it to v3.
   reset();
-  // theme:'light' is a legacy literal — no KEY migration (already on v2), but
-  // the value still normalizes to GitHub Light (WARDEN-255) on load.
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['keep'], theme: 'light' }));
+  // theme:'dark' is a legacy literal — it survives the v2->v3 promotion AND
+  // normalizes to GitHub Dark (WARDEN-255) on load; snippets seed because the v2
+  // payload has no snippets field (the starter-set discriminator fires).
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['chat-a', 'chat-b'], theme: 'dark', density: 'compact', customPresets: [{ name: 'codex', cmd: 'codex' }] }));
+  const ui = loadUi();
+  assert.deepEqual(ui.activeTabs, ['chat-a', 'chat-b'], 'workspace survived the v2->v3 promotion');
+  assert.equal(ui.theme, 'github-dark', 'legacy dark pref migrated to GitHub Dark across the promotion');
+  assert.equal(ui.density, 'compact', 'density survived');
+  assert.deepEqual(ui.customPresets, [{ name: 'codex', cmd: 'codex' }], 'customPresets survived');
+  assert.deepEqual(ui.snippets, STARTER_SNIPPETS, 'snippets seeded (no field in the v2 payload)');
+  assert.ok(mem.has('warden:ui:v3'), 'payload promoted to the current key (v3)');
+  assert.ok(!mem.has('warden:ui:v2'), 'prior key (v2) removed after promotion');
+});
+
+test('UI data under the current key (v3) is read as-is and triggers no migration', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['keep'], theme: 'light' }));
   const ui = loadUi();
   assert.deepEqual(ui.activeTabs, ['keep']);
   assert.equal(ui.theme, 'github-light', 'legacy light pref migrated to GitHub Light');
@@ -667,22 +684,22 @@ test('UI data under the current key (v2) is read as-is and triggers no migration
   assert.ok(!mem.has('warden:ui:v1'), 'no spurious older key created');
 });
 
-test('UI data under a legacy unversioned key (warden:ui) is promoted to v2', () => {
+test('UI data under a legacy unversioned key (warden:ui) is promoted to v3', () => {
   reset();
   // Pre-versioning shape: the bare prefix key, no :vN suffix.
   mem.set('warden:ui', JSON.stringify({ activeTabs: ['legacy'], terminalFontSize: 18 }));
   const ui = loadUi();
   assert.deepEqual(ui.activeTabs, ['legacy']);
   assert.equal(ui.terminalFontSize, 18);
-  assert.ok(mem.has('warden:ui:v2'), 'legacy payload promoted to the current key');
+  assert.ok(mem.has('warden:ui:v3'), 'legacy payload promoted to the current key');
   assert.ok(!mem.has('warden:ui'), 'legacy unversioned key removed after promotion');
 });
 
-test('UI migration prefers the newest surviving version (v2 beats v1)', () => {
+test('UI migration prefers the newest surviving version (v3 beats v1)', () => {
   reset();
   // Both keys present (e.g. a partial bump left an old copy behind). The current
   // version wins and the older copy is left untouched (it was never read).
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['newer'] }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['newer'] }));
   mem.set('warden:ui:v1', JSON.stringify({ activeTabs: ['older'] }));
   const ui = loadUi();
   assert.deepEqual(ui.activeTabs, ['newer']);
@@ -691,7 +708,7 @@ test('UI migration prefers the newest surviving version (v2 beats v1)', () => {
 
 test('corrupt UI JSON falls back to defaults instead of throwing (WARDEN-89)', () => {
   reset();
-  mem.set('warden:ui:v2', '{not valid json');
+  mem.set('warden:ui:v3', '{not valid json');
   const ui = loadUi();
   assert.deepEqual(ui.activeTabs, []);
   assert.equal(ui.theme, 'system', 'falls back to the default theme');
@@ -731,20 +748,20 @@ test('a blank value round-trips (the meaningful "auto-detect" value)', () => {
 });
 test('whitespace is trimmed on load so it can never become the spawned shell name', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultSplitShell: '  zsh  ' }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultSplitShell: '  zsh  ' }));
   assert.equal(loadUi().defaultSplitShell, 'zsh');
   // All-whitespace collapses to the blank "auto-detect" value.
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultSplitShell: '   ' }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultSplitShell: '   ' }));
   assert.equal(loadUi().defaultSplitShell, '');
 });
 test('a non-string coerces back to "" (defensive)', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultSplitShell: 42 }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultSplitShell: 42 }));
   assert.equal(loadUi().defaultSplitShell, '');
 });
 test('a missing field loads as ""', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
   assert.equal(loadUi().defaultSplitShell, '');
 });
 test('the pref survives an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
@@ -774,38 +791,38 @@ test('an empty map round-trips as {} (clearing all overrides persists nothing)',
 test('a non-object coerces to {} (defensive, no throw)', () => {
   reset();
   // A string is not a plain map → {}.
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: 'bogus' }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: 'bogus' }));
   assert.deepEqual(loadUi().defaultNewChatCwdByHost, {});
   // An array is an object but NOT a plain map → {}.
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: [['prod-box', '/srv/app']] }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: [['prod-box', '/srv/app']] }));
   assert.deepEqual(loadUi().defaultNewChatCwdByHost, {});
   // A number → {}.
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: 42 }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: 42 }));
   assert.deepEqual(loadUi().defaultNewChatCwdByHost, {});
 });
 test('entries with non-string values are dropped (never seed the spawn field with a non-path)', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: { 'prod-box': '/srv/app', 'num': 42, 'obj': { x: 1 }, 'arr': [1] } }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: { 'prod-box': '/srv/app', 'num': 42, 'obj': { x: 1 }, 'arr': [1] } }));
   assert.deepEqual(loadUi().defaultNewChatCwdByHost, { 'prod-box': '/srv/app' });
 });
 test('entries with empty/whitespace values are dropped (empty override = use the global default, never persists as a blank)', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: { 'prod-box': '/srv/app', 'blank': '', 'ws': '   ', 'tab': '\t' } }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: { 'prod-box': '/srv/app', 'blank': '', 'ws': '   ', 'tab': '\t' } }));
   assert.deepEqual(loadUi().defaultNewChatCwdByHost, { 'prod-box': '/srv/app' });
 });
 test('entries with an empty-string key are dropped', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: { '': '/srv/app', 'prod-box': '/srv/app' } }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: { '': '/srv/app', 'prod-box': '/srv/app' } }));
   assert.deepEqual(loadUi().defaultNewChatCwdByHost, { 'prod-box': '/srv/app' });
 });
 test('values are trimmed on load (matching defaultNewChatCwd)', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: { 'prod-box': '  /srv/app  ' } }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultNewChatCwdByHost: { 'prod-box': '  /srv/app  ' } }));
   assert.deepEqual(loadUi().defaultNewChatCwdByHost, { 'prod-box': '/srv/app' });
 });
 test('a missing field loads as {}', () => {
   reset();
-  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
   assert.deepEqual(loadUi().defaultNewChatCwdByHost, {});
 });
 test('the map survives an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
@@ -989,6 +1006,117 @@ test('a migrated legacy value persists as the new id on the next save', () => {
   assert.equal(migrated.theme, 'github-dark');
   saveUi({ ...migrated });
   assert.equal(loadUi().theme, 'github-dark');
+});
+
+console.log('\nsnippets (instruction library) validate + round-trip through loadUi/saveUi — WARDEN-323');
+test('seeds STARTER_SNIPPETS when nothing is stored (fresh install)', () => {
+  reset();
+  assert.deepEqual(loadUi().snippets, STARTER_SNIPPETS);
+});
+test('seeds STARTER_SNIPPETS when the persisted field is absent (v2->v3 promote)', () => {
+  // A v2 payload (no snippets field) promoted forward must seed the starter set,
+  // so an upgrading user gets the library out of the box.
+  reset();
+  mem.set('warden:ui:v2', JSON.stringify({ activeTabs: ['x'] }));
+  assert.deepEqual(loadUi().snippets, STARTER_SNIPPETS);
+});
+test('does NOT re-seed once an empty list is persisted (deletions stick)', () => {
+  reset();
+  saveUi({ ...loadUi(), snippets: [] });
+  assert.deepEqual(loadUi().snippets, [], 'an explicit [] is respected, not re-seeded');
+});
+test('does NOT re-seed once a non-empty list is persisted', () => {
+  reset();
+  const mine = [{ name: 'Mine', text: 'do the thing' }];
+  saveUi({ ...loadUi(), snippets: mine });
+  assert.deepEqual(loadUi().snippets, mine);
+});
+test('valid snippets round-trip', () => {
+  reset();
+  const list = [{ name: 'Run tests', text: 'run the test suite' }, { name: 'Ship it', text: 'commit and push' }];
+  saveUi({ ...loadUi(), snippets: list });
+  assert.deepEqual(loadUi().snippets, list);
+});
+test('a non-array snippets coerces to [] (defensive, no throw) — and does NOT re-seed', () => {
+  // A present-but-wrong-type value is "a value exists": parseSnippets returns []
+  // rather than re-seeding, matching the "deletions stick" contract.
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snippets: 'bogus' }));
+  assert.deepEqual(loadUi().snippets, []);
+});
+test('entries missing name or text are dropped', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snippets: [{ name: 'ok', text: 'ok' }, { name: 'notext' }, { text: 'noname' }, {}] }));
+  assert.deepEqual(loadUi().snippets, [{ name: 'ok', text: 'ok' }]);
+});
+test('the name length cap is exactly SNIPPET_NAME_MAX (boundary: N ok, N+1 dropped)', () => {
+  reset();
+  const exact = 'x'.repeat(SNIPPET_NAME_MAX);
+  const tooLong = 'x'.repeat(SNIPPET_NAME_MAX + 1);
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snippets: [{ name: exact, text: 'a' }, { name: tooLong, text: 'b' }] }));
+  assert.deepEqual(loadUi().snippets, [{ name: exact, text: 'a' }]);
+});
+test('the text length cap is exactly SNIPPET_TEXT_MAX (boundary: N ok, N+1 dropped)', () => {
+  reset();
+  const exact = 'y'.repeat(SNIPPET_TEXT_MAX);
+  const tooLong = 'y'.repeat(SNIPPET_TEXT_MAX + 1);
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snippets: [{ name: 'a', text: exact }, { name: 'b', text: tooLong }] }));
+  assert.deepEqual(loadUi().snippets, [{ name: 'a', text: exact }]);
+});
+test('duplicate names are de-duplicated (case-insensitive, first wins)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snippets: [{ name: 'Run Tests', text: 'first' }, { name: 'run tests', text: 'second' }] }));
+  assert.deepEqual(loadUi().snippets, [{ name: 'Run Tests', text: 'first' }]);
+});
+test('the count cap drops overflow (first SNIPPET_MAX_COUNT win)', () => {
+  reset();
+  const many = Array.from({ length: SNIPPET_MAX_COUNT + 5 }, (_, i) => ({ name: `s${i}`, text: `t${i}` }));
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snippets: many }));
+  const loaded = loadUi().snippets;
+  assert.equal(loaded.length, SNIPPET_MAX_COUNT, 'overflow entries dropped');
+  assert.deepEqual(loaded[0], { name: 's0', text: 't0' });
+});
+test('names and text are trimmed on load', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snippets: [{ name: '  Run tests  ', text: '  run it  ' }] }));
+  assert.deepEqual(loadUi().snippets, [{ name: 'Run tests', text: 'run it' }]);
+});
+test('snippets survive an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
+  reset();
+  const d0 = loadUi();
+  const mine = [{ name: 'Mine', text: 'do the thing' }];
+  saveUi(persistUiState({ ...d0, snippets: mine }, 'empty', d0, true));
+  assert.deepEqual(loadUi().snippets, mine);
+});
+
+console.log('\nvalidateSnippetName — the write-site contract (add/rename route through this)');
+test('returns null for an acceptable name', () => {
+  assert.equal(validateSnippetName('Run tests', [{ name: 'Ship', text: 'x' }]), null);
+});
+test('flags empty (after trim)', () => {
+  assert.equal(validateSnippetName('', []), 'empty');
+  assert.equal(validateSnippetName('   ', []), 'empty');
+});
+test('flags names longer than SNIPPET_NAME_MAX', () => {
+  assert.equal(validateSnippetName('x'.repeat(SNIPPET_NAME_MAX), []), null);
+  assert.equal(validateSnippetName('x'.repeat(SNIPPET_NAME_MAX + 1), []), 'too-long');
+});
+test('flags duplicates case-insensitively', () => {
+  const existing = [{ name: 'Run tests', text: 'r' }];
+  assert.equal(validateSnippetName('Run tests', existing), 'duplicate');
+  assert.equal(validateSnippetName('RUN TESTS', existing), 'duplicate');
+  assert.equal(validateSnippetName('Ship', existing), null);
+});
+test('excludes `except` so a case-only rename is allowed', () => {
+  const existing = [{ name: 'Run tests', text: 'r' }];
+  assert.equal(validateSnippetName('RUN TESTS', existing, 'Run tests'), null);
+  // But a rename colliding with a DIFFERENT snippet is still blocked.
+  const two = [{ name: 'Run tests', text: 'r' }, { name: 'Ship', text: 's' }];
+  assert.equal(validateSnippetName('Ship', two, 'Run tests'), 'duplicate');
+});
+test('trims before validating (matches load-time normalization)', () => {
+  assert.equal(validateSnippetName('  Run tests  ', []), null);
+  assert.equal(validateSnippetName('  Run tests  ', [{ name: 'Run tests', text: 'r' }]), 'duplicate');
 });
 
 console.log(`\n✓ STORAGE TESTS PASS (${passed})`);

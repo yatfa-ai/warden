@@ -16,7 +16,7 @@ import { summarizeBroadcast, formatBroadcastToast } from '@/lib/broadcast';
 import { summarizeKill, formatKillToast } from '@/lib/kill';
 import { DiffViewer } from './DiffViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
-import { loadUi, saveUi } from '@/lib/storage';
+import { loadUi, saveUi, type Snippet } from '@/lib/storage';
 import { THIS_MACHINE, basename, chatType, displayName } from '@/lib/chatDisplay';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import {
@@ -73,11 +73,16 @@ interface Props {
   // Timestamp format pref (WARDEN-213): routes every sidebar time display through
   // the shared formatTimestamp helper. Pure client-side localStorage pref.
   timestampFormat: TimestampFormat;
+  // Saved instruction snippets (WARDEN-323): threaded straight through to the
+  // BroadcastDialog as an insert-only picker. Pure client-side localStorage pref;
+  // owned by App (persisted by its saveUi effect), so this is a read-only prop
+  // here — ChatSidebar never mutates it.
+  snippets: Snippet[];
 }
 
 const LABEL: Record<string, string> = { '(local)': 'this machine' };
 
-export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat }: Props) {
+export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, snippets }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
   const [offlineExpanded, setOfflineExpanded] = useState(false);
@@ -779,6 +784,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           open={broadcastOpen}
           onOpenChange={setBroadcastOpen}
           targets={selectedChats}
+          snippets={snippets}
           onSend={handleBroadcastSend}
         />
         <KillDialog
@@ -924,6 +930,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           open={broadcastOpen}
           onOpenChange={setBroadcastOpen}
           targets={selectedChats}
+          snippets={snippets}
           onSend={handleBroadcastSend}
         />
         <KillDialog
@@ -1118,6 +1125,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
         open={broadcastOpen}
         onOpenChange={setBroadcastOpen}
         targets={selectedChats}
+        snippets={snippets}
         onSend={handleBroadcastSend}
       />
       <KillDialog

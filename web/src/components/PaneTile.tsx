@@ -8,12 +8,12 @@ import type { Chat } from '@/lib/types';
 import { findPathCandidates } from '@/lib/path-links';
 import { hostTagOf } from '@/lib/chatDisplay';
 import { hostKeyOf, attachEffectDeps } from '@/lib/paneAttach';
-import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBehavior, type HostOptionsMap } from '@/lib/storage';
+import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBehavior, type HostOptionsMap, type Snippet } from '@/lib/storage';
 import { PANE_DRAG_MIME } from '@/lib/dnd';
 import { getThemeById, type ThemeId } from '@/lib/themes';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Button } from '@/components/ui/button';
-import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { StatusDot } from '@/components/StatusDot';
 import { FileViewer } from './FileViewer';
 import { postJson } from '@/lib/api';
@@ -131,9 +131,15 @@ interface Props {
   // shell or re-spawn). App refreshes the chat list and opens/focuses the new
   // pane; the dead pane is replaced/closed.
   onSpawned: (chat: Chat) => void;
+  // Saved instruction snippets (WARDEN-323): the focused-pane context menu
+  // renders a "Snippets" submenu whose items one-click SEND to THIS pane's agent
+  // via the existing /api/send path (no confirm step — the action targets exactly
+  // one visible agent). Read-only here; App owns the persisted list. The submenu
+  // is hidden when the list is empty.
+  snippets: Snippet[];
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, hostOptions, copyHintDismissed, onDismissCopyHint, onSpawned }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, hostOptions, copyHintDismissed, onDismissCopyHint, onSpawned, snippets }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -704,6 +710,21 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     retryAttach();
   };
 
+  // One-click send a saved instruction snippet to THIS pane's agent (WARDEN-323).
+  // Reuses the existing /api/send path (server.js → sendPane → tmux send-keys) —
+  // the same durable path typing into the pane uses — and surfaces the result via
+  // a toast. No confirm step: the action targets exactly one visible agent
+  // (Decision 2), distinct from the WARDEN-292 broadcast confirm gate. `id` is
+  // this pane's chat key (c.key || c.id) — the same identity /api/send takes.
+  const sendSnippet = async (snippet: Snippet) => {
+    const res = await postJson('/api/send', { id, text: snippet.text });
+    if (!res.ok) {
+      toast.error(res.error || `Failed to send "${snippet.name}"`);
+      return;
+    }
+    toast.success(`Sent "${snippet.name}" to ${label || id}`);
+  };
+
   const stop = (e: React.MouseEvent) => e.stopPropagation();
   const Btn = ({ children, onClick, title, active, disabled }: { children: React.ReactNode; onClick: () => void; title: string; active?: boolean; disabled?: boolean }) => (
     <IconTooltip label={title} side="bottom" disabled={disabled}>
@@ -867,6 +888,22 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       <ContextMenuContent>
         <ContextMenuItem onSelect={() => setShowSearch(!showSearch)}>Search</ContextMenuItem>
         <ContextMenuItem onSelect={() => termRef.current?.clear()}>Clear</ContextMenuItem>
+        {/* Saved instruction snippets (WARDEN-323): a submenu whose items
+            one-click SEND to THIS pane's agent via /api/send (no confirm step —
+            the action targets exactly one visible agent). Hidden when the
+            library is empty (WARDEN-103). */}
+        {snippets.length > 0 && (
+          <ContextMenuSub>
+            <ContextMenuSubTrigger>Snippets</ContextMenuSubTrigger>
+            <ContextMenuSubContent>
+              {snippets.map((s) => (
+                <ContextMenuItem key={s.name} onSelect={() => sendSnippet(s)}>
+                  {s.name}
+                </ContextMenuItem>
+              ))}
+            </ContextMenuSubContent>
+          </ContextMenuSub>
+        )}
         <ContextMenuItem disabled={downloading || !chat} onSelect={() => downloadPane()}>Download</ContextMenuItem>
         <ContextMenuItem variant="destructive" onSelect={() => onKill()}>Force-kill</ContextMenuItem>
         <ContextMenuItem onSelect={() => onFontSizeChange(Math.max(8, safeFontSize - 1))}>Smaller font</ContextMenuItem>
