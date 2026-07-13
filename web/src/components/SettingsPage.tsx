@@ -16,6 +16,7 @@ import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ArrowLeft, Trash2 } from 'lucide-react';
 import { type Theme, type TerminalColorScheme } from '@/lib/theme';
 import { type Density } from '@/lib/density';
+import { type TimestampFormat } from '@/lib/formatTimestamp';
 import { type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type PresetNameIssue, PRESET_NAME_MAX, validatePresetName, DEFAULT_TERMINAL_FONT_FAMILY } from '@/lib/storage';
 import { hasWindowBridge } from '@/lib/electron';
 import { requestAlertPermission } from '@/lib/desktopAlerts';
@@ -135,6 +136,14 @@ interface Props {
   // effect. It must never be added to the `config` state / PUT /api/config body.
   copyOnSelect: boolean;
   setCopyOnSelect: (v: boolean) => void;
+  // Timestamp format is a pure client-side localStorage pref (NOT backend
+  // config): it chooses how every timestamp surface reads — 'relative'
+  // ("2m"/"3h" buckets) or 'absolute' (clock time) — applies instantly via the
+  // prop callback (every surface re-renders through the shared formatTimestamp
+  // helper), and is persisted by App's saveUi effect. It must NEVER be added to
+  // the `config` state / PUT /api/config body. See WARDEN-213.
+  timestampFormat: TimestampFormat;
+  setTimestampFormat: (v: TimestampFormat) => void;
   // Default agent type + host pre-filled in the ＋ new chat form. Pure client-side
   // localStorage prefs: applied instantly via the prop callbacks and persisted by
   // App's saveUi effect. They must never be added to the `config` state /
@@ -306,7 +315,7 @@ function PresetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin, closeToTray, setCloseToTray }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, timestampFormat, setTimestampFormat, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin, closeToTray, setCloseToTray }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -981,6 +990,22 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   </Select>
                   <p className="text-xs text-muted-foreground">
                     "Compact" tightens row and header spacing so more agents fit on screen. Applies instantly and is remembered across reloads.
+                  </p>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="timestampFormat">Timestamp format</Label>
+                  <Select value={timestampFormat} onValueChange={(v) => setTimestampFormat(v as TimestampFormat)}>
+                    <SelectTrigger id="timestampFormat" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="relative">Relative (default)</SelectItem>
+                      <SelectItem value="absolute">Absolute</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    How times read across the dashboard. "Relative" shows compact buckets like "2m ago"; "Absolute" shows clock time like "2:13 PM". Applies instantly to every timestamp and is remembered across reloads.
                   </p>
                 </div>
 

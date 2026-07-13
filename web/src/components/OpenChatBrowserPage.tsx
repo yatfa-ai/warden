@@ -9,7 +9,8 @@ import { StatusDot } from '@/components/StatusDot';
 import type { Chat } from '@/lib/types';
 // Shared pure display helpers live in @/lib/chatDisplay so the sidebar and this
 // page render identical labels (no drift in chat names between the two surfaces).
-import { THIS_MACHINE, ago, basename, displayName, hostTagOf } from '@/lib/chatDisplay';
+import { THIS_MACHINE, basename, displayName, hostTagOf } from '@/lib/chatDisplay';
+import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import type { ClaudeSession, SessionSearchResult } from './ChatSidebar';
 
 // Loading placeholder for a session row (two skeleton bars). Local to this page —
@@ -51,13 +52,13 @@ interface DiscoverItem {
   snippet?: string;      // content-match snippet (full-content search only)
 }
 
-function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView }: { it: DiscoverItem; resumingId: string | null; onOpen: () => void; onResume: () => void; onView: () => void; }) {
+function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFormat }: { it: DiscoverItem; resumingId: string | null; onOpen: () => void; onResume: () => void; onView: () => void; timestampFormat: TimestampFormat; }) {
   if (it.kind === 'live') {
     return (
       <Button variant="ghost" onClick={onOpen} className="w-full h-auto justify-start gap-2 px-2 py-1.5 text-xs font-normal hover:bg-accent">
         <StatusDot tone="green" variant="solid" label="Live session" />
         <span className="truncate flex-1">{it.label}</span>
-        {it.time ? <span className="text-[10px] text-muted-foreground shrink-0">{ago(it.time)}</span> : null}
+        {it.time ? <span className="text-[10px] text-muted-foreground shrink-0">{formatTimestamp(it.time, timestampFormat)}</span> : null}
         <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span>
         <span className="text-[10px] text-green-500/80 shrink-0">live</span>
       </Button>
@@ -71,7 +72,7 @@ function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView }: { it: Dis
         <Button variant="ghost" onClick={onResume} disabled={isLoading} className="h-auto w-full justify-start px-1 py-0 truncate text-xs font-normal">{it.label}</Button>
         {it.snippet ? <div className="px-1 truncate text-[10px] text-muted-foreground/80 italic" title={it.snippet}>{it.snippet}</div> : null}
       </div>
-      {it.time ? <span className="text-[10px] text-muted-foreground shrink-0">{ago(it.time)}</span> : null}
+      {it.time ? <span className="text-[10px] text-muted-foreground shrink-0">{formatTimestamp(it.time, timestampFormat)}</span> : null}
       <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span>
       <IconTooltip label="view transcript (read-only)">
         <Button variant="ghost" size="icon-xs" onClick={onView} aria-label="View transcript" className="text-muted-foreground hover:text-foreground">
@@ -96,6 +97,9 @@ interface Props {
   onResume: (id: string, description: string, cwd: string, host: string) => void;
   onDiscoverHost: (host: string) => void;
   hostStatuses: Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }>;
+  // Timestamp format pref (WARDEN-213): routes every row time + the transcript
+  // viewer's message times through the shared formatTimestamp helper.
+  timestampFormat: TimestampFormat;
 }
 
 // Full-page replacement for the former Open Chat browser modal. Mirrors the
@@ -104,7 +108,7 @@ interface Props {
 // sets chatBrowserOpen; the back button / Escape clears it. Per WARDEN-68 Rule 7
 // the browser is a real UI surface (unbounded list + search), so it must be a
 // page, not a blocking Dialog.
-export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResume, onDiscoverHost, hostStatuses }: Props) {
+export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResume, onDiscoverHost, hostStatuses, timestampFormat }: Props) {
   const [selected, setSelected] = useState<string[] | undefined>(undefined);
   const [query, setQuery] = useState('');
   const [resumingId, setResumingId] = useState<string | null>(null);
@@ -360,6 +364,7 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
                 onOpen={() => { if (it.openId) { onOpenChat(it.openId); onClose(); } }}
                 onResume={() => handleResume(it)}
                 onView={() => { if (it.resume) setViewing({ id: it.resume.id, host: it.resume.host, label: it.label }); }}
+                timestampFormat={timestampFormat}
               />
             ))
           )}
@@ -390,6 +395,7 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
         open={!!viewing}
         onOpenChange={(o) => { if (!o) setViewing(null); }}
         session={viewing}
+        timestampFormat={timestampFormat}
       />
     </div>
   );

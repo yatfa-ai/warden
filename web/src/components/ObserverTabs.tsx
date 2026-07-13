@@ -10,6 +10,7 @@ import { postJson } from '@/lib/api';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { hasBoundSession, selectIdleTabs, IDLE_TICK_MS } from '@/lib/observerLifecycle';
 import type { Chat, SessionMeta } from '@/lib/types';
+import type { TimestampFormat } from '@/lib/formatTimestamp';
 
 interface Props {
   externalViewMode?: 'sessions' | 'activity' | null;
@@ -29,12 +30,16 @@ interface Props {
   //   behavior change for every fresh install, NOT a regression to "fix".
   observerAutoStart?: boolean;
   observerSessionTimeout?: number | null;
+  // Timestamp format pref (WARDEN-213): threaded to ObserverPanel + ActivityTimeline
+  // so every observer/timeline time honors it via the shared formatTimestamp helper.
+  // Optional with a 'relative' default so this component's `= {}` default stays valid.
+  timestampFormat?: TimestampFormat;
 }
 
 // Manages persisted observer sessions as tabs. Every open tab keeps its own
 // ObserverPanel (and WS) mounted; inactive ones are display:none so their
 // conversations stay live. Open tabs + active tab persist in localStorage.
-export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout }: Props = {}) {
+export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, timestampFormat = 'relative' }: Props = {}) {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [openIds, setOpenIds] = useState<string[]>(() => loadObs().openIds);
   const [activeId, setActiveId] = useState<string | null>(() => loadObs().activeId);
@@ -320,7 +325,7 @@ export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onRe
           <div className="flex-1 min-h-0">
             {openIds.map((id) => (
               <div key={id} className={activeId === id ? 'h-full' : 'hidden'}>
-                <ObserverPanel sessionId={id} onFocusAgent={onFocusAgent} onActivity={() => bumpActivity(id)} />
+                <ObserverPanel sessionId={id} onFocusAgent={onFocusAgent} onActivity={() => bumpActivity(id)} timestampFormat={timestampFormat} />
               </div>
             ))}
           </div>
@@ -330,7 +335,7 @@ export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onRe
       {/* Activity view */}
       {viewMode === 'activity' && (
         <div className="flex-1 min-h-0">
-          <ActivityTimeline />
+          <ActivityTimeline timestampFormat={timestampFormat} />
         </div>
       )}
     </div>

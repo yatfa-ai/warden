@@ -26,6 +26,7 @@ import {
   type ThreadMessageLike,
 } from '@assistant-ui/react';
 import type { ChatContextMeta, ObserveMsg } from '@/lib/types';
+import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -93,6 +94,9 @@ interface Props {
   // session the agent is actively producing output to is never idle. Read through
   // a ref inside the memoized `connect` so adding it never resubscribes the WS.
   onActivity?: () => void;
+  // Timestamp format pref (WARDEN-213): routes each message's Clock time through
+  // the shared formatTimestamp helper. Pure client-side localStorage pref.
+  timestampFormat: TimestampFormat;
 }
 
 const MAX_COMPOSER_HEIGHT = 160; // px — must match the `max-h-40` class (10rem)
@@ -153,7 +157,7 @@ function convertMessage(item: Item): ThreadMessageLike {
 
 // One observer conversation, bound to a persisted session (?sid=). History is
 // replayed on connect so a refresh/restore shows the prior conversation.
-export function ObserverPanel({ sessionId, onFocusAgent, onActivity }: Props) {
+export function ObserverPanel({ sessionId, onFocusAgent, onActivity, timestampFormat }: Props) {
   const [items, setItems] = useState<Item[]>([]);
   const [busy, setBusy] = useState(false);
   const [conn, setConn] = useState(false);
@@ -640,7 +644,7 @@ export function ObserverPanel({ sessionId, onFocusAgent, onActivity }: Props) {
                     if (!item) return null;
                     if (item.kind === 'user')
                       return (
-                        <UserRow key={message.id} text={item.text} ts={item.ts} />
+                        <UserRow key={message.id} text={item.text} ts={item.ts} timestampFormat={timestampFormat} />
                       );
                     if (item.kind === 'observer')
                       return (
@@ -651,6 +655,7 @@ export function ObserverPanel({ sessionId, onFocusAgent, onActivity }: Props) {
                             (!!message.isLast || !!item.errored) && !busy && !item.streaming && !pendingGate
                           }
                           onRegenerate={regenerate}
+                          timestampFormat={timestampFormat}
                         />
                       );
                     if (item.kind === 'tool') return <ToolChip key={message.id} name={item.name} arg={item.arg} />;
@@ -796,13 +801,12 @@ function Avatar({ kind }: { kind: 'user' | 'observer' }) {
   );
 }
 
-function Clock({ ts }: { ts: number }) {
+function Clock({ ts, timestampFormat }: { ts: number; timestampFormat: TimestampFormat }) {
   if (!ts) return null;
-  const time = new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  return <span className="tabular-nums">{time}</span>;
+  return <span className="tabular-nums">{formatTimestamp(ts, timestampFormat)}</span>;
 }
 
-function UserRow({ text, ts }: { text: string; ts: number }) {
+function UserRow({ text, ts, timestampFormat }: { text: string; ts: number; timestampFormat: TimestampFormat }) {
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -811,7 +815,7 @@ function UserRow({ text, ts }: { text: string; ts: number }) {
           <div className="flex min-w-0 max-w-[85%] flex-col items-end gap-1">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <span className="font-medium text-foreground/70">You</span>
-              <Clock ts={ts} />
+              <Clock ts={ts} timestampFormat={timestampFormat} />
             </div>
             <div className="whitespace-pre-wrap break-words rounded-2xl rounded-tr-sm border border-primary/20 bg-primary/10 px-3 py-2 text-sm">
               {text}
@@ -835,10 +839,12 @@ function ObserverEntry({
   item,
   canRegenerate,
   onRegenerate,
+  timestampFormat,
 }: {
   item: Extract<Item, { kind: 'observer' }>;
   canRegenerate: boolean;
   onRegenerate: () => void;
+  timestampFormat: TimestampFormat;
 }) {
   return (
     <MessagePrimitive.Root className="group/msg relative flex items-start gap-2">
@@ -846,7 +852,7 @@ function ObserverEntry({
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <span className="font-medium text-foreground/70">Observer</span>
-          <Clock ts={item.ts} />
+          <Clock ts={item.ts} timestampFormat={timestampFormat} />
         </div>
         <ContextMenu>
           <ContextMenuTrigger asChild>
