@@ -1,6 +1,6 @@
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert';
-import { send } from './tmux.js';
+import { send, parseMouseState } from './tmux.js';
 
 // WARDEN-254: multiline send must deliver one bracketed paste (+ a single
 // submit), not N line-by-line submits. These tests drive the actual argv
@@ -89,5 +89,44 @@ describe('tmux send() — bracketed paste for multiline (WARDEN-254)', () => {
     await send(chat, cfg, 'hello\n', { runTmux: fn });
     assert.strictEqual(calls[0].args[0], 'set-buffer');
     assert.strictEqual(calls[0].args[4], 'hello\n');
+  });
+});
+
+// Unit tests for the Seamless-copy tmux helpers (WARDEN-261).
+// parseMouseState is a pure function over `tmux show-options -g mouse` stdout,
+// so it is tested directly. detectMouse/disableMouse shell out via runTmux and
+// are exercised end-to-end elsewhere; their argv is a trivial constant.
+describe('parseMouseState (WARDEN-261)', () => {
+  it('reads the default show-options form (`mouse on` / `mouse off`)', () => {
+    assert.strictEqual(parseMouseState('mouse on'), true);
+    assert.strictEqual(parseMouseState('mouse off'), false);
+  });
+
+  it('reads the -v form (bare `on` / `off`)', () => {
+    assert.strictEqual(parseMouseState('on'), true);
+    assert.strictEqual(parseMouseState('off'), false);
+  });
+
+  it('tolerates surrounding whitespace / CRLF from an SSH pty', () => {
+    assert.strictEqual(parseMouseState('mouse on\r\n'), true);
+    assert.strictEqual(parseMouseState('  mouse off  \n'), false);
+  });
+
+  it('returns null for an unreadable / unknown value (never a false "on")', () => {
+    // A failed read (host down, tmux error, no server, unexpected output) must
+    // be null so the frontend never shows the "copy impaired" hint on a failure.
+    assert.strictEqual(parseMouseState(''), null);
+    assert.strictEqual(parseMouseState('   '), null);
+    assert.strictEqual(parseMouseState('unknown option: mouse'), null);
+    assert.strictEqual(parseMouseState(undefined), null);
+    assert.strictEqual(parseMouseState(null), null);
+  });
+
+  it('is tri-state: the value is the last token; trailing junk is null', () => {
+    // Defensive: we take the LAST whitespace-separated token as the value, which
+    // is correct for both real forms (`mouse on`, `on`). A trailing token that
+    // isn't exactly on/off stays null (never a false "on") — safe for the hint.
+    assert.strictEqual(parseMouseState('set mouse off'), false);
+    assert.strictEqual(parseMouseState('mouse on # comment'), null);
   });
 });

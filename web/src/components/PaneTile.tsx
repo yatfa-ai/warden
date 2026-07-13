@@ -7,8 +7,9 @@ import { streamApi } from '@/lib/stream';
 import type { Chat } from '@/lib/types';
 import { findPathCandidates } from '@/lib/path-links';
 import { hostTagOf } from '@/lib/chatDisplay';
-import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBehavior } from '@/lib/storage';
+import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBehavior, type HostOptionsMap } from '@/lib/storage';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
+import { Button } from '@/components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { StatusDot } from '@/components/StatusDot';
 import { FileViewer } from './FileViewer';
@@ -120,9 +121,21 @@ interface Props {
   // pane grid is no longer ambiguous. Pure pass-through from App via PaneGrid —
   // one toggle governs both surfaces. Undefined/true → shown, false → hidden.
   showHostTags?: boolean;
+  // WARDEN-261: per-host "Seamless copy" toggle. When on for THIS pane's host,
+  // the attach message carries `seamlessCopy` so the backend disables tmux mouse
+  // and xterm owns the selection (standard select+copy works with no tmux
+  // knowledge). Pure client-side pref (App owns it); read via a ref at
+  // attach-send time so a Settings toggle applies on the next attach without
+  // re-attaching already-open panes.
+  hostOptions: HostOptionsMap;
+  // WARDEN-261: per-host dismissal of the "copy may not grab selected text"
+  // hint. When the backend reports tmux mouse is ON (mouse_state) and Seamless
+  // copy is off, the hint shows — unless this host was dismissed.
+  copyHintDismissed: Record<string, boolean>;
+  onDismissCopyHint: (host: string) => void;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalTheme, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalTheme, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, hostOptions, copyHintDismissed, onDismissCopyHint }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -159,6 +172,19 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const wasEverActiveRef = useRef(false);   // has this pane's agent ever been active:true?
   const exitHandledRef = useRef(false);     // one-shot: the exit action fires once per live→exited transition
   const [agentExited, setAgentExited] = useState(false);   // 'dim' overlay state
+  // WARDEN-261: this pane's host key — the chat's host ('(local)' or an SSH
+  // alias), falling back to the restore hint then '(local)'. Used to look up the
+  // Seamless-copy toggle and to key the per-host hint dismissal.
+  const hostKey = chat?.host || host || '(local)';
+  // WARDEN-261: tmux mouse state for this pane's host. Set true when the backend
+  // pushes a `mouse_state` notice after attach (mouse is ON → copy impaired).
+  // Drives the dismissible hint; false/unknown → no hint.
+  const [mouseOn, setMouseOn] = useState(false);
+  // Latest hostOptions read via ref so the attach effect (deps [id, host]) sends
+  // the current seamlessCopy value WITHOUT adding hostOptions to its deps — a
+  // Settings toggle must apply on the next attach, never re-attach an open pane.
+  const hostOptionsRef = useRef(hostOptions);
+  hostOptionsRef.current = hostOptions;
 
   // Defensive clamp: the global font size can briefly fall outside 8–24 while a
   // user types into the Settings field (coerced on blur). xterm must never receive
@@ -389,16 +415,30 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       else if (m.type === 'attached') { setConnected(true); setErrored(false); }
       else if (m.type === 'ended') setConnected(false);
       else if (m.type === 'attach_error') { term.write('\r\n[error: ' + m.error + ']\r\n'); setConnected(false); setErrored(true); }
+      // WARDEN-261: backend reports this host's tmux has mouse ON (copy impaired)
+      // and Seamless copy is off → show the dismissible hint. Only sent when
+      // mouse is on, so arrival implies impairment.
+      else if (m.type === 'mouse_state') setMouseOn(!!m.mouseOn);
     });
   }, [id]);
 
   useEffect(() => {
     const term = termRef.current; if (!term) return;
-    setConnected(false); setErrored(false);
+    setConnected(false); setErrored(false); setMouseOn(false);
     try { fitRef.current?.fit(); } catch {}
-    streamApi.send({ type: 'attach', id, host, cols: term.cols, rows: term.rows });
+    // WARDEN-261: tell the backend whether to disable tmux mouse for this host
+    // (Seamless copy). Read from the ref so a Settings toggle applies on the NEXT
+    // attach — hostOptions is deliberately NOT a dep, so toggling never re-
+    // attaches (kills/recreates the PTY of) an already-open pane. Keyed by
+    // `hostKey` so the toggle and the per-host hint dismissal always resolve to
+    // the same host for this pane.
+    const seamlessCopy = !!hostOptionsRef.current[hostKey]?.seamlessCopy;
+    streamApi.send({ type: 'attach', id, host, cols: term.cols, rows: term.rows, seamlessCopy });
     return () => { streamApi.send({ type: 'detach', id }); };
-  }, [id, host]);
+    // `hostKey` is the pane's host identity (stable string — only changes when the
+    // actual host changes, never on a Seamless-copy toggle), so listing it never
+    // re-attaches on a pref change. hostOptions stays out on purpose (see above).
+  }, [id, host, hostKey]);
 
   // clear "new" badge on focus
   useEffect(() => { if (focused && hasNew) onClearNew(); }, [focused]);
@@ -597,6 +637,21 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           <Btn title="prev" onClick={() => doSearch('prev')}>↑</Btn>
           <Btn title="next" onClick={() => doSearch('next')}>↓</Btn>
           <Btn title="close search" onClick={() => setShowSearch(false)}>×</Btn>
+        </div>
+      )}
+      {/* WARDEN-261: dismissible "copy impaired" hint. Shown only when the
+          backend reports this host's tmux mouse is ON (mouse_state) AND Seamless
+          copy is off for this host AND the user hasn't dismissed it. Non-blocking
+          (a thin strip, not a modal); dismissal is persisted per host by App. */}
+      {mouseOn && !copyHintDismissed[hostKey] && (
+        <div className="flex items-center gap-2 px-2 py-1 compact:py-0.5 bg-amber-500/10 border-b border-amber-500/30 text-xs text-amber-700 dark:text-amber-300 shrink-0">
+          <span className="flex-1 truncate">
+            Copy may not grab selected text — tmux mouse is on for this host. Enable <strong>Seamless copy</strong> in Settings to fix it.
+          </span>
+          <Button variant="ghost" size="icon" className="size-5"
+            aria-label="Dismiss copy hint"
+            title="Dismiss (silenced for this host)"
+            onClick={(e) => { stop(e); onDismissCopyHint(hostKey); }}>×</Button>
         </div>
       )}
       {/* terminal surface — stop the contextmenu event so right-clicks here keep the xterm
