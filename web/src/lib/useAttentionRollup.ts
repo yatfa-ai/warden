@@ -1,7 +1,18 @@
 // useAttentionRollup — the live, visibility-gated data source for the header
-// AttentionBadge (WARDEN-228). Polls /api/health and /api/activity/stats on the
-// same ~10s cadence HealthDashboard uses, then folds them into an AttentionRollup
-// via the pure buildAttentionRollup aggregator.
+// AttentionBadge (WARDEN-228), extended in WARDEN-344 to also poll each open pane's
+// CLASSIFIED STATE (stuck / erroring / waiting / blocked) so an agent actively
+// emitting a loop / stack trace / "press enter" prompt no longer reads "Healthy".
+//
+// Three signals are folded into one AttentionRollup via the pure buildAttentionRollup:
+//   - /api/health        (inactivity-based critical/warning)   — 10s cadence
+//   - /api/activity/stats (recent directive/error event counts) — 10s cadence
+//   - /api/agent-states   (per-open-pane classified state)      — 30s cadence  [NEW]
+//
+// The pane-state poll runs on a DEDICATED slower cadence (~30s, never the 10s health
+// poll) and classifies ONLY the panes the human has open (passed as ?panes=), because
+// it costs one batched capturePanes SSH round-trip. The Observer already batch-
+// captures open panes every turn, so the SSH cost is already incurred during active
+// use; this rides a slower beat. (WARDEN-344 scope item #5.)
 //
 // Why a standalone hook (not a shared /api/health context with HealthDashboard):
 // the health side panel is collapsed by default, so the badge is the ONLY always-on
@@ -9,14 +20,14 @@
 // deliberately expanded HealthDashboard — an acceptable trade for a cheap local
 // endpoint every 10s, and far smaller risk than refactoring HealthDashboard onto a
 // shared context. See WARDEN-228 impl notes ("standalone hook is acceptable").
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   buildAttentionRollup,
-  EMPTY_ATTENTION_ROLLUP,
   type AttentionRollup,
+  type AttentionRollupOptions,
 } from '@/lib/attentionRollup';
 import { shouldFireAlert, fireAttentionNotification } from '@/lib/desktopAlerts';
-import type { HealthData, ActivityStats } from '@/lib/types';
+import type { HealthData, ActivityStats, AgentStateRow, AgentStatesData } from '@/lib/types';
 
 // Recent-error / recent-directive window. ActivityStats counts raw events in the
 // queried window — there is NO server-side "unresolved"/"pending" flag — so a
@@ -26,8 +37,10 @@ import type { HealthData, ActivityStats } from '@/lib/types';
 // this is the live, always-on rollup, so it uses a fixed rolling window instead.)
 export const ATTENTION_RECENT_WINDOW_MS = 15 * 60 * 1000;
 
-// Match HealthDashboard's polling cadence.
-const POLL_MS = 10_000;
+// Health + activity stay on HealthDashboard's 10s cadence. Pane-state classification
+// runs capturePanes (a batched SSH round-trip), so it gets a DEDICATED slower cadence.
+const HEALTH_POLL_MS = 10_000;
+const AGENT_STATE_POLL_MS = 30_000;
 
 export interface AttentionRollupState {
   rollup: AttentionRollup;
@@ -35,32 +48,58 @@ export interface AttentionRollupState {
   loading: boolean;
 }
 
-export function useAttentionRollup(attentionDesktopAlerts = false): AttentionRollupState {
-  const [rollup, setRollup] = useState<AttentionRollup>(EMPTY_ATTENTION_ROLLUP);
+export function useAttentionRollup(
+  attentionDesktopAlerts = false,
+  openPanes: string[] = [],
+  enabledStates?: AttentionRollupOptions['enabledStates'],
+): AttentionRollupState {
+  const [health, setHealth] = useState<HealthData | null>(null);
+  const [stats, setStats] = useState<ActivityStats | null>(null);
+  const [agentStates, setAgentStates] = useState<AgentStateRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [agentStatesLoaded, setAgentStatesLoaded] = useState(false);
   // The previous rollup, for the desktop-alert increase detector below. Tracked
-  // in a ref (not state) so updating it never triggers a re-render and the gate
-  // effect's only dependency is the rollup itself.
+  // in refs (not state) so updating them never triggers a re-render.
   const prevRef = useRef<AttentionRollup | null>(null);
+  // Whether the first real rollup has been observed (the desktop-alert baseline).
+  const primedRef = useRef(false);
 
-  const fetchAll = useCallback(async () => {
+  // Refs so the interval closures read the LIVE open-panes set without the interval
+  // being rebuilt on every openPanes change (which would reset the 10s health cadence).
+  const openPanesRef = useRef(openPanes);
+  openPanesRef.current = openPanes;
+
+  const fetchHealthStats = useCallback(async () => {
     const after = new Date(Date.now() - ATTENTION_RECENT_WINDOW_MS).toISOString();
     // allSettled: a health OR stats failure must not blank the other half of the
-    // rollup, and must not crash the badge. A failed half degrades to null and
-    // buildAttentionRollup treats null as an empty bucket; the last good data for
-    // the other half is preserved.
+    // rollup, and must not crash the badge. A failed half degrades to null and the
+    // last good data for the other half is preserved (state isn't cleared on failure).
     const [healthRes, statsRes] = await Promise.allSettled([
       fetch('/api/health').then((r) => (r.ok ? (r.json() as Promise<HealthData>) : Promise.reject(new Error(`health ${r.status}`)))),
       fetch(`/api/activity/stats?after=${encodeURIComponent(after)}`).then((r) => (r.ok ? (r.json() as Promise<ActivityStats>) : Promise.reject(new Error(`stats ${r.status}`)))),
     ]);
-    const health = healthRes.status === 'fulfilled' ? healthRes.value : null;
-    const stats = statsRes.status === 'fulfilled' ? statsRes.value : null;
-    setRollup(buildAttentionRollup(health, stats));
+    setHealth(healthRes.status === 'fulfilled' ? healthRes.value : null);
+    setStats(statsRes.status === 'fulfilled' ? statsRes.value : null);
     setLoading(false);
   }, []);
 
+  const fetchAgentStates = useCallback(async () => {
+    const panes = openPanesRef.current;
+    if (!panes.length) { setAgentStates([]); setAgentStatesLoaded(true); return; }
+    try {
+      const res = await fetch(`/api/agent-states?panes=${encodeURIComponent(panes.join(','))}`);
+      if (!res.ok) { setAgentStatesLoaded(true); return; }
+      const data = (await res.json()) as AgentStatesData;
+      setAgentStates(Array.isArray(data?.agents) ? data.agents : []);
+    } catch {
+      // A failed state poll must not blank the other halves or crash the badge.
+    }
+    setAgentStatesLoaded(true);
+  }, []);
+
+  // Health + stats on the 10s cadence (unchanged from WARDEN-228).
   useEffect(() => {
-    void fetchAll();
+    void fetchHealthStats();
     // Visibility-gated: a backgrounded tab never burns requests (matches the catalog
     // auto-refresh in App.tsx). On regaining focus we poll immediately because state
     // may be stale while hidden.
@@ -68,38 +107,67 @@ export function useAttentionRollup(attentionDesktopAlerts = false): AttentionRol
     // EXCEPT when desktop alerts are opted in (WARDEN-259): then the poll MUST keep
     // running while hidden, otherwise the rollup would never update while the human
     // is away and the "fire on increase-while-hidden" alert would have no trigger.
-    // This reuses the SAME poll + subscriber (no second loop) — it only relaxes the
-    // visibility guard for opted-in users, so the default-off case is unchanged.
     const tick = () => {
-      if (attentionDesktopAlerts || document.visibilityState === 'visible') void fetchAll();
+      if (attentionDesktopAlerts || document.visibilityState === 'visible') void fetchHealthStats();
     };
     const onVisibility = () => {
-      if (document.visibilityState === 'visible') void fetchAll();
+      if (document.visibilityState === 'visible') void fetchHealthStats();
     };
-    const intervalId = window.setInterval(tick, POLL_MS);
+    const intervalId = window.setInterval(tick, HEALTH_POLL_MS);
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
       window.clearInterval(intervalId);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [fetchAll, attentionDesktopAlerts]);
+  }, [fetchHealthStats, attentionDesktopAlerts]);
+
+  // Pane states on the dedicated ~30s cadence (WARDEN-344). Classifies ONLY open
+  // panes; an empty open-panes set is a cheap no-op. Re-fires immediately when the
+  // open-panes set changes so a freshly-opened stuck pane surfaces within a poll,
+  // not after 30s. Same visibility relaxation as the health poll when alerts are on.
+  useEffect(() => {
+    void fetchAgentStates();
+    const tick = () => {
+      if (attentionDesktopAlerts || document.visibilityState === 'visible') void fetchAgentStates();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void fetchAgentStates();
+    };
+    const intervalId = window.setInterval(tick, AGENT_STATE_POLL_MS);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [fetchAgentStates, attentionDesktopAlerts, openPanes]);
+
+  // Derive the rollup from the three signals + the per-state toggle. useMemo so a
+  // toggle change re-aggregates without a refetch, and so the badge only re-renders
+  // when something that affects the count actually changed.
+  const rollup = useMemo(
+    () => buildAttentionRollup(health, stats, agentStates, { enabledStates }),
+    [health, stats, agentStates, enabledStates],
+  );
 
   // Fire an OS desktop notification on a genuine rollup INCREASE while Warden is
-  // unfocused (WARDEN-259). The always-on AttentionBadge already covers the
-  // in-app case, so a desktop alert while looking at Warden is pure noise — hence
-  // the hidden guard. shouldFireAlert returns true ONLY on a total increase, so a
-  // persistent condition never repeats and a recovery never fires. prevRef always
-  // advances (even when we don't fire) so the next comparison is against the last
-  // rollup, not a stale one. No-op entirely when the pref is off.
+  // unfocused (WARDEN-259). The always-on AttentionBadge already covers the in-app
+  // case, so a desktop alert while looking at Warden is pure noise — hence the hidden
+  // guard. shouldFireAlert returns true ONLY on a total increase, so a persistent
+  // condition never repeats and a recovery never fires. prevRef always advances (even
+  // when we don't fire) so the next comparison is against the last rollup.
   //
-  // The initial EMPTY_ATTENTION_ROLLUP is a loading PLACEHOLDER, not real data
-  // (buildAttentionRollup always returns a fresh object, so this reference check
-  // is true only for the placeholder). Skipping it leaves prev=null until the
-  // first REAL poll, so that first poll becomes the baseline instead of firing on
-  // pre-existing attention at launch/reload — matches shouldFireAlert's
-  // "either input missing → false" and the "While you were away" banner's role.
+  // Baseline priming: the FIRST rollup observed after both initial fetches land
+  // becomes the baseline (no fire) — so pre-existing attention at launch/reload does
+  // not fire (the "While you were away" banner covers that), matching shouldFireAlert's
+  // "either input missing → false". A pane that flips stuck/erroring/waiting AFTER
+  // that raises total → fires.
   useEffect(() => {
-    if (rollup === EMPTY_ATTENTION_ROLLUP) return;
+    if (loading || !agentStatesLoaded) return;
+    if (!primedRef.current) {
+      primedRef.current = true;
+      prevRef.current = rollup;
+      return;
+    }
     const prev = prevRef.current;
     prevRef.current = rollup;
     if (!attentionDesktopAlerts) return;
@@ -107,7 +175,7 @@ export function useAttentionRollup(attentionDesktopAlerts = false): AttentionRol
     if (shouldFireAlert(prev, rollup)) {
       fireAttentionNotification(rollup);
     }
-  }, [rollup, attentionDesktopAlerts]);
+  }, [rollup, attentionDesktopAlerts, loading, agentStatesLoaded]);
 
   return { rollup, loading };
 }

@@ -177,6 +177,11 @@ export interface UiState {
   // unfocused (WARDEN-259). Default OFF (opt-in). Pure client-side pref (like
   // terminalFontSize/scrollback); never sent to the backend / /api/config.
   attentionDesktopAlerts?: boolean;
+  // Per-state toggle for the Attention badge + desktop alert (WARDEN-344): which
+  // pane states (stuck/erroring/waiting/blocked) raise attention. Each defaults to
+  // ON so every state surfaces; a human can silence a noisy "waiting" without losing
+  // "erroring". Pure client-side pref; never sent to the backend / /api/config.
+  attentionStates?: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean };
   terminalScrollback?: number;
   // Terminal font family: the CSS font-family value xterm renders in every agent
   // pane. '' / absent = the DEFAULT_TERMINAL_FONT_FAMILY stack (today's look);
@@ -449,6 +454,7 @@ const DEFAULT_UI: UiState = {
   sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true,
   sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14,
   attentionDesktopAlerts: false,
+  attentionStates: { stuck: true, erroring: true, waiting: true, blocked: true },
   terminalScrollback: 10000, terminalFontFamily: '',
   terminalColorScheme: 'auto',
   terminalCursorStyle: 'blink-block',
@@ -507,6 +513,15 @@ export function loadUi(): UiState {
         // Opt-in: only an explicitly-stored `true` enables it. Anything else
         // (missing / false / wrong type) stays OFF — the conservative default.
         attentionDesktopAlerts: v.attentionDesktopAlerts === true,
+        // Per-state toggle: each state defaults ON (only an explicit false silences
+        // it), so a partial/legacy payload never drops a state silently. Matches
+        // buildAttentionRollup's `enabledStates[k] !== false` semantics.
+        attentionStates: {
+          stuck: v.attentionStates?.stuck !== false,
+          erroring: v.attentionStates?.erroring !== false,
+          waiting: v.attentionStates?.waiting !== false,
+          blocked: v.attentionStates?.blocked !== false,
+        },
         terminalScrollback: typeof v.terminalScrollback === 'number' ? v.terminalScrollback : 10000,
         terminalFontFamily: typeof v.terminalFontFamily === 'string' ? v.terminalFontFamily : '',
         terminalColorScheme: ['auto', 'dark', 'light'].includes(v.terminalColorScheme) ? v.terminalColorScheme : 'auto',

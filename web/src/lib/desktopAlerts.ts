@@ -67,12 +67,19 @@ export function shouldFireAlert(
  * "N items need attention" wording. The body lists only the non-zero buckets.
  */
 export function formatAlertMessage(rollup: AttentionRollup): { title: string; body: string } {
-  const { critical, warning, directives, errors, total } = rollup;
+  const { critical, warning, stuck, erroring, waiting, blocked, directives, errors, total } = rollup;
   const plural = (n: number, noun: string) => `${n} ${noun}${n !== 1 ? 's' : ''}`;
   const parts: string[] = [];
-  // critical/warning read as labels (no plural-s); directive/error pluralize.
+  // Red-tone buckets first (critical + the red pane states stuck/erroring), then
+  // amber (warning + the amber pane states waiting/blocked), then event counts. Each
+  // label reads as a bare noun (no plural-s); directives/errors pluralize. Only the
+  // non-zero buckets are listed. (WARDEN-344: stuck/erroring/waiting/blocked added.)
   if (critical.length > 0) parts.push(`${critical.length} critical`);
+  if (stuck.length > 0) parts.push(`${stuck.length} stuck`);
+  if (erroring.length > 0) parts.push(`${erroring.length} erroring`);
   if (warning.length > 0) parts.push(`${warning.length} warning`);
+  if (waiting.length > 0) parts.push(`${waiting.length} waiting`);
+  if (blocked.length > 0) parts.push(`${blocked.length} blocked`);
   if (directives > 0) parts.push(plural(directives, 'directive'));
   if (errors > 0) parts.push(plural(errors, 'error'));
   const title = `Warden: ${total} ${total === 1 ? 'item needs' : 'items need'} attention`;

@@ -22,6 +22,7 @@ import { listSessions, createSession, renameSession, deleteSession } from './ses
 import { appendEvent, rotateEvents, readEvents, getStatsSince, getSeriesSince } from './activity.js';
 import { buildSnapshot, diffLifecycles } from './lifecycle.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
+import { classifyPane, stripAnsi } from './agentState.js';
 import { checkHost } from './hostStatus.js';
 import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, isDetachedHead, normalizeHeadSha, parseUpstream, buildDockerGitArgv } from './gitStatus.js';
 
@@ -172,6 +173,66 @@ app.get('/api/health', (_req, res) => {
       summary,
       timestamp: Date.now()
     });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Pane-state classification for the proactive attention surfaces (WARDEN-344).
+//
+// `/api/health` above is purely inactivity-based (HEALTHY/WARNING/CRITICAL by
+// time-since-last-output), so an agent ACTIVELY emitting a repeating loop, a stack
+// trace, or a "press enter" prompt reads HEALTHY — it never raises the Attention
+// badge. This endpoint fills that gap by running the existing classifyPane heuristic
+// (WARDEN-33; no LLM) over the panes the human currently has OPEN, returning each
+// agent's state + the triggering signal.
+//
+// The client passes its open pane KEYS as ?panes=k1,k2 (same convention as
+// /api/search-pane) — we classify ONLY those, never the whole fleet, so a poll costs
+// one capturePanes round-trip grouped per host, not a full SSH sweep. Panes whose
+// host is unreachable are returned with state 'capture_failed' (flagged, not dropped
+// — WARDEN-89). Capture is the only SSH cost; resolution is cache-derived (zero SSH).
+app.get('/api/agent-states', async (req, res) => {
+  try {
+    const keys = String(req.query.panes || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (keys.length === 0) return res.json({ agents: [], total: 0, timestamp: Date.now() });
+
+    // Resolve pane keys → chats from the cache (zero ssh). Match on key OR id so a
+    // bare restored tab id resolves the same as a host-qualified key.
+    const seen = new Set();
+    const chats = [];
+    for (const k of keys) {
+      const c = cache.find((x) => x.key === k || x.id === k);
+      if (c && !seen.has(c.key)) { seen.add(c.key); chats.push(c); }
+    }
+    if (chats.length === 0) return res.json({ agents: [], total: 0, timestamp: Date.now() });
+
+    const panes = await capturePanes(chats, cfg);
+
+    const agents = chats.map((c) => {
+      const base = {
+        id: c.container || c.session,
+        key: c.key,
+        host: c.host,
+        project: c.project,
+        role: c.role,
+        name: c.name || c.key || (c.container || c.session),
+      };
+      // A MISSING key means capturePanes silently dropped this chat (host SSH
+      // failed → `if (!res.ok) return;` per host). Surface it as capture_failed so
+      // the badge can still name the agent instead of omitting it (WARDEN-89).
+      if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
+        return { ...base, state: 'capture_failed', captureError: true, signal: null };
+      }
+      const clean = stripAnsi(panes[c.key] || '');
+      const { state, signal } = classifyPane(clean, c);
+      return { ...base, state, signal, captureError: false };
+    });
+
+    res.json({ agents, total: agents.length, timestamp: Date.now() });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
