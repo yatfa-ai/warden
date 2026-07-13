@@ -420,6 +420,30 @@
  * it only feeds `@custom-variant dark (&:is(.dark *))` and `dark:` utilities.
  */
 
+/*
+ * xterm terminal surface — match the active theme's background (WARDEN-255 QA fix).
+ *
+ * xterm's bundled stylesheet pins `.xterm .xterm-viewport { background-color: #000 }`,
+ * and with no webgl/canvas addon loaded the DOM renderer does NOT paint the
+ * theme's `background` onto the viewport element. So every terminal pane renders
+ * pure black regardless of the active theme — which on the two LIGHT themes makes
+ * the shell prompt invisible (black foreground on a black viewport). The theme
+ * object DOES reach xterm (foreground/cursor already track it); only the viewport
+ * background is lost. Each theme defines its CSS `--background` to EQUAL its
+ * `xterm.background` hex by construction (see themes.ts), so driving the surface
+ * from that token makes the pane background match the active theme.
+ *
+ * `!important` + UNLAYERED is deliberate, not a smell: xterm.css is an unlayered
+ * third-party stylesheet that loads AFTER index.css (see main.tsx), and the DOM
+ * renderer may inject an inline background — so neither the @layer cascade, nor
+ * source order, nor plain specificity can reliably override the library default.
+ * This is a targeted override of a single third-party rule.
+ */
+.xterm .xterm-viewport,
+.xterm .xterm {
+  background-color: var(--background) !important;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

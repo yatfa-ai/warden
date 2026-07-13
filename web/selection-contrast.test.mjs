@@ -29,6 +29,12 @@
 // from themes.ts (the registry) so a theme added to the registry without a CSS
 // block (or failing contrast) fails here.
 //
+// It also guards the xterm terminal-surface rule (criterion 7): the DOM renderer
+// doesn't paint theme.background onto `.xterm-viewport`, so a CSS rule drives it
+// from var(--background) — without it every terminal pane is black and light-theme
+// prompts are invisible. Asserted here (rule ships + !important) for the same
+// "verified, not asserted" reason as the selection contrast above.
+//
 // Run: node selection-contrast.test.mjs   (or: npm test, from web/)
 import { transformWithOxc } from 'vite';
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
@@ -167,6 +173,28 @@ test(':root selection tokens equal the default theme (' + DEFAULT_THEME_ID + ') 
   assert.ok(def, 'default theme has a CSS block');
   assert.equal(blocks.root['--selection'], def['--selection'], ':root --selection must mirror the default theme');
   assert.equal(blocks.root['--selection-foreground'], def['--selection-foreground'], ':root --selection-foreground must mirror the default theme');
+});
+
+console.log('\nxterm terminal surface tracks the active theme background (criterion 7 — QA fix)');
+test('a .xterm-viewport rule ships in index.css driving background from var(--background)', () => {
+  // The DOM renderer (no webgl/canvas addon) does not paint theme.background onto
+  // the viewport element, so a CSS rule must drive the surface from the token.
+  // Without it every terminal pane renders pure black and the two LIGHT themes
+  // have an invisible (black-on-black) shell prompt. Each theme's --background
+  // equals its xterm.background hex by construction, so the token IS the right
+  // color. This guards the rule against accidental removal.
+  const rule = /\.xterm-viewport[^{]*\{[^}]*background-color:\s*var\(--background\)/;
+  assert.ok(rule.test(css), '.xterm-viewport must set background-color: var(--background) so the pane matches the active theme');
+});
+test('the xterm-viewport rule is fortified (!important) to override xterm.css\'s #000 default', () => {
+  // xterm.css pins `.xterm .xterm-viewport { background-color: #000 }` UNLAYERED
+  // and loads AFTER index.css (main.tsx), and the DOM renderer may inject an
+  // inline background — so neither the @layer cascade, source order, nor plain
+  // specificity can reliably reach it. !important is the load-bearing override;
+  // pinning it here stops a future "specificity should suffice" cleanup from
+  // silently re-breaking light-theme terminals.
+  const rule = /\.xterm-viewport[^{]*\{[^}]*background-color:\s*var\(--background\)\s*!important/;
+  assert.ok(rule.test(css), '.xterm-viewport rule must use !important to beat xterm.css (unlayered, loads later, may be inline)');
 });
 
 console.log(`\n✓ SELECTION CONTRAST TESTS PASS (${passed})`);
