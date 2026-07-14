@@ -56,15 +56,29 @@ type Response struct {
 // containerInfo is one row of a discover result. It mirrors warden's
 // DISCOVER_SCRIPT TSV layout (name \t status \t cwd \t active) so the Node side
 // can map it to the identical chat shape the default discover() path produces.
+// Pane carries the raw LEADING pane line for an active container (captured
+// host-side in ONE batched shell when activity is requested) so the Node side
+// can parse lastActivity from it via the SAME helper the default path uses —
+// closing the read-parity gap where companion-discovered agents classified
+// UNKNOWN in Fleet Health. Empty when inactive, lean, or no parseable line.
+// (WARDEN-376)
 type containerInfo struct {
 	Name   string `json:"name"`
 	Status string `json:"status"`
 	Cwd    string `json:"cwd"`
 	Active bool   `json:"active"`
+	Pane   string `json:"pane,omitempty"`
 }
 
 type discoverParams struct {
 	Session string `json:"session"` // tmux session to probe; defaults to "agent"
+	// Activity gates the leading-pane-line capture. The Node side forwards
+	// opts.activity !== false as a boolean: true for the user-facing discover
+	// (capture pane lines so Fleet Health classifies HEALTHY/WARNING/CRITICAL),
+	// false for the lean 60s lifecycle poll (skip per-container capture-pane
+	// work — WARDEN-147's optimization, preserved exactly). Absent (a direct
+	// stdio caller that sends no activity field) defaults to false → no capture.
+	Activity bool `json:"activity"`
 }
 
 func main() {
@@ -197,6 +211,35 @@ func discover(params json.RawMessage) ([]containerInfo, error) {
 			Active: active,
 		})
 	}
+
+	// Activity capture (WARDEN-376): when requested (the non-lean path — the
+	// lifecycle poll forwards activity:false to SKIP this), batch-capture each
+	// ACTIVE container's leading pane line in ONE local shell invocation. This
+	// is the same `docker exec <c> tmux capture-pane -t <session> -p -S - -E -
+	// | head -1` the default SSH discover path runs per active agent (chats.js),
+	// sentinel-framed like capturePanes so parseCaptureSentinels recovers a
+	// name→line map. The raw line is emitted on Pane; the timestamp is PARSED
+	// in JS by the shared parseActivityTimestamp so both paths agree by
+	// construction (the regex lives once, in chatMeta.js). Skipped entirely
+	// when lean (zero per-tick local capture-pane work — lean-mode parity) and
+	// when no container is active.
+	if p.Activity {
+		var actives []string
+		for i := range result {
+			if result[i].Active {
+				actives = append(actives, result[i].Name)
+			}
+		}
+		if len(actives) > 0 {
+			lines := captureActivityLines(actives, session)
+			for i := range result {
+				if result[i].Active {
+					result[i].Pane = lines[result[i].Name]
+				}
+			}
+		}
+	}
+
 	return result, nil
 }
 
@@ -209,6 +252,60 @@ func captureFirst(name string, args ...string) string {
 		return ""
 	}
 	return strings.TrimSpace(strings.TrimRight(string(out), "\r"))
+}
+
+// --------------------------- activity capture --------------------------------
+// WARDEN-376 (read-parity slice of roadmap WARDEN-270). The default SSH discover
+// path captures each active agent's leading pane line and parses a timestamp
+// out of it to populate chat.lastActivity — without which Fleet Health renders
+// an actively-working companion-discovered agent as UNKNOWN (health.js short-
+// circuits on a null lastActivity). This captures that SAME leading line
+// host-side, in ONE batched local shell (zero further ssh handshakes — the
+// companion is already local), and emits it raw on containerInfo.Pane for the
+// Node side to parse with the shared parseActivityTimestamp. The bootstrap+
+// channel are slice 1's, reused verbatim; this only adds the host-side capture.
+
+// buildActivityScript builds the batched, sentinel-framed script that captures
+// the LEADING pane line for each active container in ONE local shell. It runs
+// the SAME per-container command the default SSH discover path runs
+// (chats.js): `docker exec <c> tmux capture-pane -t <session> -p -S - -E -
+// 2>/dev/null | head -1`, sentinel-bracketed with ___B_<name>___ / ___E_<name>___
+// so parseCaptureSentinels recovers a name→line map. Container names are docker
+// names (^[A-Za-z0-9_.-]+$), never free-form input, so interpolating <name>
+// verbatim inside the single-quoted printf argument is the same trust boundary
+// buildCaptureScript relies on. (WARDEN-376)
+func buildActivityScript(names []string, session string) string {
+	if session == "" {
+		session = "agent"
+	}
+	target := shellQuote(session)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		c := shellQuote(name)
+		parts = append(parts,
+			"printf '___B_"+name+"___\\n'; "+
+				"docker exec "+c+" tmux capture-pane -t "+target+
+				" -p -S - -E - 2>/dev/null | head -1; "+
+				"printf '\\n___E_"+name+"___\\n'")
+	}
+	return strings.Join(parts, "; ")
+}
+
+// captureActivityLines runs the batched leading-line capture for the given
+// active container names in ONE `bash -lc` invocation (mirrors capturePanes:
+// one local fan-out, zero further ssh). Returns a name→line map; a container
+// whose capture yielded no line is absent (callers leave Pane empty → JS parses
+// null → lastActivity stays null, exactly as the default path's per-agent
+// .catch() leaves it). A failed batch (e.g. tmux absent) is non-fatal: discover
+// still returns the containers with no Pane, so a transient capture failure
+// never breaks discovery — it just leaves lastActivity null. (WARDEN-376)
+func captureActivityLines(names []string, session string) map[string]string {
+	script := buildActivityScript(names, session)
+	out, err := exec.Command("bash", "-lc", script).Output()
+	if err != nil {
+		return map[string]string{}
+	}
+	return parseCaptureSentinels(string(out))
 }
 
 // ----------------------------- capturePanes ---------------------------------

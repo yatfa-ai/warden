@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { resolveChat, resolveChatWithRefresh, comparePinned, parseDiscoverRow, parseDockerStats, splitDiscoverOutput, discover, capturePanes, DISCOVER_SCRIPT } from './chats.js';
-import { buildChat } from './chatMeta.js';
+import { buildChat, parseActivityTimestamp } from './chatMeta.js';
 
 // ----------------------------- capturePanes routing -------------------------
 // WARDEN-276: under WARDEN_COMPANION_TRANSPORT=1, REMOTE hosts route capture-pane
@@ -591,6 +591,66 @@ describe('discover() default path builds chats via buildChat (refactor is a no-o
     assert.strictEqual(res.ok, false);
     assert.strictEqual(res.chats.length, 0);
     assert.ok(res.error.includes('Permission denied'));
+  });
+});
+
+// WARDEN-376: the default SSH discover path's second-pass activity capture was
+// refactored to parse the leading pane line via the shared parseActivityTimestamp
+// (the SAME helper the companion path uses). Every existing discover test skips
+// this pass with { activity: false }, so this block exercises the capture path
+// itself — locking the refactor as a no-op and proving default<->companion
+// parity (both produce the same lastActivity for the same leading line). The raw
+// `run` the capture pass uses is injected via deps.run (defaults to the real run;
+// production behavior unchanged).
+describe('discover() default-path activity capture uses the shared helper (WARDEN-376)', () => {
+  it('populates lastActivity from the captured leading pane line (parity with companion)', async () => {
+    const stdout = 'myproject-worker\tUp 2 hours\t/work/myproject\t1'; // one active agent
+    const pane = '[2024-01-15 10:30:00] worker: thinking';
+    let runCalls = 0;
+    const res = await discover('prod', { connectTimeout: 10 }, { /* activity omitted -> capture runs */ }, {
+      isCompanionTransportEnabled: () => false,
+      runWithPool: async () => ({ ok: true, stdout }),
+      run: async () => { runCalls++; return { ok: true, stdout: pane }; },
+    });
+    assert.strictEqual(runCalls, 1, 'one capture-pane run per active agent');
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.chats.length, 1);
+    assert.strictEqual(res.chats[0].lastActivity, parseActivityTimestamp(pane),
+      'lastActivity parsed by the SAME helper the companion uses');
+    assert.ok(Number.isFinite(res.chats[0].lastActivity));
+  });
+
+  it('leaves lastActivity null when the captured line has no timestamp', async () => {
+    const stdout = 'myproject-worker\tUp 2 hours\t/work/myproject\t1';
+    const res = await discover('prod', {}, {}, {
+      isCompanionTransportEnabled: () => false,
+      runWithPool: async () => ({ ok: true, stdout }),
+      run: async () => ({ ok: true, stdout: 'agent output with no timestamp' }),
+    });
+    assert.strictEqual(res.chats[0].lastActivity, null);
+  });
+
+  it('skips the capture pass entirely when lean (activity: false) — no per-agent run', async () => {
+    const stdout = 'myproject-worker\tUp 2 hours\t/work/myproject\t1';
+    let runCalls = 0;
+    const res = await discover('prod', {}, { activity: false }, {
+      isCompanionTransportEnabled: () => false,
+      runWithPool: async () => ({ ok: true, stdout }),
+      run: async () => { runCalls++; return { ok: true, stdout: '' }; },
+    });
+    assert.strictEqual(runCalls, 0, 'lean mode skips the per-agent capture-pane run');
+    assert.strictEqual(res.chats[0].lastActivity, null);
+  });
+
+  it('a failed capture (run !ok) leaves lastActivity null without throwing (per-agent resilience)', async () => {
+    const stdout = 'myproject-worker\tUp 2 hours\t/work/myproject\t1';
+    const res = await discover('prod', {}, {}, {
+      isCompanionTransportEnabled: () => false,
+      runWithPool: async () => ({ ok: true, stdout }),
+      run: async () => ({ ok: false, code: 1, stderr: 'capture failed' }),
+    });
+    assert.strictEqual(res.ok, true, 'discover itself still succeeds');
+    assert.strictEqual(res.chats[0].lastActivity, null);
   });
 });
 

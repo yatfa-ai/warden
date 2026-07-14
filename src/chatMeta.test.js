@@ -9,7 +9,7 @@
 // shared sortChats() ordering both paths use.
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { ROLES, parseContainerName, buildChat, sortChats } from './chatMeta.js';
+import { ROLES, parseContainerName, buildChat, sortChats, parseActivityTimestamp } from './chatMeta.js';
 
 describe('parseContainerName', () => {
   it('splits "{project}-{role}" on the LAST hyphen', () => {
@@ -140,5 +140,62 @@ describe('sortChats (shared ordering: active first, then by key)', () => {
   });
   it('handles an empty array', () => {
     assert.deepStrictEqual(sortChats([]), []);
+  });
+});
+
+// parseActivityTimestamp is the SINGLE timestamp regex BOTH discovery paths use
+// (WARDEN-376): the default SSH path (chats.js) and the companion transport
+// (companion.js) both call it on the leading pane line, so lastActivity is
+// parsed identically by construction. This locks the exact behavior extracted
+// from chats.js's former inline parse — the bracketed/unbracketed,
+// space/T-separated YYYY-MM-DD HH:MM:SS forms the default path accepted.
+describe('parseActivityTimestamp (the shared leading-line timestamp parse)', () => {
+  // For every valid form, the helper must return the SAME epoch ms that
+  // `new Date(<extracted substring>)` yields — proving it extracts the
+  // timestamp substring (stripping any brackets) and parses it, without
+  // hardcoding a timezone-dependent constant (both sides use local time).
+  const cases = [
+    ['[2024-01-15 10:30:00] worker thinking…', '2024-01-15 10:30:00'],   // bracketed, space
+    ['2024-06-01 08:15:42 > running step', '2024-06-01 08:15:42'],        // unbracketed, space
+    ['2024-06-01T08:15:42', '2024-06-01T08:15:42'],                       // unbracketed, T (ISO)
+    ['[2024-06-01T08:15:42]', '2024-06-01T08:15:42'],                     // bracketed, T
+    ['noise 2024-03-09 23:59:59 trailing', '2024-03-09 23:59:59'],        // timestamp mid-line
+  ];
+  for (const [line, ts] of cases) {
+    it(`parses "${line.slice(0, 24)}…" -> epoch ms (extracts ${ts})`, () => {
+      const got = parseActivityTimestamp(line);
+      const want = new Date(ts).getTime();
+      assert.ok(Number.isFinite(got), `expected a finite epoch ms, got ${got}`);
+      assert.strictEqual(got, want, 'equals new Date(<extracted ts>).getTime()');
+      assert.strictEqual(got, new Date(ts).getTime());
+    });
+  }
+
+  it('returns null when the line carries no parseable timestamp', () => {
+    for (const line of [
+      'no timestamp here',
+      'worker just says things',
+      'Jan 15 10:30:00 worker',           // wrong format (no YYYY-MM-DD)
+      '2024/01/15 10:30:00',              // slashes, not dashes
+      '2024-01-15',                       // date only, no time
+      '10:30:00',                         // time only, no date
+    ]) {
+      assert.strictEqual(parseActivityTimestamp(line), null, `expected null for ${JSON.stringify(line)}`);
+    }
+  });
+
+  it('returns null for empty / null / undefined / whitespace input', () => {
+    assert.strictEqual(parseActivityTimestamp(''), null);
+    assert.strictEqual(parseActivityTimestamp('   '), null);
+    assert.strictEqual(parseActivityTimestamp('\n\t'), null);
+    assert.strictEqual(parseActivityTimestamp(null), null);
+    assert.strictEqual(parseActivityTimestamp(undefined), null);
+  });
+
+  it('returns null for a syntactically-matching but invalid ISO date (no NaN leaks)', () => {
+    // The regex matches (month/day shape is right) but month 13 is impossible;
+    // an ISO date-time with no zone rejects it as Invalid Date. The helper must
+    // return null rather than stamping NaN into lastActivity.
+    assert.strictEqual(parseActivityTimestamp('2024-13-01T10:00:00'), null);
   });
 });

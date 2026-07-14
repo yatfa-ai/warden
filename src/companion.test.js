@@ -31,7 +31,7 @@ import {
   CompanionRpcError, getChannel, discover, capturePanes, isCompanionTransportEnabled, loadManifest,
   projectSpawnModel, _resetChannelCacheForTests,
 } from './companion.js';
-import { buildChat } from './chatMeta.js';
+import { buildChat, parseActivityTimestamp } from './chatMeta.js';
 import { buildCaptureScript, parseCaptureSentinels } from './chats.js';
 
 // ------------------------------- pure seams ---------------------------------
@@ -139,6 +139,51 @@ describe('mapCompanionContainers (maps containers into the shared buildChat)', (
   it('tolerates null/undefined containers', () => {
     assert.deepStrictEqual(mapCompanionContainers(host, null), []);
     assert.deepStrictEqual(mapCompanionContainers(host, undefined), []);
+  });
+
+  // WARDEN-376: an active container's host-side-captured leading pane line is
+  // parsed into lastActivity via the SAME parseActivityTimestamp the default
+  // path uses, so a companion-discovered active agent classifies
+  // HEALTHY/WARNING/CRITICAL (not UNKNOWN) in Fleet Health.
+
+  it('sets lastActivity from an active container pane line (parity with the default path)', () => {
+    const pane = '[2024-01-15 10:30:00] worker: thinking';
+    const [chat] = mapCompanionContainers(host, [
+      { name: 'p-worker', status: 'Up', cwd: '/w', active: true, pane },
+    ]);
+    assert.strictEqual(chat.lastActivity, parseActivityTimestamp(pane),
+      'lastActivity is exactly what the shared helper parses from the pane line');
+    assert.ok(Number.isFinite(chat.lastActivity), 'a real epoch ms, not null');
+  });
+
+  it('leaves lastActivity null when the active container pane line is garbage/empty', () => {
+    for (const pane of ['no timestamp here', '', '   ', null, undefined]) {
+      const [chat] = mapCompanionContainers(host, [
+        { name: 'p-worker', status: 'Up', cwd: '/w', active: true, pane },
+      ]);
+      assert.strictEqual(chat.lastActivity, null, `expected null for pane=${JSON.stringify(pane)}`);
+    }
+  });
+
+  it('does not parse lastActivity for INACTIVE containers (even with a pane line)', () => {
+    // The Go side captures Pane for active containers only; even if an inactive
+    // row carried a pane, the mapper must not stamp activity onto a dead chat.
+    const [chat] = mapCompanionContainers(host, [
+      { name: 'p-worker', status: 'Exited', cwd: '/w', active: false, pane: '[2024-01-15 10:30:00] stale' },
+    ]);
+    assert.strictEqual(chat.active, false);
+    assert.strictEqual(chat.lastActivity, null, 'inactive containers are not parsed');
+  });
+
+  it('leaves lastActivity null when no pane field is present (lean-mode / slice-1 shape)', () => {
+    // Backward-compatible: a container with no pane (the lean lifecycle poll, or
+    // an older companion) leaves lastActivity null exactly like slice 1.
+    const [active, inactive] = mapCompanionContainers(host, [
+      { name: 'a-worker', status: 'Up', cwd: '/w', active: true },
+      { name: 'i-worker', status: 'Up', cwd: '/w', active: false },
+    ]);
+    assert.strictEqual(active.lastActivity, null);
+    assert.strictEqual(inactive.lastActivity, null);
   });
 });
 
@@ -647,6 +692,47 @@ describe('discover() via companion (companion-or-fail)', () => {
     const res = await discover('(local)', {}, {});
     assert.strictEqual(res.ok, false);
     assert.ok(/local/.test(res.error));
+  });
+
+  it('forwards opts.activity in the discover RPC params (lean-mode parity, WARDEN-376)', async () => {
+    // The lifecycle poll runs lean (activity:false) to SKIP per-container
+    // capture-pane work; the user-facing discover omits activity (-> true) so the
+    // host captures leading lines. Both must be forwarded exactly — otherwise the
+    // lean poll would suddenly do per-active-container capture-pane work every
+    // tick (a quiet local-cost regression vs the default path's lean mode).
+    const seen = [];
+    const t = fakeTransport((req) => {
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER } };
+      if (req.method === 'discover') { seen.push(req.params); return { id: req.id, ok: true, result: { containers: [] } }; }
+      return { id: req.id, ok: false, error: 'unknown method' };
+    });
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    await discover('prod', {}, { activity: false }, deps); // lean
+    await discover('prod', {}, {}, deps);                  // user-facing (omitted)
+    await discover('prod', {}, { activity: true }, deps);  // explicit
+    assert.strictEqual(seen.length, 3);
+    assert.deepStrictEqual(seen[0], { session: 'agent', activity: false }, 'lean forwards activity:false');
+    assert.deepStrictEqual(seen[1], { session: 'agent', activity: true }, 'omitted forwards activity:true');
+    assert.deepStrictEqual(seen[2], { session: 'agent', activity: true }, 'explicit true forwards activity:true');
+  });
+
+  it('populates lastActivity from a container pane line so Fleet Health classifies (not UNKNOWN) — WARDEN-376', async () => {
+    // Success criterion #1: a discovered ACTIVE agent populates lastActivity with
+    // the SAME field the default path sets (parsed by the same helper), so
+    // getHealthState classifies HEALTHY/WARNING/CRITICAL instead of UNKNOWN.
+    const containers = [
+      { name: 'p-worker', status: 'Up', cwd: '/w', active: true, pane: '[2024-01-15 10:30:00] thinking' },
+      { name: 'p-planner', status: 'Up', cwd: '/w', active: false }, // inactive: no pane
+    ];
+    const { deps } = fakeDeps({ spawnChannel: () => healthyTransport({ containers }) });
+    const res = await discover('prod', { tmuxSession: 'agent' }, {}, deps);
+    assert.strictEqual(res.ok, true);
+    const worker = res.chats.find((c) => c.key === 'p-worker');
+    assert.strictEqual(worker.active, true);
+    assert.ok(Number.isFinite(worker.lastActivity), 'active agent has a real lastActivity (NOT UNKNOWN)');
+    assert.strictEqual(worker.lastActivity, parseActivityTimestamp('[2024-01-15 10:30:00] thinking'));
+    const planner = res.chats.find((c) => c.key === 'p-planner');
+    assert.strictEqual(planner.lastActivity, null, 'inactive agent has no lastActivity');
   });
 });
 
