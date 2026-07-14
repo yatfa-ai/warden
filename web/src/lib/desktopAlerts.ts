@@ -17,6 +17,8 @@
 // runtime imports — the unit test can import it standalone (mirrors
 // attentionRollup.ts's testability discipline).
 import type { AttentionRollup } from '@/lib/attentionRollup';
+import type { AgentStateRow } from '@/lib/types';
+import type { WatchReason } from '@/lib/chatWatch';
 
 // Per-severity routing for the desktop-alert channel (WARDEN-364). These layer ON
 // TOP of the master `attentionDesktopAlerts` boolean: the master gates the whole
@@ -196,5 +198,78 @@ export function fireAttentionNotification(rollup: AttentionRollup): void {
   } catch {
     // A construction failure (e.g. a restrictive webview) must never crash the
     // 10s poll; the badge still covers the in-app case.
+  }
+}
+
+// --- Per-chat "watch" ping (WARDEN-378) -------------------------------------
+//
+// The targeted, reason-specific complement to the fleet-wide fireAttentionNotification
+// above. Where the fleet alert says "N items need attention" (lumped, count-based),
+// this fires ONCE per watched chat that newly needs the human and NAMES the agent +
+// quotes the concrete triggering signal. The transition detection (which chat, which
+// reason, fire-once) lives in chatWatch.ts (pure, unit-tested); this module is only
+// the formatting + browser delivery channel — the same discipline as the fleet alert.
+//
+// `import type { WatchReason }` is erased at transpile, so this module stays
+// runtime-import-free and the existing desktopAlerts.test.mjs can still load it
+// standalone via the OXC transform.
+
+// Reason → human phrasing for the watch body. Conveys the concrete "why" so the
+// human knows what kind of attention the chat needs, not just that it needs some.
+const WATCH_REASON_LABEL: Record<WatchReason, string> = {
+  waiting: 'waiting for your input',
+  erroring: 'erroring',
+  stuck: 'stuck (repeating output)',
+  completed: 'finished a task',
+};
+
+/**
+ * Pure: build the per-chat watch notification title + body. Sibling of
+ * formatAlertMessage (above) for the targeted, per-chat channel (WARDEN-378).
+ *
+ * The BODY names the agent and conveys the reason, and — when the row carries a
+ * `signal` — quotes it verbatim (e.g. "press enter to continue"), so the human
+ * knows exactly WHICH chat needs them and WHY without opening Warden. Pure so the
+ * wording is unit-tested directly (mirrors formatAlertMessage's testability).
+ */
+export function formatWatchMessage(row: AgentStateRow, reason: WatchReason): { title: string; body: string } {
+  const name = row.name || row.key || row.id;
+  const label = WATCH_REASON_LABEL[reason] || reason;
+  const title = `Warden: ${label}`;
+  const body = `${name} · ${label}${row.signal ? ` — '${row.signal}'` : ''}`;
+  return { title, body };
+}
+
+/**
+ * Show the per-chat watch desktop notification (WARDEN-378). Sibling of
+ * fireAttentionNotification: same Web Notifications channel + the same
+ * `notificationsSupported` / permission guards. Uses a DISTINCT `tag` per chat key
+ * (`warden-watch:<key>`) so two watched chats never replace each other's ping, while
+ * a repeat transition on the SAME chat replaces its prior ping (no stacking).
+ *
+ * Clicking deep-links to + focuses the watched pane via the open-chat-by-key
+ * callback (reuses App's openChat), so a click lands the human straight on the chat
+ * that needs them. Never throws — some embedded webviews reject `new Notification`.
+ *
+ * Deliberately NOT gated on document visibility (unlike fireAttentionNotification):
+ * the watch is opt-in per chat and has no always-on in-app surface in this slice, so
+ * suppressing while Warden is visible would lose the signal entirely. The
+ * near-zero-false-signal bar is met by the transition detector (fires once on
+ * entering a needs-you state, never on persistent state), not by a visibility filter.
+ */
+export function fireWatchNotification(row: AgentStateRow, reason: WatchReason, onOpenChat?: (id: string) => void): void {
+  if (!notificationsSupported()) return;
+  if (Notification.permission !== 'granted') return;
+  try {
+    const { title, body } = formatWatchMessage(row, reason);
+    const key = row.key || row.id;
+    const n = new Notification(title, { body, tag: `warden-watch:${key}` });
+    n.onclick = () => {
+      if (onOpenChat) onOpenChat(key);
+      window.focus();
+      n.close();
+    };
+  } catch {
+    // A construction failure must never crash the poll.
   }
 }

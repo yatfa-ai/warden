@@ -7,6 +7,7 @@ import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThe
 import { applyDensity, type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
 import { stampLastSeen } from '@/lib/whatsNew';
+import { requestAlertPermission } from '@/lib/desktopAlerts';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
@@ -225,6 +226,14 @@ function App() {
   const toggleMuteAlertKey = useCallback((key: string) => {
     setMutedAlertKeys((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
   }, []);
+  // Per-chat "watch" opt-in (WARDEN-378): pane keys the human marked "watch this
+  // chat" for a targeted, reason-specific desktop ping when that chat newly needs
+  // them. Global (not per-workspace). Pure client-side pref (like
+  // attentionDesktopAlerts/attentionStates): persisted by the saveUi effect below,
+  // forwarded to the AttentionBadge's useAttentionRollup (which unions watched ∪
+  // open into the ?panes= poll and runs the per-chat transition detector). Never
+  // sent to the backend.
+  const [watchedChats, setWatchedChats] = useState<string[]>(() => uiState.watchedChats ?? []);
   const [terminalScrollback, setTerminalScrollback] = useState(() => uiState.terminalScrollback ?? 10000);
   // Terminal font family: the CSS font-family value every agent pane renders.
   // '' / absent / blank → DEFAULT_TERMINAL_FONT_FAMILY (today's exact stack) so
@@ -450,8 +459,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed, restoreOnStartup, startedEmpty]);
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
   // workspace, so switching clears it (WARDEN-256: maximized resets on switch).
@@ -711,6 +720,19 @@ function App() {
   const handleFocusAgent = useCallback((id: string) => {
     openChat(id);
   }, [openChat]);
+
+  // WARDEN-378: toggle a chat's per-chat "watch" — marks it for a targeted,
+  // reason-specific desktop ping when it newly needs the human. Turning watch ON
+  // also requests OS notification permission (if not already granted) so the ping
+  // can actually fire — the same requestAlertPermission the fleet-alert toggle uses.
+  // Pure client-side state (persisted via the saveUi effect); no backend call. The
+  // permission request is hoisted out of the updater (updaters must stay pure, and
+  // StrictMode double-invokes them in dev); requestAlertPermission is idempotent.
+  const toggleWatch = useCallback((key: string) => {
+    const turningOn = !watchedChats.includes(key);
+    setWatchedChats((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+    if (turningOn) void requestAlertPermission();
+  }, [watchedChats]);
 
   // Seamless cross-host resume: when an observer session bound to an agent is
   // opened, reconnect to that agent's chat. We prime the pane's host hint and
@@ -1093,6 +1115,9 @@ function App() {
   const cancelCloseWorkspace = useCallback(() => setWorkspaceCloseTarget(null), []);
 
   const openPaneSet = new Set(openPanes);
+  // WARDEN-378: O(1) "is this chat watched?" lookup for the sidebar rows (the watch
+  // toggle's active state). A Set mirroring watchedChats, recomputed each render.
+  const watchedChatSet = new Set(watchedChats);
   const tiles = openPanes.map((id) => ({ id }));
   // Resolved terminal theme id (which named theme's xterm palette to use).
   // 'auto' defers to the active (OS-resolved) app theme; 'dark'/'light' force it
@@ -1383,7 +1408,7 @@ function App() {
             label={streamConn ? 'Connected' : 'Disconnected'}
             className="transition-colors duration-300 ease-in-out"
           />
-          <AttentionBadge onOpenChat={openChat} onOpenActivity={openActivityTab} attentionDesktopAlerts={attentionDesktopAlerts} openPanes={openPanes} attentionStates={attentionStates} alertCritical={alertCritical} alertWarning={alertWarning} alertDirective={alertDirective} alertError={alertError} mutedAlertKeys={mutedAlertKeys} onToggleMuteAlertKey={toggleMuteAlertKey} />
+          <AttentionBadge onOpenChat={openChat} onOpenActivity={openActivityTab} attentionDesktopAlerts={attentionDesktopAlerts} openPanes={openPanes} attentionStates={attentionStates} alertCritical={alertCritical} alertWarning={alertWarning} alertDirective={alertDirective} alertError={alertError} mutedAlertKeys={mutedAlertKeys} onToggleMuteAlertKey={toggleMuteAlertKey} watchedChats={watchedChats} />
           <IconTooltip label="global search (Ctrl+Shift+F)" side="bottom"><button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⌕</button></IconTooltip>
           <IconTooltip label="toggle health panel" side="bottom"><button onClick={() => setHealthCollapsed(!healthCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{healthCollapsed ? '◂' : '▸'} Health</button></IconTooltip>
           <IconTooltip label="toggle observer" side="bottom"><button onClick={() => setObserverCollapsed(!observerCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>
@@ -1423,6 +1448,8 @@ function App() {
               hostStatuses={hostStatuses}
               timestampFormat={timestampFormat}
               snippets={snippets}
+              watchedChats={watchedChatSet}
+              onToggleWatch={toggleWatch}
             />
           </ErrorBoundary>
         </section>

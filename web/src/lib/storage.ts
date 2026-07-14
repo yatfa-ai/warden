@@ -347,6 +347,14 @@ export interface UiState {
   // identity, so mute applies to the health buckets only. Pure client-side pref;
   // never sent to the backend / /api/config.
   mutedAlertKeys?: string[];
+  // Per-chat "watch" opt-in (WARDEN-378): pane keys the human marked "watch this
+  // chat" for a targeted, reason-specific desktop ping when that chat newly needs
+  // them. Global (not per-workspace) — a watched chat stays watched across workspace
+  // switches. Pure client-side pref (like attentionDesktopAlerts/attentionStates):
+  // persisted by App's saveUi effect, never sent to the backend. The keys ride the
+  // existing ?panes= query on /api/agent-states, which already accepts arbitrary
+  // pane keys and resolves them from the cache (no server writer / allow-list risk).
+  watchedChats?: string[];
   terminalScrollback?: number;
   // Terminal font family: the CSS font-family value xterm renders in every agent
   // pane. '' / absent = the DEFAULT_TERMINAL_FONT_FAMILY stack (today's look);
@@ -741,6 +749,8 @@ const DEFAULT_UI: UiState = {
   attentionStates: { stuck: true, erroring: true, waiting: true, blocked: true },
   alertCritical: true, alertWarning: true, alertDirective: true, alertError: true,
   mutedAlertKeys: [],
+  // WARDEN-378: no chats watched by default (opt-in per chat).
+  watchedChats: [],
   terminalScrollback: 10000, terminalFontFamily: '',
   terminalColorScheme: 'auto',
   terminalCursorStyle: 'blink-block',
@@ -819,6 +829,11 @@ export function loadUi(): UiState {
         alertError: v.alertError !== false,
         // Sanitized to a de-duplicated string[] of non-empty keys.
         mutedAlertKeys: parseMutedKeys(v.mutedAlertKeys),
+        // WARDEN-378: only string entries survive; a corrupt/non-array value
+        // degrades to [] (no chats watched) — the conservative default.
+        watchedChats: Array.isArray(v.watchedChats)
+          ? v.watchedChats.filter((s: unknown): s is string => typeof s === 'string')
+          : [],
         terminalScrollback: typeof v.terminalScrollback === 'number' ? v.terminalScrollback : 10000,
         terminalFontFamily: typeof v.terminalFontFamily === 'string' ? v.terminalFontFamily : '',
         terminalColorScheme: ['auto', 'dark', 'light'].includes(v.terminalColorScheme) ? v.terminalColorScheme : 'auto',

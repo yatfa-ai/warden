@@ -4,7 +4,7 @@
 // primary opened-tabs working-set rows).
 
 import { useState } from 'react';
-import { WifiOff } from 'lucide-react';
+import { WifiOff, Eye } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -66,7 +66,7 @@ export function SessionRowSkeleton() {
   );
 }
 
-export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, isPinned, onTogglePin, selected, onToggleSelect, selectionActive, note, onSetNote }: {
+export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, isPinned, onTogglePin, selected, onToggleSelect, selectionActive, note, onSetNote, isWatched, onToggleWatch }: {
   c: Chat; open: boolean; onOpen: () => void; onKill: () => void;
   onRename: (session: string, kind: string, name: string, host?: string) => void;
   dim?: boolean;
@@ -92,6 +92,9 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
   selected?: boolean; onToggleSelect?: () => void; selectionActive?: boolean;
   // WARDEN-305: per-agent note (id-keyed, persists across restart via /api/agent-notes).
   note?: string; onSetNote?: (text: string) => void;
+  // WARDEN-378: per-chat "watch" toggle state + handler. Optional so call sites that
+  // don't surface watch (e.g. the full-page chat browser) render unchanged.
+  isWatched?: boolean; onToggleWatch?: () => void;
 }) {
   const isUser = c.kind === 'tmux';
   const canRename = isUser;
@@ -239,6 +242,26 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
           ) : null}
         </span>
       )}
+      {/* WARDEN-378: per-chat "watch" toggle — opt this chat into a targeted ping when
+          it newly needs the human. Built on shadcn <Button> per WARDEN-68 (Rule 1 +
+          Rule 2: no raw <button>), mirroring the note affordance. The watched state
+          is always visible (blue eye) so a watched chat is recognizable at a glance;
+          unwatched is hover/focus-revealed to keep the default fleet list quiet.
+          aria-pressed exposes the toggle state to assistive tech. */}
+      {!editing && onToggleWatch && (
+        <IconTooltip label={isWatched ? 'unwatch — stop pinging me about this chat' : 'watch — ping me when this chat needs you'}>
+          <Button
+            variant="ghost"
+            size="xs"
+            className={cn('px-0.5', isWatched ? 'text-blue-500' : 'text-muted-foreground hover:text-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100')}
+            onClick={(e) => { e.stopPropagation(); onToggleWatch(); }}
+            aria-label={isWatched ? 'unwatch this chat' : 'watch this chat'}
+            aria-pressed={isWatched}
+          >
+            <Eye className="size-3" />
+          </Button>
+        </IconTooltip>
+      )}
       {!editing && onTogglePin && (
         <IconTooltip label={isPinned ? 'unpin' : 'pin'}>
           <button
@@ -291,7 +314,7 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
 // the list mirrors the pane grid (no sidebar reorder) and hide/unhide is
 // abolished. Closing a row (× / "Close pane") is `onClose`, which removes the
 // pane and records it in the workspace's recently-closed recovery list.
-export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, onKill, note, onSetNote, timestampFormat }: {
+export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, onKill, note, onSetNote, timestampFormat, isWatched, onToggleWatch }: {
   id: string;
   c?: Chat;
   isOpen: boolean;
@@ -313,6 +336,8 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
   // Timestamp format pref (WARDEN-213): routes the last-activity time + its
   // hover tooltip through the shared formatTimestamp / formatAbsoluteFull helpers.
   timestampFormat: TimestampFormat;
+  // WARDEN-378: per-chat "watch" toggle state + handler (mirrors ChatRow).
+  isWatched?: boolean; onToggleWatch?: () => void;
 }) {
   const type = c ? chatType(c) : '?';
   const hostTag = c ? hostTagOf(c.host) : '';
@@ -379,6 +404,23 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
         )}
         {!dead && !editing && whatsNew.show && (
           <WhatsNewMarker summary={whatsNew.summary} since={whatsNew.since} files={gitInfo?.files} onOpenDiff={onOpenDiff} />
+        )}
+        {/* WARDEN-378: per-chat "watch" toggle (mirrors ChatRow's). Shown even for a
+            dead pane so a watched-but-dead chat can be unwatched; the row's own
+            dead-dim mutes it. The watched state is always visible (blue eye). */}
+        {!editing && onToggleWatch && (
+          <IconTooltip label={isWatched ? 'unwatch — stop pinging me about this chat' : 'watch — ping me when this chat needs you'}>
+            <Button
+              variant="ghost"
+              size="xs"
+              className={cn('px-0.5', isWatched ? 'text-blue-500' : 'text-muted-foreground hover:text-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100')}
+              onClick={(e) => { e.stopPropagation(); onToggleWatch(); }}
+              aria-label={isWatched ? 'unwatch this chat' : 'watch this chat'}
+              aria-pressed={isWatched}
+            >
+              <Eye className="size-3" />
+            </Button>
+          </IconTooltip>
         )}
         {!editing && canRename && (
           <IconTooltip label="rename"><Button variant="ghost" size="xs" className="px-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); startEdit(); }} aria-label="rename">✎</Button></IconTooltip>
