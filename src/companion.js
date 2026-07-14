@@ -592,6 +592,84 @@ export async function hasSession(host, { container, session } = {}, cfg = {}, op
   }
 }
 
+// --------------------------------- lifecycle ---------------------------------
+// WARDEN-386 (slice 3 of roadmap WARDEN-270). The agent lifecycle commands —
+// spawn (create) + kill (destroy) — are the create/destroy twins that today still
+// pay a per-op SSH handshake. These two RPCs run the tmux command LOCALLY on the
+// host over the persistent channel (the per-op-handshake win), mirroring the
+// shipped capturePanes sibling. The bootstrap + channel are slice 1's, reused
+// verbatim; this only adds the two RPC clients + the host-side spawnSession/
+// killSession RPCs (companion/main.go) that run new-session/kill-session LOCALLY
+// on the host.
+
+// spawnSession() over the companion channel — the CREATE half of the agent
+// lifecycle. Returns { host, ok } on success, or { host, ok:false, error } on ANY
+// failure — it NEVER falls back to raw SSH (the experimental path's contract; opt
+// out via WARDEN_COMPANION_TRANSPORT). `params` carries the semantic fields the
+// host-side RPC builds the new-session argv from: container (docker container, or
+// null for a bare-tmux/manual chat → bare `tmux`), session (the tmux target,
+// falling back to container then 'agent'), cwd (chat.cwd VERBATIM for remote —
+// no msys translation, which is local-only), and cmd (the command argv; empty →
+// tmux's default shell, WARDEN-223). The argv is reproduced byte-for-byte on the
+// host side (companion/main.go spawnSession), matching the default runTmux path.
+export async function spawnSession(host, params, cfg = {}, opts = {}, deps = {}) {
+  if (host === LOCAL) {
+    return { host, ok: false, error: 'companion transport does not apply to the local host' };
+  }
+  try {
+    const channel = await getChannel(host, cfg, deps);
+    const payload = {
+      container: params?.container || null,
+      session: params?.session || params?.container || 'agent',
+      cwd: params?.cwd || '',
+      cmd: Array.isArray(params?.cmd) ? params.cmd : [],
+    };
+    await channel.call('spawnSession', payload, { timeout: opts.timeout ?? 30000 });
+    return { host, ok: true };
+  } catch (e) {
+    let msg;
+    if (e instanceof CompanionTransportError) {
+      msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
+    } else if (e instanceof CompanionRpcError) {
+      msg = e.message;
+    } else {
+      msg = `companion spawnSession failed on ${host}: ${e?.message ?? e}`;
+    }
+    return { host, ok: false, error: msg };
+  }
+}
+
+// killSession() over the companion channel — the DESTROY half of the agent
+// lifecycle. Returns { host, ok } / { host, ok:false, error }, companion-or-fail
+// (never falls back to raw SSH). kill is IDEMPOTENT / best-effort: the host-side
+// RPC surfaces "session not found" / "no server running" as a benign ok (the
+// session is already gone — exactly what the caller wanted), so /api/kill's
+// existing best-effort semantics are preserved. Mirrors capturePanes' shape.
+export async function killSession(host, params, cfg = {}, opts = {}, deps = {}) {
+  if (host === LOCAL) {
+    return { host, ok: false, error: 'companion transport does not apply to the local host' };
+  }
+  try {
+    const channel = await getChannel(host, cfg, deps);
+    const payload = {
+      container: params?.container || null,
+      session: params?.session || params?.container || 'agent',
+    };
+    await channel.call('killSession', payload, { timeout: opts.timeout ?? 15000 });
+    return { host, ok: true };
+  } catch (e) {
+    let msg;
+    if (e instanceof CompanionTransportError) {
+      msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
+    } else if (e instanceof CompanionRpcError) {
+      msg = e.message;
+    } else {
+      msg = `companion killSession failed on ${host}: ${e?.message ?? e}`;
+    }
+    return { host, ok: false, error: msg };
+  }
+}
+
 
 // Pure model of per-tick ssh spawn cost, used by scripts/companion-benchmark.mjs
 // and unit-tested here (WARDEN-272 AC #5: "a spawn/handshake counter per discover

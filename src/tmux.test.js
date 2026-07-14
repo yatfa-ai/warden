@@ -1,6 +1,6 @@
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert';
-import { send, parseMouseState } from './tmux.js';
+import { send, parseMouseState, spawn, kill } from './tmux.js';
 
 // WARDEN-254: multiline send must deliver one bracketed paste (+ a single
 // submit), not N line-by-line submits. These tests drive the actual argv
@@ -128,5 +128,180 @@ describe('parseMouseState (WARDEN-261)', () => {
     // isn't exactly on/off stays null (never a false "on") — safe for the hint.
     assert.strictEqual(parseMouseState('set mouse off'), false);
     assert.strictEqual(parseMouseState('mouse on # comment'), null);
+  });
+});
+
+// WARDEN-386: spawn/kill argv + companion routing. The deps seam this slice
+// introduces (deps.runTmux / deps.spawnSession / deps.killSession /
+// deps.isCompanionTransportEnabled) is what makes the lifecycle ops unit-testable
+// without real ssh — mirroring how send's tests assert argv via deps.runTmux. No
+// real tmux is spawned; the recording mocks capture the exact argv/params.
+
+// A runTmux that should never be reached on the path under test — fails loudly.
+function neverRun() {
+  return mock.fn(() => { throw new Error('runTmux should not be called on this path'); });
+}
+
+// Recording companion-client mock: captures (host, params, cfg) and returns a
+// canned result so a test can assert the params spawn()/kill() built AND the
+// companion-or-fail routing, without a real channel.
+function recordingClient(result = { ok: true }) {
+  const calls = [];
+  const fn = mock.fn(async (host, params, cfg) => {
+    calls.push({ host, params, cfg });
+    return result;
+  });
+  return { fn, calls };
+}
+
+describe('tmux spawn() — exact new-session argv (WARDEN-386)', () => {
+  it('builds new-session -d -s <session> -x 120 -y 32 -c <cwd> <cmd> for a remote chat', async () => {
+    const { fn, calls } = recordingRun();
+    const chat = { host: 'prod-1', session: 'mysess', cwd: '/work/proj', cmd: 'claude --resume abc' };
+    await spawn(chat, {}, { runTmux: fn, isCompanionTransportEnabled: () => false });
+    assert.strictEqual(fn.mock.callCount(), 1);
+    // detached, fixed initial size, cwd, then the cmd argv (split on whitespace).
+    assert.deepStrictEqual(calls[0].args, [
+      'new-session', '-d', '-s', 'mysess', '-x', '120', '-y', '32',
+      '-c', '/work/proj', 'claude', '--resume', 'abc',
+    ]);
+  });
+
+  it('passes cwd VERBATIM for a remote chat (msys translation is local-only)', async () => {
+    // The remote branch is `chat.host === '(local)' ? toMsysPath(cwd) : cwd` — a
+    // remote chat must take the else branch and pass chat.cwd untouched. On win32
+    // a Windows-style cwd would be mangled if the branch were reversed; this
+    // locks the verbatim passthrough (the cross-platform suite catches a win32
+    // regression; on other platforms toMsysPath is identity, but the verbatim
+    // equality still pins the contract).
+    const { fn, calls } = recordingRun();
+    const chat = { host: 'prod-1', session: 's', cwd: 'C:\\work\\proj', cmd: 'bash' };
+    await spawn(chat, {}, { runTmux: fn, isCompanionTransportEnabled: () => false });
+    const cwdIdx = calls[0].args.indexOf('-c');
+    assert.ok(cwdIdx > -1, '-c present (cwd was set)');
+    assert.strictEqual(calls[0].args[cwdIdx + 1], 'C:\\work\\proj', 'cwd passed verbatim, not msys-translated');
+  });
+
+  it('omits -c when cwd is empty', async () => {
+    const { fn, calls } = recordingRun();
+    const chat = { host: 'prod-1', session: 's', cwd: '', cmd: 'claude' };
+    await spawn(chat, {}, { runTmux: fn, isCompanionTransportEnabled: () => false });
+    assert.strictEqual(calls[0].args.includes('-c'), false, 'no -c when cwd is empty');
+  });
+
+  it('an EMPTY cmd appends no trailing argv → tmux default shell (WARDEN-223)', async () => {
+    const { fn, calls } = recordingRun();
+    // cmd omitted entirely AND cmd explicitly '' both yield no trailing argv.
+    for (const cmd of [undefined, '']) {
+      await spawn({ host: 'prod-1', session: 's', cwd: '', cmd }, {}, { runTmux: fn, isCompanionTransportEnabled: () => false });
+    }
+    for (const c of calls) {
+      assert.deepStrictEqual(c.args, ['new-session', '-d', '-s', 's', '-x', '120', '-y', '32'],
+        `empty cmd must not append trailing argv (got ${JSON.stringify(c.args)})`);
+    }
+  });
+
+  it('throws on a failed spawn (non-zero exit) so /api/spawn surfaces a 500', async () => {
+    const fail = mock.fn(async () => ({ ok: false, code: 1, stdout: '', stderr: 'duplicate session: s' }));
+    await assert.rejects(
+      () => spawn({ host: 'prod-1', session: 's', cwd: '', cmd: '' }, {}, { runTmux: fail, isCompanionTransportEnabled: () => false }),
+      (e) => { assert.ok(e.message.includes('duplicate session'), e.message); return true; },
+    );
+  });
+
+  it('a LOCAL chat keeps the runTmux fast path even with companion enabled', async () => {
+    const { fn, calls } = recordingRun();
+    const spawnSession = neverRun(); // companion must NOT be used for a local chat
+    const chat = { host: '(local)', session: 's', cwd: '/tmp/x', cmd: 'bash' };
+    await spawn(chat, {}, { runTmux: fn, isCompanionTransportEnabled: () => true, spawnSession });
+    assert.strictEqual(fn.mock.callCount(), 1, 'local chat used runTmux');
+    assert.strictEqual(spawnSession.mock.callCount(), 0, 'local chat did NOT route through the companion');
+    assert.deepStrictEqual(calls[0].args, ['new-session', '-d', '-s', 's', '-x', '120', '-y', '32', '-c', '/tmp/x', 'bash']);
+  });
+});
+
+describe('tmux spawn() — companion routing (WARDEN-386)', () => {
+  it('a remote chat with companion enabled routes through spawnSession, NOT runTmux', async () => {
+    const { fn, calls } = recordingClient({ ok: true });
+    const runTmux = neverRun();
+    const chat = { host: 'prod-1', container: 'p-worker', session: 'agent', cwd: '/work/p', cmd: 'claude --resume xyz' };
+    const r = await spawn(chat, {}, { runTmux, isCompanionTransportEnabled: () => true, spawnSession: fn });
+    assert.strictEqual(r, true);
+    assert.strictEqual(fn.mock.callCount(), 1, 'routed through spawnSession');
+    assert.strictEqual(runTmux.mock.callCount(), 0, 'did NOT use runTmux');
+    // The params carry the semantic fields the host-side RPC builds the argv from:
+    // container (docker-exec prefix), session, cwd VERBATIM, and the split cmd argv.
+    assert.strictEqual(calls[0].host, 'prod-1');
+    assert.deepStrictEqual(calls[0].params, {
+      container: 'p-worker', session: 'agent', cwd: '/work/p', cmd: ['claude', '--resume', 'xyz'],
+    });
+  });
+
+  it('a bare-tmux (manual) chat passes container:null so the host uses bare tmux', async () => {
+    const { fn, calls } = recordingClient({ ok: true });
+    const chat = { host: 'prod-1', container: null, session: 'mysess', cwd: '', cmd: '' };
+    await spawn(chat, {}, { isCompanionTransportEnabled: () => true, spawnSession: fn });
+    assert.strictEqual(calls[0].params.container, null, 'manual chat → container null → bare tmux on the host');
+    assert.deepStrictEqual(calls[0].params.cmd, [], 'empty cmd → empty argv → default shell');
+  });
+
+  it('throws on a companion spawn failure (companion-or-fail: no silent runTmux fallback)', async () => {
+    const { fn } = recordingClient({ ok: false, error: 'spawnSession failed: duplicate session: agent' });
+    const runTmux = neverRun();
+    await assert.rejects(
+      () => spawn({ host: 'prod-1', session: 'agent', cwd: '', cmd: 'claude' }, {},
+        { runTmux, isCompanionTransportEnabled: () => true, spawnSession: fn }),
+      (e) => { assert.ok(e.message.includes('duplicate session'), e.message); return true; },
+    );
+    assert.strictEqual(runTmux.mock.callCount(), 0, 'did NOT fall back to runTmux on companion failure');
+  });
+
+  it('a remote chat with companion DISABLED uses runTmux (the default path is unchanged)', async () => {
+    const { fn, calls } = recordingRun();
+    const spawnSession = neverRun();
+    await spawn({ host: 'prod-1', session: 's', cwd: '', cmd: 'claude' }, {},
+      { runTmux: fn, isCompanionTransportEnabled: () => false, spawnSession });
+    assert.strictEqual(fn.mock.callCount(), 1);
+    assert.strictEqual(spawnSession.mock.callCount(), 0);
+    assert.deepStrictEqual(calls[0].args, ['new-session', '-d', '-s', 's', '-x', '120', '-y', '32', 'claude']);
+  });
+});
+
+describe('tmux kill() — kill-session argv + best-effort (WARDEN-386)', () => {
+  it('builds kill-session -t <session> (default path)', async () => {
+    const { fn, calls } = recordingRun();
+    await kill({ host: 'prod-1', session: 'mysess' }, {}, { runTmux: fn, isCompanionTransportEnabled: () => false });
+    assert.strictEqual(fn.mock.callCount(), 1);
+    assert.deepStrictEqual(calls[0].args, ['kill-session', '-t', 'mysess']);
+  });
+
+  it('a remote chat with companion enabled routes through killSession, NOT runTmux', async () => {
+    const { fn, calls } = recordingClient({ ok: true });
+    const runTmux = neverRun();
+    const chat = { host: 'prod-1', container: 'p-worker', session: 'agent' };
+    await kill(chat, {}, { runTmux, isCompanionTransportEnabled: () => true, killSession: fn });
+    assert.strictEqual(fn.mock.callCount(), 1);
+    assert.strictEqual(runTmux.mock.callCount(), 0);
+    assert.deepStrictEqual(calls[0].params, { container: 'p-worker', session: 'agent' });
+  });
+
+  it('kill is BEST-EFFORT: a companion failure does NOT throw (mirrors runTmux resolve-not-throw)', async () => {
+    // The default runTmux path never throws on a kill-session failure (runWithPool
+    // catches HostConnectionError → run() resolves {ok:false}); the companion path
+    // must match that so /api/kill's try/catch-noop best-effort semantics hold.
+    const { fn } = recordingClient({ ok: false, error: 'killSession failed: tmux missing' });
+    await assert.doesNotReject(
+      () => kill({ host: 'prod-1', session: 's' }, {}, { isCompanionTransportEnabled: () => true, killSession: fn }),
+    );
+    assert.strictEqual(fn.mock.callCount(), 1, 'killSession was still invoked');
+  });
+
+  it('a LOCAL chat keeps the runTmux fast path even with companion enabled', async () => {
+    const { fn, calls } = recordingRun();
+    const killSession = neverRun();
+    await kill({ host: '(local)', session: 's' }, {}, { runTmux: fn, isCompanionTransportEnabled: () => true, killSession });
+    assert.strictEqual(fn.mock.callCount(), 1);
+    assert.strictEqual(killSession.mock.callCount(), 0);
+    assert.deepStrictEqual(calls[0].args, ['kill-session', '-t', 's']);
   });
 });

@@ -123,7 +123,7 @@ func main() {
 		case "ping":
 			write(Response{ID: req.ID, OK: true, Result: map[string]any{
 				"version": version,
-				"methods": []string{"ping", "discover", "capturePanes", "hasSession"},
+				"methods": []string{"ping", "discover", "capturePanes", "hasSession", "spawnSession", "killSession"},
 			}})
 		case "discover":
 			containers, err := discover(req.Params)
@@ -149,6 +149,18 @@ func main() {
 				write(Response{ID: req.ID, OK: false, Error: err.Error()})
 			} else {
 				write(Response{ID: req.ID, OK: true, Result: result})
+			}
+		case "spawnSession":
+			if err := spawnSession(req.Params); err != nil {
+				write(Response{ID: req.ID, OK: false, Error: err.Error()})
+			} else {
+				write(Response{ID: req.ID, OK: true, Result: map[string]any{}})
+			}
+		case "killSession":
+			if err := killSession(req.Params); err != nil {
+				write(Response{ID: req.ID, OK: false, Error: err.Error()})
+			} else {
+				write(Response{ID: req.ID, OK: true, Result: map[string]any{}})
 			}
 		default:
 			write(Response{ID: req.ID, OK: false, Error: "unknown method: " + req.Method})
@@ -519,4 +531,145 @@ func hasSession(params json.RawMessage) (map[string]any, error) {
 	script := tmuxCmd + " has-session -t " + shellQuote(target)
 	err := exec.Command("bash", "-lc", script).Run()
 	return map[string]any{"exists": err == nil}, nil
+}
+
+// ------------------------------- lifecycle -----------------------------------
+// WARDEN-386 (slice 3 of roadmap WARDEN-270). The agent lifecycle commands —
+// spawn (create) + kill (destroy) — are the create/destroy twins that today still
+// spawn their own per-op SSH handshake. These two RPCs run the tmux command
+// LOCALLY on the host in one round-trip over the persistent channel (the per-op-
+// handshake win), mirroring the shipped capturePanes sibling. The bootstrap +
+// channel are slice 1's, reused verbatim; this only adds the two RPCs.
+
+// spawnSessionParams mirrors the fields warden's tmux.spawn() (src/tmux.js) needs
+// to build the new-session argv: Container (docker container, or "" for a bare-
+// tmux / manual chat → bare `tmux`), Session (the tmux target, falling back to
+// Container then "agent" — identical to src/tmux.js sess()), Cwd (the working dir
+// for `-c`; chat.cwd VERBATIM for remote, "" → omit `-c`), and Cmd (the command
+// argv appended after the tmux flags; empty → tmux launches its own default shell,
+// the WARDEN-223 "no explicit shell" case).
+type spawnSessionParams struct {
+	Container string   `json:"container"`
+	Session   string   `json:"session"`
+	Cwd       string   `json:"cwd"`
+	Cmd       []string `json:"cmd"`
+}
+
+// killSessionParams mirrors tmux.kill(): Container + Session (same fallback as
+// spawnSession). kill is idempotent/best-effort, so only the target is needed.
+type killSessionParams struct {
+	Container string `json:"container"`
+	Session   string `json:"session"`
+}
+
+// tmuxPrefix reproduces the docker-exec vs bare-tmux selection from
+// buildCaptureScript (and src/ssh.js runTmux's prefix): `docker exec <container>
+// tmux` when a container is set, else bare `tmux` — so both yatfa (container set)
+// and manual (bare-tmux) chats work through the companion. The container is
+// shell-quoted (byte-identical to buildCaptureScript / ssh.js shellQuote).
+func tmuxPrefix(container string) string {
+	if container != "" {
+		return "docker exec " + shellQuote(container) + " tmux"
+	}
+	return "tmux"
+}
+
+// resolveSession applies the Session -> Container -> "agent" fallback shared by
+// src/tmux.js sess() and buildCaptureScript's target selection, so the companion
+// resolves the tmux target identically to the default path.
+func resolveSession(session, container string) string {
+	if session != "" {
+		return session
+	}
+	if container != "" {
+		return container
+	}
+	return "agent"
+}
+
+// spawnSession mirrors warden's tmux.spawn() (src/tmux.js): creates a detached
+// tmux session via `new-session -d -s <session> -x 120 -y 32 [-c <cwd>] <cmd...>`,
+// run LOCALLY on the host in one round-trip. The argv is byte-for-byte identical
+// to the default runTmux path (src/tmux.js spawn builds the same args; ssh.js
+// runTmux shell-quotes each and prefixes docker-exec/bare tmux):
+//   - `-d` detached, `-s <session>`, `-x 120 -y 32` initial size
+//   - optional `-c <cwd>` (cwd is chat.cwd VERBATIM for remote — the msys-path
+//     translation in tmux.js is LOCAL-only and does NOT apply on the companion path)
+//   - the cmd argv (`chat.cmd.split(/\s+/).filter(Boolean)`); an EMPTY cmd launches
+//     tmux's default shell (WARDEN-223): no trailing argv is appended.
+// Each argv element is shell-quoted (byte-identical to ssh.js shellQuote) and run
+// in a login shell (`bash -lc`, per CLAUDE.md) so docker/tmux resolve on PATH
+// exactly as they do over SSH today.
+func spawnSession(params json.RawMessage) error {
+	var p spawnSessionParams
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return fmt.Errorf("invalid spawnSession params: %s", err)
+		}
+	}
+	session := resolveSession(p.Session, p.Container)
+	argv := []string{"new-session", "-d", "-s", session, "-x", "120", "-y", "32"}
+	if p.Cwd != "" {
+		argv = append(argv, "-c", p.Cwd)
+	}
+	argv = append(argv, p.Cmd...)
+	quoted := make([]string, len(argv))
+	for i, a := range argv {
+		quoted[i] = shellQuote(a)
+	}
+	script := tmuxPrefix(p.Container) + " " + strings.Join(quoted, " ")
+	_, err := exec.Command("bash", "-lc", script).Output()
+	if err != nil {
+		stderr := ""
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr = strings.TrimSpace(string(exitErr.Stderr))
+		}
+		if stderr == "" {
+			stderr = err.Error()
+		}
+		return fmt.Errorf("spawnSession failed: %s", stderr)
+	}
+	return nil
+}
+
+// killSession mirrors warden's tmux.kill() (src/tmux.js): `kill-session -t
+// <session>`, run LOCALLY on the host. kill is IDEMPOTENT / best-effort:
+// kill-session on an already-dead session is a no-op the caller already swallows
+// (src/server.js /api/kill try/catch noop, "a dead session may not exist"). So a
+// "session not found" / "no server running" outcome is surfaced as a benign ok
+// (nil), not a hard error — any OTHER failure (docker exec failed, tmux missing)
+// is returned as an error. This preserves /api/kill's best-effort semantics: the
+// session being already gone is exactly what the caller wanted.
+func killSession(params json.RawMessage) error {
+	var p killSessionParams
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return fmt.Errorf("invalid killSession params: %s", err)
+		}
+	}
+	session := resolveSession(p.Session, p.Container)
+	script := tmuxPrefix(p.Container) + " kill-session -t " + shellQuote(session)
+	_, err := exec.Command("bash", "-lc", script).Output()
+	if err == nil {
+		return nil
+	}
+	// A missing session (or no tmux server at all) is the idempotent case — the
+	// session is already gone, which is what the caller wanted. tmux reports these
+	// as "can't find session: <name>" / "no server running on <socket>"; the same
+	// strings surface when docker-exec'ing tmux in a container with no server.
+	stderr := ""
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		stderr = string(exitErr.Stderr)
+	}
+	low := strings.ToLower(stderr)
+	if strings.Contains(low, "can't find session") ||
+		strings.Contains(low, "session not found") ||
+		strings.Contains(low, "no server running") {
+		return nil // benign: the session is already gone
+	}
+	msg := strings.TrimSpace(stderr)
+	if msg == "" {
+		msg = err.Error()
+	}
+	return fmt.Errorf("killSession failed: %s", msg)
 }
