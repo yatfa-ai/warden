@@ -67,12 +67,24 @@ export function classifyPane(clean, c) {
 
   const lastAction = nonEmpty.length ? nonEmpty[nonEmpty.length - 1].trim().slice(0, 200) : null;
 
-  // Order mirrors suggest_next_actions: erroring > stuck > blocked > waiting > active.
+  // Recency-bound the STATE decision (WARDEN-390): erroring/blocked/waiting are
+  // decided against the LIVE BOTTOM of the pane (a recent tail of non-empty lines),
+  // not the full ~60-line capture. A triggering line that has scrolled OUT of the
+  // tail, with active/other output below it, no longer flips the state — so an agent
+  // that hit an error and recovered stops reading "needs attention" while the stale
+  // line still lingers in the window. `stuck` is already recency-safe (the last-6
+  // repeat check above); `active` keeps scanning the full window so a busy-but-
+  // briefly-quiet agent doesn't false-flip to the alertable 'idle'. Precedence
+  // (erroring > stuck > blocked > waiting > active) still holds among the tail's
+  // lines — erroring is tested first, so an error + blocked both in the tail → erroring.
+  const STATE_TAIL_LINES = 15; // ~one visible screen of non-empty output
+  const tail = nonEmpty.slice(-STATE_TAIL_LINES).join('\n');
+
   let state;
-  if (SUMM_ERROR_RE.test(clean)) state = 'erroring';
+  if (SUMM_ERROR_RE.test(tail)) state = 'erroring';
   else if (stuck) state = 'stuck';
-  else if (SUMM_BLOCKED_RE.test(clean)) state = 'blocked';
-  else if (SUMM_WAITING_RE.test(clean)) state = 'waiting';
+  else if (SUMM_BLOCKED_RE.test(tail)) state = 'blocked';
+  else if (SUMM_WAITING_RE.test(tail)) state = 'waiting';
   else if (SUMM_ACTIVE_RE.test(clean) && c && c.active) state = 'active';
   else state = 'idle';
 
