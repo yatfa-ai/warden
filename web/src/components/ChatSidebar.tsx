@@ -513,6 +513,18 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
     // enterCollection(_collection);
   };
 
+  // WARDEN-396: sync ChatSidebar's derived collection state when a card is
+  // renamed or deleted from CollectionsSection's context menu (which owns its
+  // own card list + refresh). On delete, leave the live view if the deleted
+  // collection was the one open; always re-fetch so the CreateCollectionDialog
+  // duplicate-name check stays accurate after a rename/delete.
+  const handleCollectionChange = (change: { type: 'rename' | 'delete'; id: string }) => {
+    if (change.type === 'delete' && view.kind === 'collection' && view.collection.id === change.id) {
+      setView({ kind: 'root' });
+    }
+    fetchCollections();
+  };
+
   // Fetch collections on mount
   useEffect(() => {
     fetchCollections();
@@ -1033,6 +1045,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
             chats={chats}
             onEnterCollection={enterCollection}
             onCreateCollection={handleCreateCollection}
+            onCollectionChange={handleCollectionChange}
           />
           {visibleHosts.map(renderHost)}
           {offlineHosts.length > 0 && (
