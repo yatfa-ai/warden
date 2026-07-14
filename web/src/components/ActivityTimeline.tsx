@@ -96,6 +96,8 @@ export function ActivityTimeline({ timestampFormat }: { timestampFormat: Timesta
   const renderEvent = (event: ActivityEvent) => {
     const typeColors = {
       directive_proposed: 'text-blue-500',
+      directive_sent: 'text-emerald-500',
+      directive_rejected: 'text-red-500',
       attached: 'text-green-500',
       ended: 'text-orange-500',
       error: 'text-red-500',
@@ -110,6 +112,8 @@ export function ActivityTimeline({ timestampFormat }: { timestampFormat: Timesta
 
     const icons = {
       directive_proposed: '💬',
+      directive_sent: '✅',
+      directive_rejected: '❌',
       attached: '🔌',
       ended: '🔌',
       error: '⚠️',
@@ -130,6 +134,24 @@ export function ActivityTimeline({ timestampFormat }: { timestampFormat: Timesta
               <span className="font-medium">{event.role || 'Agent'}</span>
               <span className="text-muted-foreground mx-1">→</span>
               <span className="font-mono text-xs bg-muted px-1 rounded">{event.directive?.slice(0, 60)}...</span>
+            </div>
+          );
+        case 'directive_sent':
+          return (
+            <div className="text-sm">
+              <span className="text-emerald-600 dark:text-emerald-400">sent to</span>
+              <span className="font-medium mx-1">{event.role || 'Agent'}</span>
+              <span className="text-muted-foreground mx-1">→</span>
+              <span className="font-mono text-xs bg-muted px-1 rounded">{event.directive?.slice(0, 60)}...</span>
+            </div>
+          );
+        case 'directive_rejected':
+          return (
+            <div className="text-sm">
+              <span className="text-red-600 dark:text-red-400">declined for</span>
+              <span className="font-medium mx-1">{event.role || 'Agent'}</span>
+              <span className="text-muted-foreground mx-1">→</span>
+              <span className="font-mono text-xs bg-muted px-1 rounded line-through opacity-70">{event.directive?.slice(0, 60)}...</span>
             </div>
           );
         case 'attached':

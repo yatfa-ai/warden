@@ -964,7 +964,7 @@ export function persistUiState(
 const OBS_KEY = 'warden:observer:v1';
 const OBS_PREFIX = 'warden:observer';
 const OBS_VERSION = 1;
-export interface ObsUi { openIds: string[]; activeId: string | null; viewMode?: 'sessions' | 'activity' }
+export interface ObsUi { openIds: string[]; activeId: string | null; viewMode?: 'sessions' | 'activity' | 'directives' }
 export function loadObs(): ObsUi {
   try {
     const v = JSON.parse(readVersioned(OBS_PREFIX, OBS_VERSION) ?? 'null');
