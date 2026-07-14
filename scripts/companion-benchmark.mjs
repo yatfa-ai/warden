@@ -21,17 +21,22 @@
 // still purely the per-tick handshake elimination, now across the busier polling
 // surface. Both legs are reported below.
 //
+// WARDEN-382 (slice 3) adds a has-session leg: has-session is the pre-attach /
+// pre-recovery LIVENESS PROBE (it fires on every pane open + the recovery flows),
+// so the same handshake collapse applies to the critical attach path. probeSession
+// today spawns ONE ssh process per probe; the companion collapses it to a single
+// hasSession RPC over the persistent channel. All three legs are reported below.
+//
 // Two parts:
 //   Part 1 (always):  a deterministic spawn/handshake-count projection per tick —
 //                     the roadmap's success measure, with no host required.
-//                     Covers BOTH discover and capture-pane (slice 2).
+//                     Covers discover, capture-pane, AND has-session (slices 1-3).
 //   Part 2 (--host):  a LIVE replay against a real host. The default side runs
 //                     ops on the ControlMaster-disabled path (the Windows-
 //                     equivalent, one handshake per tick); the companion side
 //                     runs the real src/companion.js (bootstrap once, then RPC
 //                     over the one channel). Reports real spawn counts + the
-//                     before/after per-tick wall-clock cost, for discover AND
-//                     capture-pane.
+//                     before/after per-tick wall-clock cost, for all three ops.
 //
 // Usage:
 //   node scripts/companion-benchmark.mjs                       # Part 1 only
@@ -43,6 +48,7 @@ import { SSH_BASE_OPTS, SSH_BIN, shellQuote, run as sshRun } from '../src/ssh.js
 import {
   discover as companionDiscover,
   capturePanes as companionCapturePanes,
+  hasSession as companionHasSession,
   _resetChannelCacheForTests,
   projectSpawnModel,
 } from '../src/companion.js';
@@ -150,6 +156,37 @@ function printCaptureProjection(hosts, ticks) {
   console.log();
   console.log('This is the roadmap\'s "polling-tick" success-metric leg: per-tick');
   console.log('handshake collapse on the busiest remote op.');
+  console.log();
+}
+
+// Slice 3 (WARDEN-382): the has-session / liveness-probe leg. has-session is the
+// pre-attach / pre-recovery liveness probe (one probe per pane open + the recovery
+// flows). probeSession() today spawns ONE ssh process per probe; routing it over
+// the companion collapses that to a single hasSession RPC over the persistent
+// channel — 0 handshakes/probe after bootstrap. Same handshake-collapse shape as
+// the discover/capture legs, now on the critical attach path.
+function printProbeProjection(hosts, ticks) {
+  const m = projectSpawnModel({ hosts, ticks });
+  console.log('━'.repeat(72));
+  console.log(`Part 1.c — has-session: handshake projection  (${hosts} host(s), ${ticks} probe(s))`);
+  console.log('━'.repeat(72));
+  console.log('has-session is the pre-attach / pre-recovery liveness probe: one');
+  console.log('probeSession() per pane open + the recovery flows. Each probe today');
+  console.log('spawns ONE ssh process (a full handshake on the ControlMaster-disabled');
+  console.log('/ Windows path); the companion collapses it to a single hasSession RPC');
+  console.log('over the persistent channel:');
+  console.log();
+  console.log('  DEFAULT path (runWithPool, no companion):');
+  console.log(`    1 handshake / host / probe  →  ${hosts} × ${ticks} = ${m.before.totalSpawns} handshakes`);
+  console.log('  COMPANION path:');
+  console.log(`    reuses slice 1's bootstrapped channel — 0 handshakes/probe`);
+  console.log(`    total = ${m.after.totalSpawns} handshakes (all bootstrap, 0 probe)`);
+  console.log();
+  const delta = m.before.totalSpawns - m.after.totalSpawns;
+  console.log(`  ▶ handshakes saved over ${ticks} probe(s): ${m.before.totalSpawns} → ${m.after.totalSpawns}  (−${delta})`);
+  console.log();
+  console.log('This is the roadmap\'s "attach-path" success-metric leg: the liveness');
+  console.log('probe no longer pays a per-attach SSH handshake.');
   console.log();
 }
 
@@ -344,6 +381,84 @@ async function liveCaptureBenchmark(host, ticks) {
   console.log();
 }
 
+// Slice 3 (WARDEN-382): the has-session / liveness-probe live leg. Same shape as
+// the capture leg — default side runs `docker exec <c> tmux has-session -t agent`
+// via a fresh ControlMaster-disabled ssh per probe; companion side runs the real
+// hasSession RPC over the persistent channel (0 handshakes/probe). The target
+// container is discovered once up front (default path) so both sides probe the
+// same session; if the host has no discoverable chats the leg is skipped.
+async function liveProbeBenchmark(host, ticks) {
+  console.log('━'.repeat(72));
+  console.log(`Part 2.c — has-session: LIVE ControlMaster-disabled replay  (host: ${host}, ${ticks} probe(s))`);
+  console.log('━'.repeat(72));
+  console.log('Default side: one fresh ssh handshake per liveness probe (ControlMaster off).');
+  console.log('Companion side: hasSession RPC over slice 1\'s channel — 0 handshakes/probe.');
+  console.log();
+
+  // Discover once (default path) to get a container both sides probe.
+  const probe = await sshRunNoMaster(host, DISCOVER_SCRIPT, 60000, { val: 0 });
+  const chats = chatsFromDiscoverStdout(host, probe.stdout);
+  if (!chats.length) {
+    console.log(`(no discoverable yatfa chats on ${host} — has-session leg skipped; discover leg above still valid.)\n`);
+    return;
+  }
+  const target = chats[0]; // probe the first container's 'agent' session
+  // The default probeSession path builds `docker exec <container> tmux has-session -t <session>`.
+  const probeCmd = `docker exec ${target.container} tmux has-session -t ${target.session}`;
+  console.log(`probing container '${target.container}' session '${target.session}'\n`);
+
+  const defaultSpawns = { val: 0 };
+  const companionSpawns = { val: 0 };
+  const countingSpawn = (...a) => { companionSpawns.val++; return spawn(...a); };
+  const countingRun = (...a) => { companionSpawns.val++; return sshRun(...a); };
+
+  // ---- DEFAULT: N probes, each a ControlMaster-disabled ssh has-session ----
+  console.log(`▶ default path: ${ticks} has-session probe(s), handshake each …`);
+  const defaultSamples = [];
+  for (let i = 0; i < ticks; i++) {
+    const r = await timed(() => sshRunNoMaster(host, probeCmd, 30000, defaultSpawns));
+    defaultSamples.push(r);
+    process.stdout.write(`   probe ${i + 1}/${ticks}: ${r.ms.toFixed(0).padStart(6)} ms  ${r.ok ? 'ok (exists)' : 'cmd-failed (handshake still measured)'}\n`);
+  }
+
+  // ---- COMPANION: bootstrap once, then N hasSession probes over the channel ----
+  console.log(`▶ companion path: bootstrap + ${ticks} has-session probe(s) over the channel …`);
+  _resetChannelCacheForTests();
+  const companionDeps = { spawn: countingSpawn, run: countingRun };
+  const bootR = await timed(() =>
+    companionHasSession(host, { container: target.container, session: target.session }, { connectTimeout: 10 }, { timeout: 30000 }, companionDeps));
+  console.log(`   bootstrap + 1st probe: ${bootR.ms.toFixed(0).padStart(6)} ms  ${bootR.ok ? `ok (exists:${bootR.exists})` : `error: ${(bootR.error || '').slice(0, 80)}`}`);
+  const companionSamples = [{ ms: bootR.ms, ok: bootR.ok }];
+  for (let i = 1; i < ticks; i++) {
+    const r = await timed(() =>
+      companionHasSession(host, { container: target.container, session: target.session }, { connectTimeout: 10 }, { timeout: 30000 }, companionDeps));
+    companionSamples.push(r);
+    process.stdout.write(`   probe ${i + 1}/${ticks}: ${r.ms.toFixed(0).padStart(6)} ms  ${r.ok ? `ok (exists:${r.exists})` : `error: ${(r.error || '').slice(0, 80)}`}\n`);
+  }
+  _resetChannelCacheForTests();
+
+  // ---- report ----
+  const def = summarize(defaultSamples);
+  const steady = summarize(companionSamples.slice(1));
+
+  console.log();
+  console.log('── results ──────────────────────────────────────────────');
+  console.log(`  spawns (ssh processes started):`);
+  console.log(`     default   : ${defaultSpawns.val}  (≈ ${ticks} handshakes — one per probe)`);
+  console.log(`     companion : ${companionSpawns.val}  (bootstrap only; has-session rides the channel, 0/probe)`);
+  console.log(`  per-probe wall-clock (handshake + remote work):`);
+  console.log(`     default   : avg ${def.avg.toFixed(0)} ms  (p95 ${def.p95.toFixed(0)} ms) over ${def.n}`);
+  if (steady.n > 0) {
+    console.log(`     companion : avg ${steady.avg.toFixed(0)} ms  (p95 ${steady.p95.toFixed(0)} ms) over ${steady.n} steady probe(s)`);
+    const saved = def.avg - steady.avg;
+    console.log(`  ▶ handshake cost eliminated per probe: ~${Math.max(0, saved).toFixed(0)} ms`);
+  }
+  console.log('────────────────────────────────────────────────────────');
+  console.log('Note: has-session fires on every pane open + the recovery flows, so this');
+  console.log('per-probe handshake win lands on the critical attach path.');
+  console.log();
+}
+
 // Parse the default discover script's stdout into chat objects capturePanes can
 // consume (key/container/session). The discover TSV is name \t status \t cwd \t
 // active; only name (the container) is needed to target a capture. yatfa chats
@@ -372,12 +487,13 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) { console.log(HELP); return; }
 
-  console.log('warden companion-transport benchmark  (WARDEN-272 + WARDEN-276 / roadmap WARDEN-270)\n');
+  console.log('warden companion-transport benchmark  (WARDEN-272 + WARDEN-276 + WARDEN-382 / roadmap WARDEN-270)\n');
 
-  // Part 1 always runs — deterministic, no host needed. Both the discover and
-  // capture-pane handshake projections (the roadmap's success measure).
+  // Part 1 always runs — deterministic, no host needed. The discover, capture-pane,
+  // and has-session handshake projections (the roadmap's success measure).
   printProjection(args.hosts, args.ticks);
   printCaptureProjection(args.hosts, args.ticks);
+  printProbeProjection(args.hosts, args.ticks);
 
   if (!args.host) {
     console.log('Part 2 (live replay) skipped — pass --host <ssh-host> to measure the real');
@@ -390,6 +506,7 @@ async function main() {
   try {
     await liveDiscoverBenchmark(args.host, args.ticks);
     await liveCaptureBenchmark(args.host, args.ticks);
+    await liveProbeBenchmark(args.host, args.ticks);
   } catch (e) {
     console.error(`\nbenchmark failed: ${e?.message ?? e}`);
     console.error('(is the host reachable over SSH with key auth? BatchMode=yes is used.)');

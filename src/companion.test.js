@@ -15,7 +15,7 @@
 //   - end-to-end stdio: spawn the REAL built companion binary and verify it
 //     answers ping over stdio (proves AC #4: NO network port), guarded by
 //     platform/binary presence so it skips cleanly elsewhere.
-import { describe, it, beforeEach } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -28,9 +28,11 @@ import { fileURLToPath } from 'node:url';
 import {
   targetForUname, remoteBinaryPath, buildProbeScript, buildUploadScript, parseProbe,
   encodeRequest, mapCompanionContainers, CompanionChannel, CompanionTransportError,
-  CompanionRpcError, getChannel, discover, capturePanes, isCompanionTransportEnabled, loadManifest,
+  CompanionRpcError, getChannel, discover, capturePanes, hasSession, isCompanionTransportEnabled, loadManifest,
   projectSpawnModel, _resetChannelCacheForTests,
 } from './companion.js';
+import { probeSession, hasSession as tmuxHasSession } from './tmux.js';
+import { classifyProbe } from './sessionRecovery.js';
 import { buildChat, parseActivityTimestamp } from './chatMeta.js';
 import { buildCaptureScript, parseCaptureSentinels } from './chats.js';
 
@@ -392,9 +394,10 @@ const TEST_MANIFEST = {
 
 // Build a fake transport whose ping reports the test version (a healthy channel).
 const healthyTransport = (extra = {}) => fakeTransport((req) => {
-  if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'discover', 'capturePanes'] } };
+  if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'discover', 'capturePanes', 'hasSession'] } };
   if (req.method === 'discover') return { id: req.id, ok: true, result: { containers: extra.containers ?? [] } };
   if (req.method === 'capturePanes') return { id: req.id, ok: true, result: { panes: extra.panes ?? {} } };
+  if (req.method === 'hasSession') return { id: req.id, ok: true, result: { exists: extra.exists ?? true } };
   return { id: req.id, ok: false, error: 'unknown method' };
 });
 
@@ -967,6 +970,229 @@ describe('capturePanes() via companion (companion-or-fail)', () => {
   });
 });
 
+// --------------------------------- hasSession --------------------------------
+// WARDEN-382 (slice 3): the hasSession RPC client. has-session is the pre-attach
+// / pre-recovery liveness probe; routing it over the persistent channel collapses
+// the per-probe SSH handshake. The contract under test: returns {ok, exists} on a
+// reachable host and flags transport failures so tmux.js can map them to
+// host_unreachable instead of the ambiguous session_dead — companion-or-fail, no
+// raw-SSH fallback anywhere.
+
+describe('hasSession() via companion (companion-or-fail)', () => {
+  beforeEach(() => _resetChannelCacheForTests());
+
+  it('returns {ok:true, exists:true} when the host-side session is live', async () => {
+    const { deps } = fakeDeps({ spawnChannel: () => healthyTransport({ exists: true }) });
+    const res = await hasSession('prod', { container: 'p-worker', session: 'agent' }, {}, {}, deps);
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.host, 'prod');
+    assert.strictEqual(res.exists, true);
+  });
+
+  it('returns {ok:true, exists:false} when the session is absent (host reachable)', async () => {
+    const { deps } = fakeDeps({ spawnChannel: () => healthyTransport({ exists: false }) });
+    const res = await hasSession('prod', { container: 'p-worker', session: 'agent' }, {}, {}, deps);
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.exists, false);
+  });
+
+  it('sends the hasSession RPC params {container, session} (container null for bare-tmux)', async () => {
+    let sent = null;
+    const t = fakeTransport((req) => {
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER } };
+      if (req.method === 'hasSession') { sent = req.params; return { id: req.id, ok: true, result: { exists: true } }; }
+      return { id: req.id, ok: false, error: 'unknown method' };
+    });
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    // yatfa chat: container + session.
+    await hasSession('prod', { container: 'p-worker', session: 'agent' }, {}, {}, deps);
+    assert.deepStrictEqual(sent, { container: 'p-worker', session: 'agent' });
+    // bare-tmux chat: container null, session is the target.
+    await hasSession('prod', { container: null, session: 'mysession' }, {}, {}, deps);
+    assert.deepStrictEqual(sent, { container: null, session: 'mysession' });
+  });
+
+  it('target fallback session->container->agent is applied on the JS side', async () => {
+    let sent = null;
+    const t = fakeTransport((req) => {
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER } };
+      if (req.method === 'hasSession') { sent = req.params; return { id: req.id, ok: true, result: { exists: false } }; }
+      return { id: req.id, ok: false, error: 'unknown method' };
+    });
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    // empty session -> target falls back to container
+    await hasSession('prod', { container: 'c1', session: '' }, {}, {}, deps);
+    assert.strictEqual(sent.session, 'c1', 'empty session falls back to container');
+    // nothing set -> target 'agent'
+    await hasSession('prod', { container: 'c2', session: null }, {}, {}, deps);
+    assert.strictEqual(sent.session, 'c2', 'null session falls back to container');
+    await hasSession('prod', {}, {}, {}, deps);
+    assert.strictEqual(sent.session, 'agent', 'no container/session -> agent');
+    assert.strictEqual(sent.container, null, 'no container -> null');
+  });
+
+  it('bootstrap failure -> {ok:false, transport:true, actionable error}, NOT a raw-ssh fallback', async () => {
+    const { deps } = fakeDeps({
+      run: async () => ({ ok: false, code: 255, stderr: 'Permission denied (publickey).' }),
+    });
+    const res = await hasSession('prod', { container: 'p-worker', session: 'agent' }, {}, {}, deps);
+    assert.strictEqual(res.ok, false);
+    assert.strictEqual(res.exists, false);
+    assert.strictEqual(res.transport, true, 'a bootstrap/transport failure is flagged transport');
+    assert.ok(res.error.includes('companion'), `error names the companion: ${res.error}`);
+    // The error must carry the actionable opt-out guidance.
+    assert.ok(res.error.includes('WARDEN_COMPANION_TRANSPORT=0'),
+      `bootstrap error must tell the user how to opt out: ${res.error}`);
+  });
+
+  it('channel death (timeout) mid-RPC -> {ok:false, transport:true}', async () => {
+    // The channel is alive for ping (bootstrap succeeds) but never answers the
+    // hasSession RPC -> CompanionTransportError (timeout) -> flagged transport.
+    const { deps } = fakeDeps({
+      spawnChannel: () => fakeTransport((req) =>
+        req.method === 'ping'
+          ? { id: req.id, ok: true, result: { version: TEST_VER } }
+          : null), // hasSession never gets a reply
+    });
+    const res = await hasSession('prod', { container: 'p-worker', session: 'agent' }, {}, { timeout: 60 }, deps);
+    assert.strictEqual(res.ok, false);
+    assert.strictEqual(res.transport, true, 'channel timeout is a transport failure');
+    assert.strictEqual(res.exists, false);
+  });
+
+  it('hasSession RPC error ({ok:false}) propagates as {ok:false} without fallback', async () => {
+    // The Go RPC itself never fails for a host-side command result (it returns
+    // exists:false), so this exercises the dispatch-level / generic-error path.
+    const { deps } = fakeDeps({
+      spawnChannel: () => fakeTransport((req) =>
+        req.method === 'ping'
+          ? { id: req.id, ok: true, result: { version: TEST_VER } }
+          : { id: req.id, ok: false, error: 'hasSession failed: tmux: not found' }),
+    });
+    const res = await hasSession('prod', { container: 'p-worker', session: 'agent' }, {}, {}, deps);
+    assert.strictEqual(res.ok, false);
+    assert.strictEqual(res.transport, false, 'an RPC error is NOT a transport failure');
+    assert.ok(res.error.includes('hasSession failed'), res.error);
+  });
+
+  it('(local) host is refused (companion serves remote hosts only)', async () => {
+    const res = await hasSession('(local)', { container: null, session: 'agent' }, {});
+    assert.strictEqual(res.ok, false);
+    assert.ok(/local/.test(res.error));
+  });
+});
+
+// ---------------------- probe routing over the companion ---------------------
+// WARDEN-382: the routing change lives in src/tmux.js (probeSession/hasSession),
+// but the whole transport surface is tested here. Drives the REAL exported
+// probeSession/hasSession through an injected companion client (no real ssh) and
+// asserts the reason contract classifyProbe produces — the ticket's tri-state:
+// exists -> alive, !exists -> session_dead, transport -> host_unreachable.
+
+// Capture/restore WARDEN_COMPANION_TRANSPORT so the routing tests can flip the
+// gate without leaking the change to the rest of the suite.
+const ORIG_COMPANION_ENV = process.env.WARDEN_COMPANION_TRANSPORT;
+
+describe('probe routing over the companion (WARDEN-382 reason mapping)', () => {
+  const remoteChat = { host: 'prod-1', container: 'p-worker', session: 'agent' };
+
+  beforeEach(() => { process.env.WARDEN_COMPANION_TRANSPORT = '1'; });
+  afterEach(() => {
+    if (ORIG_COMPANION_ENV === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = ORIG_COMPANION_ENV;
+  });
+
+  it('exists:true -> probeSession ok -> classifyProbe null (alive)', async () => {
+    const probe = await probeSession(remoteChat, {}, {}, {
+      companionHasSession: async () => ({ host: 'prod-1', ok: true, exists: true }),
+    });
+    assert.strictEqual(probe.ok, true);
+    assert.strictEqual(probe.code, 0);
+    assert.strictEqual(classifyProbe(probe), null, 'live session -> null reason (attach normally)');
+  });
+
+  it('exists:false -> classifyProbe session_dead', async () => {
+    const probe = await probeSession(remoteChat, {}, {}, {
+      companionHasSession: async () => ({ host: 'prod-1', ok: true, exists: false }),
+    });
+    assert.strictEqual(probe.ok, false);
+    // session_dead requires NOT looking like transport: stdout empty, no transport
+    // phrases. The synthesized result carries "can't find session" on stderr (code 1).
+    assert.ok((probe.stderr || '').includes("can't find session"), probe.stderr);
+    assert.strictEqual(classifyProbe(probe), 'session_dead');
+  });
+
+  it('transport failure -> classifyProbe host_unreachable', async () => {
+    const probe = await probeSession(remoteChat, {}, {}, {
+      companionHasSession: async () => ({
+        host: 'prod-1', ok: false, transport: true,
+        error: 'companion transport error for prod-1: bootstrap probe failed',
+        exists: false,
+      }),
+    });
+    assert.strictEqual(probe.ok, false);
+    assert.strictEqual(probe.code, -1, 'transport -> code -1 so isTransportFailure classifies it');
+    assert.strictEqual(classifyProbe(probe), 'host_unreachable');
+  });
+
+  it('hasSession() boolean: true iff the companion says exists:true', async () => {
+    const yes = await tmuxHasSession(remoteChat, {}, {
+      companionHasSession: async () => ({ host: 'prod-1', ok: true, exists: true }),
+    });
+    assert.strictEqual(yes, true, 'exists:true -> hasSession true');
+    const no = await tmuxHasSession(remoteChat, {}, {
+      companionHasSession: async () => ({ host: 'prod-1', ok: true, exists: false }),
+    });
+    assert.strictEqual(no, false, 'exists:false -> hasSession false');
+    const dead = await tmuxHasSession(remoteChat, {}, {
+      companionHasSession: async () => ({ host: 'prod-1', ok: false, transport: true, error: 'x', exists: false }),
+    });
+    assert.strictEqual(dead, false, 'transport failure -> hasSession false');
+  });
+
+  it('runTmux is NOT invoked for a remote probe under the flag', async () => {
+    let runTmuxCalls = 0;
+    await probeSession(remoteChat, {}, {}, {
+      runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+      companionHasSession: async () => ({ host: 'prod-1', ok: true, exists: true }),
+    });
+    assert.strictEqual(runTmuxCalls, 0, 'remote probe under the flag routes through the companion, NOT runTmux');
+  });
+
+  it('LOCAL still uses runTmux (never the companion), even under the flag', async () => {
+    let runTmuxCalls = 0;
+    let companionCalls = 0;
+    const localChat = { host: '(local)', session: 'agent' };
+    await probeSession(localChat, {}, {}, {
+      runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+      companionHasSession: async () => { companionCalls++; return { host: '(local)', ok: true, exists: true }; },
+    });
+    assert.strictEqual(runTmuxCalls, 1, 'local probe uses runTmux');
+    assert.strictEqual(companionCalls, 0, 'local probe does NOT call the companion');
+  });
+});
+
+describe('probe routing: the default path (flag off) is byte-for-byte unchanged', () => {
+  afterEach(() => {
+    if (ORIG_COMPANION_ENV === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = ORIG_COMPANION_ENV;
+  });
+
+  it('a remote probe uses runTmux (the deps seam) when the flag is OFF', async () => {
+    delete process.env.WARDEN_COMPANION_TRANSPORT;
+    let runTmuxCalls = 0;
+    let companionCalls = 0;
+    const remoteChat = { host: 'prod-1', container: 'p-worker', session: 'agent' };
+    const r = await probeSession(remoteChat, {}, { timeout: 5000 }, {
+      runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+      companionHasSession: async () => { companionCalls++; return { host: 'prod-1', ok: true, exists: true }; },
+    });
+    assert.strictEqual(runTmuxCalls, 1, 'flag OFF -> remote probe uses runTmux (default path)');
+    assert.strictEqual(companionCalls, 0, 'flag OFF -> companion is not consulted');
+    assert.deepStrictEqual(r, { ok: true, code: 0, stdout: '', stderr: '' }, 'raw runTmux result passed through');
+  });
+});
+
 // ----------------------- end-to-end: the real binary ------------------------
 // Spawns the committed companion binary and drives it over stdio. Proves AC #4
 // (the channel is stdio — NO network port) and that the baked version matches the
@@ -1003,6 +1229,7 @@ function realBinaryTransport() {
         `binary version ${res.version} must match manifest ${manifest.version}`);
       assert.ok(Array.isArray(res.methods) && res.methods.includes('discover'));
       assert.ok(res.methods.includes('capturePanes'), 'ping advertises the capturePanes RPC');
+      assert.ok(res.methods.includes('hasSession'), 'ping advertises the hasSession RPC (WARDEN-382)');
     } finally {
       ch.kill();
     }
@@ -1081,6 +1308,34 @@ function realBinaryTransport() {
         const content = res.panes[session];
         assert.ok(content.includes('WARDEN_CAPTURE_MARKER_42'),
           `captured content includes the marker; got:\n${content}`);
+      } finally {
+        ch.kill();
+      }
+    } finally {
+      spawnSync(TMUX_BIN, ['kill-session', '-t', session], { encoding: 'utf8' });
+    }
+  });
+
+  // WARDEN-382 (slice 3) parity test: the Go companion runs `tmux has-session`
+  // LOCALLY via bash -lc and reports exists = (exit 0). Probes a live session
+  // (exists:true) and an absent one (exists:false) so both halves of the tri-state
+  // are exercised against the real binary. Skipped unless tmux is available.
+  (canCapture ? it : it.skip)('hasSession: real binary reports exists true/false over stdio', async () => {
+    const session = uniqueSession();
+    const setup = spawnSync(TMUX_BIN, ['new-session', '-d', '-s', session], { encoding: 'utf8' });
+    assert.strictEqual(setup.status, 0, `tmux new-session failed: ${setup.stderr}`);
+    try {
+      const ch = new CompanionChannel('local-binary', realBinaryTransport());
+      try {
+        // A live session -> exists:true.
+        const live = await ch.call('hasSession', { container: '', session }, { timeout: 8000 });
+        assert.ok(live && typeof live === 'object', 'response is an object');
+        assert.strictEqual(live.exists, true, `live session '${session}' -> exists:true`);
+
+        // A session nobody created -> exists:false (NOT an RPC error: the host
+        // answered, the session is simply absent — the separation this slice ships).
+        const absent = await ch.call('hasSession', { container: '', session: `${session}-nope` }, { timeout: 8000 });
+        assert.strictEqual(absent.exists, false, 'absent session -> exists:false');
       } finally {
         ch.kill();
       }
