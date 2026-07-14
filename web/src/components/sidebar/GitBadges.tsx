@@ -149,7 +149,7 @@ export function DiffStatChip({ diffstat, className }: { diffstat?: DiffStat | nu
   if (diffstat.insertions === 0 && diffstat.deletions === 0) return null;
   return (
     <span className={cn('inline-flex items-center gap-1 font-mono text-[10px]', className)}>
-      <span className="text-emerald-400">+{diffstat.insertions}</span>
+      <span className="text-green-400">+{diffstat.insertions}</span>
       <span className="text-red-400">−{diffstat.deletions}</span>
     </span>
   );
