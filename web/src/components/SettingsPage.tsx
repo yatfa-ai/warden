@@ -69,6 +69,13 @@ interface ConfigData {
   // warning→CRITICAL boundary (default 30) which also fires desktop alerts.
   healthWarningThresholdMin: number | null;
   healthCriticalThresholdMin: number | null;
+  // Token-spend budget (WARDEN-415). tokenBudgetEnabled is the master switch;
+  // the three numeric knobs may be null (cleared to default at read time). The
+  // per-session threshold is null-able so it can be turned OFF independently.
+  tokenBudgetEnabled: boolean;
+  tokenBudgetThresholdTokens: number | null;
+  tokenBudgetWindowHours: number | null;
+  tokenBudgetPerSessionThresholdTokens: number | null;
   confirmDestructiveActions: boolean;
   notifyChatOps: boolean;
   notifyErrors: boolean;
@@ -298,6 +305,7 @@ const SETTINGS_SECTIONS = [
   { id: 'observer', label: 'Observer Preferences' },
   { id: 'safety', label: 'Safety' },
   { id: 'attention', label: 'Attention thresholds' },
+  { id: 'tokenbudget', label: 'Token budget' },
   { id: 'display', label: 'Display' },
   { id: 'appearance', label: 'Appearance' },
   { id: 'newchats', label: 'New Chats' },
@@ -508,6 +516,10 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
     llm: { model: '', baseUrl: '', maxTokens: null },
     healthWarningThresholdMin: 5,
     healthCriticalThresholdMin: 30,
+    tokenBudgetEnabled: false,
+    tokenBudgetThresholdTokens: 2_000_000,
+    tokenBudgetWindowHours: 24,
+    tokenBudgetPerSessionThresholdTokens: 1_000_000,
     confirmDestructiveActions: true,
     notifyChatOps: true,
     notifyErrors: true,
@@ -582,6 +594,19 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
           },
           healthWarningThresholdMin: configData.healthWarningThresholdMin ?? 5,
           healthCriticalThresholdMin: configData.healthCriticalThresholdMin ?? 30,
+          tokenBudgetEnabled: configData.tokenBudgetEnabled ?? false,
+          tokenBudgetThresholdTokens:
+            typeof configData.tokenBudgetThresholdTokens === 'number'
+              ? configData.tokenBudgetThresholdTokens
+              : 2_000_000,
+          tokenBudgetWindowHours:
+            typeof configData.tokenBudgetWindowHours === 'number'
+              ? configData.tokenBudgetWindowHours
+              : 24,
+          tokenBudgetPerSessionThresholdTokens:
+            typeof configData.tokenBudgetPerSessionThresholdTokens === 'number'
+              ? configData.tokenBudgetPerSessionThresholdTokens
+              : 1_000_000,
           confirmDestructiveActions: configData.confirmDestructiveActions ?? true,
           notifyChatOps: configData.notifyChatOps ?? true,
           notifyErrors: configData.notifyErrors ?? true,
@@ -1248,6 +1273,103 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   <p className="text-xs text-muted-foreground">
                     Minutes of inactivity before an agent is critical and triggers a desktop alert. Leave empty for the default (30).
                   </p>
+                </div>
+              </SettingsSection>
+
+              {/* Token budget (WARDEN-415) — the ALARM that completes the
+                  WARDEN-367 token meter. When enabled, Warden watches the
+                  fleet's token spend on a slow (~120s) cadence and raises a
+                  desktop alert + in-app toast when it crosses a threshold —
+                  routing attention to a runaway/looping agent's cost while the
+                  founder is away. Fully human-in-the-loop: it NOTIFY, it never
+                  auto-kills/stops. Disabled by default. */}
+              <SettingsSection title="Token budget" className={cn(activeSection !== 'tokenbudget' && 'hidden')}>
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="tokenBudgetEnabled"
+                    checked={config.tokenBudgetEnabled ?? false}
+                    onCheckedChange={(checked) =>
+                      setConfig({ ...config, tokenBudgetEnabled: checked === true })
+                    }
+                  />
+                  <Label htmlFor="tokenBudgetEnabled" className="cursor-pointer">
+                    Enable token-spend budget alerts
+                  </Label>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Watch the fleet's token usage on a slow cadence and raise a desktop alert + in-app
+                  toast when spend crosses a threshold — so a runaway or looping agent's cost is
+                  caught while you're away. Model-agnostic token counts, not dollar cost. It only
+                  notifies; it never kills or pauses agents.
+                </p>
+                <div className={cn('flex flex-col gap-4 pl-4 ml-1 border-l border-border/60', !config.tokenBudgetEnabled && 'pointer-events-none opacity-50')}>
+                  <div className="flex flex-col gap-2">
+                    <Label htmlFor="tokenBudgetThresholdTokens">Fleet threshold (tokens)</Label>
+                    <Input
+                      id="tokenBudgetThresholdTokens"
+                      type="number"
+                      min="1"
+                      step="100000"
+                      value={config.tokenBudgetThresholdTokens ?? ''}
+                      onChange={(e) =>
+                        setConfig({
+                          ...config,
+                          tokenBudgetThresholdTokens: e.target.value ? parseInt(e.target.value) : null,
+                        })
+                      }
+                      placeholder="Default 2,000,000"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Total tokens spent by sessions active in the window before the fleet alarm
+                      fires. Leave empty for the default (2,000,000).
+                    </p>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <Label htmlFor="tokenBudgetWindowHours">Window (hours)</Label>
+                    <Input
+                      id="tokenBudgetWindowHours"
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={config.tokenBudgetWindowHours ?? ''}
+                      onChange={(e) =>
+                        setConfig({
+                          ...config,
+                          tokenBudgetWindowHours: e.target.value ? parseInt(e.target.value) : null,
+                        })
+                      }
+                      placeholder="Default 24"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Which sessions count: those active in the last N hours. Each contributes its
+                      full lifetime token total (the existing meter), not just turns within the
+                      window — so a runaway that's burning tokens right now is captured. Default 24.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <Label htmlFor="tokenBudgetPerSessionThresholdTokens">Per-session threshold (tokens)</Label>
+                    <Input
+                      id="tokenBudgetPerSessionThresholdTokens"
+                      type="number"
+                      min="1"
+                      step="100000"
+                      value={config.tokenBudgetPerSessionThresholdTokens ?? ''}
+                      onChange={(e) =>
+                        setConfig({
+                          ...config,
+                          tokenBudgetPerSessionThresholdTokens: e.target.value ? parseInt(e.target.value) : null,
+                        })
+                      }
+                      placeholder="Default 1,000,000"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Catch the specific runaway: when any single session's lifetime total crosses
+                      this, Warden names it in the alert. Empty disables the per-session alarm
+                      (the fleet threshold still applies). Default 1,000,000.
+                    </p>
+                  </div>
                 </div>
               </SettingsSection>
 
