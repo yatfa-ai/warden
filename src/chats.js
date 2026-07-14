@@ -8,7 +8,7 @@ import { loadCatalog, stampCatalogActivity } from './config.js';
 import { ROLES, parseContainerName, buildChat, sortChats, parseActivityTimestamp } from './chatMeta.js';
 // Re-export for any external consumer; the canonical home is now ./chatMeta.js.
 export { ROLES, parseContainerName };
-import { isCompanionTransportEnabled, discover as discoverViaCompanion, capturePanes as capturePanesViaCompanion } from './companion.js';
+import { isCompanionTransportEnabled, discover as discoverViaCompanion, capturePanes as capturePanesViaCompanion, hasFreshPaneDelta, readPaneDeltas } from './companion.js';
 
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 const LOCAL = '(local)';
@@ -559,6 +559,16 @@ export async function capturePanes(chats, cfg = {}) {
     // NOT fall back to raw SSH — the error is surfaced and the panes map is
     // simply empty for this host (opt out via the env var).
     if (isCompanionTransportEnabled()) {
+      // WARDEN-413: if a live subscription is pushing fresh deltas for this host,
+      // render from the in-memory delta cache and SKIP the capturePanes RPC — the
+      // success gate (idle companion host -> ZERO capturePanes RPCs per monitor
+      // tick). Freshness is the liveness backstop: a stalled/dead push ages out
+      // within PANE_DELTA_FRESH_MS and capturePanes resumes polling, so a frozen
+      // push can never freeze the UI. The cache is in-memory only.
+      if (hasFreshPaneDelta(host)) {
+        Object.assign(out, readPaneDeltas(host, list.map((c) => c.key)));
+        return;
+      }
       const r = await capturePanesViaCompanion(host, list, cfg);
       if (r.ok) Object.assign(out, r.panes);
       return;

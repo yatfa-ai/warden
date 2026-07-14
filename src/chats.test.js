@@ -1,10 +1,11 @@
-import { describe, it, mock } from 'node:test';
+import { describe, it, mock, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { resolveChat, resolveChatWithRefresh, comparePinned, parseDiscoverRow, parseDockerStats, splitDiscoverOutput, discover, capturePanes, DISCOVER_SCRIPT } from './chats.js';
+import { applyPaneDelta, hasFreshPaneDelta, readPaneDeltas, _resetPaneDeltaStateForTests } from './companion.js';
 import { buildChat, parseActivityTimestamp } from './chatMeta.js';
 
 // ----------------------------- capturePanes routing -------------------------
@@ -86,6 +87,58 @@ function uniqueSession() {
       if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
       else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
     }
+  });
+});
+
+// --------------------- capturePanes renders from pushed deltas (WARDEN-413) ---
+// The success gate: a companion-enabled REMOTE host with a live subscription
+// delivering fresh deltas is rendered from the in-memory delta cache and the
+// capturePanes RPC is SKIPPED — an idle host receives ZERO capturePanes RPCs per
+// monitor tick. Proving the cached content comes back is proof the RPC path was
+// never taken: the only other route (capturePanesViaCompanion) would bootstrap a
+// real SSH channel and fail/empty — never return the seeded content. No network.
+
+describe('capturePanes renders companion hosts from the pushed delta cache (WARDEN-413)', () => {
+  let savedEnv;
+  beforeEach(() => {
+    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+    process.env.WARDEN_COMPANION_TRANSPORT = '1';
+    _resetPaneDeltaStateForTests();
+  });
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
+    _resetPaneDeltaStateForTests();
+  });
+
+  it('a fresh subscription -> capturePanes returns the cached deltas and issues NO RPC', async () => {
+    // Seed a fresh paneDelta for a REMOTE companion host (the push path).
+    applyPaneDelta('prod', { event: 'paneDelta', panes: { 'p-worker': 'IDLE PANE CONTENT' } });
+    assert.ok(hasFreshPaneDelta('prod'), 'precondition: host has a fresh delta');
+
+    const out = await capturePanes([{ host: 'prod', key: 'p-worker', container: 'p-worker', session: 'agent' }], {});
+
+    // The cached content came back — proving capturePanes read the cache and never
+    // called capturePanesViaCompanion (which would have hit a real channel).
+    assert.deepStrictEqual(out, { 'p-worker': 'IDLE PANE CONTENT' });
+    // And the cache is unchanged (read is non-destructive).
+    assert.deepStrictEqual(readPaneDeltas('prod', ['p-worker']), { 'p-worker': 'IDLE PANE CONTENT' });
+  });
+
+  it('only the requested keys are returned; a key absent from the cache stays missing', async () => {
+    applyPaneDelta('prod', { event: 'paneDelta', panes: { a: 'AAA' } }); // b never pushed
+    const out = await capturePanes([
+      { host: 'prod', key: 'a', container: 'a', session: 'agent' },
+      { host: 'prod', key: 'b', container: 'b', session: 'agent' },
+    ], {});
+    assert.deepStrictEqual(out, { a: 'AAA' }, 'b is missing (cache miss) -> caller capture_failed handling, unchanged');
+  });
+
+  it('a host with NO fresh delta is not read from the cache (would poll instead)', async () => {
+    // No delta seeded for 'prod' -> hasFreshPaneDelta is false, so capturePanes
+    // must NOT serve the cache. The cache read returns nothing.
+    assert.ok(!hasFreshPaneDelta('prod'));
+    assert.deepStrictEqual(readPaneDeltas('prod', ['p-worker']), {});
   });
 });
 

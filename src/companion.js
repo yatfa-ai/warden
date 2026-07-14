@@ -200,6 +200,8 @@ export class CompanionChannel {
     this.pending = new Map(); // String(id) -> { resolve, reject, timer }
     this.dead = false;
     this._diedWith = null;
+    this._eventHandler = null; // unsolicited event handler (WARDEN-413)
+    this._methods = null;      // cached ping `methods` (feature-detect; WARDEN-413)
     transport.onLine((line) => this._onLine(line));
     transport.onExit((err) => this._die(err || new Error('companion process exited')));
   }
@@ -209,6 +211,16 @@ export class CompanionChannel {
     if (!trimmed) return;
     let msg;
     try { msg = JSON.parse(trimmed); } catch { return; } // ignore non-JSON noise
+    // WARDEN-413: an UNSOLICITED event line carries an `event` field and NO id
+    // (e.g. {"event":"paneDelta","panes":{…}}). RPC responses never carry `event`
+    // (they carry `ok`), so this is unambiguous and strictly additive: dispatch
+    // to the registered handler instead of dropping it as an unknown id.
+    if (msg.event) {
+      if (this._eventHandler) {
+        try { this._eventHandler(msg); } catch { /* handler must not break the channel */ }
+      }
+      return;
+    }
     const p = this.pending.get(String(msg.id));
     if (!p) return; // response for an unknown/already-resolved id
     this.pending.delete(String(msg.id));
@@ -218,6 +230,19 @@ export class CompanionChannel {
     } else {
       p.reject(new CompanionRpcError(this.host, msg.error || 'rpc returned ok:false with no error'));
     }
+  }
+
+  // Register a handler for unsolicited event lines (subscribePanes paneDelta
+  // pushes). At most one handler per channel; the channel is shared per host so
+  // the handler fans updates into the host's delta cache. Returns the handler so
+  // it can be re-installed idempotently. (WARDEN-413)
+  onEvent(handler) {
+    this._eventHandler = handler;
+    return handler;
+  }
+
+  offEvent() {
+    this._eventHandler = null;
   }
 
   _die(err) {
@@ -363,6 +388,10 @@ async function pingOnce(channel, expectedVersion, cfg) {
   if (!res || res.version !== expectedVersion) {
     return { ok: false, reason: 'mismatch', got: res ? res.version : null };
   }
+  // Cache the advertised method list for feature-detection (WARDEN-413): a stale
+  // cached companion binary predates subscribePanes, so subscribePanes() checks
+  // this list before subscribing and degrades to the poll path when it's absent.
+  if (Array.isArray(res.methods)) channel._methods = res.methods;
   return { ok: true };
 }
 
@@ -739,6 +768,240 @@ export async function resize(host, { container, session } = {}, cfg = {}, opts =
   }
 }
 
+// ------------------------------- subscribePanes --------------------------------
+// WARDEN-413 (problem #3 of roadmap WARDEN-270). capture-pane is polled every 2s
+// monitor tick + every observer poll even when nothing changed; for an idle fleet
+// that is pure waste scaled by hosts × panes × scrollback. subscribePanes flips
+// REMOTE pane capture from PULL to PUSH: the companion watches the pane set and
+// emits paneDelta events for ONLY the changed panes (empty-panes = heartbeat);
+// the consumer renders from the in-memory delta cache and SKIPS the capturePanes
+// RPC on the monitor tick. Idle-fleet channel traffic collapses to ~0 while
+// active panes still update within ~one tick.
+//
+// This whole path is GATED behind WARDEN_COMPANION_TRANSPORT=1 (experimental),
+// reuses the shipped channel/bootstrap (WARDEN-272/276/382), and is strictly
+// additive: request/response RPCs are byte-for-byte unchanged. A companion that
+// does NOT advertise subscribePanes (a stale cached binary) is detected via the
+// ping `methods` list and the subscription degrades to the existing poll path —
+// never a hard failure that breaks pane rendering.
+
+// A delta is "fresh" while no monitor-tick liveness window has elapsed without a
+// push. 3 × the 2s monitor tick = 6s; the companion heartbeat (4s, main.go) stays
+// below this so a LIVE idle host keeps warden out of its poll backstop, while a
+// stalled/dead push ages out and capturePanes resumes polling within ~3 ticks.
+export const PANE_DELTA_FRESH_MS = 6000;
+
+// host -> { panes: {key: content}, lastEventAt: ms }. In-memory only — never
+// persisted/serialized (the same trust boundary as capturePanes' panes map).
+const paneDeltaCache = new Map();
+
+// host -> Map(key -> { descriptor, refs }). Ref-counted across WS connections so
+// two tabs monitoring panes on the same host share ONE subscription whose pane
+// set is the union of both; a key is dropped only when its LAST monitor closes.
+const paneSubscriptions = new Map();
+
+// host -> Promise. Serializes per-host subscribe/unsubscribe syncs so concurrent
+// monitor/unmonitor churn (two tabs, rapid open/close) cannot interleave partial
+// pane sets to the companion; the last sync always reflects the true union.
+const syncInFlight = new Map();
+
+export function _resetPaneDeltaStateForTests() {
+  paneDeltaCache.clear();
+  paneSubscriptions.clear();
+  syncInFlight.clear();
+}
+
+// Apply one paneDelta event to the host's cache entry. Exported (and pure aside
+// from the cache mutation) so the freshness/skip contract is unit-testable: a
+// payload refreshes content + liveness; an empty payload (heartbeat) refreshes
+// liveness only. Returns the entry. (WARDEN-413)
+export function applyPaneDelta(host, event, now = Date.now()) {
+  let entry = paneDeltaCache.get(host);
+  if (!entry) {
+    entry = { panes: {}, lastEventAt: 0 };
+    paneDeltaCache.set(host, entry);
+  }
+  if (event && event.event === 'paneDelta') {
+    const changed = event.panes || {};
+    for (const [k, v] of Object.entries(changed)) entry.panes[k] = v;
+    entry.lastEventAt = now;
+  }
+  return entry;
+}
+
+// True iff host has a subscription delivering fresh deltas — the gate capturePanes
+// checks to SKIP the capturePanes RPC. `now` is injectable for deterministic tests.
+export function hasFreshPaneDelta(host, now = Date.now()) {
+  const e = paneDeltaCache.get(host);
+  return !!e && e.lastEventAt > 0 && (now - e.lastEventAt) <= PANE_DELTA_FRESH_MS;
+}
+
+// Read the cached deltas for the requested keys. Only keys present in the cache
+// are returned; a missing key stays missing so the caller's existing
+// capture_failed handling is unchanged (WARDEN-89). (WARDEN-413)
+export function readPaneDeltas(host, keys) {
+  const e = paneDeltaCache.get(host);
+  const out = {};
+  if (!e) return out;
+  for (const k of keys || []) {
+    if (Object.prototype.hasOwnProperty.call(e.panes, k)) out[k] = e.panes[k];
+  }
+  return out;
+}
+
+// Look up the cached channel for a host without bootstrapping is intentionally
+// NOT provided: subscribe/unsubscribe go through syncSubscriptionOnce, which uses
+// getChannel (bootstraps if needed for subscribe; unsubscribe's RPC is skipped
+// when the channel is absent/dead via the methods check). (WARDEN-413)
+
+// Resolve the companion's advertised method list, caching it on the channel.
+// Bootstrapping already stashed it from the ping; if it didn't (e.g. an older
+// bootstrap path), fetch it with one ping. Never throws — returns [] on failure
+// so the caller's feature-detect simply degrades to the poll path.
+async function channelMethods(channel, opts = {}) {
+  if (Array.isArray(channel._methods)) return channel._methods;
+  try {
+    const res = await channel.call('ping', {}, { timeout: opts.timeout ?? 8000 });
+    if (res && Array.isArray(res.methods)) channel._methods = res.methods;
+    return channel._methods || [];
+  } catch {
+    return [];
+  }
+}
+
+// Wire the channel's event handler to feed the host's delta cache, once per
+// channel. Idempotent: re-installs the same handler shape if the channel was
+// re-bootstrapped (a fresh channel has _eventWired unset). (WARDEN-413)
+function ensurePaneDeltaHandler(channel, host) {
+  if (channel._eventWired) return;
+  channel._eventWired = true;
+  channel.onEvent((msg) => {
+    if (msg.event !== 'paneDelta') return;
+    applyPaneDelta(host, msg);
+  });
+}
+
+// describePanes normalizes a chat list to the {key,container,session} shape the
+// companion expects (identical to capturePanes' mapping). container null for
+// bare-tmux; target falls back session -> container -> 'agent'.
+function describePanes(list) {
+  return (list || []).map((c) => ({
+    key: c.key,
+    container: c.container || null,
+    session: c.session || c.container || 'agent',
+  }));
+}
+
+// syncSubscriptionOnce sends the host's CURRENT subscribed pane set (the union
+// across all connections) to the companion — subscribePanes with the full set, or
+// unsubscribePanes when it has emptied. Reads the union fresh on every call so the
+// last sync of a churn burst always reflects the true set. (WARDEN-413)
+async function syncSubscriptionOnce(host, cfg, opts = {}, deps = {}) {
+  const sub = paneSubscriptions.get(host);
+  const panes = sub ? [...sub.values()].map((e) => e.descriptor) : [];
+  try {
+    const channel = await getChannel(host, cfg, deps);
+    const methods = await channelMethods(channel, opts);
+    if (!methods.includes('subscribePanes')) {
+      // Stale cached binary (predates WARDEN-413): degrade to the existing poll
+      // path. NOT a failure — capturePanes still works; we just don't push.
+      return { host, ok: false, unsupported: true, subscribed: false };
+    }
+    ensurePaneDeltaHandler(channel, host);
+    if (panes.length === 0) {
+      // No one is monitoring this host anymore: stop serving cached deltas (so a
+      // later capturePanes resumes polling) and tell the companion to stop.
+      paneDeltaCache.delete(host);
+      if (methods.includes('unsubscribePanes')) {
+        await channel.call('unsubscribePanes', {}, { timeout: opts.timeout ?? 5000 });
+      }
+      return { host, ok: true, subscribed: false };
+    }
+    await channel.call('subscribePanes', { panes }, { timeout: opts.timeout ?? 15000 });
+    return { host, ok: true, subscribed: true, count: panes.length };
+  } catch (e) {
+    let msg;
+    if (e instanceof CompanionTransportError) {
+      msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
+    } else if (e instanceof CompanionRpcError) {
+      msg = e.message;
+    } else {
+      msg = `companion subscribePanes failed on ${host}: ${e?.message ?? e}`;
+    }
+    // Companion-or-fail surfaces the actionable error, but a subscription failure
+    // does NOT break pane rendering: capturePanes keeps polling (freshness is
+    // false until a real push arrives), so this is a recoverable degradation.
+    return { host, ok: false, error: msg, subscribed: false };
+  }
+}
+
+// Serialize per-host syncs so concurrent subscribe/unsubscribe churn collapses
+// into an ordered sequence whose final state is the true union. Each call chains
+// after the previous one for the same host; the last call reflects reality.
+function syncSubscription(host, cfg, opts = {}, deps = {}) {
+  const prev = syncInFlight.get(host) || Promise.resolve();
+  const next = prev.catch(() => {}).then(() => syncSubscriptionOnce(host, cfg, opts, deps));
+  syncInFlight.set(host, next);
+  next.finally(() => {
+    if (syncInFlight.get(host) === next) syncInFlight.delete(host);
+  });
+  return next;
+}
+
+// subscribePanes adds a chat list's keys to the host's subscription (ref-counted
+// across connections) and syncs the union to the companion. Returns
+// {host, ok, subscribed} or {host, ok:false, unsupported} for a stale binary (the
+// caller leaves the poll path intact) or {host, ok:false, error} on transport
+// failure. LOCAL hosts are refused (the companion serves remote hosts only).
+// Signature mirrors capturePanes(host, list, cfg, opts, deps) so the test deps
+// seam (spawnChannel manifest, etc.) routes through to getChannel. (WARDEN-413)
+export async function subscribePanes(host, list, cfg = {}, opts = {}, deps = {}) {
+  if (host === LOCAL) {
+    return { host, ok: false, error: 'companion transport does not apply to the local host', subscribed: false };
+  }
+  let sub = paneSubscriptions.get(host);
+  if (!sub) { sub = new Map(); paneSubscriptions.set(host, sub); }
+  for (const descriptor of describePanes(list)) {
+    const existing = sub.get(descriptor.key);
+    if (existing) existing.refs++;
+    else sub.set(descriptor.key, { descriptor, refs: 1 });
+  }
+  return syncSubscription(host, cfg, opts, deps);
+}
+
+// unsubscribePanes drops a key set's refs (ref-counted: a key leaves the
+// subscription only when its LAST monitor closes), then syncs the union. Safe to
+// call for a host/key set that was never subscribed (no-op). LOCAL is a no-op.
+// Signature mirrors capturePanes(host, list, cfg, opts, deps). (WARDEN-413)
+export async function unsubscribePanes(host, keys, cfg = {}, opts = {}, deps = {}) {
+  if (host === LOCAL) {
+    return { host, ok: true, subscribed: false };
+  }
+  const sub = paneSubscriptions.get(host);
+  if (sub) {
+    for (const k of keys || []) {
+      const existing = sub.get(k);
+      if (existing) {
+        existing.refs--;
+        if (existing.refs <= 0) sub.delete(k);
+      }
+    }
+    if (sub.size === 0) paneSubscriptions.delete(host);
+  }
+  return syncSubscription(host, cfg, opts, deps);
+}
+
+// _getPaneSubscriptionsForTests exposes the ref-counted subscription state for
+// deterministic tests (refcounting + union sync are the multi-tab correctness
+// contract). Not for production use.
+export function _getPaneSubscriptionsForTests() {
+  const out = {};
+  for (const [host, sub] of paneSubscriptions.entries()) {
+    out[host] = {};
+    for (const [k, v] of sub.entries()) out[host][k] = v.refs;
+  }
+  return out;
+}
 
 // Pure model of per-tick ssh spawn cost, used by scripts/companion-benchmark.mjs
 // and unit-tested here (WARDEN-272 AC #5: "a spawn/handshake counter per discover
