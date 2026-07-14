@@ -76,6 +76,21 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
     (h: string) => initialUi.defaultNewChatPresetByHost?.[h] ?? initialUi.defaultNewChatPreset ?? 'claude',
     [initialUi],
   );
+  // Resolve the default shell for a given host (WARDEN-429 — the shell mirror of
+  // cwdFor/presetFor): a per-host override (defaultShellByHost) wins, falling
+  // back to the global defaultShell, then blank. Blank is the meaningful
+  // "host login shell" value — an empty cmd flows through to tmux as a bare login
+  // shell per WARDEN-223, so a zsh-login host yields zsh with zero config.
+  // loadUi already dropped any blank per-host entry (parseShellByHost), so a host
+  // with no override falls through to the global default, then blank. Used to
+  // (re-)seed the command field when the shell preset is selected — on mount, on
+  // host change, and after submit — so the shell terminal opens the resolved
+  // shell, not a hardcoded 'bash'. Memoized like cwdFor/presetFor: it depends
+  // only on the mount-once initialUi (stable), safe in effect deps.
+  const shellFor = useCallback(
+    (h: string) => initialUi.defaultShellByHost?.[h] ?? initialUi.defaultShell ?? '',
+    [initialUi],
+  );
   const [open, setOpen] = useState(false);
   const [sshHosts, setSshHosts] = useState<string[]>([]);
   // Per-host rolled-up load (WARDEN-361): host -> {agentCount, avgCpu, memPct},
@@ -157,7 +172,13 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
     if (!open) return;
     let def: string;
     if (preset === 'shell') {
-      def = 'bash';
+      // WARDEN-429: resolve the shell through the single Default shell setting
+      // (per-host override → global default → blank). Blank means "no explicit
+      // shell" → the host launches its own login shell (an explicit empty cmd
+      // flows through to tmux as a bare login shell per WARDEN-223), NOT a
+      // hardcoded 'bash'. The resolved value (or empty) seeds the command field
+      // and remains editable per-spawn.
+      def = shellFor(host);
     } else if (preset === 'claude') {
       def = host === THIS_MACHINE ? `${claudePath} --dangerously-skip-permissions` : 'claude --dangerously-skip-permissions';
     } else {
@@ -168,7 +189,7 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
       def = found ? found.cmd : 'claude --dangerously-skip-permissions';
     }
     setCmd(def);
-  }, [host, preset, open, claudePath, customPresets]);
+  }, [host, preset, open, claudePath, customPresets, shellFor]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -233,7 +254,7 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
       </div>
       <Input value={session} onChange={(e) => setSession(e.target.value)} placeholder="session name" className="h-7 text-[11px]" />
       <Input value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="cwd (dir)" className="h-7 text-[11px]" />
-      <Input value={cmd} onChange={(e) => setCmd(e.target.value)} placeholder="command" className="h-7 text-[11px]" />
+      <Input value={cmd} onChange={(e) => setCmd(e.target.value)} placeholder={preset === 'shell' ? 'auto (host login shell)' : 'command'} className="h-7 text-[11px]" />
       {host !== THIS_MACHINE && <span className="text-[10px] text-muted-foreground">needs tmux on {host} · survives warden restart</span>}
       {host === THIS_MACHINE && <span className="text-[10px] text-muted-foreground">direct · survives reload (not restart)</span>}
       {err && <div className="text-[10px] text-red-500">{err}</div>}

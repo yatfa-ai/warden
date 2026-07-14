@@ -439,13 +439,24 @@ export interface UiState {
   // behavior. Sanitized on load by parseCwdByHost. Pure client-side pref; never
   // sent to the backend / /api/config.
   defaultNewChatCwdByHost?: Record<string, string>;
-  // Default shell launched by the pane-grid ＋ split button (WARDEN-223). A
-  // non-empty value (e.g. 'zsh', 'pwsh') is the `cmd` every split spawns; blank
-  // (default) means "no explicit shell" — the host launches its own login shell
-  // (auto-detected per host, never hardcoded). Independent of the New Chats
-  // spawn presets above (a scratch terminal is a different concern). Pure
-  // client-side pref; never sent to the backend / /api/config.
-  defaultSplitShell?: string;
+  // Default shell opened by BOTH the ＋ new-chat *shell* preset and the ＋ split
+  // button (WARDEN-429 — unifies the prior split-only `defaultSplitShell` with the
+  // hardcoded `'bash'` the new-chat shell preset used to force-feed). Blank
+  // (default) means "no explicit shell" → the host launches its own login shell
+  // (auto-detected per host, never hardcoded; WARDEN-223), so a zsh-login host
+  // yields zsh out of the box with zero config. A non-empty value (e.g. 'zsh',
+  // 'fish', 'pwsh') is the cmd every shell terminal/split spawns, overridable per
+  // host below. Pure client-side pref; never sent to the backend / /api/config.
+  defaultShell?: string;
+  // Per-host default-shell overrides (WARDEN-429 — mirrors the
+  // defaultNewChatCwdByHost shape from WARDEN-336). Keys are the host strings —
+  // '(local)' for local, the SSH host name for remote (matching
+  // defaultNewChatHost); values are shell names. A host with no entry (or one
+  // whose value is empty/whitespace, dropped on load by parseShellByHost) falls
+  // through to defaultShell, then blank (host login shell) — identical to the
+  // single-host behavior. Pure client-side pref; never sent to the backend /
+  // /api/config.
+  defaultShellByHost?: Record<string, string>;
   // User-defined spawn presets (named quick-fill commands beyond claude/shell).
   // Validated on load: entries missing a name/cmd are dropped, names are bounded
   // (≤32 chars) and de-duplicated, and reserved built-in names are rejected.
@@ -554,6 +565,35 @@ function parseCwdByHost(raw: unknown): Record<string, string> {
     if (raw !== undefined && raw !== null) {
       // A present-but-wrong-type value is genuine corruption worth surfacing.
       console.warn('[loadUi] defaultNewChatCwdByHost is not an object; ignoring:', raw);
+    }
+    return {};
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const key = typeof k === 'string' ? k.trim() : '';
+    const val = typeof v === 'string' ? v.trim() : '';
+    if (!key || !val) continue; // empty key → drop; empty value → inherit global default
+    out[key] = val;
+  }
+  return out;
+}
+
+// Sanitize a raw defaultShellByHost value (host key → default shell) into a
+// valid Record<string,string> (WARDEN-429 — mirrors parseCwdByHost). Like a cwd
+// path, a shell name is an arbitrary string, so a non-empty trim is enough
+// (there is no semantic "valid preset" check as parsePresetByHost needs).
+// Defensive: never throws on malformed input (WARDEN-89) — it drops bad entries
+// instead, so one corrupt/blank entry can never seed the spawn command with a
+// dangling shell name. Each entry requires a non-empty trimmed-string KEY and a
+// trimmed-string VALUE; entries whose value is empty/whitespace are dropped — an
+// empty override means "use the global defaultShell" (then the host login shell)
+// and so must never persist as a blank that could seed the command field empty.
+// Values are trimmed, matching defaultShell's own load-time trim.
+function parseShellByHost(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    if (raw !== undefined && raw !== null) {
+      // A present-but-wrong-type value is genuine corruption worth surfacing.
+      console.warn('[loadUi] defaultShellByHost is not an object; ignoring:', raw);
     }
     return {};
   }
@@ -761,7 +801,7 @@ const DEFAULT_UI: UiState = {
   autoFocusNewPane: true,
   restoreOnStartup: 'previous',
   defaultNewChatPreset: 'claude', defaultNewChatPresetByHost: {}, defaultNewChatHost: '(local)', customPresets: [], snippets: STARTER_SNIPPETS, defaultNewChatCwd: '', defaultNewChatCwdByHost: {},
-  defaultSplitShell: '',
+  defaultShell: '', defaultShellByHost: {},
   paneHost: {}, agentFilter: 'all', agentSort: 'manual',
   hostOptions: {}, copyHintDismissed: {},
 };
@@ -870,9 +910,22 @@ export function loadUi(): UiState {
         // paneHost's loose pass — a corrupt/blank entry must never seed the
         // spawn field empty. Empty values drop ("use the global default").
         defaultNewChatCwdByHost: parseCwdByHost(v.defaultNewChatCwdByHost),
-        // Trim on load so stray whitespace never becomes the spawned shell name;
-        // blank is the meaningful "auto-detect host login shell" value.
-        defaultSplitShell: typeof v.defaultSplitShell === 'string' ? v.defaultSplitShell.trim() : '',
+        // Default shell for the ＋ new-chat *shell* preset AND the ＋ split
+        // button (WARDEN-429). MIGRATION: the legacy split-only `defaultSplitShell`
+        // is folded in here — if the new `defaultShell` field is absent, the prior
+        // split-shell value (if any) is used so an upgrade never silently drops
+        // the user's shell choice. Trimmed on load; blank is the meaningful
+        // "auto-detect host login shell" value (an explicit empty cmd flows through
+        // to tmux as a bare login shell per WARDEN-223). The legacy key is read
+        // for migration only and not re-persisted (it is gone from UiState), so a
+        // subsequent save drops it cleanly.
+        defaultShell: typeof v.defaultShell === 'string'
+          ? v.defaultShell.trim()
+          : (typeof v.defaultSplitShell === 'string' ? v.defaultSplitShell.trim() : ''),
+        // Per-host shell overrides: same drop-bad-entries discipline as the cwd
+        // map — a corrupt/blank entry must never seed the command field empty.
+        // Empty values drop ("use the global default", then the host login shell).
+        defaultShellByHost: parseShellByHost(v.defaultShellByHost),
         customPresets,
         // One-time starter-set seeding (WARDEN-323 Decision 3): when the
         // persisted `snippets` field is ABSENT (a fresh install OR a v2→v3

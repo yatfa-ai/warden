@@ -297,11 +297,18 @@ function App() {
   // backend as anything but the literal `text` over the existing /api/send path.
   // Seeded once with STARTER_SNIPPETS by loadUi when the field is absent.
   const [snippets, setSnippets] = useState<Snippet[]>(() => uiState.snippets ?? []);
-  // Default shell launched by the pane-grid ＋ split button (WARDEN-223). Blank
-  // means "no explicit shell" → the host launches its own login shell. Pure
-  // client-side pref (like the new-chat prefs above): persisted by the saveUi
-  // effect below, never sent to the backend.
-  const [defaultSplitShell, setDefaultSplitShell] = useState(() => uiState.defaultSplitShell ?? '');
+  // Default shell opened by BOTH the ＋ new-chat *shell* preset and the ＋ split
+  // button (WARDEN-429 — unifies the prior split-only defaultSplitShell, migrated
+  // into defaultShell on load). Blank means "no explicit shell" → the host
+  // launches its own login shell. Pure client-side pref (like the new-chat prefs
+  // above): persisted by the saveUi effect below, never sent to the backend.
+  const [defaultShell, setDefaultShell] = useState(() => uiState.defaultShell ?? '');
+  // Per-host default-shell overrides (WARDEN-429 — mirrors the cwd/preset maps
+  // above). Keys are host strings ('(local)' / SSH host name); a host with no
+  // entry (or an empty value, dropped on load) falls through to defaultShell,
+  // then blank (host login shell). Pure client-side pref like defaultShell
+  // above: persisted by the saveUi effect below, never sent to the backend.
+  const [defaultShellByHost, setDefaultShellByHost] = useState<Record<string, string>>(() => uiState.defaultShellByHost ?? {});
   // "Remember window position and size" is an Electron-main-owned pref, NOT a
   // renderer localStorage pref like the ones above: the OS window bounds must be
   // readable at createWindow() time (before this renderer loads), so the flag +
@@ -468,8 +475,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, hostOptions, copyHintDismissed }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, hostOptions, copyHintDismissed, restoreOnStartup, startedEmpty]);
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
   // workspace, so switching clears it (WARDEN-256: maximized resets on switch).
@@ -677,7 +684,8 @@ function App() {
     setDefaultNewChatCwdByHost({});
     setCustomPresets([]);
     setSnippets(STARTER_SNIPPETS);
-    setDefaultSplitShell('');
+    setDefaultShell('');
+    setDefaultShellByHost({});
     // Attention / desktop alerts
     setAttentionDesktopAlerts(false);
     setAttentionStates({ stuck: true, erroring: true, waiting: true, blocked: true });
@@ -840,11 +848,13 @@ function App() {
 
   // ＋ split (WARDEN-223): spawn a scratch shell pane next to the focused pane,
   // derived entirely from it — same host, same cwd — like VSCode's integrated-
-  // terminal split. The shell `cmd` comes from the Default split shell setting;
-  // blank means "no explicit shell" so the host launches its own login shell.
-  // host/cwd are read from chatsRef so this callback isn't rebuilt on every poll.
-  // A yatfa pane has no cwd → empty → the host's default login dir, and its host
-  // is the SSH host, so the shell lands OUTSIDE the container (host-side tmux).
+  // terminal split. The shell `cmd` is resolved through the single Default shell
+  // setting (WARDEN-429): a per-host override (defaultShellByHost) wins, falling
+  // back to the global defaultShell, then blank; blank means "no explicit shell"
+  // so the host launches its own login shell. host/cwd are read from chatsRef so
+  // this callback isn't rebuilt on every poll. A yatfa pane has no cwd → empty →
+  // the host's default login dir, and its host is the SSH host, so the shell
+  // lands OUTSIDE the container (host-side tmux).
   const handleSplitShell = useCallback(async () => {
     const id = focused;
     if (!id) return;
@@ -852,7 +862,7 @@ function App() {
     if (!fc) return;
     const host = fc.host || THIS_MACHINE;
     const cwd = fc.cwd || '';
-    const cmd = defaultSplitShell.trim();
+    const cmd = (defaultShellByHost[host] ?? defaultShell ?? '').trim();
     const session = `split-${Math.random().toString(36).slice(2, 10)}`;
     const result = await postJson<{ chat: Chat }>('/api/spawn', { host, session, cwd, cmd });
     if (!result.ok || !result.data) {
@@ -861,7 +871,7 @@ function App() {
     }
     await refresh();
     openChat(result.data.chat.key || result.data.chat.id);
-  }, [focused, defaultSplitShell, refresh, openChat, prefs.notifyErrors]);
+  }, [focused, defaultShell, defaultShellByHost, refresh, openChat, prefs.notifyErrors]);
   // A chat was spawned from a pane's recovery panel (open-shell / re-spawn,
   // WARDEN-231): refresh the list so the new chat appears, then open + focus it.
   const handlePaneSpawned = useCallback((chat: Chat) => {
@@ -1448,8 +1458,10 @@ function App() {
           setCustomPresets={setCustomPresets}
           snippets={snippets}
           setSnippets={setSnippets}
-          defaultSplitShell={defaultSplitShell}
-          setDefaultSplitShell={setDefaultSplitShell}
+          defaultShell={defaultShell}
+          setDefaultShell={setDefaultShell}
+          defaultShellByHost={defaultShellByHost}
+          setDefaultShellByHost={setDefaultShellByHost}
           rememberWindowBounds={rememberWindowBounds}
           setRememberWindowBounds={setRememberWindowBounds}
           launchAtLogin={launchAtLogin}

@@ -722,46 +722,146 @@ test('observer round-trips under the current key without disturbing older keys',
   assert.ok(!mem.has('warden:observer'), 'no legacy key created on a normal save/load');
 });
 
-console.log('\ndefaultSplitShell (the ＋ split shell) round-trips through loadUi/saveUi — WARDEN-223');
+console.log('\ndefaultShell (the unified shell for new-chat shell preset + ＋ split) round-trips through loadUi/saveUi — WARDEN-429');
 test('defaults to "" (auto-detect host login shell) when nothing is stored', () => {
   reset();
-  assert.equal(loadUi().defaultSplitShell, '');
+  assert.equal(loadUi().defaultShell, '');
 });
 test('a set shell (e.g. zsh) round-trips', () => {
   reset();
-  saveUi({ ...loadUi(), defaultSplitShell: 'zsh' });
-  assert.equal(loadUi().defaultSplitShell, 'zsh');
+  saveUi({ ...loadUi(), defaultShell: 'zsh' });
+  assert.equal(loadUi().defaultShell, 'zsh');
 });
 test('a blank value round-trips (the meaningful "auto-detect" value)', () => {
   reset();
-  saveUi({ ...loadUi(), defaultSplitShell: '' });
-  assert.equal(loadUi().defaultSplitShell, '');
+  saveUi({ ...loadUi(), defaultShell: '' });
+  assert.equal(loadUi().defaultShell, '');
 });
 test('whitespace is trimmed on load so it can never become the spawned shell name', () => {
   reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultSplitShell: '  zsh  ' }));
-  assert.equal(loadUi().defaultSplitShell, 'zsh');
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultShell: '  zsh  ' }));
+  assert.equal(loadUi().defaultShell, 'zsh');
   // All-whitespace collapses to the blank "auto-detect" value.
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultSplitShell: '   ' }));
-  assert.equal(loadUi().defaultSplitShell, '');
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultShell: '   ' }));
+  assert.equal(loadUi().defaultShell, '');
 });
 test('a non-string coerces back to "" (defensive)', () => {
   reset();
-  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultSplitShell: 42 }));
-  assert.equal(loadUi().defaultSplitShell, '');
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultShell: 42 }));
+  assert.equal(loadUi().defaultShell, '');
 });
 test('a missing field loads as ""', () => {
   reset();
   mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
-  assert.equal(loadUi().defaultSplitShell, '');
+  assert.equal(loadUi().defaultShell, '');
 });
 test('the pref survives an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
-  // defaultSplitShell is NOT a workspace field, so persistUiState spreads it from
+  // defaultShell is NOT a workspace field, so persistUiState spreads it from
   // `live`. Confirm an empty-launch still round-trips a freshly set value.
   reset();
   const d0 = loadUi();
-  saveUi(persistUiState({ ...d0, defaultSplitShell: 'pwsh' }, 'empty', d0, true));
-  assert.equal(loadUi().defaultSplitShell, 'pwsh');
+  saveUi(persistUiState({ ...d0, defaultShell: 'pwsh' }, 'empty', d0, true));
+  assert.equal(loadUi().defaultShell, 'pwsh');
+});
+
+console.log('\ndefaultShell MIGRATION: the legacy split-only `defaultSplitShell` folds in on load — WARDEN-429');
+test('a legacy defaultSplitShell value is migrated into defaultShell (no silent loss of preference)', () => {
+  // An upgrading user who set the old split-shell pref keeps it as the unified default.
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultSplitShell: 'zsh' }));
+  const ui = loadUi();
+  assert.equal(ui.defaultShell, 'zsh', 'legacy split shell preserved as the default shell');
+  // The legacy field is gone from the new shape (read for migration only).
+  assert.equal('defaultSplitShell' in ui, false, 'the legacy key is not part of UiState');
+});
+test('a legacy blank defaultSplitShell migrates to "" (still host login shell — no change)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultSplitShell: '' }));
+  assert.equal(loadUi().defaultShell, '');
+});
+test('a legacy whitespace-only defaultSplitShell migrates to "" (trimmed, then the auto-detect value)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultSplitShell: '   ' }));
+  assert.equal(loadUi().defaultShell, '');
+});
+test('an explicit defaultShell WINS over the legacy defaultSplitShell (the new field takes precedence)', () => {
+  // Once the new field exists it is authoritative; the legacy value is ignored.
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultShell: 'fish', defaultSplitShell: 'zsh' }));
+  assert.equal(loadUi().defaultShell, 'fish');
+});
+test('after migration the value persists as defaultShell and the legacy key is dropped on the next save', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultSplitShell: 'zsh' }));
+  const migrated = loadUi();
+  assert.equal(migrated.defaultShell, 'zsh');
+  saveUi({ ...migrated });
+  const raw = JSON.parse(mem.get('warden:ui:v3'));
+  assert.equal(raw.defaultShell, 'zsh', 'persisted under the new key');
+  assert.equal('defaultSplitShell' in raw, false, 'legacy key dropped on re-save');
+  // And a reload reads it back from the new key.
+  assert.equal(loadUi().defaultShell, 'zsh');
+});
+
+console.log('\ndefaultShellByHost (per-host shell overrides) round-trips through loadUi/saveUi — WARDEN-429');
+test('defaults to {} when nothing is stored', () => {
+  reset();
+  assert.deepEqual(loadUi().defaultShellByHost, {});
+});
+test('a valid host→shell map round-trips', () => {
+  reset();
+  saveUi({ ...loadUi(), defaultShellByHost: { 'prod-box': 'zsh', '(local)': 'fish' } });
+  assert.deepEqual(loadUi().defaultShellByHost, { 'prod-box': 'zsh', '(local)': 'fish' });
+});
+test('an empty map round-trips as {} (clearing all overrides persists nothing)', () => {
+  reset();
+  saveUi({ ...loadUi(), defaultShellByHost: {} });
+  assert.deepEqual(loadUi().defaultShellByHost, {});
+});
+test('a non-object coerces to {} (defensive, no throw)', () => {
+  reset();
+  // A string is not a plain map → {}.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultShellByHost: 'bogus' }));
+  assert.deepEqual(loadUi().defaultShellByHost, {});
+  // An array is an object but NOT a plain map → {}.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultShellByHost: [['prod-box', 'zsh']] }));
+  assert.deepEqual(loadUi().defaultShellByHost, {});
+  // A number → {}.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultShellByHost: 42 }));
+  assert.deepEqual(loadUi().defaultShellByHost, {});
+});
+test('entries with non-string values are dropped (never seed the command field with a non-shell)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultShellByHost: { 'prod-box': 'zsh', 'num': 42, 'obj': { x: 1 }, 'arr': [1] } }));
+  assert.deepEqual(loadUi().defaultShellByHost, { 'prod-box': 'zsh' });
+});
+test('entries with empty/whitespace values are dropped (empty override = use the global default, never persists as a blank)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultShellByHost: { 'prod-box': 'zsh', 'blank': '', 'ws': '   ', 'tab': '\t' } }));
+  assert.deepEqual(loadUi().defaultShellByHost, { 'prod-box': 'zsh' });
+});
+test('entries with an empty-string key are dropped', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultShellByHost: { '': 'zsh', 'prod-box': 'zsh' } }));
+  assert.deepEqual(loadUi().defaultShellByHost, { 'prod-box': 'zsh' });
+});
+test('values are trimmed on load (matching defaultShell)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], defaultShellByHost: { 'prod-box': '  zsh  ' } }));
+  assert.deepEqual(loadUi().defaultShellByHost, { 'prod-box': 'zsh' });
+});
+test('a missing field loads as {}', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
+  assert.deepEqual(loadUi().defaultShellByHost, {});
+});
+test('the map survives an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
+  // defaultShellByHost is NOT a workspace field, so persistUiState spreads it from
+  // `live`. Confirm an empty-launch still round-trips a freshly set map.
+  reset();
+  const d0 = loadUi();
+  saveUi(persistUiState({ ...d0, defaultShellByHost: { 'prod-box': 'zsh' } }, 'empty', d0, true));
+  assert.deepEqual(loadUi().defaultShellByHost, { 'prod-box': 'zsh' });
 });
 
 console.log('\ndefaultNewChatCwdByHost (per-host cwd overrides) round-trips through loadUi/saveUi — WARDEN-336');
@@ -1313,7 +1413,8 @@ const overTunedLive = () => {
     defaultNewChatCwdByHost: { 'host-a': '/srv' },
     customPresets: [{ name: 'codex', cmd: 'codex' }],
     snippets: [{ name: 'custom-snippet', text: 'do the thing' }],
-    defaultSplitShell: 'zsh',
+    defaultShell: 'zsh',
+    defaultShellByHost: { 'host-a': 'fish' },
     hostOptions: { 'host-a': { seamlessCopy: true } },
     copyHintDismissed: { 'host-a': true },
     agentFilter: 'filtering',
@@ -1355,6 +1456,8 @@ test('every pref field of resetUiPrefsPreservingWorkspace(live) equals DEFAULT_U
   assert.equal(live.alertCritical, false);
   assert.deepEqual(live.mutedAlertKeys, ['mute-1']);
   assert.deepEqual(live.snippets, [{ name: 'custom-snippet', text: 'do the thing' }]);
+  assert.equal(live.defaultShell, 'zsh', 'guard: live default shell was non-default');
+  assert.deepEqual(live.defaultShellByHost, { 'host-a': 'fish' }, 'guard: live per-host shell override was non-default');
 
   const r = resetUiPrefsPreservingWorkspace(live);
   // Every pref snaps to its DEFAULT_UI value.
@@ -1375,7 +1478,8 @@ test('every pref field of resetUiPrefsPreservingWorkspace(live) equals DEFAULT_U
   assert.equal(r.defaultNewChatHost, '(local)');
   assert.equal(r.defaultNewChatCwd, '');
   assert.deepEqual(r.customPresets, []);
-  assert.equal(r.defaultSplitShell, '');
+  assert.equal(r.defaultShell, '');
+  assert.deepEqual(r.defaultShellByHost, {});
   // Prefs added by tickets that landed after WARDEN-346 branched reset too.
   assert.equal(r.timestampFormat, 'relative');
   assert.deepEqual(r.attentionStates, { stuck: true, erroring: true, waiting: true, blocked: true });
@@ -1441,7 +1545,8 @@ test('round-trip: saveUi(resetUiPrefsPreservingWorkspace(live)) then loadUi() yi
   assert.equal(after.defaultNewChatHost, '(local)');
   assert.equal(after.defaultNewChatCwd, '');
   assert.deepEqual(after.customPresets, []);
-  assert.equal(after.defaultSplitShell, '');
+  assert.equal(after.defaultShell, '');
+  assert.deepEqual(after.defaultShellByHost, {});
   // Prefs added after WARDEN-346 round-trip to their defaults through loadUi too.
   assert.equal(after.timestampFormat, 'relative');
   assert.deepEqual(after.attentionStates, { stuck: true, erroring: true, waiting: true, blocked: true });
