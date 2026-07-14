@@ -330,6 +330,23 @@ export interface UiState {
   // ON so every state surfaces; a human can silence a noisy "waiting" without losing
   // "erroring". Pure client-side pref; never sent to the backend / /api/config.
   attentionStates?: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean };
+  // WARDEN-364 — per-severity routing for the desktop-alert channel, layered on
+  // top of the `attentionDesktopAlerts` master switch. The master gates the whole
+  // channel; these route WHICH of the four attention buckets may escalate to an
+  // OS notification (critical/warning health, pending directives, recent errors).
+  // Defaults all-true = behavior-preserving. Pure client-side pref; never sent to
+  // the backend / /api/config.
+  alertCritical?: boolean;
+  alertWarning?: boolean;
+  alertDirective?: boolean;
+  alertError?: boolean;
+  // WARDEN-364 — chat keys (`a.key || a.id`) muted on the desktop-alert channel.
+  // A muted agent driving a critical/warning increase fires NO OS notification
+  // while still appearing in the in-app AttentionBadge (which consumes the
+  // unfiltered rollup). directives/errors are aggregate counts with no per-agent
+  // identity, so mute applies to the health buckets only. Pure client-side pref;
+  // never sent to the backend / /api/config.
+  mutedAlertKeys?: string[];
   terminalScrollback?: number;
   // Terminal font family: the CSS font-family value xterm renders in every agent
   // pane. '' / absent = the DEFAULT_TERMINAL_FONT_FAMILY stack (today's look);
@@ -616,6 +633,30 @@ function parseDismissedMap(raw: unknown): Record<string, boolean> {
   return out;
 }
 
+// Sanitize a raw mutedAlertKeys value into a de-duplicated string[] of non-empty
+// chat keys (WARDEN-364). Defensive: never throws on malformed input (WARDEN-89)
+// — drops non-string / blank / duplicate entries instead, so one corrupt value
+// can never blank the mute set. Modeled on parseCustomPresets's drop-bad-entries
+// discipline; order is preserved (first occurrence wins) so the set is stable.
+function parseMutedKeys(raw: unknown): string[] {
+  if (!Array.isArray(raw)) {
+    if (raw !== undefined && raw !== null) {
+      console.warn('[loadUi] mutedAlertKeys is not an array; ignoring:', raw);
+    }
+    return [];
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const k of raw) {
+    if (typeof k !== 'string') continue;
+    const key = k.trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(key);
+  }
+  return out;
+}
+
 // Sanitize a raw workspaces value into a valid, id-unique WorkspacePaneSet[].
 // Defensive: never throws on malformed input (WARDEN-89) — drops/replaces bad
 // entries instead, so one corrupt workspace can never blank the pane grid.
@@ -698,6 +739,8 @@ const DEFAULT_UI: UiState = {
   sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14,
   attentionDesktopAlerts: false,
   attentionStates: { stuck: true, erroring: true, waiting: true, blocked: true },
+  alertCritical: true, alertWarning: true, alertDirective: true, alertError: true,
+  mutedAlertKeys: [],
   terminalScrollback: 10000, terminalFontFamily: '',
   terminalColorScheme: 'auto',
   terminalCursorStyle: 'blink-block',
@@ -767,6 +810,15 @@ export function loadUi(): UiState {
           waiting: v.attentionStates?.waiting !== false,
           blocked: v.attentionStates?.blocked !== false,
         },
+        // WARDEN-364 — severity routing defaults ON (only an explicit `false`
+        // opts a bucket out), so an upgrade or a partial payload preserves the
+        // pre-routing "every bucket escalates" behavior bit-for-bit.
+        alertCritical: v.alertCritical !== false,
+        alertWarning: v.alertWarning !== false,
+        alertDirective: v.alertDirective !== false,
+        alertError: v.alertError !== false,
+        // Sanitized to a de-duplicated string[] of non-empty keys.
+        mutedAlertKeys: parseMutedKeys(v.mutedAlertKeys),
         terminalScrollback: typeof v.terminalScrollback === 'number' ? v.terminalScrollback : 10000,
         terminalFontFamily: typeof v.terminalFontFamily === 'string' ? v.terminalFontFamily : '',
         terminalColorScheme: ['auto', 'dark', 'light'].includes(v.terminalColorScheme) ? v.terminalColorScheme : 'auto',

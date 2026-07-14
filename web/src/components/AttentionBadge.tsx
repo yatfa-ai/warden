@@ -1,9 +1,10 @@
-import { useState, type ReactNode } from 'react';
-import { TriangleAlert } from 'lucide-react';
+import { useMemo, useState, type ReactNode } from 'react';
+import { TriangleAlert, Bell, BellOff } from 'lucide-react';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { Button } from '@/components/ui/button';
 import { useAttentionRollup } from '@/lib/useAttentionRollup';
 import type { AttentionRollupOptions } from '@/lib/attentionRollup';
+import type { AttentionSeverityPrefs } from '@/lib/desktopAlerts';
 import type { AttentionAgent } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -23,6 +24,15 @@ interface Props {
   /** Per-state toggle: silence a noisy state (e.g. "waiting") without losing others
    * (WARDEN-344). */
   attentionStates?: AttentionRollupOptions['enabledStates'];
+  /** WARDEN-364 — per-severity routing + per-agent mute for the desktop channel.
+   * Forwarded to useAttentionRollup so the alert effect decides over the routable
+   * sub-rollup. The in-app badge itself always consumes the UNFILTERED rollup. */
+  alertCritical: boolean;
+  alertWarning: boolean;
+  alertDirective: boolean;
+  alertError: boolean;
+  mutedAlertKeys: string[];
+  onToggleMuteAlertKey: (key: string) => void;
 }
 
 /**
@@ -41,9 +51,35 @@ interface Props {
  * link; the individual events themselves aren't fetchable as REST items, so each
  * links to the Activity tab rather than a specific event.
  */
-export function AttentionBadge({ onOpenChat, onOpenActivity, attentionDesktopAlerts, openPanes, attentionStates }: Props) {
-  const { rollup } = useAttentionRollup(attentionDesktopAlerts, openPanes, attentionStates);
+export function AttentionBadge({
+  onOpenChat,
+  onOpenActivity,
+  attentionDesktopAlerts,
+  openPanes,
+  attentionStates,
+  alertCritical,
+  alertWarning,
+  alertDirective,
+  alertError,
+  mutedAlertKeys,
+  onToggleMuteAlertKey,
+}: Props) {
+  // Memoize the severity-prefs object so its reference is stable across renders
+  // (keeps the hook's gate-effect dep list quiet on unrelated re-renders). Keyed
+  // on the four primitives, so it only changes when one actually flips.
+  const severityPrefs = useMemo<AttentionSeverityPrefs>(
+    () => ({ alertCritical, alertWarning, alertDirective, alertError }),
+    [alertCritical, alertWarning, alertDirective, alertError],
+  );
+  const { rollup } = useAttentionRollup(attentionDesktopAlerts, openPanes, attentionStates, severityPrefs, mutedAlertKeys);
   const [open, setOpen] = useState(false);
+
+  // The mute affordance is only meaningful while the desktop-alert channel is on
+  // (master toggle). When it's off the whole routing layer is moot, so the rows
+  // render exactly as before WARDEN-364 — no bell, no strike-through.
+  const muteEnabled = attentionDesktopAlerts;
+  // Fast membership check for the mute set on each render.
+  const mutedSet = useMemo(() => new Set(mutedAlertKeys), [mutedAlertKeys]);
 
   // Zero-state: render nothing intrusive. (A neutral ✓ was considered per the AC,
   // but an absent element is the least-noise zero state for an always-on header.)
@@ -103,9 +139,20 @@ export function AttentionBadge({ onOpenChat, onOpenActivity, attentionDesktopAle
             */}
             {critical.length > 0 && (
               <Section title="Critical" count={critical.length} tone="text-red-500">
-                {critical.map((a) => (
-                  <AgentRow key={a.key || a.id} agent={a} dot="bg-red-500" onClick={() => openChat(a.key || a.id)} />
-                ))}
+                {critical.map((a) => {
+                  const key = a.key || a.id;
+                  return (
+                    <AgentRow
+                      key={key}
+                      agent={a}
+                      dot="bg-red-500"
+                      onClick={() => openChat(key)}
+                      muted={muteEnabled && mutedSet.has(key)}
+                      muteEnabled={muteEnabled}
+                      onToggleMute={() => onToggleMuteAlertKey(key)}
+                    />
+                  );
+                })}
               </Section>
             )}
             {stuck.length > 0 && (
@@ -124,9 +171,20 @@ export function AttentionBadge({ onOpenChat, onOpenActivity, attentionDesktopAle
             )}
             {warning.length > 0 && (
               <Section title="Warnings" count={warning.length} tone="text-yellow-500">
-                {warning.map((a) => (
-                  <AgentRow key={a.key || a.id} agent={a} dot="bg-yellow-500" onClick={() => openChat(a.key || a.id)} />
-                ))}
+                {warning.map((a) => {
+                  const key = a.key || a.id;
+                  return (
+                    <AgentRow
+                      key={key}
+                      agent={a}
+                      dot="bg-yellow-500"
+                      onClick={() => openChat(key)}
+                      muted={muteEnabled && mutedSet.has(key)}
+                      muteEnabled={muteEnabled}
+                      onToggleMute={() => onToggleMuteAlertKey(key)}
+                    />
+                  );
+                })}
               </Section>
             )}
             {waiting.length > 0 && (
@@ -176,21 +234,69 @@ function rowClass() {
   return 'w-full justify-start gap-2 h-auto px-2 py-1.5 font-normal text-xs text-foreground';
 }
 
-function AgentRow({ agent, dot, onClick, detail }: { agent: AttentionAgent; dot: string; onClick: () => void; detail?: string | null }) {
+function AgentRow({
+  agent,
+  dot,
+  onClick,
+  detail,
+  muted = false,
+  muteEnabled = false,
+  onToggleMute,
+}: {
+  agent: AttentionAgent;
+  dot: string;
+  onClick: () => void;
+  /** The triggering signal (repeating line / matched prompt) for a pane-state row —
+   * shown muted under the name so the human sees WHY it needs attention (WARDEN-344). */
+  detail?: string | null;
+  /** WARDEN-364 per-agent mute. Only the health-bucket rows (critical/warning) pass
+   * these; pane-state rows pass none, so no bell renders there. */
+  muted?: boolean;
+  muteEnabled?: boolean;
+  onToggleMute?: () => void;
+}) {
+  const label = agent.name || agent.key || agent.id;
   return (
-    <Button variant="ghost" onClick={onClick} className={rowClass()}>
-      <span className={cn('size-2 rounded-full shrink-0 mt-0.5', dot)} aria-hidden />
-      <span className="min-w-0 flex-1">
-        <span className="flex items-center gap-1">
-          <span className="truncate">{agent.name || agent.key || agent.id}</span>
-          {agent.role && <span className="text-xs text-blue-400 shrink-0">{agent.role}</span>}
-          {agent.host && agent.host !== '(local)' && <span className="text-xs text-muted-foreground shrink-0">{agent.host}</span>}
+    <div className="flex items-stretch gap-0.5 pr-1">
+      <Button variant="ghost" onClick={onClick} className={cn('flex-1 min-w-0 justify-start gap-2 h-auto px-2 py-1.5 font-normal text-xs text-foreground', muted && 'opacity-60')}>
+        <span className={cn('size-2 rounded-full shrink-0 mt-0.5', dot)} aria-hidden />
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-1">
+            <span className={cn('truncate', muted && 'line-through')}>{label}</span>
+            {agent.role && <span className="text-xs text-blue-400 shrink-0">{agent.role}</span>}
+            {agent.host && agent.host !== '(local)' && <span className="text-xs text-muted-foreground shrink-0">{agent.host}</span>}
+          </span>
+          {/* detail = the triggering signal (the repeating line / matched prompt) shown
+              muted under the agent name so the human can see WHY it needs attention. */}
+          {detail ? <span className="block truncate text-[10px] text-muted-foreground">{detail}</span> : null}
         </span>
-        {/* detail = the triggering signal (the repeating line / matched prompt) shown
-            muted under the agent name so the human can see WHY it needs attention. */}
-        {detail ? <span className="block truncate text-[10px] text-muted-foreground">{detail}</span> : null}
-      </span>
-    </Button>
+      </Button>
+      {/*
+        WARDEN-364 — per-agent mute on the desktop-alert channel (health buckets
+        only). stopPropagation so tapping the bell never also opens the chat pane.
+        aria-pressed reflects the toggle state for screen readers; the icon swaps
+        Bell ↔ BellOff so the state is glanceable without color alone (WCAG 1.4.1).
+        Uses the library <Button> (variant=ghost size=icon-xs) — same component the
+        row itself uses right beside it (WARDEN-68 Rule 1: no raw <button>).
+      */}
+      {muteEnabled && onToggleMute && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleMute();
+          }}
+          aria-pressed={muted}
+          aria-label={muted ? `Stop muting desktop alerts for ${label}` : `Mute desktop alerts for ${label}`}
+          title={muted ? 'Unmute desktop alerts for this agent' : 'Mute desktop alerts for this agent'}
+          className="shrink-0 self-center text-muted-foreground hover:text-foreground"
+        >
+          {muted ? <BellOff className="size-3.5" /> : <Bell className="size-3.5" />}
+        </Button>
+      )}
+    </div>
   );
 }
 

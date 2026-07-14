@@ -237,6 +237,16 @@ interface Props {
   // this is a different delivery channel AND a different persistence path.
   attentionDesktopAlerts: boolean;
   setAttentionDesktopAlerts: (v: boolean) => void;
+  // WARDEN-364 — per-severity routing for the desktop-alert channel (layered on
+  // the master toggle above). Same persistence path (App's saveUi / UiState).
+  alertCritical: boolean;
+  setAlertCritical: (v: boolean) => void;
+  alertWarning: boolean;
+  setAlertWarning: (v: boolean) => void;
+  alertDirective: boolean;
+  setAlertDirective: (v: boolean) => void;
+  alertError: boolean;
+  setAlertError: (v: boolean) => void;
   // WARDEN-261: per-host "Seamless copy" toggle. Pure client-side localStorage
   // pref (like the terminal prefs), persisted by App's saveUi effect — NOT part
   // of the backend `config` state / PUT /api/config body. Sent to the backend
@@ -470,7 +480,7 @@ function SnippetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, attentionStates, setAttentionStates, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, timestampFormat, setTimestampFormat, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatPresetByHost, setDefaultNewChatPresetByHost, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, snippets, setSnippets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin, closeToTray, setCloseToTray, hostOptions, onSetHostSeamlessCopy }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, attentionStates, setAttentionStates, alertCritical, setAlertCritical, alertWarning, setAlertWarning, alertDirective, setAlertDirective, alertError, setAlertError, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, timestampFormat, setTimestampFormat, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatPresetByHost, setDefaultNewChatPresetByHost, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, snippets, setSnippets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin, closeToTray, setCloseToTray, hostOptions, onSetHostSeamlessCopy }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -2011,6 +2021,32 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   <p className="text-xs text-muted-foreground">
                     Which agent pane states raise the Attention badge (and desktop alert). Turn a noisy one off without losing the others.
                   </p>
+
+                  {/* WARDEN-364 — per-severity routing, nested under the master
+                      toggle. Greyed + inert while the master is off: the whole
+                      channel is off then, so routing is moot. Defaults are all
+                      ON (behavior-preserving); the human opts buckets OUT. */}
+                  <div className={cn('pl-4 ml-1 flex flex-col gap-2 border-l border-border/60', !attentionDesktopAlerts && 'pointer-events-none opacity-50')}>
+                    <div className="flex items-center gap-2">
+                      <Switch id="alertCritical" checked={alertCritical} disabled={!attentionDesktopAlerts} onCheckedChange={setAlertCritical} />
+                      <Label htmlFor="alertCritical" className="cursor-pointer">Critical agents</Label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Switch id="alertWarning" checked={alertWarning} disabled={!attentionDesktopAlerts} onCheckedChange={setAlertWarning} />
+                      <Label htmlFor="alertWarning" className="cursor-pointer">Warning agents</Label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Switch id="alertDirective" checked={alertDirective} disabled={!attentionDesktopAlerts} onCheckedChange={setAlertDirective} />
+                      <Label htmlFor="alertDirective" className="cursor-pointer">Pending directives</Label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Switch id="alertError" checked={alertError} disabled={!attentionDesktopAlerts} onCheckedChange={setAlertError} />
+                      <Label htmlFor="alertError" className="cursor-pointer">Recent errors</Label>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Choose which signals escalate to the desktop. To mute a specific agent, use the bell on its row in the attention menu (health signals only — directives and errors aren’t per-agent).
+                    </p>
+                  </div>
                 </div>
               </SettingsSection>
                 </>
