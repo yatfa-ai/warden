@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import { toast } from 'sonner';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import type { HealthData, Chat } from '@/lib/types';
 import {
@@ -17,9 +18,17 @@ import { StatusDot, type StatusTone } from '@/components/StatusDot';
 import { Sparkline } from '@/components/Sparkline';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
+import { KillDialog } from './KillDialog';
+import { SelectionActionBar } from './sidebar/SidebarBits';
+import { formatKillToast, runKillFanout } from '@/lib/kill';
+import { isSelectedAll, toggleGroupSelection } from '@/lib/selection';
 import { useHostStatuses } from '@/lib/useHostStatuses';
 import { useActivitySeries } from '@/lib/useActivitySeries';
+import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { buildAgentActivity, selectAgentSparkline } from '@/lib/agentSparkline';
+import { displayName } from '@/lib/chatDisplay';
+import { cn } from '@/lib/utils';
 
 interface Props {
   onOpenChat: (id: string) => void;
@@ -136,6 +145,14 @@ function byRecencyDesc(a: Chat, b: Chat): number {
   return bv - av;
 }
 
+// Selection identity for a fleet agent — the same `key || id` the sidebar's
+// multi-select (WARDEN-328) and /api/kill use. Module-scope so it's stable
+// across renders (safe to reference inside memos without re-creating closures).
+// (WARDEN-371)
+function agentIdOf(a: Chat): string {
+  return a.key || a.id;
+}
+
 /**
  * Health status indicator — pairs the health color with a distinct per-state
  * glyph (from getHealthIcon) plus an accessible name, so health state survives
@@ -194,6 +211,30 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat }: Props)
   // /api/health poll below, so adding the sparklines is a no-op on the hot path.
   const { series: activitySeries } = useActivitySeries();
 
+  // Multi-select batch-kill (WARDEN-371): the set of selected agent ids, held at
+  // the dashboard level so it can span every health/host section. Mirrors the
+  // sidebar's WARDEN-328 surface (selectedIds Set keyed by `key || id`). Selection
+  // is ephemeral React state — no persistence/serialization boundary touched —
+  // exactly like the sidebar's selectedIds.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [killOpen, setKillOpen] = useState(false);
+  // Result-toast gating reuses the sidebar's notifyChatOps pref so a kill from
+  // Fleet Health has the SAME UX contract (toast on success / partial failure) as
+  // a kill from the sidebar (WARDEN-328).
+  const { prefs } = useNotificationPrefs();
+
+  // Toggle one agent's membership; select/clear a whole group via the pure tri-
+  // state reducer (so the section/host select-all checkboxes share one tested
+  // helper). clearSelection empties the set (the action bar's "Clear" + the
+  // post-kill reset).
+  const toggleSelect = (id: string) => setSelectedIds((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const toggleGroup = (ids: string[]) => setSelectedIds((prev) => toggleGroupSelection(prev, ids));
+  const clearSelection = () => setSelectedIds(new Set());
+
   const fetchHealth = async () => {
     setLoading(true);
     setError(null);
@@ -246,6 +287,44 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat }: Props)
   const agentActivity = useMemo(() => buildAgentActivity(activitySeries), [activitySeries]);
   const bucketCount = activitySeries?.buckets.length ?? 0;
 
+  // Resolve the selected ids to their chats (in catalog order) for the confirm
+  // dialog's target list. Mirrors the sidebar's selectedChats memo: stale ids
+  // (an agent that died between selecting and killing) simply don't resolve and
+  // are absent from the list — but they are STILL killed via runKillFanout (which
+  // iterates selectedIds, not this list) so a dead target is reported as a
+  // per-agent failure rather than silently dropped.
+  const selectedChats = useMemo(
+    () => (selectedIds.size === 0 ? [] : (healthData?.agents ?? []).filter((a) => selectedIds.has(agentIdOf(a)))),
+    [healthData, selectedIds],
+  );
+
+  // The ids of every agent currently RENDERED in the dashboard — the action
+  // bar's "All" selects exactly these. Health mode respects the Closed-section
+  // bounding (5 collapsed / 20 expanded); host mode respects per-host collapse —
+  // so "All" never silently targets an agent you can't see. KEEP THIS IN SYNC
+  // with the per-section `shown` computation in the JSX below (they apply the
+  // same bounding/collapse rules); a future refactor could lift both into one
+  // `useRenderedSections` hook.
+  const renderedIds = useMemo(() => {
+    if (!healthData) return [] as string[];
+    if (groupBy === 'health') {
+      const ids: string[] = [];
+      for (const section of HEALTH_SECTION_ORDER) {
+        const agents = healthData.groups[section];
+        if (!agents || agents.length === 0) continue;
+        const isClosed = section === 'closed';
+        const limit = isClosed
+          ? (closedExpanded ? CLOSED_EXPANDED_LIMIT : CLOSED_COLLAPSED_LIMIT)
+          : agents.length;
+        const shown = isClosed ? [...agents].sort(byRecencyDesc).slice(0, limit) : agents;
+        for (const a of shown) ids.push(agentIdOf(a));
+      }
+      return ids;
+    }
+    // Host mode: only non-collapsed hosts' agents are rendered.
+    return hostGroups.flatMap((g) => (collapsedHosts[g.host] ? [] : g.agents.map(agentIdOf)));
+  }, [healthData, groupBy, closedExpanded, collapsedHosts, hostGroups]);
+
   // The per-row sparkline, or null. Delegates the three cases (no container →
   // none; container + events → real series; container + no events → idle flat
   // baseline) to the pure selectAgentSparkline so the logic is unit-testable.
@@ -266,12 +345,43 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat }: Props)
   // One agent row, reused by both the health-state and host views. `showHost`
   // hides the per-row host tag in host mode (the section header already names
   // the host — a repeated tag would be noise).
-  const renderAgent = (agent: Chat, showHost: boolean) => (
-    <button
+  //
+  // The row is a `<div role="button">` (not a real `<button>`) so it can nest
+  // the selection Checkbox (WARDEN-371) — mirroring the sidebar's ChatRow, which
+  // uses the same shape for the same reason (Radix Checkbox renders a button, and
+  // a button can't nest a button). The row-body click still opens the chat
+  // (onClick + Enter/Space); the checkbox's click/keydown stopPropagation so
+  // toggling selection never also opens the chat.
+  const renderAgent = (agent: Chat, showHost: boolean) => {
+    const id = agentIdOf(agent);
+    const isSelected = selectedIds.has(id);
+    const selectionActive = selectedIds.size > 0;
+    return (
+    <div
       key={agent.id}
+      role="button"
+      tabIndex={0}
+      aria-label={`open chat ${agent.name || agent.key || agent.id}`}
       onClick={() => onOpenChat(agent.id)}
-      className="flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 transition-colors"
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenChat(agent.id); } }}
+      className="group flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background"
     >
+      {/* Selection checkbox (WARDEN-371). Mirrors ChatRow: sits leftmost, click +
+          keydown stop propagation so toggling selection never also opens the chat.
+          Subtle (hover/focus-revealed) until selection is active somewhere in the
+          view or this row is itself selected — keeps the default fleet list quiet
+          while staying keyboard-accessible (focus-within reveals it). */}
+      <span
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => e.stopPropagation()}
+        className={cn('flex shrink-0 items-center', isSelected || selectionActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100')}
+      >
+        <Checkbox
+          checked={isSelected}
+          onCheckedChange={() => toggleSelect(id)}
+          aria-label={`${isSelected ? 'deselect' : 'select'} ${agent.name || agent.key || agent.id}`}
+        />
+      </span>
       {/* Status Indicator */}
       <HealthDot state={normalizeHealthState(agent.healthState)} />
 
@@ -312,8 +422,49 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat }: Props)
           cache-carried from discover (zero SSH on this 10s poll). Renders nothing
           when the chat has no resource fields. */}
       <ResourceChip agent={agent} />
-    </button>
-  );
+    </div>
+    );
+  };
+
+  // Fan a KILL out to every selected agent via the shared runKillFanout
+  // (@/lib/kill; the same helper the sidebar's WARDEN-328 path uses), supplying
+  // this surface's reconciliation as `onSettled`: re-discover each distinct host
+  // so dead tmux sessions drop from the server cache, then re-read health. The
+  // dashboard owns its own fetches (no App-level refresh/discover props), so this
+  // is self-contained — /api/discover per host mirrors the sidebar's
+  // onDiscoverHost, and fetchHealth() mirrors onRefresh. The result toast +
+  // selection clear stay here (view concerns). runKillFanout never throws;
+  // partial failure is encoded in the summary.
+  const handleKillSelected = async () => {
+    const ids = Array.from(selectedIds);
+    const nameOf = (id: string) => {
+      const a = (healthData?.agents ?? []).find((c) => agentIdOf(c) === id);
+      return a ? displayName(a) : id;
+    };
+    const summary = await runKillFanout(ids, nameOf, async () => {
+      const hosts = new Set<string>();
+      selectedChats.forEach((c) => { if (c.host) hosts.add(c.host); });
+      await Promise.all(
+        Array.from(hosts).map((h) =>
+          fetch(`/api/discover?host=${encodeURIComponent(h)}`).catch(() => {}),
+        ),
+      );
+      await fetchHealth();
+    });
+    const outcome = formatKillToast(summary);
+    if (prefs.notifyChatOps) {
+      if (outcome.variant === 'success') {
+        toast.success(outcome.title);
+      } else {
+        // whitespace-pre-line so the per-agent failure list (joined with \n in
+        // formatKillToast) renders one failure per line instead of collapsing.
+        toast.error(outcome.title, { description: <span className="whitespace-pre-line">{outcome.description}</span> });
+      }
+    }
+    // The kill's intent is discharged — clear the selection regardless of outcome.
+    setSelectedIds(new Set());
+    return summary;
+  };
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -412,12 +563,27 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat }: Props)
                 const shown = isClosed ? ordered.slice(0, limit) : ordered;
                 const hiddenBeyondCap = isClosed ? count - shown.length : 0;
                 const showToggle = isClosed && count > CLOSED_COLLAPSED_LIMIT;
+                // The ids actually rendered in this section — the select-all
+                // checkbox targets exactly these (the bounded `shown` subset for
+                // Closed, so it never selects agents hidden behind the cap).
+                const sectionIds = shown.map(agentIdOf);
 
                 return (
                   <div key={section} className="flex flex-col gap-1">
                     {/* Section Header */}
-                    <div className={`px-2 py-1 text-[10px] uppercase tracking-wider font-semibold ${sectionInfo.color}`}>
-                      {sectionInfo.icon} {sectionInfo.title} ({count})
+                    <div className={`flex items-center gap-1.5 px-2 py-1 text-[10px] uppercase tracking-wider font-semibold ${sectionInfo.color}`}>
+                      {/* Select all in this section (WARDEN-371). Boolean checked
+                          = every RENDERED agent in the section is selected.
+                          Toggling adds/removes exactly this section's rendered ids
+                          via the pure toggleGroupSelection reducer (partial → all,
+                          all → none). */}
+                      <Checkbox
+                        checked={isSelectedAll(selectedIds, sectionIds)}
+                        onCheckedChange={() => toggleGroup(sectionIds)}
+                        disabled={sectionIds.length === 0}
+                        aria-label={`select all ${sectionInfo.title.toLowerCase()}`}
+                      />
+                      <span>{sectionInfo.icon} {sectionInfo.title} ({count})</span>
                     </div>
 
                     {/* Agent List */}
@@ -468,6 +634,13 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat }: Props)
                   const load = summarizeHostLoad(group.agents);
                   const hasLoad = load.avgCpu != null || load.memPct != null;
                   const loadTitle = `Host load: ${load.avgCpu != null ? `${load.avgCpu.toFixed(0)}% avg CPU` : 'no CPU data'} · ${load.memPct != null ? `${load.memPct.toFixed(0)}% max mem` : 'no mem data'} (across ${load.agentCount} agent${load.agentCount !== 1 ? 's' : ''})`;
+                  // Select-all targets the agents currently RENDERED for this
+                  // host — empty while collapsed (nothing rendered → checkbox is
+                  // disabled), all of the host's agents when expanded. This
+                  // matches the Closed-section bounding and the action bar's
+                  // "All" (renderedIds), so every select-all targets exactly what
+                  // is visible, never agents hidden behind a collapse/cap.
+                  const hostIds = collapsed ? [] : group.agents.map(agentIdOf);
 
                   return (
                     <div key={group.host} className="flex flex-col gap-1 min-w-0">
@@ -499,13 +672,30 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat }: Props)
                         index.css. The `min-w-0`s here are belt-and-suspenders.
                         (WARDEN-237)
                       */}
+                      <div className="flex items-start gap-1 w-full min-w-0">
+                        {/* Select all agents RENDERED for this host (WARDEN-371).
+                            SIBLING of the collapse Button (interactive elements
+                            can't nest). Boolean checked = every rendered agent
+                            on the host is selected; disabled while collapsed
+                            (nothing rendered to select). pt-1 aligns it with
+                            line 1. The shrink-0 cell + the Button's flex-1/
+                            min-w-0 keep the hostname-truncation chain intact (the
+                            definite panel width still reaches the truncate span). */}
+                        <span className="flex items-center pt-1 pl-1 shrink-0">
+                          <Checkbox
+                            checked={isSelectedAll(selectedIds, hostIds)}
+                            onCheckedChange={() => toggleGroup(hostIds)}
+                            disabled={hostIds.length === 0}
+                            aria-label={`select all agents on ${hostLabel}`}
+                          />
+                        </span>
                       <Button
                         variant="ghost"
                         onClick={() => setCollapsedHosts(prev => ({ ...prev, [group.host]: !prev[group.host] }))}
                         aria-expanded={!collapsed}
                         aria-label={`${hostLabel}: ${group.agents.length} agent${group.agents.length !== 1 ? 's' : ''}${collapsed ? ', expand' : ', collapse'}`}
                         title={collapsed ? 'Expand host' : 'Collapse host'}
-                        className="flex flex-col items-stretch justify-start gap-0.5 h-auto w-full min-w-0 px-2 py-1 rounded-md font-normal"
+                        className="flex flex-col items-stretch justify-start gap-0.5 h-auto flex-1 min-w-0 px-2 py-1 rounded-md font-normal"
                       >
                         {/* Line 1: chevron + connectivity dot + host (truncates) + status + count */}
                         <div className="flex items-center gap-1.5 min-w-0">
@@ -571,6 +761,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat }: Props)
                           </div>
                         )}
                       </Button>
+                      </div>
 
                       {/* Agents beneath, reusing the standard row */}
                       {!collapsed && (
@@ -586,6 +777,33 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat }: Props)
           </div>
         </ScrollArea>
       )}
+
+      {/* Selection action bar (WARDEN-371): appears only while ≥1 agent is
+          selected. "All" selects every agent currently rendered in the dashboard
+          (renderedIds — respects the Closed-section bounding + host collapse);
+          "Clear" empties the selection; "Kill N…" opens the confirm gate.
+          Broadcast (Send) is omitted — out of scope for this slice. shrink-0 so
+          it pins at the bottom while the fleet list scrolls above it, mirroring
+          the sidebar's bar. */}
+      {selectedIds.size > 0 && (
+        <SelectionActionBar
+          count={selectedIds.size}
+          onSelectAll={() => setSelectedIds(new Set(renderedIds))}
+          onClear={clearSelection}
+          onKill={() => setKillOpen(true)}
+        />
+      )}
+
+      {/* The confirm-and-stop safety gate (reused unchanged from WARDEN-328).
+          Shows the resolved target list; the actual fan-out + result toast +
+          reconcile live in handleKillSelected. Nothing is stopped until the
+          destructive Confirm. */}
+      <KillDialog
+        open={killOpen}
+        onOpenChange={setKillOpen}
+        targets={selectedChats}
+        onKill={handleKillSelected}
+      />
 
       {/* Timestamp */}
       {healthData && (

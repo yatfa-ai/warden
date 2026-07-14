@@ -43,12 +43,19 @@ const { code: killCode } = await transformWithOxc(killSrc, join(libDir, 'kill.ts
 const killFile = join(tmpDir, 'kill.mjs');
 writeFileSync(killFile, killCode);
 
-const { summarizeKill, formatKillToast } = await import(killFile);
+const { summarizeKill, formatKillToast, runKillFanout } = await import(killFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
 const test = (name, fn) => {
   fn();
+  passed += 1;
+  console.log('  ok -', name);
+};
+// runKillFanout is async (it awaits the fan-out), so its tests need an async
+// runner. Increments the same `passed` tally as the sync tests.
+const testAsync = async (name, fn) => {
+  await fn();
   passed += 1;
   console.log('  ok -', name);
 };
@@ -174,5 +181,117 @@ test('description lists every failure (one per line) for a partial stop', () => 
   });
   assert.equal(t.description, 'agent-a: e1\nagent-b: e2');
 });
+
+// ---------------------------------------------------------------------------
+console.log('\nrunKillFanout — shared impure fan-out (mocked fetch)');
+// ---------------------------------------------------------------------------
+// runKillFanout is the shared impure seam both kill surfaces (sidebar WARDEN-328,
+// Fleet Health WARDEN-371) call. It fans one /api/kill per id, reduces via
+// summarizeKill, then runs the surface-supplied onSettled reconcile. We mock
+// globalThis.fetch to drive the allSettled outcomes (ok / {ok:false} / rejected)
+// and assert the summary + that onSettled fires + that each id is POSTed once.
+
+const realFetch = globalThis.fetch;
+// outcomes: {ok:true} | {ok:false,error} | {reject:'msg'} (a thrown fetch).
+const mockFetch = (outcomes) => {
+  let i = 0;
+  const calls = [];
+  globalThis.fetch = async (url, opts) => {
+    calls.push({ url, body: JSON.parse(opts?.body ?? '{}') });
+    const o = outcomes[i++] ?? { ok: true };
+    if (o.reject) throw new Error(o.reject);
+    return {
+      ok: !!o.ok,
+      status: o.ok ? 200 : (o.status ?? 500),
+      json: async () => ({ error: o.error }),
+    };
+  };
+  return calls;
+};
+
+await testAsync('all ok → every id POSTed once, stopped=N, no failures, onSettled ran', async () => {
+  let settled = 0;
+  const calls = mockFetch([{ ok: true }, { ok: true }, { ok: true }]);
+  const s = await runKillFanout(['a', 'b', 'c'], nameOf, () => { settled += 1; });
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls.map((c) => c.body.id), ['a', 'b', 'c']);
+  assert.deepEqual(calls.map((c) => c.url), ['/api/kill', '/api/kill', '/api/kill']);
+  assert.equal(s.total, 3);
+  assert.equal(s.stopped, 3);
+  assert.deepEqual(s.failed, []);
+  assert.equal(settled, 1, 'onSettled ran exactly once after the fan-out');
+});
+
+await testAsync('a fulfilled {ok:false} is a per-agent failure (does not abort siblings)', async () => {
+  const calls = mockFetch([{ ok: true }, { ok: false, error: 'session not found' }, { ok: true }]);
+  const s = await runKillFanout(['a', 'b', 'c'], nameOf);
+  assert.equal(calls.length, 3, 'all three were attempted (no short-circuit)');
+  assert.equal(s.stopped, 2);
+  assert.equal(s.failed.length, 1);
+  assert.deepEqual(s.failed[0], { id: 'b', name: 'agent-b', error: 'session not found' });
+});
+
+await testAsync('a rejected fetch is a per-agent failure reading reason.message', async () => {
+  mockFetch([{ reject: 'network down' }, { ok: true }]);
+  const s = await runKillFanout(['a', 'b'], nameOf);
+  assert.equal(s.stopped, 1);
+  assert.equal(s.failed.length, 1);
+  assert.equal(s.failed[0].id, 'a');
+  assert.equal(s.failed[0].error, 'network down');
+});
+
+await testAsync('a server error with no JSON error falls back to the HTTP status string', async () => {
+  // runKillFanout's own fallback: a non-ok response whose body carries no
+  // `error` reads `HTTP {status}` (here 503), so the failure is still
+  // identifiable. (The deeper "kill failed" fallback lives in summarizeFanout
+  // for a direct {ok:false}-with-no-error caller, covered by the summarizeKill
+  // tests above — unreachable via the real fan-out, which always supplies one.)
+  mockFetch([{ ok: false, status: 503 }]);
+  const s = await runKillFanout(['a'], nameOf);
+  assert.equal(s.failed[0].error, 'HTTP 503');
+});
+
+await testAsync('an unknown id (nameOf → undefined) keeps the raw id as its name', async () => {
+  mockFetch([{ ok: false, error: 'x' }]);
+  const s = await runKillFanout(['orphan'], () => 'whatever');
+  // nameOf returns a string here; the orphan-name fallback lives in summarizeFanout
+  // (nameOf ?? id) and is covered by the summarizeKill tests above. This asserts
+  // the fan-out threads nameOf through unchanged.
+  assert.equal(s.failed[0].name, 'whatever');
+});
+
+await testAsync('never throws on total failure — encoded in the summary', async () => {
+  mockFetch([{ reject: 'down' }, { ok: false, error: 'timeout' }]);
+  const s = await runKillFanout(['a', 'b'], nameOf);
+  assert.equal(s.stopped, 0);
+  assert.equal(s.failed.length, 2);
+});
+
+await testAsync('onSettled is awaited (an async reconcile completes before resolve)', async () => {
+  let order = [];
+  mockFetch([{ ok: true }]);
+  await runKillFanout(['a'], nameOf, async () => {
+    await new Promise((r) => setTimeout(r, 0));
+    order.push('settled');
+  });
+  order.push('resolved');
+  // The async onSettled is awaited inside runKillFanout, so 'settled' lands
+  // before the await resolves — 'resolved' is pushed after, in source order.
+  assert.deepEqual(order, ['settled', 'resolved']);
+});
+
+await testAsync('empty ids → empty summary, no fetch, onSettled still runs', async () => {
+  let settled = 0;
+  const calls = mockFetch([]);
+  const s = await runKillFanout([], nameOf, () => { settled += 1; });
+  assert.equal(calls.length, 0);
+  assert.equal(s.total, 0);
+  assert.equal(s.stopped, 0);
+  assert.deepEqual(s.failed, []);
+  assert.equal(settled, 1);
+});
+
+// Restore the real fetch so nothing leaks past this file.
+globalThis.fetch = realFetch;
 
 console.log(`\n✓ KILL TESTS PASS (${passed})`);

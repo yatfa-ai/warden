@@ -52,12 +52,18 @@ export function SectionToggle({ expanded, onClick, label, title }: {
  * and "Kill N…" (confirm-and-stop, destructive). Built on shadcn <Button> per
  * the WARDEN-68 quality bar. shrink-0 so it stays pinned at the bottom while
  * the fleet list scrolls above it.
+ *
+ * `onSend` (broadcast) is OPTIONAL: a surface without broadcast omits it and
+ * the "Send to N…" button is simply not rendered — Fleet Health (WARDEN-371)
+ * reuses this bar for batch-kill only, since broadcast-by-health is deliberately
+ * out of scope for that slice. The sidebar passes `onSend`, so its bar is
+ * unchanged.
  */
 export function SelectionActionBar({ count, onSelectAll, onClear, onSend, onKill }: {
   count: number;
   onSelectAll: () => void;
   onClear: () => void;
-  onSend: () => void;
+  onSend?: () => void;
   onKill: () => void;
 }) {
   return (
@@ -66,7 +72,7 @@ export function SelectionActionBar({ count, onSelectAll, onClear, onSend, onKill
       <div className="ml-auto flex items-center gap-1">
         <Button variant="ghost" size="xs" onClick={onSelectAll} title="select every agent in this list">All</Button>
         <Button variant="ghost" size="xs" onClick={onClear} title="clear the selection">Clear</Button>
-        <Button size="xs" onClick={onSend}>Send to {count}…</Button>
+        {onSend && <Button size="xs" onClick={onSend}>Send to {count}…</Button>}
         <Button variant="destructive" size="xs" onClick={onKill} title="stop each selected agent's tmux session">Kill {count}…</Button>
       </div>
     </div>

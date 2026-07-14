@@ -13,7 +13,7 @@ import { CreateCollectionDialog } from './CreateCollectionDialog';
 import { BroadcastDialog } from './BroadcastDialog';
 import { KillDialog } from './KillDialog';
 import { summarizeBroadcast, formatBroadcastToast } from '@/lib/broadcast';
-import { summarizeKill, formatKillToast } from '@/lib/kill';
+import { formatKillToast, runKillFanout } from '@/lib/kill';
 import { DiffViewer } from './DiffViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { loadUi, saveUi, RECENTLY_CLOSED_PREVIEW, type Snippet, type RecentlyClosedEntry } from '@/lib/storage';
@@ -430,36 +430,35 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
     return summary;
   };
 
-  // Fan a KILL out to every selected agent via the existing per-target /api/kill
-  // path (server.js → killTmux + catalog forget), then summarize. This is the
-  // batch analogue of handleBroadcastSend and of App.tsx's per-row performKill
-  // — but deliberately its OWN fan-out (NOT N calls to the per-row onKill): the
-  // per-row path drives a single killTarget confirm slot and an optimistic-per-
-  // id UI built for one id, so batching it races the slot and clobbers the wrong
-  // dialog. Here, Promise.allSettled (not Promise.all) means a partial failure —
-  // one host unreachable, one session already dead — is reported per-agent and
-  // does NOT abort the other kills. Never throws: failure is encoded in the
-  // summary. Returns the summary so the KillDialog can close on completion.
+  // Fan a KILL out to every selected agent via the shared runKillFanout
+  // (WARDEN-328; reused by Fleet Health WARDEN-371). The fan-out itself
+  // (Promise.allSettled over /api/kill + summarize) lives in @/lib/kill so both
+  // surfaces share one copy; this component supplies the surface-specific
+  // reconciliation (onSettled: re-read the catalog + re-discover each distinct
+  // host) and keeps the view concerns (toast, selection clear) here.
+  //
+  // runKillFanout never throws — partial failure (one host unreachable, one
+  // session already dead) is encoded in the summary, not aborted — and returns
+  // the summary so the result toast can surface it. Stale ids (an agent that
+  // died between selecting and killing) are still killed-at and reported as a
+  // per-agent failure rather than silently dropped.
   const handleKillSelected = async () => {
     const ids = Array.from(selectedIds);
-    const results = await Promise.allSettled(
-      ids.map((id) =>
-        fetch('/api/kill', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id }),
-        }).then(async (r) =>
-          r.ok
-            ? { ok: true }
-            : { ok: false, error: (await r.json().catch(() => ({}))).error || `HTTP ${r.status}` },
-        ),
-      ),
-    );
     const nameOf = (id: string) => {
       const c = findChat(chats, id);
       return c ? displayName(c) : id;
     };
-    const summary = summarizeKill(results, ids, nameOf);
+    const summary = await runKillFanout(ids, nameOf, async () => {
+      // Reconcile rows after the fan-out: re-read the catalog (manual tmux chats
+      // are forgotten server-side) AND re-discover each unique host so yatfa
+      // (auto-discovered) agents reflect the dead tmux session immediately rather
+      // than waiting for the 60s poll — mirroring performKill's refresh() +
+      // discoverHost(host) per kill, deduped across the batch's hosts.
+      onRefresh();
+      const hosts = new Set<string>();
+      selectedChats.forEach((c) => { if (c.host) hosts.add(c.host); });
+      hosts.forEach((h) => onDiscoverHost(h));
+    });
     const outcome = formatKillToast(summary);
     if (prefs.notifyChatOps) {
       if (outcome.variant === 'success') {
@@ -470,18 +469,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
         toast.error(outcome.title, { description: <span className="whitespace-pre-line">{outcome.description}</span> });
       }
     }
-    // Reconcile rows after the fan-out: re-read the catalog (manual tmux chats
-    // are forgotten server-side) AND re-discover each unique host so yatfa
-    // (auto-discovered) agents reflect the dead tmux session immediately rather
-    // than waiting for the 60s poll — mirroring performKill's refresh() +
-    // discoverHost(host) per kill, deduped across the batch's hosts. Stale ids
-    // (an agent that died between selecting and killing) resolve to no host and
-    // are simply absent here, but were still killed-at above and reported as a
-    // per-agent failure rather than silently dropped.
-    onRefresh();
-    const hosts = new Set<string>();
-    selectedChats.forEach((c) => { if (c.host) hosts.add(c.host); });
-    hosts.forEach((h) => onDiscoverHost(h));
     // The kill's intent is discharged — clear the selection regardless of
     // outcome. Failed targets remain visible in the toast; the human can
     // re-select and retry if needed.
