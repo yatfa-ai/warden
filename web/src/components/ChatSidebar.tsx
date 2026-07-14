@@ -486,7 +486,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
     const status = hostStatuses[host];
     if (status?.status === 'offline') {
       // Show helpful error instead of navigating
-      toast.error(`Cannot reach ${host} — SSH connection failed. Please check:
+      if (prefs.notifyErrors) toast.error(`Cannot reach ${host} — SSH connection failed. Please check:
 • Network connectivity
 • SSH daemon is running
 • SSH keys are configured`);

@@ -644,7 +644,7 @@ export function ObserverPanel({ sessionId, onFocusAgent, onActivity, timestampFo
                     if (!item) return null;
                     if (item.kind === 'user')
                       return (
-                        <UserRow key={message.id} text={item.text} ts={item.ts} timestampFormat={timestampFormat} />
+                        <UserRow key={message.id} text={item.text} ts={item.ts} timestampFormat={timestampFormat} notifySuccess={prefs.notifySuccess} />
                       );
                     if (item.kind === 'observer')
                       return (
@@ -656,6 +656,7 @@ export function ObserverPanel({ sessionId, onFocusAgent, onActivity, timestampFo
                           }
                           onRegenerate={regenerate}
                           timestampFormat={timestampFormat}
+                          notifySuccess={prefs.notifySuccess}
                         />
                       );
                     if (item.kind === 'tool') return <ToolChip key={message.id} name={item.name} arg={item.arg} />;
@@ -806,7 +807,7 @@ function Clock({ ts, timestampFormat }: { ts: number; timestampFormat: Timestamp
   return <span className="tabular-nums">{formatTimestamp(ts, timestampFormat)}</span>;
 }
 
-function UserRow({ text, ts, timestampFormat }: { text: string; ts: number; timestampFormat: TimestampFormat }) {
+function UserRow({ text, ts, timestampFormat, notifySuccess }: { text: string; ts: number; timestampFormat: TimestampFormat; notifySuccess: boolean }) {
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -824,7 +825,7 @@ function UserRow({ text, ts, timestampFormat }: { text: string; ts: number; time
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <ContextMenuItem onSelect={() => copyText(text)}>
+        <ContextMenuItem onSelect={() => copyText(text, notifySuccess)}>
           <CopyIcon /> Copy
         </ContextMenuItem>
       </ContextMenuContent>
@@ -840,11 +841,13 @@ function ObserverEntry({
   canRegenerate,
   onRegenerate,
   timestampFormat,
+  notifySuccess,
 }: {
   item: Extract<Item, { kind: 'observer' }>;
   canRegenerate: boolean;
   onRegenerate: () => void;
   timestampFormat: TimestampFormat;
+  notifySuccess: boolean;
 }) {
   return (
     <MessagePrimitive.Root className="group/msg relative flex items-start gap-2">
@@ -868,7 +871,7 @@ function ObserverEntry({
             </div>
           </ContextMenuTrigger>
           <ContextMenuContent>
-            <ContextMenuItem onSelect={() => copyText(item.text)}>
+            <ContextMenuItem onSelect={() => copyText(item.text, notifySuccess)}>
               <CopyIcon /> Copy
             </ContextMenuItem>
             {canRegenerate && (
@@ -1044,10 +1047,11 @@ function SuggestionCard({
 
 /* -------------------------------- helpers -------------------------------- */
 
-async function copyText(text: string) {
+async function copyText(text: string, notifySuccess: boolean) {
   try {
     await navigator.clipboard.writeText(text);
-    toast.success('Copied');
+    // WARDEN-400: clipboard-confirmation is a success toast; gate behind pref.
+    if (notifySuccess) toast.success('Copied');
   } catch {
     // Clipboard unavailable; fail silently.
   }
