@@ -22,7 +22,7 @@ import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { run as defaultRun, SSH_BASE_OPTS, SSH_BIN, shellQuote } from './ssh.js';
-import { buildChat, sortChats } from './chatMeta.js';
+import { buildChat, sortChats, parseActivityTimestamp } from './chatMeta.js';
 
 const LOCAL = '(local)';
 const COMPANION_DIR = '$HOME/.warden'; // expands on the remote host
@@ -138,15 +138,28 @@ export function encodeRequest(id, method, params) {
 // the SAME shape the default discover() path builds (chats.js), so callers can't
 // tell the two paths apart by field. Both paths build the literal via the shared
 // chatMeta.buildChat(), so parity is structural (WARDEN-272 review #5).
-// `lastActivity` is null here: capturing it would mean extra remote work that's
-// out of scope for slice 1 (the activity / capture-pane migration is a later
-// slice). The default path retains it.
+// lastActivity is parsed here from each ACTIVE container's host-side-captured
+// leading pane line (containerInfo.Pane) via the SAME parseActivityTimestamp
+// helper the default path uses — one regex, both paths agree by construction
+// (WARDEN-376 closed the slice-1 gap where the companion left lastActivity null
+// and active agents classified UNKNOWN in Fleet Health). Inactive containers,
+// lean-mode (no Pane captured), and garbage/empty lines leave lastActivity null.
 export function mapCompanionContainers(host, containers, session = 'agent') {
   const chats = [];
   for (const c of containers || []) {
     const name = c.name;
     if (!name) continue;
-    chats.push(buildChat(host, name, c.status, c.cwd, c.active, session));
+    const chat = buildChat(host, name, c.status, c.cwd, c.active, session);
+    // Only active agents carry a captured leading line (the Go side captures
+    // Pane for active containers only); parse it through the shared helper so
+    // lastActivity matches the default path's field exactly.
+    if (c.active) {
+      const ts = parseActivityTimestamp(c.pane);
+      if (ts != null) {
+        chat.lastActivity = ts;
+      }
+    }
+    chats.push(chat);
   }
   // Identical ordering to the default discover() path: active first, then by key.
   return sortChats(chats);
@@ -467,7 +480,16 @@ export async function discover(host, cfg = {}, opts = {}, deps = {}) {
   try {
     const channel = await getChannel(host, cfg, deps);
     const session = cfg.tmuxSession || 'agent';
-    const result = await channel.call('discover', { session }, { timeout: opts.timeout ?? 60000 });
+    // Forward opts.activity over the wire (lean-mode parity — WARDEN-376). The
+    // default path gates its per-agent capture-pane pass on `opts.activity !==
+    // false` (chats.js:265); the 60s lifecycle poll runs lean (`activity: false`)
+    // to SKIP that per-agent work (WARDEN-147). Mirror the same semantics so the
+    // companion's host-side leading-line capture runs on the user-facing discover
+    // but NOT on the lean lifecycle poll — otherwise the poll would suddenly do
+    // per-active-container capture-pane work every tick (a quiet local-cost
+    // regression and a behavioral divergence from the default path's lean mode).
+    const activity = opts.activity !== false;
+    const result = await channel.call('discover', { session, activity }, { timeout: opts.timeout ?? 60000 });
     const chats = mapCompanionContainers(host, result?.containers || [], session);
     return { host, ok: true, chats };
   } catch (e) {

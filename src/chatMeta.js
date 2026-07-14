@@ -28,9 +28,11 @@ export function parseContainerName(name) {
 // `active` is normalized with `!!` (the default path already passes a boolean;
 // the companion passes a possibly-truthy flag), and `cwd`/`status` are coerced
 // so a missing/empty cwd -> undefined and a missing status -> '' exactly as
-// both paths did inline. lastActivity is null: the default path may fill it in
-// a follow-up activity-capture pass; the companion leaves it null in slice 1
-// (the activity migration is a later slice).
+// both paths did inline. lastActivity starts at null: both discovery paths may
+// fill it in via a follow-up activity-capture pass that parses the leading pane
+// line's timestamp with the shared parseActivityTimestamp() below (WARDEN-376
+// closed the companion's read-parity gap — it now captures that line host-side
+// too, where slice 1 had left it null).
 export function buildChat(host, name, status, cwd, active, session) {
   const { project, role } = parseContainerName(name);
   return {
@@ -42,6 +44,26 @@ export function buildChat(host, name, status, cwd, active, session) {
     cwd: (cwd || '').trim() || undefined,
     lastActivity: null,
   };
+}
+
+// Parse a leading pane line's timestamp into epoch ms, or null when the line
+// carries no parseable timestamp. This is the SINGLE timestamp regex BOTH
+// discovery paths use: the default SSH path (src/chats.js) captures the leading
+// pane line per active agent and calls this, and the companion transport
+// (src/companion.js) captures the same leading line host-side and calls this
+// SAME helper on it — so lastActivity is parsed identically by construction
+// (the same single-source-of-truth philosophy that motivated centralizing
+// buildChat). Mirrors the regex the default path accepted inline: an optional
+// `[`/`]` around a `YYYY-MM-DD[space|T]HH:MM:SS` timestamp. Returns null for
+// empty/non-matching input OR a syntactically-matching but invalid calendar
+// date so callers leave lastActivity null rather than stamping NaN. (WARDEN-376)
+export function parseActivityTimestamp(line) {
+  const s = line == null ? '' : String(line);
+  if (!s.trim()) return null;
+  const m = s.match(/\[?(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2})\]?/);
+  if (!m) return null;
+  const ms = new Date(m[1]).getTime();
+  return Number.isNaN(ms) ? null : ms;
 }
 
 // Shared discovery ordering: active chats first, then by key. Both discovery

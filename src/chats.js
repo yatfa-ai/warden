@@ -5,7 +5,7 @@
 // whether `container` is set, and uses `session` for the tmux target.
 import { run, runWithPool, runLocalTmux, shellQuote } from './ssh.js';
 import { loadCatalog, stampCatalogActivity } from './config.js';
-import { ROLES, parseContainerName, buildChat, sortChats } from './chatMeta.js';
+import { ROLES, parseContainerName, buildChat, sortChats, parseActivityTimestamp } from './chatMeta.js';
 // Re-export for any external consumer; the canonical home is now ./chatMeta.js.
 export { ROLES, parseContainerName };
 import { isCompanionTransportEnabled, discover as discoverViaCompanion, capturePanes as capturePanesViaCompanion } from './companion.js';
@@ -211,6 +211,12 @@ export async function discover(host, cfg, opts = {}, deps = {}) {
   }
 
   const runWithPoolFn = deps.runWithPool ?? runWithPool;
+  // The second-pass activity capture uses the raw `run` (one fresh ssh per
+  // active agent). Injectable via deps.run so the capture path — which every
+  // existing discover test skips with { activity: false } — can be exercised
+  // end-to-end and the shared-helper refactor locked as a no-op. Defaults to
+  // the real run, so production behavior is unchanged. (WARDEN-376)
+  const runFn = deps.run ?? run;
   const timeout = (cfg.connectTimeout ?? 10) * 1000 + 25000;
   const res = await runWithPoolFn(host, DISCOVER_SCRIPT, { timeout }, cfg);
   if (!res.ok) {
@@ -265,15 +271,15 @@ export async function discover(host, cfg, opts = {}, deps = {}) {
   if (opts.activity !== false && activeAgents.length > 0) {
     const activityResults = await Promise.all(
       activeAgents.map(chat =>
-        run(host, `docker exec ${chat.container} tmux capture-pane -t ${session} -p -S - -E - 2>/dev/null | head -1`, { timeout: 1000 })
+        runFn(host, `docker exec ${chat.container} tmux capture-pane -t ${session} -p -S - -E - 2>/dev/null | head -1`, { timeout: 1000 })
           .then(activityRes => {
-            if (activityRes.ok && activityRes.stdout.trim()) {
-              const timestampMatch = activityRes.stdout.match(/\[?(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2})\]?/);
-              if (timestampMatch) {
-                const date = new Date(timestampMatch[1]);
-                if (!isNaN(date.getTime())) {
-                  chat.lastActivity = date.getTime();
-                }
+            if (activityRes.ok) {
+              // Shared timestamp parse (chatMeta.parseActivityTimestamp) — the
+              // SAME helper the companion path uses, so lastActivity is parsed
+              // identically by both discovery paths. (WARDEN-376)
+              const ts = parseActivityTimestamp(activityRes.stdout);
+              if (ts != null) {
+                chat.lastActivity = ts;
               }
             }
             return chat;
@@ -316,16 +322,15 @@ async function discoverManual(host, entries, cfg) {
       activeEntries.map(entry =>
         run(host, `tmux capture-pane -t ${entry.session} -p -S - -E - 2>/dev/null | head -1`, { timeout: 1000 })
           .then(activityRes => {
-            if (activityRes.ok && activityRes.stdout.trim()) {
-              const timestampMatch = activityRes.stdout.match(/\[?(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2})\]?/);
-              if (timestampMatch) {
-                const date = new Date(timestampMatch[1]);
-                if (!isNaN(date.getTime())) {
-                  entry.lastActivity = date.getTime();
-                  // Persist while alive so the value survives the chat later going
-                  // inactive AND a warden restart (WARDEN-245).
-                  stampCatalogActivity(host, entry.session, entry.lastActivity);
-                }
+            if (activityRes.ok) {
+              // Shared timestamp parse — same helper the companion + yatfa path
+              // use (WARDEN-376).
+              const ts = parseActivityTimestamp(activityRes.stdout);
+              if (ts != null) {
+                entry.lastActivity = ts;
+                // Persist while alive so the value survives the chat later going
+                // inactive AND a warden restart (WARDEN-245).
+                stampCatalogActivity(host, entry.session, entry.lastActivity);
               }
             }
           })
@@ -381,16 +386,15 @@ export async function discoverAll(hosts, cfg, opts = {}) {
           activeLocalSessions.map(obj =>
             Promise.resolve(runLocalTmux(['capture-pane', '-t', obj.session, '-p', '-S', '-', '-E', '-']))
               .then(activityRes => {
-                if (activityRes.ok && activityRes.stdout.trim()) {
-                  const timestampMatch = activityRes.stdout.match(/\[?(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2})\]?/);
-                  if (timestampMatch) {
-                    const date = new Date(timestampMatch[1]);
-                    if (!isNaN(date.getTime())) {
-                      obj.lastActivity = date.getTime();
-                      // Persist while alive so lastActivity survives the chat going
-                      // inactive and a warden restart (WARDEN-245).
-                      stampCatalogActivity(host, obj.session, obj.lastActivity);
-                    }
+                if (activityRes.ok) {
+                  // Shared timestamp parse — same helper the companion + remote
+                  // manual path use (WARDEN-376).
+                  const ts = parseActivityTimestamp(activityRes.stdout);
+                  if (ts != null) {
+                    obj.lastActivity = ts;
+                    // Persist while alive so lastActivity survives the chat going
+                    // inactive and a warden restart (WARDEN-245).
+                    stampCatalogActivity(host, obj.session, obj.lastActivity);
                   }
                 }
               })
@@ -465,16 +469,15 @@ export async function discoverHost(host, cfg) {
     await Promise.all(objs.filter((o) => o.active).map((o) =>
       Promise.resolve(runLocalTmux(['capture-pane', '-t', o.session, '-p', '-S', '-', '-E', '-']))
         .then((r) => {
-          if (r.ok && r.stdout.trim()) {
-            const m = r.stdout.match(/\[?(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2})\]?/);
-            if (m) {
-              const d = new Date(m[1]);
-              if (!isNaN(d.getTime())) {
-                o.lastActivity = d.getTime();
-                // Persist while alive so lastActivity survives the chat going
-                // inactive and a warden restart (WARDEN-245).
-                stampCatalogActivity(LOCAL, o.session, o.lastActivity);
-              }
+          if (r.ok) {
+            // Shared timestamp parse — same helper every discovery path uses
+            // (WARDEN-376).
+            const ts = parseActivityTimestamp(r.stdout);
+            if (ts != null) {
+              o.lastActivity = ts;
+              // Persist while alive so lastActivity survives the chat going
+              // inactive and a warden restart (WARDEN-245).
+              stampCatalogActivity(LOCAL, o.session, o.lastActivity);
             }
           }
         }).catch(() => {})
