@@ -142,6 +142,55 @@ describe('classifyPane — precedence: erroring > stuck > blocked > waiting > ac
   });
 });
 
+// Recency-bound state decision (WARDEN-390): erroring/blocked/waiting are decided
+// against the LIVE BOTTOM of the pane (the last ~15 non-empty lines), not the full
+// ~60-line capture. A triggering line that has scrolled OUT of that tail, with
+// active/other output below it, no longer flips the state — so a recovered agent
+// stops reading "needs attention". `stuck` is already recency-safe; `active` keeps
+// scanning the full window (a busy-but-quiet agent must not false-flip to alertable
+// 'idle'). Precedence still holds among the tail's lines.
+describe('classifyPane — recency: a recovered error/prompt/block scrolled past no longer flips the state', () => {
+  // Fully neutral filler lines (no word in ANY state regex) used to push a triggering
+  // line OUT of the 15-line tail, simulating the pane scrolling past it. 16 of them
+  // guarantees the trigger lands outside the last-15 window.
+  const fillers = n => Array.from({ length: n }, (_, i) => `filler output line number ${i}`);
+
+  it('(a) an error line in the OLDER window + active output in the tail → active, NOT erroring', () => {
+    const lines = ['Error: something failed early on', ...fillers(16), 'building the project modules', 'running the full test suite now'];
+    const r = classify(lines.join('\n'));
+    assert.notEqual(r.state, 'erroring', 'a scrolled-past error must not pin the state to erroring');
+    assert.equal(r.state, 'active', 'recovered agent with active output reads active');
+  });
+  it('(b) a "press enter" prompt scrolled past + active output → active, NOT waiting', () => {
+    const lines = ['Press enter to continue', ...fillers(16), 'building modules', 'running the test suite'];
+    const r = classify(lines.join('\n'));
+    assert.notEqual(r.state, 'waiting', 'a scrolled-past prompt must not pin the state to waiting');
+    assert.equal(r.state, 'active');
+  });
+  it('(c) a resolved "blocked by…" scrolled past + active output → active, NOT blocked', () => {
+    const lines = ['blocked by the reviewer on the dependency', ...fillers(16), 'building the project', 'running the suite'];
+    const r = classify(lines.join('\n'));
+    assert.notEqual(r.state, 'blocked', 'a scrolled-past coordination block must not pin the state to blocked');
+    assert.equal(r.state, 'active');
+  });
+  it('(d) a current error at the LIVE BOTTOM still classifies as erroring (no false negative)', () => {
+    const lines = [...fillers(20), 'Traceback: live error at the very bottom'];
+    assert.equal(classify(lines.join('\n')).state, 'erroring');
+  });
+  it('(e) a current prompt at the LIVE BOTTOM still classifies as waiting (no false negative)', () => {
+    const lines = [...fillers(20), 'Press enter to continue'];
+    assert.equal(classify(lines.join('\n')).state, 'waiting');
+  });
+  it('(f) precedence is preserved WITHIN the tail: error + blocked both present → erroring', () => {
+    // Both lines sit in a short pane (well inside any reasonable tail); error wins.
+    assert.equal(classify('blocked by the reviewer\nError: something failed here').state, 'erroring');
+  });
+  it('a current coordination block at the LIVE BOTTOM still classifies as blocked (no false negative)', () => {
+    const lines = [...fillers(20), 'blocked on the planner decision'];
+    assert.equal(classify(lines.join('\n')).state, 'blocked');
+  });
+});
+
 describe('classifyPane — goal inference still works (unchanged from observer.js)', () => {
   it('prefers an explicit ticket reference', () => {
     assert.equal(classify('working on WARDEN-344\nrunning').goal, 'WARDEN-344');
