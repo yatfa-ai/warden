@@ -497,6 +497,18 @@ function CommitFile({ chatId, hash, file }: { chatId: string; hash: string; file
   );
 }
 
+/** The commit's body — the "why" behind the change — rendered above the changed-
+ *  files list inside an expanded commit. Undefined/empty → renders nothing, so a
+ *  subject-only commit stays compact (the collapsed row already shows the subject).
+ *  whitespace-pre-wrap preserves the message's own line breaks; break-words +
+ *  muted text-[10px] match DiffBlock's density. (WARDEN-388) */
+function CommitMessage({ message }: { message?: string }) {
+  if (!message) return null;
+  return (
+    <div className="whitespace-pre-wrap break-words px-1 pb-0.5 text-[10px] text-muted-foreground">{message}</div>
+  );
+}
+
 // The cyan branch badge (+ yellow ±). Made interactive: click opens a popover showing
 // the last few commits (git log) for the chat's repo. Commits are lazily fetched on
 // first open and cached by chatId; the ↻ affordance re-fetches. The popover is portaled
@@ -583,7 +595,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   // repeat expansion is instant. The popover owns the interaction, so this state
   // lives here rather than being prop-drilled through ChatRow/ChatSidebar.
   const [expandedHash, setExpandedHash] = useState<string | null>(null);
-  const [showCache, setShowCache] = useState<Record<string, { files?: GitFile[]; error?: string | null }>>({});
+  const [showCache, setShowCache] = useState<Record<string, { files?: GitFile[]; message?: string; error?: string | null }>>({});
   const [showLoading, setShowLoading] = useState<Record<string, boolean>>({});
 
   // Lazy stash detail (mirror of fetchShow for commits): undefined = not yet
@@ -598,7 +610,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
     try {
       const r = await fetch(`/api/git-show?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(hash)}`);
       const j = await r.json();
-      setShowCache((p) => ({ ...p, [hash]: { files: Array.isArray(j.files) ? j.files : [], error: j.error } }));
+      setShowCache((p) => ({ ...p, [hash]: { files: Array.isArray(j.files) ? j.files : [], message: typeof j.message === 'string' ? j.message : undefined, error: j.error } }));
     } catch {
       setShowCache((p) => ({ ...p, [hash]: { files: [], error: 'fetch failed' } }));
     } finally {
@@ -714,6 +726,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
                   </div>
                   {expandedHash === cm.hash && (
                     <div className="pb-1 pl-1">
+                      <CommitMessage message={showCache[cm.hash]?.message} />
                       {showLoading[cm.hash] && !showCache[cm.hash] ? (
                         <div className="px-1 text-[10px] text-muted-foreground">loading files…</div>
                       ) : (showCache[cm.hash]?.files?.length ?? 0) > 0 ? (
@@ -772,6 +785,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
                       </div>
                       {expandedHash === cm.hash && (
                         <div className="pb-1 pl-1">
+                          <CommitMessage message={showCache[cm.hash]?.message} />
                           {showLoading[cm.hash] && !showCache[cm.hash] ? (
                             <div className="px-1 text-[10px] text-muted-foreground">loading files…</div>
                           ) : (showCache[cm.hash]?.files?.length ?? 0) > 0 ? (
@@ -831,6 +845,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
                       </div>
                       {expandedHash === cm.hash && (
                         <div className="pb-1 pl-1">
+                          <CommitMessage message={showCache[cm.hash]?.message} />
                           {showLoading[cm.hash] && !showCache[cm.hash] ? (
                             <div className="px-1 text-[10px] text-muted-foreground">loading files…</div>
                           ) : (showCache[cm.hash]?.files?.length ?? 0) > 0 ? (
