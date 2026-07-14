@@ -16,20 +16,18 @@ import { summarizeBroadcast, formatBroadcastToast } from '@/lib/broadcast';
 import { summarizeKill, formatKillToast } from '@/lib/kill';
 import { DiffViewer } from './DiffViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
-import { loadUi, saveUi, type Snippet } from '@/lib/storage';
+import { loadUi, saveUi, RECENTLY_CLOSED_PREVIEW, type Snippet, type RecentlyClosedEntry } from '@/lib/storage';
 import { THIS_MACHINE, basename, chatType, displayName } from '@/lib/chatDisplay';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import {
-  matchesAgentFilter, compareChats, sortChats, findChat,
+  matchesAgentFilter, sortChats, findChat,
   type AgentFilter, type AgentSort,
 } from '@/lib/agentFilter';
-import { summarizeProjectGitState, detectProjectFileCollisions } from '@/lib/gitStateSummary';
 import { getLastSeen, WHATS_NEW_FETCH_LIMIT } from '@/lib/whatsNew';
 import type { Chat, Collection } from '@/lib/types';
 import { StatusDot } from '@/components/StatusDot';
 import type { GitCommit, GitFile, ClaudeSession } from './sidebar/types';
-import { GitStateBadges, GitCollisionBadge } from './sidebar/GitBadges';
-import { ChatRow, OpenedChatRow, ChatRowSkeleton, SessionRowSkeleton } from './sidebar/ChatRows';
+import { ChatRow, OpenPaneRow, ChatRowSkeleton, SessionRowSkeleton } from './sidebar/ChatRows';
 import { AgentFilterSortControls } from './sidebar/AgentFilterSortControls';
 import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/SidebarBits';
 import { SessionTagChips, SessionTagFilterRow } from './sidebar/SessionTags';
@@ -42,15 +40,14 @@ export type { ClaudeSession, SessionSearchResult } from './sidebar/types';
 interface Props {
   chats: Chat[];
   sshHosts: string[];
-  activeTabs: string[];
-  hiddenTabs: string[];
+  // WARDEN-372: the sidebar root is panes-first. openPanes is the active
+  // workspace's pane set (grid order); recentlyClosed is that workspace's
+  // per-workspace recovery list. The tabs model (activeTabs/hiddenTabs) is gone.
   openPanes: Set<string>;
+  recentlyClosed: RecentlyClosedEntry[];
   onOpenChat: (id: string) => void;
   onClosePane: (id: string) => void;
-  onRemoveActive: (id: string) => void;
-  onReorder: (from: number, to: number) => void;
-  onHideTab: (id: string) => void;
-  onUnhideTab: (id: string) => void;
+  onReopenClosed: (id: string) => void;
   onKill: (id: string) => void;
   onRename: (session: string, kind: string, name: string, host?: string) => void;
   onResume: (id: string, description: string, cwd: string, host: string) => void;
@@ -82,12 +79,12 @@ interface Props {
 
 const LABEL: Record<string, string> = { '(local)': 'this machine' };
 
-export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes, onOpenChat, onRemoveActive, onReorder, onHideTab, onUnhideTab, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, snippets }: Props) {
+export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, snippets }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
-  const [hiddenExpanded, setHiddenExpanded] = useState(false);
   const [offlineExpanded, setOfflineExpanded] = useState(false);
-  const [dragIdx, setDragIdx] = useState<number | null>(null);
-  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
+  // WARDEN-372: "show more" affordance for the per-workspace recently-closed list
+  // (5 previewed → up to the 20-entry cap).
+  const [showAllClosed, setShowAllClosed] = useState(false);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [tabSearchQuery, setTabSearchQuery] = useState('');
@@ -100,7 +97,6 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   // any of the selected tags (union semantics).
   const [sessionTags, setSessionTags] = useState<Record<string, string[]>>({});
   const [activeTagFilters, setActiveTagFilters] = useState<Set<string>>(new Set());
-  const [projectFilter, setProjectFilter] = useState<string | null>(null);
   const [hostSessions, setHostSessions] = useState<Record<string, { sessions: ClaudeSession[]; claudeAvailable?: boolean }>>({});
   const [loadingHost, setLoadingHost] = useState<string | null>(null);
   const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; detached?: boolean; headSha?: string | null; clean: boolean | null; cwd: string; files?: GitFile[]; ahead?: number | null; behind?: number | null; upstream?: string | null; inProgress?: { operation: string | null }; stashCount?: number | null }>>({});
@@ -131,46 +127,18 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   const [agentSort, setAgentSort] = useState<AgentSort>('manual');
 
   // Multi-select broadcast (WARDEN-292): the set of selected agent ids, held at
-  // the ChatSidebar level so it can span the active/hidden/idle fleet lists in
-  // whichever fleet view (host or collection) is open. Keyed by `c.key || c.id`
-  // — the same identity openPanes/pinnedChatIds use — so a row stays selected
-  // across the active→hidden→idle regrouping within one view. Selection is
-  // scoped to the current fleet view: navigating away (back to root, into a
-  // host/collection, or opening a chat) clears it, so the human's mental model
-  // is "the agents I picked in THIS list," never a stale cross-view mix. v1
-  // wires selection into ChatRow (the fleet lists) only — OpenedChatRow (the
-  // root active-tabs working set) is intentionally excluded.
+  // the ChatSidebar level so it can span the active/idle fleet lists in whichever
+  // fleet view (host or collection) is open. Keyed by `c.key || c.id` — the same
+  // identity openPanes/pinnedChatIds use — so a row stays selected across the
+  // active→idle regrouping within one view. Selection is scoped to the current
+  // fleet view: navigating away (back to root, into a host/collection, or opening
+  // a chat) clears it, so the human's mental model is "the agents I picked in THIS
+  // list," never a stale cross-view mix. v1 wires selection into ChatRow (the
+  // fleet lists) only — the root open-pane rows (OpenPaneRow) are intentionally
+  // excluded.
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [broadcastOpen, setBroadcastOpen] = useState(false);
   const [killOpen, setKillOpen] = useState(false);
-
-  // Extract project counts from active agents
-  const projectCounts = chats.reduce((acc, c) => {
-    if (c.active && c.project) {
-      acc[c.project] = (acc[c.project] || 0) + 1;
-    }
-    return acc;
-  }, {} as Record<string, number>);
-
-  // Per-project + global uncommitted (dirty) / unpushed WIP counts for the project
-  // filter chips (WARDEN-201). Reuses the cached gitStatus map (populated per open
-  // tab) — no new fetch. A still-loading or non-git agent counts as neither, so the
-  // chips only flag agents whose repo state is actually known to be dirty/unpushed.
-  const gitStateSummary = useMemo(
-    () => summarizeProjectGitState(chats, gitStatus),
-    [chats, gitStatus],
-  );
-
-  // Cross-agent file-edit collisions (WARDEN-288): changed-file paths ≥2 active
-  // agents in the same project both have uncommitted — the proactive complement
-  // to the dirty/unpushed WIP summary above (which counts HOW MANY agents have
-  // WIP; this catches WHEN two are editing the SAME file). Reuses the same
-  // cached gitStatus map — whose value already carries each chat's changed
-  // `files` from /api/git-status — so no new fetch, no backend change.
-  const fileCollisions = useMemo(
-    () => detectProjectFileCollisions(chats, gitStatus),
-    [chats, gitStatus],
-  );
 
   const fetchHostSessions = async (host: string) => {
     setLoadingHost(host);
@@ -574,13 +542,14 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     saveUi(ui);
   }, [agentFilter, agentSort]);
 
-  // Fetch git status for active chats (lazy loading)
+  // Fetch git status for open panes (lazy loading). WARDEN-372: this was keyed on
+  // the abolished activeTabs; it now follows the active workspace's open panes.
   useEffect(() => {
-    activeTabs.forEach((id) => {
+    openPanes.forEach((id) => {
       const c = findChat(chats, id);
       if (c) fetchGitStatus(id);
     });
-  }, [chats, activeTabs, fetchGitStatus]);
+  }, [chats, openPanes, fetchGitStatus]);
 
   // WARDEN-356: keep recent git-log fresh for chats the human has VISITED so the
   // per-agent "What's new since your last visit" marker reflects commits landed
@@ -596,12 +565,12 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   // documented future optimization is a server `since` param if this client-side
   // filtering ever proves costly for large fleets.
   useEffect(() => {
-    activeTabs.forEach((id) => {
+    openPanes.forEach((id) => {
       if (getLastSeen(id) === null) return;
       const c = findChat(chats, id);
       if (c) fetchGitLog(id);
     });
-  }, [chats, activeTabs, fetchGitLog]);
+  }, [chats, openPanes, fetchGitLog]);
 
   const handleSpawned = (chat: Chat) => { onRefresh(); onOpenChat(chat.key || chat.id); setView({ kind: 'root' }); };
   const hosts = [THIS_MACHINE, ...sshHosts];
@@ -612,27 +581,20 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
   // are never hidden — only explicitly 'offline' ones. Derived on every render,
   // so the 30s status poll drives it: a recovered host re-appears inline and a
   // dropped one collapses away, with no extra wiring. When OFF (default),
-  // isOfflineHidden is always false → visibleHosts === filteredHosts, no summary.
+  // isOfflineHidden is always false → visibleHosts === hosts, no summary.
   const hideOffline = hideOfflineHosts === true;
   const isOfflineHidden = (h: string) =>
     hideOffline && h !== THIS_MACHINE && hostStatuses[h]?.status === 'offline';
 
-  // Hosts after the project filter (unchanged behavior) — the offline split is
-  // applied on top of this so filtering stays consistent.
-  const filteredHosts = hosts.filter((h) => {
-    if (!projectFilter) return true;
-    const n = chats.filter((c) => c.host === h && c.active && c.project === projectFilter).length;
-    return n > 0;
-  });
-  const offlineHosts = filteredHosts.filter(isOfflineHidden);
-  const visibleHosts = filteredHosts.filter((h) => !isOfflineHidden(h));
+  const offlineHosts = hosts.filter(isOfflineHidden);
+  const visibleHosts = hosts.filter((h) => !isOfflineHidden(h));
 
   // Renders one host row. Shared by the live list and the expanded offline
   // summary so the two stay identical — expanding the summary reveals the exact
   // same rows (the WARDEN-178 colorblind-safe StatusDot, incl. offline=square,
   // + retry/inspect still works via enterHost).
   const renderHost = (h: string) => {
-    const n = chats.filter((c) => c.host === h && c.active && (!projectFilter || c.project === projectFilter)).length;
+    const n = chats.filter((c) => c.host === h && c.active).length;
     const hostStatus = hostStatuses[h];
     return (
       <button key={h} onClick={() => enterHost(h)} className="flex items-center gap-2 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 w-full transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background">
@@ -695,13 +657,11 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
         })
       : [];
 
-    // Apply agent filter + sort to collection agents
-    agents = sortChats(agents.filter((c) => matchesAgentFilter(c, agentFilter, hiddenTabs)), agentSort);
+    // Apply agent filter + sort to collection agents (WARDEN-372: no 'hidden' case).
+    agents = sortChats(agents.filter((c) => matchesAgentFilter(c, agentFilter)), agentSort);
 
     const active = agents.filter((c) => c.active);
     const idle = agents.filter((c) => !c.active);
-    const visibleActive = active.filter((c) => !hiddenTabs.includes(c.key || c.id));
-    const hiddenActive = active.filter((c) => hiddenTabs.includes(c.key || c.id));
     const openFromCollection = (key: string) => { onOpenChat(key); setView({ kind: 'root' }); };
 
     return (
@@ -742,18 +702,10 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
             {C.metadata?.description && (
               <div className="px-2 pt-1 pb-2 text-[10px] text-muted-foreground">{C.metadata.description}</div>
             )}
-            {(visibleActive.length > 0 || idle.length > 0 || hiddenActive.length > 0) && (
+            {(active.length > 0 || idle.length > 0) && (
               <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">● matching agents</div>
             )}
-            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onHide={() => onHideTab(c.key || c.id)} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} note={agentNotes[c.id]} onSetNote={(text: string) => setNote(c.id, text)} />)}
-            {hiddenActive.length > 0 && (
-              <>
-                <SectionToggle expanded={hiddenExpanded} onClick={() => setHiddenExpanded(!hiddenExpanded)} label={`hidden (${hiddenActive.length})`} />
-                {hiddenExpanded && hiddenActive.map((c) => (
-                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onUnhide={() => onUnhideTab(c.key || c.id)} dim showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} note={agentNotes[c.id]} onSetNote={(text: string) => setNote(c.id, text)} />
-                ))}
-              </>
-            )}
+            {active.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} note={agentNotes[c.id]} onSetNote={(text: string) => setNote(c.id, text)} />)}
             {idle.length > 0 && (
               <>
                 <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">idle</div>
@@ -799,18 +751,16 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
 
   if (view.kind === 'host') {
     const H = view.host;
-    const hostChats = chats.filter((c) => c.host === H && (!projectFilter || c.project === projectFilter));
+    const hostChats = chats.filter((c) => c.host === H);
 
-    // Apply agent filter + sort to host chats
+    // Apply agent filter + sort to host chats (WARDEN-372: no 'hidden' case).
     const sortedHostChats = sortChats(
-      hostChats.filter((c) => matchesAgentFilter(c, agentFilter, hiddenTabs)),
+      hostChats.filter((c) => matchesAgentFilter(c, agentFilter)),
       agentSort,
     );
 
     const active = sortedHostChats.filter((c) => c.active);
     const idle = sortedHostChats.filter((c) => !c.active);
-    const visibleActive = active.filter((c) => !hiddenTabs.includes(c.key || c.id));
-    const hiddenActive = active.filter((c) => hiddenTabs.includes(c.key || c.id));
     const info = hostSessions[H] || {};
     const sessions = info.sessions || [];
     // WARDEN-342: tagsInUse + visibleSessions are computed at the top level (hooks
@@ -834,18 +784,10 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
         </div>
         <ScrollArea className="flex-1 min-h-0">
           <div className="p-1.5 flex flex-col gap-0.5">
-            {(visibleActive.length > 0 || idle.length > 0 || hiddenActive.length > 0) && (
+            {(active.length > 0 || idle.length > 0) && (
               <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">● live (tmux)</div>
             )}
-            {visibleActive.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onHide={() => onHideTab(c.key || c.id)} gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} note={agentNotes[c.id]} onSetNote={(text: string) => setNote(c.id, text)} />)}
-            {hiddenActive.length > 0 && (
-              <>
-                <SectionToggle expanded={hiddenExpanded} onClick={() => setHiddenExpanded(!hiddenExpanded)} label={`hidden (${hiddenActive.length})`} />
-                {hiddenExpanded && hiddenActive.map((c) => (
-                  <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} onUnhide={() => onUnhideTab(c.key || c.id)} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} note={agentNotes[c.id]} onSetNote={(text: string) => setNote(c.id, text)} />
-                ))}
-              </>
-            )}
+            {active.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path) => setDiffTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} note={agentNotes[c.id]} onSetNote={(text: string) => setNote(c.id, text)} />)}
             {idle.length > 0 && (
               <>
                 <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">idle</div>
@@ -943,30 +885,35 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
     );
   }
 
-  // ROOT VIEW — persistent active tabs + hosts
-  const filteredTabs = activeTabs.filter((id) => {
+  // ROOT VIEW — open panes + per-workspace recently-closed + hosts.
+  // WARDEN-372: this was a "tabs" working set (activeTabs with hide/unhide, drag-
+  // reorder, and a project-filter chip row). It is now the active workspace's
+  // openPanes in grid order — the list MIRRORS the pane grid (no sidebar reorder,
+  // no sort), narrowed only by the search box + agent filter. Closing a pane
+  // records it in recentlyClosed (below) for one-click reopen.
+  const filteredPanes = [...openPanes].filter((id) => {
     const c = findChat(chats, id);
-    if (!c) return false;
     const query = tabSearchQuery.toLowerCase();
+    // A pane whose chat has left the catalog (e.g. a dead pane pending close) still
+    // shows so the user can close it; it just can't match a name/host/type filter.
+    if (!c) return query === '';
     const name = displayName(c).toLowerCase();
     const host = (c.host || '').toLowerCase();
     const type = chatType(c).toLowerCase();
     const matchesSearch = name.includes(query) || host.includes(query) || type.includes(query);
-    return matchesSearch && matchesAgentFilter(c, agentFilter, hiddenTabs);
+    return matchesSearch && matchesAgentFilter(c, agentFilter);
   });
 
-  // Apply sorting — manual preserves the drag-to-reorder order.
-  const sortedTabs = agentSort === 'manual'
-    ? filteredTabs
-    : [...filteredTabs]
-        .map((id) => ({ id, c: findChat(chats, id)! }))
-        .sort((a, b) => compareChats(a.c, b.c, agentSort))
-        .map((x) => x.id);
+  // The recently-closed list shows a few entries with a "show more" affordance that
+  // expands to the full (storage-capped) list. Already-open entries still render
+  // (dimmed via the open dot) so the user sees the recovery state.
+  const closedPreview = showAllClosed ? recentlyClosed : recentlyClosed.slice(0, RECENTLY_CLOSED_PREVIEW);
+  const hasMoreClosed = recentlyClosed.length > RECENTLY_CLOSED_PREVIEW;
 
   return (
     <div className="@container flex flex-col h-full min-h-0">
       <div className="flex items-center gap-2 compact:gap-1 px-3 py-2 compact:py-1.5 border-b shrink-0">
-        <span className="text-xs text-muted-foreground @max-[20rem]:hidden">active</span>
+        <span className="text-xs text-muted-foreground @max-[20rem]:hidden">open</span>
         <Input
           placeholder="filter..."
           value={tabSearchQuery}
@@ -979,7 +926,7 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
           onFilterChange={setAgentFilter}
           onSortChange={setAgentSort}
         />
-        <Badge variant="secondary" className="text-xs @max-[18rem]:hidden">{sortedTabs.length}</Badge>
+        <Badge variant="secondary" className="text-xs @max-[18rem]:hidden">{filteredPanes.length}</Badge>
         <span className="@max-[20rem]:hidden"><UpdatedAgo at={lastRefreshAt} timestampFormat={timestampFormat} /></span>
         <button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={onRefresh} disabled={loading} title="refresh">
           {loading ? <Skeleton className="h-3 w-3" /> : '↻'}
@@ -988,62 +935,27 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
       <NewChatForm onSpawned={handleSpawned} />
       <ScrollArea className="flex-1 min-h-0">
         <div className="p-1.5 flex flex-col gap-0.5">
-          {loading && activeTabs.length === 0 ? (
+          {loading && openPanes.size === 0 ? (
             <>
-              <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/40">loading tabs</div>
+              <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/40">loading panes</div>
               {[1, 2, 3].map((i) => <ChatRowSkeleton key={i} />)}
             </>
           ) : null}
-          {activeTabs.length > 0 && (
-            <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">tabs</div>
+          {openPanes.size > 0 && (
+            <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">open panes</div>
           )}
-          {Object.keys(projectCounts).length > 1 && (
-            <div className="flex flex-wrap gap-1 px-2 pb-1">
-              <button
-                onClick={() => setProjectFilter(null)}
-                className={`text-xs px-2 py-1 rounded transition-all duration-150 ease-out active:scale-95 ${!projectFilter ? 'bg-accent' : 'hover:bg-accent/50'}`}
-              >
-                All Projects ({chats.filter(c => c.active).length})
-                <GitStateBadges dirty={gitStateSummary.total.dirty} unpushed={gitStateSummary.total.unpushed} behind={gitStateSummary.total.behind} agents={gitStateSummary.total.agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
-                <GitCollisionBadge collisions={fileCollisions.total.paths} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} showProject />
-              </button>
-              {Object.entries(projectCounts).map(([project, count]) => (
-                <button
-                  key={project}
-                  onClick={() => setProjectFilter(project)}
-                  className={`text-xs px-2 py-1 rounded transition-all duration-150 ease-out active:scale-95 ${projectFilter === project ? 'bg-accent' : 'hover:bg-accent/50'}`}
-                >
-                  {project} ({count})
-                  <GitStateBadges dirty={gitStateSummary.perProject[project]?.dirty ?? 0} unpushed={gitStateSummary.perProject[project]?.unpushed ?? 0} behind={gitStateSummary.perProject[project]?.behind ?? 0} agents={gitStateSummary.perProject[project]?.agents ?? []} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
-                  <GitCollisionBadge collisions={fileCollisions.perProject[project]?.paths ?? []} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
-                </button>
-              ))}
-            </div>
-          )}
-          {sortedTabs
-            .filter((id) => {
-              if (!projectFilter) return true;
-              const c = findChat(chats, id);
-              return c && c.project === projectFilter;
-            })
-            .map((id) => {
+          {filteredPanes.map((id) => {
             const c = findChat(chats, id);
-            const originalIdx = activeTabs.indexOf(id);
-            // WARDEN-91: drag-reorder is only meaningful in manual sort order; in any
-            // sorted mode the list is derived from compareChats, so we disable drag.
-            const canDrag = agentSort === 'manual';
             return (
-              <OpenedChatRow
+              <OpenPaneRow
                 key={id}
                 id={id}
                 c={c}
                 isOpen={openPanes.has(id)}
                 onOpen={() => onOpenChat(id)}
-                onRemove={() => onRemoveActive(id)}
+                onClose={() => onClosePane(id)}
                 onRename={onRename}
-                onHide={() => onHideTab(id)}
                 onKill={() => onKill(id)}
-                canDrag={canDrag}
                 showHostTags={showHostTags}
                 showTypeBadges={showTypeBadges}
                 showStatusIndicators={showStatusIndicators}
@@ -1059,23 +971,46 @@ export function ChatSidebar({ chats, sshHosts, activeTabs, hiddenTabs, openPanes
                 outgoingLoading={gitLogOutgoingLoading[id]}
                 onFetchOutgoing={() => fetchGitLogOutgoing(id)}
                 onOpenDiff={(path) => setDiffTarget({ chatId: id, path })}
-                originalIdx={originalIdx}
-                dragIdx={dragIdx}
-                dragOverIdx={dragOverIdx}
-                setDragIdx={setDragIdx}
-                setDragOverIdx={setDragOverIdx}
-                onReorder={onReorder}
                 note={c ? agentNotes[c.id] : undefined}
                 onSetNote={c ? (text: string) => setNote(c.id, text) : undefined}
                 timestampFormat={timestampFormat}
               />
             );
           })}
-          {sortedTabs.length === 0 && activeTabs.length > 0 && (
-            <div className="text-xs text-muted-foreground p-3 text-center">{tabSearchQuery ? `no tabs match "${tabSearchQuery}"` : 'no tabs match the current filter'}</div>
+          {filteredPanes.length === 0 && openPanes.size > 0 && (
+            <div className="text-xs text-muted-foreground p-3 text-center">{tabSearchQuery ? `no panes match "${tabSearchQuery}"` : 'no panes match the current filter'}</div>
           )}
-          {activeTabs.length === 0 && !loading && (
-            <EmptyState type="no-tabs" />
+          {openPanes.size === 0 && !loading && (
+            <EmptyState type="no-panes" />
+          )}
+          {recentlyClosed.length > 0 && (
+            <>
+              <div className="mt-3 mb-1 border-t border-border/50" />
+              <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">recently closed</div>
+              {closedPreview.map((entry) => {
+                const open = openPanes.has(entry.id);
+                return (
+                  <Button
+                    key={entry.id}
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => onReopenClosed(entry.id)}
+                    className="w-full justify-start gap-2 px-2 text-xs text-muted-foreground hover:text-foreground"
+                    title={`reopen ${entry.name}`}
+                  >
+                    <StatusDot tone={open ? 'green' : 'muted'} variant={open ? 'solid' : 'ring'} label={open ? 'Open' : 'Reopen'} />
+                    <span className="truncate flex-1 text-left">{entry.name || entry.id}</span>
+                    {entry.host && entry.host !== '(local)' && <span className="text-[10px] text-muted-foreground/70 shrink-0">{entry.host}</span>}
+                    <span className="text-[10px] text-muted-foreground/70 shrink-0">{formatTimestamp(entry.closedAt, timestampFormat)}</span>
+                  </Button>
+                );
+              })}
+              {hasMoreClosed && (
+                <Button variant="ghost" size="xs" onClick={() => setShowAllClosed((v) => !v)} className="mx-2 mt-0.5 self-start text-xs text-muted-foreground hover:text-foreground">
+                  {showAllClosed ? 'show less' : `show ${recentlyClosed.length - RECENTLY_CLOSED_PREVIEW} more`}
+                </Button>
+              )}
+            </>
           )}
           <div className="px-2 pt-2 pb-1">
             <Button

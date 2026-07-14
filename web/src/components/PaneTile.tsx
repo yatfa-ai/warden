@@ -222,7 +222,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // 0.1.11 regression was hostKey (and the latent host) sitting in the deps.
   // hostOptions already followed this pattern (WARDEN-261); host/hostKey now do
   // too. Assigned during render, the same latest-value mirror pattern as
-  // copyOnSelectRef above / activeTabsRef in App.tsx.
+  // copyOnSelectRef above / openPanesRef in App.tsx.
   const hostOptionsRef = useRef(hostOptions);
   hostOptionsRef.current = hostOptions;
   const hostRef = useRef(host);
@@ -253,7 +253,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // panes — toggling OFF stops auto-copying immediately, toggling ON starts it —
   // without re-running the mount effect (which would tear down and rebuild the
   // terminal). Assigned during render, the same latest-value mirror pattern as
-  // activeTabsRef/openPanesRef in App.tsx.
+  // openPanesRef/focusedRef in App.tsx.
   const copyOnSelectRef = useRef(copyOnSelect);
   copyOnSelectRef.current = copyOnSelect;
 

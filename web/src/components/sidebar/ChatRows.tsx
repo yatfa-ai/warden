@@ -66,10 +66,10 @@ export function SessionRowSkeleton() {
   );
 }
 
-export function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, dim, hostStatus, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, isPinned, onTogglePin, selected, onToggleSelect, selectionActive, note, onSetNote }: {
+export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, isPinned, onTogglePin, selected, onToggleSelect, selectionActive, note, onSetNote }: {
   c: Chat; open: boolean; onOpen: () => void; onKill: () => void;
   onRename: (session: string, kind: string, name: string, host?: string) => void;
-  onHide?: () => void; onUnhide?: () => void; dim?: boolean;
+  dim?: boolean;
   // WARDEN-198: per-host reachability from the 30s /api/hosts/status poll.
   // 'offline' → the row renders a distinct "unreachable" state.
   hostStatus?: 'online' | 'offline' | 'unknown';
@@ -265,9 +265,6 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, d
         </IconTooltip>
       )}
       {isUser && !editing && (
-        <>
-          {onHide && <IconTooltip label="hide"><button className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground px-0.5 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded" onClick={(e) => { e.stopPropagation(); onHide(); }}>▾</button></IconTooltip>}
-          {onUnhide && <IconTooltip label="unhide"><button className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground px-0.5 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded" onClick={(e) => { e.stopPropagation(); onUnhide(); }}>▴</button></IconTooltip>}
           <IconTooltip label="kill + forget">
             <button
               className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-red-500 px-0.5 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded"
@@ -276,7 +273,6 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, d
               ×
             </button>
           </IconTooltip>
-        </>
       )}
     </div>
   );
@@ -285,19 +281,22 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, onHide, onUnhide, d
 // Host tag for display: (local) → "local", else the host name.
 
 
-// A row in the primary "opened chats" list (the user's activeTabs working set).
-// Table-like columns: drag handle · status indicator · display name · last-activity time
-// · type/host/project/git badges · rename · remove. Rename works directly on the row for
-// manual/spawned chats via the ✎ affordance only (single-click the row opens/focuses it;
-// gating rename off double-click avoids the two-fires-before-dblclick open-then-edit jank);
-// yatfa agents are not renameable. Drag-reorder is preserved via the parent-owned
-// dragIdx/dragOverIdx pair.
-export function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, canDrag, originalIdx, dragIdx, dragOverIdx, setDragIdx, setDragOverIdx, onReorder, onHide, onKill, note, onSetNote, timestampFormat }: {
+// A row in the primary "open panes" list — the active workspace's openPanes,
+// mirroring pane-grid order (WARDEN-372). Table-like columns: status indicator ·
+// display name · last-activity time · type/host/project/git badges · rename ·
+// close. Rename works directly on the row for manual/spawned chats via the ✎
+// affordance only (single-click the row opens/focuses it; gating rename off
+// double-click avoids the two-fires-before-dblclick open-then-edit jank); yatfa
+// agents are not renameable. The old drag-reorder + hide affordances are gone:
+// the list mirrors the pane grid (no sidebar reorder) and hide/unhide is
+// abolished. Closing a row (× / "Close pane") is `onClose`, which removes the
+// pane and records it in the workspace's recently-closed recovery list.
+export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, onKill, note, onSetNote, timestampFormat }: {
   id: string;
   c?: Chat;
   isOpen: boolean;
   onOpen: () => void;
-  onRemove: () => void;
+  onClose: () => void;
   onRename: (session: string, kind: string, name: string, host?: string) => void;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
   gitInfo?: { branch: string | null; detached?: boolean; headSha?: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; upstream?: string | null; inProgress?: { operation: string | null }; stashCount?: number | null };
@@ -307,12 +306,6 @@ export function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showH
   // WARDEN-252: outgoing (ahead/unpushed) commits + their own fetch/loader.
   outgoingCommits?: GitCommit[]; outgoingLoading?: boolean; onFetchOutgoing?: () => void;
   onOpenDiff?: (path: string) => void;
-  canDrag: boolean;
-  originalIdx: number;
-  dragIdx: number | null; dragOverIdx: number | null;
-  setDragIdx: (n: number | null) => void; setDragOverIdx: (n: number | null) => void;
-  onReorder: (from: number, to: number) => void;
-  onHide?: () => void;
   onKill?: () => void;
   // WARDEN-305: per-agent note (mirrors pins; keyed by chat id).
   note?: string;
@@ -354,19 +347,13 @@ export function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showH
       <div
       role="button"
       tabIndex={0}
-      aria-label={`open tab ${c ? displayName(c) : id}`}
+      aria-label={`open pane ${c ? displayName(c) : id}`}
       aria-current={isOpen ? 'true' : undefined}
-      draggable={canDrag}
-      onDragStart={canDrag ? () => setDragIdx(originalIdx) : undefined}
-      onDragOver={canDrag ? (e) => { e.preventDefault(); setDragOverIdx(originalIdx); } : undefined}
-      onDragEnd={canDrag ? () => { if (dragIdx !== null && dragOverIdx !== null && dragIdx !== dragOverIdx) onReorder(dragIdx, dragOverIdx); setDragIdx(null); setDragOverIdx(null); } : undefined}
-      onDrop={canDrag ? (e) => { e.preventDefault(); if (dragIdx !== null && originalIdx !== dragIdx) onReorder(dragIdx, originalIdx); setDragIdx(null); setDragOverIdx(null); } : undefined}
       onClick={() => { if (!editing) onOpen(); }}
       onKeyDown={(e) => { if (!editing && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onOpen(); } }}
-      className={`group flex flex-col gap-0.5 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent ${canDrag ? 'cursor-pointer' : 'cursor-default'} transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${dead ? 'opacity-50' : ''} ${dragOverIdx === originalIdx && dragIdx !== null ? 'border-t-2 border-primary' : ''}`}
+      className={`group flex flex-col gap-0.5 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent cursor-pointer transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${dead ? 'opacity-50' : ''}`}
     >
       <div className="flex items-center gap-2">
-        <span className={`text-muted-foreground/40 ${canDrag ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'} select-none`}>⠿</span>
         {showStatusIndicators !== false && (
           <StatusDot
             tone={dead ? 'red' : isOpen ? 'green' : 'muted'}
@@ -396,7 +383,7 @@ export function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showH
         {!editing && canRename && (
           <IconTooltip label="rename"><Button variant="ghost" size="xs" className="px-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); startEdit(); }} aria-label="rename">✎</Button></IconTooltip>
         )}
-        <IconTooltip label={dead ? 'remove dead tab' : 'remove'}><button className={`px-1 text-sm active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded ${dead ? 'text-red-500 font-bold' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-red-500'}`} onClick={(e) => { e.stopPropagation(); onRemove(); }}>×</button></IconTooltip>
+        <IconTooltip label={dead ? 'remove dead pane' : 'close pane'}><button className={`px-1 text-sm active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded ${dead ? 'text-red-500 font-bold' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-red-500'}`} onClick={(e) => { e.stopPropagation(); onClose(); }}>×</button></IconTooltip>
       </div>
       {hasFiles && gitInfo?.files && (
         <div className="ml-6 flex flex-col gap-0.5">
@@ -420,14 +407,13 @@ export function OpenedChatRow({ id, c, isOpen, onOpen, onRemove, onRename, showH
       <ContextMenuContent>
         <ContextMenuItem onSelect={() => onOpen()}>Open</ContextMenuItem>
         {onSetNote && <ContextMenuItem onSelect={() => { setNoteVal(note || ''); setNoteEditing(true); }}>{note ? 'Edit note' : 'Add note'}</ContextMenuItem>}
-        {!dead && onHide && <ContextMenuItem onSelect={() => onHide()}>Hide</ContextMenuItem>}
         {!dead && onKill && (
           <ContextMenuItem onSelect={() => onKill()}>
             Kill session
           </ContextMenuItem>
         )}
         <ContextMenuSeparator />
-        <ContextMenuItem variant="destructive" onSelect={() => onRemove()}>Remove tab</ContextMenuItem>
+        <ContextMenuItem variant="destructive" onSelect={() => onClose()}>Close pane</ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
   );
