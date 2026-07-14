@@ -35,6 +35,26 @@ const DEFAULTS = {
   // drives the IDLE branch for manual tmux sessions, so all three
   // getHealthState call sites consume the same configured value. Default 30.
   healthCriticalThresholdMin: 30,
+  // Token-spend budget with threshold alerts (WARDEN-415). A meter without an
+  // alarm is half-finished: WARDEN-367 surfaces per-session + fleet token totals;
+  // these add the ALARM that routes human attention to a runaway/looping agent's
+  // cost. Fully human-in-the-loop — it NOTIFY (desktop + in-app toast), it never
+  // auto-kills/stops. Defaults: budget OFF (the human opts in via Settings).
+  //   tokenBudgetEnabled                 — master switch for the whole feature.
+  //   tokenBudgetThresholdTokens         — fleet-wide windowed threshold (the
+  //                                        "spent across active sessions" alarm).
+  //   tokenBudgetWindowHours             — rolling window (which SESSIONS count:
+  //                                        active in the last N hours). Each
+  //                                        contributes its FULL lifetime total
+  //                                        (reuses the existing meter, no new
+  //                                        transcript logic) — see budget.js.
+  //   tokenBudgetPerSessionThresholdTokens — per-session runaway threshold (catches
+  //                                        the SPECIFIC looping agent, not just
+  //                                        aggregate drift). null/0 disables it.
+  tokenBudgetEnabled: false,
+  tokenBudgetThresholdTokens: 2_000_000,
+  tokenBudgetWindowHours: 24,
+  tokenBudgetPerSessionThresholdTokens: 1_000_000,
   // Safety
   confirmDestructiveActions: true, // boolean - confirm before destructive kills (force-kill tmux session, kill chat)
   notifyChatOps: true,           // chat operations (session kill, chat kill, resume, rename)
