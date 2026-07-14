@@ -3,7 +3,7 @@ import { TriangleAlert, Bell, BellOff } from 'lucide-react';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { Button } from '@/components/ui/button';
 import { useAttentionRollup } from '@/lib/useAttentionRollup';
-import type { AttentionRollupOptions } from '@/lib/attentionRollup';
+import { rankAttention, type AttentionRollupOptions, type AttentionItem } from '@/lib/attentionRollup';
 import type { AttentionSeverityPrefs } from '@/lib/desktopAlerts';
 import type { AttentionAgent } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -90,6 +90,13 @@ export function AttentionBadge({
   // but an absent element is the least-noise zero state for an always-on header.)
   if (rollup.total === 0) return null;
 
+  // The directed answer (WARDEN-384): the ONE pane a human should go to first,
+  // "you're needed HERE, because X" — promoted above the flat rundown so the human
+  // doesn't have to scan to find "first." top is null only when no pane/health agent
+  // needs attention (e.g. just directives/errors counts remain), in which case the
+  // sectioned rundown alone is the directed answer.
+  const { top } = rankAttention(rollup);
+
   const { critical, warning, stuck, erroring, waiting, blocked, directives, errors, total } = rollup;
   // Severity cue: red when something is broken (critical/stuck/erroring agent or a
   // recent error), else amber (warnings / waiting / blocked / pending directives).
@@ -126,6 +133,11 @@ export function AttentionBadge({
           <TriangleAlert className={cn('size-3.5', tone)} />
           <span className="text-sm font-semibold">{total} need attention</span>
         </div>
+        {top && (
+          <div className="px-1.5 pt-1.5">
+            <Callout top={top} onClick={() => openChat(top.id)} />
+          </div>
+        )}
         {/*
           Bounded with max-h-* + overflow-y-auto (NOT Radix ScrollArea). The Radix
           Viewport is height:100%, which needs a *definite* ancestor height to resolve
@@ -313,4 +325,51 @@ function LinkRow({ label, dot, onClick }: { label: string; dot: string; onClick:
       <span className="text-xs text-muted-foreground">view →</span>
     </Button>
   );
+}
+
+/**
+ * Directed callout for the single ranked "you're needed HERE, because X" pane
+ * (WARDEN-384). Rendered once at the top of the popover, above the sectioned
+ * rundown, so a human with several panes needing attention sees the one to act on
+ * first without scanning. Clicking deep-links into the pane via the existing
+ * openChat — no new routing. Styled as a distinct headline (bordered + muted fill)
+ * so it reads as the answer, not another list row.
+ */
+function Callout({ top, onClick }: { top: AttentionItem; onClick: () => void }) {
+  // The "because X": the triggering signal when one flows (pane states), else a
+  // short human-readable fallback keyed off the state (health-group agents carry
+  // no signal line of their own).
+  const reason = top.signal || REASON_FALLBACK[top.state] || 'needs attention';
+  return (
+    <Button variant="ghost" onClick={onClick} className={cn(rowClass(), 'rounded-md border border-border bg-muted/40 py-2')}>
+      <span className={cn('size-2 rounded-full shrink-0 mt-0.5', dotForState(top.state))} aria-hidden />
+      <span className="min-w-0 flex-1">
+        <span className="text-xs text-foreground">
+          You&rsquo;re needed in <span className="font-semibold">{top.name}</span>
+        </span>
+        <span className="block truncate text-[10px] text-muted-foreground">{reason}</span>
+      </span>
+      <span className="text-xs text-muted-foreground shrink-0">open →</span>
+    </Button>
+  );
+}
+
+// State → short reason when no concrete `signal` is available. Phrased as the
+// "why it needs you" so the callout line always reads as a complete reason.
+const REASON_FALLBACK: Record<string, string> = {
+  waiting: 'waiting for your input',
+  erroring: 'emitting errors',
+  stuck: 'stuck in a loop',
+  critical: 'critical health',
+  blocked: 'blocked on another agent',
+  warning: 'needs attention',
+};
+
+// Callout urgency dot — red for live-failure / severe states, amber for the
+// "act on this" / mild ones, mirroring the rundown Section dots so the promoted
+// answer reads as part of the same attention system.
+function dotForState(state: string): string {
+  return state === 'erroring' || state === 'stuck' || state === 'critical'
+    ? 'bg-red-500'
+    : 'bg-yellow-500';
 }

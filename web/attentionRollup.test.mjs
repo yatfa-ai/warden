@@ -30,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-attention-test-'));
 const tmpFile = join(tmpDir, 'attentionRollup.mjs');
 writeFileSync(tmpFile, code);
-const { buildAttentionRollup, EMPTY_ATTENTION_ROLLUP } = await import(tmpFile);
+const { buildAttentionRollup, EMPTY_ATTENTION_ROLLUP, rankAttention } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -235,6 +235,87 @@ test('enabledStates does not touch the inactivity buckets (critical/warning unaf
     { enabledStates: { stuck: false, erroring: false, waiting: false, blocked: false } });
   assert.equal(r.critical.length, 1);
   assert.equal(r.total, 1);
+});
+
+console.log('\nrankAttention (WARDEN-384): flatten the rollup into ONE directed "you\'re needed HERE, because X" answer');
+test('top is the highest-urgency pane, ranked follows urgency', () => {
+  const r = roll(health(), stats(), [
+    stateRow('w1', 'waiting', { signal: 'press enter' }),
+    stateRow('s1', 'stuck', { signal: 'repeating line' }),
+  ]);
+  const { top, ranked } = rankAttention(r);
+  assert.equal(top.id, 'w1', 'waiting is highest urgency → top');
+  assert.equal(top.state, 'waiting');
+  assert.equal(top.signal, 'press enter', 'the concrete "because X" is carried through');
+  assert.deepEqual(ranked.map((x) => x.id), ['w1', 's1']);
+});
+test('a waiting-on-you pane ranks above a merely stuck one (even when stuck is listed first)', () => {
+  const r = roll(health(), stats(), [
+    stateRow('s1', 'stuck', { signal: 'repeating line' }),
+    stateRow('w1', 'waiting', { signal: 'please respond' }),
+  ]);
+  const { top } = rankAttention(r);
+  assert.equal(top.id, 'w1', 'waiting outranks stuck');
+  assert.notEqual(top.state, 'stuck');
+});
+test('an empty rollup (total 0) has no directed top', () => {
+  const { top, ranked } = rankAttention(roll(health(), stats()));
+  assert.equal(top, null);
+  assert.deepEqual(ranked, []);
+});
+test('EMPTY_ATTENTION_ROLLUP has no directed top', () => {
+  const { top } = rankAttention(EMPTY_ATTENTION_ROLLUP);
+  assert.equal(top, null);
+});
+test('a silenced state can never become top (silenced waiting → next-highest wins)', () => {
+  // waiting would normally win, but buildAttentionRollup silences it upstream (empty
+  // bucket), so the next-highest pane becomes the directed answer.
+  const r = roll(health(), stats(),
+    [stateRow('w1', 'waiting'), stateRow('s1', 'stuck')],
+    { enabledStates: { waiting: false } });
+  const { top } = rankAttention(r);
+  assert.equal(r.waiting.length, 0, 'waiting silenced upstream → empty bucket');
+  assert.notEqual(top.state, 'waiting');
+  assert.equal(top.id, 's1');
+});
+test('ties (same urgency tier) resolve in input order, deterministically', () => {
+  const r = roll(health(), stats(), [stateRow('w1', 'waiting'), stateRow('w2', 'waiting'), stateRow('w3', 'waiting')]);
+  const a = rankAttention(r);
+  const b = rankAttention(r);
+  assert.deepEqual(a.ranked.map((x) => x.id), ['w1', 'w2', 'w3'], 'same-tier order preserved');
+  assert.deepEqual(a.ranked, b.ranked, 'stable across calls');
+  assert.equal(a.top.id, 'w1');
+});
+test('below the waiting bias, the encoded precedence holds (erroring > stuck > blocked)', () => {
+  const r = roll(health(), stats(), [
+    stateRow('b1', 'blocked'), stateRow('s1', 'stuck'), stateRow('e1', 'erroring'),
+  ]);
+  const { ranked } = rankAttention(r);
+  assert.deepEqual(ranked.map((x) => x.state), ['erroring', 'stuck', 'blocked']);
+});
+test('health agents rank alongside pane states (stuck > critical > blocked > warning)', () => {
+  const r = roll(
+    health({ critical: [agent('c1')], warning: [agent('warn1')] }),
+    stats(),
+    [stateRow('b1', 'blocked'), stateRow('s1', 'stuck')],
+  );
+  const { ranked } = rankAttention(r);
+  assert.deepEqual(ranked.map((x) => x.id), ['s1', 'c1', 'b1', 'warn1']);
+});
+test('only directives/errors counts (no pane) → no directed top (counts have no pane to deep-link)', () => {
+  const r = roll(health(), stats({ directive_proposed: 3, error: 2 }));
+  assert.equal(r.total, 5);
+  const { top, ranked } = rankAttention(r);
+  assert.equal(top, null);
+  assert.deepEqual(ranked, []);
+});
+test('top identity uses key || id so the deep-link opens the correct pane', () => {
+  const r = roll(health(), stats(), [
+    stateRow('raw-id', 'waiting', { key: 'pane-key', name: 'My Agent', signal: 'hi' }),
+  ]);
+  const { top } = rankAttention(r);
+  assert.equal(top.id, 'pane-key', 'id is the key when present (matches the badge row keying)');
+  assert.equal(top.name, 'My Agent');
 });
 
 console.log(`\n✓ ATTENTION ROLLUP TESTS PASS (${passed})`);

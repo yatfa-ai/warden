@@ -1,15 +1,17 @@
 // Pure aggregator behind the always-visible header "Attention" badge (WARDEN-228),
 // extended in WARDEN-344 to also fold in rich pane states (stuck / erroring /
 // waiting / blocked) from /api/agent-states — the cases /api/health's inactivity-only
-// classification reads as "Healthy".
+// classification reads as "Healthy" — and in WARDEN-384 to RANK those buckets into a
+// single directed answer (rankAttention) so the badge promotes "you're needed HERE,
+// because X" instead of a flat rundown the human must scan.
 //
 // The badge surfaces — in one zero-click place — signals that already exist but are
 // scattered/buried: critical + warning fleet health, stuck/erroring/waiting/blocked
 // pane states, pending directives, and recent errors from the activity log. This
-// module only AGGREGATES; the fetching, cadence, and visibility-gating live in
-// useAttentionRollup. Keeping aggregation pure + dependency-free is what lets
-// attentionRollup.test.mjs load it directly (TS -> ESM via Vite's OXC transform) and
-// exercise the formula with plain objects.
+// module only AGGREGATES (+ ranks); the fetching, cadence, and visibility-gating
+// live in useAttentionRollup. Keeping aggregation pure + dependency-free is what
+// lets attentionRollup.test.mjs load it directly (TS -> ESM via Vite's OXC
+// transform) and exercise the formula with plain objects.
 //
 // `import type` is fully erased at transpile time, so the emitted module has no
 // runtime imports — the unit test can import it standalone.
@@ -115,4 +117,114 @@ export function buildAttentionRollup(
     critical.length + warning.length + directives + errors +
     stuck.length + erroring.length + waiting.length + blocked.length;
   return { critical, warning, stuck, erroring, waiting, blocked, directives, errors, total };
+}
+
+// ─── Directed ranking (Observer Intelligence roadmap WARDEN-8, Job #2) ────────
+//
+// buildAttentionRollup above is a flat bucket sum — with N panes needing attention
+// the human must open the popover, scan sections top→bottom, scan rows within each,
+// and mentally pick "where am I needed FIRST." rankAttention turns that rundown into
+// a single directed answer ("you're needed HERE, because X"): it flattens the
+// buckets into one urgency-ordered list and exposes the top item as the promoted
+// callout target. The sectioned rundown stays below it as the fallback for N>1.
+//
+// Like buildAttentionRollup this is PURE + dependency-free (only the `import type`
+// above, erased at transpile), so attentionRollup.test.mjs can exercise it
+// standalone alongside the existing aggregation cases.
+
+/**
+ * A single attention item flattened to the minimal shape the directed callout +
+ * ranked fallback need: identity (`key || id`, to deep-link the CORRECT pane —
+ * matches the badge's existing row keying), a display name, the attention `state`
+ * (a pane state, or a synthesized 'critical'/'warning' for health-group agents
+ * that carry no pane state of their own), and the `signal` line that explains WHY
+ * it needs attention (null for health-group agents, which have no triggering line).
+ */
+export interface AttentionItem {
+  id: string;
+  name?: string;
+  state: string;
+  signal?: string | null;
+}
+
+/**
+ * Urgency precedence for the directed callout — higher weight is picked first.
+ *
+ * The pane-state precedence already encoded in `agentState.js`'s `classifyPane` is
+ * `erroring > stuck > blocked > waiting` — but that decides which SINGLE state wins
+ * when ONE pane matches several. "Which of MANY panes to go to first" is a
+ * different question, so we start from that order and BIAS it: a pane WAITING on
+ * the human is the unique case where ONLY the human can unblock, so it is promoted
+ * to the very top — above even a live error/loop. That is the strongest "you're
+ * needed HERE" signal (a `waiting`-on-you pane ranks above a merely `stuck` one).
+ * `blocked` sinks: the agent depends on OTHER agents, so the human is not the sole
+ * unblocker. `critical`/`warning` health sit alongside, severe-but-less-actionable
+ * than a live failure with a visible signal.
+ */
+const ATTENTION_RANK: Record<string, number> = {
+  waiting: 100,
+  erroring: 90,
+  stuck: 80,
+  critical: 70,
+  blocked: 60,
+  warning: 50,
+};
+
+/**
+ * Flatten the rollup into a single directed answer + an urgency-ordered list.
+ *
+ * Returns `{ top, ranked }`:
+ *  - `top`    — the single highest-urgency deep-linkable item (the callout target),
+ *               or `null` when no pane/health agent needs attention (e.g. only
+ *               directives/errors counts remain — those have no single pane to
+ *               deep-link, so they cannot be the directed answer).
+ *  - `ranked` — every deep-linkable item, highest urgency first, for the sectioned
+ *               fallback rundown.
+ *
+ * `enabledStates` is already honored upstream by `buildAttentionRollup` (a silenced
+ * state's bucket is empty), so a silenced state can never become `top`. Ties (same
+ * precedence tier — e.g. several `waiting` panes) resolve in input order, since
+ * `Array#sort` is stable: the order `/api/agent-states` returned is preserved.
+ */
+export function rankAttention(rollup: AttentionRollup): {
+  top: AttentionItem | null;
+  ranked: AttentionItem[];
+} {
+  // Health-group agents (Chat) carry no pane state or signal of their own; tag them
+  // with a synthesized state so the callout can still phrase the reason. Pane-state
+  // rows (AgentStateRow) keep their real state + signal. Identity mirrors the badge's
+  // existing row keying (`a.key || a.id`) so the deep-link opens the correct pane.
+  const fromChat =
+    (state: string) =>
+    (a: Chat): AttentionItem => ({
+      id: a.key || a.id,
+      name: a.name || a.key || a.id,
+      state,
+      signal: null,
+    });
+  const fromRow = (a: AgentStateRow): AttentionItem => ({
+    id: a.key || a.id,
+    name: a.name || a.key || a.id,
+    state: a.state,
+    signal: a.signal ?? null,
+  });
+
+  // `directives`/`errors` are raw event counts with no single pane to deep-link, so
+  // they are excluded from the directed answer — they stay in the sectioned rundown.
+  // Items are seeded in precedence order so the stable sort below keeps same-tier
+  // ties deterministic even if a caller ever reorders the rollup's buckets.
+  const items: AttentionItem[] = [
+    ...rollup.waiting.map(fromRow),
+    ...rollup.erroring.map(fromRow),
+    ...rollup.stuck.map(fromRow),
+    ...rollup.critical.map(fromChat('critical')),
+    ...rollup.blocked.map(fromRow),
+    ...rollup.warning.map(fromChat('warning')),
+  ];
+
+  const ranked = items
+    .slice()
+    .sort((a, b) => (ATTENTION_RANK[b.state] ?? 0) - (ATTENTION_RANK[a.state] ?? 0));
+
+  return { top: ranked.length > 0 ? ranked[0] : null, ranked };
 }
