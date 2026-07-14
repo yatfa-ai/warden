@@ -24,6 +24,7 @@ import { type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type 
 import { hasWindowBridge } from '@/lib/electron';
 import { requestAlertPermission } from '@/lib/desktopAlerts';
 import { putJson } from '@/lib/api';
+import { resolvePollIntervalMs } from '@/lib/pollInterval';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 
@@ -943,18 +944,21 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                 </div>
 
                 <div className="flex flex-col gap-2">
-                  <Label htmlFor="pollIntervalMs">Poll Interval (ms)</Label>
+                  <Label htmlFor="pollIntervalMs">Dashboard Refresh Interval (ms)</Label>
                   <Input
                     id="pollIntervalMs"
                     type="number"
-                    min="500"
-                    max="10000"
-                    step="100"
-                    value={config.pollIntervalMs}
+                    min="10000"
+                    max="120000"
+                    step="5000"
+                    value={resolvePollIntervalMs(config.pollIntervalMs)}
                     onChange={(e) =>
                       setConfig({ ...config, pollIntervalMs: parseInt(e.target.value) || 1500 })
                     }
                   />
+                  <p className="text-xs text-muted-foreground">
+                    How often the dashboard auto-refreshes — re-pulls the chat catalog, re-checks engaged hosts for live status, and re-checks host connectivity. Range 10000–120000ms (10s–2min). The dashboard enforces a 10s minimum and reverts any smaller value (including the 1500ms CLI default) to 60s, so the value shown is the cadence you get. The CLI reads the raw value directly for its watch mode (default 1500ms). Backgrounded tabs still skip ticks.
+                  </p>
                 </div>
 
                 <div className="flex flex-col gap-2">
