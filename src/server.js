@@ -24,7 +24,7 @@ import { buildSnapshot, diffLifecycles } from './lifecycle.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { classifyPane, stripAnsi } from './agentState.js';
 import { checkHost } from './hostStatus.js';
-import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, isDetachedHead, normalizeHeadSha, parseUpstream, buildDockerGitArgv } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, buildDockerGitArgv } from './gitStatus.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = load();
@@ -1427,7 +1427,7 @@ app.get('/api/git-status', async (req, res) => {
 
   try {
     const cwd = gitCwd(chat);
-    if (!cwd) return res.json({ branch: null, detached: false, headSha: null, clean: null, cwd: '', ahead: null, behind: null, upstream: null, inProgress: { operation: null }, stashCount: null, files: null, error: 'no cwd' });
+    if (!cwd) return res.json({ branch: null, detached: false, headSha: null, clean: null, cwd: '', ahead: null, behind: null, upstream: null, inProgress: { operation: null }, stashCount: null, diffstat: null, files: null, error: 'no cwd' });
 
     // branch / status / ahead-behind / detached / stash all run via runGit: argv
     // (no shell) for the LOCAL transports, ssh for the remote ones — and for yatfa
@@ -1492,6 +1492,21 @@ app.get('/api/git-status', async (req, res) => {
     const stashR = await runGit(chat, ['stash', 'list'], cwd);
     const stashCount = parseStashCount(stashR.ok ? stashR.stdout : '');
 
+    // Working-tree WIP magnitude (WARDEN-411): `git diff HEAD --shortstat` prints
+    // a one-line "N files changed, N insertions(+), N deletions(-)" summary of the
+    // combined (staged + unstaged) edits vs HEAD. Where stashCount surfaces PARKED
+    // work and the porcelain file list surfaces WHICH files are dirty, this surfaces
+    // HOW MUCH — a 4-file WIP could be four one-line tweaks or a 1000-line rewrite,
+    // and this is the only signal that distinguishes them at a glance. Read-only
+    // (the withdrawn WARDEN-199 branch-switch slice is the cautionary tale; this
+    // stays on the read side). Same runGit transport as the probes above, so it runs
+    // inside yatfa containers via `docker exec … git -C <cwd>` too (WARDEN-235).
+    // parseDiffStat nulls empty/garbage (incl. a clean tree and an all-untracked
+    // WIP — `git diff HEAD` counts tracked edits only); the `branch` gate keeps
+    // non-git/detached consistent with stashCount.
+    const diffstatR = await runGit(chat, ['diff', 'HEAD', '--shortstat'], cwd);
+    const diffstat = parseDiffStat(diffstatR.ok ? diffstatR.stdout : '');
+
     res.json({
       branch: branch || null,
       // detached: true only inside a real repo whose HEAD is not on a branch.
@@ -1514,11 +1529,15 @@ app.get('/api/git-status', async (req, res) => {
       upstream: branch ? upstream : null,
       inProgress: { operation: branch ? inProgressOp : null },
       stashCount: branch ? stashCount : null,
+      // diffstat: net insertions/deletions of the working-tree edits vs HEAD
+      // (WARDEN-411), or null for a clean / non-git / detached repo. Gated on
+      // `branch` like stashCount; parseDiffStat already nulls an all-untracked WIP.
+      diffstat: branch ? diffstat : null,
       files: branch ? files : null,
       error: null,
     });
   } catch (e) {
-    res.json({ branch: null, detached: false, headSha: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, upstream: null, inProgress: { operation: null }, stashCount: null, files: null, error: e.message });
+    res.json({ branch: null, detached: false, headSha: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, upstream: null, inProgress: { operation: null }, stashCount: null, diffstat: null, files: null, error: e.message });
   }
 });
 

@@ -18,7 +18,7 @@ import { displayName } from '@/lib/chatDisplay';
 import { type ProjectGitAgent, type FileCollision } from '@/lib/gitStateSummary';
 import { formatWhatsNewLine, type WhatsNewSummary } from '@/lib/whatsNew';
 import type { Chat } from '@/lib/types';
-import type { GitCommit, GitFile, GitStash } from './types';
+import type { GitCommit, GitFile, GitStash, DiffStat } from './types';
 
 /**
  * Color the porcelain X/Y columns for one changed file (WARDEN-369). Working-tree
@@ -133,6 +133,26 @@ export function GitChangedFile({ file, onOpen }: { file: GitFile; onOpen?: (path
   }
   return (
     <span className="flex items-center gap-1 text-[10px] text-muted-foreground">{content}</span>
+  );
+}
+
+/**
+ * A compact `+N −M` magnitude chip for an agent's uncommitted working-tree edits
+ * (insertions/deletions from `git diff HEAD --shortstat`). Renders NOTHING for a
+ * clean tree or an all-untracked WIP: `--shortstat` counts TRACKED (staged +
+ * unstaged) edits only, so a purely-untracked WIP yields +0−0 which would read as
+ * "nothing changed" (a lie) — untracked adds keep speaking through the existing
+ * file count. Reuses the badge's green-add / red-del color language (WARDEN-411).
+ */
+export function DiffStatChip({ diffstat, className }: { diffstat?: DiffStat | null; className?: string }) {
+  if (!diffstat) return null;
+  // The all-untracked guard: no tracked edits → render nothing, not +0−0.
+  if (diffstat.insertions === 0 && diffstat.deletions === 0) return null;
+  return (
+    <span className={cn('inline-flex items-center gap-1 font-mono text-[10px]', className)}>
+      <span className="text-green-400">+{diffstat.insertions}</span>
+      <span className="text-red-400">−{diffstat.deletions}</span>
+    </span>
   );
 }
 
@@ -516,7 +536,7 @@ function CommitMessage({ message }: { message?: string }) {
 // to document.body via Radix Popover so it isn't clipped by the `truncate` name span
 // this badge sits inside (in ChatRow). stopPropagation on clicks keeps it from also
 // opening the chat pane (mirrors the other inline buttons in these rows).
-export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, inProgress, stashCount, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, detached, headSha, upstream, className }: {
+export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, inProgress, stashCount, diffstat, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, detached, headSha, upstream, className }: {
   branch: string;
   clean: boolean | null;
   commits?: GitCommit[];
@@ -527,6 +547,11 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   chatId: string;
   inProgress?: { operation: string | null };
   stashCount?: number | null;
+  // WARDEN-411: net insertions/deletions of the working-tree edits vs HEAD, or
+  // null when clean/unavailable. Surfaced in the badge tooltip so a hover shows
+  // the magnitude alongside the ± dirty glyph; the on-surface glyph stays a bare
+  // ± to avoid cluttering the already-dense badge (the chip lives in the file list).
+  diffstat?: DiffStat | null;
   // WARDEN-225: the "behind" half — commits @{u} has that HEAD doesn't. Lazily
   // fetched on open when behindCount > 0, with its own cache/loader so it refreshes
   // independently of the local recent-commits list. Explorable (WARDEN-348): each row
@@ -587,7 +612,12 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
     else titleParts.push('no remote tracking — local-only, not backed up');
   }
   if (operation) titleParts.push(`${operation} in progress`);
-  if (clean === false) titleParts.push('uncommitted changes');
+  if (clean === false) {
+    // WARDEN-411: fold the magnitude into the dirty tooltip so a hover distinguishes
+    // a 4-line WIP from a 1000-line rewrite without expanding the file list.
+    const mag = diffstat && diffstat.insertions + diffstat.deletions > 0 ? ` (+${diffstat.insertions} −${diffstat.deletions})` : '';
+    titleParts.push(`uncommitted changes${mag}`);
+  }
   if (stashN > 0) titleParts.push(`${stashN} stashed`);
   if (!isDetached && aheadCount > 0) titleParts.push(`${aheadCount} unpushed`);
   if (!isDetached && behindCount > 0) titleParts.push(`${behindCount} behind remote`);
@@ -988,9 +1018,13 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
  * row opens the per-file DiffViewer exactly like the inline list does. Rendered
  * portaled via Radix so it isn't clipped by the row's `truncate` name span.
  */
-function WhatsNewPopoverContent({ summary, files, onOpenDiff }: {
+function WhatsNewPopoverContent({ summary, files, diffstat, onOpenDiff }: {
   summary: WhatsNewSummary;
   files?: GitFile[];
+  // WARDEN-411: working-tree edit magnitude (insertions/deletions), rendered as a
+  // +N −M chip in the working-tree header. null/zero (clean or all-untracked WIP)
+  // → DiffStatChip renders nothing.
+  diffstat?: DiffStat | null;
   onOpenDiff?: (path: string, staged?: boolean) => void;
 }) {
   const line = formatWhatsNewLine(summary);
@@ -1033,8 +1067,12 @@ function WhatsNewPopoverContent({ summary, files, onOpenDiff }: {
       )}
       {hasFiles && files && (
         <div className={summary.newCommits.length > 0 ? 'mt-1 border-t border-border pt-1' : ''}>
-          <div className="px-0.5 pb-0.5 text-[10px] uppercase tracking-wider text-muted-foreground/70">
-            ± working-tree changes · {files.length}
+          <div className="px-0.5 pb-0.5 flex items-center gap-1 text-[10px] uppercase tracking-wider text-muted-foreground/70">
+            <span>± working-tree changes · {files.length}</span>
+            {/* WARDEN-411: the "and how much" extension — magnitude chip alongside
+                the file count. tracking-normal/normal-case shed the header's
+                uppercase+wide-tracking so the +N −M reads as a clean diffstat. */}
+            <DiffStatChip diffstat={diffstat} className="tracking-normal normal-case" />
           </div>
           <div className="flex flex-col gap-0.5">
             {files.map((file, i) => (
@@ -1058,12 +1096,15 @@ function WhatsNewPopoverContent({ summary, files, onOpenDiff }: {
  * no progress since the last visit (the caller passes the precomputed summary +
  * `since`; this double-checks the gate so a stale call site can't paint a "0").
  */
-export function WhatsNewMarker({ summary, since, files, onOpenDiff }: {
+export function WhatsNewMarker({ summary, since, files, diffstat, onOpenDiff }: {
   summary: WhatsNewSummary;
   // The raw lastSeen epoch (null = never visited). Used both to gate visibility
   // and to anchor the tooltip's "since your last visit" framing.
   since: number | null;
   files?: GitFile[];
+  // WARDEN-411: working-tree edit magnitude, passed through to the catch-up
+  // popover's working-tree header chip.
+  diffstat?: DiffStat | null;
   onOpenDiff?: (path: string, staged?: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -1091,7 +1132,7 @@ export function WhatsNewMarker({ summary, since, files, onOpenDiff }: {
         </button>
       </RadixPopover.Trigger>
       <RadixPopover.Portal>
-        <WhatsNewPopoverContent summary={summary} files={files} onOpenDiff={onOpenDiff} />
+        <WhatsNewPopoverContent summary={summary} files={files} diffstat={diffstat} onOpenDiff={onOpenDiff} />
       </RadixPopover.Portal>
     </RadixPopover.Root>
   );

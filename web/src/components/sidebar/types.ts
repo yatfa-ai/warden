@@ -46,3 +46,22 @@ export interface GitFile {
   worktree?: string;
   conflict?: boolean;
 }
+
+// Net insertions/deletions of an agent's uncommitted working-tree edits, parsed
+// from `git diff HEAD --shortstat` (the "N files changed, N insertions(+), N
+// deletions(-)" summary line). Additive field on /api/git-status alongside the
+// porcelain file list — WHERE stashCount/files show PARKED work / WHICH files are
+// dirty, this shows HOW MUCH (a 4-file WIP could be four one-line tweaks or a
+// 1000-line rewrite). null when the tree matches HEAD or the stat is unavailable
+// (WARDEN-411).
+//
+// CAVEAT: counts TRACKED (staged + unstaged) edits vs HEAD only — a purely-
+// UNTRACKED new file (`??` in porcelain) contributes to the file list but NOT to
+// these numbers (GitHub/gitk behave identically). The chip must therefore render
+// only when `insertions + deletions > 0` so an all-untracked WIP shows no
+// misleading `+0 −0`; untracked adds keep speaking through the existing file count.
+export interface DiffStat {
+  files: number;
+  insertions: number;
+  deletions: number;
+}

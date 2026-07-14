@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, isConflictStatus, isDetachedHead, normalizeHeadSha, parseUpstream, buildDockerGitArgv } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseDiffStat, isConflictStatus, isDetachedHead, normalizeHeadSha, parseUpstream, buildDockerGitArgv } from './gitStatus.js';
 
 describe('parseGitStatusPorcelain', () => {
   it('parses the most common case: unstaged modification as the FIRST file', () => {
@@ -532,6 +532,93 @@ describe('parseStashList', () => {
     assert.deepEqual(parseStashList('stash@{0}|WIP on main: msg|1 hour ago\r\n'), [
       { ref: 'stash@{0}', subject: 'WIP on main: msg', date: '1 hour ago' },
     ]);
+  });
+});
+
+describe('parseDiffStat', () => {
+  // `git diff HEAD --shortstat` prints a one-line summary of the combined
+  // (staged + unstaged) edits vs HEAD. The insertions/deletions halves are
+  // optional and the singular form drops the trailing "s". When the tree matches
+  // HEAD git prints nothing → null, so a clean tree (and an all-untracked WIP —
+  // `git diff HEAD` counts tracked edits only) renders no stat (WARDEN-411).
+
+  it('parses a full "files changed, insertions, deletions" line', () => {
+    // A big WIP — exactly the case the file count alone can't distinguish from
+    // four one-line tweaks.
+    assert.deepEqual(parseDiffStat(' 3 files changed, 847 insertions(+), 203 deletions(-)\n'), {
+      files: 3, insertions: 847, deletions: 203,
+    });
+  });
+
+  it('parses an insertions-only line (deletions absent → 0)', () => {
+    assert.deepEqual(parseDiffStat(' 1 file changed, 5 insertions(+)\n'), {
+      files: 1, insertions: 5, deletions: 0,
+    });
+  });
+
+  it('parses a deletions-only line (insertions absent → 0)', () => {
+    assert.deepEqual(parseDiffStat(' 2 files changed, 9 deletions(-)\n'), {
+      files: 2, insertions: 0, deletions: 9,
+    });
+  });
+
+  it('parses the singular "1 file changed" form', () => {
+    assert.deepEqual(parseDiffStat(' 1 file changed, 1 insertion(+), 1 deletion(-)\n'), {
+      files: 1, insertions: 1, deletions: 1,
+    });
+  });
+
+  it('parses a large multi-file rewrite', () => {
+    assert.deepEqual(parseDiffStat(' 42 files changed, 12034 insertions(+), 891 deletions(-)\n'), {
+      files: 42, insertions: 12034, deletions: 891,
+    });
+  });
+
+  it('returns null for empty output (clean tree / all-untracked WIP)', () => {
+    // git prints nothing when the tree matches HEAD, and also nothing for a tree
+    // with ONLY untracked files (tracked edits only) — both must null, never +0−0.
+    assert.equal(parseDiffStat(''), null);
+  });
+
+  it('treats whitespace-only output as null', () => {
+    assert.equal(parseDiffStat('   \n  \n'), null);
+  });
+
+  it('handles undefined / null input without throwing', () => {
+    assert.equal(parseDiffStat(undefined), null);
+    assert.equal(parseDiffStat(null), null);
+  });
+
+  it('returns null for garbage / unrelated output', () => {
+    // No recognizable clause → null, not a {0,0,0} lie (mirrors parseAheadBehind).
+    assert.equal(parseDiffStat('not a shortstat line'), null);
+    assert.equal(parseDiffStat('fatal: not a git repository'), null);
+    assert.equal(parseDiffStat('something changed somewhere'), null);
+  });
+
+  it('tolerates leading/trailing whitespace and no trailing newline', () => {
+    assert.deepEqual(parseDiffStat('  3 files changed, 847 insertions(+), 203 deletions(-)  '), {
+      files: 3, insertions: 847, deletions: 203,
+    });
+  });
+
+  it('tolerates CRLF line endings (e.g. over SSH)', () => {
+    assert.deepEqual(parseDiffStat(' 3 files changed, 847 insertions(+), 203 deletions(-)\r\n'), {
+      files: 3, insertions: 847, deletions: 203,
+    });
+  });
+
+  it('tolerates collapsed/internal whitespace variations', () => {
+    // Defensive: git's format is stable, but be tolerant of odd spacing.
+    assert.deepEqual(parseDiffStat('3 files changed,847 insertions(+),203 deletions(-)'), {
+      files: 3, insertions: 847, deletions: 203,
+    });
+  });
+
+  it('accepts a Buffer input', () => {
+    assert.deepEqual(parseDiffStat(Buffer.from(' 3 files changed, 847 insertions(+), 203 deletions(-)\n')), {
+      files: 3, insertions: 847, deletions: 203,
+    });
   });
 });
 

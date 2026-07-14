@@ -239,6 +239,50 @@ export function parseStashCount(output) {
 }
 
 /**
+ * Parse `git diff HEAD --shortstat` output into
+ * `{ files, insertions, deletions }`, or `null` when the tree matches HEAD.
+ *
+ * `--shortstat` prints a single summary line for the combined (staged +
+ * unstaged) changes vs HEAD:
+ *
+ *   " 3 files changed, 847 insertions(+), 203 deletions(-)"
+ *
+ * The insertions/deletions halves are OPTIONAL — an insertions-only change omits
+ * the deletions half and vice versa, and the singular form drops the trailing
+ * "s" ("1 file changed, 1 insertion(+)", "1 file changed, 1 deletion(-)"). When
+ * the working tree matches HEAD git prints NOTHING (a clean tree, OR a tree with
+ * ONLY untracked files — `git diff HEAD` counts tracked edits only), so
+ * empty/garbage/clean input returns `null`, never throwing — same discipline as
+ * `parseAheadBehind` / `parseStashCount`. The return shape is additive so the
+ * frontend can render a compact `+N −M` magnitude chip (WARDEN-411).
+ *
+ * RENDERING CAVEAT (WARDEN-411): the line stat counts TRACKED (staged + unstaged)
+ * edits vs HEAD. A purely-UNTRACKED new file (`??` in porcelain) contributes to
+ * the porcelain file list but NOT to these numbers (GitHub/gitk behave
+ * identically). The frontend therefore ties the chip to `insertions + deletions
+ * > 0` so an all-untracked WIP renders no misleading `+0 −0` — untracked adds
+ * keep speaking through the existing file count.
+ *
+ * @param {string|Buffer|undefined} output - Raw stdout from `git diff HEAD --shortstat`.
+ * @returns {{ files: number, insertions: number, deletions: number } | null}
+ */
+export function parseDiffStat(output) {
+  const raw = (output ?? '').toString().trim();
+  if (!raw) return null;
+  const files = raw.match(/(\d+)\s+files?\s+changed/);
+  const insertions = raw.match(/(\d+)\s+insertions?\(\+\)/);
+  const deletions = raw.match(/(\d+)\s+deletions?\(-\)/);
+  // Require at least one recognizable clause so arbitrary garbage → null (mirrors
+  // parseAheadBehind's rejection of malformed input) rather than a {0,0,0} lie.
+  if (!files && !insertions && !deletions) return null;
+  return {
+    files: files ? parseInt(files[1], 10) : 0,
+    insertions: insertions ? parseInt(insertions[1], 10) : 0,
+    deletions: deletions ? parseInt(deletions[1], 10) : 0,
+  };
+}
+
+/**
  * Build the local (host) argv to run `git -C <cwd> <args>` INSIDE a yatfa
  * container via `docker exec`. The in-container cwd is passed to git with `-C`
  * (not a shell `cd`) so there is NO shell and therefore NO injection surface:
