@@ -7,6 +7,13 @@ import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState } from '@/components/EmptyState';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 import { NewChatForm } from './NewChatForm';
 import { CollectionsSection } from './CollectionsSection';
 import { CreateCollectionDialog } from './CreateCollectionDialog';
@@ -14,6 +21,7 @@ import { BroadcastDialog } from './BroadcastDialog';
 import { KillDialog } from './KillDialog';
 import { summarizeBroadcast, formatBroadcastToast } from '@/lib/broadcast';
 import { formatKillToast, runKillFanout } from '@/lib/kill';
+import { copyText } from '@/lib/clipboard';
 import { DiffViewer } from './DiffViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { loadUi, saveUi, RECENTLY_CLOSED_PREVIEW, type Snippet, type RecentlyClosedEntry } from '@/lib/storage';
@@ -602,35 +610,61 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
   // summary so the two stay identical — expanding the summary reveals the exact
   // same rows (the WARDEN-178 colorblind-safe StatusDot, incl. offline=square,
   // + retry/inspect still works via enterHost).
+  // WARDEN-419: clipboard helper for the host-row context menu. Mirrors the
+  // handleCopy pattern shipped in CollectionsSection (WARDEN-396): the
+  // Electron-safe copyText() (Clipboard API + execCommand fallback) + a toast
+  // so the user sees the copy landed.
+  const handleCopy = async (text: string) => {
+    const ok = await copyText(text);
+    if (ok) toast.success('Copied');
+    else toast.error('Copy failed');
+  };
+
   const renderHost = (h: string) => {
     const n = chats.filter((c) => c.host === h && c.active).length;
     const hostStatus = hostStatuses[h];
+    // THIS_MACHINE ("this machine" / local) has no SSH address, so its menu
+    // omits "Copy SSH address"; "Copy host name" copies the friendly label.
+    const isLocal = h === THIS_MACHINE;
     return (
-      <button key={h} onClick={() => enterHost(h)} className="flex items-center gap-2 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 w-full transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background">
-        <StatusDot
-          tone={n ? 'green' : 'muted'}
-          variant={n ? 'solid' : 'ring'}
-          label={n ? `${n} active chat${n !== 1 ? 's' : ''}` : 'No active chats'}
-        />
-        <span className="flex-1 truncate">{LABEL[h] || h}</span>
-        {h === THIS_MACHINE && <span className="text-[10px] text-cyan-400">local</span>}
-        {h !== THIS_MACHINE && (
-          <StatusDot
-            tone={hostStatus?.status === 'online' ? 'green' : hostStatus?.status === 'offline' ? 'red' : 'gray'}
-            variant={hostStatus?.status === 'online' ? 'solid' : hostStatus?.status === 'offline' ? 'square' : 'ring'}
-            label={
-              hostStatus?.status === 'online'
-                ? `Online${hostStatus?.latency_ms ? ` (${hostStatus.latency_ms}ms)` : ''}`
-                : hostStatus?.status === 'offline' ? 'Offline' : 'Unknown'
-            }
-            title={hostStatus?.status === 'online' && hostStatus?.latency_ms ?
-              `${hostStatus.status} (${hostStatus.latency_ms}ms)` :
-              hostStatus?.status || 'unknown'}
-          />
-        )}
-        {n > 0 && <span className="text-[10px] text-muted-foreground">{n}</span>}
-        <span className="text-muted-foreground/60">›</span>
-      </button>
+      <ContextMenu key={h}>
+        <ContextMenuTrigger asChild>
+          <button onClick={() => enterHost(h)} className="flex items-center gap-2 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 w-full transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background">
+            <StatusDot
+              tone={n ? 'green' : 'muted'}
+              variant={n ? 'solid' : 'ring'}
+              label={n ? `${n} active chat${n !== 1 ? 's' : ''}` : 'No active chats'}
+            />
+            <span className="flex-1 truncate">{LABEL[h] || h}</span>
+            {isLocal && <span className="text-[10px] text-cyan-400">local</span>}
+            {!isLocal && (
+              <StatusDot
+                tone={hostStatus?.status === 'online' ? 'green' : hostStatus?.status === 'offline' ? 'red' : 'gray'}
+                variant={hostStatus?.status === 'online' ? 'solid' : hostStatus?.status === 'offline' ? 'square' : 'ring'}
+                label={
+                  hostStatus?.status === 'online'
+                    ? `Online${hostStatus?.latency_ms ? ` (${hostStatus.latency_ms}ms)` : ''}`
+                    : hostStatus?.status === 'offline' ? 'Offline' : 'Unknown'
+                }
+                title={hostStatus?.status === 'online' && hostStatus?.latency_ms ?
+                  `${hostStatus.status} (${hostStatus.latency_ms}ms)` :
+                  hostStatus?.status || 'unknown'}
+              />
+            )}
+            {n > 0 && <span className="text-[10px] text-muted-foreground">{n}</span>}
+            <span className="text-muted-foreground/60">›</span>
+          </button>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem onSelect={() => enterHost(h)}>Open</ContextMenuItem>
+          <ContextMenuItem onSelect={() => onDiscoverHost(h)}>Discover</ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem onSelect={() => handleCopy(LABEL[h] || h)}>Copy host name</ContextMenuItem>
+          {!isLocal && (
+            <ContextMenuItem onSelect={() => handleCopy(`ssh ${h}`)}>Copy SSH address</ContextMenuItem>
+          )}
+        </ContextMenuContent>
+      </ContextMenu>
     );
   };
 
