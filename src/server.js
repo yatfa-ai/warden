@@ -3337,9 +3337,12 @@ function restartBudgetPoll() {
 // `server` is exported so stream-lifecycle tests (src/server-stream-reattach.test.js)
 // can listen the SAME http server that streamWss's upgrade handler is bound to —
 // app.listen() would create a different server with no WS routing.
-// tickBudget is exported so src/budget.test.js can drive a single budget sweep
-// deterministically (the running server drives it off a 120s setInterval via
-// startBudgetPoll, which is far too slow for a test).
+// tickBudget is exported so src/server-budget.test.js can drive a single budget
+// sweep deterministically (the running server drives it off a 120s setInterval
+// via startBudgetPoll, which is far too slow for a test). That test exercises
+// the integration glue the pure src/budget.test.js suite cannot reach:
+// localClaudeSessions → computeBudgetState → this cache → /api/budget, including
+// the '(local)' host tag and the window filter over a planted transcript.
 export { app, tickLifecycle, tickBudget, server };
 
 export function startServer(port = 7421, host = '127.0.0.1') {

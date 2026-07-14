@@ -55,7 +55,7 @@ interface DiscoverItem {
   tokenUsage?: TokenUsage | null; // history: per-session LLM token total (WARDEN-367)
 }
 
-function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFormat }: { it: DiscoverItem; resumingId: string | null; onOpen: () => void; onResume: () => void; onView: () => void; timestampFormat: TimestampFormat; }) {
+function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFormat, isBudgetOffender }: { it: DiscoverItem; resumingId: string | null; onOpen: () => void; onResume: () => void; onView: () => void; timestampFormat: TimestampFormat; isBudgetOffender?: boolean; }) {
   if (it.kind === 'live') {
     return (
       <Button variant="ghost" onClick={onOpen} className="w-full h-auto justify-start gap-2 px-2 py-1.5 text-xs font-normal hover:bg-accent">
@@ -69,7 +69,7 @@ function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFo
   }
   const isLoading = resumingId === it.id;
   return (
-    <div className="group flex items-center gap-2 px-2 py-1.5 rounded-md text-xs hover:bg-accent transition-colors">
+    <div className={`group flex items-center gap-2 px-2 py-1.5 rounded-md text-xs hover:bg-accent transition-colors${isBudgetOffender ? ' ring-1 ring-red-500/50 bg-red-500/5' : ''}`}>
       <StatusDot tone="cyan" variant="ring" label="History session (resumable)" />
       <div className="flex-1 min-w-0">
         <Button variant="ghost" onClick={onResume} disabled={isLoading} className="h-auto w-full justify-start px-1 py-0 truncate text-xs font-normal">{it.label}</Button>
@@ -79,6 +79,11 @@ function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFo
       {it.tokenUsage?.total ? (
         <IconTooltip label="Total tokens this session consumed (input + output + cache). Model-agnostic — not dollar cost.">
           <span className="text-[10px] text-amber-500/80 shrink-0 tabular-nums">{formatTokens(it.tokenUsage.total)}</span>
+        </IconTooltip>
+      ) : null}
+      {isBudgetOffender ? (
+        <IconTooltip label="Budget breach — heaviest session in the alert window (the row the alert deep-linked here). An older, out-of-window session may sit above it because this list sorts by lifetime total.">
+          <span className="text-[10px] text-red-400 shrink-0 font-medium" aria-label="budget offender">⚑ offender</span>
         </IconTooltip>
       ) : null}
       <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span>
@@ -373,10 +378,18 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
         resume: { id: s.id, description: s.summary, cwd: s.cwd, host: s.host },
       });
     }
-    // Recency by default; when sortUsage is on, heavier token usage floats up
-    // (rows without usage sink but keep recency order as the tiebreak). Live
-    // sessions carry no tokenUsage, so under usage-sort they sit among the
+    // Recency by default; when sortUsage is on, heavier LIFETIME token usage
+    // floats up (rows without usage sink but keep recency order as the tiebreak).
+    // Live sessions carry no tokenUsage, so under usage-sort they sit among the
     // zero-usage rows by recency — an explicit trade for "heaviest first".
+    //
+    // WARDEN-415 conscious choice: this sort is window-AGNOSTIC (lifetime total),
+    // but the budget offender is the heaviest IN-WINDOW session — so an old,
+    // out-of-window session can land above it. Rather than sort by windowed
+    // spend (which the frontend can't compute — no per-turn timestamps), the
+    // offender row is marked with a ⚑ + red ring (isBudgetOffenderRow) so it is
+    // identifiable at any sort position. The human still lands in a heaviest-
+    // first view; the marker pins the exact row the alert pointed at.
     if (sortUsage) {
       out.sort((a, b) => {
         const d = (b.tokenUsage?.total || 0) - (a.tokenUsage?.total || 0);
@@ -398,6 +411,21 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
       return it.label.toLowerCase().includes(q) || it.sub.toLowerCase().includes(q);
     });
   }, [items, query]);
+
+  // The budget breach's heaviest in-window session (WARDEN-415). The alert's
+  // "View sessions" deep-link opens this page sorted by LIFETIME total
+  // (window-agnostic), so an old, out-of-window session with a larger lifetime
+  // total can float above the real offender. Marking the offender row (⚑ + red
+  // ring) makes it identifiable regardless of sort position — a conscious
+  // resolution of the in-window-vs-lifetime mismatch (true windowed spend would
+  // need per-turn timestamps the frontend doesn't carry; the backend's
+  // topOffender is the source of truth for "heaviest active session"). Only set
+  // while breached, and matched to history rows by id + host (the offender is
+  // always a resumable claude session). If the offender sits past the loaded
+  // page, "load more" reaches it — the marker then appears on it.
+  const budgetOffender = budget?.alerted ? (budget?.topOffender ?? null) : null;
+  const isBudgetOffenderRow = (it: DiscoverItem) =>
+    !!budgetOffender && !!it.resume && budgetOffender.id === it.resume.id && budgetOffender.host === it.resume.host;
 
   const handleResume = async (it: DiscoverItem) => {
     if (!it.resume || resumingId) return;
@@ -491,6 +519,7 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
                 onResume={() => handleResume(it)}
                 onView={() => { if (it.resume) setViewing({ id: it.resume.id, host: it.resume.host, label: it.label }); }}
                 timestampFormat={timestampFormat}
+                isBudgetOffender={isBudgetOffenderRow(it)}
               />
             ))
           )}

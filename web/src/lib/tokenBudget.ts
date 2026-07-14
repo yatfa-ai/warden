@@ -67,6 +67,27 @@ export function shouldFireBudgetAlert(prev: BudgetState | null, next: BudgetStat
   return !prev.alerted && next.alerted;
 }
 
+// The delivery channel a budget breach should use, given the human's presence
+// (tab visibility) and their opt-in to OS desktop alerts. The "no double fire"
+// visibility split (WARDEN-415) — the two live channels are MUTUALLY EXCLUSIVE
+// so a breach never fires both the sonner toast and the OS notification at the
+// same instant:
+//   - VISIBLE            → 'toast'    (the human is at Warden → in-app sonner only)
+//   - HIDDEN + opted-in  → 'desktop'  (the human stepped away → OS notification)
+//   - HIDDEN + not-opted → 'none'     (no channel now; useTokenBudget's focus-
+//                                      regain catch-up surfaces the toast on return)
+// A 'desktop'/'none' outcome leaves the in-app toast UN-shown, so the hook keeps
+// its "toast shown for this breach" flag false and the catch-up fires the toast
+// the moment the human returns — the at-Warden surfacing of the same crossing,
+// not a repeat of one already toasted while visible. Pure + dependency-free so
+// web/tokenBudget.test.mjs can pin the contract directly (mirrors
+// shouldFireBudgetAlert's testability).
+export type BudgetChannel = 'toast' | 'desktop' | 'none';
+export function pickBudgetChannel(visible: boolean, optedInDesktop: boolean): BudgetChannel {
+  if (visible) return 'toast';
+  return optedInDesktop ? 'desktop' : 'none';
+}
+
 // Pure: spent/threshold as a 0..1 fraction, clamped for a progress-bar width.
 // Returns 0 when there's no threshold (budget off / misconfigured) so the bar
 // renders empty rather than dividing by zero. The RAW ratio (which can exceed 1)

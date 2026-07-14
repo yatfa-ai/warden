@@ -29,6 +29,7 @@ const tmpFile = join(tmpDir, 'tokenBudget.mjs');
 writeFileSync(tmpFile, code);
 const {
   shouldFireBudgetAlert,
+  pickBudgetChannel,
   budgetProgress,
   budgetOverPercent,
   offenderHostLabel,
@@ -75,6 +76,31 @@ test('does NOT fire on recovery', () => {
 test('does NOT fire on first observation (baseline priming)', () => {
   assert.equal(shouldFireBudgetAlert(null, b({ alerted: true })), false);
   assert.equal(shouldFireBudgetAlert(b({ alerted: false }), null), false);
+});
+
+console.log('\npickBudgetChannel: the no-double-fire visibility split');
+test('VISIBLE → toast (the human is at Warden)', () => {
+  // Opted in or not, a visible tab always gets the in-app sonner — never desktop.
+  assert.equal(pickBudgetChannel(true, true), 'toast');
+  assert.equal(pickBudgetChannel(true, false), 'toast');
+});
+test('HIDDEN + opted-in → desktop (the human stepped away)', () => {
+  assert.equal(pickBudgetChannel(false, true), 'desktop');
+});
+test('HIDDEN + not-opted → none (deferred to the focus-regain catch-up)', () => {
+  // No channel fires now; useTokenBudget surfaces the toast on return instead.
+  assert.equal(pickBudgetChannel(false, false), 'none');
+});
+test('toast and desktop are mutually exclusive (never both at once)', () => {
+  // No (visible, optedIn) combination returns both channels — the split is the
+  // "no double fire" guarantee: an away human gets the OS notification, and the
+  // in-app toast is caught up on focus-regain, never fired alongside it.
+  for (const visible of [true, false]) {
+    for (const opted of [true, false]) {
+      const ch = pickBudgetChannel(visible, opted);
+      assert.ok(ch === 'toast' || ch === 'desktop' || ch === 'none', `bad channel ${ch}`);
+    }
+  }
 });
 
 console.log('\nbudgetProgress: clamped 0..1 bar fraction');

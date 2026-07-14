@@ -29,6 +29,7 @@ import {
   type BudgetState,
   EMPTY_BUDGET,
   shouldFireBudgetAlert,
+  pickBudgetChannel,
   formatBudgetMessageWith,
 } from '@/lib/tokenBudget';
 import { fireBudgetNotification } from '@/lib/desktopAlerts';
@@ -69,25 +70,39 @@ export function useTokenBudget(
   // primedRef: false until the first real observation lands (baseline).
   const primedRef = useRef(false);
   // shownForBreachRef: whether the CURRENT alerted stretch has already been
-  // surfaced (toast/desktop). Re-arms (false) only when the budget recovers, so
-  // a persistent breach never repeats and a fresh breach after recovery fires.
+  // surfaced as an in-app TOAST. Re-arms (false) only when the budget recovers,
+  // so a persistent breach never repeats the toast and a fresh breach after
+  // recovery fires. Stays false while only the desktop channel fired (hidden) so
+  // the focus-regain catch-up can surface the toast on return — the at-Warden
+  // view of the same crossing, not a repeat of one already toasted while visible.
   const shownForBreachRef = useRef(false);
 
-  const deliver = (b: BudgetState) => {
+  // Deliver a breach through exactly ONE channel, picked by pickBudgetChannel so
+  // the toast (visible) and the desktop notification (hidden + opted-in) never
+  // fire at the same instant. Returns whether the in-app TOAST fired — the caller
+  // records this in shownForBreachRef so the focus-regain catch-up surfaces a
+  // breach whose toast was suppressed while hidden (desktop or none) and skips
+  // one already toasted while visible.
+  const deliver = (b: BudgetState): boolean => {
     const { title, body } = formatBudgetMessageWith(b, formatTokens);
     const open = () => onOpenSessionsRef.current?.();
-    // In-app toast: the visible-channel surface. Single one-shot per crossing.
-    toast.warning(title, {
-      description: body,
-      duration: 12_000,
-      action: { label: 'View sessions', onClick: open },
-    });
-    // Desktop: the away-channel surface. Only when opted in AND hidden, so a
-    // human looking at Warden gets the toast alone (no double fire) and a human
-    // who stepped away gets the OS notification.
-    if (attentionDesktopAlerts && document.visibilityState === 'hidden') {
+    const channel = pickBudgetChannel(
+      document.visibilityState === 'visible',
+      attentionDesktopAlerts,
+    );
+    if (channel === 'toast') {
+      // In-app sonner: the visible-channel surface. Single one-shot per crossing.
+      toast.warning(title, {
+        description: body,
+        duration: 12_000,
+        action: { label: 'View sessions', onClick: open },
+      });
+    } else if (channel === 'desktop') {
+      // OS notification: the away-channel surface. The toast is deliberately
+      // suppressed here (hidden) and caught up on focus-regain instead.
       fireBudgetNotification(title, body, open);
     }
+    return channel === 'toast';
   };
 
   const fetchBudget = async () => {
@@ -115,16 +130,17 @@ export function useTokenBudget(
     // pre-existing breach at launch/reload IS surfaced once (the human just
     // opened Warden and a runaway is already burning; they should learn now,
     // unlike the attention system whose "While you were away" banner covers it).
+    // deliver returns whether the toast fired; if only the desktop channel fired
+    // (hidden), shownForBreachRef stays false so the catch-up surfaces the toast
+    // on focus-regain.
     if (!primedRef.current) {
       primedRef.current = true;
-      if (next.alerted) deliver(next);
-      shownForBreachRef.current = next.alerted;
+      if (next.alerted && deliver(next)) shownForBreachRef.current = true;
       prevRef.current = next;
       return;
     }
     if (shouldFireBudgetAlert(prev, next)) {
-      deliver(next);
-      shownForBreachRef.current = true;
+      if (deliver(next)) shownForBreachRef.current = true;
     }
     // Re-arm when recovered (both thresholds back under) so the next breach fires.
     if (!next.alerted) shownForBreachRef.current = false;
@@ -145,11 +161,14 @@ export function useTokenBudget(
     const onVisibility = () => {
       if (document.visibilityState !== 'visible') return;
       // Catch-up: a breach that crossed while away surfaces as a toast the
-      // moment the human returns (it would otherwise be silently one-shot past).
+      // moment the human returns. It would otherwise be silently one-shot past:
+      // while hidden the crossing fired only the desktop channel (or nothing,
+      // when not opted in), so shownForBreachRef is still false. Now visible,
+      // deliver picks the toast channel and records it shown — the at-Warden
+      // surfacing of the same crossing, never a repeat of one already toasted.
       const cur = prevRef.current;
       if (cur && cur.alerted && !shownForBreachRef.current) {
-        deliver(cur);
-        shownForBreachRef.current = true;
+        if (deliver(cur)) shownForBreachRef.current = true;
       }
       void fetchBudget();
     };
