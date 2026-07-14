@@ -671,6 +671,98 @@ export async function killSession(host, params, cfg = {}, opts = {}, deps = {}) 
 }
 
 
+// ------------------------------- resize / mouse ------------------------------
+// WARDEN-409 (slice 4 of roadmap WARDEN-270). The interactive-pane CONTROL-PLANE
+// tmux commands — `resize` (set-option window-size latest) and `mouse` (set -g
+// mouse off / show-options -g mouse) — are one-line request/response tmux-option
+// ops that fire on every pane OPEN (resize + mouse) and every in-session RESIZE
+// (resize again). Routing them over the persistent companion channel collapses
+// the per-open / per-resize SSH handshake the default runTmux path pays. The
+// bootstrap+channel are slice 1's, reused verbatim; this only adds the RPC clients.
+//
+// Unlike hasSession (which returns {host, ok, exists}), these return the SAME raw
+// {host, ok, code, stdout, stderr} shape — minus nothing runTmux produces — so
+// src/tmux.js maps them to the identical result the default path emits and
+// parseMouseState + the server.js best-effort call sites are unchanged. The
+// detect variant MUST carry stdout (the `mouse on`/`mouse off` text) so
+// parseMouseState reads it; the Go RPC returns it in result.stdout. Companion-or-
+// fail: NEVER falls back to raw SSH (opt out via WARDEN_COMPANION_TRANSPORT).
+
+// Map a successful RPC result ({ok, code, stdout, stderr} from the Go side) to
+// the raw runTmux-shaped envelope the control-plane clients return. Mirrors the
+// JS result shape runTmux/runLocalTmux produce (src/ssh.js): ok + code + stdout +
+// stderr, with `host` carried as the envelope convention every companion client
+// uses. Defensively defaults missing fields so a malformed result can never crash
+// a best-effort caller.
+function mapCmdResult(host, result) {
+  const r = result || {};
+  return {
+    host,
+    ok: !!r.ok,
+    code: typeof r.code === 'number' ? r.code : (r.ok ? 0 : -1),
+    stdout: r.stdout || '',
+    stderr: r.stderr || '',
+  };
+}
+
+// Map a thrown channel error (bootstrap/transport/RPC) to the raw-shaped envelope
+// with ok:false. A transport failure (host unreachable / channel died) and an RPC
+// error both surface as ok:false with the message on stderr — exactly what a
+// best-effort caller (disableMouse.detectMouse/resize, all wrapped in try/catch
+// or .catch at the server.js call sites) needs to swallow without distinguishing.
+function mapCmdError(host, e) {
+  let msg;
+  if (e instanceof CompanionTransportError) {
+    msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
+  } else if (e instanceof CompanionRpcError) {
+    msg = e.message;
+  } else {
+    msg = `companion op failed on ${host}: ${e?.message ?? e}`;
+  }
+  return { host, ok: false, code: -1, stdout: '', stderr: msg };
+}
+
+// resize() over the companion channel: runs `set-option -t <target> window-size
+// latest` host-side. Returns {host, ok, code, stdout, stderr} (the raw runTmux
+// shape) or {host, ok:false, code:-1, stderr} on ANY failure — it NEVER falls back
+// to raw SSH. The target falls back session → container → "agent", identical to
+// hasSession (companion.js) and src/chats.js. `container` is null for bare-tmux /
+// manual chats so the companion selects bare `tmux`.
+export async function resize(host, { container, session } = {}, cfg = {}, opts = {}, deps = {}) {
+  if (host === LOCAL) {
+    return { host, ok: false, code: -1, stdout: '', stderr: 'companion transport does not apply to the local host' };
+  }
+  try {
+    const channel = await getChannel(host, cfg, deps);
+    const target = session || container || 'agent';
+    const result = await channel.call('resize', { container: container || null, session: target }, { timeout: opts.timeout ?? 10000 });
+    return mapCmdResult(host, result);
+  } catch (e) {
+    return mapCmdError(host, e);
+  }
+}
+
+// mouse() over the companion channel: mode 'disable' runs `set -g mouse off`,
+// mode 'detect' runs `show-options -g mouse` (whose `mouse on`/`mouse off` stdout
+// comes back in result.stdout so the JS side's parseMouseState reads the identical
+// bytes the default runTmux path carries). Returns {host, ok, code, stdout, stderr}
+// (the raw runTmux shape) or {host, ok:false, code:-1, stderr} on ANY failure — it
+// NEVER falls back to raw SSH. `container` selects docker-exec vs bare tmux; there
+// is no session target (mouse is a server-global -g option).
+export async function mouse(host, { container, mode } = {}, cfg = {}, opts = {}, deps = {}) {
+  if (host === LOCAL) {
+    return { host, ok: false, code: -1, stdout: '', stderr: 'companion transport does not apply to the local host' };
+  }
+  try {
+    const channel = await getChannel(host, cfg, deps);
+    const result = await channel.call('mouse', { container: container || null, mode }, { timeout: opts.timeout ?? 10000 });
+    return mapCmdResult(host, result);
+  } catch (e) {
+    return mapCmdError(host, e);
+  }
+}
+
+
 // Pure model of per-tick ssh spawn cost, used by scripts/companion-benchmark.mjs
 // and unit-tested here (WARDEN-272 AC #5: "a spawn/handshake counter per discover
 // tick"). Mirrors the real transport:

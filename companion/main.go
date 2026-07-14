@@ -11,7 +11,7 @@
 //
 // Protocol (one JSON object per line):
 //
-//	request : {"id":<any-json>,"method":"ping"|"discover"|"capturePanes"|"hasSession","params":{...}}
+//	request : {"id":<any-json>,"method":"ping"|"discover"|"capturePanes"|"hasSession"|"resize"|"mouse","params":{...}}
 //	response: {"id":<echoed>,"ok":true,"result":{...}}
 //	          {"id":<echoed>,"ok":false,"error":"..."}
 //
@@ -22,6 +22,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -123,7 +124,7 @@ func main() {
 		case "ping":
 			write(Response{ID: req.ID, OK: true, Result: map[string]any{
 				"version": version,
-				"methods": []string{"ping", "discover", "capturePanes", "hasSession", "spawnSession", "killSession"},
+				"methods": []string{"ping", "discover", "capturePanes", "hasSession", "spawnSession", "killSession", "resize", "mouse"},
 			}})
 		case "discover":
 			containers, err := discover(req.Params)
@@ -162,6 +163,20 @@ func main() {
 			} else {
 				write(Response{ID: req.ID, OK: true, Result: map[string]any{}})
 			}
+		case "resize":
+			// resize is the interactive-pane control-plane op (WARDEN-409): runs
+			// `set-option -t <target> window-size latest` LOCALLY. It returns the
+			// raw cmdResult (ok/code/stdout/stderr), never an RPC error for a
+			// host-side command failure — same "never fails the RPC" shape as
+			// hasSession, only richer (it carries stdout/stderr/code so the JS side
+			// maps it to the identical runTmux result the default path produces).
+			write(Response{ID: req.ID, OK: true, Result: resize(req.Params)})
+		case "mouse":
+			// mouse is the seamless-copy control-plane op (WARDEN-409): disable runs
+			// `set -g mouse off`, detect runs `show-options -g mouse`. detect MUST
+			// capture stdout (the `mouse on`/`mouse off` text) so the JS side can
+			// feed parseMouseState — hence the raw cmdResult, not a {value} field.
+			write(Response{ID: req.ID, OK: true, Result: mouse(req.Params)})
 		default:
 			write(Response{ID: req.ID, OK: false, Error: "unknown method: " + req.Method})
 		}
@@ -411,7 +426,7 @@ func stripSentinel(line, prefix string) (key string, ok bool) {
 	if !strings.HasPrefix(line, prefix) || !strings.HasSuffix(line, suffix) {
 		return "", false
 	}
-	k := line[len(prefix):len(line)-len(suffix)]
+	k := line[len(prefix) : len(line)-len(suffix)]
 	if k == "" {
 		return "", false
 	}
@@ -497,11 +512,11 @@ func capturePanes(params json.RawMessage) (map[string]string, error) {
 
 // hasSession is the liveness-probe RPC. It runs `tmux has-session -t <target>`
 // LOCALLY on the host using the IDENTICAL docker-exec/bare-tmux selection as
-// buildCaptureScript (main.go:253-277: `docker exec <container> tmux` when
-// container is set, else bare `tmux`). The target falls back session → container
-// → "agent" (same fallback chain as capturePanes). has-session exits 0 only when
-// the session exists, so exists = (exit 0). `bash -lc` mirrors capturePanes /
-// the default runWithPool path so docker and tmux resolve on PATH identically.
+// buildCaptureScript (tmuxCmdFor: `docker exec <container> tmux` when container
+// is set, else bare `tmux`). The target falls back session → container → "agent"
+// (same fallback chain as capturePanes). has-session exits 0 only when the
+// session exists, so exists = (exit 0). `bash -lc` mirrors capturePanes / the
+// default runWithPool path so docker and tmux resolve on PATH identically.
 //
 // The result is returned as {ok:true, exists:<bool>}: the RPC itself never fails
 // (a host-side command failure — tmux missing, container absent — is simply
@@ -522,13 +537,7 @@ func hasSession(params json.RawMessage) (map[string]any, error) {
 	if target == "" {
 		target = "agent"
 	}
-	var tmuxCmd string
-	if p.Container != "" {
-		tmuxCmd = "docker exec " + shellQuote(p.Container) + " tmux"
-	} else {
-		tmuxCmd = "tmux"
-	}
-	script := tmuxCmd + " has-session -t " + shellQuote(target)
+	script := tmuxCmdFor(p.Container) + " has-session -t " + shellQuote(target)
 	err := exec.Command("bash", "-lc", script).Run()
 	return map[string]any{"exists": err == nil}, nil
 }
@@ -562,12 +571,43 @@ type killSessionParams struct {
 	Session   string `json:"session"`
 }
 
-// tmuxPrefix reproduces the docker-exec vs bare-tmux selection from
-// buildCaptureScript (and src/ssh.js runTmux's prefix): `docker exec <container>
-// tmux` when a container is set, else bare `tmux` — so both yatfa (container set)
-// and manual (bare-tmux) chats work through the companion. The container is
-// shell-quoted (byte-identical to buildCaptureScript / ssh.js shellQuote).
-func tmuxPrefix(container string) string {
+// ------------------------------- resize / mouse ------------------------------
+// WARDEN-409 (slice 4 of roadmap WARDEN-270). The interactive-pane CONTROL-PLANE
+// tmux commands — `resize` (set-option window-size latest) and `mouse` (set -g
+// mouse off / show-options -g mouse) — are one-line request/response tmux-option
+// ops that fire on every pane OPEN (resize + mouse) and every in-session RESIZE
+// (resize again). Routing them over the persistent companion channel collapses
+// the per-open / per-resize SSH handshake the default runTmux path pays — after
+// this slice the ONLY remaining raw-SSH path on the attach flow is the live
+// interactive PTY itself (the roadmap's separate open question). The bootstrap+
+// channel are slice 1's, reused verbatim; this only adds the two RPCs.
+//
+// Unlike hasSession (which returns only {exists} and captures no stdout), these
+// return the RAW cmdResult {ok, code, stdout, stderr} — the same shape runTmux
+// produces — so the JS side maps them to the identical result the default path
+// emits and parseMouseState + the server.js best-effort call sites are unchanged.
+// The detect variant in particular MUST carry stdout (the `mouse on`/`mouse off`
+// text) so parseMouseState can read it.
+
+// cmdResult is the raw {ok, code, stdout, stderr} shape src/ssh.js runTmux /
+// runLocalTmux produce. The control-plane RPCs (resize/mouse) return it verbatim
+// so the JS clients can feed it straight back as the runTmux result (the
+// "both paths agree by construction" parity contract). Mirrors the JS result
+// shape, not the {exists}/{panes} domain envelopes the other RPCs use.
+type cmdResult struct {
+	OK     bool   `json:"ok"`
+	Code   int    `json:"code"`
+	Stdout string `json:"stdout"`
+	Stderr string `json:"stderr"`
+}
+
+// tmuxCmdFor builds the `docker exec <container> tmux` prefix (container set) or
+// bare `tmux` (bare-tmux / manual chat) — the IDENTICAL selection
+// buildCaptureScript makes per-pane (main.go buildCaptureScript). Shared by the
+// control-plane RPCs (resize/mouse), the lifecycle RPCs (spawnSession/killSession),
+// and hasSession so the docker-exec vs bare-tmux resolution lives once. The
+// container is shell-quoted (byte-identical to buildCaptureScript / ssh.js shellQuote).
+func tmuxCmdFor(container string) string {
 	if container != "" {
 		return "docker exec " + shellQuote(container) + " tmux"
 	}
@@ -617,7 +657,7 @@ func spawnSession(params json.RawMessage) error {
 	for i, a := range argv {
 		quoted[i] = shellQuote(a)
 	}
-	script := tmuxPrefix(p.Container) + " " + strings.Join(quoted, " ")
+	script := tmuxCmdFor(p.Container) + " " + strings.Join(quoted, " ")
 	_, err := exec.Command("bash", "-lc", script).Output()
 	if err != nil {
 		stderr := ""
@@ -648,7 +688,7 @@ func killSession(params json.RawMessage) error {
 		}
 	}
 	session := resolveSession(p.Session, p.Container)
-	script := tmuxPrefix(p.Container) + " kill-session -t " + shellQuote(session)
+	script := tmuxCmdFor(p.Container) + " kill-session -t " + shellQuote(session)
 	_, err := exec.Command("bash", "-lc", script).Output()
 	if err == nil {
 		return nil
@@ -672,4 +712,108 @@ func killSession(params json.RawMessage) error {
 		msg = err.Error()
 	}
 	return fmt.Errorf("killSession failed: %s", msg)
+}
+
+// runTmuxRaw runs a tmux command via `bash -lc` LOCALLY on the host (the per-op-
+// handshake win — no further ssh) and returns the raw {ok, code, stdout, stderr}
+// result. Unlike hasSession's `.Run()` (exit only), this captures BOTH streams so
+// the control-plane RPCs can return stdout — the detect variant needs it for
+// parseMouseState. `bash -lc` mirrors capturePanes / the default runWithPool path
+// so docker and tmux resolve on PATH exactly as they do over SSH today.
+func runTmuxRaw(script string) cmdResult {
+	cmd := exec.Command("bash", "-lc", script)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	code := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			code = exitErr.ExitCode()
+		} else {
+			code = -1 // spawn-level failure (bash missing, etc.) — mirrors runTmux's -1
+		}
+	}
+	return cmdResult{OK: err == nil, Code: code, Stdout: stdout.String(), Stderr: stderr.String()}
+}
+
+// resizeParams is the resize RPC params (WARDEN-409). Container is the docker
+// container (empty for a bare-tmux / manual chat); Session is the tmux target,
+// falling back to Container then "agent" — identical to hasSession / capturePanes.
+// Both are JSON-serialized RPC params, never persisted fields.
+type resizeParams struct {
+	Container string `json:"container"`
+	Session   string `json:"session"`
+}
+
+// buildResizeScript builds the `set-option -t <target> window-size latest` command
+// the resize RPC runs host-side via bash -lc. <target> is shellQuoted and defaults
+// to "agent"; the docker-exec/bare-tmux prefix is selected by container. Byte-for-
+// byte identical to src/tmux.js resize() (the default runTmux path), so the
+// companion and default paths build the SAME command — the "both paths agree by
+// construction" parity contract. Exposed + tested directly (mirrors
+// buildCaptureScript / buildActivityScript).
+func buildResizeScript(container, target string) string {
+	if target == "" {
+		target = "agent"
+	}
+	return tmuxCmdFor(container) + " set-option -t " + shellQuote(target) + " window-size latest"
+}
+
+// buildMouseScript builds the seamless-copy mouse command the mouse RPC runs
+// host-side: detect → `show-options -g mouse` (whose `mouse on`/`mouse off` stdout
+// is captured and returned so the JS parseMouseState reads it), disable (or any
+// unrecognized mode) → `set -g mouse off`. Byte-for-byte identical to src/tmux.js
+// disableMouse() / detectMouse(). The docker-exec/bare-tmux prefix is selected by
+// container; there is no -t target because mouse is a server-global (-g) option.
+func buildMouseScript(container, mode string) string {
+	sub := "set -g mouse off"
+	if mode == "detect" {
+		sub = "show-options -g mouse"
+	}
+	return tmuxCmdFor(container) + " " + sub
+}
+
+// resize runs `set-option -t <target> window-size latest` LOCALLY via bash -lc,
+// mirroring src/tmux.js resize() byte-for-byte (window-size latest so tmux follows
+// whichever client is active; ConPTY's SIGWINCH then propagates through ssh →
+// tmux). Returns the raw cmdResult — never an RPC error for a host-side command
+// failure — so the JS side maps it to the identical runTmux result the default
+// path produces.
+func resize(params json.RawMessage) cmdResult {
+	var p resizeParams
+	if len(params) > 0 {
+		_ = json.Unmarshal(params, &p) // bad params → fall through to defaults
+	}
+	target := p.Session
+	if target == "" {
+		target = p.Container
+	}
+	return runTmuxRaw(buildResizeScript(p.Container, target))
+}
+
+// mouseParams is the seamless-copy mouse RPC params (WARDEN-409). Container
+// selects docker-exec vs bare tmux; Mode is "disable" (set -g mouse off) or
+// "detect" (show-options -g mouse). Unlike resize/hasSession there is no Session
+// target: `set`/`show-options -g` are SERVER-GLOBAL options (the `-g` flag), so
+// the command needs no `-t <target>` — matching src/tmux.js disableMouse /
+// detectMouse, which run `tmux set -g mouse off` / `tmux show-options -g mouse`
+// against the chat's tmux server (the docker-exec prefix selects WHICH server).
+type mouseParams struct {
+	Container string `json:"container"`
+	Mode      string `json:"mode"` // "disable" | "detect" (anything else → disable)
+}
+
+// mouse runs the seamless-copy tmux option LOCALLY via bash -lc, mirroring
+// src/tmux.js disableMouse() / detectMouse() byte-for-byte: disable →
+// `set -g mouse off`; detect → `show-options -g mouse`. The detect variant's
+// stdout (the `mouse on` / `mouse off` text) flows back in cmdResult.Stdout so
+// the JS side's parseMouseState reads the identical bytes the default path's
+// runTmux result carries. Returns the raw cmdResult — never an RPC error.
+func mouse(params json.RawMessage) cmdResult {
+	var p mouseParams
+	if len(params) > 0 {
+		_ = json.Unmarshal(params, &p) // bad params → fall through to defaults
+	}
+	return runTmuxRaw(buildMouseScript(p.Container, p.Mode))
 }
