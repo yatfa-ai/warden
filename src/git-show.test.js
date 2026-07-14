@@ -36,6 +36,7 @@ import { spawnSync } from 'node:child_process';
  */
 
 let parseGitShowNameStatus;
+let stripCommitSubject;
 let httpServer;
 let baseUrl;
 let originalHome;
@@ -45,6 +46,11 @@ let incomingRepo;
 let nonGitDir;
 let headHash; // hash of the most recent commit (rename b, add c)
 let addHash;  // hash of the initial commit (add a)
+// Hash of a commit with a real multi-paragraph body (subject + 2 paragraphs) so we
+// can assert the expanded-commit detail surfaces the body — the "why" — not just the
+// subject the list row already shows. Empty commit (--allow-empty) so it adds no
+// files and leaves the rename/added-file assertions on headHash untouched (WARDEN-388).
+let bodyHash;
 // Hash of a commit reachable from a remote-tracking ref (refs/remotes/origin/main,
 // what @{u} resolves to) but NOT an ancestor of HEAD — a genuine "incoming · ↓N"
 // commit. Locks WARDEN-348: git show serves it without a pull.
@@ -88,6 +94,16 @@ before(async () => {
   git(['add', '.'], gitRepo);
   git(['commit', '-q', '-m', 'rename b, add c'], gitRepo);
   headHash = git(['rev-parse', '--short', 'HEAD'], gitRepo).stdout.toString().trim();
+
+  // A commit with a real body (subject + 2 paragraphs). Multiple -m flags each start
+  // a new blank-line-separated paragraph, so %B is "<subject>\n\n<para1>\n\n<para2>".
+  // --allow-empty keeps it file-neutral (headHash's rename/added-file assertions stay
+  // valid; this commit just carries a message to surface). (WARDEN-388.)
+  git(['commit', '-q', '--allow-empty',
+    '-m', 'feat: add a real commit body for the message test',
+    '-m', 'First body paragraph explaining why this change matters.',
+    '-m', 'Second body paragraph with further detail and context.'], gitRepo);
+  bodyHash = git(['rev-parse', '--short', 'HEAD'], gitRepo).stdout.toString().trim();
 
   // A plain non-git directory
   nonGitDir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitshow-nongit-'));
@@ -133,6 +149,7 @@ before(async () => {
   // Import server.js ONCE — after HOME/config/catalog are in place.
   const server = await import('./server.js');
   parseGitShowNameStatus = server.parseGitShowNameStatus;
+  stripCommitSubject = server.stripCommitSubject;
   httpServer = server.app.listen(0, '127.0.0.1');
   await new Promise((resolve, reject) => {
     httpServer.once('listening', resolve);
@@ -190,6 +207,46 @@ describe('parseGitShowNameStatus', () => {
   });
 });
 
+describe('stripCommitSubject', () => {
+  // The subject-echo rule (WARDEN-388): %B is "<subject>\n\n<body>…", and the
+  // collapsed row already shows the subject, so we keep only the body after the
+  // first blank line. A subject-only commit (no blank line) → '' so the UI renders
+  // nothing extra for it.
+
+  it('keeps the body after the first blank line (multi-paragraph)', () => {
+    assert.strictEqual(
+      stripCommitSubject('feat: a thing\n\nFirst body paragraph.\n\nSecond body paragraph.\n'),
+      'First body paragraph.\n\nSecond body paragraph.',
+    );
+  });
+
+  it('keeps a single body paragraph (trims the trailing newline)', () => {
+    assert.strictEqual(stripCommitSubject('fix: x\n\nOnly one body paragraph.\n'), 'Only one body paragraph.');
+  });
+
+  it('returns "" for a subject-only commit (no blank line)', () => {
+    // %B for a no-body commit is just "<subject>\n" — nothing to surface.
+    assert.strictEqual(stripCommitSubject('just a subject\n'), '');
+    assert.strictEqual(stripCommitSubject('just a subject'), '');
+  });
+
+  it('returns "" for empty / undefined input', () => {
+    assert.strictEqual(stripCommitSubject(''), '');
+    assert.strictEqual(stripCommitSubject(undefined), '');
+  });
+
+  it('tolerates CRLF (e.g. output arriving over SSH) for the blank-line split', () => {
+    assert.strictEqual(stripCommitSubject('subj\r\n\r\nbody line\r\n'), 'body line');
+  });
+
+  it('preserves blank lines INSIDE the body (only the subject split is dropped)', () => {
+    assert.strictEqual(
+      stripCommitSubject('s\n\npara one\n\npara two\n\npara three\n'),
+      'para one\n\npara two\n\npara three',
+    );
+  });
+});
+
 describe('/api/git-show HTTP endpoint (real Express app from server.js)', () => {
   it('returns the touched files for a known commit hash (add)', async () => {
     const res = await fetch(`${baseUrl}/api/git-show?id=warden-gitshow&hash=${addHash}`);
@@ -215,6 +272,45 @@ describe('/api/git-show HTTP endpoint (real Express app from server.js)', () => 
     assert.strictEqual(body.error, null);
     assert.ok(typeof body.diff === 'string' && body.diff.length > 0, 'diff must be a non-empty string');
     assert.ok(body.diff.includes('+c1'), 'diff should show the added line(s)');
+  });
+
+  it('surfaces the full commit message body (no subject echo) for a multi-paragraph commit (WARDEN-388)', async () => {
+    // The no-path branch (the sidebar's expanded-commit fetch) must return the commit's
+    // body — the "why" — with the subject stripped (the collapsed row already shows it).
+    // bodyHash is the --allow-empty commit with subject + 2 paragraphs.
+    const res = await fetch(`${baseUrl}/api/git-show?id=warden-gitshow&hash=${bodyHash}`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.error, null);
+    assert.ok(typeof body.message === 'string', 'message must be a string');
+    // Subject dropped; both body paragraphs preserved with their blank-line separation;
+    // trailing newline trimmed.
+    assert.strictEqual(
+      body.message,
+      'First body paragraph explaining why this change matters.\n\n' +
+        'Second body paragraph with further detail and context.',
+    );
+    // The subject must NOT be echoed as the first line.
+    assert.ok(!body.message.startsWith('feat: add a real commit body'), 'subject must not echo into the body');
+  });
+
+  it('returns an empty message (no body) for a subject-only commit (WARDEN-388)', async () => {
+    // addHash ("add a") has no body → message is '' so the UI renders nothing extra.
+    const body = await (await fetch(`${baseUrl}/api/git-show?id=warden-gitshow&hash=${addHash}`)).json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.message, '');
+  });
+
+  it('also surfaces the message body from the per-file branch (FileViewer blame/history, WARDEN-388)', async () => {
+    // The per-file branch (?path=) feeds FileViewer's BlameHash popover; it must carry
+    // the same body so the "why" can show above the per-file diff there too.
+    const body = await (await fetch(`${baseUrl}/api/git-show?id=warden-gitshow&hash=${bodyHash}&path=${encodeURIComponent('c.txt')}`)).json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(
+      body.message,
+      'First body paragraph explaining why this change matters.\n\n' +
+        'Second body paragraph with further detail and context.',
+    );
   });
 
   it('serves a commit reachable from a tracking ref but NOT from HEAD (incoming/behind, WARDEN-348)', async () => {

@@ -564,6 +564,7 @@ function BlameHash({ chatId, filePath, hash, summary, author, dateLabel }: {
 }) {
   const [open, setOpen] = useState(false);
   const [diff, setDiff] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [fetched, setFetched] = useState(false);
 
@@ -573,11 +574,16 @@ function BlameHash({ chatId, filePath, hash, summary, author, dateLabel }: {
     setLoading(true);
     try {
       const r = await fetch(`/api/git-show?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(hash)}&path=${encodeURIComponent(filePath)}`);
-      if (!r.ok) { setDiff(null); return; }
+      if (!r.ok) { setDiff(null); setMessage(null); return; }
       const j = await r.json();
       setDiff(typeof j.diff === 'string' ? j.diff : null);
+      // The commit's body rides the same per-file fetch (no extra round-trip). Empty
+      // for a subject-only commit → null so it renders nothing above the diff (the
+      // hash row already shows the summary/subject) (WARDEN-388).
+      setMessage(typeof j.message === 'string' && j.message ? j.message : null);
     } catch {
       setDiff(null);
+      setMessage(null);
     } finally {
       setLoading(false);
       setFetched(true);
@@ -614,10 +620,17 @@ function BlameHash({ chatId, filePath, hash, summary, author, dateLabel }: {
         </div>
         {loading ? (
           <div className="px-1 text-[10px] text-muted-foreground">loading diff…</div>
-        ) : diff ? (
-          <DiffBlock diff={diff} />
         ) : (
-          <div className="px-1 text-[10px] text-muted-foreground">no diff for this file at this commit</div>
+          <>
+            {message ? (
+              <div className="mb-0.5 whitespace-pre-wrap break-words px-0.5 text-[10px] text-muted-foreground">{message}</div>
+            ) : null}
+            {diff ? (
+              <DiffBlock diff={diff} />
+            ) : (
+              <div className="px-1 text-[10px] text-muted-foreground">no diff for this file at this commit</div>
+            )}
+          </>
         )}
       </PopoverContent>
     </Popover>

@@ -1572,6 +1572,20 @@ export function parseGitShowNameStatus(output) {
   return out;
 }
 
+// Strip a commit message's subject line so only the BODY shows in an expanded
+// commit. git's `%B` (raw body, fetched by commitMessage below) is
+// "<subject>\n\n<body>…": the collapsed row already shows the subject (cm.subject),
+// so rendering raw `%B` would echo the subject again as the first line. We keep
+// only the body AFTER the first blank line. A subject-only commit (no blank line,
+// i.e. no body) → '' so the UI renders nothing extra for it. CRLF-tolerant so a
+// remote transport's \r\n doesn't hide the split. Exported (pure) so the
+// subject-strip rule has a unit test (WARDEN-388).
+export function stripCommitSubject(raw) {
+  const s = (raw ?? '').toString().replace(/\r\n/g, '\n');
+  const i = s.indexOf('\n\n');
+  return i === -1 ? '' : s.slice(i + 2).trim();
+}
+
 // The `--pretty=format:` used by /api/git-log: short hash | subject | author |
 // relative date | committer epoch. Named (not inlined) so the field order is
 // documented at a glance and grep-able. The '|' separators are passed as ONE argv
@@ -1822,6 +1836,24 @@ function isSafeRelativePath(p) {
 // "--version", shell metacharacters) is rejected before it reaches git or the remote
 // shell, mirroring the shellQuote care taken in /api/git-log. `path`, when present,
 // is a git pathspec and gets the isSafeRelativePath containment check.
+//
+// commitMessage: fetch a commit's full message (git's %B: subject + body) WITHOUT
+// computing a diff (--no-patch ≡ -s), then cap + strip it to the BODY only. `hash`
+// is already hex-validated by the route ([0-9a-f]{4,40}), so it's safe as argv
+// after `git -C <cwd>` (local) / the shellQuoted remote form (the same WARDEN-122
+// discipline as the rest of this route). The 1MB cap (capDiff — byte-accurate, no
+// lone surrogate) bounds a pathological message; stripCommitSubject drops the
+// subject the collapsed row already shows. Returns '' for a subject-only commit
+// (no body) or a non-ok git result, so the UI renders the message block
+// unconditionally and it just hides when empty. Shared by the no-path and per-file
+// branches so both commit inspectors (sidebar expand + FileViewer blame/history)
+// surface the "why" (WARDEN-388). Read-only: honors the WARDEN-199 no-mutation line.
+async function commitMessage(chat, hash, cwd) {
+  const r = await runGit(chat, ['show', '--no-patch', '--format=%B', hash], cwd);
+  if (!r.ok) return '';
+  return stripCommitSubject(capDiff(r.stdout || ''));
+}
+
 app.get('/api/git-show', async (req, res) => {
   const chatId = String(req.query.id || '');
   const hash = String(req.query.hash || '');
@@ -1848,17 +1880,25 @@ app.get('/api/git-show', async (req, res) => {
     // argv after `git -C <cwd>` / the shellQuoted remote form.
     let files = [];
     let diff = null;
+    let message = '';
     if (filePath) {
       // --format= strips the commit header (author/date/message) so we get ONLY the
-      // file's patch — exactly what inspecting a single file should surface.
+      // file's patch — exactly what inspecting a single file should surface. The
+      // commit's full message rides a separate --no-patch call (commitMessage) so the
+      // FileViewer blame/history popover can show the "why" above this diff too.
       const r = await runGit(chat, ['show', '--format=', hash, '--', filePath], cwd);
       diff = capDiff(r.ok ? r.stdout : '');
+      message = await commitMessage(chat, hash, cwd);
     } else {
       const r = await runGit(chat, ['show', '--name-status', '--pretty=format:', hash], cwd);
       files = parseGitShowNameStatus(r.ok ? r.stdout : '');
+      // The commit's full message (body) rides this same detail fetch — no extra
+      // round-trip for the primary path. parseGitShowNameStatus stays untouched (the
+      // %B fetch is deliberately separate so the name-status parser isn't complicated).
+      message = await commitMessage(chat, hash, cwd);
     }
 
-    res.json({ files, diff, error: null });
+    res.json({ files, diff, message, error: null });
   } catch (e) {
     res.json({ files: [], diff: null, error: e.message });
   }
