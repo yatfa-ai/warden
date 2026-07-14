@@ -6,12 +6,15 @@
 // exercises it directly with plain objects.
 //
 // Coverage focus: the branching cases that lived untested inside the component —
-// matchesAgentFilter's 6 cases (esp. claude matches both claude+resume, manual
-// matches both shell+manual, hidden matches on key||id), compareChats' status
-// active-first with id tiebreak, sortChats' manual no-op (drag order preserved),
-// and findChat's key-||-id lookup. (chatType/processCwdLabel/displayName/basename
-// are tested in chatDisplay.test.mjs — their canonical home after WARDEN-216; the
-// local chatType copy in agentFilter is exercised indirectly via matchesAgentFilter.)
+// matchesAgentFilter's 4 cases (claude matches both claude+resume, manual
+// matches both shell+manual), compareChats' status active-first with id
+// tiebreak, sortChats' manual no-op (drag order preserved), and findChat's
+// key-||-id lookup. (chatType/processCwdLabel/displayName/basename are tested in
+// chatDisplay.test.mjs — their canonical home after WARDEN-216; the local
+// chatType copy in agentFilter is exercised indirectly via matchesAgentFilter.)
+// WARDEN-372: the 'active'/'hidden' filter cases are abolished (the root list is
+// the open panes; hide/unhide is gone), so matchesAgentFilter takes no
+// hiddenTabs arg and FILTER_OPTIONS has 4 values.
 //
 // Run: node agentFilter.test.mjs   (from web/)
 import { transformWithOxc } from 'vite';
@@ -48,7 +51,7 @@ const test = (name, fn) => {
 const chat = (over = {}) => ({ id: 'c1', ...over });
 
 // ---------------------------------------------------------------------------
-console.log('\nmatchesAgentFilter — the 6 filter cases');
+console.log('\nmatchesAgentFilter — the 4 filter cases');
 // ---------------------------------------------------------------------------
 const yatfa = chat({ id: 'y1', kind: 'yatfa' });
 const claude = chat({ id: 'c1', cmd: 'claude' });
@@ -57,41 +60,25 @@ const shell = chat({ id: 's1', cmd: 'bash' });
 const arbitrary = chat({ id: 'n1', cmd: 'node app.js' });
 
 test('"all" passes everything (a yatfa, a shell, an arbitrary bin)', () => {
-  assert.equal(matchesAgentFilter(yatfa, 'all', []), true);
-  assert.equal(matchesAgentFilter(shell, 'all', []), true);
-  assert.equal(matchesAgentFilter(arbitrary, 'all', []), true);
+  assert.equal(matchesAgentFilter(yatfa, 'all'), true);
+  assert.equal(matchesAgentFilter(shell, 'all'), true);
+  assert.equal(matchesAgentFilter(arbitrary, 'all'), true);
 });
 test('"yatfa" matches only yatfa kind', () => {
-  assert.equal(matchesAgentFilter(yatfa, 'yatfa', []), true);
-  assert.equal(matchesAgentFilter(claude, 'yatfa', []), false);
+  assert.equal(matchesAgentFilter(yatfa, 'yatfa'), true);
+  assert.equal(matchesAgentFilter(claude, 'yatfa'), false);
 });
 test('"claude" matches BOTH a fresh claude and a --resume session', () => {
-  assert.equal(matchesAgentFilter(claude, 'claude', []), true);
-  assert.equal(matchesAgentFilter(resumed, 'claude', []), true);
-  assert.equal(matchesAgentFilter(yatfa, 'claude', []), false);
-  assert.equal(matchesAgentFilter(shell, 'claude', []), false);
+  assert.equal(matchesAgentFilter(claude, 'claude'), true);
+  assert.equal(matchesAgentFilter(resumed, 'claude'), true);
+  assert.equal(matchesAgentFilter(yatfa, 'claude'), false);
+  assert.equal(matchesAgentFilter(shell, 'claude'), false);
 });
 test('"manual" matches shell, but NOT an arbitrary bin or yatfa', () => {
-  assert.equal(matchesAgentFilter(shell, 'manual', []), true);
-  assert.equal(matchesAgentFilter(arbitrary, 'manual', []), false);
-  assert.equal(matchesAgentFilter(yatfa, 'manual', []), false);
-  assert.equal(matchesAgentFilter(claude, 'manual', []), false);
-});
-test('"active" matches only active === true (not false / null / missing)', () => {
-  assert.equal(matchesAgentFilter(chat({ active: true }), 'active', []), true);
-  assert.equal(matchesAgentFilter(chat({ active: false }), 'active', []), false);
-  assert.equal(matchesAgentFilter(chat({ active: null }), 'active', []), false);
-  assert.equal(matchesAgentFilter(chat({}), 'active', []), false);
-});
-test('"hidden" matches on key || id (key takes precedence over id)', () => {
-  // key set and present in hiddenTabs → hidden
-  assert.equal(matchesAgentFilter(chat({ id: '1', key: 'hostA:1' }), 'hidden', ['hostA:1']), true);
-  // key set but only the bare id is in hiddenTabs → NOT hidden (key wins)
-  assert.equal(matchesAgentFilter(chat({ id: '1', key: 'hostA:1' }), 'hidden', ['1']), false);
-  // no key → matched by id
-  assert.equal(matchesAgentFilter(chat({ id: '1' }), 'hidden', ['1']), true);
-  // neither key nor id present → not hidden
-  assert.equal(matchesAgentFilter(chat({ id: '1' }), 'hidden', ['other']), false);
+  assert.equal(matchesAgentFilter(shell, 'manual'), true);
+  assert.equal(matchesAgentFilter(arbitrary, 'manual'), false);
+  assert.equal(matchesAgentFilter(yatfa, 'manual'), false);
+  assert.equal(matchesAgentFilter(claude, 'manual'), false);
 });
 
 // ---------------------------------------------------------------------------
@@ -202,8 +189,8 @@ test('returns undefined when no chat matches', () => {
 // ---------------------------------------------------------------------------
 console.log('\noption metadata is exported intact');
 // ---------------------------------------------------------------------------
-test('FILTER_OPTIONS has the 6 values in order', () => {
-  assert.deepEqual(FILTER_OPTIONS.map((o) => o.value), ['all', 'yatfa', 'claude', 'manual', 'active', 'hidden']);
+test('FILTER_OPTIONS has the 4 values in order', () => {
+  assert.deepEqual(FILTER_OPTIONS.map((o) => o.value), ['all', 'yatfa', 'claude', 'manual']);
 });
 test('SORT_OPTIONS has the 5 values in order', () => {
   assert.deepEqual(SORT_OPTIONS.map((o) => o.value), ['manual', 'name', 'host', 'status', 'activity']);

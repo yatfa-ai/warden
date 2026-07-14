@@ -2,7 +2,7 @@ import { Button } from '@/components/ui/button';
 import { InboxIcon, SearchIcon, FileTextIcon, FolderOpenIcon } from 'lucide-react';
 
 export interface EmptyStateProps {
-  type?: 'no-results' | 'no-data' | 'no-search-matches' | 'no-tabs' | 'nothing-here';
+  type?: 'no-results' | 'no-data' | 'no-search-matches' | 'no-tabs' | 'no-panes' | 'nothing-here';
   message?: string;
   action?: {
     label: string;
@@ -31,6 +31,11 @@ const TYPE_CONFIG = {
     icon: FileTextIcon,
     title: 'No active tabs',
     description: 'Browse hosts below to start',
+  },
+  'no-panes': {
+    icon: FolderOpenIcon,
+    title: 'No open panes',
+    description: 'Open a chat or resume a session below',
   },
   'nothing-here': {
     icon: FolderOpenIcon,

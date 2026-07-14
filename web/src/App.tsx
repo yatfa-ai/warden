@@ -1,7 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
-import { loadUi, saveUi, persistUiState, initialWorkspace, DEFAULT_TERMINAL_FONT_FAMILY, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type HostOptionsMap, type WorkspacePaneSet, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
+import { loadUi, saveUi, persistUiState, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type HostOptionsMap, type WorkspacePaneSet, type RecentlyClosedEntry, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
+import { displayName } from '@/lib/chatDisplay';
 import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThemeId, type Theme, type ThemeId, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
@@ -61,12 +62,12 @@ function App() {
   const startedEmpty = uiState.restoreOnStartup === 'empty';
   const [restoreOnStartup, setRestoreOnStartup] = useState<RestoreOnStartup>(() => uiState.restoreOnStartup ?? 'previous');
   const initWs = initialWorkspace(uiState, uiState.restoreOnStartup ?? 'previous');
-  const [activeTabs, setActiveTabs] = useState<string[]>(() => initWs.activeTabs);
-  const [hiddenTabs, setHiddenTabs] = useState<string[]>(() => initWs.hiddenTabs);
-  // Multi-workspace (WARDEN-256): openPanes/focused now live INSIDE per-workspace
-  // pane-sets. The active workspace's panes are what render in the grid; switching
-  // activeWorkspaceId swaps the grid instantly. activeTabs/hiddenTabs stay flat +
-  // global (the sidebar's working set); paneHost stays global.
+  // Multi-workspace (WARDEN-256): openPanes/focused/recentlyClosed now live INSIDE
+  // per-workspace pane-sets. The active workspace's panes are what render in the
+  // grid; switching activeWorkspaceId swaps the grid instantly. paneHost stays
+  // global (keyed by pane id). WARDEN-372 abolished the flat activeTabs/hiddenTabs
+  // working set — the sidebar root is now the active workspace's openPanes + a
+  // per-workspace recently-closed list.
   const [workspaces, setWorkspaces] = useState<WorkspacePaneSet[]>(() => initWs.workspaces);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>(() => initWs.activeWorkspaceId);
   const [paneHost, setPaneHost] = useState<Record<string, string>>(() => initWs.paneHost);
@@ -80,8 +81,6 @@ function App() {
   const focused: string | null = activeWorkspace?.focused ?? null;
   // Mirrors read synchronously inside stable callbacks (performKill's rollback,
   // openChat's cross-workspace dedup) without widening their dependency arrays.
-  const activeTabsRef = useRef(activeTabs); activeTabsRef.current = activeTabs;
-  const hiddenTabsRef = useRef(hiddenTabs); hiddenTabsRef.current = hiddenTabs;
   const openPanesRef = useRef(openPanes); openPanesRef.current = openPanes;
   const focusedRef = useRef(focused); focusedRef.current = focused;
   const workspacesRef = useRef(workspaces); workspacesRef.current = workspaces;
@@ -426,8 +425,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ activeTabs, hiddenTabs, workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [activeTabs, hiddenTabs, workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed, restoreOnStartup, startedEmpty]);
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
   // workspace, so switching clears it (WARDEN-256: maximized resets on switch).
@@ -650,18 +649,15 @@ function App() {
     return () => window.clearInterval(interval);
   }, []);
 
-  // open chat: add to active tabs + open pane + focus. The dedup point for the
-  // multi-workspace model (WARDEN-256): a pane lives in at most one workspace, so
-  // if `id` is already a pane in some workspace we switch there + focus it instead
-  // of duplicating it in the active workspace. activeTabs is flat/global (sidebar),
-  // so it is always kept in sync regardless of which workspace owns the pane. The
-  // focus calls are gated behind autoFocusNewPane (WARDEN-274): when OFF, the tab +
-  // pane still open but the currently focused pane is preserved (click-to-focus
-  // still works via xterm's native focus). Adding autoFocusNewPane to the deps
-  // rebuilds this callback (and its callers) when the pref toggles — a rare,
-  // deliberate action.
+  // open chat: open pane + focus. The dedup point for the multi-workspace model
+  // (WARDEN-256): a pane lives in at most one workspace, so if `id` is already a
+  // pane in some workspace we switch there + focus it instead of duplicating it
+  // in the active workspace. The focus calls are gated behind autoFocusNewPane
+  // (WARDEN-274): when OFF, the pane still opens but the currently focused pane is
+  // preserved (click-to-focus still works via xterm's native focus). Adding
+  // autoFocusNewPane to the deps rebuilds this callback (and its callers) when
+  // the pref toggles — a rare, deliberate action.
   const openChat = useCallback((id: string) => {
-    setActiveTabs((p) => p.includes(id) ? p : [...p, id]);
     // WARDEN-356: opening the pane counts as a visit to THIS agent — reset its
     // per-agent lastSeen so the "What's new since" marker reflects work landed
     // after THIS open. Stamped before the workspace search below so a visit
@@ -734,34 +730,55 @@ function App() {
     openChat(chat.key || chat.id);
   }, [refresh, openChat]);
 
-  // close pane: pane gone, tab stays
+  // WARDEN-372: record a closing pane in the active workspace's recently-closed
+  // recovery list. Snapshots the chat's display name/host/cwd at close time so the
+  // row renders even if the chat later leaves the catalog. Dedup-by-id (a re-close
+  // moves it to the top) + cap are handled by mergeRecentlyClosed. No-op when the
+  // chat can't be found (e.g. a pane already gone from the catalog) — there is
+  // nothing to snapshot or reopen. Reads chatsRef so this callback stays stable.
+  const pushRecentlyClosed = useCallback((id: string) => {
+    const c = chatsRef.current.find((x) => (x.key || x.id) === id);
+    if (!c) return;
+    const entry: RecentlyClosedEntry = {
+      id,
+      name: displayName(c),
+      host: c.host || '',
+      cwd: c.cwd || '',
+      closedAt: Date.now(),
+    };
+    updateActiveWorkspace((w) => ({
+      ...w,
+      // mergeRecentlyClosed(existing, incoming) iterates incoming first, so the
+      // just-closed entry (newest) lands on top and any prior occurrence of its
+      // id is dropped — re-closing moves it to the top (WARDEN-372).
+      recentlyClosed: mergeRecentlyClosed(w.recentlyClosed ?? [], [entry]),
+    }));
+  }, [updateActiveWorkspace]);
+
+  // close pane: pane gone + recorded in recently-closed for one-click reopen.
+  // Used by BOTH the pane-grid close (×) and the sidebar open-pane row close —
+  // every pane close is a recovery candidate.
   const closePane = useCallback((id: string) => {
+    pushRecentlyClosed(id);
     setOpenPanes((p) => p.filter((x) => x !== id));
     setFocused((f) => (f === id ? null : f));
-  }, [setOpenPanes, setFocused]);
-  // remove from active: tab gone + pane gone
+  }, [setOpenPanes, setFocused, pushRecentlyClosed]);
+  // remove the pane only (no recently-closed entry) — used by the KILL flow, since
+  // a killed chat's tmux session is destroyed and is not safely reopenable.
   const removeActive = useCallback((id: string) => {
-    setActiveTabs((p) => p.filter((x) => x !== id));
-    setHiddenTabs((p) => p.filter((x) => x !== id));
     setOpenPanes((p) => p.filter((x) => x !== id));
     setFocused((f) => (f === id ? null : f));
   }, [setOpenPanes, setFocused]);
-  const reorderTabs = useCallback((from: number, to: number) => {
-    setActiveTabs((p) => {
-      const n = [...p];
-      const [item] = n.splice(from, 1);
-      n.splice(to, 0, item);
-      return n;
-    });
-  }, []);
-  const hideTab = useCallback((id: string) => {
-    setHiddenTabs((p) => p.includes(id) ? p : [...p, id]);
-    setOpenPanes((p) => p.filter((x) => x !== id));
-    setFocused((f) => (f === id ? null : f));
-  }, [setOpenPanes, setFocused]);
-  const unhideTab = useCallback((id: string) => {
-    setHiddenTabs((p) => p.filter((x) => x !== id));
-  }, []);
+  // reopen a recently-closed pane: drop it from the recovery list (it is no longer
+  // closed), then open it. openChat re-primes paneHost from the live catalog entry,
+  // so a remote pane re-discovers its host on reopen.
+  const reopenClosed = useCallback((id: string) => {
+    updateActiveWorkspace((w) => ({
+      ...w,
+      recentlyClosed: (w.recentlyClosed ?? []).filter((e) => e.id !== id),
+    }));
+    openChat(id);
+  }, [updateActiveWorkspace, openChat]);
   const toggleMax = useCallback((id: string) => setMaximized((m) => (m === id ? null : id)), []);
   // Stable toggles for keyboard shortcuts: useCallback with functional updates gives
   // them empty deps and a stable identity, so PaneGrid's keydown effect doesn't
@@ -816,10 +833,10 @@ function App() {
   const performKill = useCallback(async (id: string) => {
     const existing = chatsRef.current.find((x) => (x.key || x.id) === id);
     const host = existing?.host;
-    // Snapshot the row's tab/pane occupancy (read from refs so this callback's
-    // deps stay stable) so a failed kill can restore the exact pre-click state.
-    const wasActive = activeTabsRef.current.includes(id);
-    const wasHidden = hiddenTabsRef.current.includes(id);
+    // Snapshot the row's pane occupancy (read from refs so this callback's deps
+    // stay stable) so a failed kill can restore the exact pre-click state.
+    // WARDEN-372: tab occupancy (activeTabs/hiddenTabs) is gone — only pane state
+    // is restored on rollback.
     const wasPane = openPanesRef.current.includes(id);
     const wasFocused = focusedRef.current === id;
 
@@ -830,8 +847,6 @@ function App() {
       // the row before we restore it.
       killedChatIdsRef.current.delete(id);
       if (existing) setChats((prev) => prev.some((c) => (c.key || c.id) === id) ? prev : [...prev, existing]);
-      if (wasActive) setActiveTabs((p) => p.includes(id) ? p : [...p, id]);
-      if (wasHidden) setHiddenTabs((p) => p.includes(id) ? p : [...p, id]);
       if (wasPane) setOpenPanes((p) => p.includes(id) ? p : [...p, id]);
       if (wasFocused) setFocused(id);
     };
@@ -987,7 +1002,7 @@ function App() {
   // "Workspace N" where N is the new count; renameable via the tab strip.
   const createWorkspace = useCallback((seedPaneId?: string) => {
     const id = globalThis.crypto?.randomUUID?.() ?? `ws-${Math.random().toString(36).slice(2)}`;
-    setWorkspaces((prev) => [...prev, { id, name: `Workspace ${prev.length + 1}`, openPanes: seedPaneId ? [seedPaneId] : [], focused: seedPaneId ?? null }]);
+    setWorkspaces((prev) => [...prev, { id, name: `Workspace ${prev.length + 1}`, openPanes: seedPaneId ? [seedPaneId] : [], focused: seedPaneId ?? null, recentlyClosed: [] }]);
     setActiveWorkspaceId(id);
     return id;
   }, []);
@@ -1308,7 +1323,7 @@ function App() {
       <header className="flex items-center gap-3 px-3 h-11 border-b shrink-0">
         <IconTooltip label="toggle sidebar" side="bottom"><button onClick={() => setSidebarCollapsed(!sidebarCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{sidebarCollapsed ? '▸' : '◂'}</button></IconTooltip>
         <span className="font-semibold tracking-wide shrink-0">Yatfa Warden</span>
-        <span className="text-xs text-muted-foreground shrink-0 whitespace-nowrap">{activeTabs.length} active · {openPanes.length} open</span>
+        <span className="text-xs text-muted-foreground shrink-0 whitespace-nowrap">{openPanes.length} open</span>
         {/* Workspace tab strip (WARDEN-256) — the flexible, bounded middle region.
             min-w-0 + overflow-x-auto let it absorb remaining width and scroll its
             tabs internally so it can never push the right-side control cluster
@@ -1352,15 +1367,11 @@ function App() {
             <ChatSidebar
               chats={chats}
               sshHosts={sshHosts}
-              activeTabs={activeTabs}
-              hiddenTabs={hiddenTabs}
               openPanes={openPaneSet}
+              recentlyClosed={activeWorkspace?.recentlyClosed ?? []}
               onOpenChat={openChat}
               onClosePane={closePane}
-              onRemoveActive={removeActive}
-              onReorder={reorderTabs}
-              onHideTab={hideTab}
-              onUnhideTab={unhideTab}
+              onReopenClosed={reopenClosed}
               onKill={requestKill}
               onRename={renameChat}
               onResume={resumeSession}

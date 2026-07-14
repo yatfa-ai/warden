@@ -57,7 +57,10 @@ export function chatType(c?: AgentFilterChat): string {
 
 // Agent-list filter/sort controls (WARDEN-91). Shared across the root, host, and
 // collection views so the option lists and matching logic can never drift.
-export type AgentFilter = 'all' | 'yatfa' | 'claude' | 'manual' | 'active' | 'hidden';
+// WARDEN-372: the 'active' and 'hidden' filter cases were abolished along with
+// the tabs model — the root list is now literally the open panes, and hide/
+// unhide no longer exists. The 'status' SORT (active-first) still uses c.active.
+export type AgentFilter = 'all' | 'yatfa' | 'claude' | 'manual';
 export type AgentSort = 'manual' | 'name' | 'host' | 'status' | 'activity';
 
 export const FILTER_OPTIONS: { value: AgentFilter; label: string }[] = [
@@ -65,8 +68,6 @@ export const FILTER_OPTIONS: { value: AgentFilter; label: string }[] = [
   { value: 'yatfa', label: 'Yatfa agents only' },
   { value: 'claude', label: 'Claude sessions only' },
   { value: 'manual', label: 'Manual/shell only' },
-  { value: 'active', label: 'Active only' },
-  { value: 'hidden', label: 'Hidden only' },
 ];
 
 export const SORT_OPTIONS: { value: AgentSort; label: string }[] = [
@@ -77,15 +78,14 @@ export const SORT_OPTIONS: { value: AgentSort; label: string }[] = [
   { value: 'activity', label: 'Last activity' },
 ];
 
-// Does `c` pass the active agent filter? Hidden membership matches on the
-// host-prefixed id (`key || id`) so it lines up with hideTab()/activeTabs.
-export function matchesAgentFilter(c: AgentFilterChat, filter: AgentFilter, hiddenTabs: string[]): boolean {
+// Does `c` pass the active agent filter? WARDEN-372: the 'active' and 'hidden'
+// cases are gone (the root list is the open panes; hide/unhide is abolished), so
+// this predicate is now purely about the chat's type/kind — no tab membership.
+export function matchesAgentFilter(c: AgentFilterChat, filter: AgentFilter): boolean {
   switch (filter) {
     case 'yatfa': return chatType(c) === 'yatfa';
     case 'claude': { const t = chatType(c); return t === 'claude' || t === 'resume'; }
     case 'manual': { const t = chatType(c); return t === 'shell' || t === 'manual'; }
-    case 'active': return c.active === true;
-    case 'hidden': return hiddenTabs.includes(c.key || c.id);
     case 'all':
     default: return true;
   }

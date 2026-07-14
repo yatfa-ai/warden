@@ -2,12 +2,13 @@ import type { AgentFilter, AgentSort } from './agentFilter';
 import type { TimestampFormat } from './formatTimestamp';
 
 // UI state persisted in localStorage.
-// activeTabs = the user's persistent working set (survives reload, pane close, host nav).
-//   (Flat + global — the sidebar's working set, unchanged by WARDEN-256.)
 // workspaces = the browser-tab-style project pane-sets the user switches between;
-//   each owns its own openPanes + focused. activeWorkspaceId picks the one whose
-//   panes render in the grid. A pane lives in at most one workspace (openChat
-//   dedups across workspaces). paneHost stays global (keyed by pane id).
+//   each owns its own openPanes + focused + recentlyClosed. activeWorkspaceId
+//   picks the one whose panes render in the grid. A pane lives in at most one
+//   workspace (openChat dedups across workspaces). paneHost stays global (keyed
+//   by pane id). WARDEN-372 abolished the flat activeTabs/hiddenTabs working set
+//   — the sidebar root is now the active workspace's openPanes + a per-workspace
+//   recently-closed recovery list.
 //
 // NOTE on durability (WARDEN-181): localStorage persists across a normal restart
 // inside the OS-default userData dir. Reads below go through readVersioned() so a
@@ -124,16 +125,42 @@ export function validatePresetName(
   return null;
 }
 
+// A snapshot of a pane the user closed, kept per-workspace as a click-to-reopen
+// recovery list (WARDEN-372). `id` is the chat's host-prefixed id (key || id),
+// the same identity openPanes uses, so reopening is a plain openChat(id). The
+// display fields (name/host/cwd) are a snapshot at close time so the row still
+// renders even if the underlying chat has since left the catalog. `closedAt` is
+// ms-since-epoch for the "show more / newest-first" ordering. Pure client-side
+// state; never sent to the backend.
+export interface RecentlyClosedEntry {
+  id: string;
+  name: string;
+  host: string;
+  cwd: string;
+  closedAt: number;
+}
+
+// Cap on how many recently-closed entries a workspace retains. The UI shows 5
+// with a "show more" affordance that expands to this cap; older entries beyond
+// it are dropped (newest-first). Centralized so the parse sanitizer, the merge
+// helper, and the UI's "show more" all agree on one bound.
+export const RECENTLY_CLOSED_CAP = 20;
+// How many recently-closed entries the sidebar shows before the "show more"
+// affordance expands the list to the full cap.
+export const RECENTLY_CLOSED_PREVIEW = 5;
+
 // A named workspace: one browser-tab-style project pane-set. Owns its openPanes
-// (the pane ids with a live terminal in the grid when this workspace is active)
-// and its focused pane. `id` is a stable UUID (never an array index) so drag-
-// and-drop payloads identify a workspace unambiguously (WARDEN-108). `name` is
-// the user-editable tab label. Pure client-side pref; never sent to the backend.
+// (the pane ids with a live terminal in the grid when this workspace is active),
+// its focused pane, and its per-workspace recently-closed recovery list. `id` is
+// a stable UUID (never an array index) so drag-and-drop payloads identify a
+// workspace unambiguously (WARDEN-108). `name` is the user-editable tab label.
+// Pure client-side pref; never sent to the backend.
 export interface WorkspacePaneSet {
   id: string;
   name: string;
   openPanes: string[];
   focused: string | null;
+  recentlyClosed: RecentlyClosedEntry[];
 }
 
 // Default name for the first / migrated workspace. New workspaces created via
@@ -154,9 +181,65 @@ function makeWorkspace(
   name: string,
   openPanes: string[] = [],
   focused: string | null = null,
+  recentlyClosed: RecentlyClosedEntry[] = [],
   id: string = genWorkspaceId(),
 ): WorkspacePaneSet {
-  return { id, name, openPanes, focused };
+  return { id, name, openPanes, focused, recentlyClosed };
+}
+
+// Merge a live session's recently-closed entries into the carried-forward disk
+// list, deduping by id (the live/incoming entry wins → re-closing moves it to
+// the top) and capping at RECENTLY_CLOSED_CAP, newest-first. Used by the
+// 'empty'-mode freeze so recentlyClosed — which is NOT workspace-restoration
+// state — tracks live recovery activity instead of being frozen to disk. Pure
+// and dependency-free so it is unit-tested directly. (WARDEN-372.)
+export function mergeRecentlyClosed(
+  existing: RecentlyClosedEntry[],
+  incoming: RecentlyClosedEntry[],
+): RecentlyClosedEntry[] {
+  const seen = new Set<string>();
+  const out: RecentlyClosedEntry[] = [];
+  for (const entry of [...incoming, ...existing]) {
+    if (seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    out.push(entry);
+    if (out.length >= RECENTLY_CLOSED_CAP) break;
+  }
+  return out;
+}
+
+// Sanitize a raw recentlyClosed value into a valid, id-unique, capped
+// RecentlyClosedEntry[]. Defensive: never throws on malformed input (WARDEN-89)
+// — it drops bad entries instead, so one corrupt entry can never blank the
+// recovery list. Each entry requires a string id; name/host/cwd coerce to
+// strings; closedAt coerces to a number (0 if absent/invalid). Dedups by id
+// (first occurrence wins) and caps at RECENTLY_CLOSED_CAP.
+function parseRecentlyClosed(raw: unknown): RecentlyClosedEntry[] {
+  if (!Array.isArray(raw)) {
+    if (raw !== undefined && raw !== null) {
+      console.warn('[loadUi] recentlyClosed is not an array; ignoring:', raw);
+    }
+    return [];
+  }
+  const seen = new Set<string>();
+  const out: RecentlyClosedEntry[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const e = entry as Record<string, unknown>;
+    const id = typeof e.id === 'string' ? e.id : '';
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const closedAt = typeof e.closedAt === 'number' && Number.isFinite(e.closedAt) ? e.closedAt : 0;
+    out.push({
+      id,
+      name: typeof e.name === 'string' ? e.name : '',
+      host: typeof e.host === 'string' ? e.host : '',
+      cwd: typeof e.cwd === 'string' ? e.cwd : '',
+      closedAt,
+    });
+    if (out.length >= RECENTLY_CLOSED_CAP) break;
+  }
+  return out;
 }
 
 // A user-defined instruction snippet: a named, reusable instruction the human
@@ -224,13 +307,12 @@ export const STARTER_SNIPPETS: Snippet[] = [
 ];
 
 export interface UiState {
-  activeTabs: string[];
-  hiddenTabs: string[];
   // Browser-tab-style project pane-sets (WARDEN-256). Each workspace owns its own
-  // openPanes + focused; switching the active workspace swaps the pane grid. A
-  // pane id lives in at most one workspace's openPanes (openChat dedups across
-  // them). activeTabs/hiddenTabs stay flat + global (the sidebar's working set,
-  // unchanged); paneHost stays global (keyed by pane id).
+  // openPanes + focused + recentlyClosed; switching the active workspace swaps the
+  // pane grid. A pane id lives in at most one workspace's openPanes (openChat
+  // dedups across them); paneHost stays global (keyed by pane id). WARDEN-372
+  // abolished the flat activeTabs/hiddenTabs working set — the sidebar root is now
+  // the active workspace's openPanes plus a per-workspace recently-closed list.
   workspaces: WorkspacePaneSet[];
   activeWorkspaceId: string | null;
   sidebarCollapsed: boolean;
@@ -516,7 +598,8 @@ function parseWorkspaces(raw: unknown): WorkspacePaneSet[] {
     const name = typeof e.name === 'string' && e.name.trim() ? e.name.trim() : DEFAULT_WORKSPACE_NAME;
     const openPanes = Array.isArray(e.openPanes) ? e.openPanes.filter((p: unknown): p is string => typeof p === 'string') : [];
     const focused = typeof e.focused === 'string' ? e.focused : null;
-    out.push({ id, name, openPanes, focused });
+    const recentlyClosed = parseRecentlyClosed(e.recentlyClosed);
+    out.push({ id, name, openPanes, focused, recentlyClosed });
   }
   return out;
 }
@@ -562,7 +645,6 @@ function readVersioned(prefix: string, version: number): string | null {
 // The default owns exactly one empty workspace (the active one).
 const DEFAULT_WORKSPACE = makeWorkspace(DEFAULT_WORKSPACE_NAME);
 const DEFAULT_UI: UiState = {
-  activeTabs: [], hiddenTabs: [],
   workspaces: [DEFAULT_WORKSPACE],
   activeWorkspaceId: DEFAULT_WORKSPACE.id,
   sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true,
@@ -587,7 +669,11 @@ const DEFAULT_UI: UiState = {
 export function loadUi(): UiState {
   try {
     const v = JSON.parse(readVersioned(KEY_PREFIX, KEY_VERSION) ?? 'null');
-    if (v && Array.isArray(v.activeTabs)) {
+    // A valid payload is any plain object. WARDEN-372 removed the activeTabs
+    // canary this guard used to key on (the tabs model is abolished); keying on
+    // "is this a non-null object" is robust against future field removals and
+    // still rejects a non-payload (string/number/null) the parse might surface.
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
       // Parse custom presets first so defaultNewChatPreset can be validated
       // against them: a default naming a since-deleted preset falls back to claude.
       const customPresets = parseCustomPresets(v.customPresets);
@@ -614,8 +700,6 @@ export function loadUi(): UiState {
           ? v.activeWorkspaceId
           : workspaces[0].id;
       return {
-        activeTabs: v.activeTabs.map((t: any) => typeof t === 'string' ? t : t.id),
-        hiddenTabs: Array.isArray(v.hiddenTabs) ? v.hiddenTabs : [],
         workspaces,
         activeWorkspaceId,
         sidebarCollapsed: v.sidebarCollapsed ?? false,
@@ -679,7 +763,10 @@ export function loadUi(): UiState {
         paneHost: (v.paneHost && typeof v.paneHost === 'object') ? v.paneHost : {},
         hostOptions: parseHostOptions(v.hostOptions),
         copyHintDismissed: parseDismissedMap(v.copyHintDismissed),
-        agentFilter: v.agentFilter ?? 'all',
+        // WARDEN-372: 'active'/'hidden' filter cases are abolished — a stored
+        // value naming either coerces back to 'all' (defensive, like every other
+        // enum-ish pref) so a legacy payload never selects a dead filter.
+        agentFilter: ['all', 'yatfa', 'claude', 'manual'].includes(v.agentFilter) ? v.agentFilter : 'all',
         agentSort: v.agentSort ?? 'manual',
       };
     }
@@ -805,10 +892,8 @@ export function clampLayoutWidths(
 // an 'empty' launch must blank and what 'previous' must restore. paneHost is
 // required here: initialWorkspace always returns a concrete object for it. The
 // pane-set (openPanes/focused) now lives inside `workspaces` + `activeWorkspaceId`
-// (WARDEN-256); activeTabs/hiddenTabs stay flat + global.
+// (WARDEN-256). WARDEN-372 abolished the flat activeTabs/hiddenTabs fields.
 type Workspace = {
-  activeTabs: string[];
-  hiddenTabs: string[];
   workspaces: WorkspacePaneSet[];
   activeWorkspaceId: string;
   paneHost: Record<string, string>;
@@ -821,11 +906,9 @@ type Workspace = {
 export function initialWorkspace(disk: UiState, restoreOnStartup: RestoreOnStartup): Workspace {
   if (restoreOnStartup === 'empty') {
     const ws = makeWorkspace(DEFAULT_WORKSPACE_NAME);
-    return { activeTabs: [], hiddenTabs: [], workspaces: [ws], activeWorkspaceId: ws.id, paneHost: {} };
+    return { workspaces: [ws], activeWorkspaceId: ws.id, paneHost: {} };
   }
   return {
-    activeTabs: disk.activeTabs,
-    hiddenTabs: disk.hiddenTabs,
     workspaces: disk.workspaces,
     activeWorkspaceId: disk.activeWorkspaceId ?? disk.workspaces[0]?.id ?? '',
     paneHost: disk.paneHost ?? {},
@@ -842,6 +925,13 @@ export function initialWorkspace(disk: UiState, restoreOnStartup: RestoreOnStart
 // snapshot whenever the pref is 'empty' OR this launch started empty
 // (`startedEmpty`, captured at mount); all other fields always persist from `live`.
 // Pure: no localStorage access (the caller passes the `disk` snapshot).
+//
+// WARDEN-372 exemption: recentlyClosed is NOT workspace-restoration state, so it
+// is NOT frozen with the pane grid. While the openPanes/focused of the carried-
+// forward disk workspaces are preserved (the pane grid is frozen), the LIVE
+// active workspace's recently-closed entries are merged INTO the disk active
+// workspace — so this session's closes persist even in 'empty' mode, without
+// wiping the recovery history already on disk (mergeRecentlyClosed dedups + caps).
 export function persistUiState(
   live: Omit<UiState, 'restoreOnStartup'>,
   restoreOnStartup: RestoreOnStartup,
@@ -849,11 +939,19 @@ export function persistUiState(
   startedEmpty: boolean,
 ): UiState {
   if (restoreOnStartup === 'empty' || startedEmpty) {
+    // recentlyClosed exemption: overlay the live active workspace's recovery
+    // list onto the frozen disk active workspace (union, dedup, cap). The live
+    // active workspace may be a fresh-id empty-mode workspace, so match by the
+    // DISK active id (the workspace that survives the freeze), not live's.
+    const liveActive = live.workspaces.find((w) => w.id === live.activeWorkspaceId) ?? live.workspaces[0];
+    const frozenWorkspaces = disk.workspaces.map((w) =>
+      liveActive && w.id === disk.activeWorkspaceId
+        ? { ...w, recentlyClosed: mergeRecentlyClosed(w.recentlyClosed ?? [], liveActive.recentlyClosed ?? []) }
+        : w,
+    );
     return {
       ...live,
-      activeTabs: disk.activeTabs,
-      hiddenTabs: disk.hiddenTabs,
-      workspaces: disk.workspaces,
+      workspaces: frozenWorkspaces,
       activeWorkspaceId: disk.activeWorkspaceId,
       paneHost: disk.paneHost,
       restoreOnStartup,
