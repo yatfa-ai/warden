@@ -24,6 +24,7 @@ import { StatusDot } from '@/components/StatusDot';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
+import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS } from '@/lib/pollInterval';
 import { toast } from 'sonner';
 
 // Canonical id of this machine's own tmux host (mirrors LOCAL in src/chats.js). Local agents
@@ -347,6 +348,14 @@ function App() {
   // → disabled (never auto-close).
   const [observerAutoStart, setObserverAutoStart] = useState(false);
   const [observerSessionTimeout, setObserverSessionTimeout] = useState<number | null>(30);
+  // WARDEN-394 — the dashboard auto-refresh cadence, resolved from the persisted
+  // pollIntervalMs pref. Initialized to the 60s web default and refreshed from
+  // /api/config below (after Settings saves) so a changed "Poll Interval" takes
+  // effect immediately without a reload. The stored value is ALWAYS already
+  // web-safe (resolvePollIntervalMs runs at read time), so the two poll effects
+  // below consume it directly — a stale CLI default (1500) or sub-floor value
+  // can never reach setInterval and flood SSH.
+  const [pollIntervalMs, setPollIntervalMs] = useState<number>(WEB_POLL_DEFAULT_MS);
 
   useEffect(() => {
     streamApi.onOpen = () => setStreamConn(true);
@@ -539,6 +548,12 @@ function App() {
       // — never auto-close when the value is unknown). A fresh install returns 30.
       setObserverAutoStart(cfg.observerAutoStart ?? false);
       setObserverSessionTimeout(cfg.observerSessionTimeout ?? null);
+      // WARDEN-394 — resolve the persisted pollIntervalMs to a web-safe cadence.
+      // cfg.pollIntervalMs defaults to 1500 (config.js CLI watch cadence); that,
+      // any non-number/absent/sub-floor value, and anything over the ceiling all
+      // land on the 60s web default (resolvePollIntervalMs). The resolved value
+      // feeds both dashboard poll effects so the pref actually governs refresh.
+      setPollIntervalMs(resolvePollIntervalMs(cfg.pollIntervalMs));
     } catch (e) {
       console.error('Failed to refresh config preferences:', e);
     }
@@ -632,7 +647,7 @@ function App() {
   // Ticks are gated on Page Visibility so a backgrounded tab never burns SSH; on regaining
   // focus we refresh immediately because state may be stale while hidden.
   useEffect(() => {
-    const REFRESH_MS = 60_000;
+    const REFRESH_MS = pollIntervalMs;
     const poll = async () => {
       if (document.visibilityState !== 'visible') return;
       await applyCatalog(true);
@@ -649,7 +664,7 @@ function App() {
       window.clearInterval(intervalId);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [applyCatalog, refreshDiscoveredHosts]);
+  }, [applyCatalog, refreshDiscoveredHosts, pollIntervalMs]);
 
   // Discover this machine's own agents once on mount. Local discovery is cheap (no SSH) and is
   // the common case, so local agents show live immediately and the auto-refresh above keeps
@@ -679,9 +694,9 @@ function App() {
       }
     };
     fetchHostStatuses();
-    const interval = window.setInterval(fetchHostStatuses, 30000);
+    const interval = window.setInterval(fetchHostStatuses, pollIntervalMs);
     return () => window.clearInterval(interval);
-  }, []);
+  }, [pollIntervalMs]);
 
   // open chat: open pane + focus. The dedup point for the multi-workspace model
   // (WARDEN-256): a pane lives in at most one workspace, so if `id` is already a
