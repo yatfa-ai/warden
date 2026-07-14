@@ -11,24 +11,35 @@
 //
 // Protocol (one JSON object per line):
 //
-//	request : {"id":<any-json>,"method":"ping"|"discover"|"capturePanes"|"hasSession"|"resize","params":{...}}
+//	request : {"id":<any-json>,"method":"ping"|"discover"|"capturePanes"|"hasSession"|"resize"|"subscribePanes"|"unsubscribePanes","params":{...}}
 //	response: {"id":<echoed>,"ok":true,"result":{...}}
 //	          {"id":<echoed>,"ok":false,"error":"..."}
+//	event   : {"event":"paneDelta","panes":{key:content,…}}   // UNSOLICITED — no id
 //
 // `id` is echoed untouched so the caller (warden) can be a multiplexing client
 // with many requests in flight on the one stdio channel. stderr is for human
 // diagnostics only — warden never parses it.
+//
+// subscribePanes (WARDEN-413) is the one unsolicited-emitter: after it ACKs, the
+// companion pushes paneDelta event lines for ONLY the panes that changed (an
+// empty-panes line is a liveness heartbeat) so warden can render idle panes from
+// the push instead of polling capturePanes every tick. Events carry NO id, so
+// warden's _onLine routes any line with an `event` field to a handler instead of
+// matching it against a pending request — a strictly additive protocol addition.
 package main
 
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 )
 
 // version is baked in at build time via -ldflags "-X main.version=..." and is
@@ -99,15 +110,18 @@ func main() {
 	// per-line cap well above the 64KB default so large fleets don't truncate.
 	scanner.Buffer(make([]byte, 1024*1024), 64*1024*1024)
 
-	// All stdout writes go through one encoder + mutex so concurrent dispatch
-	// (future) can never interleave half-lines. Requests are read serially today.
+	// All stdout writes go through one encoder + mutex so the subscription
+	// watcher's unsolicited paneDelta events can never interleave half-lines with
+	// RPC responses (both go through writeLine). Requests are read serially today;
+	// only the watcher goroutine runs concurrently, and it shares this mutex.
 	var outMu sync.Mutex
 	enc := json.NewEncoder(os.Stdout)
-	write := func(r Response) {
+	writeLine := func(v any) {
 		outMu.Lock()
 		defer outMu.Unlock()
-		_ = enc.Encode(r) // json.Encoder appends the newline delimiter
+		_ = enc.Encode(v) // json.Encoder appends the newline delimiter
 	}
+	write := func(r Response) { writeLine(r) }
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -124,7 +138,7 @@ func main() {
 		case "ping":
 			write(Response{ID: req.ID, OK: true, Result: map[string]any{
 				"version": version,
-				"methods": []string{"ping", "discover", "capturePanes", "hasSession", "spawnSession", "killSession", "resize"},
+				"methods": []string{"ping", "discover", "capturePanes", "hasSession", "spawnSession", "killSession", "resize", "subscribePanes", "unsubscribePanes"},
 			}})
 		case "discover":
 			containers, err := discover(req.Params)
@@ -171,10 +185,27 @@ func main() {
 			// hasSession, only richer (it carries stdout/stderr/code so the JS side
 			// maps it to the identical runTmux result the default path produces).
 			write(Response{ID: req.ID, OK: true, Result: resize(req.Params)})
+		case "subscribePanes":
+			// WARDEN-413: start (or replace) a background watcher that re-captures
+			// the pane set on a short interval and pushes paneDelta events for ONLY
+			// the panes that changed (empty-panes = heartbeat). The ACK returns
+			// immediately; emission happens asynchronously via writeLine. An empty
+			// pane list stops any running watcher (treated as unsubscribe).
+			var p capturePanesParams
+			if len(req.Params) > 0 {
+				_ = json.Unmarshal(req.Params, &p) // bad params -> empty -> stop watcher
+			}
+			startSubscription(p.Panes, writeLine)
+			write(Response{ID: req.ID, OK: true, Result: map[string]any{"subscribed": len(p.Panes)}})
+		case "unsubscribePanes":
+			stopSubscription()
+			write(Response{ID: req.ID, OK: true, Result: map[string]any{"unsubscribed": true}})
 		default:
 			write(Response{ID: req.ID, OK: false, Error: "unknown method: " + req.Method})
 		}
 	}
+	// Stop the watcher if the channel (stdin) closed so a reconnect starts clean.
+	stopSubscription()
 	if err := scanner.Err(); err != nil {
 		fmt.Fprintln(os.Stderr, "companion: stdin scanner error:", err)
 		os.Exit(1)
@@ -461,24 +492,14 @@ func parseCaptureSentinels(stdout string) map[string]string {
 	return out
 }
 
-// capturePanes mirrors warden's batched capturePanes (src/chats.js) for ONE host:
-// build the ___B_/___E_ sentinel-framed batch script, run it once in a login
-// shell LOCALLY on the host (the per-op-handshake win — no further ssh), parse
-// the sentinels back into a key->content map, return it in one RPC response. The
-// docker-exec vs bare-tmux selection is reproduced faithfully via
-// buildCaptureScript so both yatfa (container set) and manual (bare-tmux) chats
-// work through the companion.
-func capturePanes(params json.RawMessage) (map[string]string, error) {
-	var p capturePanesParams
-	if len(params) > 0 {
-		if err := json.Unmarshal(params, &p); err != nil {
-			return nil, fmt.Errorf("invalid capturePanes params: %s", err)
-		}
-	}
-	if len(p.Panes) == 0 {
+// capturePanesList runs the batched capture for an already-parsed pane list and
+// returns the key->content map. Shared by capturePanes (the RPC) and the
+// subscribePanes watcher (which re-captures the same set on each tick to diff).
+func capturePanesList(panes []capturePaneReq) (map[string]string, error) {
+	if len(panes) == 0 {
 		return map[string]string{}, nil
 	}
-	script := buildCaptureScript(p.Panes)
+	script := buildCaptureScript(panes)
 	// `bash -lc` mirrors the default runWithPool path (CLAUDE.md: always wrap
 	// remote commands in a login shell) so docker/tmux resolve on PATH exactly as
 	// they do over SSH today.
@@ -494,6 +515,192 @@ func capturePanes(params json.RawMessage) (map[string]string, error) {
 		return nil, fmt.Errorf("capturePanes script failed: %s", stderr)
 	}
 	return parseCaptureSentinels(string(out)), nil
+}
+
+// capturePanes mirrors warden's batched capturePanes (src/chats.js) for ONE host:
+// build the ___B_/___E_ sentinel-framed batch script, run it once in a login
+// shell LOCALLY on the host (the per-op-handshake win — no further ssh), parse
+// the sentinels back into a key->content map, return it in one RPC response. The
+// docker-exec vs bare-tmux selection is reproduced faithfully via
+// buildCaptureScript so both yatfa (container set) and manual (bare-tmux) chats
+// work through the companion.
+func capturePanes(params json.RawMessage) (map[string]string, error) {
+	var p capturePanesParams
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid capturePanes params: %s", err)
+		}
+	}
+	return capturePanesList(p.Panes)
+}
+
+// ----------------------------- subscribePanes --------------------------------
+// WARDEN-413 (problem #3 of roadmap WARDEN-270). capture-pane is polled every 2s
+// monitor tick + every observer poll even when nothing changed; for an idle fleet
+// (the common state) that is pure waste scaled by hosts × panes × scrollback.
+// subscribePanes flips REMOTE pane capture from PULL to PUSH: after an initial
+// capture, a background watcher re-captures the pane set on a short interval,
+// content-hashes each pane, and emits unsolicited paneDelta event lines for ONLY
+// the panes whose hash changed (an empty-panes line is a liveness heartbeat). The
+// Node side renders idle panes from the push and SKIPS the capturePanes RPC on
+// the monitor tick, collapsing idle-fleet channel traffic to ~0 while active panes
+// still update within one tick interval.
+//
+// Emission rides the SAME stdio channel (no port) through writeLine so event
+// lines never interleave with RPC responses. Stays user-space: a local content
+// hash is the change signal — no tmux change-detection prerequisite.
+
+// paneDeltaEvent is the unsolicited push line. Panes carries ONLY the panes that
+// changed since the last push; an empty map is a liveness heartbeat (the Node
+// side refreshes its freshness timer on any paneDelta, payload or not).
+type paneDeltaEvent struct {
+	Event string            `json:"event"`
+	Panes map[string]string `json:"panes"`
+}
+
+const (
+	// subscribeInterval is the watcher's local re-capture cadence. Kept just under
+	// one monitor-tick interval (2s) so a pane whose content changes is pushed
+	// within ~one tick — the success measure's "active panes update as promptly as
+	// today".
+	subscribeInterval = 1 * time.Second
+	// subscribeHeartbeat is how long the watcher stays silent before emitting an
+	// empty-panes heartbeat. Must stay BELOW warden's freshness window
+	// (PANE_DELTA_FRESH_MS in src/companion.js, 3 monitor ticks = 6s) so a live
+	// idle host keeps warden out of its poll backstop; small enough that idle
+	// channel traffic is ~0 (one tiny line every few seconds, not a 60-line × N
+	// capture every tick).
+	subscribeHeartbeat = 4 * time.Second
+)
+
+// paneSubscription is one active watcher. Exactly one is live per process (the
+// companion serves one warden client over its one stdio channel).
+type paneSubscription struct {
+	mu     sync.Mutex
+	panes  []capturePaneReq  // current pane set (the latest subscribePanes)
+	hashes map[string]string // key -> last-emitted content hash
+	stop   chan struct{}
+	done   chan struct{}
+}
+
+var (
+	subMu     sync.Mutex
+	activeSub *paneSubscription
+)
+
+// hashContent returns a stable hex digest of a pane's captured content. Only used
+// for change detection, so a collision would at worst skip one push (corrected on
+// the next change) — sha256 makes that effectively impossible.
+func hashContent(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
+}
+
+// diffPanes computes which captured panes changed vs the last-emitted hashes and
+// updates the hash map in place. Pure (no I/O) so it is unit-testable. A pane
+// present in hashes but absent from captured is dropped (the pane left the set).
+func diffPanes(captured, hashes map[string]string) map[string]string {
+	changed := map[string]string{}
+	for k, content := range captured {
+		h := hashContent(content)
+		if prev, ok := hashes[k]; !ok || prev != h {
+			hashes[k] = h
+			changed[k] = content
+		}
+	}
+	for k := range hashes {
+		if _, ok := captured[k]; !ok {
+			delete(hashes, k)
+		}
+	}
+	return changed
+}
+
+// captureOnce re-captures the current pane set and pushes a paneDelta for the
+// changed panes (or an empty-heartbeat if idle longer than subscribeHeartbeat).
+// lastEmit is the time of the last push (in/out) so heartbeats reset the timer.
+// A capture failure is non-fatal: the watcher skips this tick and tries again
+// next interval (a transient bash/tmux failure must never break the push path or
+// wedge the ACK'd RPC channel — warden's freshness backstop covers a stuck push).
+func (s *paneSubscription) captureOnce(writeLine func(any), lastEmit *time.Time, now time.Time) {
+	s.mu.Lock()
+	panes := append([]capturePaneReq(nil), s.panes...)
+	s.mu.Unlock()
+	if len(panes) == 0 {
+		return
+	}
+	captured, err := capturePanesList(panes)
+	if err != nil {
+		return // transient — retry next tick; never wedge the channel.
+	}
+	s.mu.Lock()
+	changed := diffPanes(captured, s.hashes)
+	dueHeartbeat := now.Sub(*lastEmit) >= subscribeHeartbeat
+	s.mu.Unlock()
+	if len(changed) > 0 || dueHeartbeat {
+		writeLine(paneDeltaEvent{Event: "paneDelta", Panes: changed})
+		*lastEmit = now
+	}
+}
+
+// loop runs the watcher until stop is closed. An immediate first capture pushes
+// the full initial state (every pane is "changed" against an empty hash map), so
+// warden's cache populates within ~one interval of the ACK rather than waiting a
+// tick.
+func (s *paneSubscription) loop(writeLine func(any)) {
+	defer close(s.done)
+	ticker := time.NewTicker(subscribeInterval)
+	defer ticker.Stop()
+	lastEmit := time.Now()
+	// Immediate initial capture: the first diff sees every pane as new and pushes
+	// the full set, so the Node cache is seeded without waiting for a tick.
+	s.captureOnce(writeLine, &lastEmit, lastEmit)
+	for {
+		select {
+		case <-s.stop:
+			return
+		case now := <-ticker.C:
+			s.captureOnce(writeLine, &lastEmit, now)
+		}
+	}
+}
+
+// startSubscription stops any running watcher and starts a new one for panes.
+// Called from the dispatch loop (synchronously handling subscribePanes); it
+// returns once the new watcher goroutine has started (the goroutine runs in the
+// background). An empty pane list stops the watcher without starting a new one
+// (unsubscribe semantics). Blocking on the previous watcher's done channel
+// guarantees a clean handoff: no two watchers ever capture/emit concurrently.
+func startSubscription(panes []capturePaneReq, writeLine func(any)) {
+	subMu.Lock()
+	defer subMu.Unlock()
+	if activeSub != nil {
+		close(activeSub.stop)
+		<-activeSub.done
+		activeSub = nil
+	}
+	if len(panes) == 0 {
+		return
+	}
+	s := &paneSubscription{
+		panes:  panes,
+		hashes: map[string]string{},
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
+	}
+	activeSub = s
+	go s.loop(writeLine)
+}
+
+// stopSubscription stops the running watcher (unsubscribePanes, or stdin close).
+func stopSubscription() {
+	subMu.Lock()
+	defer subMu.Unlock()
+	if activeSub != nil {
+		close(activeSub.stop)
+		<-activeSub.done
+		activeSub = nil
+	}
 }
 
 // ------------------------------- hasSession ---------------------------------
@@ -628,6 +835,7 @@ func resolveSession(session, container string) string {
 //     translation in tmux.js is LOCAL-only and does NOT apply on the companion path)
 //   - the cmd argv (`chat.cmd.split(/\s+/).filter(Boolean)`); an EMPTY cmd launches
 //     tmux's default shell (WARDEN-223): no trailing argv is appended.
+//
 // Each argv element is shell-quoted (byte-identical to ssh.js shellQuote) and run
 // in a login shell (`bash -lc`, per CLAUDE.md) so docker/tmux resolve on PATH
 // exactly as they do over SSH today.
