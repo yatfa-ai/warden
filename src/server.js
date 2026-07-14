@@ -1739,6 +1739,90 @@ app.get('/api/git-show', async (req, res) => {
   }
 });
 
+// ---- File blob at a historical commit (WARDEN-354) --------------------------
+// The temporal file-exploration trio's full-snapshot leg: blame = per-line
+// provenance (WARDEN-206), history = commit sequence + per-file diff (WARDEN-319),
+// this = the file's FULL content as it existed at a commit (git show <hash>:<path>).
+// Read-only — consistent with the git-status/log/diff/show/stash/blame set. No
+// checkouts, no mutating ops (the WARDEN-199 line stays read-only).
+//
+//   GET /api/git-cat-file?id=<chatId>&hash=<hash>&path=<file>
+//     → { content: string|null, error: string|null }
+//
+// Mirrors /api/git-show's resolve → hex-validate hash → isSafeRelativePath →
+// gitCwd guard → runGit → never-500 shape, and layers /api/read-file's 1MB +
+// binary guards on top (a blob is full file content, not a diff, so an oversize
+// blob is a clean size error rather than a silent truncation). `hash` is hex-
+// validated and `path` is isSafeRelativePath-checked, so `${hash}:${path}` is
+// safe as a single argv element (no shell on the local branch; shellQuoted
+// remotely). A non-git cwd, a deleted-at-commit path, or an invalid hash yields
+// a clean empty/error result — never a 500.
+app.get('/api/git-cat-file', async (req, res) => {
+  const chatId = String(req.query.id || '');
+  const hash = String(req.query.hash || '');
+  const filePath = String(req.query.path || '').trim();
+  const { chat, error } = await resolve(chatId);
+  if (error) return res.status(404).json({ error });
+
+  // Reject malformed hashes before any git invocation: hex only, 4–40 chars.
+  if (!/^[0-9a-f]{4,40}$/i.test(hash)) {
+    return res.json({ content: null, error: 'invalid hash' });
+  }
+  // Empty path → nothing to read; unsafe path → 'invalid path' (never 500).
+  if (!filePath) return res.json({ content: null, error: 'path is required' });
+  if (!isSafeRelativePath(filePath)) return res.json({ content: null, error: 'invalid path' });
+
+  try {
+    const cwd = gitCwd(chat);
+    if (!cwd) return res.json({ content: null, error: 'no cwd' });
+
+    // Binary by extension: mirror /api/read-file (a .png at a commit is still a
+    // .png). Checked before any git call so we never transfer garbled bytes.
+    if (isBinaryFile(filePath)) {
+      return res.json({ content: null, error: 'cannot read binary files' });
+    }
+
+    // Pre-check existence + size with `git cat-file -s` (tiny output, never hits
+    // a maxBuffer). An oversize blob is a clean size error BEFORE we transfer its
+    // bytes — mirroring /api/read-file's stat-before-read (a blob is full file
+    // content, so a truncation would mislead; we error instead). A path that
+    // doesn't exist at this commit (deleted/never touched) exits non-zero here.
+    const sizeR = await runGit(chat, ['cat-file', '-s', `${hash}:${filePath}`], cwd);
+    if (!sizeR.ok) {
+      // Distinguish a non-git cwd (soft failure → clean empty, mirroring git-show)
+      // from a path that doesn't exist at this commit (→ helpful 'not found at
+      // commit'). Both are 200, never a 500.
+      const probe = await runGit(chat, ['rev-parse', '--is-inside-work-tree'], cwd);
+      const isRepo = probe.ok && (probe.stdout || '').trim() === 'true';
+      return res.json({ content: null, error: isRepo ? 'not found at commit' : null });
+    }
+    const size = parseInt(sizeR.stdout || '', 10);
+    if (Number.isNaN(size)) return res.json({ content: null, error: 'not found at commit' });
+    if (size > GIT_DIFF_MAX_BYTES) {
+      return res.json({ content: null, error: 'file too large (max 1MB)' });
+    }
+
+    // `git show <hash>:<path>` emits the full blob bytes. hash is hex-validated
+    // and filePath is isSafeRelativePath-checked, so `<hash>:<path>` is safe as
+    // one argv element after `git -C <cwd>` / the shellQuoted remote form. The
+    // size pre-check above guarantees the blob fits the transport's maxBuffer.
+    const r = await runGit(chat, ['show', `${hash}:${filePath}`], cwd);
+    if (!r.ok) {
+      return res.json({ content: null, error: 'not found at commit' });
+    }
+    const raw = r.stdout || '';
+    // Defense-in-depth: a file with a non-binary extension but binary content
+    // (e.g. an extension-less blob) would decode to garbled UTF-8. Detect a NUL
+    // byte anywhere in the content — git's own binary heuristic.
+    if (isBinaryBlob(raw)) {
+      return res.json({ content: null, error: 'cannot read binary files' });
+    }
+    res.json({ content: raw, error: null });
+  } catch (e) {
+    res.json({ content: null, error: e.message });
+  }
+});
+
 // Shelved work-in-progress detail (git stash list). Mirrors /api/git-log: local
 // chats run git via spawnSync, remote chats run over SSH with shellQuote(cwd).
 // We reuse git-log's --pretty pipe format (`%gd|%s|%cr`) so the subject (which
@@ -2070,6 +2154,20 @@ export function isBinaryFile(filePath) {
   ];
   const ext = path.extname(filePath).toLowerCase();
   return binaryExtensions.includes(ext);
+}
+
+// Detect binary content in a decoded blob string (WARDEN-354). `git show
+// <hash>:<path>` emits raw bytes; runGit decodes them as UTF-8, so a binary
+// blob's NUL bytes (0x00) survive as embedded '\0' characters in the string. A
+// NUL anywhere in the content means the blob isn't valid text — git's own
+// binary heuristic. The blob is already size-capped to 1MB by the cat-file -s
+// pre-check above, so a full scan is cheap. Defense-in-depth behind
+// isBinaryFile's extension check (which catches known-binary paths up front);
+// this catches an extension-less file whose content is binary so we never emit
+// garbled UTF-8. Exported for unit tests.
+export function isBinaryBlob(content) {
+  if (!content) return false;
+  return content.includes('\0');
 }
 
 // Build the remote (SSH) shell script that safely reads a file under `cwd`.
