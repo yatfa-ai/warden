@@ -11,7 +11,7 @@
 //
 // Protocol (one JSON object per line):
 //
-//	request : {"id":<any-json>,"method":"ping"|"discover"|"capturePanes","params":{...}}
+//	request : {"id":<any-json>,"method":"ping"|"discover"|"capturePanes"|"hasSession","params":{...}}
 //	response: {"id":<echoed>,"ok":true,"result":{...}}
 //	          {"id":<echoed>,"ok":false,"error":"..."}
 //
@@ -81,6 +81,17 @@ type discoverParams struct {
 	Activity bool `json:"activity"`
 }
 
+// hasSessionParams is the liveness-probe RPC params (WARDEN-382). Container is
+// the docker container (empty for a bare-tmux / manual chat); Session is the
+// tmux target, falling back to Container then "agent" — identical to
+// capturePanes (main.go:263-269) and src/chats.js. Both are JSON-serialized RPC
+// params, never persisted fields (the same trust boundary capturePanes' panes[]
+// already relies on).
+type hasSessionParams struct {
+	Container string `json:"container"`
+	Session   string `json:"session"`
+}
+
 func main() {
 	scanner := bufio.NewScanner(os.Stdin)
 	// A discover over many containers can produce a sizable line; raise the
@@ -112,7 +123,7 @@ func main() {
 		case "ping":
 			write(Response{ID: req.ID, OK: true, Result: map[string]any{
 				"version": version,
-				"methods": []string{"ping", "discover", "capturePanes"},
+				"methods": []string{"ping", "discover", "capturePanes", "hasSession"},
 			}})
 		case "discover":
 			containers, err := discover(req.Params)
@@ -131,6 +142,13 @@ func main() {
 				write(Response{ID: req.ID, OK: true, Result: map[string]any{
 					"panes": panes,
 				}})
+			}
+		case "hasSession":
+			result, err := hasSession(req.Params)
+			if err != nil {
+				write(Response{ID: req.ID, OK: false, Error: err.Error()})
+			} else {
+				write(Response{ID: req.ID, OK: true, Result: result})
 			}
 		default:
 			write(Response{ID: req.ID, OK: false, Error: "unknown method: " + req.Method})
@@ -455,4 +473,50 @@ func capturePanes(params json.RawMessage) (map[string]string, error) {
 		return nil, fmt.Errorf("capturePanes script failed: %s", stderr)
 	}
 	return parseCaptureSentinels(string(out)), nil
+}
+
+// ------------------------------- hasSession ---------------------------------
+// WARDEN-382 (slice 3 of roadmap WARDEN-270). has-session is the pre-attach /
+// pre-recovery LIVENESS PROBE: it fires on every pane open + the recovery flows,
+// so — like discover and capturePanes — migrating it onto the persistent
+// companion channel collapses the per-probe SSH handshake the default
+// probeSession path pays (one ssh spawn per probe). The bootstrap+channel are
+// slice 1's, reused verbatim; this only adds the RPC.
+
+// hasSession is the liveness-probe RPC. It runs `tmux has-session -t <target>`
+// LOCALLY on the host using the IDENTICAL docker-exec/bare-tmux selection as
+// buildCaptureScript (main.go:253-277: `docker exec <container> tmux` when
+// container is set, else bare `tmux`). The target falls back session → container
+// → "agent" (same fallback chain as capturePanes). has-session exits 0 only when
+// the session exists, so exists = (exit 0). `bash -lc` mirrors capturePanes /
+// the default runWithPool path so docker and tmux resolve on PATH identically.
+//
+// The result is returned as {ok:true, exists:<bool>}: the RPC itself never fails
+// (a host-side command failure — tmux missing, container absent — is simply
+// exists:false, never an RPC error), so the only {ok:false} this RPC can produce
+// is the dispatch-level "unknown method" path. This is what lets warden map the
+// result to the tri-state attach reason unambiguously: exists separates
+// "session absent" from "host unreachable", which the raw-SSH isTransportFailure
+// heuristic could only guess at.
+func hasSession(params json.RawMessage) (map[string]any, error) {
+	var p hasSessionParams
+	if len(params) > 0 {
+		_ = json.Unmarshal(params, &p) // bad params → fall through to defaults
+	}
+	target := p.Session
+	if target == "" {
+		target = p.Container
+	}
+	if target == "" {
+		target = "agent"
+	}
+	var tmuxCmd string
+	if p.Container != "" {
+		tmuxCmd = "docker exec " + shellQuote(p.Container) + " tmux"
+	} else {
+		tmuxCmd = "tmux"
+	}
+	script := tmuxCmd + " has-session -t " + shellQuote(target)
+	err := exec.Command("bash", "-lc", script).Run()
+	return map[string]any{"exists": err == nil}, nil
 }

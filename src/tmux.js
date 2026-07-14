@@ -3,6 +3,7 @@
 // executes them via the transport layer (ssh.js runTmux/attachTmux), which routes
 // to a remote host over SSH or to this machine locally. tmux is required everywhere.
 import { runTmux, attachTmux, attachInteractiveTmux, toMsysPath } from './ssh.js';
+import { isCompanionTransportEnabled, hasSession as companionHasSession } from './companion.js';
 
 const sess = (chat, cfg) => (chat && chat.session) || (cfg && cfg.tmuxSession) || 'agent';
 
@@ -70,9 +71,51 @@ export async function sendKey(chat, cfg, k) {
   return true;
 }
 
+// Companion transport routing for the liveness probe (WARDEN-382, slice 3 of
+// roadmap WARDEN-270). For a REMOTE host under WARDEN_COMPANION_TRANSPORT=1 the
+// probe takes ONE hasSession RPC round-trip over the persistent companion channel
+// (zero per-op SSH handshakes — today probeSession spawns one ssh process per
+// probe). The result is mapped to the SAME raw {ok,code,stdout,stderr} shape
+// runTmux produces, so classifyProbe yields the identical attach reason the
+// default path emits — only sharper: the companion channel separates
+// reachability from session-existence, eliminating the ambiguous "transport vs
+// command failure" gap the raw-SSH isTransportFailure heuristic can only guess at.
+//   ok && exists      → {ok:true}                       → alive (classifyProbe null)
+//   ok && !exists     → {ok:false,code:1,"can't find"}   → session_dead
+//   !ok && transport  → {ok:false,code:-1}               → host_unreachable
+//   !ok && !transport → {ok:false,code:1}                → session_dead (parity: the
+//                                                          default path also classifies
+//                                                          a host-side command failure,
+//                                                          e.g. tmux missing, as dead)
+// LOCAL never routes through the companion. `deps.runTmux` / `deps.companionHasSession`
+// are optional test seams (mirrors the deps seam in ssh.js runWithPool / tmux send).
+function companionHasSessionResultToProbe(res, session) {
+  if (res && res.ok) {
+    return res.exists
+      ? { ok: true, code: 0, stdout: '', stderr: '' }
+      : { ok: false, code: 1, stdout: '', stderr: `can't find session: ${session}\n` };
+  }
+  if (res && res.transport) {
+    return { ok: false, code: -1, stdout: '', stderr: res.error || 'companion transport failed' };
+  }
+  return { ok: false, code: 1, stdout: '', stderr: (res && res.error) || 'companion has-session failed' };
+}
+
+async function probeViaCompanion(chat, cfg, deps) {
+  const fn = deps.companionHasSession ?? companionHasSession;
+  const session = sess(chat, cfg);
+  const res = await fn(chat.host, { container: chat.container, session }, cfg, {});
+  return companionHasSessionResultToProbe(res, session);
+}
+
 // tmux is alive for this chat? (has-session exits 0 if yes)
-export async function hasSession(chat, cfg) {
-  const r = await runTmux(chat, ['has-session', '-t', sess(chat, cfg)]);
+export async function hasSession(chat, cfg, deps = {}) {
+  if (chat.host !== '(local)' && isCompanionTransportEnabled()) {
+    const r = await probeViaCompanion(chat, cfg, deps);
+    return r.ok;
+  }
+  const run = deps.runTmux ?? runTmux;
+  const r = await run(chat, ['has-session', '-t', sess(chat, cfg)]);
   return r.ok;
 }
 
@@ -87,8 +130,15 @@ export async function hasSession(chat, cfg) {
 //                       wedged ControlMaster) or the probe timed out → host_unreachable.
 // `timeout` bounds both the remote (SIGKILL on the ssh child) and the local
 // (spawnSync SIGTERM) path so a wedged host can never hang the probe forever.
-export async function probeSession(chat, cfg, { timeout = 8000 } = {}) {
-  return runTmux(chat, ['has-session', '-t', sess(chat, cfg)], { timeout });
+// Under WARDEN_COMPANION_TRANSPORT=1 a REMOTE host probes via the companion RPC
+// (see companionHasSessionResultToProbe); the timeout then bounds nothing extra
+// (the channel has its own RPC timeout) but is accepted for signature parity.
+export async function probeSession(chat, cfg, { timeout = 8000 } = {}, deps = {}) {
+  if (chat.host !== '(local)' && isCompanionTransportEnabled()) {
+    return probeViaCompanion(chat, cfg, deps);
+  }
+  const run = deps.runTmux ?? runTmux;
+  return run(chat, ['has-session', '-t', sess(chat, cfg)], { timeout });
 }
 
 // Set window-size latest so tmux follows whichever client is active (Warden's

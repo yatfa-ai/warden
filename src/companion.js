@@ -552,6 +552,47 @@ export async function capturePanes(host, list, cfg = {}, opts = {}, deps = {}) {
 }
 
 
+// -------------------------------- hasSession --------------------------------
+// WARDEN-382 (slice 3 of roadmap WARDEN-270). has-session is the pre-attach /
+// pre-recovery LIVENESS PROBE — it fires on every pane open + the recovery flows.
+// Routing it over the persistent companion channel collapses the per-probe SSH
+// handshake the default probeSession path pays (one ssh spawn per probe). The
+// bootstrap+channel are slice 1's, reused verbatim; this only adds the RPC client.
+//
+// Returns { host, ok, exists } where exists is the host-side has-session verdict,
+// or { host, ok:false, transport, error, exists:false } on ANY failure — it NEVER
+// falls back to raw SSH (companion-or-fail; opt out via WARDEN_COMPANION_TRANSPORT).
+// `transport` flags a CompanionTransportError (host unreachable / channel died) so
+// tmux.js can map it to 'host_unreachable' rather than the ambiguous 'session_dead'
+// — the whole point of the slice: reachability vs session-existence, separated by
+// the channel contract instead of the raw-SSH isTransportFailure heuristic.
+export async function hasSession(host, { container, session } = {}, cfg = {}, opts = {}, deps = {}) {
+  if (host === LOCAL) {
+    return { host, ok: false, error: 'companion transport does not apply to the local host', exists: false };
+  }
+  try {
+    const channel = await getChannel(host, cfg, deps);
+    // The target falls back session -> container -> 'agent', identical to
+    // capturePanes (companion.js:512-517) and src/chats.js. `container` is null
+    // for bare-tmux / manual chats so the companion selects bare `tmux`.
+    const target = session || container || 'agent';
+    const result = await channel.call('hasSession', { container: container || null, session: target }, { timeout: opts.timeout ?? 10000 });
+    return { host, ok: true, exists: !!(result && result.exists) };
+  } catch (e) {
+    const transport = e instanceof CompanionTransportError;
+    let msg;
+    if (transport) {
+      msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
+    } else if (e instanceof CompanionRpcError) {
+      msg = e.message;
+    } else {
+      msg = `companion hasSession failed on ${host}: ${e?.message ?? e}`;
+    }
+    return { host, ok: false, transport, error: msg, exists: false };
+  }
+}
+
+
 // Pure model of per-tick ssh spawn cost, used by scripts/companion-benchmark.mjs
 // and unit-tested here (WARDEN-272 AC #5: "a spawn/handshake counter per discover
 // tick"). Mirrors the real transport:
