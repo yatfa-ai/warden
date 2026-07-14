@@ -164,6 +164,14 @@ interface Props {
   // ('claude' | 'shell') OR a custom preset name.
   defaultNewChatPreset: string;
   setDefaultNewChatPreset: (v: string) => void;
+  // Per-host agent-type (preset) overrides for the ＋ new chat spawn form
+  // (WARDEN-352 — mirrors defaultNewChatCwdByHost). Keys are host strings
+  // ('(local)' / SSH host name); a host with no entry (or one whose value names
+  // a since-deleted preset, dropped on load) falls through to the global
+  // defaultNewChatPreset, then 'claude'. Pure client-side localStorage pref,
+  // persisted by App's saveUi effect; never sent to the backend.
+  defaultNewChatPresetByHost: Record<string, string>;
+  setDefaultNewChatPresetByHost: (v: Record<string, string>) => void;
   defaultNewChatHost: string;
   setDefaultNewChatHost: (v: string) => void;
   // Default working directory pre-filled in the ＋ new chat spawn form
@@ -462,7 +470,7 @@ function SnippetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, attentionStates, setAttentionStates, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, timestampFormat, setTimestampFormat, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, snippets, setSnippets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin, closeToTray, setCloseToTray, hostOptions, onSetHostSeamlessCopy }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, attentionStates, setAttentionStates, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, timestampFormat, setTimestampFormat, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatPresetByHost, setDefaultNewChatPresetByHost, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, snippets, setSnippets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin, closeToTray, setCloseToTray, hostOptions, onSetHostSeamlessCopy }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -658,6 +666,15 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
     const name = newName.trim();
     setCustomPresets(customPresets.map((p) => (p.name === oldName ? { ...p, name } : p)));
     if (defaultNewChatPreset === oldName) setDefaultNewChatPreset(name);
+    // Keep per-host overrides in sync (WARDEN-352): a host defaulting to the
+    // renamed preset must keep pointing at it, not dangle on the old name (which
+    // the load-time sanitizer would drop on next reload — this avoids a stale
+    // dropdown between saves). Mirrors the defaultNewChatPreset sync above.
+    if (Object.values(defaultNewChatPresetByHost).includes(oldName)) {
+      setDefaultNewChatPresetByHost(Object.fromEntries(
+        Object.entries(defaultNewChatPresetByHost).map(([h, p]) => [h, p === oldName ? name : p]),
+      ));
+    }
     return true;
   };
 
@@ -673,6 +690,15 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
   const deletePreset = (name: string) => {
     setCustomPresets(customPresets.filter((p) => p.name !== name));
     if (defaultNewChatPreset === name) setDefaultNewChatPreset('claude');
+    // Drop any per-host override referencing the deleted preset (WARDEN-352): the
+    // host would fall back to the global default on next load anyway (the load-
+    // time sanitizer drops it), but removing it here keeps the live dropdown free
+    // of a dangling name between saves. Mirrors the defaultNewChatPreset reset.
+    if (Object.values(defaultNewChatPresetByHost).includes(name)) {
+      setDefaultNewChatPresetByHost(Object.fromEntries(
+        Object.entries(defaultNewChatPresetByHost).filter(([, p]) => p !== name),
+      ));
+    }
   };
 
   // --- Instruction-snippet management (create / rename / edit-text / delete) --
@@ -756,6 +782,23 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
       next[host] = value;
     }
     setDefaultNewChatCwdByHost(next);
+  };
+
+  // Write a per-host agent-type (preset) override (WARDEN-352 — the preset mirror
+  // of setHostCwd). A blank/"use global" value means "inherit the global
+  // defaultNewChatPreset" — drop the key entirely so it never persists as a blank
+  // that presetFor would return instead of falling through to the global default.
+  // (The load-time sanitizer drops invalid/blank entries too; this keeps the live
+  // state in the same sanitized shape between saves.) Keys are the same host
+  // strings the spawn form uses ('(local)' / SSH host name).
+  const setHostPreset = (host: string, value: string) => {
+    const next = { ...defaultNewChatPresetByHost };
+    if (value.trim() === '') {
+      delete next[host];
+    } else {
+      next[host] = value;
+    }
+    setDefaultNewChatPresetByHost(next);
   };
 
   return (
@@ -1695,6 +1738,63 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   <p className="text-xs text-muted-foreground">
                     Working directory pre-filled in the ＋ new chat spawn form. Enter a path like <code className="bg-muted px-1 rounded">~/projects/warden</code>; leave blank to start each chat in the host's home directory (today's behavior). Editable per-spawn. Set a per-host override below to use a different directory on a specific host.
                   </p>
+                </div>
+
+                {/* Per-host agent-type (preset) overrides (WARDEN-352 — the preset
+                    mirror of the per-host cwd block below). Just like a cwd path,
+                    the agent you run is host-specific: claude locally but codex
+                    (or a wrapper) on a remote GPU box. Leave a host on "Use global
+                    default" to inherit the default agent type above. Keys are the
+                    same host strings the spawn form uses ('(local)' / SSH host). */}
+                <div className="flex flex-col gap-2">
+                  <Label>Agent type per host</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Override the default agent type for a specific host when spawning. Leave a host on “Use global default” to use the default agent type above.
+                  </p>
+                  <div className="flex flex-col gap-2 rounded-md border bg-muted/30 p-2">
+                    {[{ key: '(local)', label: 'this machine (local)' }, ...availableHosts.map((h) => ({ key: h, label: h }))].map(({ key, label }) => {
+                      // Radix Select forbids an empty-string item value, so
+                      // "inherit global" is a sentinel option mapped to a blank
+                      // (deleted) entry by setHostPreset — a cleared row means
+                      // "inherit the global default", never a persisted blank.
+                      const INHERIT = '__inherit_global__';
+                      const saved = defaultNewChatPresetByHost[key];
+                      const hasOverride = typeof saved === 'string' && saved.trim() !== '';
+                      const validOverride = hasOverride && (saved === 'claude' || saved === 'shell' || customPresets.some((p) => p.name === saved));
+                      return (
+                        <div className="flex flex-col gap-1" key={`presetByHost-${key}`}>
+                          <Label className="text-xs font-normal text-muted-foreground">{label}</Label>
+                          <Select value={hasOverride ? saved : INHERIT} onValueChange={(v) => setHostPreset(key, v === INHERIT ? '' : v)}>
+                            <SelectTrigger className="h-8 w-full">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value={INHERIT}>Use global default</SelectItem>
+                              <SelectItem value="claude">claude</SelectItem>
+                              <SelectItem value="shell">shell</SelectItem>
+                              {customPresets.map((p) => (
+                                <SelectItem key={p.name} value={p.name}>
+                                  {p.name}
+                                </SelectItem>
+                              ))}
+                              {/* A saved value naming a since-deleted preset
+                                  (only reachable via direct localStorage
+                                  tampering — the load sanitizer + the rename/
+                                  delete propagation above keep the live map
+                                  valid) must never leave an empty trigger;
+                                  render it visibly but disabled, mirroring the
+                                  global preset Select's "(deleted)" item. */}
+                              {hasOverride && !validOverride && (
+                                <SelectItem value={saved} disabled>
+                                  {saved} (deleted)
+                                </SelectItem>
+                              )}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
 
                 {/* Per-host working directory overrides (WARDEN-336): one input per

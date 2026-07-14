@@ -32,14 +32,30 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
     (h: string) => initialUi.defaultNewChatCwdByHost?.[h] ?? initialUi.defaultNewChatCwd ?? '',
     [initialUi],
   );
+  // Resolve the default agent-type (preset) for a given host (WARDEN-352 — the
+  // preset mirror of cwdFor from WARDEN-336): a per-host override
+  // (defaultNewChatPresetByHost) wins, falling back to the global
+  // defaultNewChatPreset, then 'claude'. loadUi already dropped any per-host
+  // value naming a since-deleted preset (parsePresetByHost), so a host with no
+  // valid override falls through to today's exact behavior. Used to (re-)seed
+  // the preset field on mount, on host change, and after submit — so every
+  // defaultable spawn field tracks the selected host. Memoized like cwdFor: it
+  // depends only on the mount-once initialUi (stable), safe in effect deps.
+  const presetFor = useCallback(
+    (h: string) => initialUi.defaultNewChatPresetByHost?.[h] ?? initialUi.defaultNewChatPreset ?? 'claude',
+    [initialUi],
+  );
   const [open, setOpen] = useState(false);
   const [sshHosts, setSshHosts] = useState<string[]>([]);
   const [claudePath, setClaudePath] = useState('claude');
   const [host, setHost] = useState(() => initialUi.defaultNewChatHost ?? THIS_MACHINE);
   // preset is a built-in name ('claude' | 'shell') or a custom preset name.
-  // loadUi already validated the stored default against the custom list, so a
-  // default naming a since-deleted preset has already fallen back to 'claude'.
-  const [preset, setPreset] = useState<string>(() => initialUi.defaultNewChatPreset ?? 'claude');
+  // Host-aware (WARDEN-352): pre-fill the agent type for the INITIAL host (the
+  // saved defaultNewChatHost), resolved via presetFor so a per-host override
+  // seeds the field immediately on first open — mirroring cwd's host-aware init
+  // above. loadUi already dropped any per-host value naming a since-deleted
+  // preset, so presetFor falls through to the global default, then 'claude'.
+  const [preset, setPreset] = useState<string>(() => presetFor(initialUi.defaultNewChatHost ?? THIS_MACHINE));
   const [customPresets] = useState(() => initialUi.customPresets ?? []);
   const [session, setSession] = useState('');
   // cwd pre-fills HOST-AWARE (WARDEN-336): the default for the INITIAL host
@@ -70,6 +86,7 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
         setHost((cur) => {
           if (cur !== THIS_MACHINE && !hosts.includes(cur)) {
             setCwd(cwdFor(THIS_MACHINE));
+            setPreset(presetFor(THIS_MACHINE));
             return THIS_MACHINE;
           }
           return cur;
@@ -77,7 +94,7 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
       })
       .catch((error) => console.error('[ssh-hosts] Failed:', error));
     fetch('/api/this-session').then((r) => r.json()).then((t) => { if (t.claudePath) setClaudePath(t.claudePath); }).catch((error) => console.error('[this-session] Failed:', error));
-  }, [open, cwdFor]);
+  }, [open, cwdFor, presetFor]);
 
   useEffect(() => {
     if (!open) return;
@@ -112,8 +129,10 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
       // runs only once per session — clearing cwd to '' here would empty the
       // field for every spawn after the first. Re-seed via cwdFor so the path
       // pre-fills every open for the selected host; a per-spawn edit correctly
-      // does NOT persist (it's a default, not the last-used value).
-      setOpen(false); setSession(''); setCwd(cwdFor(host));
+      // does NOT persist (it's a default, not the last-used value). The preset
+      // field re-seeds host-aware too (WARDEN-352) so it never sticks on a
+      // manually-selected agent type across spawns.
+      setOpen(false); setSession(''); setCwd(cwdFor(host)); setPreset(presetFor(host));
       onSpawned(result.data!.chat);
     } catch (e: unknown) { setErr(e instanceof Error ? e.message : String(e)); }
     setBusy(false);
@@ -129,7 +148,11 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
         value={host}
         onValueChange={(h) => {
           setHost(h);
+          // Re-seed BOTH host-aware spawn defaults when the host changes, so a
+          // user who runs claude locally but codex on a remote box never has to
+          // manually re-select — WARDEN-336 (cwd) + WARDEN-352 (preset).
           setCwd(cwdFor(h));
+          setPreset(presetFor(h));
         }}
       >
         <SelectTrigger className="h-7 w-full text-[11px]">
