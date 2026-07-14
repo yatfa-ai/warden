@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Input } from '@/components/ui/input';
@@ -6,8 +6,39 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { postJson } from '@/lib/api';
 import { loadUi } from '@/lib/storage';
 import type { Chat } from '@/lib/types';
+import { groupByHost, summarizeHostLoad, resourceTone, type HostLoadSummary } from '@/lib/healthUtils';
 
 const THIS_MACHINE = '(local)';
+
+// Per-host load annotation for the host picker (WARDEN-361). The picker already
+// fetches /api/ssh-hosts (names only) when it opens; a companion fetch of the
+// cache-derived /api/health (zero SSH) supplies the per-agent cpu/mem WARDEN-309
+// captured, which we roll up per host (groupByHost + summarizeHostLoad) and suffix
+// each option with the live agent count + mem% (cpu% when present) — so a human
+// spawning their next agent can see which host is already loaded.
+//
+// NUANCE: this is a shadcn <Select>/<SelectItem> (NOT a native <select> as the
+// original proposal assumed), so the suffix CAN carry real color. Radix clones the
+// selected item's text into the collapsed trigger, so the selected host's load
+// also shows inline when the picker is closed — a side benefit, not a regression.
+// A ≥90% mem host is colored red AND given a ⚠ glyph (double-cue) via resourceTone.
+// Stats-less hosts (no entry in hostLoad, or avgCpu/memPct both null) render
+// EXACTLY as before — "host (tmux)" with no suffix.
+function hostOptionChildren(label: string, load?: HostLoadSummary): ReactNode {
+  if (!load || (load.avgCpu == null && load.memPct == null)) return label;
+  const segs: string[] = [];
+  segs.push(`${load.agentCount} agent${load.agentCount !== 1 ? 's' : ''}`);
+  if (load.avgCpu != null) segs.push(`${Math.round(load.avgCpu)}% cpu`);
+  if (load.memPct != null) segs.push(`${load.memPct >= 90 ? '⚠ ' : ''}${Math.round(load.memPct)}% mem`);
+  return (
+    <span className="flex items-center gap-1.5">
+      <span>{label}</span>
+      <span className={`text-[10px] tabular-nums ${resourceTone(load.avgCpu, load.memPct)}`}>
+        · {segs.join(' · ')}
+      </span>
+    </span>
+  );
+}
 
 // Inline (non-modal) spawn. The HOST decides the mechanism:
 //   this machine → direct PTY (no tmux; Windows has none)
@@ -47,6 +78,12 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
   );
   const [open, setOpen] = useState(false);
   const [sshHosts, setSshHosts] = useState<string[]>([]);
+  // Per-host rolled-up load (WARDEN-361): host -> {agentCount, avgCpu, memPct},
+  // snapshot from /api/health fetched once when the picker opens (cache-derived,
+  // zero SSH). An absent host, or one whose agents carry no docker stats, renders
+  // the option with no suffix (graceful). Refreshed on every open so the snapshot
+  // can't go stale across spawns.
+  const [hostLoad, setHostLoad] = useState<Record<string, HostLoadSummary>>({});
   const [claudePath, setClaudePath] = useState('claude');
   const [host, setHost] = useState(() => initialUi.defaultNewChatHost ?? THIS_MACHINE);
   // preset is a built-in name ('claude' | 'shell') or a custom preset name.
@@ -95,6 +132,26 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
       .catch((error) => console.error('[ssh-hosts] Failed:', error));
     fetch('/api/this-session').then((r) => r.json()).then((t) => { if (t.claudePath) setClaudePath(t.claudePath); }).catch((error) => console.error('[this-session] Failed:', error));
   }, [open, cwdFor, presetFor]);
+
+  // Companion fetch (WARDEN-361): pull the cache-derived /api/health (zero SSH) and
+  // roll per-agent cpu/mem up per host, so each picker option can be suffixed with
+  // live load. Separate effect so the load snapshot doesn't refetch when cwd's
+  // stable deps change — only when the popover opens. Reads the same endpoint the
+  // Fleet Health dashboard polls, so a stats-less host here is stats-less there too.
+  useEffect(() => {
+    if (!open) return;
+    fetch('/api/health')
+      .then((r) => r.json())
+      .then((j) => {
+        const agents: Chat[] = Array.isArray(j?.agents) ? j.agents : [];
+        const map: Record<string, HostLoadSummary> = {};
+        for (const g of groupByHost(agents)) {
+          map[g.host] = summarizeHostLoad(g.agents);
+        }
+        setHostLoad(map);
+      })
+      .catch((error) => console.error('[health] host load fetch failed:', error));
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -159,10 +216,10 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value={THIS_MACHINE}>this machine (direct)</SelectItem>
+          <SelectItem value={THIS_MACHINE}>{hostOptionChildren('this machine (direct)', hostLoad[THIS_MACHINE])}</SelectItem>
           {sshHosts.map((h) => (
             <SelectItem key={h} value={h}>
-              {h} (tmux)
+              {hostOptionChildren(`${h} (tmux)`, hostLoad[h])}
             </SelectItem>
           ))}
         </SelectContent>
