@@ -37,6 +37,11 @@ interface Props {
    * watched chat is classified even when its pane isn't open, and diffed for a
    * targeted ping when it newly needs the human. */
   watchedChats?: string[];
+  /** WARDEN-426 — the pane key the human is currently focused on. Forwarded to
+   * useAttentionRollup so the watch ping is suppressed for a watched pane the
+   * human is already reading (they can see it via this badge). Null = focused
+   * elsewhere / away → ping fires unchanged. */
+  focusedPaneKey?: string | null;
 }
 
 /**
@@ -68,6 +73,7 @@ export function AttentionBadge({
   mutedAlertKeys,
   onToggleMuteAlertKey,
   watchedChats,
+  focusedPaneKey,
 }: Props) {
   // Memoize the severity-prefs object so its reference is stable across renders
   // (keeps the hook's gate-effect dep list quiet on unrelated re-renders). Keyed
@@ -76,7 +82,7 @@ export function AttentionBadge({
     () => ({ alertCritical, alertWarning, alertDirective, alertError }),
     [alertCritical, alertWarning, alertDirective, alertError],
   );
-  const { rollup } = useAttentionRollup(attentionDesktopAlerts, openPanes, attentionStates, severityPrefs, mutedAlertKeys, watchedChats ?? [], onOpenChat);
+  const { rollup } = useAttentionRollup(attentionDesktopAlerts, openPanes, attentionStates, severityPrefs, mutedAlertKeys, watchedChats ?? [], onOpenChat, focusedPaneKey);
   const [open, setOpen] = useState(false);
 
   // The mute affordance is only meaningful while the desktop-alert channel is on

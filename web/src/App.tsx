@@ -1261,6 +1261,11 @@ function App() {
   const terminalThemeId = resolveTerminalThemeId(terminalColorScheme, resolvedThemeId);
   // The chat the observer should bind to when "observe focused" is clicked.
   const focusedChat = chats.find((c) => (c.key || c.id) === focused) || null;
+  // WARDEN-426: the focused pane's identity, for focus-gating the per-chat watch
+  // ping. Derived from focusedChat (not `focused` directly) so a STALE focused key
+  // (a chat that's since closed/re-keyed) resolves to null → the ping fires
+  // unchanged rather than spuriously matching a transient row sharing the old key.
+  const focusedPaneKey = focusedChat?.key || focusedChat?.id || null;
   // Selectable host list for the Open Chat browser's multiselect chips: this
   // machine plus every configured SSH host.
   const hosts = [THIS_MACHINE, ...sshHosts];
@@ -1565,7 +1570,7 @@ function App() {
             label={streamConn ? 'Connected' : 'Disconnected'}
             className="transition-colors duration-300 ease-in-out"
           />
-          <AttentionBadge onOpenChat={openChat} onOpenActivity={openActivityTab} attentionDesktopAlerts={attentionDesktopAlerts} openPanes={openPanes} attentionStates={attentionStates} alertCritical={alertCritical} alertWarning={alertWarning} alertDirective={alertDirective} alertError={alertError} mutedAlertKeys={mutedAlertKeys} onToggleMuteAlertKey={toggleMuteAlertKey} watchedChats={watchedChats} />
+          <AttentionBadge onOpenChat={openChat} onOpenActivity={openActivityTab} attentionDesktopAlerts={attentionDesktopAlerts} openPanes={openPanes} attentionStates={attentionStates} alertCritical={alertCritical} alertWarning={alertWarning} alertDirective={alertDirective} alertError={alertError} mutedAlertKeys={mutedAlertKeys} onToggleMuteAlertKey={toggleMuteAlertKey} watchedChats={watchedChats} focusedPaneKey={focusedPaneKey} />
           <IconTooltip label="global search (Ctrl+Shift+F)" side="bottom"><button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⌕</button></IconTooltip>
           <IconTooltip label="toggle health panel" side="bottom"><button onClick={() => setHealthCollapsed(!healthCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{healthCollapsed ? '◂' : '▸'} Health</button></IconTooltip>
           <IconTooltip label="toggle observer" side="bottom"><button onClick={() => setObserverCollapsed(!observerCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>

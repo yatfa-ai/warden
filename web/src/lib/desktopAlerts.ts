@@ -224,6 +224,31 @@ const WATCH_REASON_LABEL: Record<WatchReason, string> = {
 };
 
 /**
+ * Pure: should the per-chat watch ping fire, given which pane the human is
+ * currently focused on? (WARDEN-426.) Suppresses the ping for the ONE pane the
+ * human is already reading — they can see it (a focused pane is, by definition,
+ * open, so it already appears in the OPEN-only AttentionBadge with its "because
+ * X" signal). Removing that single redundant ping is the PRECISE per-pane-focus
+ * gate that `fireWatchNotification`'s "deliberately NOT gated on document
+ * visibility" comment pointed at: the coarse window-visibility filter was
+ * rejected because it would lose signal; this gate never loses signal because
+ * the in-app badge already carries it for an open pane.
+ *
+ * Fires unchanged when the human is focused elsewhere, on a DIFFERENT pane, or
+ * away (`focusedPaneKey == null` — the loose check covers both `null` and the
+ * `undefined` an un-passed optional param yields) — those are exactly the cases
+ * where the ping is the only signal. Identity is the SAME `row.key ?? row.id`
+ * space the watch subsystem keys on (`indexByWatchKey`) and the ping deep-links
+ * to, so the comparison is apples-to-apples. Pure + dependency-free so it is
+ * unit-tested directly alongside `shouldFireAlert`.
+ */
+export function shouldFireWatch(focusedPaneKey: string | null | undefined, row: AgentStateRow): boolean {
+  if (focusedPaneKey == null) return true;
+  const paneKey = row.key ?? row.id;
+  return paneKey !== focusedPaneKey;
+}
+
+/**
  * Pure: build the per-chat watch notification title + body. Sibling of
  * formatAlertMessage (above) for the targeted, per-chat channel (WARDEN-378).
  *

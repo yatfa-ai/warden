@@ -29,6 +29,7 @@ import {
 } from '@/lib/attentionRollup';
 import {
   shouldFireAlert,
+  shouldFireWatch,
   fireAttentionNotification,
   fireWatchNotification,
   applySeverityPrefs,
@@ -129,6 +130,13 @@ export function useAttentionRollup(
   // Deep-link click handler for the watch ping — reuses App's openChat to land on
   // the pane that needs attention. Optional (the ping still fires without it).
   onOpenChat?: (id: string) => void,
+  // WARDEN-426: the pane key the human is currently focused on. Suppresses the
+  // per-chat watch ping when a watched pane transitions into a needs-you state
+  // WHILE the human is already reading that exact pane (they can already see it —
+  // it's in the OPEN-only AttentionBadge). Null/undefined = focused elsewhere or
+  // away → ping fires unchanged. Trailing + optional so existing call sites stay
+  // compatible.
+  focusedPaneKey?: string | null,
 ): AttentionRollupState {
   const [health, setHealth] = useState<HealthData | null>(null);
   const [stats, setStats] = useState<ActivityStats | null>(null);
@@ -163,6 +171,11 @@ export function useAttentionRollup(
   watchedChatsRef.current = watchedChats;
   const onOpenChatRef = useRef(onOpenChat);
   onOpenChatRef.current = onOpenChat;
+  // WARDEN-426: live focused-pane key, as a ref for the same reason (read inside
+  // the interval closure without rebuilding the ~30s poll on every focus change —
+  // focus shifts WHAT fires, not WHAT's classified, so it must not reset cadence).
+  const focusedPaneRef = useRef(focusedPaneKey);
+  focusedPaneRef.current = focusedPaneKey;
   const watchPrevRef = useRef<Record<string, AgentStateRow>>({});
   // The set of keys that were watched when the last watch diff ran. A key NEWLY
   // added to the watch set must start fresh (its first observation is a baseline,
@@ -230,18 +243,27 @@ export function useAttentionRollup(
           }
           watchPrevRef.current = nextPrev;
           for (const a of alerts) {
-            // WARDEN-378: fire the OS notification. WARDEN-417: capture whether the OS
-            // channel DELIVERED it (false on unsupported / denied / restrictive-webview)
-            // so the catch-up can record ONLY what the OS lost — not a duplicate channel.
-            const delivered = fireWatchNotification(a.row, a.reason, onOpenChatRef.current);
-            // WARDEN-417: durably record the ping for the in-app catch-up surfaced on
-            // return (watchCatchup) when the OS channel LOST it (delivered === false) OR
-            // the human is away (hidden — a delivered ping may yet be cleared / DND'd, the
-            // success criterion's "cleared" case). A ping the OS delivered to a PRESENT
-            // human is NOT recorded: they saw it, so recording would only become stale
-            // catch-up noise (the success criterion's converse). shouldRecordMiss is the
-            // pure, unit-tested gate that carries BOTH measurable outcomes. Never throws.
-            if (shouldRecordMiss(delivered, document.visibilityState)) recordWatchMiss(a.row, a.reason);
+            // WARDEN-426: focus-gate the ping — if the human is already focused on
+            // this exact pane, skip BOTH the OS ping AND the catch-up record: a
+            // focused pane is open + visible (they can see it via the OPEN-only
+            // AttentionBadge) and the human is present, so recording would only
+            // become stale catch-up noise. The baseline (nextPrev above) advanced
+            // regardless, so suppressing this fire introduces no re-fire surprise
+            // on a later focus loss.
+            if (shouldFireWatch(focusedPaneRef.current, a.row)) {
+              // WARDEN-378: fire the OS notification. WARDEN-417: capture whether
+              // the OS channel DELIVERED it (false on unsupported / denied /
+              // restrictive-webview) so the catch-up records ONLY what the OS
+              // lost — not a duplicate channel.
+              const delivered = fireWatchNotification(a.row, a.reason, onOpenChatRef.current);
+              // WARDEN-417: durably record the ping for the in-app catch-up
+              // surfaced on return (watchCatchup) when the OS channel LOST it
+              // (delivered === false) OR the human is away (hidden — a delivered
+              // ping may yet be cleared / DND'd). A ping the OS delivered to a
+              // PRESENT human is NOT recorded (they saw it). shouldRecordMiss is
+              // the pure, unit-tested gate carrying BOTH outcomes. Never throws.
+              if (shouldRecordMiss(delivered, document.visibilityState)) recordWatchMiss(a.row, a.reason);
+            }
           }
         }
         // The rollup (AttentionBadge) stays OPEN-only (WARDEN-344): a watched-but-

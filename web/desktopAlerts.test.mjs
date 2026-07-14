@@ -30,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-desktop-alerts-test-'));
 const tmpFile = join(tmpDir, 'desktopAlerts.mjs');
 writeFileSync(tmpFile, code);
-const { shouldFireAlert, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage, diffNewAttention, formatInAppEntry, fireWatchNotification } = await import(tmpFile);
+const { shouldFireAlert, shouldFireWatch, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage, diffNewAttention, formatInAppEntry, fireWatchNotification } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -627,6 +627,53 @@ test('aggregate entrant (no name) renders its reason as the title with NO descri
   const { title, description } = formatInAppEntry(e);
   assert.equal(title, '2 recent errors');
   assert.equal(description, undefined);
+});
+
+// --- WARDEN-426: shouldFireWatch (focus-gate the per-chat watch ping) ----
+console.log('\nshouldFireWatch (WARDEN-426): suppress the ping ONLY for the focused pane');
+test('focused === pane key (matched by key) → suppress (false)', () => {
+  const row = { id: 'i', key: 'k', state: 'waiting', signal: 'press enter' };
+  assert.equal(shouldFireWatch('k', row), false);
+});
+test('focused !== pane key → fire (true)', () => {
+  const row = { id: 'i', key: 'k', state: 'waiting', signal: 'press enter' };
+  assert.equal(shouldFireWatch('other-pane', row), true);
+});
+test('focused null (human is away) → fire (true)', () => {
+  const row = { id: 'i', key: 'k', state: 'waiting' };
+  assert.equal(shouldFireWatch(null, row), true);
+});
+test('focused undefined (no focus context threaded) → fire (true)', () => {
+  const row = { id: 'i', key: 'k', state: 'waiting' };
+  assert.equal(shouldFireWatch(undefined, row), true);
+});
+test('a row with ONLY id (no key) is matched against focusedPaneKey by id', () => {
+  const row = { id: 'container-1', state: 'stuck', signal: 'loop line' };
+  assert.equal(shouldFireWatch('container-1', row), false); // focused on it → suppress
+  assert.equal(shouldFireWatch('container-2', row), true);  // focused elsewhere → fire
+});
+test('empty-string focused key is treated as "away" (fires)', () => {
+  // A nullish check (== null) intentionally lets '' fall through to the comparison;
+  // '' never equals a real pane key (which is non-empty), so this still fires —
+  // matching the "focused elsewhere / away" contract without special-casing ''.
+  const row = { id: 'i', key: 'k', state: 'waiting' };
+  assert.equal(shouldFireWatch('', row), true);
+});
+
+console.log('\nshouldFireWatch: the gate is reason-agnostic — every WatchReason suppresses equally');
+test('suppresses uniformly across waiting/erroring/stuck/completed when focused on that pane', () => {
+  const focus = 'k';
+  for (const state of ['waiting', 'erroring', 'stuck', 'completed']) {
+    const row = { id: 'i', key: 'k', state };
+    assert.equal(shouldFireWatch(focus, row), false, `${state} suppresses when focused`);
+  }
+});
+test('fires uniformly across waiting/erroring/stuck/completed when focused elsewhere', () => {
+  const focus = 'other-pane';
+  for (const state of ['waiting', 'erroring', 'stuck', 'completed']) {
+    const row = { id: 'i', key: 'k', state };
+    assert.equal(shouldFireWatch(focus, row), true, `${state} fires when focused elsewhere`);
+  }
 });
 
 console.log(`\n✓ DESKTOP ALERTS TESTS PASS (${passed})`);
