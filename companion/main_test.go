@@ -107,3 +107,80 @@ func TestBuildActivityScriptRoundTripNoOutput(t *testing.T) {
 		t.Fatalf("expected empty/absent capture for an emitting-nothing stub; got %q", line)
 	}
 }
+
+// TestBuildResizeScript locks the byte-exact resize command the companion runs
+// host-side (WARDEN-409). It must build the SAME `set-option -t <target>
+// window-size latest` src/tmux.js resize() runs over runTmux — `docker exec <c>
+// tmux` when a container is set, else bare `tmux`, with the target shellQuoted and
+// defaulting to "agent". The command string is the contract under test (the
+// "both paths agree by construction" parity).
+func TestBuildResizeScript(t *testing.T) {
+	t.Run("yatfa chat: docker exec prefix, agent session", func(t *testing.T) {
+		got := buildResizeScript("p-worker", "agent")
+		want := "docker exec 'p-worker' tmux set-option -t 'agent' window-size latest"
+		if got != want {
+			t.Fatalf("buildResizeScript mismatch:\ngot:  %s\nwant: %s", got, want)
+		}
+	})
+
+	t.Run("bare-tmux chat: no container, custom session shellQuoted", func(t *testing.T) {
+		got := buildResizeScript("", "my session")
+		want := "tmux set-option -t 'my session' window-size latest"
+		if got != want {
+			t.Fatalf("bare-tmux resize mismatch:\ngot:  %s\nwant: %s", got, want)
+		}
+	})
+
+	t.Run("empty target defaults to agent", func(t *testing.T) {
+		got := buildResizeScript("p-worker", "")
+		if !strings.Contains(got, "set-option -t 'agent' window-size latest") {
+			t.Fatalf("expected target to default to 'agent'; got: %s", got)
+		}
+	})
+
+	t.Run("container name with an apostrophe is shellQuoted", func(t *testing.T) {
+		got := buildResizeScript("c'x", "agent")
+		if !strings.Contains(got, "docker exec 'c'\\''x' tmux") {
+			t.Fatalf("expected shellQuoted container; got: %s", got)
+		}
+	})
+}
+
+// TestBuildMouseScript locks the byte-exact seamless-copy mouse commands
+// (WARDEN-409): detect → `show-options -g mouse` (the stdout the JS parseMouseState
+// reads), disable → `set -g mouse off`. Must match src/tmux.js detectMouse() /
+// disableMouse() byte-for-byte. There is no -t target (mouse is a server-global
+// -g option); the docker-exec prefix selects which tmux server.
+func TestBuildMouseScript(t *testing.T) {
+	t.Run("detect: show-options, docker exec prefix", func(t *testing.T) {
+		got := buildMouseScript("p-worker", "detect")
+		want := "docker exec 'p-worker' tmux show-options -g mouse"
+		if got != want {
+			t.Fatalf("detect mismatch:\ngot:  %s\nwant: %s", got, want)
+		}
+	})
+
+	t.Run("disable: set -g mouse off, bare tmux", func(t *testing.T) {
+		got := buildMouseScript("", "disable")
+		want := "tmux set -g mouse off"
+		if got != want {
+			t.Fatalf("disable mismatch:\ngot:  %s\nwant: %s", got, want)
+		}
+	})
+
+	t.Run("unrecognized mode defaults to disable", func(t *testing.T) {
+		if got := buildMouseScript("", "bogus"); got != "tmux set -g mouse off" {
+			t.Fatalf("expected unrecognized mode to disable; got: %s", got)
+		}
+		if got := buildMouseScript("", ""); got != "tmux set -g mouse off" {
+			t.Fatalf("expected empty mode to disable; got: %s", got)
+		}
+	})
+
+	t.Run("container name with an apostrophe is shellQuoted", func(t *testing.T) {
+		got := buildMouseScript("c'x", "detect")
+		if !strings.Contains(got, "docker exec 'c'\\''x' tmux show-options -g mouse") {
+			t.Fatalf("expected shellQuoted container; got: %s", got)
+		}
+	})
+}

@@ -3,7 +3,7 @@
 // executes them via the transport layer (ssh.js runTmux/attachTmux), which routes
 // to a remote host over SSH or to this machine locally. tmux is required everywhere.
 import { runTmux, attachTmux, attachInteractiveTmux, toMsysPath } from './ssh.js';
-import { isCompanionTransportEnabled, hasSession as companionHasSession, spawnSession, killSession } from './companion.js';
+import { isCompanionTransportEnabled, hasSession as companionHasSession, spawnSession, killSession, resize as companionResize, mouse as companionMouse } from './companion.js';
 
 const sess = (chat, cfg) => (chat && chat.session) || (cfg && cfg.tmuxSession) || 'agent';
 
@@ -146,9 +146,49 @@ export async function probeSession(chat, cfg, { timeout = 8000 } = {}, deps = {}
 // ConPTY SIGWINCH propagates through ssh → tmux automatically). Don't use
 // `manual` — it locks the window and prevents other clients from resizing.
 // One call on attach is enough; ConPTY handles subsequent resizes via SIGWINCH.
-export async function resize(chat, cfg, cols, rows) {
+//
+// Companion routing (WARDEN-409, slice 4 of roadmap WARDEN-270): for a REMOTE
+// host under WARDEN_COMPANION_TRANSPORT=1 this is ONE resize RPC over the
+// persistent companion channel (zero per-op SSH handshakes — today resize spawns
+// one ssh process per open AND one per in-session resize). The companion client
+// returns the SAME raw {ok,code,stdout,stderr} shape runTmux produces, so the
+// call sites are unchanged. LOCAL never routes through the companion.
+// `deps.runTmux` / `deps.companionResize` are optional test seams (mirrors
+// probeSession's deps seam).
+function companionRawResult(res) {
+  // The companion client always returns {host, ok, code, stdout, stderr}; strip
+  // the host envelope so the result is byte-identical to runTmux's {ok, code,
+  // stdout, stderr} — the "both paths agree by construction" parity contract.
+  if (res && res.ok) {
+    return { ok: true, code: res.code ?? 0, stdout: res.stdout || '', stderr: res.stderr || '' };
+  }
+  return {
+    ok: false,
+    code: res && typeof res.code === 'number' ? res.code : -1,
+    stdout: (res && res.stdout) || '',
+    stderr: (res && res.stderr) || 'companion control-plane op failed',
+  };
+}
+
+async function resizeViaCompanion(chat, cfg, deps) {
+  const fn = deps.companionResize ?? companionResize;
+  const session = sess(chat, cfg);
+  const res = await fn(chat.host, { container: chat.container, session }, cfg, {});
+  return companionRawResult(res);
+}
+
+// resize() fires on attach AND on every in-session resize (server.js wraps both
+// in try/catch noop). Signature keeps (cols, rows) for call-site compatibility
+// even though set-option window-size latest takes no geometry — the ConPTY SIGWINCH
+// is what actually resizes; this just unlocks the window to follow it.
+export async function resize(chat, cfg, _cols, _rows, deps = {}) {
+  if (chat.host !== '(local)' && isCompanionTransportEnabled()) {
+    await resizeViaCompanion(chat, cfg, deps);
+    return;
+  }
   const s = sess(chat, cfg);
-  await runTmux(chat, ['set-option', '-t', s, 'window-size', 'latest']);
+  const run = deps.runTmux ?? runTmux;
+  await run(chat, ['set-option', '-t', s, 'window-size', 'latest']);
 }
 
 // Spawn the chat's tmux session (detached): new-session -d, cwd (msys-translated
@@ -250,15 +290,40 @@ export function parseMouseState(stdout) {
 // effort: returns the runTmux result; callers swallow failures so a mouse-off
 // failure never blocks the attach. A short timeout keeps a slow/unreachable host
 // from hanging the attach.
-export async function disableMouse(chat, cfg, opts = {}) {
-  return runTmux(chat, ['set', '-g', 'mouse', 'off'], { timeout: 3000, ...opts });
+//
+// Companion routing (WARDEN-409): a REMOTE host under the flag takes ONE mouse
+// (mode:disable) RPC over the persistent channel (zero per-open SSH spawns);
+// the {timeout:3000} is accepted for signature parity (the channel has its own
+// RPC timeout — see probeSession), exactly like the has-session probe. LOCAL and
+// the disabled path keep runTmux byte-for-byte.
+export async function disableMouse(chat, cfg, opts = {}, deps = {}) {
+  if (chat.host !== '(local)' && isCompanionTransportEnabled()) {
+    const fn = deps.companionMouse ?? companionMouse;
+    const res = await fn(chat.host, { container: chat.container, mode: 'disable' }, cfg, {});
+    return companionRawResult(res);
+  }
+  const run = deps.runTmux ?? runTmux;
+  return run(chat, ['set', '-g', 'mouse', 'off'], { timeout: 3000, ...opts });
 }
 
 // Read the chat's tmux global mouse state. Returns true/false/null (null when
 // the value can't be read — host down, tmux error, no server yet). Best-effort:
 // a failed read is null, which the frontend treats as "don't show the hint".
-export async function detectMouse(chat, cfg, opts = {}) {
-  const r = await runTmux(chat, ['show-options', '-g', 'mouse'], { timeout: 3000, ...opts });
+//
+// Companion routing (WARDEN-409): a REMOTE host under the flag takes ONE mouse
+// (mode:detect) RPC over the persistent channel; the detect variant returns the
+// `mouse on`/`mouse off` stdout in res.stdout so parseMouseState reads the
+// identical bytes the default runTmux path carries — the make-or-break parity
+// (same tri-state over both paths). LOCAL / disabled keep runTmux byte-for-byte.
+export async function detectMouse(chat, cfg, opts = {}, deps = {}) {
+  if (chat.host !== '(local)' && isCompanionTransportEnabled()) {
+    const fn = deps.companionMouse ?? companionMouse;
+    const r = companionRawResult(await fn(chat.host, { container: chat.container, mode: 'detect' }, cfg, {}));
+    if (!r.ok) return null;
+    return parseMouseState(r.stdout);
+  }
+  const run = deps.runTmux ?? runTmux;
+  const r = await run(chat, ['show-options', '-g', 'mouse'], { timeout: 3000, ...opts });
   if (!r.ok) return null;
   return parseMouseState(r.stdout);
 }
