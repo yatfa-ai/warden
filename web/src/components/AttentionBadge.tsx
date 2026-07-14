@@ -33,6 +33,10 @@ interface Props {
   alertError: boolean;
   mutedAlertKeys: string[];
   onToggleMuteAlertKey: (key: string) => void;
+  /** Per-chat "watch" pane keys (WARDEN-378) — unioned into the ?panes= poll so a
+   * watched chat is classified even when its pane isn't open, and diffed for a
+   * targeted ping when it newly needs the human. */
+  watchedChats?: string[];
 }
 
 /**
@@ -63,6 +67,7 @@ export function AttentionBadge({
   alertError,
   mutedAlertKeys,
   onToggleMuteAlertKey,
+  watchedChats,
 }: Props) {
   // Memoize the severity-prefs object so its reference is stable across renders
   // (keeps the hook's gate-effect dep list quiet on unrelated re-renders). Keyed
@@ -71,7 +76,7 @@ export function AttentionBadge({
     () => ({ alertCritical, alertWarning, alertDirective, alertError }),
     [alertCritical, alertWarning, alertDirective, alertError],
   );
-  const { rollup } = useAttentionRollup(attentionDesktopAlerts, openPanes, attentionStates, severityPrefs, mutedAlertKeys);
+  const { rollup } = useAttentionRollup(attentionDesktopAlerts, openPanes, attentionStates, severityPrefs, mutedAlertKeys, watchedChats ?? [], onOpenChat);
   const [open, setOpen] = useState(false);
 
   // The mute affordance is only meaningful while the desktop-alert channel is on

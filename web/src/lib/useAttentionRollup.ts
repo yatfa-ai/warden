@@ -29,10 +29,12 @@ import {
 import {
   shouldFireAlert,
   fireAttentionNotification,
+  fireWatchNotification,
   applySeverityPrefs,
   ATTENTION_SEVERITY_DEFAULTS,
   type AttentionSeverityPrefs,
 } from '@/lib/desktopAlerts';
+import { diffWatchAlerts, indexByWatchKey } from '@/lib/chatWatch';
 import type { HealthData, ActivityStats, AgentStateRow, AgentStatesData } from '@/lib/types';
 
 // Recent-error / recent-directive window. ActivityStats counts raw events in the
@@ -64,6 +66,13 @@ export function useAttentionRollup(
   enabledStates?: AttentionRollupOptions['enabledStates'],
   severityPrefs: AttentionSeverityPrefs = ATTENTION_SEVERITY_DEFAULTS,
   mutedAlertKeys: readonly string[] = EMPTY_MUTED_KEYS,
+  // WARDEN-378: pane keys the human opted into per-chat "watch" — unioned into the
+  // ?panes= poll so a watched chat is classified even when its pane is NOT open, and
+  // diffed for a targeted ping when it newly needs the human.
+  watchedChats: string[] = [],
+  // Deep-link click handler for the watch ping — reuses App's openChat to land on
+  // the pane that needs attention. Optional (the ping still fires without it).
+  onOpenChat?: (id: string) => void,
 ): AttentionRollupState {
   const [health, setHealth] = useState<HealthData | null>(null);
   const [stats, setStats] = useState<ActivityStats | null>(null);
@@ -90,6 +99,20 @@ export function useAttentionRollup(
   // being rebuilt on every openPanes change (which would reset the 10s health cadence).
   const openPanesRef = useRef(openPanes);
   openPanesRef.current = openPanes;
+  // WARDEN-378: watched-chats set + the open-chat deep-link, as refs for the same
+  // reason (live reads inside the interval closure without rebuilding it). And the
+  // per-chat prior-state baseline the watch transition detector diffs against —
+  // tracked per-key so a watched-but-closed pane's transitions are correct.
+  const watchedChatsRef = useRef(watchedChats);
+  watchedChatsRef.current = watchedChats;
+  const onOpenChatRef = useRef(onOpenChat);
+  onOpenChatRef.current = onOpenChat;
+  const watchPrevRef = useRef<Record<string, AgentStateRow>>({});
+  // The set of keys that were watched when the last watch diff ran. A key NEWLY
+  // added to the watch set must start fresh (its first observation is a baseline,
+  // not a fire) — so a stale prior carried over from a previous watch session is
+  // dropped before the diff (see fetchAgentStates).
+  const prevWatchedRef = useRef<Set<string> | null>(null);
 
   const fetchHealthStats = useCallback(async () => {
     const after = new Date(Date.now() - ATTENTION_RECENT_WINDOW_MS).toISOString();
@@ -106,13 +129,60 @@ export function useAttentionRollup(
   }, []);
 
   const fetchAgentStates = useCallback(async () => {
-    const panes = openPanesRef.current;
-    if (!panes.length) { setAgentStates([]); setAgentStatesLoaded(true); return; }
+    const open = openPanesRef.current;
+    const watched = watchedChatsRef.current;
+    // WARDEN-378: watched ∪ open — a watched chat is classified even when its pane
+    // isn't open (the whole point of "watch this chat, step away"). Same ~30s poll,
+    // no new poller. Deduped (a watched+open pane is requested once). The server
+    // resolves arbitrary ?panes= keys from the cache, so a watched-but-closed key
+    // (its chat still in the catalog) resolves the same as an open one.
+    const union = Array.from(new Set([...open, ...watched]));
+    if (!union.length) { setAgentStates([]); setAgentStatesLoaded(true); return; }
     try {
-      const res = await fetch(`/api/agent-states?panes=${encodeURIComponent(panes.join(','))}`);
-      if (!res.ok) { setAgentStatesLoaded(true); return; }
-      const data = (await res.json()) as AgentStatesData;
-      setAgentStates(Array.isArray(data?.agents) ? data.agents : []);
+      const res = await fetch(`/api/agent-states?panes=${encodeURIComponent(union.join(','))}`);
+      if (res.ok) {
+        const data = (await res.json()) as AgentStatesData;
+        const rows = Array.isArray(data?.agents) ? data.agents : [];
+        // WARDEN-378: per-chat watch transition detector. Runs on WATCHED keys only,
+        // over the full fetched set (which includes watched-but-closed panes). First
+        // observation is a baseline (no fire); a ping fires ONLY on a change-into a
+        // needs-you state — the near-zero-false-signal bar (chatWatch.diffWatchAlerts).
+        if (watched.length) {
+          const curByKey = indexByWatchKey(rows);
+          // Newly-watched keys (absent from the previous watched set) start fresh:
+          // drop any stale prior carried over from a prior watch session so their
+          // first observation is a baseline, not a fire (the
+          // first-observation-is-baseline rule, applied across un/re-watch).
+          const prevWatched = prevWatchedRef.current;
+          if (prevWatched) {
+            for (const k of watched) {
+              if (!prevWatched.has(k)) delete watchPrevRef.current[k];
+            }
+          }
+          prevWatchedRef.current = new Set(watched);
+          const alerts = diffWatchAlerts(watchPrevRef.current, curByKey, watched);
+          // Advance the per-key baseline for watched keys. A key observed this poll
+          // updates; a watched key ABSENT this poll (host blip / gone chat) KEEPS its
+          // last-known state so a recover-into-needs-you still diffs correctly. The
+          // map is rebuilt from watched keys only — bounded across a long session,
+          // and a stale prior for an un-watched key can't surprise on a re-watch.
+          const nextPrev: Record<string, AgentStateRow> = {};
+          for (const k of watched) {
+            const cur = curByKey[k];
+            if (cur) nextPrev[k] = cur;
+            else if (watchPrevRef.current[k]) nextPrev[k] = watchPrevRef.current[k];
+          }
+          watchPrevRef.current = nextPrev;
+          for (const a of alerts) {
+            fireWatchNotification(a.row, a.reason, onOpenChatRef.current);
+          }
+        }
+        // The rollup (AttentionBadge) stays OPEN-only (WARDEN-344): a watched-but-
+        // closed pane does NOT inflate the fleet attention count — its signal reaches
+        // the human through the targeted watch ping, not the lumped badge.
+        const openSet = new Set(open);
+        setAgentStates(rows.filter((r) => openSet.has(r.key ?? r.id)));
+      }
     } catch {
       // A failed state poll must not blank the other halves or crash the badge.
     }
@@ -143,14 +213,19 @@ export function useAttentionRollup(
     };
   }, [fetchHealthStats, attentionDesktopAlerts]);
 
-  // Pane states on the dedicated ~30s cadence (WARDEN-344). Classifies ONLY open
-  // panes; an empty open-panes set is a cheap no-op. Re-fires immediately when the
-  // open-panes set changes so a freshly-opened stuck pane surfaces within a poll,
-  // not after 30s. Same visibility relaxation as the health poll when alerts are on.
+  // Pane states on the dedicated ~30s cadence (WARDEN-344). Classifies the OPEN
+  // panes ∪ the watched-chats set (WARDEN-378 — a watched chat is classified even
+  // when its pane isn't open); an empty union is a cheap no-op. Re-fires immediately
+  // when the open-panes OR watched set changes so a freshly-watched / freshly-opened
+  // pane surfaces within a poll, not after 30s. Visibility relaxation fires while
+  // hidden when the fleet alert is opted in OR any chat is watched (step-away case).
   useEffect(() => {
     void fetchAgentStates();
     const tick = () => {
-      if (attentionDesktopAlerts || document.visibilityState === 'visible') void fetchAgentStates();
+      // WARDEN-378: a watched chat must keep being classified while Warden is hidden
+      // (the human stepped away — the watch's whole premise), so the visibility
+      // relaxation extends to "any watched chat", not just the fleet alert opt-in.
+      if (attentionDesktopAlerts || watchedChats.length > 0 || document.visibilityState === 'visible') void fetchAgentStates();
     };
     const onVisibility = () => {
       if (document.visibilityState === 'visible') void fetchAgentStates();
@@ -161,7 +236,7 @@ export function useAttentionRollup(
       window.clearInterval(intervalId);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [fetchAgentStates, attentionDesktopAlerts, openPanes]);
+  }, [fetchAgentStates, attentionDesktopAlerts, openPanes, watchedChats]);
 
   // Derive the rollup from the three signals + the per-state toggle. useMemo so a
   // toggle change re-aggregates without a refetch, and so the badge only re-renders

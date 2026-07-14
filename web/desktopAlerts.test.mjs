@@ -30,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-desktop-alerts-test-'));
 const tmpFile = join(tmpDir, 'desktopAlerts.mjs');
 writeFileSync(tmpFile, code);
-const { shouldFireAlert, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey } = await import(tmpFile);
+const { shouldFireAlert, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -322,6 +322,33 @@ test('a muted agent recovering while nothing else changes does NOT fire', () => 
   const prev = applySeverityPrefs(roll({ critical: [agent('a'), agent('b')] }), ATTENTION_SEVERITY_DEFAULTS, muted); // routable [b]
   const next = applySeverityPrefs(roll({ critical: [agent('b')] }), ATTENTION_SEVERITY_DEFAULTS, muted); // routable [b]
   assert.equal(shouldFireAlert(prev, next), false); // 1 → 1
+});
+
+console.log('\nformatWatchMessage (WARDEN-378): targeted body names the agent + quotes the signal');
+test('body names the agent and quotes the triggering signal', () => {
+  const r = { id: 'w', key: 'w', name: 'warden-worker', state: 'waiting', signal: 'press enter to continue' };
+  const { title, body } = formatWatchMessage(r, 'waiting');
+  assert.ok(body.includes('warden-worker'), 'body names the agent');
+  assert.ok(body.includes("'press enter to continue'"), 'body quotes the signal verbatim');
+  assert.ok(body.includes('waiting for your input'), 'body conveys the reason');
+  assert.ok(title.startsWith('Warden:'), 'title is branded');
+});
+test('body conveys the reason even when no signal is present', () => {
+  const r = { id: 'w', key: 'w', name: 'warden-worker', state: 'erroring', signal: null };
+  const { body } = formatWatchMessage(r, 'erroring');
+  assert.ok(body.includes('warden-worker'), 'still names the agent');
+  assert.ok(body.includes('erroring'), 'conveys the reason');
+  assert.ok(!body.includes("'"), 'no signal quote when signal absent');
+});
+test('completed reason has a human label in the body', () => {
+  const r = { id: 'w', key: 'w', name: 'w', state: 'idle', signal: null };
+  const { body } = formatWatchMessage(r, 'completed');
+  assert.ok(body.includes('finished a task'), 'completed → "finished a task"');
+});
+test('falls back to id when name is absent', () => {
+  const r = { id: 'container-1', state: 'stuck', signal: 'loop line' };
+  const { body } = formatWatchMessage(r, 'stuck');
+  assert.ok(body.includes('container-1'), 'falls back to id for the name');
 });
 
 console.log(`\n✓ DESKTOP ALERTS TESTS PASS (${passed})`);
