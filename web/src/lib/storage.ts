@@ -17,9 +17,9 @@ import type { TimestampFormat } from './formatTimestamp';
 // swallowed (WARDEN-89), so a quota/serialization failure is never silent.
 import { normalizeThemePref, type ThemePref } from '@/lib/themes';
 
-const KEY = 'warden:ui:v2';
+const KEY = 'warden:ui:v3';
 const KEY_PREFIX = 'warden:ui';
-const KEY_VERSION = 2;
+const KEY_VERSION = 3;
 
 // The default monospace font stack for every agent terminal pane. Must stay
 // byte-identical to the previous hardcoded literal baked into PaneTile's
@@ -159,6 +159,70 @@ function makeWorkspace(
   return { id, name, openPanes, focused };
 }
 
+// A user-defined instruction snippet: a named, reusable instruction the human
+// can insert at an intervention point (the Broadcast dialog + a focused pane's
+// context menu) instead of retyping common guidance ("run the tests", "pull
+// latest", "commit your work"). Mirrors CustomPreset's {name, cmd} shape but
+// holds free-form instruction text rather than a spawn command. Pure client-
+// side pref; never sent to the backend as anything but the literal `text` over
+// the existing /api/send path. Global — one flat list, not host-keyed
+// (WARDEN-323 Decision 1); per-host/per-agent scoping is a v2 extension.
+export interface Snippet {
+  name: string;
+  text: string;
+}
+
+// Maximum length of a snippet name / text, and the max persisted count.
+// Centralized here so every write site (parseSnippets, SettingsPage add/rename,
+// the Inputs' maxLength) agrees with the load-time sanitizer on one bound — the
+// in-memory list can never hold a name/text the sanitizer would silently drop
+// on next reload. SNIPPET_MAX_COUNT caps the payload so a runaway list can
+// never bloat localStorage; the load-time sanitizer drops the overflow.
+export const SNIPPET_NAME_MAX = 32;
+export const SNIPPET_TEXT_MAX = 2000;
+export const SNIPPET_MAX_COUNT = 50;
+
+// The validation outcome for a candidate snippet name. `null` means acceptable.
+// Simpler than presets: there are no reserved built-in snippet names, so only
+// empty | too-long | duplicate.
+export type SnippetNameIssue = 'empty' | 'too-long' | 'duplicate';
+
+// Validate a candidate snippet name against the SAME contract parseSnippets
+// enforces at load time, so the Settings write sites (add/rename) can never
+// persist a name the sanitizer would silently drop. Pure and dependency-free so
+// it is unit-tested directly (there is no React test runner in this repo).
+//   - `existing`: the current snippet list (for duplicate detection)
+//   - `except`:   an entry name to EXCLUDE from duplicate detection (for renames,
+//                 so a case-only rename like "Run tests" -> "RUN TESTS" isn't its
+//                 own dupe)
+// Trims the name first, matching how parseSnippets normalizes on load.
+export function validateSnippetName(
+  name: string,
+  existing: Snippet[],
+  except?: string,
+): SnippetNameIssue | null {
+  const n = name.trim();
+  if (!n) return 'empty';
+  if (n.length > SNIPPET_NAME_MAX) return 'too-long';
+  const lower = n.toLowerCase();
+  if (existing.some((s) => s.name !== except && s.name.toLowerCase() === lower)) return 'duplicate';
+  return null;
+}
+
+// The starter snippet set seeded once on a fresh install (and on a v2→v3
+// promote where the persisted `snippets` field is absent). Ordinary editable
+// Snippet entries — no "built-in vs user" distinction; the user can rename,
+// edit-text, or delete each freely. Seeding is one-time: it fires ONLY when the
+// persisted `snippets` field is absent; once any value exists (including `[]`
+// after the user deletes everything), the seed never re-triggers, so deletions
+// stick. (WARDEN-323 Decision 3.)
+export const STARTER_SNIPPETS: Snippet[] = [
+  { name: 'Run tests', text: 'run the test suite' },
+  { name: 'Pull latest', text: 'pull latest' },
+  { name: 'Commit your work', text: 'commit your work' },
+  { name: 'Summarize progress', text: 'summarize your progress so far' },
+];
+
 export interface UiState {
   activeTabs: string[];
   hiddenTabs: string[];
@@ -271,6 +335,15 @@ export interface UiState {
   // (≤32 chars) and de-duplicated, and reserved built-in names are rejected.
   // Pure client-side pref; never sent to the backend.
   customPresets?: CustomPreset[];
+  // User-defined instruction snippets (named, reusable intervention text —
+  // "run the tests", "pull latest", etc.) surfaced at the Broadcast dialog and
+  // a focused pane's context menu. Global (one flat list, not host-keyed).
+  // Validated on load by parseSnippets: entries missing a name/text are dropped,
+  // names/text are bounded and de-duplicated (case-insensitive), and the count
+  // is capped. Seeded once with STARTER_SNIPPETS when the field is absent
+  // (WARDEN-323). Pure client-side pref; only the literal `text` ever leaves
+  // the client, over the existing /api/send path.
+  snippets?: Snippet[];
   // pane id (chat key) -> host, so restored remote panes know which host to discover.
   paneHost?: Record<string, string>;
   agentFilter?: AgentFilter;
@@ -312,6 +385,40 @@ function parseCustomPresets(raw: unknown): CustomPreset[] {
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({ name, cmd });
+  }
+  return out;
+}
+
+// Sanitize a raw snippets value into a valid Snippet[]. Defensive: never throws
+// on malformed input (WARDEN-89) — it drops bad entries instead, so one corrupt
+// entry can never blank the snippet list. Drops entries missing a name or text,
+// names over SNIPPET_NAME_MAX chars, text over SNIPPET_TEXT_MAX chars, and
+// duplicates (case-insensitive; first occurrence wins). Caps the count at
+// SNIPPET_MAX_COUNT (overflow dropped) so the payload can never bloat
+// localStorage. Mirrors parseCustomPresets's drop-bad-entries discipline.
+function parseSnippets(raw: unknown): Snippet[] {
+  if (!Array.isArray(raw)) {
+    if (raw !== undefined && raw !== null) {
+      // A present-but-wrong-type value is genuine corruption worth surfacing.
+      console.warn('[loadUi] snippets is not an array; ignoring:', raw);
+    }
+    return [];
+  }
+  const seen = new Set<string>();
+  const out: Snippet[] = [];
+  for (const entry of raw) {
+    if (out.length >= SNIPPET_MAX_COUNT) break; // cap payload size
+    if (!entry || typeof entry !== 'object') continue;
+    const e = entry as Record<string, unknown>;
+    const name = typeof e.name === 'string' ? e.name.trim() : '';
+    const text = typeof e.text === 'string' ? e.text.trim() : '';
+    if (!name || !text) continue;
+    if (name.length > SNIPPET_NAME_MAX) continue;
+    if (text.length > SNIPPET_TEXT_MAX) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ name, text });
   }
   return out;
 }
@@ -471,7 +578,7 @@ const DEFAULT_UI: UiState = {
   onExitBehavior: 'keep',
   autoFocusNewPane: true,
   restoreOnStartup: 'previous',
-  defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', customPresets: [], defaultNewChatCwd: '', defaultNewChatCwdByHost: {},
+  defaultNewChatPreset: 'claude', defaultNewChatHost: '(local)', customPresets: [], snippets: STARTER_SNIPPETS, defaultNewChatCwd: '', defaultNewChatCwdByHost: {},
   defaultSplitShell: '',
   paneHost: {}, agentFilter: 'all', agentSort: 'manual',
   hostOptions: {}, copyHintDismissed: {},
@@ -561,6 +668,14 @@ export function loadUi(): UiState {
         // blank is the meaningful "auto-detect host login shell" value.
         defaultSplitShell: typeof v.defaultSplitShell === 'string' ? v.defaultSplitShell.trim() : '',
         customPresets,
+        // One-time starter-set seeding (WARDEN-323 Decision 3): when the
+        // persisted `snippets` field is ABSENT (a fresh install OR a v2→v3
+        // promote of a payload that predates snippets), seed STARTER_SNIPPETS so
+        // the library is useful out of the box. Once ANY value exists — including
+        // `[]` after the user deletes everything — the seed never re-triggers, so
+        // deletions stick. A present-but-corrupt value falls through to
+        // parseSnippets (which returns [] defensively) rather than re-seeding.
+        snippets: v.snippets == null ? STARTER_SNIPPETS : parseSnippets(v.snippets),
         paneHost: (v.paneHost && typeof v.paneHost === 'object') ? v.paneHost : {},
         hostOptions: parseHostOptions(v.hostOptions),
         copyHintDismissed: parseDismissedMap(v.copyHintDismissed),

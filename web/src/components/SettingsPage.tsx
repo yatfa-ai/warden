@@ -1,6 +1,7 @@
 import { useState, useEffect, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Badge } from '@/components/ui/badge';
@@ -19,7 +20,7 @@ import { ArrowLeft, Trash2 } from 'lucide-react';
 import { type Theme, type TerminalColorScheme, THEMES } from '@/lib/theme';
 import { type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
-import { type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type PresetNameIssue, type HostOptionsMap, PRESET_NAME_MAX, validatePresetName, DEFAULT_TERMINAL_FONT_FAMILY } from '@/lib/storage';
+import { type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type PresetNameIssue, type Snippet, type SnippetNameIssue, type HostOptionsMap, PRESET_NAME_MAX, validatePresetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, validateSnippetName, DEFAULT_TERMINAL_FONT_FAMILY } from '@/lib/storage';
 import { hasWindowBridge } from '@/lib/electron';
 import { requestAlertPermission } from '@/lib/desktopAlerts';
 import { putJson } from '@/lib/api';
@@ -183,6 +184,13 @@ interface Props {
   // sent to the backend.
   customPresets: CustomPreset[];
   setCustomPresets: (v: CustomPreset[]) => void;
+  // User-defined instruction snippets (named, reusable intervention text —
+  // WARDEN-323). Surfaced at the Broadcast dialog (insert-only) and a focused
+  // pane's context menu (one-click send). Global (one flat list). Pure client-
+  // side localStorage pref, persisted by App's saveUi effect; only the literal
+  // `text` ever leaves the client, over the existing /api/send path.
+  snippets: Snippet[];
+  setSnippets: (v: Snippet[]) => void;
   // Default shell launched by the pane-grid ＋ split button (WARDEN-223). Blank
   // means "no explicit shell" → the host launches its own login shell. Pure
   // client-side localStorage pref, persisted by App's saveUi effect; never sent
@@ -259,6 +267,7 @@ const SETTINGS_SECTIONS = [
   { id: 'display', label: 'Display' },
   { id: 'appearance', label: 'Appearance' },
   { id: 'newchats', label: 'New Chats' },
+  { id: 'snippets', label: 'Instruction snippets' },
   { id: 'notifications', label: 'Notifications' },
 ] as const;
 type SectionId = (typeof SETTINGS_SECTIONS)[number]['id'];
@@ -357,7 +366,103 @@ function PresetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, attentionStates, setAttentionStates, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, timestampFormat, setTimestampFormat, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin, closeToTray, setCloseToTray, hostOptions, onSetHostSeamlessCopy }: Props) {
+/**
+ * One editable instruction-snippet row: an inline name field (committed on
+ * blur/Enter, reverted on a rejected rename) and a live-editable text field
+ * (the instruction itself — free-form, so a Textarea), plus delete. Stateless
+ * w.r.t. its own value except the two drafts — the list is the source of truth.
+ * Mirrors PresetRow; the only structural difference is Textarea vs Input for
+ * the body (instructions are multi-line free text up to SNIPPET_TEXT_MAX chars,
+ * not a single spawn command).
+ */
+function SnippetRow({
+  snippet,
+  onRename,
+  onTextChange,
+  onDelete,
+}: {
+  snippet: Snippet;
+  onRename: (oldName: string, newName: string) => boolean;
+  onTextChange: (name: string, text: string) => void;
+  onDelete: (name: string) => void;
+}) {
+  const [nameDraft, setNameDraft] = useState(snippet.name);
+  const [textDraft, setTextDraft] = useState(snippet.text);
+  // Re-sync the drafts if the snippet changes from the outside (e.g. after a
+  // coordinated load), so the inputs never drift.
+  useEffect(() => {
+    setNameDraft(snippet.name);
+  }, [snippet.name]);
+  useEffect(() => {
+    setTextDraft(snippet.text);
+  }, [snippet.text]);
+
+  const commitName = () => {
+    const trimmed = nameDraft.trim();
+    if (trimmed && trimmed !== snippet.name) {
+      if (!onRename(snippet.name, trimmed)) setNameDraft(snippet.name); // revert on rejection
+    } else {
+      setNameDraft(snippet.name); // empty or unchanged → revert
+    }
+  };
+
+  // Commit the text on blur, mirroring commitName: free-edit while focused, but
+  // never persist an empty text — parseSnippets would drop the whole snippet on
+  // next reload (silent data loss). Empty on commit reverts to the last saved
+  // value, so the field is editable but never goes dangling.
+  const commitText = () => {
+    const trimmed = textDraft.trim();
+    if (trimmed) {
+      onTextChange(snippet.name, trimmed);
+    } else {
+      setTextDraft(snippet.text); // empty → revert
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-1 rounded-md border bg-muted/30 p-2">
+      <div className="flex items-center gap-2">
+        <Input
+          value={nameDraft}
+          onChange={(e) => setNameDraft(e.target.value)}
+          onBlur={commitName}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') e.currentTarget.blur();
+            if (e.key === 'Escape') setNameDraft(snippet.name);
+          }}
+          className="h-8 flex-1"
+          placeholder="name"
+          aria-label="Snippet name"
+          maxLength={SNIPPET_NAME_MAX}
+        />
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          onClick={() => onDelete(snippet.name)}
+          aria-label={`Delete ${snippet.name} snippet`}
+        >
+          <Trash2 />
+        </Button>
+      </div>
+      <Textarea
+        value={textDraft}
+        onChange={(e) => setTextDraft(e.target.value)}
+        onBlur={commitText}
+        onKeyDown={(e) => {
+          // Enter inserts a newline in a Textarea; ⌘/Ctrl+Enter commits.
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.currentTarget.blur(); }
+          if (e.key === 'Escape') setTextDraft(snippet.text);
+        }}
+        className="min-h-[60px] text-sm"
+        placeholder="the instruction to send"
+        aria-label={`${snippet.name} instruction text`}
+        maxLength={SNIPPET_TEXT_MAX}
+      />
+    </div>
+  );
+}
+
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, attentionStates, setAttentionStates, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, timestampFormat, setTimestampFormat, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, snippets, setSnippets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin, closeToTray, setCloseToTray, hostOptions, onSetHostSeamlessCopy }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -568,6 +673,73 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
   const deletePreset = (name: string) => {
     setCustomPresets(customPresets.filter((p) => p.name !== name));
     if (defaultNewChatPreset === name) setDefaultNewChatPreset('claude');
+  };
+
+  // --- Instruction-snippet management (create / rename / edit-text / delete) --
+  // All pure client-side: edits apply instantly via setSnippets and are
+  // persisted by App's saveUi effect. Mirrors the custom-preset handlers above;
+  // the differences are the {name, text} shape (vs {name, cmd}), a text-edit
+  // handler (vs cmd), and NO reserved built-in names (so validateSnippetName
+  // has no 'reserved' case). The starter set the library seeds on first run
+  // (WARDEN-323) renders here as ordinary editable entries — rename, edit text,
+  // or delete like any user-created snippet; once deleted, they stay deleted.
+  const [newSnippetName, setNewSnippetName] = useState('');
+  const [newSnippetText, setNewSnippetText] = useState('');
+
+  // Human message for a non-null snippet-name validation issue. The contract
+  // itself lives in storage.ts (validateSnippetName); this just renders it.
+  const snippetNameErrorMessage = (name: string, issue: SnippetNameIssue): string => {
+    switch (issue) {
+      case 'empty': return 'Snippet needs a name.';
+      case 'too-long': return `Snippet name must be ${SNIPPET_NAME_MAX} characters or fewer.`;
+      case 'duplicate': return `A snippet named "${name}" already exists.`;
+    }
+  };
+
+  const addSnippet = () => {
+    const name = newSnippetName.trim();
+    const text = newSnippetText.trim();
+    if (!name || !text) {
+      toast.error('Snippet needs both a name and instruction text.');
+      return;
+    }
+    const issue = validateSnippetName(name, snippets);
+    if (issue) {
+      toast.error(snippetNameErrorMessage(name, issue));
+      return;
+    }
+    setSnippets([...snippets, { name, text }]);
+    setNewSnippetName('');
+    setNewSnippetText('');
+  };
+
+  // Returns true on success (SnippetRow reverts its draft on false). Validates
+  // through the shared storage contract so a name the load-time sanitizer would
+  // drop (too long / duplicate) can never be persisted.
+  const renameSnippet = (oldName: string, newName: string): boolean => {
+    const issue = validateSnippetName(newName, snippets, oldName);
+    if (issue) {
+      // commitName already reverts an empty draft silently before calling us;
+      // only surface a toast for the rejectable issues.
+      if (issue !== 'empty') toast.error(snippetNameErrorMessage(newName.trim(), issue));
+      return false;
+    }
+    const name = newName.trim();
+    setSnippets(snippets.map((s) => (s.name === oldName ? { ...s, name } : s)));
+    return true;
+  };
+
+  const updateSnippetText = (name: string, text: string) => {
+    const trimmed = text.trim();
+    // Never persist an empty text — parseSnippets would drop the whole snippet
+    // on next reload (silent data loss). SnippetRow also reverts an empty draft
+    // on blur, but this guards the contract at the write site itself.
+    if (!trimmed) return;
+    setSnippets(snippets.map((s) => (s.name === name ? { ...s, text: trimmed } : s)));
+  };
+
+  const deleteSnippet = (name: string) => {
+    setSnippets(snippets.filter((s) => s.name !== name));
   };
 
   // Write a per-host cwd override (WARDEN-336). An empty/whitespace value means
@@ -1552,6 +1724,73 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                       );
                     })}
                   </div>
+                </div>
+              </SettingsSection>
+
+              {/* Instruction snippets (WARDEN-323): a named, reusable intervention
+                  library surfaced at the Broadcast dialog (insert-only) and a
+                  focused pane's context menu (one-click send). Pure client-side;
+                  the starter set ships as ordinary editable entries. */}
+              <SettingsSection title="Instruction snippets" className={cn(activeSection !== 'snippets' && 'hidden')}>
+                <p className="text-xs text-muted-foreground">
+                  Save instructions you send often ("run the tests", "pull latest", "commit your work") and reuse them from the Broadcast dialog or a pane's right-click menu. New installs start with a few examples you can edit or delete.
+                </p>
+                <div className="flex flex-col gap-2">
+                  {snippets.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">
+                      No snippets yet. Add one to reuse common instructions like 'run the tests' across your fleet.
+                    </p>
+                  ) : (
+                    <div className="flex flex-col gap-2">
+                      {snippets.map((s) => (
+                        <SnippetRow
+                          key={s.name}
+                          snippet={s}
+                          onRename={renameSnippet}
+                          onTextChange={updateSnippetText}
+                          onDelete={deleteSnippet}
+                        />
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Add a new snippet */}
+                  <div className="flex flex-col gap-1 rounded-md border bg-muted/30 p-2">
+                    <Input
+                      value={newSnippetName}
+                      onChange={(e) => setNewSnippetName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          addSnippet();
+                        }
+                      }}
+                      className="h-8"
+                      placeholder="name (e.g. Run tests)"
+                      aria-label="New snippet name"
+                      maxLength={SNIPPET_NAME_MAX}
+                    />
+                    <Textarea
+                      value={newSnippetText}
+                      onChange={(e) => setNewSnippetText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                          e.preventDefault();
+                          addSnippet();
+                        }
+                      }}
+                      className="min-h-[60px] text-sm"
+                      placeholder="instruction (e.g. run the test suite)"
+                      aria-label="New snippet instruction text"
+                      maxLength={SNIPPET_TEXT_MAX}
+                    />
+                    <Button variant="outline" size="sm" className="w-full" onClick={addSnippet}>
+                      Add snippet
+                    </Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Snippets appear in the Broadcast dialog (insert into the message, then confirm Send) and in a pane's right-click menu (one-click send to that agent). Names must be unique.
+                  </p>
                 </div>
               </SettingsSection>
 

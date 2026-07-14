@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
-import { loadUi, saveUi, persistUiState, initialWorkspace, DEFAULT_TERMINAL_FONT_FAMILY, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type HostOptionsMap, type WorkspacePaneSet, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
+import { loadUi, saveUi, persistUiState, initialWorkspace, DEFAULT_TERMINAL_FONT_FAMILY, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type HostOptionsMap, type WorkspacePaneSet, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
 import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThemeId, type Theme, type ThemeId, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
@@ -256,6 +256,13 @@ function App() {
   // cwd above: persisted by the saveUi effect below, never sent to the backend.
   const [defaultNewChatCwdByHost, setDefaultNewChatCwdByHost] = useState<Record<string, string>>(() => uiState.defaultNewChatCwdByHost ?? {});
   const [customPresets, setCustomPresets] = useState<CustomPreset[]>(() => uiState.customPresets ?? []);
+  // Saved instruction snippets (WARDEN-323): a named, reusable intervention
+  // library surfaced at the Broadcast dialog (insert-only) and a focused pane's
+  // context menu (one-click send). Pure client-side localStorage pref like the
+  // spawn presets above: persisted by the saveUi effect below, never sent to the
+  // backend as anything but the literal `text` over the existing /api/send path.
+  // Seeded once with STARTER_SNIPPETS by loadUi when the field is absent.
+  const [snippets, setSnippets] = useState<Snippet[]>(() => uiState.snippets ?? []);
   // Default shell launched by the pane-grid ＋ split button (WARDEN-223). Blank
   // means "no explicit shell" → the host launches its own login shell. Pure
   // client-side pref (like the new-chat prefs above): persisted by the saveUi
@@ -419,8 +426,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ activeTabs, hiddenTabs, workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, defaultSplitShell, hostOptions, copyHintDismissed }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [activeTabs, hiddenTabs, workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, defaultSplitShell, hostOptions, copyHintDismissed, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ activeTabs, hiddenTabs, workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [activeTabs, hiddenTabs, workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultSplitShell, hostOptions, copyHintDismissed, restoreOnStartup, startedEmpty]);
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
   // workspace, so switching clears it (WARDEN-256: maximized resets on switch).
@@ -1272,6 +1279,8 @@ function App() {
           setDefaultNewChatCwdByHost={setDefaultNewChatCwdByHost}
           customPresets={customPresets}
           setCustomPresets={setCustomPresets}
+          snippets={snippets}
+          setSnippets={setSnippets}
           defaultSplitShell={defaultSplitShell}
           setDefaultSplitShell={setDefaultSplitShell}
           rememberWindowBounds={rememberWindowBounds}
@@ -1367,6 +1376,7 @@ function App() {
               onOpenChatBrowser={() => setChatBrowserOpen(true)}
               hostStatuses={hostStatuses}
               timestampFormat={timestampFormat}
+              snippets={snippets}
             />
           </ErrorBoundary>
         </section>
@@ -1401,6 +1411,7 @@ function App() {
             hostOptions={hostOptions}
             copyHintDismissed={copyHintDismissed}
             onDismissCopyHint={dismissCopyHint}
+            snippets={snippets}
           />
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"

@@ -24,25 +24,41 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Loader2 } from 'lucide-react';
 import { chatType, displayName, hostTagOf } from '@/lib/chatDisplay';
 import type { Chat } from '@/lib/types';
 import type { BroadcastSummary } from '@/lib/broadcast';
+import type { Snippet } from '@/lib/storage';
 
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Resolved selected chats, in display order. Empty list disables Send. */
   targets: Chat[];
+  /** Saved instruction snippets (WARDEN-323). Insert-only here: picking one
+   *  fills the textarea via setMsg; it does NOT auto-send. The confirm gate
+   *  below still governs every send (WARDEN-292). */
+  snippets: Snippet[];
   /** Fan out `text` to every selected agent. Resolves with the per-agent summary
    *  (the parent toasts it + clears the selection). Never rejects — partial
    *  failure is encoded in the summary, not thrown. */
   onSend: (text: string) => Promise<BroadcastSummary>;
 }
 
-export function BroadcastDialog({ open, onOpenChange, targets, onSend }: Props) {
+export function BroadcastDialog({ open, onOpenChange, targets, snippets, onSend }: Props) {
   const [msg, setMsg] = useState('');
   const [sending, setSending] = useState(false);
+  // The snippet picker's selected value. Insert-only: picking a snippet fills
+  // `msg`; this state only drives the picker's trigger label (so the user sees
+  // which snippet they inserted) and resets every open alongside `msg`.
+  const [picked, setPicked] = useState('');
 
   // Start every open fresh: a previous attempt's text shouldn't linger to be
   // re-sent by accident on the next selection.
@@ -50,6 +66,7 @@ export function BroadcastDialog({ open, onOpenChange, targets, onSend }: Props) 
     if (open) {
       setMsg('');
       setSending(false);
+      setPicked('');
     }
   }, [open]);
 
@@ -105,6 +122,37 @@ export function BroadcastDialog({ open, onOpenChange, targets, onSend }: Props) 
               </ul>
             </div>
           </div>
+
+          {/* Saved-snippet picker (WARDEN-323). Insert-only: picking a snippet
+              fills the textarea below via setMsg — it does NOT auto-send. The
+              WARDEN-292 confirm gate (canSend / handleSend / the footer button)
+              is untouched, so nothing reaches a tmux session until the human
+              clicks Send. Hidden when the library is empty (WARDEN-103). */}
+          {snippets.length > 0 && (
+            <div className="flex flex-col gap-1">
+              <label htmlFor="broadcast-snippet" className="text-xs text-muted-foreground">Insert snippet</label>
+              <Select
+                value={picked || undefined}
+                onValueChange={(name) => {
+                  const s = snippets.find((x) => x.name === name);
+                  if (s) setMsg(s.text);
+                  setPicked(name);
+                }}
+              >
+                <SelectTrigger id="broadcast-snippet" className="text-sm" disabled={sending}>
+                  <SelectValue placeholder="Pick a saved instruction to fill the message" />
+                </SelectTrigger>
+                <SelectContent>
+                  {snippets.map((s) => (
+                    <SelectItem key={s.name} value={s.name}>
+                      {s.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <span className="text-[10px] text-muted-foreground">Inserting fills the message — nothing is sent until you confirm below.</span>
+            </div>
+          )}
 
           <div className="flex flex-col gap-1">
             <label htmlFor="broadcast-msg" className="text-xs text-muted-foreground">Message</label>

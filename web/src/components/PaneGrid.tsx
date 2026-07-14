@@ -15,7 +15,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import type { Chat } from '@/lib/types';
-import type { PaneLayout, TerminalCursorStyle, OnExitBehavior, HostOptionsMap } from '@/lib/storage';
+import type { PaneLayout, TerminalCursorStyle, OnExitBehavior, HostOptionsMap, Snippet } from '@/lib/storage';
 import type { ThemeId } from '@/lib/theme';
 
 export interface OpenTile { id: string }
@@ -76,11 +76,15 @@ interface Props {
   hostOptions: HostOptionsMap;
   copyHintDismissed: Record<string, boolean>;
   onDismissCopyHint: (host: string) => void;
+  // Saved instruction snippets (WARDEN-323): pure pass-through to PaneTile —
+  // App owns the persisted list. PaneTile renders a "Snippets" submenu in each
+  // pane's context menu for one-click send to that pane's agent.
+  snippets: Snippet[];
 }
 
 function colsFor(n: number) { return n <= 1 ? 1 : Math.ceil(Math.sqrt(n)); }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, hostOptions, copyHintDismissed, onDismissCopyHint }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, hostOptions, copyHintDismissed, onDismissCopyHint, snippets }: Props) {
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
   // WARDEN-334: the 1-based line a grep result selected, fed to FileViewer's
@@ -278,6 +282,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     copyHintDismissed={copyHintDismissed}
                     onDismissCopyHint={onDismissCopyHint}
                     onSpawned={onSpawned}
+                    snippets={snippets}
                   />
                 </div>
               );
