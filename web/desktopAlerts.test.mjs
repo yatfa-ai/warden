@@ -30,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-desktop-alerts-test-'));
 const tmpFile = join(tmpDir, 'desktopAlerts.mjs');
 writeFileSync(tmpFile, code);
-const { shouldFireAlert, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage } = await import(tmpFile);
+const { shouldFireAlert, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage, diffNewAttention, formatInAppEntry } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -349,6 +349,186 @@ test('falls back to id when name is absent', () => {
   const r = { id: 'container-1', state: 'stuck', signal: 'loop line' };
   const { body } = formatWatchMessage(r, 'stuck');
   assert.ok(body.includes('container-1'), 'falls back to id for the name');
+});
+
+// --- WARDEN-402: diffNewAttention (the in-app ping's "WHICH agent is newly needy") ----
+//
+// shouldFireAlert decides WHETHER to ping by comparing only totals; diffNewAttention
+// decides WHO is newly needy so the at-Warden sonner toast can name the specific
+// chat/agent + its concrete reason (the granularity shouldFireAlert can't provide).
+// Mirrors the purity discipline above: plain rollup objects, no browser globals. The
+// `toast(...)` delivery itself (a browser-global side effect) is left untested, exactly
+// as fireAttentionNotification is — only the pure diff + formatter are exercised.
+// A pane-state row builder carrying the optional `signal` (AgentStateRow-shape); the
+// health buckets use the existing agent() builder (a Chat has no `signal` field).
+const pane = (id, signal = null, state = 'stuck') => ({ id, key: id, name: id, state, signal });
+
+console.log('\ndiffNewAttention: a single new pane-state agent surfaces with its reason + signal');
+test('a newly-stuck agent surfaces once, keyed by id, with the stuck reason + signal', () => {
+  const prev = roll();
+  const next = roll({ stuck: [pane('s1', 'loop line', 'stuck')] });
+  const out = diffNewAttention(prev, next);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].key, 's1');
+  assert.equal(out[0].name, 's1');
+  assert.equal(out[0].tone, 'critical');
+  assert.ok(out[0].reason.toLowerCase().includes('stuck'), 'reason conveys stuck');
+  assert.equal(out[0].signal, 'loop line');
+});
+test('a newly-waiting agent surfaces as the amber tone with its signal', () => {
+  const next = roll({ waiting: [pane('w1', 'press enter to continue', 'waiting')] });
+  const out = diffNewAttention(roll(), next);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].tone, 'warning');
+  assert.equal(out[0].signal, 'press enter to continue');
+});
+
+console.log('\ndiffNewAttention: multiple new entrants across buckets, severity-ordered (red before amber)');
+test('a critical agent + a waiting agent surface both, red before amber', () => {
+  const next = roll({
+    critical: [agent('c1')],
+    waiting: [pane('w1', null, 'waiting')],
+  });
+  const out = diffNewAttention(roll(), next);
+  assert.equal(out.length, 2);
+  assert.equal(out[0].key, 'c1'); // red first
+  assert.equal(out[0].tone, 'critical');
+  assert.equal(out[1].key, 'w1');
+  assert.equal(out[1].tone, 'warning');
+});
+test('entrants across all six named buckets each surface (no cross-bucket collision)', () => {
+  const next = roll({
+    critical: [agent('c1')],
+    stuck: [pane('s', null, 'stuck')],
+    erroring: [pane('e', null, 'erroring')],
+    warning: [agent('w1')],
+    waiting: [pane('wt', null, 'waiting')],
+    blocked: [pane('b', null, 'blocked')],
+  });
+  const out = diffNewAttention(roll(), next);
+  assert.equal(out.length, 6);
+});
+
+console.log('\ndiffNewAttention: net-zero churn surfaces the NEW entrant, NOT the recovering one');
+test('one agent recovers while another newly errors → only the new one surfaces', () => {
+  // prev: 'a' stuck. next: 'a' recovered (gone) + 'b' newly erroring. Total 1 → 1.
+  const prev = roll({ stuck: [pane('a', null, 'stuck')] });
+  const next = roll({ erroring: [pane('b', null, 'erroring')] });
+  const out = diffNewAttention(prev, next);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].key, 'b'); // the newly-needy one
+  assert.ok(!out.find((e) => e.key === 'a'), 'the recovering agent does not surface');
+});
+test('an agent MOVING bucket (waiting → erroring) is NOT a new entrant (same key)', () => {
+  const prev = roll({ waiting: [pane('a', null, 'waiting')] });
+  const next = roll({ erroring: [pane('a', null, 'erroring')] });
+  assert.equal(diffNewAttention(prev, next).length, 0);
+});
+
+console.log('\ndiffNewAttention: a persistent condition does not repeat (increase-only parity)');
+test('the same agent stuck across two polls surfaces zero times on the second', () => {
+  const prev = roll({ stuck: [pane('a', null, 'stuck')] });
+  assert.equal(diffNewAttention(prev, prev).length, 0);
+});
+
+console.log('\ndiffNewAttention: health-bucket entrants surface with the label reason and NO signal');
+test('a newly-critical health agent surfaces with the critical label and no signal', () => {
+  // A Chat carries no `signal` field — the bucket label IS the reason.
+  const out = diffNewAttention(roll(), roll({ critical: [agent('c1')] }));
+  assert.equal(out.length, 1);
+  assert.equal(out[0].key, 'c1');
+  assert.equal(out[0].name, 'c1');
+  assert.equal(out[0].tone, 'critical');
+  assert.ok(out[0].reason.toLowerCase().includes('critical'));
+  assert.equal(out[0].signal, undefined); // health rows carry no signal
+});
+test('a newly-warning health agent surfaces as amber with no signal', () => {
+  const out = diffNewAttention(roll(), roll({ warning: [agent('w1')] }));
+  assert.equal(out.length, 1);
+  assert.equal(out[0].tone, 'warning');
+  assert.equal(out[0].signal, undefined);
+});
+
+console.log('\ndiffNewAttention: one entry per key (an agent newly in two buckets surfaces once)');
+test('an agent newly critical AND erroring surfaces ONCE, red-first (not twice)', () => {
+  const next = roll({
+    critical: [agent('x')],
+    erroring: [pane('x', null, 'erroring')],
+  });
+  const out = diffNewAttention(roll(), next);
+  assert.equal(out.length, 1); // deduped by key
+  assert.equal(out[0].key, 'x');
+  assert.ok(out[0].reason.toLowerCase().includes('critical'), 'surfaces in the first (critical) bucket');
+});
+
+console.log('\ndiffNewAttention: aggregate directives/errors deltas surface as summary entries (no deep-link)');
+test('an errors-count increase surfaces a summary entry with no key/name', () => {
+  const out = diffNewAttention(roll({ errors: 1 }), roll({ errors: 3 }));
+  assert.equal(out.length, 1);
+  assert.equal(out[0].key, '');
+  assert.equal(out[0].name, '');
+  assert.equal(out[0].tone, 'critical');
+  assert.match(out[0].reason, /2 recent errors/);
+});
+test('a directives-count increase surfaces an amber summary entry', () => {
+  const out = diffNewAttention(roll(), roll({ directives: 2 }));
+  assert.equal(out.length, 1);
+  assert.equal(out[0].key, '');
+  assert.equal(out[0].tone, 'warning');
+  assert.match(out[0].reason, /2 pending directives/);
+});
+test('a count DECREASE (recovery) does NOT produce a phantom aggregate entry', () => {
+  assert.equal(diffNewAttention(roll({ errors: 5 }), roll({ errors: 1 })).length, 0); // delta clamped at 0
+});
+test('named entrants + an aggregate delta both surface (named first, then aggregate)', () => {
+  const out = diffNewAttention(roll(), roll({ stuck: [pane('s', null, 'stuck')], errors: 2 }));
+  assert.equal(out.length, 2);
+  assert.equal(out[0].key, 's'); // named (red) first
+  assert.equal(out[1].key, ''); // aggregate after
+});
+
+console.log('\ndiffNewAttention: identity is key || id (parity with the badge / alertAgentKey)');
+test('an agent known by key in prev suppresses the same key in a different next bucket', () => {
+  const prev = roll({ critical: [{ id: 'i1', key: 'k1', name: 'n1' }] });
+  const next = roll({ erroring: [{ id: 'i1', key: 'k1', name: 'n1', state: 'erroring' }] });
+  assert.equal(diffNewAttention(prev, next).length, 0);
+});
+test('a row with neither key nor id is skipped (un-actionable, un-trackable)', () => {
+  const out = diffNewAttention(roll(), roll({ stuck: [{ state: 'stuck', signal: 'x' }] }));
+  assert.equal(out.length, 0);
+});
+
+console.log('\ndiffNewAttention: missing input is defensive (returns [])');
+test('null prev returns []', () => {
+  assert.deepEqual(diffNewAttention(null, roll({ critical: [agent('c1')] })), []);
+});
+test('null next returns []', () => {
+  assert.deepEqual(diffNewAttention(roll(), null), []);
+});
+test('both null returns []', () => {
+  assert.deepEqual(diffNewAttention(null, null), []);
+});
+
+console.log('\nformatInAppEntry (WARDEN-402): named entrant → name title + reason/signal description');
+test('named entrant with a signal quotes it verbatim in the description', () => {
+  const e = { key: 'w', name: 'worker', reason: 'Waiting for your input', signal: 'press enter to continue', tone: 'warning' };
+  const { title, description } = formatInAppEntry(e);
+  assert.equal(title, 'worker');
+  assert.ok(description.includes('Waiting for your input'), 'description carries the reason');
+  assert.ok(description.includes("'press enter to continue'"), 'description quotes the signal');
+});
+test('named entrant without a signal uses the reason alone as the description', () => {
+  const e = { key: 'c', name: 'crit-agent', reason: 'Critical — no recent activity', tone: 'critical' };
+  const { title, description } = formatInAppEntry(e);
+  assert.equal(title, 'crit-agent');
+  assert.equal(description, 'Critical — no recent activity');
+  assert.ok(!description.includes("'"), 'no signal quote when signal absent');
+});
+test('aggregate entrant (no name) renders its reason as the title with NO description', () => {
+  const e = { key: '', name: '', reason: '2 recent errors', tone: 'critical' };
+  const { title, description } = formatInAppEntry(e);
+  assert.equal(title, '2 recent errors');
+  assert.equal(description, undefined);
 });
 
 console.log(`\n✓ DESKTOP ALERTS TESTS PASS (${passed})`);

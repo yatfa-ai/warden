@@ -21,6 +21,7 @@
 // endpoint every 10s, and far smaller risk than refactoring HealthDashboard onto a
 // shared context. See WARDEN-228 impl notes ("standalone hook is acceptable").
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { toast } from 'sonner';
 import {
   buildAttentionRollup,
   type AttentionRollup,
@@ -31,6 +32,8 @@ import {
   fireAttentionNotification,
   fireWatchNotification,
   applySeverityPrefs,
+  diffNewAttention,
+  formatInAppEntry,
   ATTENTION_SEVERITY_DEFAULTS,
   type AttentionSeverityPrefs,
 } from '@/lib/desktopAlerts';
@@ -58,6 +61,58 @@ export interface AttentionRollupState {
   rollup: AttentionRollup;
   /** True only during the very first fetch (before any data has arrived). */
   loading: boolean;
+}
+
+/**
+ * Show the crafted in-app attention ping (WARDEN-402). Sibling of
+ * fireAttentionNotification (the OS channel) for the AT-WARDEN case: instead of the
+ * raw "N items need attention" OS toast — which is hard-gated to fire only while
+ * Warden is UNFOCUSED — this renders a themed sonner toast, reason-specific and
+ * one-click deep-linkable, for each genuinely NEW entrant that appeared WHILE the
+ * human was looking at Warden. That closes the prior "visible → return" gap, which
+ * left a watched chat newly needing them producing only the header badge silently
+ * ticking up — exactly the "noise the human learns to ignore" the roadmap rejects.
+ *
+ * The entrants come from the pure diffNewAttention (so the ping names the SPECIFIC
+ * chat/agent + its concrete reason, not a lumped count), and each NAMED entrant's
+ * toast carries a one-click "Open" action that deep-links via App's openChat. A
+ * stable per-key sonner `id` means a still-visible ping for the same chat updates
+ * rather than stacking — the in-app analog of the OS channel's stable `tag`.
+ *
+ * Auto-dismisses (sonner's transience — the property the relaxed visible-gate's
+ * noise-avoidance relied on): it fires ONCE per genuine new need (the increase-only
+ * shouldFireAlert gate the caller already enforced) and then leaves, so it is NOT
+ * the always-on repetition the visible→return gate existed to suppress. Aggregate
+ * directives/errors entrants (no pane identity) surface with no deep-link — their
+ * resolution path is the Activity tab, surfaced in the badge. Never throws.
+ */
+function fireAttentionInApp(
+  prev: AttentionRollup,
+  next: AttentionRollup,
+  onOpenChat?: (id: string) => void,
+): void {
+  const entries = diffNewAttention(prev, next);
+  for (const entry of entries) {
+    const { title, description } = formatInAppEntry(entry);
+    // Themed tone maps 1:1 to the badge's red/amber severity split (WARDEN-68): a
+    // broken agent (critical/stuck/erroring/recent-error) → error (red); a slowing
+    // one (warning/waiting/blocked/directive) → warning (amber). Called as a METHOD
+    // on `toast` (not a destructured ref) so its internal binding is preserved.
+    const method = entry.tone === 'critical' ? 'error' : 'warning';
+    toast[method](title, {
+      description,
+      // Noticeable but still transient — longer than a "chat renamed" toast (this is
+      // the product's most important signal), short enough never to linger as noise.
+      duration: 6000,
+      // One stable ping per chat: a still-visible ping updates instead of stacking.
+      ...(entry.key ? { id: `warden-attention:${entry.key}` } : {}),
+      // One-click deep-link for named entrants. Aggregate entrants have no pane to
+      // open, so they carry no action (the Activity tab is their resolution path).
+      ...(entry.key && onOpenChat
+        ? { action: { label: 'Open', onClick: () => onOpenChat(entry.key) } }
+        : {}),
+    });
+  }
 }
 
 export function useAttentionRollup(
@@ -246,19 +301,28 @@ export function useAttentionRollup(
     [health, stats, agentStates, enabledStates],
   );
 
-  // Fire an OS desktop notification on a genuine rollup INCREASE while Warden is
-  // unfocused (WARDEN-259). The always-on AttentionBadge already covers the in-app
-  // case, so a desktop alert while looking at Warden is pure noise — hence the hidden
-  // guard. shouldFireAlert returns true ONLY on a total increase, so a persistent
-  // condition never repeats and a recovery never fires. prevRoutableRef always
-  // advances (even when we don't fire) so the next comparison is against the last
-  // ROUTABLE rollup, not a stale one. No-op entirely when the master toggle is off.
+  // Fire an attention notification on a genuine rollup INCREASE (WARDEN-259). The
+  // increase-only shouldFireAlert returns true ONLY on a total increase, so a
+  // persistent condition never repeats and a recovery never fires. prevRoutableRef
+  // always advances (even when we don't fire) so the next comparison is against the
+  // last ROUTABLE rollup, not a stale one. No-op entirely when the master toggle is
+  // off. Both delivery channels below share the SAME opt-in pref + increase-only
+  // gate (no new noise).
   //
   // WARDEN-364: the decision runs over the ROUTABLE sub-rollup (severity prefs +
   // per-agent mute applied), so an increase in only a disabled/muted bucket fires
   // nothing while still appearing in the in-app badge (which consumes the raw
   // rollup). The visibility-gate relaxation in the poll effects above stays keyed
   // on the MASTER toggle only — the sub-toggles never add polling.
+  //
+  // WARDEN-402: visibility now BRANCHES the delivery channel instead of gating it.
+  // UNFOCUSED → the raw OS desktop toast (the away channel, unchanged). VISIBLE →
+  // the crafted, themed IN-APP sonner ping (fireAttentionInApp above), reason-
+  // specific + one-click deep-linkable. This closes the prior "visible → return"
+  // gap (a watched chat newly needing the human while they were AT Warden produced
+  // no transient ping at all — only the header badge ticking up). The in-app
+  // toast's transience (sonner auto-dismiss) is what keeps the relaxed gate from
+  // reintroducing the noise the visible-return originally existed to suppress.
   //
   // Baseline priming: the FIRST rollup observed after both initial fetches land
   // becomes the baseline (no fire) — so pre-existing attention at launch/reload does
@@ -276,9 +340,14 @@ export function useAttentionRollup(
     const prev = prevRoutableRef.current;
     prevRoutableRef.current = routable;
     if (!attentionDesktopAlerts) return;
-    if (document.visibilityState === 'visible') return;
-    if (shouldFireAlert(prev, routable)) {
-      fireAttentionNotification(routable);
+    // `prev &&` narrows the nullable ref for TS — and is a true no-op logically, since
+    // shouldFireAlert already returns false when prev is null (its missing-input guard).
+    if (prev && shouldFireAlert(prev, routable)) {
+      if (document.visibilityState === 'visible') {
+        fireAttentionInApp(prev, routable, onOpenChatRef.current);
+      } else {
+        fireAttentionNotification(routable);
+      }
     }
   }, [rollup, attentionDesktopAlerts, loading, agentStatesLoaded, severityPrefs, mutedSet]);
 
