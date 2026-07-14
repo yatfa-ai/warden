@@ -94,8 +94,11 @@ export function AttentionBadge({
   // "you're needed HERE, because X" — promoted above the flat rundown so the human
   // doesn't have to scan to find "first." top is null only when no pane/health agent
   // needs attention (e.g. just directives/errors counts remain), in which case the
-  // sectioned rundown alone is the directed answer.
-  const { top } = rankAttention(rollup);
+  // sectioned rundown alone is the directed answer. The callout is gated to ≥2
+  // deep-linkable items: with exactly one pane needing attention the rundown's lone
+  // row already IS the answer, so promoting it would just duplicate that single pane
+  // as both the callout and the row beneath it.
+  const { top, ranked } = rankAttention(rollup);
 
   const { critical, warning, stuck, erroring, waiting, blocked, directives, errors, total } = rollup;
   // Severity cue: red when something is broken (critical/stuck/erroring agent or a
@@ -133,7 +136,7 @@ export function AttentionBadge({
           <TriangleAlert className={cn('size-3.5', tone)} />
           <span className="text-sm font-semibold">{total} need attention</span>
         </div>
-        {top && (
+        {top && ranked.length >= 2 && (
           <div className="px-1.5 pt-1.5">
             <Callout top={top} onClick={() => openChat(top.id)} />
           </div>
@@ -347,7 +350,7 @@ function Callout({ top, onClick }: { top: AttentionItem; onClick: () => void }) 
         <span className="text-xs text-foreground">
           You&rsquo;re needed in <span className="font-semibold">{top.name}</span>
         </span>
-        <span className="block truncate text-[10px] text-muted-foreground">{reason}</span>
+        <span className="block truncate text-xs text-muted-foreground">{reason}</span>
       </span>
       <span className="text-xs text-muted-foreground shrink-0">open →</span>
     </Button>
