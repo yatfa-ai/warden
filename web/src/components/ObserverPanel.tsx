@@ -933,11 +933,25 @@ function ThinkingRow() {
 
 function ToolChip({ name, arg }: { name: string; arg?: string }) {
   return (
-    <div className="flex items-center gap-1.5 pl-9 text-xs text-muted-foreground">
-      <span className="size-1 rounded-full bg-current opacity-50" />
-      <span className="font-mono">{toolLabel(name)}</span>
-      {arg && <span className="opacity-70">· {arg}</span>}
-    </div>
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div className="flex items-center gap-1.5 pl-9 text-xs text-muted-foreground">
+          <span className="size-1 rounded-full bg-current opacity-50" />
+          <span className="font-mono">{toolLabel(name)}</span>
+          {arg && <span className="opacity-70">· {arg}</span>}
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={() => copyText(name)}>
+          <CopyIcon /> Copy tool name
+        </ContextMenuItem>
+        {arg && (
+          <ContextMenuItem onSelect={() => copyText(arg)}>
+            <CopyIcon /> Copy argument
+          </ContextMenuItem>
+        )}
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
