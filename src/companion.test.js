@@ -28,7 +28,8 @@ import { fileURLToPath } from 'node:url';
 import {
   targetForUname, remoteBinaryPath, buildProbeScript, buildUploadScript, parseProbe,
   encodeRequest, mapCompanionContainers, CompanionChannel, CompanionTransportError,
-  CompanionRpcError, getChannel, discover, capturePanes, hasSession, isCompanionTransportEnabled, loadManifest,
+  CompanionRpcError, getChannel, discover, capturePanes, hasSession, spawnSession, killSession,
+  isCompanionTransportEnabled, loadManifest,
   projectSpawnModel, _resetChannelCacheForTests,
 } from './companion.js';
 import { probeSession, hasSession as tmuxHasSession } from './tmux.js';
@@ -394,10 +395,12 @@ const TEST_MANIFEST = {
 
 // Build a fake transport whose ping reports the test version (a healthy channel).
 const healthyTransport = (extra = {}) => fakeTransport((req) => {
-  if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'discover', 'capturePanes', 'hasSession'] } };
+  if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'discover', 'capturePanes', 'hasSession', 'spawnSession', 'killSession'] } };
   if (req.method === 'discover') return { id: req.id, ok: true, result: { containers: extra.containers ?? [] } };
   if (req.method === 'capturePanes') return { id: req.id, ok: true, result: { panes: extra.panes ?? {} } };
   if (req.method === 'hasSession') return { id: req.id, ok: true, result: { exists: extra.exists ?? true } };
+  if (req.method === 'spawnSession') return { id: req.id, ok: true, result: {} };
+  if (req.method === 'killSession') return { id: req.id, ok: true, result: {} };
   return { id: req.id, ok: false, error: 'unknown method' };
 });
 
@@ -1082,6 +1085,147 @@ describe('hasSession() via companion (companion-or-fail)', () => {
   });
 });
 
+// --------------------------------- lifecycle ---------------------------------
+// WARDEN-386 (slice 3): the spawnSession/killSession RPCs — the agent create/
+// destroy twins migrated off per-op SSH. The contract under test mirrors
+// capturePanes: companion-or-fail (no raw-SSH fallback), (local) refused, and
+// the exact params sent over channel.call (the host-side RPC builds the tmux
+// argv from them — locked byte-for-byte in the e2e test below).
+
+describe('spawnSession() via companion (companion-or-fail)', () => {
+  beforeEach(() => _resetChannelCacheForTests());
+
+  it('returns {ok:true} from the spawnSession RPC', async () => {
+    const { deps } = fakeDeps({ spawnChannel: () => healthyTransport() });
+    const res = await spawnSession('prod', { container: 'p-worker', session: 'agent', cwd: '/w', cmd: ['claude'] }, {}, {}, deps);
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.host, 'prod');
+  });
+
+  it('sends container/session/cwd/cmd (cmd split; container null + empty cmd for a manual default-shell chat)', async () => {
+    let sent = null;
+    const t = fakeTransport((req) => {
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER } };
+      if (req.method === 'spawnSession') { sent = req.params; return { id: req.id, ok: true, result: {} }; }
+      return { id: req.id, ok: false, error: 'unknown method' };
+    });
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    // yatfa chat: container set, cmd argv (pre-split by tmux.js), cwd verbatim.
+    await spawnSession('prod', { container: 'p-worker', session: 'agent', cwd: '/work/p', cmd: ['claude', '--resume', 'xyz'] }, {}, {}, deps);
+    assert.deepStrictEqual(sent, { container: 'p-worker', session: 'agent', cwd: '/work/p', cmd: ['claude', '--resume', 'xyz'] });
+
+    // manual chat: container null (→ bare tmux on the host), empty cmd (→ default shell).
+    await spawnSession('prod', { container: null, session: 'mysess', cwd: '', cmd: [] }, {}, {}, deps);
+    assert.deepStrictEqual(sent, { container: null, session: 'mysess', cwd: '', cmd: [] },
+      'empty cmd → cmd:[] (host appends no trailing argv → default shell, WARDEN-223)');
+  });
+
+  it('applies the session -> container -> agent fallback on the JS side too', async () => {
+    let sent = null;
+    const t = fakeTransport((req) => {
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER } };
+      if (req.method === 'spawnSession') { sent = req.params; return { id: req.id, ok: true, result: {} }; }
+      return { id: req.id, ok: false, error: 'unknown method' };
+    });
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    await spawnSession('prod', { container: 'c1', session: '', cwd: '', cmd: [] }, {}, {}, deps);
+    assert.strictEqual(sent.session, 'c1', 'empty session falls back to container');
+  });
+
+  it('bootstrap failure -> {ok:false, actionable error}, NOT a raw-ssh fallback', async () => {
+    const { deps } = fakeDeps({
+      run: async () => ({ ok: false, code: 255, stderr: 'Permission denied (publickey).' }),
+    });
+    const res = await spawnSession('prod', { container: 'p-worker', session: 'agent', cwd: '', cmd: [] }, {}, {}, deps);
+    assert.strictEqual(res.ok, false);
+    assert.ok(res.error.includes('companion'), `error names the companion: ${res.error}`);
+    assert.ok(res.error.includes('WARDEN_COMPANION_TRANSPORT=0'),
+      `bootstrap error must tell the user how to opt out: ${res.error}`);
+  });
+
+  it('spawnSession RPC error ({ok:false}) propagates without fallback', async () => {
+    const { deps } = fakeDeps({
+      spawnChannel: () => fakeTransport((req) =>
+        req.method === 'ping'
+          ? { id: req.id, ok: true, result: { version: TEST_VER } }
+          : { id: req.id, ok: false, error: 'spawnSession failed: duplicate session: agent' }),
+    });
+    const res = await spawnSession('prod', { container: 'p-worker', session: 'agent', cwd: '', cmd: [] }, {}, {}, deps);
+    assert.strictEqual(res.ok, false);
+    assert.ok(res.error.includes('duplicate session'), res.error);
+  });
+
+  it('(local) host is refused (companion serves remote hosts only)', async () => {
+    const res = await spawnSession('(local)', { container: null, session: 's', cwd: '', cmd: [] }, {}, {});
+    assert.strictEqual(res.ok, false);
+    assert.ok(/local/.test(res.error));
+  });
+});
+
+describe('killSession() via companion (companion-or-fail, best-effort)', () => {
+  beforeEach(() => _resetChannelCacheForTests());
+
+  it('returns {ok:true} from the killSession RPC', async () => {
+    const { deps } = fakeDeps({ spawnChannel: () => healthyTransport() });
+    const res = await killSession('prod', { container: 'p-worker', session: 'agent' }, {}, {}, deps);
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.host, 'prod');
+  });
+
+  it('sends container/session (container null for a bare-tmux chat)', async () => {
+    let sent = null;
+    const t = fakeTransport((req) => {
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER } };
+      if (req.method === 'killSession') { sent = req.params; return { id: req.id, ok: true, result: {} }; }
+      return { id: req.id, ok: false, error: 'unknown method' };
+    });
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    await killSession('prod', { container: 'p-worker', session: 'agent' }, {}, {}, deps);
+    assert.deepStrictEqual(sent, { container: 'p-worker', session: 'agent' });
+    await killSession('prod', { container: null, session: 'mysess' }, {}, {}, deps);
+    assert.deepStrictEqual(sent, { container: null, session: 'mysess' });
+  });
+
+  it('"session not found" RPC ok is surfaced as a benign ok (idempotent — the host returns ok for an already-dead session)', async () => {
+    // kill is idempotent: the Go side returns ok for "session not found" /
+    // "no server running" (the session is already gone). The client must surface
+    // that as {ok:true}, NOT a hard error — or /api/kill's best-effort semantics
+    // break. (The host-side idempotency is exercised end-to-end below.)
+    const { deps } = fakeDeps({ spawnChannel: () => healthyTransport() });
+    const res = await killSession('prod', { container: null, session: 'already-dead' }, {}, {}, deps);
+    assert.strictEqual(res.ok, true, 'an already-dead session is a benign ok, not an error');
+  });
+
+  it('bootstrap failure -> {ok:false, actionable error}, NOT a raw-ssh fallback', async () => {
+    const { deps } = fakeDeps({
+      run: async () => ({ ok: false, code: 255, stderr: 'Connection refused' }),
+    });
+    const res = await killSession('prod', { container: 'p-worker', session: 'agent' }, {}, {}, deps);
+    assert.strictEqual(res.ok, false);
+    assert.ok(res.error.includes('companion'), `error names the companion: ${res.error}`);
+    assert.ok(res.error.includes('WARDEN_COMPANION_TRANSPORT=0'),
+      `bootstrap error must tell the user how to opt out: ${res.error}`);
+  });
+
+  it('killSession RPC error (a genuine failure, not session-not-found) propagates without fallback', async () => {
+    const { deps } = fakeDeps({
+      spawnChannel: () => fakeTransport((req) =>
+        req.method === 'ping'
+          ? { id: req.id, ok: true, result: { version: TEST_VER } }
+          : { id: req.id, ok: false, error: 'killSession failed: docker: not found' }),
+    });
+    const res = await killSession('prod', { container: 'p-worker', session: 'agent' }, {}, {}, deps);
+    assert.strictEqual(res.ok, false);
+    assert.ok(res.error.includes('docker: not found'), res.error);
+  });
+
+  it('(local) host is refused (companion serves remote hosts only)', async () => {
+    const res = await killSession('(local)', { container: null, session: 's' }, {}, {});
+    assert.strictEqual(res.ok, false);
+    assert.ok(/local/.test(res.error));
+  });
+});
+
 // ---------------------- probe routing over the companion ---------------------
 // WARDEN-382: the routing change lives in src/tmux.js (probeSession/hasSession),
 // but the whole transport surface is tested here. Drives the REAL exported
@@ -1340,6 +1484,39 @@ function realBinaryTransport() {
         ch.kill();
       }
     } finally {
+      spawnSync(TMUX_BIN, ['kill-session', '-t', session], { encoding: 'utf8' });
+    }
+  });
+
+  // WARDEN-386 (slice 3): the make-or-break parity test for the lifecycle RPCs.
+  // The Go companion builds the new-session/kill-session argv, runs it via bash
+  // -lc against a REAL tmux server, and the session must actually come up / come
+  // down — proving the host-side argv matches what the default runTmux path
+  // produces. Also locks kill's idempotency: killing an already-dead session is
+  // a benign ok (the host returns ok, not a hard error). Skipped unless tmux +
+  // the binary are available (the docker-exec path is the same code with a
+  // `docker exec <c>` prefix; the bare-tmux path here exercises every other seam).
+  (canCapture ? it : it.skip)('spawnSession + killSession: real binary creates + destroys a live tmux session over stdio', async () => {
+    const session = uniqueSession();
+    const ch = new CompanionChannel('local-binary', realBinaryTransport());
+    try {
+      // CREATE: an empty cmd launches tmux's default shell (WARDEN-223) — a
+      // long-lived session that stays alive to be verified.
+      await ch.call('spawnSession', { container: '', session, cwd: '', cmd: [] }, { timeout: 8000 });
+      const hasAfterSpawn = spawnSync(TMUX_BIN, ['has-session', '-t', session], { encoding: 'utf8' });
+      assert.strictEqual(hasAfterSpawn.status, 0, 'the spawned session is alive (default shell stays up)');
+
+      // DESTROY: killSession tears it down.
+      await ch.call('killSession', { container: '', session }, { timeout: 8000 });
+      const hasAfterKill = spawnSync(TMUX_BIN, ['has-session', '-t', session], { encoding: 'utf8' });
+      assert.notStrictEqual(hasAfterKill.status, 0, 'the session is gone after killSession');
+
+      // IDEMPOTENT: killing an already-dead session resolves ok (the host
+      // surfaces "session not found" as a benign ok — ch.call would REJECT with
+      // CompanionRpcError if the host returned {ok:false}, failing this test).
+      await ch.call('killSession', { container: '', session }, { timeout: 8000 });
+    } finally {
+      ch.kill();
       spawnSync(TMUX_BIN, ['kill-session', '-t', session], { encoding: 'utf8' });
     }
   });

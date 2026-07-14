@@ -3,7 +3,7 @@
 // executes them via the transport layer (ssh.js runTmux/attachTmux), which routes
 // to a remote host over SSH or to this machine locally. tmux is required everywhere.
 import { runTmux, attachTmux, attachInteractiveTmux, toMsysPath } from './ssh.js';
-import { isCompanionTransportEnabled, hasSession as companionHasSession } from './companion.js';
+import { isCompanionTransportEnabled, hasSession as companionHasSession, spawnSession, killSession } from './companion.js';
 
 const sess = (chat, cfg) => (chat && chat.session) || (cfg && cfg.tmuxSession) || 'agent';
 
@@ -88,7 +88,8 @@ export async function sendKey(chat, cfg, k) {
 //                                                          a host-side command failure,
 //                                                          e.g. tmux missing, as dead)
 // LOCAL never routes through the companion. `deps.runTmux` / `deps.companionHasSession`
-// are optional test seams (mirrors the deps seam in ssh.js runWithPool / tmux send).
+// / `deps.isCompanionTransportEnabled` are optional test seams (mirrors the deps seam
+// in ssh.js runWithPool / tmux send / tmux spawn+kill).
 function companionHasSessionResultToProbe(res, session) {
   if (res && res.ok) {
     return res.exists
@@ -110,7 +111,7 @@ async function probeViaCompanion(chat, cfg, deps) {
 
 // tmux is alive for this chat? (has-session exits 0 if yes)
 export async function hasSession(chat, cfg, deps = {}) {
-  if (chat.host !== '(local)' && isCompanionTransportEnabled()) {
+  if (chat.host !== '(local)' && (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)()) {
     const r = await probeViaCompanion(chat, cfg, deps);
     return r.ok;
   }
@@ -134,7 +135,7 @@ export async function hasSession(chat, cfg, deps = {}) {
 // (see companionHasSessionResultToProbe); the timeout then bounds nothing extra
 // (the channel has its own RPC timeout) but is accepted for signature parity.
 export async function probeSession(chat, cfg, { timeout = 8000 } = {}, deps = {}) {
-  if (chat.host !== '(local)' && isCompanionTransportEnabled()) {
+  if (chat.host !== '(local)' && (deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled)()) {
     return probeViaCompanion(chat, cfg, deps);
   }
   const run = deps.runTmux ?? runTmux;
@@ -158,20 +159,62 @@ export async function resize(chat, cfg, cols, rows) {
 // omitting it rather than hardcoding `bash`. Every caller sets `cmd` explicitly
 // (the /api/spawn handler defaults it to claude when omitted), so dropping the
 // former `|| 'claude …'` fallback here only changes the empty-string case.
-export async function spawn(chat, _cfg) {
+//
+// `deps` is an optional test seam (mirrors send's deps.runTmux): inject
+// isCompanionTransportEnabled / spawnSession / runTmux to drive the routing guard
+// + the exact argv without real ssh. Production callers omit it.
+export async function spawn(chat, _cfg, deps = {}) {
   const s = sess(chat, _cfg);
   const cwd = chat.host === '(local)' ? toMsysPath(chat.cwd || '') : (chat.cwd || '');
   const cmdParts = chat.cmd ? String(chat.cmd).split(/\s+/).filter(Boolean) : [];
   const args = ['new-session', '-d', '-s', s, '-x', '120', '-y', '32'];
   if (cwd) args.push('-c', cwd);
   args.push(...cmdParts);
-  const r = await runTmux(chat, args);
+  // Experimental companion transport (WARDEN-386): for REMOTE hosts only, when
+  // WARDEN_COMPANION_TRANSPORT=1 is set, route spawn through the persistent
+  // companion channel (one RPC, zero per-op ssh handshakes — the create/destroy
+  // twin of discover/capturePanes). The default runTmux path below is byte-for-
+  // byte unchanged and remains the default. The companion reproduces this exact
+  // argv on the host side (companion/main.go spawnSession); cwd is passed
+  // VERBATIM (the msys translation above is local-only and does not apply on the
+  // companion path). companion-or-fail: spawnSession returns {ok:false} with an
+  // actionable error and never silently falls back to runTmux here.
+  const isEnabled = deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled;
+  if (chat.host !== '(local)' && isEnabled()) {
+    const r = await (deps.spawnSession ?? spawnSession)(chat.host, {
+      container: chat.container || null,
+      session: s,
+      cwd,
+      cmd: cmdParts,
+    }, _cfg);
+    if (!r.ok) throw new Error(r.error || `spawn failed`);
+    return true;
+  }
+  const run = deps.runTmux ?? runTmux;
+  const r = await run(chat, args);
   if (!r.ok) throw new Error((r.stderr || '').trim() || `spawn failed (exit ${r.code})`);
   return true;
 }
 
-export async function kill(chat, cfg) {
-  await runTmux(chat, ['kill-session', '-t', sess(chat, cfg)]);
+// Kill the chat's tmux session. Best-effort / idempotent: kill-session on an
+// already-dead session is a no-op the caller already swallows (server.js
+// /api/kill try/catch noop, "a dead session may not exist"). The default runTmux
+// path never throws on a kill-session failure (runWithPool catches the
+// HostConnectionError and falls back to run(), which resolves {ok:false}), so
+// this discard-and-never-throw shape mirrors it exactly — the companion path
+// does the same (the host-side RPC surfaces "session not found" as a benign ok).
+// `deps` is the same test seam as spawn.
+export async function kill(chat, cfg, deps = {}) {
+  const s = sess(chat, cfg);
+  const isEnabled = deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled;
+  if (chat.host !== '(local)' && isEnabled()) {
+    await (deps.killSession ?? killSession)(chat.host, {
+      container: chat.container || null,
+      session: s,
+    }, cfg);
+    return;
+  }
+  await (deps.runTmux ?? runTmux)(chat, ['kill-session', '-t', s]);
 }
 
 // ---- Seamless copy (WARDEN-261) -------------------------------------------

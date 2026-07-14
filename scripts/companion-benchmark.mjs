@@ -25,18 +25,28 @@
 // pre-recovery LIVENESS PROBE (it fires on every pane open + the recovery flows),
 // so the same handshake collapse applies to the critical attach path. probeSession
 // today spawns ONE ssh process per probe; the companion collapses it to a single
-// hasSession RPC over the persistent channel. All three legs are reported below.
+// hasSession RPC over the persistent channel.
+//
+// WARDEN-386 (slice 3) adds a lifecycle leg: spawn (create) + kill (destroy) are
+// the agent create/destroy twins. Unlike discover/capture-pane these are USER-
+// initiated — every create/destroy is a deliberate action where a human is
+// actively waiting (New chat / Kill) — and today each pays its own per-op SSH
+// handshake. The companion collapses that to near-instant after bootstrap
+// (spawnSession + killSession ride the persistent channel, zero handshakes per
+// action). The roadmap's DONE criterion: under WARDEN_COMPANION_TRANSPORT=1, N
+// spawns + M kills against a remote host emit ZERO `ssh` processes. All four legs
+// are reported below.
 //
 // Two parts:
 //   Part 1 (always):  a deterministic spawn/handshake-count projection per tick —
 //                     the roadmap's success measure, with no host required.
-//                     Covers discover, capture-pane, AND has-session (slices 1-3).
+//                     Covers discover, capture-pane, has-session, AND lifecycle (slices 1-3).
 //   Part 2 (--host):  a LIVE replay against a real host. The default side runs
 //                     ops on the ControlMaster-disabled path (the Windows-
 //                     equivalent, one handshake per tick); the companion side
 //                     runs the real src/companion.js (bootstrap once, then RPC
 //                     over the one channel). Reports real spawn counts + the
-//                     before/after per-tick wall-clock cost, for all three ops.
+//                     before/after per-tick wall-clock cost, for all four ops.
 //
 // Usage:
 //   node scripts/companion-benchmark.mjs                       # Part 1 only
@@ -49,6 +59,8 @@ import {
   discover as companionDiscover,
   capturePanes as companionCapturePanes,
   hasSession as companionHasSession,
+  spawnSession as companionSpawnSession,
+  killSession as companionKillSession,
   _resetChannelCacheForTests,
   projectSpawnModel,
 } from '../src/companion.js';
@@ -187,6 +199,41 @@ function printProbeProjection(hosts, ticks) {
   console.log();
   console.log('This is the roadmap\'s "attach-path" success-metric leg: the liveness');
   console.log('probe no longer pays a per-attach SSH handshake.');
+  console.log();
+}
+
+// Slice 3 (WARDEN-386): the lifecycle leg. spawn + kill are USER-initiated (not
+// polled) — every create/destroy is a deliberate action where a human is actively
+// waiting (New chat / Kill). On the ControlMaster-disabled / Windows path each
+// pays a full ~30s handshake; the companion collapses that to near-instant after
+// bootstrap. The model: 1 handshake per spawn AND per kill on the default path;
+// 0 per action on the companion channel (bootstrap-only, reused from discover).
+function printLifecycleProjection(hosts, ticks) {
+  // ticks = create/destroy actions (a spawn or a kill each). Split for illustration.
+  const spawns = Math.ceil(ticks / 2);
+  const kills = Math.floor(ticks / 2);
+  const m = projectSpawnModel({ hosts, ticks });
+  console.log('━'.repeat(72));
+  console.log(`Part 1.d — lifecycle (spawn + kill): handshake projection  (${hosts} host(s), ${spawns} spawn(s) + ${kills} kill(s))`);
+  console.log('━'.repeat(72));
+  console.log('spawn + kill are the agent create/destroy twins. Each is a deliberate');
+  console.log('action where a human is actively WAITING (New chat / Kill). On the');
+  console.log('ControlMaster-disabled / Windows path each pays a full ~30s handshake:');
+  console.log();
+  console.log('  DEFAULT path (runWithPool, no companion):');
+  console.log(`    1 handshake / spawn AND / kill  →  ${hosts} × ${ticks} = ${m.before.totalSpawns} handshakes`);
+  console.log('  COMPANION path:');
+  console.log(`    reuses the bootstrapped channel — 0 handshakes per spawn/kill`);
+  console.log(`    (bootstrap cost was paid by discover; lifecycle rides the same channel)`);
+  console.log(`    total = ${m.after.totalSpawns} handshakes (all bootstrap, 0 lifecycle)`);
+  console.log();
+  const delta = m.before.totalSpawns - m.after.totalSpawns;
+  console.log(`  ▶ handshakes saved over ${spawns} spawn(s) + ${kills} kill(s): ${m.before.totalSpawns} → ${m.after.totalSpawns}  (−${delta})`);
+  console.log('  ▶ the win is per-ACTION wait, not polling cadence: every create/destroy');
+  console.log('    goes from ~30s (handshake) to near-instant after the first bootstrap.');
+  console.log();
+  console.log('DONE criterion: under WARDEN_COMPANION_TRANSPORT=1, N spawns + M kills');
+  console.log('against a remote host emit ZERO `ssh` processes (all ride the channel).');
   console.log();
 }
 
@@ -459,6 +506,86 @@ async function liveProbeBenchmark(host, ticks) {
   console.log();
 }
 
+// Slice 3 (WARDEN-386): the lifecycle live leg. Default side runs a fresh
+// ControlMaster-disabled ssh per spawn AND per kill (2 handshakes per
+// create+destroy cycle); companion side runs spawnSession + killSession over the
+// persistent channel (0 handshakes after bootstrap). Each cycle creates a unique
+// detached session then kills it — the real create/destroy path a human drives.
+async function liveLifecycleBenchmark(host, ticks) {
+  console.log('━'.repeat(72));
+  console.log(`Part 2.d — lifecycle (spawn + kill): LIVE ControlMaster-disabled replay  (host: ${host}, ${ticks} cycle(s))`);
+  console.log('━'.repeat(72));
+  console.log('Default side: one fresh ssh handshake per spawn AND per kill (ControlMaster off).');
+  console.log('Companion side: spawnSession + killSession over the channel — 0 handshakes/cycle.');
+  console.log();
+
+  const defaultSpawns = { val: 0 };
+  const companionSpawns = { val: 0 };
+  const countingSpawn = (...a) => { companionSpawns.val++; return spawn(...a); };
+  // The bootstrap PROBE runs through ssh.js `run()` (spawns its own ssh); wrap it
+  // so all three bootstrap legs are counted and the live replay agrees with the
+  // Part 1 projection (probe + upload + channel = 3). (WARDEN-272 review #2.)
+  const countingRun = (...a) => { companionSpawns.val++; return sshRun(...a); };
+  const companionDeps = { spawn: countingSpawn, run: countingRun };
+  const unique = (tag, i) => `warden-bench-life-${process.pid}-${tag}-${i}`;
+
+  // ---- DEFAULT: N cycles, each a spawn + kill via fresh ssh ----
+  console.log(`▶ default path: ${ticks} spawn+kill cycle(s), handshake each …`);
+  const defaultSamples = [];
+  for (let i = 0; i < ticks; i++) {
+    const s = unique('def', i);
+    const r = await timed(async () => {
+      const r1 = await sshRunNoMaster(host, `tmux new-session -d -s ${shellQuote(s)}`, 30000, defaultSpawns);
+      const r2 = await sshRunNoMaster(host, `tmux kill-session -t ${shellQuote(s)}`, 15000, defaultSpawns);
+      return { ok: r1.ok && r2.ok };
+    });
+    defaultSamples.push(r);
+    process.stdout.write(`   cycle ${i + 1}/${ticks}: spawn+kill ${r.ms.toFixed(0).padStart(6)} ms  ${r.ok ? 'ok' : 'cmd-failed (handshake still measured)'}\n`);
+  }
+
+  // ---- COMPANION: bootstrap once, then N cycles over the channel ----
+  console.log(`▶ companion path: bootstrap + ${ticks} spawn+kill cycle(s) over the channel …`);
+  _resetChannelCacheForTests();
+  const runCycle = async (s) => {
+    const sp = await companionSpawnSession(host, { container: '', session: s, cwd: '', cmd: [] }, { connectTimeout: 10 }, { timeout: 30000 }, companionDeps);
+    const kl = await companionKillSession(host, { container: '', session: s }, { connectTimeout: 10 }, { timeout: 15000 }, companionDeps);
+    return { ok: sp.ok && kl.ok, error: sp.error || kl.error };
+  };
+  // First cycle bootstraps (probe + upload + channel) AND does a spawn+kill.
+  const bootR = await timed(() => runCycle(unique('comp', 0)));
+  console.log(`   bootstrap + 1st spawn+kill: ${bootR.ms.toFixed(0).padStart(6)} ms  ${bootR.ok ? 'ok' : `error: ${(bootR.error || '').slice(0, 80)}`}`);
+  const companionSamples = [{ ms: bootR.ms, ok: bootR.ok }];
+  for (let i = 1; i < ticks; i++) {
+    const r = await timed(() => runCycle(unique('comp', i)));
+    companionSamples.push(r);
+    process.stdout.write(`   cycle ${i + 1}/${ticks}: spawn+kill ${r.ms.toFixed(0).padStart(6)} ms  ${r.ok ? 'ok' : `error: ${(r.error || '').slice(0, 80)}`}\n`);
+  }
+  _resetChannelCacheForTests();
+
+  // ---- report ----
+  const def = summarize(defaultSamples);
+  const steady = summarize(companionSamples.slice(1));
+
+  console.log();
+  console.log('── results ──────────────────────────────────────────────────────');
+  console.log(`  spawns (ssh processes started):`);
+  console.log(`     default   : ${defaultSpawns.val}  (≈ ${ticks * 2} handshakes — one per spawn AND per kill)`);
+  console.log(`     companion : ${companionSpawns.val}  (bootstrap only; spawn+kill ride the channel, 0/cycle)`);
+  console.log(`  per-cycle wall-clock (handshake + remote work):`);
+  console.log(`     default   : avg ${def.avg.toFixed(0)} ms  (p95 ${def.p95.toFixed(0)} ms) over ${def.n}`);
+  if (steady.n > 0) {
+    console.log(`     companion : avg ${steady.avg.toFixed(0)} ms  (p95 ${steady.p95.toFixed(0)} ms) over ${steady.n} steady cycle(s)`);
+    const saved = def.avg - steady.avg;
+    console.log(`  ▶ handshake cost eliminated per spawn+kill cycle: ~${Math.max(0, saved).toFixed(0)} ms`);
+  }
+  console.log('────────────────────────────────────────────────────────────────');
+  console.log('Note: spawn + kill are user-initiated (a human is waiting on each), so');
+  console.log('this per-action handshake win is felt directly as responsiveness.');
+  console.log('DONE criterion check: companion spawns should be bootstrap-only');
+  console.log(`(≈3), regardless of ${ticks} cycle(s) — i.e. ZERO ssh per spawn/kill.`);
+  console.log();
+}
+
 // Parse the default discover script's stdout into chat objects capturePanes can
 // consume (key/container/session). The discover TSV is name \t status \t cwd \t
 // active; only name (the container) is needed to target a capture. yatfa chats
@@ -487,13 +614,14 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) { console.log(HELP); return; }
 
-  console.log('warden companion-transport benchmark  (WARDEN-272 + WARDEN-276 + WARDEN-382 / roadmap WARDEN-270)\n');
+  console.log('warden companion-transport benchmark  (WARDEN-272 + WARDEN-276 + WARDEN-382 + WARDEN-386 / roadmap WARDEN-270)\n');
 
   // Part 1 always runs — deterministic, no host needed. The discover, capture-pane,
-  // and has-session handshake projections (the roadmap's success measure).
+  // has-session, and lifecycle handshake projections (the roadmap's success measure).
   printProjection(args.hosts, args.ticks);
   printCaptureProjection(args.hosts, args.ticks);
   printProbeProjection(args.hosts, args.ticks);
+  printLifecycleProjection(args.hosts, args.ticks);
 
   if (!args.host) {
     console.log('Part 2 (live replay) skipped — pass --host <ssh-host> to measure the real');
@@ -507,6 +635,7 @@ async function main() {
     await liveDiscoverBenchmark(args.host, args.ticks);
     await liveCaptureBenchmark(args.host, args.ticks);
     await liveProbeBenchmark(args.host, args.ticks);
+    await liveLifecycleBenchmark(args.host, args.ticks);
   } catch (e) {
     console.error(`\nbenchmark failed: ${e?.message ?? e}`);
     console.error('(is the host reachable over SSH with key auth? BatchMode=yes is used.)');
