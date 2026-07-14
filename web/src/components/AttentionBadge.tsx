@@ -276,10 +276,14 @@ function AgentRow({
         only). stopPropagation so tapping the bell never also opens the chat pane.
         aria-pressed reflects the toggle state for screen readers; the icon swaps
         Bell ↔ BellOff so the state is glanceable without color alone (WCAG 1.4.1).
+        Uses the library <Button> (variant=ghost size=icon-xs) — same component the
+        row itself uses right beside it (WARDEN-68 Rule 1: no raw <button>).
       */}
       {muteEnabled && onToggleMute && (
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="icon-xs"
           onClick={(e) => {
             e.stopPropagation();
             onToggleMute();
@@ -287,10 +291,10 @@ function AgentRow({
           aria-pressed={muted}
           aria-label={muted ? `Stop muting desktop alerts for ${label}` : `Mute desktop alerts for ${label}`}
           title={muted ? 'Unmute desktop alerts for this agent' : 'Mute desktop alerts for this agent'}
-          className="shrink-0 rounded p-1 self-center text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="shrink-0 self-center text-muted-foreground hover:text-foreground"
         >
           {muted ? <BellOff className="size-3.5" /> : <Bell className="size-3.5" />}
-        </button>
+        </Button>
       )}
     </div>
   );
