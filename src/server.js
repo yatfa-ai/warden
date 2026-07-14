@@ -428,6 +428,17 @@ app.get('/api/config', (_req, res) => res.json({
   observerConfirmMode: cfg.observerConfirmMode,
   observerAutoStart: cfg.observerAutoStart,
   observerSessionTimeout: cfg.observerSessionTimeout,
+  // Observer model/provider (WARDEN-350). Mask the auth token — NEVER return the
+  // cleartext secret to the renderer. authTokenSet + authTokenTail are the only
+  // token signals the UI gets; the password field is write-only (no cleartext is
+  // seeded into it on load).
+  llm: {
+    model: cfg.llm?.model ?? '',
+    baseUrl: cfg.llm?.baseUrl ?? '',
+    maxTokens: typeof cfg.llm?.maxTokens === 'number' ? cfg.llm.maxTokens : null,
+    authTokenSet: Boolean(cfg.llm?.authToken),
+    authTokenTail: cfg.llm?.authToken ? String(cfg.llm.authToken).slice(-4) : null,
+  },
   // Fleet health attention thresholds (minutes of inactivity)
   healthWarningThresholdMin: cfg.healthWarningThresholdMin,
   healthCriticalThresholdMin: cfg.healthCriticalThresholdMin,
@@ -452,7 +463,7 @@ app.put('/api/config', (req, res) => {
           confirmDestructiveActions,
           notifyChatOps, notifyErrors, notifySuccess, notifyObserver,
           showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges,
-          hideOfflineHosts } = req.body;
+          hideOfflineHosts, llm } = req.body;
   if (hosts && Array.isArray(hosts)) cfg.hosts = hosts;
   if (typeof pollIntervalMs === 'number') cfg.pollIntervalMs = pollIntervalMs;
   if (typeof tmuxSession === 'string') cfg.tmuxSession = tmuxSession;
@@ -464,6 +475,24 @@ app.put('/api/config', (req, res) => {
       (typeof observerSessionTimeout === 'number' &&
        Number.isFinite(observerSessionTimeout) &&
        observerSessionTimeout > 0)) cfg.observerSessionTimeout = observerSessionTimeout;
+  // Observer model/provider (WARDEN-350). model/baseUrl/maxTokens persist
+  // directly; the auth token is NO-CLOBBER: only overwrite the stored secret when
+  // the incoming value is a non-empty string. The UI never seeds the password
+  // field (GET masks the token), so an untouched field sends no authToken and
+  // the stored secret must survive such a save.
+  if (llm && typeof llm === 'object' && !Array.isArray(llm)) {
+    if (!cfg.llm || typeof cfg.llm !== 'object' || Array.isArray(cfg.llm)) cfg.llm = {};
+    if (typeof llm.model === 'string') cfg.llm.model = llm.model;
+    if (typeof llm.baseUrl === 'string') cfg.llm.baseUrl = llm.baseUrl;
+    // null clears to "use the llm.js default (2048)"; a finite positive int sets it.
+    if (llm.maxTokens === null ||
+        (typeof llm.maxTokens === 'number' && Number.isFinite(llm.maxTokens) && llm.maxTokens > 0)) {
+      cfg.llm.maxTokens = llm.maxTokens;
+    }
+    if (typeof llm.authToken === 'string' && llm.authToken.length > 0) {
+      cfg.llm.authToken = llm.authToken;
+    }
+  }
   // Fleet health attention thresholds — null-able OR a finite positive number of
   // minutes (mirrors the observerSessionTimeout guard). A field not destructured
   // here is silently stripped, so both must be present for the pref to persist.
