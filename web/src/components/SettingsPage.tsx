@@ -1151,11 +1151,31 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                         healthWarningThresholdMin: e.target.value ? parseInt(e.target.value) : null,
                       })
                     }
+                    onBlur={() => {
+                      // WARDEN-374: keep the pair well-ordered (warning <= critical).
+                      // On blur, clamp the warning down to the critical value when the
+                      // human has entered a warning that exceeds it. Mirrors the backend
+                      // PUT /api/config guard so the committed value matches what
+                      // persists; the classifier clamps regardless (defense-in-depth),
+                      // this just makes the relationship visible while editing.
+                      const w = config.healthWarningThresholdMin;
+                      const c = config.healthCriticalThresholdMin;
+                      if (w != null && c != null && w > c) {
+                        setConfig({ ...config, healthWarningThresholdMin: c });
+                      }
+                    }}
                     placeholder="Default 5"
                   />
                   <p className="text-xs text-muted-foreground">
                     Minutes of agent inactivity before it needs attention (warning state). Leave empty for the default (5).
                   </p>
+                  {config.healthWarningThresholdMin != null &&
+                    config.healthCriticalThresholdMin != null &&
+                    config.healthWarningThresholdMin > config.healthCriticalThresholdMin && (
+                      <p className="text-xs text-destructive">
+                        Warning must come before Critical — capped to {config.healthCriticalThresholdMin} min on blur.
+                      </p>
+                    )}
                 </div>
 
                 <div className="flex flex-col gap-2">

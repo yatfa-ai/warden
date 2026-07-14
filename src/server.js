@@ -520,6 +520,22 @@ app.put('/api/config', (req, res) => {
       (typeof healthCriticalThresholdMin === 'number' &&
        Number.isFinite(healthCriticalThresholdMin) &&
        healthCriticalThresholdMin > 0)) cfg.healthCriticalThresholdMin = healthCriticalThresholdMin;
+  // Cross-field ordering guard (WARDEN-374): once both thresholds are accepted,
+  // keep the pair well-ordered (warning <= critical) so a persisted inverted
+  // config (warning > critical) can't later make a silently-failing agent read
+  // HEALTHY. Clamp the warning to at most the critical, resolving null to its
+  // DEFAULT first (null means "use the default" — same resolution getHealthState
+  // applies). When the clamp fires we persist the numeric critical value so the
+  // saved pair is well-ordered and the UI round-trip stays consistent. The
+  // classifier's effectiveHealthyMs clamp is the real safety net; this guard
+  // keeps the persisted config clean.
+  const DEFAULT_WARNING_MIN = 5;   // mirrors config.js DEFAULTS.healthWarningThresholdMin
+  const DEFAULT_CRITICAL_MIN = 30; // mirrors config.js DEFAULTS.healthCriticalThresholdMin
+  const warningMin = cfg.healthWarningThresholdMin ?? DEFAULT_WARNING_MIN;
+  const criticalMin = cfg.healthCriticalThresholdMin ?? DEFAULT_CRITICAL_MIN;
+  if (warningMin > criticalMin) {
+    cfg.healthWarningThresholdMin = criticalMin;
+  }
   // Safety preference: confirm before destructive actions (force-kill, kill chat)
   if (typeof confirmDestructiveActions === 'boolean') cfg.confirmDestructiveActions = confirmDestructiveActions;
   // Notification preferences (toast categories). Only accept booleans so a

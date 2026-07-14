@@ -43,6 +43,14 @@ export function getHealthState(agent, lastActivity, thresholds = {}) {
   // Configurable boundaries (minutes → ms). Defaults preserve today's behavior.
   const healthyMs = (thresholds.healthyMin ?? HEALTHY_DEFAULT_MIN) * 60 * 1000;
   const warningMs = (thresholds.warningMin ?? WARNING_DEFAULT_MIN) * 60 * 1000;
+  // Defense-in-depth against an INVERTED pair (warning > critical, e.g. 60/30):
+  // the healthy band can never exceed the critical band, or the healthy→WARNING
+  // boundary swallows the entire WARNING/CRITICAL range and a silently-failing
+  // agent reads HEALTHY (a lying state). Clamp the healthy boundary to at most
+  // the critical boundary so the 3-band ladder stays well-ordered regardless of
+  // how the inversion entered (UI, PUT /api/config, or hand-edited config.json).
+  // Errs toward alerting (conservative). (WARDEN-374)
+  const effectiveHealthyMs = Math.min(healthyMs, warningMs);
 
   // Undiscovered (lazy) chats: active is null/undefined — not dead, just unknown.
   if (agent.active == null) {
@@ -73,8 +81,11 @@ export function getHealthState(agent, lastActivity, thresholds = {}) {
 
   const timeSinceActivity = Date.now() - lastActivity;
 
-  // Classify based on time since last activity (uses configured thresholds)
-  if (timeSinceActivity <= healthyMs) {
+  // Classify based on time since last activity. The healthy boundary is the
+  // clamped effectiveHealthyMs (so an inverted pair can't lie); the WARNING→
+  // CRITICAL boundary stays on warningMs. With the pair well-ordered the clamp
+  // is a no-op and behavior is unchanged. (WARDEN-374)
+  if (timeSinceActivity <= effectiveHealthyMs) {
     return HealthState.HEALTHY;
   } else if (timeSinceActivity <= warningMs) {
     return HealthState.WARNING;
