@@ -372,7 +372,7 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
             </span>
           }>
             <span className="ml-auto shrink-0 text-[11px] text-amber-500/90 tabular-nums font-medium">
-              ☁ {formatTokens(fleetTotals.total)} tok · {fleetTotals.hostCount} host{fleetTotals.hostCount === 1 ? '' : 's'}
+              ☁ {formatTokens(fleetTotals.total)} · {fleetTotals.hostCount} host{fleetTotals.hostCount === 1 ? '' : 's'}
             </span>
           </IconTooltip>
         )}

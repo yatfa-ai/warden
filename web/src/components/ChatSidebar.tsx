@@ -817,7 +817,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
               <div className="text-[10px] uppercase tracking-wider text-cyan-500/80 font-semibold">☁ sessions (history — click to resume)</div>
               {hostTokenTotal > 0 && (
                 <span className="text-[10px] text-muted-foreground/70 truncate" title="Total tokens across this host's loaded session history (model-agnostic).">
-                  {formatTokens(hostTokenTotal)} tok
+                  {formatTokens(hostTokenTotal)}
                 </span>
               )}
             </div>
