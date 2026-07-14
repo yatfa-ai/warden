@@ -1287,7 +1287,13 @@ app.get('/api/claude-session', async (req, res) => {
 // console window when warden runs as a packaged/detached app. Used by /api/git-status
 // and /api/git-log. Remote chats go through run() (ssh.js), which already hides.
 function runLocalGit(args, cwd) {
-  return spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true });
+  // 10MB maxBuffer (matching the docker-exec branches of runGit, and run() which is
+  // unbounded) so a LARGE diff/log output completes with status 0 and reaches the
+  // route's deliberate capDiff() guard intact. The pre-WARDEN-398 default (spawnSync's
+  // 1MB) killed git mid-output on any >1MB diff — so /api/git-range-diff (and any
+  // large /api/git-diff/git-show) saw a non-zero exit and reported a misleading error
+  // instead of the capped diff. capDiff remains the single 1MB truncation point.
+  return spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true, maxBuffer: 10 * 1024 * 1024 });
 }
 
 // Resolve the working directory for a chat's git operations (WARDEN-235).
@@ -1837,6 +1843,71 @@ app.get('/api/git-diff', async (req, res) => {
     res.json({ diff: result.diff, untracked: !!result.untracked, path: filePath, error: null });
   } catch (e) {
     res.json({ diff: null, untracked: false, path: filePath, error: e.message });
+  }
+});
+
+// ---- Aggregated range diff (WARDEN-398) ------------------------------------
+// The net unified diff of an agent's whole unpushed (↑N) or incoming (↓N) set, as
+// ONE view — the literal completion of the per-commit exploration arc (WARDEN-252
+// ahead list / WARDEN-303 explorable / WARDEN-348 incoming / WARDEN-180 inline diff
+// / WARDEN-225 behind list). Today the GitBranchBadge popover shows the commit
+// LISTS and supports drilling into ONE commit at a time, but the question a human
+// actually asks — "what is this agent about to push?" / "what will land if I bring
+// it up to upstream?" — is answerable only by expanding N commits and mentally
+// aggregating. This diffs the two tips directly so the total change is visible at
+// once. Strictly read-only — no fetch/pull/merge/checkout (the WARDEN-199 line).
+//
+//   GET /api/git-range-diff?id=<chatId>&range=outgoing|incoming
+//     → { diff: string|null, error: string|null }
+//
+// Range semantics reuse /api/git-log's exact `range` param:
+//   outgoing → @{u}..HEAD   (the net change that lands on push)
+//   incoming → HEAD..@{u}   (the net change that lands on a pull)
+// We use TWO-DOT (`@{u}..HEAD` ≡ `git diff @{u} HEAD`): the diff BETWEEN the two
+// tips = the honest "what changes when these two states meet." Three-dot would
+// diff from the merge-base (only HEAD's side since divergence); for a fast-forward
+// agent ahead of a still upstream the two are identical, and they diverge only if
+// upstream also moved — two-dot is the more honest "net" answer.
+//
+// Because there is NO user-supplied file pathspec, the realpath containment
+// ceremony of /api/git-diff (buildGitDiffScript / isPathWithinCwd) does NOT apply
+// — this route stays simple like /api/git-log. Output is capped at 1MB via capDiff.
+// When the branch has no upstream (or HEAD is detached), `git diff @{u}..HEAD`
+// exits non-zero → { diff: null, error: 'no upstream configured' } — never a 500,
+// mirroring how every other git route tolerates a non-git/no-upstream repo.
+app.get('/api/git-range-diff', async (req, res) => {
+  const chatId = String(req.query.id || '');
+  const range = String(req.query.range || '');
+  // Same rev map as /api/git-log (outgoing → @{u}..HEAD, incoming → HEAD..@{u}),
+  // reused verbatim so the diff honors the identical range definition the commit
+  // LIST already uses — the net diff over exactly those commits.
+  const rangeRev = range === 'outgoing' ? '@{u}..HEAD' : range === 'incoming' ? 'HEAD..@{u}' : null;
+  const { chat, error } = await resolve(chatId);
+  if (error) return res.status(404).json({ diff: null, error });
+
+  // Reject any range value other than outgoing/incoming cleanly — never a 500
+  // (mirrors /api/git-show's rejection of a malformed hash: 200 + error string).
+  if (!rangeRev) {
+    return res.json({ diff: null, error: 'invalid range' });
+  }
+
+  try {
+    const cwd = gitCwd(chat);
+    if (!cwd) return res.json({ diff: null, error: 'no cwd' });
+
+    // runGit passes the range rev as a single argv element (no shell on the LOCAL
+    // branch) so @{u}..HEAD stays brace-expansion-safe; the remote branch
+    // shellQuotes it (WARDEN-122). yatfa chats run this inside the container
+    // (WARDEN-235). `git diff @{u}..HEAD` exits non-zero when no upstream is
+    // configured (or HEAD is detached, or the cwd isn't a repo) → surfaced as a
+    // clean user-facing error rather than a 500.
+    const r = await runGit(chat, ['diff', rangeRev], cwd);
+    if (!r.ok) {
+      return res.json({ diff: null, error: 'no upstream configured' });
+    }
+    res.json({ diff: capDiff(r.stdout || ''), error: null });
+  } catch (e) {
+    res.json({ diff: null, error: e.message });
   }
 });
 
