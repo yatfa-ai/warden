@@ -57,6 +57,11 @@ before(() => {
   // realpath (it no longer exists), so this guards the missing-path tolerance: the
   // deletion diff must still come back (not a 403, not "untracked").
   fs.writeFileSync(path.join(repo, 'toDelete.txt'), 'gone\n');
+  // partial.txt — committed as v0. AFTER the init commit it is staged to v1 AND
+  // further worktree-modified to v2 (XY = "MM"): the partially-staged case that
+  // proves staged-diff isolation. `git diff HEAD` shows v0→v2 (staged + unstaged
+  // combined); `git diff --cached` shows v0→v1 (the staged portion only) (WARDEN-369).
+  fs.writeFileSync(path.join(repo, 'partial.txt'), 'v0\n');
   assert.equal(git(['add', '-A'], repo).status, 0);
   assert.equal(git(['commit', '-q', '-m', 'init'], repo).status, 0);
 
@@ -66,6 +71,12 @@ before(() => {
   fs.unlinkSync(path.join(repo, 'toDelete.txt'));
   // untracked.txt — never added; `git diff HEAD` shows nothing for it.
   fs.writeFileSync(path.join(repo, 'untracked.txt'), 'new\n');
+  // partial.txt: stage v1 (index), then worktree-modify to v2 → partially staged.
+  // `git diff --cached` (staged) must show v0→v1 and NOT v2; `git diff HEAD`
+  // (combined) must show v0→v2. This is the exact WARDEN-369 distinction.
+  fs.writeFileSync(path.join(repo, 'partial.txt'), 'v1\n');
+  assert.equal(git(['add', 'partial.txt'], repo).status, 0);
+  fs.writeFileSync(path.join(repo, 'partial.txt'), 'v2\n');
 });
 
 after(() => {
@@ -126,6 +137,42 @@ describe('getLocalGitDiff', () => {
     const r = getLocalGitDiff(repo, 'sub/../../escape.txt');
     assert.equal(r.status, 403);
   });
+
+  // ---- WARDEN-369: staged=true isolates the index-vs-HEAD diff ----------------
+  it('staged=true isolates the STAGED portion of a partially-staged file', () => {
+    // partial.txt: committed v0, staged v1, worktree v2. `git diff --cached` shows
+    // the staged hunk (v0→v1) and NOT the further worktree change (v2).
+    const r = getLocalGitDiff(repo, 'partial.txt', true);
+    assert.equal(r.error, undefined, `staged diff must not error: ${JSON.stringify(r)}`);
+    assert.equal(r.untracked, false);
+    assert.ok(r.diff.length > 0, 'staged diff should be non-empty');
+    assert.match(r.diff, /\+v1/, 'staged diff shows the staged version (v1)');
+    assert.doesNotMatch(r.diff, /v2/, 'staged diff must NOT include the worktree-only change (v2)');
+  });
+
+  it('staged=false (default) returns the COMBINED worktree-vs-HEAD diff', () => {
+    // Same file: `git diff HEAD` spans HEAD (v0) all the way to the worktree (v2),
+    // so it includes the worktree-only change the staged diff omits.
+    const combined = getLocalGitDiff(repo, 'partial.txt');
+    assert.equal(combined.error, undefined);
+    assert.ok(combined.diff.length > 0);
+    assert.match(combined.diff, /\+v2/, 'combined diff ends at the worktree version (v2)');
+  });
+
+  it('omitting staged defaults to the combined HEAD diff (backward compat)', () => {
+    const def = getLocalGitDiff(repo, 'partial.txt');
+    const explicit = getLocalGitDiff(repo, 'partial.txt', false);
+    assert.equal(def.diff, explicit.diff);
+  });
+
+  it('staged=true returns an empty diff (not untracked) for a purely-unstaged file', () => {
+    // tracked.txt is worktree-modified but NOT staged → `git diff --cached` is empty,
+    // and the file is tracked, so untracked stays false (nothing staged to show).
+    const r = getLocalGitDiff(repo, 'tracked.txt', true);
+    assert.equal(r.error, undefined);
+    assert.equal(r.untracked, false);
+    assert.equal(r.diff, '');
+  });
 });
 
 // --- Size cap (capDiff) ------------------------------------------------------
@@ -185,8 +232,8 @@ describe('isPathWithinCwd', () => {
 // --- Remote diff script (buildGitDiffScript) ---------------------------------
 // Run the generated script under a real bash in the fixture repo, the same way
 // run(host, script) executes it over SSH.
-function runScript(cwd, filePath) {
-  const script = buildGitDiffScript(cwd, filePath);
+function runScript(cwd, filePath, staged) {
+  const script = buildGitDiffScript(cwd, filePath, staged);
   const r = spawnSync('bash', ['-lc', script], { cwd, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
   return { ok: r.status === 0, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
@@ -232,6 +279,35 @@ describe('buildGitDiffScript (remote SSH script)', () => {
     // The remote script runs `git diff HEAD` only; untracked disambiguation is a
     // second round-trip the route makes. So a clean file → empty stdout, exit 0.
     const r = runScript(repo, 'clean.txt');
+    assert.equal(r.ok, true);
+    assert.equal(r.stdout, '');
+  });
+
+  // ---- WARDEN-369: staged=true swaps `git diff HEAD` → `git diff --cached` -----
+  it('staged=true swaps `git diff HEAD` for `git diff --cached`', () => {
+    const script = buildGitDiffScript('/a/b', 'c.txt', true);
+    assert.match(script, /git diff --cached -- "\$FILE"/);
+    assert.doesNotMatch(script, /git diff HEAD/);
+  });
+
+  it('staged omitted/false keeps `git diff HEAD` (backward compat)', () => {
+    assert.match(buildGitDiffScript('/a/b', 'c.txt'), /git diff HEAD -- "\$FILE"/);
+    assert.match(buildGitDiffScript('/a/b', 'c.txt', false), /git diff HEAD -- "\$FILE"/);
+  });
+
+  it('staged=true isolates the staged portion over the remote script path too', () => {
+    // Same partially-staged file: the delivered (remote) staged script must show v1
+    // (staged) and NOT v2 (worktree-only), mirroring the local-path isolation.
+    const r = runScript(repo, 'partial.txt', true);
+    assert.equal(r.ok, true, `expected ok, stderr=${r.stderr}`);
+    assert.match(r.stdout, /\+v1/);
+    assert.doesNotMatch(r.stdout, /v2/);
+  });
+
+  it('staged=true on the remote script yields empty stdout for a purely-unstaged file', () => {
+    // tracked.txt is unstaged-only → `git diff --cached` is empty over the remote
+    // path too (untracked disambiguation is the route's second round-trip).
+    const r = runScript(repo, 'tracked.txt', true);
     assert.equal(r.ok, true);
     assert.equal(r.stdout, '');
   });

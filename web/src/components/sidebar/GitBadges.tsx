@@ -19,6 +19,71 @@ import { formatWhatsNewLine, type WhatsNewSummary } from '@/lib/whatsNew';
 import type { Chat } from '@/lib/types';
 import type { GitCommit, GitFile, GitStash } from './types';
 
+/**
+ * Color the porcelain X/Y columns for one changed file (WARDEN-369). Working-tree
+ * files (from /api/git-status) carry `staged` (X) and `worktree` (Y); we color by
+ * SLOT so a staged-for-commit file reads differently from an unstaged WIP file:
+ *
+ *   staged slot (X, non-blank)    → green-400   (the "about to commit" signal)
+ *   worktree slot (Y, non-blank)  → yellow-400  (the existing WIP color)
+ *   untracked (`?`)               → gray-400    `??`
+ *   conflict                      → red-400     `!<code>`
+ *
+ * A partially-staged file ("MM" / "AM") emits BOTH a green and a yellow letter, so
+ * it no longer falls through to the old strict-`===` gray default — it communicates
+ * both halves at once. The letter itself (M/A/D/R/C) is shown verbatim in its slot's
+ * color; the staged-vs-unstaged axis is the primary signal (the whole point), so D
+ * is no longer forced red — a staged delete reads green, an unstaged delete yellow.
+ *
+ * Committed files (from /api/git-show) have NO X/Y columns, so this falls back to
+ * the legacy single-letter color map (M=yellow, A=green, D=red) — a committed
+ * modified file still reads yellow, exactly as before this change. The slot fields
+ * are additive/optional, so this branch keeps every existing CommitFile row stable.
+ *
+ * Returns one or more `{ text, cls }` segments rendered as adjacent colored spans.
+ */
+function fileStatusSegments(file: GitFile): { text: string; cls: string }[] {
+  if (file.conflict) {
+    return [{ text: `!${file.status}`, cls: 'text-red-400' }];
+  }
+  const x = file.staged;
+  const y = file.worktree;
+  // Working-tree files (X/Y present). Committed files omit both → legacy fallback.
+  if (x !== undefined || y !== undefined) {
+    if (x === '?' || y === '?') {
+      return [{ text: '??', cls: 'text-gray-400' }];
+    }
+    const segs: { text: string; cls: string }[] = [];
+    if (x && x !== ' ') segs.push({ text: x, cls: 'text-green-400' });   // staged slot
+    if (y && y !== ' ') segs.push({ text: y, cls: 'text-yellow-400' });  // worktree slot
+    if (segs.length > 0) return segs;
+  }
+  // Legacy fallback: a committed file (no X/Y) or a degenerate status. M/A/D map
+  // is preserved verbatim so CommitFile rows are unaffected.
+  const cls =
+    file.status === 'M' ? 'text-yellow-400' :
+    file.status === 'A' ? 'text-green-400' :
+    file.status === 'D' ? 'text-red-400' :
+    'text-gray-400';
+  return [{ text: file.status, cls }];
+}
+
+/** A human-readable label for a file's staged/unstaged state (for the tooltip). */
+function fileSlotLabel(file: GitFile): string {
+  if (file.conflict) return `conflict ${file.status}`;
+  const x = file.staged;
+  const y = file.worktree;
+  if (x !== undefined || y !== undefined) {
+    if (x === '?' || y === '?') return 'untracked';
+    const staged = !!x && x !== ' ';
+    const unstaged = !!y && y !== ' ';
+    if (staged && unstaged) return 'staged + unstaged';
+    if (staged) return 'staged';
+    if (unstaged) return 'unstaged';
+  }
+  return file.status;
+}
+
 /** A single changed-file row: status indicator (M/A/D/??) + truncated path.
  *  Interactive (a real <button>) only when `onOpen` is supplied — it opens the
  *  per-file DiffViewer and the click stops propagation so it never also opens the
@@ -28,20 +93,23 @@ import type { GitCommit, GitFile, GitStash } from './types';
  *  interactive elements or swallowing the parent's click — and avoids a <button>
  *  with no handler, which is poor a11y. A conflicted file (`conflict: true`,
  *  e.g. UU/AA) renders a distinct red `!`-prefixed token instead of the generic
- *  gray row, so it reads as a conflict rather than noise (WARDEN-186). */
-export function GitChangedFile({ file, onOpen }: { file: GitFile; onOpen?: (path: string) => void }) {
-  const color =
-    file.conflict ? 'text-red-400' :
-    file.status === 'M' ? 'text-yellow-400' :
-    file.status === 'A' ? 'text-green-400' :
-    file.status === 'D' ? 'text-red-400' :
-    'text-gray-400';
-  // Prefix conflicted codes with `!` so a UU/AA row is unmistakable next to an
-  // ordinary ` M`/`A ` row — the bare code alone could read as a status letter.
-  const token = file.conflict ? `!${file.status}` : file.status;
+ *  gray row, so it reads as a conflict rather than noise (WARDEN-186). A
+ *  working-tree file colors its staged vs unstaged slots distinctly (WARDEN-369);
+ *  clicking a STAGED file opens the staged-only diff (what will be committed). */
+export function GitChangedFile({ file, onOpen }: { file: GitFile; onOpen?: (path: string, staged?: boolean) => void }) {
+  const segments = fileStatusSegments(file);
+  // Whether clicking this row should open the STAGED-only diff. Only working-tree
+  // files with a non-blank staged slot (X) qualify; committed files have no slot.
+  const x = file.staged;
+  const isUntracked = x === '?' || file.worktree === '?';
+  const isStaged = x !== undefined && !isUntracked && x !== ' ';
   const content = (
     <>
-      <span className={color}>{token}</span>
+      <span className="inline-flex items-center">
+        {segments.map((s, i) => (
+          <span key={i} className={s.cls}>{s.text}</span>
+        ))}
+      </span>
       <span className="truncate">{file.path}</span>
     </>
   );
@@ -49,13 +117,13 @@ export function GitChangedFile({ file, onOpen }: { file: GitFile; onOpen?: (path
     return (
       <button
         type="button"
-        onClick={(e) => { e.stopPropagation(); onOpen(file.path); }}
+        onClick={(e) => { e.stopPropagation(); onOpen(file.path, isStaged); }}
         // Stop the keydown from reaching the parent row's onKeyDown (Enter/Space → open
         // chat): without this, keyboard-activating the file button would open the chat
         // pane instead of the diff, because the row handler calls preventDefault() before
         // the button's activation click can fire.
         onKeyDown={(e) => e.stopPropagation()}
-        title={file.conflict ? `conflict ${file.status} · ${file.path}` : `view diff: ${file.path}`}
+        title={`${fileSlotLabel(file)} · ${isStaged ? 'view staged diff' : 'view diff'}: ${file.path}`}
         className="flex items-center gap-1 w-full text-left rounded-sm text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
       >
         {content}
@@ -850,7 +918,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
 function WhatsNewPopoverContent({ summary, files, onOpenDiff }: {
   summary: WhatsNewSummary;
   files?: GitFile[];
-  onOpenDiff?: (path: string) => void;
+  onOpenDiff?: (path: string, staged?: boolean) => void;
 }) {
   const line = formatWhatsNewLine(summary);
   const hasFiles = (files?.length ?? 0) > 0;
@@ -923,7 +991,7 @@ export function WhatsNewMarker({ summary, since, files, onOpenDiff }: {
   // and to anchor the tooltip's "since your last visit" framing.
   since: number | null;
   files?: GitFile[];
-  onOpenDiff?: (path: string) => void;
+  onOpenDiff?: (path: string, staged?: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
   const count = summary.newCommits.length;

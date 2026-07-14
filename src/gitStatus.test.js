@@ -9,9 +9,9 @@ describe('parseGitStatusPorcelain', () => {
     // the first line loses its leading space and the path is truncated.
     const out = ' M README.md\n M src/server.js\n?? test-qa-file.txt\n';
     assert.deepEqual(parseGitStatusPorcelain(out), [
-      { path: 'README.md', status: 'M', conflict: false },
-      { path: 'src/server.js', status: 'M', conflict: false },
-      { path: 'test-qa-file.txt', status: '??', conflict: false },
+      { path: 'README.md', status: 'M', staged: ' ', worktree: 'M', conflict: false },
+      { path: 'src/server.js', status: 'M', staged: ' ', worktree: 'M', conflict: false },
+      { path: 'test-qa-file.txt', status: '??', staged: '?', worktree: '?', conflict: false },
     ]);
   });
 
@@ -24,41 +24,41 @@ describe('parseGitStatusPorcelain', () => {
 
   it('parses staged-only changes (X set, Y blank)', () => {
     assert.deepEqual(parseGitStatusPorcelain('M  staged.js\nA  added.js\n'), [
-      { path: 'staged.js', status: 'M', conflict: false },
-      { path: 'added.js', status: 'A', conflict: false },
+      { path: 'staged.js', status: 'M', staged: 'M', worktree: ' ', conflict: false },
+      { path: 'added.js', status: 'A', staged: 'A', worktree: ' ', conflict: false },
     ]);
   });
 
   it('parses deletion status', () => {
     assert.deepEqual(parseGitStatusPorcelain(' D gone.js\n'), [
-      { path: 'gone.js', status: 'D', conflict: false },
+      { path: 'gone.js', status: 'D', staged: ' ', worktree: 'D', conflict: false },
     ]);
   });
 
   it('parses untracked files', () => {
     assert.deepEqual(parseGitStatusPorcelain('?? new.txt\n'), [
-      { path: 'new.txt', status: '??', conflict: false },
+      { path: 'new.txt', status: '??', staged: '?', worktree: '?', conflict: false },
     ]);
   });
 
   it('parses mixed staged+worktree status (two-char code)', () => {
     // X='A' (staged add), Y='M' (further worktree mod) → "AM"
     assert.deepEqual(parseGitStatusPorcelain('AM wip.js\n'), [
-      { path: 'wip.js', status: 'AM', conflict: false },
+      { path: 'wip.js', status: 'AM', staged: 'A', worktree: 'M', conflict: false },
     ]);
   });
 
   it('preserves spaces inside file paths', () => {
     assert.deepEqual(parseGitStatusPorcelain(' M my cool file.txt\n'), [
-      { path: 'my cool file.txt', status: 'M', conflict: false },
+      { path: 'my cool file.txt', status: 'M', staged: ' ', worktree: 'M', conflict: false },
     ]);
   });
 
   it('tolerates CRLF line endings (e.g. over SSH)', () => {
     assert.deepEqual(parseGitStatusPorcelain(' M a.txt\r\n M b.txt\r\n?? c.txt\r\n'), [
-      { path: 'a.txt', status: 'M', conflict: false },
-      { path: 'b.txt', status: 'M', conflict: false },
-      { path: 'c.txt', status: '??', conflict: false },
+      { path: 'a.txt', status: 'M', staged: ' ', worktree: 'M', conflict: false },
+      { path: 'b.txt', status: 'M', staged: ' ', worktree: 'M', conflict: false },
+      { path: 'c.txt', status: '??', staged: '?', worktree: '?', conflict: false },
     ]);
   });
 
@@ -77,7 +77,7 @@ describe('parseGitStatusPorcelain', () => {
 
   it('accepts a Buffer input', () => {
     assert.deepEqual(parseGitStatusPorcelain(Buffer.from(' M buf.js\n')), [
-      { path: 'buf.js', status: 'M', conflict: false },
+      { path: 'buf.js', status: 'M', staged: ' ', worktree: 'M', conflict: false },
     ]);
   });
 
@@ -93,19 +93,19 @@ describe('parseGitStatusPorcelain', () => {
     // "UU" = both sides modified (a merge/rebase conflict). Must NOT fall through
     // to the generic-gray row — it is an unmerged path.
     assert.deepEqual(parseGitStatusPorcelain('UU both.js\n'), [
-      { path: 'both.js', status: 'UU', conflict: true },
+      { path: 'both.js', status: 'UU', staged: 'U', worktree: 'U', conflict: true },
     ]);
   });
 
   it('tags a both-added AA conflict with conflict: true', () => {
     assert.deepEqual(parseGitStatusPorcelain('AA added-twice.js\n'), [
-      { path: 'added-twice.js', status: 'AA', conflict: true },
+      { path: 'added-twice.js', status: 'AA', staged: 'A', worktree: 'A', conflict: true },
     ]);
   });
 
   it('tags a both-deleted DD conflict with conflict: true', () => {
     assert.deepEqual(parseGitStatusPorcelain('DD gone-both.js\n'), [
-      { path: 'gone-both.js', status: 'DD', conflict: true },
+      { path: 'gone-both.js', status: 'DD', staged: 'D', worktree: 'D', conflict: true },
     ]);
   });
 
@@ -114,10 +114,70 @@ describe('parseGitStatusPorcelain', () => {
     // file. Only the UU row is conflict:true.
     const out = ' M README.md\nUU conflicted.js\n?? new.txt\n';
     assert.deepEqual(parseGitStatusPorcelain(out), [
-      { path: 'README.md', status: 'M', conflict: false },
-      { path: 'conflicted.js', status: 'UU', conflict: true },
-      { path: 'new.txt', status: '??', conflict: false },
+      { path: 'README.md', status: 'M', staged: ' ', worktree: 'M', conflict: false },
+      { path: 'conflicted.js', status: 'UU', staged: 'U', worktree: 'U', conflict: true },
+      { path: 'new.txt', status: '??', staged: '?', worktree: '?', conflict: false },
     ]);
+  });
+
+  // ---- WARDEN-369: the staged/worktree X/Y columns are what distinguish a
+  // staged-for-commit file from an unstaged WIP file. The collapsed `status`
+  // alone cannot (both staged "M " and unstaged " M" read status:"M").
+  describe('staged/worktree X/Y columns', () => {
+    it('staged-only modification: X="M", Y=" "', () => {
+      const [f] = parseGitStatusPorcelain('M  staged-only.js\n');
+      assert.equal(f.staged, 'M');
+      assert.equal(f.worktree, ' ');
+      assert.equal(f.status, 'M');
+    });
+
+    it('unstaged-only modification: X=" ", Y="M"', () => {
+      const [f] = parseGitStatusPorcelain(' M unstaged-only.js\n');
+      assert.equal(f.staged, ' ');
+      assert.equal(f.worktree, 'M');
+      assert.equal(f.status, 'M');
+    });
+
+    it('staged-only add: X="A", Y=" "', () => {
+      const [f] = parseGitStatusPorcelain('A  staged-add.js\n');
+      assert.equal(f.staged, 'A');
+      assert.equal(f.worktree, ' ');
+    });
+
+    it('unstaged-only delete: X=" ", Y="D"', () => {
+      const [f] = parseGitStatusPorcelain(' D unstaged-delete.js\n');
+      assert.equal(f.staged, ' ');
+      assert.equal(f.worktree, 'D');
+    });
+
+    it('partially-staged "MM": staged="M" AND worktree="M" (both slots set)', () => {
+      const [f] = parseGitStatusPorcelain('MM partial.js\n');
+      assert.equal(f.staged, 'M');
+      assert.equal(f.worktree, 'M');
+      assert.equal(f.status, 'MM');
+    });
+
+    it('partially-staged "AM": staged add + further worktree mod', () => {
+      const [f] = parseGitStatusPorcelain('AM staged-add-wip.js\n');
+      assert.equal(f.staged, 'A');
+      assert.equal(f.worktree, 'M');
+    });
+
+    it('untracked "??": both columns carry "?"', () => {
+      const [f] = parseGitStatusPorcelain('?? untracked.js\n');
+      assert.equal(f.staged, '?');
+      assert.equal(f.worktree, '?');
+    });
+
+    it('a staged file and an unstaged file with the SAME status code differ in X/Y', () => {
+      // The core WARDEN-369 invariant: two files that both collapse to status "M"
+      // are distinguishable only via staged/worktree.
+      const files = parseGitStatusPorcelain('M  staged.js\n M unstaged.js\n');
+      assert.equal(files[0].status, 'M');
+      assert.equal(files[1].status, 'M');
+      assert.notEqual(files[0].staged, files[1].staged); // 'M' vs ' '
+      assert.notEqual(files[0].worktree, files[1].worktree); // ' ' vs 'M'
+    });
   });
 });
 
