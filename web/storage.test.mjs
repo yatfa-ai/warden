@@ -1803,6 +1803,9 @@ const overTunedLive = () => {
     sidebarCollapsed: true,
     observerCollapsed: true,
     healthCollapsed: false,
+    // WARDEN-431: a sidebar-internal section collapse — preserved (not reset)
+    // like the panel collapses above.
+    sourceControlCollapsed: true,
     sidebarWidth: 300,
     observerWidth: 500,
   };
@@ -1892,6 +1895,7 @@ test('the workspace + panel-layout fields are copied from live (the workspace su
   assert.equal(r.sidebarCollapsed, true);
   assert.equal(r.observerCollapsed, true);
   assert.equal(r.healthCollapsed, false);
+  assert.equal(r.sourceControlCollapsed, true, 'WARDEN-431 section collapse preserved');
   assert.equal(r.sidebarWidth, 300);
   assert.equal(r.observerWidth, 500);
 });
@@ -1940,6 +1944,7 @@ test('round-trip: saveUi(resetUiPrefsPreservingWorkspace(live)) then loadUi() yi
   assert.equal(after.sidebarCollapsed, true);
   assert.equal(after.observerCollapsed, true);
   assert.equal(after.healthCollapsed, false);
+  assert.equal(after.sourceControlCollapsed, true, 'WARDEN-431 section collapse survives reload');
   assert.equal(after.sidebarWidth, 300);
   assert.equal(after.observerWidth, 500);
 });

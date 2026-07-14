@@ -383,6 +383,12 @@ export interface UiState {
   sidebarCollapsed: boolean;
   observerCollapsed: boolean;
   healthCollapsed?: boolean;
+  // WARDEN-431: the Source Control section (the single place a focused pane's
+  // repo changes now show) collapsed state. A sidebar-internal section collapse
+  // — preserved on "reset prefs to defaults" like the panel collapses above, not
+  // reset. Default false (expanded), matching the sidebar/observer panels. Pure
+  // client-side pref; never sent to the backend.
+  sourceControlCollapsed?: boolean;
   sidebarWidth?: number;
   observerWidth?: number;
   terminalFontSize?: number;
@@ -934,6 +940,7 @@ const DEFAULT_UI: UiState = {
   workspaces: [DEFAULT_WORKSPACE],
   activeWorkspaceId: DEFAULT_WORKSPACE.id,
   sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true,
+  sourceControlCollapsed: false,
   sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14,
   attentionDesktopAlerts: false,
   attentionStates: { stuck: true, erroring: true, waiting: true, blocked: true, done: true },
@@ -997,6 +1004,10 @@ export function loadUi(): UiState {
         sidebarCollapsed: v.sidebarCollapsed ?? false,
         observerCollapsed: v.observerCollapsed ?? false,
         healthCollapsed: v.healthCollapsed ?? true,
+        // WARDEN-431: only an explicitly-stored `true` collapses the Source
+        // Control section; absent / false / wrong-type stays expanded (the
+        // conservative default) — defensive like copyOnSelect/attentionDesktopAlerts.
+        sourceControlCollapsed: v.sourceControlCollapsed === true,
         sidebarWidth: typeof v.sidebarWidth === 'number' ? v.sidebarWidth : 220,
         observerWidth: typeof v.observerWidth === 'number' ? v.observerWidth : 380,
         terminalFontSize: typeof v.terminalFontSize === 'number' ? v.terminalFontSize : 14,
@@ -1342,6 +1353,9 @@ export function resetUiPrefsPreservingWorkspace(live: UiState): UiState {
     sidebarCollapsed: live.sidebarCollapsed,
     observerCollapsed: live.observerCollapsed,
     healthCollapsed: live.healthCollapsed,
+    // WARDEN-431: a sidebar-internal section collapse is a viewport affordance,
+    // not a pref — preserved (not reset) like the panel collapses above.
+    sourceControlCollapsed: live.sourceControlCollapsed,
     sidebarWidth: live.sidebarWidth,
     observerWidth: live.observerWidth,
   };

@@ -53,6 +53,7 @@ import { FleetCommitSearch } from './sidebar/FleetCommitSearch';
 import { GitCollisionBadge } from './sidebar/GitBadges';
 import { detectProjectFileCollisions, detectProjectImpendingCollisions } from '@/lib/gitStateSummary';
 import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/SidebarBits';
+import { SourceControlPanel } from './sidebar/SourceControlPanel';
 import { SessionTagChips, SessionTagFilterRow } from './sidebar/SessionTags';
 import { computeTagsInUse, filterSessionsByTags, addTag, removeTag } from '@/lib/sessionTags';
 
@@ -68,6 +69,10 @@ interface Props {
   // per-workspace recovery list. The tabs model (activeTabs/hiddenTabs) is gone.
   openPanes: Set<string>;
   recentlyClosed: RecentlyClosedEntry[];
+  // WARDEN-431: the focused pane id (whichever pane is focused in the grid) —
+  // the Source Control panel re-points to this pane's repo. null when nothing is
+  // focused (the panel renders nothing).
+  focused?: string | null;
   onOpenChat: (id: string) => void;
   onClosePane: (id: string) => void;
   onReopenClosed: (id: string) => void;
@@ -140,6 +145,12 @@ interface Props {
   agentSort: AgentSort;
   onFilterChange: (filter: AgentFilter) => void;
   onSortChange: (sort: AgentSort) => void;
+  // WARDEN-431: Source Control section collapse state + setter. Owned by App
+  // (persisted via its saveUi effect, like sidebarCollapsed); the panel component
+  // receives them as props so it stays self-contained for the sidebar redesign
+  // (WARDEN-257).
+  sourceControlCollapsed?: boolean;
+  onSourceControlCollapsedChange?: (collapsed: boolean) => void;
 }
 
 const LABEL: Record<string, string> = { '(local)': 'this machine' };
@@ -178,7 +189,7 @@ function useGitLogFetcher({ setCommits, setLoading, errorLabel, buildParams }: {
   }, [setCommits, setLoading, errorLabel, buildParams]);
 }
 
-export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, snippets, watchedChats, watchedStates, onToggleWatch, onSnoozeMany, onToggleWatchMany, agentFilter, agentSort, onFilterChange, onSortChange }: Props) {
+export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focused, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, snippets, watchedChats, watchedStates, onToggleWatch, onSnoozeMany, onToggleWatchMany, agentFilter, agentSort, onFilterChange, onSortChange, sourceControlCollapsed, onSourceControlCollapsedChange }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [offlineExpanded, setOfflineExpanded] = useState(false);
   const hostLabels = useHostLabels();
@@ -729,6 +740,17 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
     });
   }, [chats, openPanes, fetchGitStatus]);
 
+  // WARDEN-431: keep the FOCUSED pane's git status fresh so the Source Control
+  // panel (the single place working-tree changes now show) reflects the focused
+  // repo immediately on focus switch, not just on the periodic catalog refresh.
+  // The per-open-panes effect above still feeds every pane's GitBranchBadge; this
+  // is a focused-only top-up so the panel is never stale right after switching
+  // panes. Read-only GET, and setGitStatus merges by key (no flicker). fetchGitStatus
+  // is stable, so this fires only when `focused` changes.
+  useEffect(() => {
+    if (focused) fetchGitStatus(focused);
+  }, [focused, fetchGitStatus]);
+
   // WARDEN-356: keep recent git-log fresh for chats the human has VISITED so the
   // per-agent "What's new since your last visit" marker reflects commits landed
   // since the last open/focus. Bounded to visited chats only (getLastSeen !==
@@ -1212,6 +1234,16 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
       <NewChatForm onSpawned={handleSpawned} />
       <ScrollArea className="flex-1 min-h-0">
         <div className="p-1.5 flex flex-col gap-0.5">
+          {/* WARDEN-431: the Source Control panel — the single place a focused
+              pane's repo working-tree changes show, grouped like VS Code. Re-points
+              to whichever pane is focused; renders nothing when the focused pane
+              has no git repo. The inline per-chat changed-file rows are gone. */}
+          <SourceControlPanel
+            gitInfo={focused ? gitStatus[focused] : undefined}
+            onOpenDiff={(path, staged) => { if (focused) setDiffTarget({ chatId: focused, path, staged }); }}
+            collapsed={!!sourceControlCollapsed}
+            onCollapsedChange={onSourceControlCollapsedChange ?? (() => {})}
+          />
           {loading && openPanes.size === 0 ? (
             <>
               <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/40">loading panes</div>
