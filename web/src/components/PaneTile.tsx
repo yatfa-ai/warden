@@ -64,6 +64,31 @@ function copySelectionToClipboard(term: Terminal): void {
   document.body.removeChild(ta);
 }
 
+// Paste the system clipboard INTO the terminal via xterm's own paste path
+// (WARDEN-254). term.paste() wraps the block in bracketed-paste markers
+// (\e[200~ … \e[201~) exactly when the app has enabled DECSET 2004, then emits
+// through onData → streamApi → PTY (the bridge is byte-transparent both ways,
+// so the markers reach the agent). So a multiline paste arrives as ONE paste
+// and is never submitted line-by-line, matching a direct paste into the same
+// tmux session; single-line + a bare-shell app (no bracketed paste) paste raw,
+// like today.
+//
+// Factored out so the Ctrl/Cmd+V keybinding below and the themed Paste menu
+// item (WARDEN-380) share one routine — mirroring how copySelectionToClipboard
+// above is shared by Ctrl/Cmd+C, copy-on-select, and the Copy menu item.
+// navigator.clipboard fails silently in Electron, so the textarea +
+// document.execCommand('paste') fallback reads a real paste event instead.
+function pasteIntoTerm(term: Terminal): void {
+  navigator.clipboard?.readText().then((t) => { if (t) term.paste(t); }).catch(() => {
+    // Electron fallback: read from a paste event
+    const ta = document.createElement('textarea');
+    ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.focus();
+    document.execCommand('paste');
+    setTimeout(() => { if (ta.value) term.paste(ta.value); document.body.removeChild(ta); }, 100);
+  });
+}
+
 interface Props {
   id: string;
   label?: string;
@@ -307,22 +332,8 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       }
       if (e.code === 'KeyV') {
         e.preventDefault();
-        // Route through xterm's own paste path instead of shipping raw bytes.
-        // term.paste() wraps the block in bracketed-paste markers (\e[200~ …
-        // \e[201~) exactly when the app has enabled DECSET 2004, then emits
-        // through onData → streamApi → PTY (the bridge is byte-transparent both
-        // ways, so the markers reach the agent). So a multiline paste arrives as
-        // ONE paste and is never submitted line-by-line, matching a direct paste
-        // into the same tmux session; single-line + a bare-shell app (no
-        // bracketed paste) paste raw, like today. (WARDEN-254)
-        navigator.clipboard?.readText().then((t) => { if (t) term.paste(t); }).catch(() => {
-          // Electron fallback: read from a paste event
-          const ta = document.createElement('textarea');
-          ta.style.position = 'fixed'; ta.style.opacity = '0';
-          document.body.appendChild(ta); ta.focus();
-          document.execCommand('paste');
-          setTimeout(() => { if (ta.value) term.paste(ta.value); document.body.removeChild(ta); }, 100);
-        });
+        // Shared with the themed Paste menu item — see pasteIntoTerm above. (WARDEN-254, WARDEN-380)
+        pasteIntoTerm(term);
         return false;
       }
       return true;
@@ -821,8 +832,16 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
             onClick={(e) => { stop(e); onDismissCopyHint(hostKey); }}>×</Button>
         </div>
       )}
-      {/* terminal surface — stop the contextmenu event so right-clicks here keep the xterm
-          native paste menu instead of opening the themed pane menu (see Done criterion).
+      {/* terminal surface — now wrapped in its OWN themed context menu (WARDEN-380).
+          The former onContextMenu stopPropagation holdout — which kept the xterm native
+          paste menu by suppressing the themed pane menu — is retired: right-click here
+          opens the themed Copy/Paste/Clear/Search menu instead. Radix opens only the
+          INNERMOST trigger on right-click: the inner handler calls preventDefault(), so
+          the outer pane trigger's composeEventHandlers sees defaultPrevented and skips
+          (exactly one menu opens; never both), and the native webview menu is suppressed
+          too (Done criteria #1 + #4). Radix gates its pointer handlers on whenTouchOrPen,
+          so mouse events pass straight through to xterm — text selection / Ctrl+click are
+          unaffected (desktop pointer context only).
 
           --terminal-background (WARDEN-255 QA rework): the xterm viewport background is
           driven from THIS token (see the `.xterm .xterm-viewport` rule in index.css), not
@@ -834,7 +853,9 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           palette followed the override — so override≠chrome decoupled them into an invisible
           terminal (light text on a light viewport, etc.). Setting the token on the xterm host
           (this element) makes it inherit to `.xterm` / `.xterm-viewport`. */}
-      <div ref={wrapRef} style={{ '--terminal-background': terminalPalette.background } as React.CSSProperties} className="flex-1 min-h-0 px-1 py-0.5 overflow-hidden relative" onContextMenu={(e) => e.stopPropagation()} onClick={() => termRef.current?.focus()}>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+      <div ref={wrapRef} style={{ '--terminal-background': terminalPalette.background } as React.CSSProperties} className="flex-1 min-h-0 px-1 py-0.5 overflow-hidden relative" onClick={() => termRef.current?.focus()}>
         {phase === 'connecting' && (
           <div className="absolute inset-0 flex items-center justify-center gap-2 text-[11px] text-muted-foreground pointer-events-none select-none">
             <span className="size-3 rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground animate-spin" />
@@ -883,6 +904,21 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           />
         )}
       </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          {/* terminal-surface menu (WARDEN-380): Copy/Paste/Clear/Search. Copy
+              reuses copySelectionToClipboard (no-op on an empty selection); Paste
+              reuses pasteIntoTerm (the same path Ctrl/Cmd+V uses, incl. the
+              Electron fallback) — so the cutover from the native-fallback holdout
+              loses NO capability. termRef.current is non-null here: the menu can
+              only open by right-clicking this terminal surface, which exists only
+              while the pane is mounted and its Terminal has been created. */}
+          <ContextMenuItem onSelect={() => copySelectionToClipboard(termRef.current!)}>Copy</ContextMenuItem>
+          <ContextMenuItem onSelect={() => pasteIntoTerm(termRef.current!)}>Paste</ContextMenuItem>
+          <ContextMenuItem onSelect={() => termRef.current?.clear()}>Clear</ContextMenuItem>
+          <ContextMenuItem onSelect={() => setShowSearch(!showSearch)}>Search</ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
     </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
