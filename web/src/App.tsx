@@ -7,6 +7,7 @@ import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThe
 import { applyDensity, type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
 import { stampLastSeen } from '@/lib/whatsNew';
+import { useWatchCatchup } from '@/lib/useWatchCatchup';
 import { requestAlertPermission } from '@/lib/desktopAlerts';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
@@ -20,6 +21,7 @@ import { OpenChatBrowserPage } from '@/components/OpenChatBrowserPage';
 import { GlobalSearchDialog } from '@/components/GlobalSearchDialog';
 import { HealthDashboard } from '@/components/HealthDashboard';
 import { AttentionBadge } from '@/components/AttentionBadge';
+import { WatchCatchup } from '@/components/WatchCatchup';
 import { StatusDot } from '@/components/StatusDot';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
@@ -821,6 +823,13 @@ function App() {
     openChat(id);
   }, [openChat]);
 
+  // WARDEN-417: in-app catch-up for per-chat watch pings that fired while the human
+  // was away (the OS notification was unsupported / denied / cleared / lost). Reads
+  // the durable miss log written at the fire site in useAttentionRollup and surfaces
+  // the unacknowledged away misses on return, each deep-linking to its watched pane
+  // via the same openChat path. See useWatchCatchup / WatchCatchup.
+  const watchCatchup = useWatchCatchup(openChat);
+
   // WARDEN-378: toggle a chat's per-chat "watch" — marks it for a targeted,
   // reason-specific desktop ping when it newly needs the human. Turning watch ON
   // also requests OS notification permission (if not already granted) so the ping
@@ -1402,6 +1411,11 @@ function App() {
           </div>
         </div>
       )}
+      <WatchCatchup
+        misses={watchCatchup.misses}
+        onOpenMiss={watchCatchup.openMiss}
+        onDismiss={watchCatchup.dismiss}
+      />
       {settingsOpen ? (
         <SettingsPage
           onClose={() => setSettingsOpen(false)}

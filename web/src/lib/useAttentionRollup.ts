@@ -38,6 +38,7 @@ import {
   type AttentionSeverityPrefs,
 } from '@/lib/desktopAlerts';
 import { diffWatchAlerts, indexByWatchKey } from '@/lib/chatWatch';
+import { recordWatchMiss } from '@/lib/watchCatchup';
 import type { HealthData, ActivityStats, AgentStateRow, AgentStatesData } from '@/lib/types';
 
 // Recent-error / recent-directive window. ActivityStats counts raw events in the
@@ -230,6 +231,14 @@ export function useAttentionRollup(
           watchPrevRef.current = nextPrev;
           for (const a of alerts) {
             fireWatchNotification(a.row, a.reason, onOpenChatRef.current);
+            // WARDEN-417: durably record each watch ping that fires WHILE THE HUMAN
+            // IS AWAY (tab hidden) — the away case where the OS notification is most
+            // likely to be missed / unsupported / denied / cleared / lost to DND.
+            // The record feeds the in-app catch-up surfaced on return (watchCatchup),
+            // recovering what the single OS channel lost. Gated on hidden so a ping
+            // the human is present for (the live AttentionBadge + OS cover it) is
+            // never recorded and never becomes stale catch-up noise. Never throws.
+            if (document.visibilityState === 'hidden') recordWatchMiss(a.row, a.reason);
           }
         }
         // The rollup (AttentionBadge) stays OPEN-only (WARDEN-344): a watched-but-
