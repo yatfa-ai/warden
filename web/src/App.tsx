@@ -779,12 +779,12 @@ function App() {
     const session = `split-${Math.random().toString(36).slice(2, 10)}`;
     const result = await postJson<{ chat: Chat }>('/api/spawn', { host, session, cwd, cmd });
     if (!result.ok || !result.data) {
-      toast.error(result.error || 'Failed to spawn split shell');
+      if (prefs.notifyErrors) toast.error(result.error || 'Failed to spawn split shell');
       return;
     }
     await refresh();
     openChat(result.data.chat.key || result.data.chat.id);
-  }, [focused, defaultSplitShell, refresh, openChat]);
+  }, [focused, defaultSplitShell, refresh, openChat, prefs.notifyErrors]);
   // A chat was spawned from a pane's recovery panel (open-shell / re-spawn,
   // WARDEN-231): refresh the list so the new chat appears, then open + focus it.
   const handlePaneSpawned = useCallback((chat: Chat) => {

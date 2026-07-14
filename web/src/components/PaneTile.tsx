@@ -17,6 +17,7 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator,
 import { StatusDot } from '@/components/StatusDot';
 import { FileViewer } from './FileViewer';
 import { postJson } from '@/lib/api';
+import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { CircleOffIcon, PowerIcon, RefreshCwIcon, SquareTerminalIcon, WifiOffIcon, XIcon } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -202,6 +203,8 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const [retryNonce, setRetryNonce] = useState(0);
   const [busy, setBusy] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  // WARDEN-400: gate generic success/error toasts behind their Notification prefs.
+  const { prefs } = useNotificationPrefs();
 
   // WARDEN-227: in-terminal clickable file paths.
   // Existence is probed once per resolved path (cached) so scrolling back over the
@@ -678,7 +681,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       URL.revokeObjectURL(url);
     } catch (err) {
       console.error('Download failed:', err);
-      toast.error('Failed to download pane content');
+      if (prefs.notifyErrors) toast.error('Failed to download pane content');
     } finally {
       setDownloading(false);
     }
@@ -704,7 +707,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       name: `shell @ ${chat.host === '(local)' ? 'local' : chat.host}`,
     });
     setBusy(false);
-    if (!res.ok || !res.data) { toast.error(res.error || 'Failed to open shell'); return; }
+    if (!res.ok || !res.data) { if (prefs.notifyErrors) toast.error(res.error || 'Failed to open shell'); return; }
     onSpawned(res.data.chat);
     onClose();
   };
@@ -717,7 +720,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     setBusy(true);
     const res = await postJson('/api/respawn', { id });
     setBusy(false);
-    if (!res.ok) { toast.error(res.error || 'Failed to re-spawn agent'); return; }
+    if (!res.ok) { if (prefs.notifyErrors) toast.error(res.error || 'Failed to re-spawn agent'); return; }
     retryAttach();
   };
 
@@ -730,10 +733,10 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const sendSnippet = async (snippet: Snippet) => {
     const res = await postJson('/api/send', { id, text: snippet.text });
     if (!res.ok) {
-      toast.error(res.error || `Failed to send "${snippet.name}"`);
+      if (prefs.notifyErrors) toast.error(res.error || `Failed to send "${snippet.name}"`);
       return;
     }
-    toast.success(`Sent "${snippet.name}" to ${label || id}`);
+    if (prefs.notifySuccess) toast.success(`Sent "${snippet.name}" to ${label || id}`);
   };
 
   const stop = (e: React.MouseEvent) => e.stopPropagation();
