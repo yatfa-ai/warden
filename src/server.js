@@ -667,6 +667,42 @@ function parseJsonlHead(text) {
   return { cwd, summary };
 }
 
+// Sum every assistant turn's `message.usage` token fields across a session's
+// FULL JSONL body → { input, output, cacheCreation, cacheRead, total } where
+// total = input+output+cacheCreation+cacheRead. Mirrors parseJsonlHead's lenient
+// contract: malformed lines, missing/empty usage, and non-message records are
+// skipped (never throws). Returns null when the body has no real usage (no
+// usage objects, or all of them zero) so a row renders without a token badge
+// instead of a misleading "0 tok" — this also keeps the LOCAL full-file path
+// byte-for-byte consistent with the REMOTE grep+awk extractor (which sums to
+// empty → null for the same all-zero case). (WARDEN-367.)
+export function parseJsonlTokenUsage(text) {
+  let input = 0, output = 0, cacheCreation = 0, cacheRead = 0;
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    let j;
+    try { j = JSON.parse(line); } catch { continue; }
+    const u = j?.message?.usage;
+    if (!u || typeof u !== 'object') continue;
+    input += tok(u.input_tokens);
+    output += tok(u.output_tokens);
+    cacheCreation += tok(u.cache_creation_input_tokens);
+    cacheRead += tok(u.cache_read_input_tokens);
+  }
+  const total = input + output + cacheCreation + cacheRead;
+  return total > 0 ? { input, output, cacheCreation, cacheRead, total } : null;
+}
+
+// Coerce one usage field to a non-negative integer, defending against a stray
+// string/null without ever throwing. Real fields are JSON numbers; absent values
+// (undefined) contribute 0. Token counts are whole units — Math.trunc guards a
+// malformed float (none observed in real files, but the contract is "never throw").
+function tok(v) {
+  if (v == null) return 0;
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+}
+
 // ---- full-content session-search helpers (WARDEN-161) ----
 // parseJsonlHead only extracts cwd + the first user message (the 100-char
 // "summary"). These helpers search the WHOLE conversation body so a session is
@@ -732,14 +768,19 @@ function localClaudeSessions(limit = 40) {
   return collectLocalSessionFiles().slice(0, limit).map((f) => {
     let cwd = '';
     let summary = '';
+    let tokenUsage = null;
     try {
-      const fd = fs.openSync(f.file, 'r');
-      const buf = Buffer.alloc(8192);
-      fs.readSync(fd, buf, 0, 8192, 0);
-      fs.closeSync(fd);
-      ({ cwd, summary } = parseJsonlHead(buf.toString('utf8')));
+      // Full-file read: token usage lives on EVERY assistant turn across the
+      // whole transcript, so the 8KB head window that sufficed for cwd/summary
+      // can't see it. Reads are sequential (one file in memory at a time), so
+      // peak memory stays bounded by the largest single transcript — not the
+      // whole archive. cwd/summary + tokens are derived from the SAME body so
+      // the file is read once. (WARDEN-367.)
+      const body = fs.readFileSync(f.file, 'utf8');
+      ({ cwd, summary } = parseJsonlHead(body));
+      tokenUsage = parseJsonlTokenUsage(body);
     } catch { /* noop */ }
-    return { id: f.id, cwd, summary, mtime: f.mtime };
+    return { id: f.id, cwd, summary, mtime: f.mtime, tokenUsage };
   }).filter((s) => s.cwd);
 }
 // `limit` bounds the returned list (most-recent first). Defaults to 40 so
@@ -748,19 +789,53 @@ function localClaudeSessions(limit = 40) {
 // every file and transfers each head, so the per-request SSH cost is the same
 // regardless of limit — only the in-Node slice changes.
 async function remoteClaudeSessions(host, limit = 40) {
-  const script = `for f in ~/.claude/projects/*/*.jsonl; do [ -f "$f" ] || continue; id=$(basename "$f" .jsonl); mt=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null); printf '___S\\t%s\\t%s\\n' "$id" "$mt"; head -c 6000 "$f"; printf '\\n___E\\t%s\\n' "$id"; done`;
+  // Token usage lives on EVERY assistant turn across the WHOLE file. Computing it
+  // needs the full transcript, but we only ever transfer cwd/summary (the 6KB
+  // head) + four summed ints per file. So the totals are computed ON-HOST with a
+  // portable grep+awk pipeline (no jq/node assumed — remote hosts run docker+
+  // tmux+claude), and only the four ints ride the ___S marker. Single SSH pass,
+  // same shape as before, just an enriched header line. An all-zero / no-usage
+  // file prints nothing → tokenUsage null (matches the local path). (WARDEN-367.)
+  const script = `for f in ~/.claude/projects/*/*.jsonl; do
+[ -f "$f" ] || continue
+id=$(basename "$f" .jsonl)
+mt=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)
+tu=$(grep -oE '"(input_tokens|output_tokens|cache_creation_input_tokens|cache_read_input_tokens)"[[:space:]]*:[[:space:]]*[0-9]+' "$f" 2>/dev/null | awk '
+/^"cache_creation_input_tokens"/ { if (match($0,/[0-9]+$/)) cc += substr($0,RSTART,RLENGTH) }
+/^"cache_read_input_tokens"/     { if (match($0,/[0-9]+$/)) cr += substr($0,RSTART,RLENGTH) }
+/^"input_tokens"/                { if (match($0,/[0-9]+$/)) inp += substr($0,RSTART,RLENGTH) }
+/^"output_tokens"/               { if (match($0,/[0-9]+$/)) out += substr($0,RSTART,RLENGTH) }
+END { if (inp||out||cc||cr) printf "%d\\t%d\\t%d\\t%d", inp, out, cc, cr }')
+if [ -n "$tu" ]; then printf '___S\\t%s\\t%s\\t%s\\n' "$id" "$mt" "$tu"; else printf '___S\\t%s\\t%s\\n' "$id" "$mt"; fi
+head -c 6000 "$f"
+printf '\\n___E\\t%s\\n' "$id"
+done`;
   const res = await run(host, script, { timeout: 15000 });
   if (!res.ok) return [];
   const out = [];
   let cur = null;
   const buf = [];
   for (const line of res.stdout.split('\n')) {
-    const sm = line.match(/^___S\t(\S+)\t(\d+)/);
-    if (sm) { cur = { id: sm[1], mtime: Number(sm[2]) * 1000 }; buf.length = 0; continue; }
+    // ___S now optionally carries four tab-separated token ints after the
+    // mtime: ___S  id  mt  input  output  cacheCreation  cacheRead. The token
+    // group is optional so a no-usage file (or a pre-token-format archive)
+    // degrades to tokenUsage null — never a parse failure.
+    const sm = line.match(/^___S\t(\S+)\t(\d+)(?:\t(\d+)\t(\d+)\t(\d+)\t(\d+))?/);
+    if (sm) {
+      cur = { id: sm[1], mtime: Number(sm[2]) * 1000 };
+      if (sm[3] != null && sm[4] != null && sm[5] != null && sm[6] != null) {
+        const i = +sm[3], o = +sm[4], cc = +sm[5], cr = +sm[6];
+        cur.tokenUsage = { input: i, output: o, cacheCreation: cc, cacheRead: cr, total: i + o + cc + cr };
+      } else {
+        cur.tokenUsage = null;
+      }
+      buf.length = 0;
+      continue;
+    }
     if (/^___E\t/.test(line)) {
       if (cur) {
         const { cwd, summary } = parseJsonlHead(buf.join('\n'));
-        if (cwd) out.push({ id: cur.id, cwd, summary, mtime: cur.mtime });
+        if (cwd) out.push({ id: cur.id, cwd, summary, mtime: cur.mtime, tokenUsage: cur.tokenUsage ?? null });
       }
       cur = null;
       continue;
@@ -1073,7 +1148,41 @@ app.get('/api/claude-sessions', async (req, res) => {
 export function mergeAndPaginateSessions(buckets, offset, limit) {
   const all = buckets.flatMap(({ host, sessions }) => sessions.map((s) => ({ ...s, host })));
   all.sort((a, b) => b.mtime - a.mtime);
-  return { sessions: all.slice(offset, offset + limit), hasMore: all.length > offset + limit };
+  const sessions = all.slice(offset, offset + limit);
+  // Per-host + grand token totals over the RETURNED window (this page), not every
+  // fetched row. Sessions with no usage (tokenUsage null) contribute nothing.
+  // Folded in here (pure + unit-tested) so the endpoint just stamps it on the
+  // response. (WARDEN-367.)
+  return { sessions, hasMore: all.length > offset + limit, totals: computeSessionTotals(sessions) };
+}
+
+// Sum a list of sessions' tokenUsage into a grand total + per-host breakdown.
+// Sessions without usage (tokenUsage null) are skipped. The aggregate shape
+// matches a single tokenUsage object so a "0-everywhere" fleet renders the same
+// way as a session's own usage. Pure + exported so the rollup is unit-testable
+// without SSH. (WARDEN-367.)
+export function computeSessionTotals(sessions) {
+  const byHost = {};
+  let input = 0, output = 0, cacheCreation = 0, cacheRead = 0;
+  for (const s of sessions) {
+    const u = s && s.tokenUsage;
+    if (!u) continue;
+    input += u.input || 0;
+    output += u.output || 0;
+    cacheCreation += u.cacheCreation || 0;
+    cacheRead += u.cacheRead || 0;
+    const h = s.host || 'unknown';
+    const b = byHost[h] || (byHost[h] = { input: 0, output: 0, cacheCreation: 0, cacheRead: 0, total: 0 });
+    b.input += u.input || 0;
+    b.output += u.output || 0;
+    b.cacheCreation += u.cacheCreation || 0;
+    b.cacheRead += u.cacheRead || 0;
+    b.total = b.input + b.output + b.cacheCreation + b.cacheRead;
+  }
+  return {
+    grand: { input, output, cacheCreation, cacheRead, total: input + output + cacheCreation + cacheRead },
+    byHost,
+  };
 }
 
 // Page-size guardrails for the unified "All Sessions" endpoint. Default 40 matches
@@ -1102,8 +1211,8 @@ app.get('/api/claude-sessions-all', async (req, res) => {
   const buckets = results
     .filter((r) => r.status === 'fulfilled')
     .map((r) => ({ host: r.value.host, sessions: r.value.sessions }));
-  const { sessions, hasMore } = mergeAndPaginateSessions(buckets, offset, limit);
-  res.json({ sessions, hasMore });
+  const { sessions, hasMore, totals } = mergeAndPaginateSessions(buckets, offset, limit);
+  res.json({ sessions, hasMore, totals });
 });
 
 // GET /api/claude-sessions-search?q= — full-content search across EVERY host's

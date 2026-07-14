@@ -11,7 +11,14 @@ export type GitCommit = { hash: string; subject: string; author: string; date: s
 // lazy detail behind the eager `stashCount` in /api/git-status. Read-only.
 export type GitStash = { ref: string; subject: string; date: string };
 
-export interface ClaudeSession { id: string; cwd: string; summary: string; mtime: number }
+// One per-session token-usage ledger, summed from every assistant turn's
+// `message.usage` across the transcript (model-agnostic raw token counts, NOT
+// dollar cost). `total = input+output+cacheCreation+cacheRead`. Optional +
+// nullable: a session with no/missing usage carries `null` so the row renders
+// without a token badge (graceful-empty contract). (WARDEN-367.)
+export interface TokenUsage { input: number; output: number; cacheCreation: number; cacheRead: number; total: number }
+
+export interface ClaudeSession { id: string; cwd: string; summary: string; mtime: number; tokenUsage?: TokenUsage | null }
 
 // One row from /api/claude-sessions-search (a session whose conversation body
 // matched the query, across hosts — incl. sessions outside the top-40 list).
