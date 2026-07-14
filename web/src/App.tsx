@@ -1500,6 +1500,7 @@ function App() {
             copyHintDismissed={copyHintDismissed}
             onDismissCopyHint={dismissCopyHint}
             snippets={snippets}
+            timestampFormat={timestampFormat}
           />
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"

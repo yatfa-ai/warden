@@ -13,7 +13,7 @@ import { DiffBlock } from './DiffBlock';
 import { MarkdownBody } from './MarkdownBody';
 import { tokenizeCode, languageFromPath, type Leaf } from '@/lib/highlight';
 import { Loader2Icon, FileIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon } from 'lucide-react';
-import { timeAgo } from '@/lib/utils';
+import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
 
 interface FileViewerProps {
   chatId: string;
@@ -22,6 +22,9 @@ interface FileViewerProps {
   /** Optional 1-based line to scroll to and visually highlight (WARDEN-227: when
    *  opened by Ctrl/Cmd+clicking a `path:line` token in a live terminal pane). */
   line?: number;
+  // "Timestamp format" pref (WARDEN-422): honors the client-side relative vs
+  // absolute pref on blame author-dates, mirroring every other timestamp surface.
+  timestampFormat: TimestampFormat;
   onOpenChange: (open: boolean) => void;
 }
 
@@ -32,12 +35,12 @@ type BlameLine = { line: number; hash: string; author: string; date: string; sum
 
 // One row from /api/git-log with a `path` filter (file history, WARDEN-319). `date` is
 // the relative %ar string straight from git ("2 days ago") — displayed VERBATIM, not
-// re-relativized through timeAgo, matching the sibling git-log commit lists in
+// re-relativized through formatTimestamp, matching the sibling git-log commit lists in
 // ChatSidebar (the only other consumer of this route). `hash` is %h (abbreviated);
 // git-show accepts abbreviated hashes, so it resolves unambiguously on click.
 type HistoryCommit = { hash: string; subject: string; author: string; date: string };
 
-export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileViewerProps) {
+export function FileViewer({ chatId, filePath, open, line, timestampFormat, onOpenChange }: FileViewerProps) {
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -407,6 +410,7 @@ export function FileViewer({ chatId, filePath, open, line, onOpenChange }: FileV
                 blameError={blameError}
                 chatId={chatId}
                 filePath={filePath}
+                timestampFormat={timestampFormat}
               />
             )}
 
@@ -458,13 +462,14 @@ function HighlightedLine({ leaves }: { leaves: Leaf[] }) {
 // wallpapered with repeated commit info. The hash opens a popover that fetches what
 // that commit did to THIS file (/api/git-show ?hash&path), reusing the same committed-
 // diff inspector as the sidebar's expanded commit (WARDEN-180) and DiffBlock.
-function AnnotatedContent({ content, blame, blameLoading, blameError, chatId, filePath }: {
+function AnnotatedContent({ content, blame, blameLoading, blameError, chatId, filePath, timestampFormat }: {
   content: string;
   blame: BlameLine[] | null;
   blameLoading: boolean;
   blameError: string | null;
   chatId: string;
   filePath: string;
+  timestampFormat: TimestampFormat;
 }) {
   // Drop a single phantom trailing element (content ending in "\n" splits to an extra
   // "") so line numbers align with blame's 1-based result lines.
@@ -527,9 +532,9 @@ function AnnotatedContent({ content, blame, blameLoading, blameError, chatId, fi
             <div className="flex w-56 shrink-0 items-center gap-1.5 text-xs leading-5">
               {b && atBoundary ? (
                 <>
-                  <BlameHash chatId={chatId} filePath={filePath} hash={b.hash} summary={b.summary} author={b.author} dateLabel={timeAgo(b.date)} />
+                  <BlameHash chatId={chatId} filePath={filePath} hash={b.hash} summary={b.summary} author={b.author} dateLabel={formatTimestamp(b.date, timestampFormat)} />
                   <span className="min-w-0 truncate text-cyan-300/60" title={b.author}>{b.author}</span>
-                  <span className="ml-auto shrink-0 text-muted-foreground/60" title={b.date}>{timeAgo(b.date)}</span>
+                  <span className="ml-auto shrink-0 text-muted-foreground/60" title={formatAbsoluteFull(b.date)}>{formatTimestamp(b.date, timestampFormat)}</span>
                 </>
               ) : null}
             </div>
@@ -552,8 +557,8 @@ function AnnotatedContent({ content, blame, blameLoading, blameError, chatId, fi
 //
 // `dateLabel` is the ALREADY-formatted display date — formatting stays the caller's job
 // because the two callers carry dates in different shapes: blame has author-time ISO
-// (caller passes timeAgo(iso)), history has git's relative %ar text (caller passes it
-// verbatim). Either way the popover just stamps it next to the author.
+// (caller passes formatTimestamp(iso, pref)), history has git's relative %ar text
+// (caller passes it verbatim). Either way the popover just stamps it next to the author.
 function BlameHash({ chatId, filePath, hash, summary, author, dateLabel }: {
   chatId: string;
   filePath: string;
