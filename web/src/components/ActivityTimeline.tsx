@@ -5,6 +5,48 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useLiveTimeline } from '@/lib/useLiveTimeline';
 import { formatUpdatedAgo } from '@/lib/timelinePacing';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger, ContextMenuLabel } from '@/components/ui/context-menu';
+import { toast } from 'sonner';
+
+// Build a readable one-line summary of an activity event from its populated
+// fields. Always non-empty — timestamp + type are always present — so "Copy
+// details" always writes something to the clipboard. Kept local to this surface
+// (no shared util extraction) per the WARDEN-392 scope guard.
+function buildEventSummary(event: ActivityEvent): string {
+  const parts: string[] = [`[${event.timestamp}] ${event.type.replace(/_/g, ' ')}`];
+  if (event.role) parts.push(`role=${event.role}`);
+  if (event.directive) parts.push(`directive=${event.directive}`);
+  if (event.host) parts.push(`host=${event.host}`);
+  if (event.container) parts.push(`container=${event.container}`);
+  if (event.project) parts.push(`project=${event.project}`);
+  if (event.id) parts.push(`id=${event.id}`);
+  if (event.error) parts.push(`error=${event.error}`);
+  if (event.context) parts.push(`context=${event.context}`);
+  if (event.code !== undefined) parts.push(`exit=${event.code}`);
+  return parts.join(' | ');
+}
+
+// Copy text to the clipboard with an Electron-safe fallback. navigator.clipboard
+// can fail silently in Electron (PaneTile.tsx:50-65), so on failure we drop to
+// the document.execCommand('copy') textarea routine — the same path the xterm
+// copy handlers use. Local to this surface on purpose: ObserverPanel and PaneTile
+// each keep their own copy routine, and extracting a shared util is out of scope
+// for this slice (WARDEN-392 / WARDEN-52).
+async function copyToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch {}
+    document.body.removeChild(ta);
+  }
+  toast.success('Copied');
+}
 
 export function ActivityTimeline({ timestampFormat }: { timestampFormat: TimestampFormat }) {
   const [filtered, setFiltered] = useState<ActivityEvent[]>([]);
@@ -204,22 +246,62 @@ export function ActivityTimeline({ timestampFormat }: { timestampFormat: Timesta
       }
     };
 
+    // Capture optional fields as const locals so TypeScript narrows them to
+    // `string` inside the menu-item onSelect closures (a `const` narrows in a
+    // closure; a property access like `event.directive` does not). The inline
+    // span below needs no capture — narrowing applies to synchronous JSX too.
+    const directive = event.directive;
+    const host = event.host;
+    const container = event.container;
+
     return (
-      <div key={event.timestamp} className="flex items-start gap-2 py-2 px-3 hover:bg-muted/50 rounded-lg transition-colors">
-        <span className="text-lg">{icons[event.type] || '📌'}</span>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1">
-            <span className={`text-xs font-semibold uppercase ${typeColors[event.type] || 'text-muted-foreground'}`}>
-              {event.type.replace('_', ' ')}
-            </span>
-            <span className="text-xs text-muted-foreground">{formatTimestamp(event.timestamp, timestampFormat)}</span>
-            {event.host && (
-              <span className="text-xs font-mono text-muted-foreground bg-muted px-1 rounded">{event.host}</span>
-            )}
+      <ContextMenu key={event.timestamp}>
+        <ContextMenuTrigger asChild>
+          <div className="flex items-start gap-2 py-2 px-3 hover:bg-muted/50 rounded-lg transition-colors">
+            <span className="text-lg">{icons[event.type] || '📌'}</span>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <span className={`text-xs font-semibold uppercase ${typeColors[event.type] || 'text-muted-foreground'}`}>
+                  {event.type.replace('_', ' ')}
+                </span>
+                <span className="text-xs text-muted-foreground">{formatTimestamp(event.timestamp, timestampFormat)}</span>
+                {event.host && (
+                  <span className="text-xs font-mono text-muted-foreground bg-muted px-1 rounded">{event.host}</span>
+                )}
+              </div>
+              {renderDetails()}
+            </div>
           </div>
-          {renderDetails()}
-        </div>
-      </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem onSelect={() => copyToClipboard(buildEventSummary(event))}>
+            Copy details
+          </ContextMenuItem>
+          {directive && (
+            <>
+              <ContextMenuSeparator />
+              <ContextMenuItem onSelect={() => copyToClipboard(directive)}>
+                Copy directive
+              </ContextMenuItem>
+            </>
+          )}
+          <ContextMenuSeparator />
+          <ContextMenuLabel>Filter</ContextMenuLabel>
+          <ContextMenuItem onSelect={() => setTypeFilter(event.type)}>
+            Filter to this type
+          </ContextMenuItem>
+          {host && (
+            <ContextMenuItem onSelect={() => setHostFilter(host)}>
+              Filter to this host
+            </ContextMenuItem>
+          )}
+          {container && (
+            <ContextMenuItem onSelect={() => setAgentFilter(container)}>
+              Filter to this agent
+            </ContextMenuItem>
+          )}
+        </ContextMenuContent>
+      </ContextMenu>
     );
   };
 
