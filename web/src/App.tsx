@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
-import { loadUi, saveUi, persistUiState, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type HostOptionsMap, type WorkspacePaneSet, type RecentlyClosedEntry, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
+import { loadUi, saveUi, persistUiState, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, STARTER_SNIPPETS, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type HostOptionsMap, type WorkspacePaneSet, type RecentlyClosedEntry, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
 import { displayName } from '@/lib/chatDisplay';
 import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThemeId, type Theme, type ThemeId, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
@@ -614,6 +614,83 @@ function App() {
   const dismissCopyHint = (host: string) => {
     setCopyHintDismissed((prev) => ({ ...prev, [host]: true }));
   };
+
+  // Reset every UI PREF to its effective default value (the value loadUi()
+  // yields post-coercion, so live React state / persisted state / a fresh
+  // reload all agree) while leaving the WORKSPACE + panel layout untouched.
+  // The setters fire the existing saveUi effect, which persists defaults-for-
+  // prefs + preserved-workspace via persistUiState. Pure client-side: never
+  // touches the backend / config.json (display/terminal/new-chat prefs are
+  // client-side only by design). Stable identity — it only calls useState
+  // setters (all stable) — so the SettingsPage prop identity never churns,
+  // matching the other stable setters passed down.
+  //
+  // terminalFontFamily nuance: resets to DEFAULT_TERMINAL_FONT_FAMILY (the
+  // curated "System default" value), NOT DEFAULT_UI.terminalFontFamily ('').
+  // The persisted shape uses '' (blank = default stack), but the LIVE React
+  // initializer coerces '' → DEFAULT_TERMINAL_FONT_FAMILY via || (App.tsx:158)
+  // so a pane can never blank. Setting live state to '' here would leave the
+  // Settings font-select showing "Custom…" (no '' option in the curated list)
+  // until reload; DEFAULT_TERMINAL_FONT_FAMILY keeps live/persisted/reload in
+  // sync (the saveUi effect persists the curated value, loadUi returns it as-
+  // is, and it is NOT the DEFAULT_UI '' sentinel — but it renders identically).
+  // defaultNewChatCwd is reset too: it is a pref (in the saveUi spread), part
+  // of the defaultNewChat* family, and omitting it would leave the stale value
+  // in live state for the next persist — violating the "all agree" invariant.
+  // Does NOT touch workspace/layout setters (workspaces/activeWorkspaceId/
+  // paneHost/sidebarCollapsed/observerCollapsed/healthCollapsed/sidebarWidth/
+  // observerWidth) — those are preserved. See WARDEN-346.
+  //
+  // Every OTHER pref in App's persist spread is reset here so live state, the
+  // next saveUi persist, and a fresh reload all agree (acceptance criterion #2).
+  // This includes prefs added by tickets that landed after WARDEN-346 branched
+  // (per-state attentionStates, per-severity alert routing, mutedAlertKeys,
+  // watchedChats, timestampFormat, hostOptions/copyHintDismissed, per-host
+  // preset/cwd overrides, instruction snippets). Omitting any would leave it
+  // stale in live React state and silently survive the "reset everything"
+  // action — the next persist would then write the stale value right back.
+  // User-curated lists (customPresets/snippets/watchedChats/mutedAlertKeys)
+  // reset too: this is a destructive, confirm-gated "back to factory defaults",
+  // consistent with customPresets → [] (customPresets is user-authored as well).
+  const resetUiPrefsToDefaults = useCallback(() => {
+    // Appearance
+    setTheme('system');
+    setDensity('comfortable');
+    setPaneLayout('auto');
+    // Behavior
+    setOnExitBehavior('keep');
+    setAutoFocusNewPane(true);
+    setRestoreOnStartup('previous');
+    setCopyOnSelect(false);
+    setTimestampFormat('relative');
+    // Terminal
+    setTerminalFontSize(14);
+    setTerminalScrollback(10000);
+    setTerminalFontFamily(DEFAULT_TERMINAL_FONT_FAMILY);
+    setTerminalColorScheme('auto');
+    setTerminalCursorStyle('blink-block');
+    // New chats
+    setDefaultNewChatPreset('claude');
+    setDefaultNewChatPresetByHost({});
+    setDefaultNewChatHost(THIS_MACHINE);
+    setDefaultNewChatCwd('');
+    setDefaultNewChatCwdByHost({});
+    setCustomPresets([]);
+    setSnippets(STARTER_SNIPPETS);
+    setDefaultSplitShell('');
+    // Attention / desktop alerts
+    setAttentionDesktopAlerts(false);
+    setAttentionStates({ stuck: true, erroring: true, waiting: true, blocked: true });
+    setAlertCritical(true);
+    setAlertWarning(true);
+    setAlertDirective(true);
+    setAlertError(true);
+    setMutedAlertKeys([]);
+    setWatchedChats([]);
+    // Per-host prefs (seamless copy + dismissed copy-hint)
+    setHostOptions({});
+    setCopyHintDismissed({});
+  }, []);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
   // its entries in the chats list so dots update to green/red.
@@ -1381,6 +1458,7 @@ function App() {
           setCloseToTray={setCloseToTray}
           hostOptions={hostOptions}
           onSetHostSeamlessCopy={setHostSeamlessCopy}
+          resetUiPrefsToDefaults={resetUiPrefsToDefaults}
         />
       ) : chatBrowserOpen ? (
         <OpenChatBrowserPage
