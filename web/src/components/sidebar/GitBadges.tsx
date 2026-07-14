@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { GitCompare } from 'lucide-react';
 import { DiffBlock } from '@/components/DiffBlock';
+import { DiffViewer } from '@/components/DiffViewer';
 import { CollisionCompareDialog } from '../CollisionCompareDialog';
 import { cn } from '@/lib/utils';
 import { findChat } from '@/lib/agentFilter';
@@ -592,6 +593,15 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   const [stashList, setStashList] = useState<GitStash[] | undefined>(undefined);
   const [stashLoading, setStashLoading] = useState(false);
 
+  // WARDEN-398: the aggregated range-diff modal target. Set by the "View full diff"
+  // affordance in the outgoing (↑N) or incoming (↓N) section; null while closed.
+  // Rendered by the generalized DiffViewer (range mode) as a sibling of this popover.
+  const [rangeDiff, setRangeDiff] = useState<{ kind: 'outgoing' | 'incoming'; count: number } | null>(null);
+  // Controlled open so the "View full diff" affordance can dismiss this popover
+  // before the DiffViewer modal opens on top (mirrors GitStateBadge's /
+  // GitCollisionBadge's setOpen(false) + open-dialog discipline).
+  const [popoverOpen, setPopoverOpen] = useState(false);
+
   const fetchShow = async (hash: string) => {
     if (showCache[hash] || showLoading[hash]) return;
     setShowLoading((p) => ({ ...p, [hash]: true }));
@@ -631,7 +641,9 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   };
 
   return (
-    <RadixPopover.Root onOpenChange={(open) => {
+    <>
+    <RadixPopover.Root open={popoverOpen} onOpenChange={(open) => {
+      setPopoverOpen(open);
       if (!open) return;
       // Lazy-fetch ALL signals on first open: the local recent commits, the incoming
       // list (only when behind upstream), and shelved stashes (only when some are
@@ -735,8 +747,26 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
           )}
           {aheadCount > 0 && (
             <div className="mt-1.5 border-t border-border pt-1.5">
-              <div className="mb-1 px-0.5">
+              <div className="mb-1 flex items-center justify-between gap-2 px-0.5">
                 <span className="text-[10px] font-medium text-amber-400">unpushed · ↑ {aheadCount} ahead</span>
+                {/* WARDEN-398: the net unified diff of the WHOLE unpushed set as one
+                    view — answers "what is this agent about to push?" without expanding
+                    each commit. A real <Button> (not a role=button div): it sits in the
+                    plain section header, so there's no nested-interactive issue (the chip
+                    + popover trigger are the only other buttons, neither an ancestor of
+                    this portaled content) — per WARDEN-68. Closes the popover so the
+                    DiffViewer modal takes focus. */}
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  onClick={(e) => { e.stopPropagation(); setPopoverOpen(false); setRangeDiff({ kind: 'outgoing', count: aheadCount }); }}
+                  className="text-muted-foreground hover:text-amber-300"
+                  aria-label={`view the full unpushed diff (${aheadCount} commit${aheadCount === 1 ? '' : 's'})`}
+                  title={`view the aggregated unpushed diff (${aheadCount} commit${aheadCount === 1 ? '' : 's'}) — net git diff @{u}..HEAD`}
+                >
+                  <GitCompare />
+                  full diff
+                </Button>
               </div>
               {outgoingLoading && (!outgoingCommits || outgoingCommits.length === 0) ? (
                 <div className="flex items-center gap-1.5 px-1 py-1">
@@ -795,8 +825,23 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
           )}
           {behindCount > 0 && (
             <div className="mt-1.5 border-t border-border pt-1.5">
-              <div className="mb-1 px-0.5">
+              <div className="mb-1 flex items-center justify-between gap-2 px-0.5">
                 <span className="text-[10px] font-medium text-blue-400">incoming · ↓ {behindCount} behind</span>
+                {/* WARDEN-398: the net unified diff of the WHOLE incoming set as one
+                    view — answers "what will land if I bring this agent up to upstream?"
+                    without expanding each commit. See the outgoing affordance above for
+                    the <Button>-not-div rationale (WARDEN-68). */}
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  onClick={(e) => { e.stopPropagation(); setPopoverOpen(false); setRangeDiff({ kind: 'incoming', count: behindCount }); }}
+                  className="text-muted-foreground hover:text-blue-300"
+                  aria-label={`view the full incoming diff (${behindCount} commit${behindCount === 1 ? '' : 's'})`}
+                  title={`view the aggregated incoming diff (${behindCount} commit${behindCount === 1 ? '' : 's'}) — net git diff HEAD..@{u}`}
+                >
+                  <GitCompare />
+                  full diff
+                </Button>
               </div>
               {incomingLoading && (!incomingCommits || incomingCommits.length === 0) ? (
                 <div className="flex items-center gap-1.5 px-1 py-1">
@@ -886,6 +931,19 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
         </RadixPopover.Content>
       </RadixPopover.Portal>
     </RadixPopover.Root>
+      {/* WARDEN-398: the aggregated range-diff modal. Rendered as a sibling of the
+          popover (not inside it) so Radix's Dialog portal stacks cleanly above the
+          already-dismissed popover — the same sibling discipline CollisionCompareDialog
+          uses. Range mode fetches /api/git-range-diff; filePath is unused here. */}
+      <DiffViewer
+        chatId={chatId}
+        filePath=""
+        range={rangeDiff?.kind}
+        count={rangeDiff?.count}
+        open={!!rangeDiff}
+        onOpenChange={(o) => { if (!o) setRangeDiff(null); }}
+      />
+    </>
   );
 }
 
