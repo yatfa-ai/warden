@@ -105,6 +105,48 @@ describe('getHealthState — live agents keep the time-based rules', () => {
   });
 });
 
+// =====================================================================
+// WARDEN-374: an inverted pair (warning > critical) must NOT lie. The
+// classifier clamps the healthy boundary to the smaller critical value so a
+// silently-failing agent can never read HEALTHY (and suppress the CRITICAL
+// desktop alert) when the thresholds are mis-ordered. Errs toward alerting.
+// =====================================================================
+
+describe('getHealthState — an inverted pair (warning > critical) cannot lie (WARDEN-374)', () => {
+  // The exact acceptance-criteria inversion: healthy=60min, critical=30min.
+  // Without the clamp, the first branch (t <= 60min) swallows everything up to
+  // 60 min and a 40-min-silent agent reads HEALTHY (a lying state).
+  const inverted = { healthyMin: 60, warningMin: 30 };
+
+  before(() => mock.method(Date, 'now', () => NOW));
+  after(() => mock.restoreAll());
+
+  it('classifies a 40-min-silent agent as CRITICAL (not HEALTHY) under the 60/30 inversion', () => {
+    // Acceptance criterion: idle 40 min at warning=60/critical=30 must read
+    // CRITICAL — the smaller (critical) value governs, never the inverted 60.
+    assert.strictEqual(getHealthState(yatfaAgent(), agoMin(40), inverted), HealthState.CRITICAL);
+  });
+
+  it('never returns HEALTHY for a live agent past the smaller (critical) boundary when inverted', () => {
+    // 40 min is well past the 30-min critical boundary → must NOT be healthy.
+    const state = getHealthState(yatfaAgent(), agoMin(40), inverted);
+    assert.notStrictEqual(state, HealthState.HEALTHY);
+  });
+
+  it('uses the smaller value as the healthy boundary under inversion (25 min still HEALTHY)', () => {
+    // 25 min is within the clamped 30-min healthy band → HEALTHY. Pins that the
+    // clamp drops the healthy boundary to 30 (not the inverted 60), keeping the
+    // band finite rather than collapsing the whole ladder to CRITICAL.
+    assert.strictEqual(getHealthState(yatfaAgent(), agoMin(25), inverted), HealthState.HEALTHY);
+  });
+
+  it('errs toward alerting past the smaller boundary under inversion (31 min → CRITICAL)', () => {
+    // With the pair inverted the WARNING band is unreachable (the two boundaries
+    // coincide at 30); 31 min falls past it → CRITICAL, never a silent HEALTHY.
+    assert.strictEqual(getHealthState(yatfaAgent(), agoMin(31), inverted), HealthState.CRITICAL);
+  });
+});
+
 describe('getHealthState — manual (tmux, non-agent) sessions are IDLE when stale', () => {
   it('a manual session silent 30+ min is IDLE, not WARNING/CRITICAL', () => {
     const agent = { active: true, kind: 'tmux', isAgent: false };
