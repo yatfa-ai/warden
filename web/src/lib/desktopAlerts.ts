@@ -252,14 +252,28 @@ export function formatWatchMessage(row: AgentStateRow, reason: WatchReason): { t
  * that needs them. Never throws — some embedded webviews reject `new Notification`.
  *
  * Deliberately NOT gated on document visibility (unlike fireAttentionNotification):
- * the watch is opt-in per chat and has no always-on in-app surface in this slice, so
- * suppressing while Warden is visible would lose the signal entirely. The
- * near-zero-false-signal bar is met by the transition detector (fires once on
- * entering a needs-you state, never on persistent state), not by a visibility filter.
+ * the watch is opt-in per chat and has no always-on in-app surface, so suppressing
+ * while Warden is visible would lose the signal entirely. The near-zero-false-signal
+ * bar is met by the transition detector (fires once on entering a needs-you state,
+ * never on persistent state), not by a visibility filter.
+ *
+ * Returns whether the OS channel DELIVERED the ping (WARDEN-417): `true` only when a
+ * Notification was actually constructed (the OS accepted it); `false` on each of the
+ * three silent no-op cases — `!notificationsSupported()` (embedded webview lacks
+ * `Notification`), `permission !== 'granted'` (never granted / denied), and the
+ * `catch` (a restrictive webview rejects `new Notification`). The caller uses this to
+ * decide whether to ALSO record the ping durably for the in-app catch-up
+ * (watchCatchup.shouldRecordMiss): a ping the OS channel LOST is recorded so it can be
+ * recovered on return; a ping the OS delivered is recorded only when the human is away
+ * (it may yet be cleared / DND'd — see shouldRecordMiss). This return contract is the
+ * recoverable-vs-delivered signal that makes the catch-up a recovery net, not a second
+ * channel: it can never duplicate a ping the OS definitively delivered to a present
+ * human. Pure-ish (touches the Notification global) but contract-unit-tested directly
+ * alongside the pure helpers via a Notification shim (desktopAlerts.test.mjs).
  */
-export function fireWatchNotification(row: AgentStateRow, reason: WatchReason, onOpenChat?: (id: string) => void): void {
-  if (!notificationsSupported()) return;
-  if (Notification.permission !== 'granted') return;
+export function fireWatchNotification(row: AgentStateRow, reason: WatchReason, onOpenChat?: (id: string) => void): boolean {
+  if (!notificationsSupported()) return false;
+  if (Notification.permission !== 'granted') return false;
   try {
     const { title, body } = formatWatchMessage(row, reason);
     const key = row.key || row.id;
@@ -269,8 +283,11 @@ export function fireWatchNotification(row: AgentStateRow, reason: WatchReason, o
       window.focus();
       n.close();
     };
+    return true;
   } catch {
-    // A construction failure must never crash the poll.
+    // A construction failure (e.g. a restrictive webview) must never crash the poll,
+    // and signals the OS channel did NOT deliver → the caller records a catch-up miss.
+    return false;
   }
 }
 

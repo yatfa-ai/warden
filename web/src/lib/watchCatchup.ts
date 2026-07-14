@@ -11,11 +11,15 @@
 // step away" — the watch's headline scenario) can be silently lost: nothing is
 // recorded at the fire site, so on return there is no in-app trace it happened.
 //
-// This module records those fired-WHILE-AWAY alerts into a BOUNDED client-side log
-// and exposes the pure logic that turns them into a reason-specific, deep-linking
-// catch-up surfaced on the human's RETURN — recovering what the OS channel lost,
-// WITHOUT firing a new OS notification. Its job is to be the safety net under the
-// OS channel, not a second channel.
+// This module records the watch alerts the OS channel did NOT reliably deliver —
+// either because fireWatchNotification no-op'd (Notifications unsupported / denied /
+// rejected) OR because the ping fired while the human was AWAY and may yet be cleared
+// — into a BOUNDED client-side log, and exposes the pure logic that turns them into a
+// reason-specific, deep-linking catch-up surfaced on the human's RETURN. It recovers
+// what the OS channel lost, WITHOUT firing a new OS notification. Its job is to be
+// the safety net under the OS channel, not a second channel: a ping the OS delivered
+// to a PRESENT human is never recorded (shouldRecordMiss), so it can never re-surface
+// as stale noise.
 //
 // Discipline (mirrors chatWatch.ts / desktopAlerts.ts / whatsNew.ts): pure +
 // dependency-free (only `import type`, erased at transpile) so the unit test loads
@@ -36,9 +40,10 @@ export const WATCH_MISS_SEEN_KEY = 'warden:watchMissedSeen';
 
 // Ring-buffer cap. A watched chat that flaps (e.g. waiting → active → waiting) can
 // fire repeatedly across a long step-away; the log is bounded so it never grows
-// unbounded in localStorage across a long session. 50 is generous (one away
-// session rarely produces more than a handful) yet cheap to serialize, and it is
-// only ever written while the human is away (see recordWatchMiss's caller gate).
+// unbounded in localStorage across a long session. 50 is generous (one away session
+// rarely produces more than a handful) yet cheap to serialize, and it is only ever
+// written when shouldRecordMiss says to (OS channel lost the ping OR the human is
+// away) — never for a ping the OS delivered to a present human.
 export const WATCH_MISS_LOG_MAX = 50;
 
 /** One fired-while-away watch alert, recorded durably for catch-up on return. */
@@ -228,18 +233,59 @@ export function stampWatchSeen(now: number = Date.now()): number {
 }
 
 /**
- * Record a fired-WHILE-AWAY watch alert durably: build the miss, append it to the
- * bounded ring buffer, and persist. Called at the watch-ping fire site
- * (useAttentionRollup) ALONGSIDE fireWatchNotification — the record is written at
- * the same instant the (already-shipped) fire happens; nothing about WARDEN-378's
- * detection or firing changes.
+ * Pure: should this fired watch alert be recorded for catch-up? The recording rule
+ * for the recovery net (WARDEN-417). Record when EITHER:
+ *   - the OS channel LOST the ping (`delivered === false` — Notifications
+ *     unsupported, permission denied, or a restrictive webview rejected `new
+ *     Notification`), so the catch-up is the ONLY channel that can carry it; OR
+ *   - the human is AWAY (`visibilityState === 'hidden'`) — even when the OS DID
+ *     deliver, a ping fired while the human is away may yet be cleared / DND'd /
+ *     auto-dismissed before they see it (the success criterion's explicit "cleared"
+ *     case), so it is recorded to be recoverable on return.
  *
- * The caller gates this on the human being AWAY (document.visibilityState ===
- * 'hidden'): a ping the human is present for is already covered by the live
- * AttentionBadge + the OS notification, so recording it would only become stale
- * catch-up noise (the success criterion's converse case). Recording ONLY the
- * away-case pings is what makes the catch-up a false-negative recovery net instead
- * of a duplicate channel. Never throws.
+ * A ping the human is PRESENT for (`visibilityState === 'visible'`) AND the OS
+ * delivered is NOT recorded — the human saw it, so recording it would only become
+ * stale catch-up noise (the success criterion's converse). That is the one
+ * combination the catch-up deliberately stays silent on: it is already covered by the
+ * live OS toast, so the catch-up has nothing to recover.
+ *
+ * This is the gate that carries BOTH of the ticket's measurable outcomes — "recover
+ * the miss" (record when lost-or-away) and "no stale noise" (don't record when
+ * present-and-delivered) — so it is extracted PURE + dependency-free and unit-tested
+ * directly (the discipline chatWatch.ts / desktopAlerts.ts follow), rather than
+ * living as untested inline logic at the fire site. `delivered` is the boolean
+ * fireWatchNotification returns; `visibilityState` is the live
+ * document.visibilityState the caller passes in.
+ *
+ * Scope boundary (deliberate, reconciled with the success criterion): the ONE
+ * unrecovered subcase is "walked away from the desk leaving Warden visible & focused
+ * AND the OS delivered AND the ping was cleared" — `delivered` is true and
+ * `visibilityState` is 'visible', so this returns false and nothing is recorded.
+ * Recovering it would require detecting "returned to the desk" with no visibility /
+ * focus change, which needs always-on idle detection — forbidden by the roadmap's
+ * "no always-on work" constraint. The success criterion is framed around "stepping
+ * away" → Warden hidden → "returning" (visibilitychange), which this gate fully
+ * covers; the visible-and-walked-away + OS-delivered posture is an accepted,
+ * documented limitation, not a regression.
+ */
+export function shouldRecordMiss(delivered: boolean, visibilityState: string): boolean {
+  return !delivered || visibilityState === 'hidden';
+}
+
+/**
+ * Record a fired watch alert durably: build the miss, append it to the bounded ring
+ * buffer, and persist. Called at the watch-ping fire site (useAttentionRollup) AFTER
+ * fireWatchNotification returns, ONLY when shouldRecordMiss says to — i.e. when the
+ * OS channel lost the ping OR the human is away. The record is written at the same
+ * instant the (already-shipped) fire happens; nothing about WARDEN-378's detection or
+ * firing changes.
+ *
+ * Gating the record on shouldRecordMiss (not recording every fire) is what makes the
+ * catch-up a false-negative recovery net instead of a duplicate channel: a ping the OS
+ * delivered to a PRESENT human is never recorded, so it can never re-surface as stale
+ * catch-up noise (the success criterion's converse). A ping the OS LOST, or one fired
+ * while AWAY (possibly cleared), IS recorded so it can be recovered on return. Never
+ * throws.
  */
 export function recordWatchMiss(row: AgentStateRow, reason: WatchReason, now: number = Date.now()): void {
   const log = loadWatchMissLog();

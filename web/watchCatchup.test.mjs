@@ -47,6 +47,7 @@ const {
   getWatchSeen,
   stampWatchSeen,
   recordWatchMiss,
+  shouldRecordMiss,
 } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
@@ -333,6 +334,45 @@ test('recordWatchMiss respects the ring-buffer cap (never grows unbounded)', () 
   const back = loadWatchMissLog();
   assert.equal(back.length, WATCH_MISS_LOG_MAX);
   assert.equal(back[back.length - 1].key, `k${WATCH_MISS_LOG_MAX + 4}`); // newest kept
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nshouldRecordMiss: the recording gate (OS channel lost OR human away) [WARDEN-417]');
+//
+// The recording decision that carries BOTH measurable outcomes of WARDEN-417:
+// "recover the miss" (record when the OS lost it OR the human is away) and
+// "no stale noise" (do NOT record a ping the OS delivered to a present human).
+// Extracted PURE so the gate — previously untested inline logic at the fire site
+// (the gap Issue 3 flagged) — is exercised directly across all four quadrants.
+
+test('OS delivered + present (visible) → NOT recorded (human saw it; no stale noise)', () => {
+  assert.equal(shouldRecordMiss(true, 'visible'), false);
+});
+test('OS lost (not delivered) + present → recorded (catch-up is the only channel)', () => {
+  assert.equal(shouldRecordMiss(false, 'visible'), true);
+});
+test('OS delivered + away (hidden) → recorded (may yet be cleared/DND — the "cleared" case)', () => {
+  assert.equal(shouldRecordMiss(true, 'hidden'), true);
+});
+test('OS lost + away → recorded (both arms agree)', () => {
+  assert.equal(shouldRecordMiss(false, 'hidden'), true);
+});
+test('the away arm is what recovers the success-criterion "cleared" case', () => {
+  // A Notification that constructed (delivered=true) but was cleared / DND'd while the
+  // human was away is still recorded via the away arm — fireWatchNotification returns
+  // true (it constructed) yet the ping may be unseen, so only the away arm recovers it.
+  assert.equal(shouldRecordMiss(true, 'hidden'), true);
+});
+test('present-and-delivered is the ONE combination never recorded (not a second channel)', () => {
+  // This is the converse of the success criterion: a ping the OS delivered to a human
+  // who is present is never recorded, so it can never re-surface as stale catch-up.
+  assert.equal(shouldRecordMiss(true, 'visible'), false);
+});
+test('walked-away-visible + OS lost IS recovered (the !delivered arm, not gated on hidden)', () => {
+  // Blocker 2's recoverable subcase: the human walked away leaving Warden visible, and
+  // the OS channel failed. The !delivered arm records it (visibility !== 'hidden' yet
+  // recorded) — the pure-hidden gate the first attempt shipped would have discarded it.
+  assert.equal(shouldRecordMiss(false, 'visible'), true);
 });
 
 console.log(`\n✓ WATCH CATCHUP TESTS PASS (${passed})`);
