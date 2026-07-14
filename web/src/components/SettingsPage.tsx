@@ -201,12 +201,20 @@ interface Props {
   // `text` ever leaves the client, over the existing /api/send path.
   snippets: Snippet[];
   setSnippets: (v: Snippet[]) => void;
-  // Default shell launched by the pane-grid ＋ split button (WARDEN-223). Blank
+  // Default shell opened by BOTH the ＋ new-chat *shell* preset and the ＋ split
+  // button (WARDEN-429 — unifies the prior split-only defaultSplitShell). Blank
   // means "no explicit shell" → the host launches its own login shell. Pure
   // client-side localStorage pref, persisted by App's saveUi effect; never sent
-  // to the backend. Independent of the spawn presets above.
-  defaultSplitShell: string;
-  setDefaultSplitShell: (v: string) => void;
+  // to the backend.
+  defaultShell: string;
+  setDefaultShell: (v: string) => void;
+  // Per-host default-shell overrides (WARDEN-429 — mirrors defaultNewChatCwdByHost).
+  // Keys are host strings ('(local)' / SSH host name); a host with no entry (or an
+  // empty value, dropped on load) falls through to defaultShell, then blank (host
+  // login shell). Pure client-side localStorage pref, persisted by App's saveUi
+  // effect; never sent to the backend.
+  defaultShellByHost: Record<string, string>;
+  setDefaultShellByHost: (v: Record<string, string>) => void;
   // "Remember window position and size" is an Electron-main-owned pref, NOT a
   // renderer localStorage pref: OS window bounds must be readable at
   // createWindow() time (before the renderer loads), so the flag + bounds live
@@ -488,7 +496,7 @@ function SnippetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, attentionStates, setAttentionStates, alertCritical, setAlertCritical, alertWarning, setAlertWarning, alertDirective, setAlertDirective, alertError, setAlertError, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, timestampFormat, setTimestampFormat, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatPresetByHost, setDefaultNewChatPresetByHost, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, snippets, setSnippets, defaultSplitShell, setDefaultSplitShell, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin, closeToTray, setCloseToTray, hostOptions, onSetHostSeamlessCopy, resetUiPrefsToDefaults }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, attentionStates, setAttentionStates, alertCritical, setAlertCritical, alertWarning, setAlertWarning, alertDirective, setAlertDirective, alertError, setAlertError, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, timestampFormat, setTimestampFormat, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatPresetByHost, setDefaultNewChatPresetByHost, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, snippets, setSnippets, defaultShell, setDefaultShell, defaultShellByHost, setDefaultShellByHost, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin, closeToTray, setCloseToTray, hostOptions, onSetHostSeamlessCopy, resetUiPrefsToDefaults }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -832,6 +840,23 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
       next[host] = value;
     }
     setDefaultNewChatPresetByHost(next);
+  };
+
+  // Write a per-host default-shell override (WARDEN-429 — the shell mirror of
+  // setHostCwd). An empty/whitespace value means "inherit the global defaultShell"
+  // (then the host login shell) — drop the key entirely so it never persists as a
+  // blank that the resolver would return instead of falling through to the global
+  // default. (The load-time sanitizer drops blanks too; this keeps the live state
+  // in the same sanitized shape between saves.) Keys are the same host strings the
+  // spawn form uses ('(local)' / SSH host name).
+  const setHostShell = (host: string, value: string) => {
+    const next = { ...defaultShellByHost };
+    if (value.trim() === '') {
+      delete next[host];
+    } else {
+      next[host] = value;
+    }
+    setDefaultShellByHost(next);
   };
 
   return (
@@ -1761,21 +1786,56 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   </p>
                 </div>
 
-                {/* Default split shell (WARDEN-223): the shell the pane-grid ＋ split
-                    button spawns next to the focused pane. Blank = the host's own
-                    login shell (auto-detected per host; never hardcoded). A separate
-                    concern from the agent spawn presets above. */}
+                {/* Default shell (WARDEN-429): the single shell preference governing
+                    BOTH the ＋ new-chat *shell* preset and the ＋ split button. Blank
+                    (default) = the host's own login shell (auto-detected per host;
+                    never hardcoded — a zsh-login host yields zsh out of the box), so
+                    an unconfigured user gets the right shell with zero config. A
+                    non-empty value (e.g. zsh/fish/pwsh) is used everywhere, overridable
+                    per host below. Supersedes the prior split-only "Default split
+                    shell" (folded in on load) and the hardcoded 'bash' the new-chat
+                    shell preset used to force-feed. */}
                 <div className="flex flex-col gap-2">
-                  <Label htmlFor="defaultSplitShell">Default split shell</Label>
+                  <Label htmlFor="defaultShell">Default shell (fallback for any host without its own)</Label>
                   <Input
-                    id="defaultSplitShell"
-                    value={defaultSplitShell}
-                    onChange={(e) => setDefaultSplitShell(e.target.value)}
+                    id="defaultShell"
+                    value={defaultShell}
+                    onChange={(e) => setDefaultShell(e.target.value)}
                     placeholder="auto (host login shell)"
                   />
                   <p className="text-xs text-muted-foreground">
-                    Shell launched by the ＋ split button next to a pane, on that pane's host at its working directory. Enter a name like <code className="bg-muted px-1 rounded">zsh</code> or <code className="bg-muted px-1 rounded">pwsh</code>; leave blank to use each host's default login shell.
+                    Shell opened by the ＋ new-chat <em>shell</em> preset and the ＋ split button. Enter a name like <code className="bg-muted px-1 rounded">zsh</code> or <code className="bg-muted px-1 rounded">fish</code>; leave blank to use each host's default login shell (the out-of-the-box behavior). Set a per-host override below to use a different shell on a specific host.
                   </p>
+                </div>
+
+                {/* Per-host default-shell overrides (WARDEN-429 — the shell mirror of
+                    the per-host cwd block below). A shell is host-specific (zsh on a
+                    mac, fish on a Linux box), so a single global default breaks the
+                    moment there is a second host. Leave a host blank to inherit the
+                    global default above (then the host's login shell). Keys are the
+                    same host strings the spawn form uses ('(local)' / SSH host). */}
+                <div className="flex flex-col gap-2">
+                  <Label>Default shell per host</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Override the default shell for a specific host. Leave a host blank to use the global default above (or the host's login shell).
+                  </p>
+                  <div className="flex flex-col gap-2 rounded-md border bg-muted/30 p-2">
+                    {[{ key: '(local)', label: 'this machine (local)' }, ...availableHosts.map((h) => ({ key: h, label: h }))].map(({ key, label }) => {
+                      const safeId = `defaultShellByHost-${key.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+                      return (
+                        <div className="flex flex-col gap-1" key={`shellByHost-${key}`}>
+                          <Label htmlFor={safeId} className="text-xs font-normal text-muted-foreground">{label}</Label>
+                          <Input
+                            id={safeId}
+                            value={defaultShellByHost[key] ?? ''}
+                            onChange={(e) => setHostShell(key, e.target.value)}
+                            placeholder="auto (host login shell)"
+                            className="h-8"
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
 
                 {/* Default working directory (WARDEN-311): the GLOBAL cwd fallback
