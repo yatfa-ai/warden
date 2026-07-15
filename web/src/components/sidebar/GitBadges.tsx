@@ -19,6 +19,7 @@ import { type ProjectGitAgent, type FileCollision } from '@/lib/gitStateSummary'
 import { formatWhatsNewLine, type WhatsNewSummary } from '@/lib/whatsNew';
 import type { Chat } from '@/lib/types';
 import type { GitCommit, GitFile, GitStash, DiffStat } from './types';
+import { DiffStatChip } from './DiffStatChip';
 
 /**
  * Color the porcelain X/Y columns for one changed file (WARDEN-369). Working-tree
@@ -142,26 +143,6 @@ export function GitChangedFile({ file, onOpen, onOpenConflict }: { file: GitFile
   }
   return (
     <span className="flex items-center gap-1 text-[10px] text-muted-foreground">{content}</span>
-  );
-}
-
-/**
- * A compact `+N −M` magnitude chip for an agent's uncommitted working-tree edits
- * (insertions/deletions from `git diff HEAD --shortstat`). Renders NOTHING for a
- * clean tree or an all-untracked WIP: `--shortstat` counts TRACKED (staged +
- * unstaged) edits only, so a purely-untracked WIP yields +0−0 which would read as
- * "nothing changed" (a lie) — untracked adds keep speaking through the existing
- * file count. Reuses the badge's green-add / red-del color language (WARDEN-411).
- */
-export function DiffStatChip({ diffstat, className }: { diffstat?: DiffStat | null; className?: string }) {
-  if (!diffstat) return null;
-  // The all-untracked guard: no tracked edits → render nothing, not +0−0.
-  if (diffstat.insertions === 0 && diffstat.deletions === 0) return null;
-  return (
-    <span className={cn('inline-flex items-center gap-1 font-mono text-[10px]', className)}>
-      <span className="text-green-400">+{diffstat.insertions}</span>
-      <span className="text-red-400">−{diffstat.deletions}</span>
-    </span>
   );
 }
 
@@ -646,8 +627,10 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
 
   // WARDEN-398: the aggregated range-diff modal target. Set by the "View full diff"
   // affordance in the outgoing (↑N) or incoming (↓N) section; null while closed.
-  // Rendered by the generalized DiffViewer (range mode) as a sibling of this popover.
-  const [rangeDiff, setRangeDiff] = useState<{ kind: 'outgoing' | 'incoming'; count: number } | null>(null);
+  // WARDEN-449: extended to the ± (worktree) axis — `git diff HEAD`, no count (the
+  // magnitude is the in-scope `diffstat` prop, not a commit count). Rendered by the
+  // generalized DiffViewer (range mode) as a sibling of this popover.
+  const [rangeDiff, setRangeDiff] = useState<{ kind: 'outgoing' | 'incoming' | 'worktree'; count?: number } | null>(null);
   // Controlled open so the "View full diff" affordance can dismiss this popover
   // before the DiffViewer modal opens on top (mirrors GitStateBadge's /
   // GitCollisionBadge's setOpen(false) + open-dialog discipline).
@@ -796,6 +779,38 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
             </ul>
           ) : (
             <div className="px-1 py-1 text-[10px] text-muted-foreground">no commits</div>
+          )}
+          {clean === false && (
+            <div className="mt-1.5 border-t border-border pt-1.5">
+              <div className="mb-1 flex items-center justify-between gap-2 px-0.5">
+                <span className="flex items-center gap-1 text-[10px] font-medium text-yellow-400">
+                  uncommitted · ±
+                  {/* The ± magnitude (+N −M) — the SAME `git diff HEAD --shortstat` the
+                      full diff below covers, so the chip's count and the diff content are
+                      consistent by construction (WARDEN-411). Renders nothing for an
+                      all-untracked WIP (DiffStatChip's own +0−0 guard). */}
+                  <DiffStatChip diffstat={diffstat} />
+                </span>
+                {/* WARDEN-449: the ± axis's aggregated "full diff" — the net `git diff
+                    HEAD` of every uncommitted (staged+unstaged) change as one view,
+                    answering "what is this agent changing right now, in full?" without
+                    expanding each dirty file (WARDEN-151). Mirrors the ↑/↓ affordances
+                    (WARDEN-398); appears only when the tree is dirty (`clean === false`),
+                    just as those appear only when ahead/behind > 0. A real <Button>
+                    (WARDEN-68); closes the popover so the DiffViewer modal takes focus. */}
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  onClick={(e) => { e.stopPropagation(); setPopoverOpen(false); setRangeDiff({ kind: 'worktree' }); }}
+                  className="text-muted-foreground hover:text-yellow-300"
+                  aria-label="view the full uncommitted diff"
+                  title="view the aggregated uncommitted diff — net git diff HEAD"
+                >
+                  <GitCompare />
+                  full diff
+                </Button>
+              </div>
+            </div>
           )}
           {aheadCount > 0 && (
             <div className="mt-1.5 border-t border-border pt-1.5">
@@ -994,6 +1009,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
         filePath=""
         range={rangeDiff?.kind}
         count={rangeDiff?.count}
+        diffstat={rangeDiff?.kind === 'worktree' ? diffstat : undefined}
         open={!!rangeDiff}
         onOpenChange={(o) => { if (!o) setRangeDiff(null); }}
       />
