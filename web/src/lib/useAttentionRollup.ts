@@ -38,7 +38,7 @@ import {
   ATTENTION_SEVERITY_DEFAULTS,
   type AttentionSeverityPrefs,
 } from '@/lib/desktopAlerts';
-import { diffWatchAlerts, indexByWatchKey } from '@/lib/chatWatch';
+import { diffWatchAlerts, indexByWatchKey, applyWatchCooldown, type WatchLastFiredMap } from '@/lib/chatWatch';
 import { recordWatchMiss, shouldRecordMiss } from '@/lib/watchCatchup';
 import type { HealthData, ActivityStats, AgentStateRow, AgentStatesData } from '@/lib/types';
 
@@ -184,6 +184,12 @@ export function useAttentionRollup(
   // not a fire) — so a stale prior carried over from a previous watch session is
   // dropped before the diff (see fetchAgentStates).
   const prevWatchedRef = useRef<Set<string> | null>(null);
+  // WARDEN-452: per-key cooldown anchor for the LIVE watch-ping channel. Sibling of
+  // watchPrevRef: a {key → {reason, firedAt}} map advanced each fire so a flapping
+  // watched chat re-fires ONE ping per episode window, not one per re-entry once the
+  // prior toast is gone (escalations override + reset). Pruned to watched keys below
+  // so an un-watched key's stale anchor can't suppress a fresh re-watch's first ping.
+  const watchLastFiredRef = useRef<WatchLastFiredMap>({});
 
   const fetchHealthStats = useCallback(async () => {
     const after = new Date(Date.now() - ATTENTION_RECENT_WINDOW_MS).toISOString();
@@ -232,6 +238,24 @@ export function useAttentionRollup(
           }
           prevWatchedRef.current = new Set(watched);
           const alerts = diffWatchAlerts(watchPrevRef.current, curByKey, watched);
+          // WARDEN-452: cooldown the LIVE watch-ping channel BEFORE firing. A flapping
+          // watched chat re-enters its needs-state on every poll, and each re-entry
+          // would ping anew once the prior toast is dismissed / DND'd / auto-timed-out
+          // (the OS `tag` only replaces a still-displayed notification). applyWatchCooldown
+          // collapses such a key to ONE ping per episode window — escalations to a more
+          // urgent need override + reset; same-or-lower-urgency re-entries within the
+          // window are suppressed. It returns the subset that may fire + the updated
+          // per-key anchor map. Suppressed alerts skip BOTH the fire AND the catch-up
+          // record below — else stale awayMisses rows would undermine the catch-up's
+          // own dedup. WARDEN-426's focus-gate is a second pre-fire filter on this same
+          // loop (now merged on main); both must pass to fire — the cooldown runs first
+          // (producing `fireable`), then the focus-gate wraps each survivor's fire+record.
+          const now = Date.now();
+          const { fire: fireable, lastFired: nextLastFiredRaw } = applyWatchCooldown(
+            alerts,
+            watchLastFiredRef.current,
+            now,
+          );
           // Advance the per-key baseline for watched keys. A key observed this poll
           // updates; a watched key ABSENT this poll (host blip / gone chat) KEEPS its
           // last-known state so a recover-into-needs-you still diffs correctly. The
@@ -244,7 +268,24 @@ export function useAttentionRollup(
             else if (watchPrevRef.current[k]) nextPrev[k] = watchPrevRef.current[k];
           }
           watchPrevRef.current = nextPrev;
-          for (const a of alerts) {
+          // WARDEN-452: prune the cooldown anchors to watched keys (mirrors the nextPrev
+          // rebuild above). The gate carried every prior anchor forward; this drops the
+          // un-watched ones so the map stays bounded to watched-keys-that-fired and a
+          // stale anchor can't suppress a fresh re-watch's first ping.
+          const nextLastFired: WatchLastFiredMap = {};
+          for (const k of watched) {
+            if (nextLastFiredRaw[k]) nextLastFired[k] = nextLastFiredRaw[k];
+          }
+          watchLastFiredRef.current = nextLastFired;
+          // WARDEN-452 + WARDEN-426 compose as two pre-fire filters on this loop,
+          // both of which must pass for a ping to fire:
+          //  - WARDEN-452 (cooldown): the loop runs over `fireable` — the subset of
+          //    `alerts` that survived the per-key cooldown (one ping per flapping
+          //    need-episode; escalations override + reset). A suppressed re-entry
+          //    never reaches here, so it skips BOTH the fire AND the catch-up record.
+          //  - WARDEN-426 (focus-gate): for each surviving alert, `shouldFireWatch`
+          //    decides whether to actually ping given the human's focus + presence.
+          for (const a of fireable) {
             // WARDEN-426: focus-gate the ping — if the human is BOTH focused on
             // this exact pane AND present (Warden visible), skip the OS ping: a
             // focused pane is open + visible, so they can already see it via the
@@ -255,7 +296,7 @@ export function useAttentionRollup(
             // watch feature's purpose (watch, step away, get pinged) and the
             // badge is not visible to carry the signal while away. Gating on
             // focus alone would swallow the away-ping entirely (the baseline
-            // below already advanced → no later re-fire either).
+            // above already advanced → no later re-fire either).
             //
             // SCOPE NOTE: the gate wraps BOTH the OS ping AND the catch-up
             // record (recordWatchMiss). That is correct ONLY because of the

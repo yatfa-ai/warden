@@ -31,7 +31,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-chat-watch-test-'));
 const tmpFile = join(tmpDir, 'chatWatch.mjs');
 writeFileSync(tmpFile, code);
-const { diffWatchAlerts, detectWatchCompleted, indexByWatchKey } = await import(tmpFile);
+const { diffWatchAlerts, detectWatchCompleted, indexByWatchKey, applyWatchCooldown, WATCH_PING_COOLDOWN_MS } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -207,6 +207,162 @@ test('falls back to id when key is absent', () => {
 test('null / empty rows → empty index (no crash)', () => {
   assert.deepEqual(indexByWatchKey(null), {});
   assert.deepEqual(indexByWatchKey([]), {});
+});
+
+// --- applyWatchCooldown (WARDEN-452) -----------------------------------------
+// The per-key cooldown gate: a flapping watched chat produces ONE ping per need-
+// episode (escalations override + reset), closing the live-channel false-positive
+// vector. applyWatchCooldown reads only `key` + `reason` off each alert, so a minimal
+// WatchAlert suffices (the row + transition states ride along for the fire site).
+const walert = (key, reason) => ({ key, reason, row: row(key, reason), fromState: 'active', toState: reason });
+
+console.log('\napplyWatchCooldown (WARDEN-452): one ping per flapping need-episode');
+test('WATCH_PING_COOLDOWN_MS defaults to ~5 min', () => {
+  assert.equal(WATCH_PING_COOLDOWN_MS, 5 * 60 * 1000);
+});
+
+test('first fire (no prior) fires + anchors the window at now', () => {
+  const { fire, lastFired } = applyWatchCooldown([walert('a', 'waiting')], {}, 1000, 5000);
+  assert.equal(fire.length, 1);
+  assert.equal(fire[0].key, 'a');
+  assert.equal(lastFired.a.reason, 'waiting');
+  assert.equal(lastFired.a.firedAt, 1000);
+});
+
+test('null lastFired → every alert fires (first-fire baseline)', () => {
+  const { fire, lastFired } = applyWatchCooldown([walert('a', 'waiting'), walert('b', 'erroring')], null, 1000, 5000);
+  assert.equal(fire.length, 2);
+  assert.equal(lastFired.a.firedAt, 1000);
+  assert.equal(lastFired.b.firedAt, 1000);
+});
+
+test('same key + same reason re-entered WITHIN the window is SUPPRESSED', () => {
+  const prev = { a: { reason: 'waiting', firedAt: 1000 } };
+  const { fire, lastFired } = applyWatchCooldown([walert('a', 'waiting')], prev, 3000, 5000);
+  assert.equal(fire.length, 0);
+  // the anchor is NOT advanced — the window stays measured from the first fire
+  assert.equal(lastFired.a.firedAt, 1000);
+  assert.equal(lastFired.a.reason, 'waiting');
+});
+
+test('same key + same reason re-entered AFTER the window fires + re-anchors', () => {
+  const prev = { a: { reason: 'waiting', firedAt: 1000 } };
+  const { fire, lastFired } = applyWatchCooldown([walert('a', 'waiting')], prev, 7000, 5000);
+  assert.equal(fire.length, 1);
+  assert.equal(lastFired.a.firedAt, 7000);
+});
+
+test('waiting → erroring WITHIN the window is an ESCALATION → fires + resets timer', () => {
+  // lower priority number = more urgent: erroring(0) < waiting(3)
+  const prev = { a: { reason: 'waiting', firedAt: 1000 } };
+  const { fire, lastFired } = applyWatchCooldown([walert('a', 'erroring')], prev, 3000, 5000);
+  assert.equal(fire.length, 1);
+  assert.equal(lastFired.a.reason, 'erroring');
+  assert.equal(lastFired.a.firedAt, 3000); // reset
+});
+
+test('escalation RESETS the timer: a later same-reason re-entry is suppressed vs the NEW anchor', () => {
+  // fire waiting@1000; escalate erroring@3000 (resets anchor to 3000); re-enter
+  // erroring@7000. From the RESET anchor: 7000-3000=4000 < 5000 → suppressed. From
+  // the original t=1000 it would be 6000 >= 5000 → fire. The suppress proves reset.
+  let lastFired = {};
+  let pings = 0;
+  const step = (alerts, now) => {
+    const r = applyWatchCooldown(alerts, lastFired, now, 5000);
+    lastFired = r.lastFired;
+    pings += r.fire.length;
+  };
+  step([walert('a', 'waiting')], 1000);  // fires (1)
+  step([walert('a', 'erroring')], 3000); // escalation → fires + resets to 3000 (2)
+  step([walert('a', 'erroring')], 7000); // 7000-3000=4000 < 5000 → suppressed
+  assert.equal(pings, 2);
+});
+
+test('erroring → waiting WITHIN the window is LOWER urgency → suppressed', () => {
+  const prev = { a: { reason: 'erroring', firedAt: 1000 } };
+  const { fire } = applyWatchCooldown([walert('a', 'waiting')], prev, 3000, 5000);
+  assert.equal(fire.length, 0);
+});
+
+test('waiting → completed WITHIN the window fires (completed outranks waiting on the urgency ladder)', () => {
+  // Documents the deliberate WARDEN-452 choice: `completed` participates in the uniform
+  // priority rule, not special-cased. completed(2) < waiting(3) → escalation → fires/reset.
+  // A finished task is genuinely new, actionable info; suppressing it risks a false negative.
+  const prev = { a: { reason: 'waiting', firedAt: 1000 } };
+  const { fire, lastFired } = applyWatchCooldown([walert('a', 'completed')], prev, 3000, 5000);
+  assert.equal(fire.length, 1);
+  assert.equal(lastFired.a.reason, 'completed');
+});
+
+test('a flapping key (erroring → active → erroring each poll) → ONE ping per episode window', () => {
+  const cooldown = WATCH_PING_COOLDOWN_MS;
+  let lastFired = {};
+  let pings = 0;
+  const step = (alerts, now) => {
+    const r = applyWatchCooldown(alerts, lastFired, now, cooldown);
+    lastFired = r.lastFired;
+    pings += r.fire.length;
+  };
+  // episode window [0, 5min): several re-entries into erroring
+  step([walert('a', 'erroring')], 0);            // first erroring → fires (1)
+  step([walert('a', 'erroring')], 60_000);       // re-entry within window → suppressed
+  step([walert('a', 'erroring')], 120_000);      // suppressed
+  step([walert('a', 'erroring')], 240_000);      // suppressed
+  assert.equal(pings, 1);
+  // after the window elapses, a re-entry fires again (a new episode)
+  step([walert('a', 'erroring')], cooldown + 60_000);
+  assert.equal(pings, 2);
+});
+
+test('different keys are independent (no cross-key cooldown)', () => {
+  const prev = { a: { reason: 'waiting', firedAt: 1000 } };
+  // key a same-reason within window → suppressed; key b no prior → fires
+  const { fire } = applyWatchCooldown([walert('a', 'waiting'), walert('b', 'waiting')], prev, 3000, 5000);
+  assert.equal(fire.length, 1);
+  assert.equal(fire[0].key, 'b');
+});
+
+test('a key with a prior anchor but no alert this diff KEEPS its anchor (carry-forward)', () => {
+  const prev = { a: { reason: 'waiting', firedAt: 1000 }, b: { reason: 'erroring', firedAt: 2000 } };
+  const { fire, lastFired } = applyWatchCooldown([], prev, 3000, 5000);
+  assert.equal(fire.length, 0);
+  assert.equal(lastFired.a.firedAt, 1000); // preserved
+  assert.equal(lastFired.b.firedAt, 2000); // preserved
+});
+
+test('the input lastFired map is NOT mutated (immutability)', () => {
+  const prev = { a: { reason: 'waiting', firedAt: 1000 } };
+  const { lastFired } = applyWatchCooldown([walert('a', 'waiting')], prev, 3000, 5000);
+  assert.equal(prev.a.firedAt, 1000);      // input unchanged
+  assert.equal(lastFired.a.firedAt, 1000); // suppressed → anchor retained
+  assert.notEqual(lastFired, prev);        // a new map is returned
+});
+
+test('composes with diffWatchAlerts: a flapping chat pings once per window end-to-end', () => {
+  const cooldown = 5 * 60 * 1000;
+  let statePrev = {};
+  let lastFired = {};
+  let pings = 0;
+  const watched = ['a'];
+  const poll = (curState, now) => {
+    const cur = { a: row('a', curState) };
+    const alerts = diffWatchAlerts(statePrev, cur, watched);
+    statePrev = cur;
+    const r = applyWatchCooldown(alerts, lastFired, now, cooldown);
+    lastFired = r.lastFired;
+    pings += r.fire.length;
+  };
+  poll('active', 0);                                   // baseline (no alert)
+  poll('erroring', 60_000);                            // active→erroring → fires (1)
+  poll('active', 120_000);                             // recovery (no alert)
+  poll('erroring', 180_000);                           // re-entry within window → suppressed
+  poll('active', 240_000);                             // recovery
+  poll('erroring', 300_000);                           // suppressed (1)
+  assert.equal(pings, 1);
+  // after the window from the first fire (t=60_000) elapses, a re-entry fires
+  poll('active', 60_000 + cooldown + 10_000);
+  poll('erroring', 60_000 + cooldown + 20_000);        // fires (2)
+  assert.equal(pings, 2);
 });
 
 console.log(`\n✓ CHAT WATCH TESTS PASS (${passed})`);
