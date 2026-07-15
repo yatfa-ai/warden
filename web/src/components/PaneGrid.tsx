@@ -79,11 +79,16 @@ interface Props {
   // this grid's own FileViewer — App owns the persisted pref; the FileViewer's
   // blame view formats author-dates per the pref, mirroring every other surface.
   timestampFormat: TimestampFormat;
+  // File Viewer markdown view mode (WARDEN-480): pure pass-through to PaneTile
+  // and to this grid's own FileViewer — App owns the persisted pref (one global
+  // remembered choice) so toggling Rendered⇄Source once sticks across opens.
+  fileViewerViewMode: 'rendered' | 'source';
+  onFileViewerViewModeChange: (mode: 'rendered' | 'source') => void;
 }
 
 function colsFor(n: number) { return n <= 1 ? 1 : Math.ceil(Math.sqrt(n)); }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, snippets, timestampFormat }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, snippets, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange }: Props) {
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
   // WARDEN-334: the 1-based line a grep result selected, fed to FileViewer's
@@ -280,6 +285,8 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     onSpawned={onSpawned}
                     snippets={snippets}
                     timestampFormat={timestampFormat}
+                    fileViewerViewMode={fileViewerViewMode}
+                    onFileViewerViewModeChange={onFileViewerViewModeChange}
                   />
                 </div>
               );
@@ -296,6 +303,8 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
           line={fileLine}
           open={fileOpen}
           timestampFormat={timestampFormat}
+          viewMode={fileViewerViewMode}
+          onViewModeChange={onFileViewerViewModeChange}
           onOpenChange={(open) => {
             setFileOpen(open);
             if (!open) {

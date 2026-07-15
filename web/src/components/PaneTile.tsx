@@ -157,9 +157,13 @@ interface Props {
   // FileViewer — App owns the persisted pref; the blame view formats author-dates
   // per the pref, mirroring every other timestamp surface.
   timestampFormat: TimestampFormat;
+  // File Viewer markdown view mode (WARDEN-480): pure pass-through to this pane's
+  // FileViewer — App owns the persisted pref (one global remembered choice).
+  fileViewerViewMode: 'rendered' | 'source';
+  onFileViewerViewModeChange: (mode: 'rendered' | 'source') => void;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, onSpawned, snippets, timestampFormat }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, onSpawned, snippets, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -923,6 +927,8 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           line={viewerLine}
           open={viewerOpen}
           timestampFormat={timestampFormat}
+          viewMode={fileViewerViewMode}
+          onViewModeChange={onFileViewerViewModeChange}
           onOpenChange={(o) => { setViewerOpen(o); if (!o) { setViewerPath(''); setViewerLine(undefined); } }}
         />
       )}

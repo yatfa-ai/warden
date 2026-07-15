@@ -599,6 +599,62 @@ test('the pref survives an empty-mode mount (carried by the live spread, not the
   assert.equal(loadUi().healthGroupBy, 'host');
 });
 
+console.log('\nfileViewerViewMode (File Viewer rendered⇄source) round-trips through loadUi/saveUi — WARDEN-480');
+// WARDEN-480: the File Viewer's markdown Rendered⇄Source toggle was a
+// FileViewer-local useState that reset to 'rendered' on every open, so a human
+// who prefers source had to re-toggle on every file. The fix makes it an
+// App-owned persisted pref (mirroring timestampFormat/agentFilter). These tests
+// pin the storage half of that contract — when the key IS in the live spread,
+// persistUiState carries it and loadUi returns it; a bogus/null persisted value
+// coerces back to the conservative 'rendered' default.
+test('defaults to "rendered" when nothing is stored (markdown opens rendered for docs/README reading)', () => {
+  reset();
+  const ui = loadUi();
+  assert.equal(ui.fileViewerViewMode, 'rendered');
+});
+test('every view mode (rendered/source) round-trips', () => {
+  for (const v of ['rendered', 'source']) {
+    reset();
+    saveUi({ ...loadUi(), fileViewerViewMode: v });
+    assert.equal(loadUi().fileViewerViewMode, v, `${v} should round-trip`);
+  }
+});
+test('a bogus persisted value coerces back to "rendered" on load (only explicit "source" opts in)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], fileViewerViewMode: 'bogus' }));
+  assert.equal(loadUi().fileViewerViewMode, 'rendered');
+});
+test('a null persisted value coerces back to "rendered" on load', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], fileViewerViewMode: null }));
+  assert.equal(loadUi().fileViewerViewMode, 'rendered');
+});
+test('missing field loads as the default', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
+  assert.equal(loadUi().fileViewerViewMode, 'rendered');
+});
+test('the pref survives App\'s persistUiState write path (the WARDEN-480 regression guard)', () => {
+  // THE bug: the toggle was transient local state, never persisted, so a choice
+  // never survived an open. This asserts the contract the fix relies on — when
+  // the key IS in the live spread (as App now includes it), persistUiState
+  // carries it and loadUi returns it. It exercises the exact write path App's
+  // saveUi effect uses, not just a direct saveUi.
+  reset();
+  const d0 = loadUi();
+  saveUi(persistUiState({ ...d0, fileViewerViewMode: 'source' }, 'previous', d0, false));
+  assert.equal(loadUi().fileViewerViewMode, 'source');
+});
+test('the pref survives an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
+  // fileViewerViewMode is NOT a workspace field, so persistUiState spreads it
+  // from `live`. Confirm an empty-launch still round-trips a freshly set value —
+  // the freeze must not drop it alongside the workspace.
+  reset();
+  const d0 = loadUi();
+  saveUi(persistUiState({ ...d0, fileViewerViewMode: 'source' }, 'empty', d0, true));
+  assert.equal(loadUi().fileViewerViewMode, 'source');
+});
+
 console.log('\ninitialWorkspace gates the workspace on mount');
 test('"previous" restores the last-saved workspace', () => {
   const disk = { ...loadUi(), workspaces: [{ id: 'w1', name: 'Workspace 1', openPanes: ['a'], focused: 'a', recentlyClosed: [] }], activeWorkspaceId: 'w1', paneHost: { a: 'host' } };
@@ -1557,6 +1613,7 @@ const overTunedLive = () => {
     agentFilter: 'filtering',
     agentSort: 'recent',
     healthGroupBy: 'host',
+    fileViewerViewMode: 'source',
     // workspace + layout (all non-default → must be PRESERVED). WARDEN-372 moved
     // the open panes + focus into per-workspace WorkspacePaneSet objects under
     // `workspaces` (+ activeWorkspaceId); paneHost stayed global. Seed a
@@ -1630,11 +1687,12 @@ test('every pref field of resetUiPrefsPreservingWorkspace(live) equals DEFAULT_U
   assert.deepEqual(r.defaultNewChatPresetByHost, {});
   assert.deepEqual(r.defaultNewChatCwdByHost, {});
   assert.deepEqual(r.snippets, STARTER_SNIPPETS);
-  // agentFilter/agentSort are in DEFAULT_UI; the helper resets them too.
+  // agentFilter/agentSort/healthGroupBy/fileViewerViewMode are in DEFAULT_UI; the helper resets them too.
   assert.equal(r.agentFilter, 'all');
   assert.equal(r.agentSort, 'manual');
   // healthGroupBy is in DEFAULT_UI (WARDEN-468); the helper resets it too.
   assert.equal(r.healthGroupBy, 'health');
+  assert.equal(r.fileViewerViewMode, 'rendered');
 });
 
 test('the workspace + panel-layout fields are copied from live (the workspace survives)', () => {

@@ -35,6 +35,13 @@ interface FileViewerProps {
   // "Timestamp format" pref (WARDEN-422): honors the client-side relative vs
   // absolute pref on blame author-dates, mirroring every other timestamp surface.
   timestampFormat: TimestampFormat;
+  // Rendered ⇄ Source view mode for markdown (WARDEN-480): App owns this as a
+  // persisted pref so the choice survives across opens/reloads — one global
+  // remembered toggle. Controlled here (no local useState); the toggle handler
+  // calls onViewModeChange to write back up to App. Defaults to 'rendered' at the
+  // App layer; the CommitBlobView historical snapshot honors the same value.
+  viewMode: 'rendered' | 'source';
+  onViewModeChange: (mode: 'rendered' | 'source') => void;
   onOpenChange: (open: boolean) => void;
 }
 
@@ -50,7 +57,7 @@ type BlameLine = { line: number; hash: string; author: string; date: string; sum
 // git-show accepts abbreviated hashes, so it resolves unambiguously on click.
 type HistoryCommit = { hash: string; subject: string; author: string; date: string };
 
-export function FileViewer({ chatId, filePath, open, line, timestampFormat, onOpenChange }: FileViewerProps) {
+export function FileViewer({ chatId, filePath, open, line, timestampFormat, viewMode, onViewModeChange, onOpenChange }: FileViewerProps) {
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -89,10 +96,11 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, onOp
   const [blobError, setBlobError] = useState<string | null>(null);
   const blobCache = useRef<Map<string, { content: string | null; error: string | null }>>(new Map());
 
-  // Rendered ⇄ Source view mode for markdown files (WARDEN-266). Only the plain
-  // view branch (!annotate && !hasLine) honors it; line-jump and blame views stay
-  // source-based regardless. Defaults to rendered so opening a README shows docs.
-  const [viewMode, setViewMode] = useState<'rendered' | 'source'>('rendered');
+  // Rendered ⇄ Source view mode for markdown files (WARDEN-266). Now App-owned
+  // and persisted (WARDEN-480): `viewMode` is the controlled prop (see Props);
+  // the toggle handler calls `onViewModeChange`. Only the plain view branch
+  // (!annotate && !hasLine) honors it; line-jump and blame views stay source-
+  // based regardless. Defaults to rendered so opening a README shows docs.
 
   useEffect(() => {
     if (!open) {
@@ -104,7 +112,9 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, onOp
       setHistory(false); // likewise reset file-history (avoid stale commits for a prior file)
       setCommits(null);
       setHistoryError(null);
-      setViewMode('rendered'); // start each markdown open rendered (avoid stale source mode)
+      // viewMode is NOT reset here (WARDEN-480): it's now a persisted App pref,
+      // so the Rendered⇄Source choice survives across opens/reloads. The other
+      // resets here clear genuinely stale per-file state; viewMode is global.
       setViewAtCommit(null); // clear any at-commit snapshot (avoid stale blob for a prior file)
       setBlobContent(null);
       setBlobError(null);
@@ -313,7 +323,7 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, onOp
                       variant={viewMode === 'rendered' ? 'default' : 'outline'}
                       size="sm"
                       className="h-7 shrink-0 gap-1.5 text-xs"
-                      onClick={() => setViewMode((m) => (m === 'rendered' ? 'source' : 'rendered'))}
+                      onClick={() => onViewModeChange(viewMode === 'rendered' ? 'source' : 'rendered')}
                       title={viewMode === 'rendered' ? 'Show raw markdown source' : 'Show rendered documentation'}
                       aria-pressed={viewMode === 'rendered'}
                     >

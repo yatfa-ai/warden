@@ -373,6 +373,11 @@ export interface UiState {
   // pref (like density/copyOnSelect); persisted by App's saveUi effect, never
   // sent to the backend / /api/config. See WARDEN-213.
   timestampFormat?: TimestampFormat;
+  // File Viewer markdown view mode: 'rendered' (default = docs/README reading)
+  // or 'source' (raw markdown — common when inspecting agent prompt/config/
+  // CLAUDE.md files). Pure client-side pref; persisted by App's saveUi effect,
+  // never sent to the backend / /api/config. See WARDEN-480.
+  fileViewerViewMode?: 'rendered' | 'source';
   // App theme: either a concrete named-theme id (e.g. 'github-dark',
   // 'dracula') or 'system' to follow the OS. Default 'system'. Backward
   // compatible: a legacy stored 'light'/'dark'/'system' value migrates on load
@@ -746,6 +751,7 @@ const DEFAULT_UI: UiState = {
   terminalCursorStyle: 'blink-block',
   copyOnSelect: false,
   timestampFormat: 'relative',
+  fileViewerViewMode: 'rendered',
   theme: 'system', density: 'comfortable', paneLayout: 'auto',
   onExitBehavior: 'keep',
   autoFocusNewPane: true,
@@ -834,6 +840,10 @@ export function loadUi(): UiState {
         // type stays 'relative' (today's "2m ago" buckets) — the conservative
         // default that minimizes disruption across every timestamp surface.
         timestampFormat: v.timestampFormat === 'absolute' ? 'absolute' : 'relative',
+        // Only an explicit 'source' opts into raw markdown; absent/unknown/wrong-
+        // type stays 'rendered' (docs/README reading) — the conservative default
+        // that minimizes disruption, matching timestampFormat above. See WARDEN-480.
+        fileViewerViewMode: v.fileViewerViewMode === 'source' ? 'source' : 'rendered',
         theme: normalizeThemePref(v.theme),
         density: v.density === 'compact' ? 'compact' : 'comfortable',
         paneLayout: (v.paneLayout === 'stacked' || v.paneLayout === 'side-by-side') ? v.paneLayout : 'auto',
