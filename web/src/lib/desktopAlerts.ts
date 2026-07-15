@@ -504,6 +504,44 @@ export function formatInAppEntry(entry: NewAttentionEntry): { title: string; des
   return { title: entry.name, description };
 }
 
+/**
+ * Pure: drop the in-app ping entrant for the pane the human is ALREADY focused on
+ * (WARDEN-482). The live at-Warden attention ping (fireAttentionInApp) fires a toast
+ * per genuinely-new entrant — but the entrant whose `key === focusedPaneKey` is the
+ * pane the human is staring at, and pinging it is precisely the roadmap's named
+ * product-killer ("a ping that fires when nothing's needed … it trains the human to
+ * ignore it"). This is the symmetric focus-gate to shouldFireWatch (WARDEN-421/426)
+ * which closed the same "not-after" trust bar for Job #1's watch ping.
+ *
+ *  - `focusedPaneKey == null` (no focus context) → nothing is dropped; every entrant
+ *    toasts. This is the only path that matters because fireAttentionInApp runs solely
+ *    on the VISIBLE branch, which is exactly when focus is meaningful.
+ *  - Aggregate entrants (directives/errors deltas) carry `key: ''` — which never
+ *    equals a real focused pane key (the key is derived `a.key || a.id`, always
+ *    non-empty) — so they ALWAYS survive and still toast. They name no single pane,
+ *    so they are never "the pane the human is reading."
+ *  - Only the ONE named entrant matching the focused pane is removed; every other
+ *    newly-needy pane still pings (focus-gating is per-pane, never a blanket mute).
+ *
+ * Applied here — as a pure, import-free filter on the entrant list — rather than
+ * inlined in fireAttentionInApp so it stays unit-testable directly: the `toast(...)`
+ * delivery lives in useAttentionRollup.ts (it imports 'sonner' + React + the `@/`
+ * alias, so it cannot be loaded standalone under the OXC test transform — exactly
+ * why fireAttentionNotification's delivery is untested too). Mirrors the purity
+ * discipline this file already keeps for shouldFireAlert / diffNewAttention.
+ */
+export function excludeFocusedPane(
+  entries: NewAttentionEntry[],
+  focusedPaneKey?: string | null,
+): NewAttentionEntry[] {
+  if (focusedPaneKey == null) return entries;
+  // Drop ONLY a NAMED entrant (key set) whose key is the focused pane. The `e.key &&`
+  // guard makes aggregate entrants (key: '') ALWAYS survive — faithful to "they are not
+  // the pane the human is reading" — even in the unreachable `focusedPaneKey === ''`
+  // case (App derives the key as `a.key || a.id || null`, so it is never '').
+  return entries.filter((e) => !(e.key && e.key === focusedPaneKey));
+}
+
 // --- Token-spend budget alert (WARDEN-415) -----------------------------------
 //
 // The "while the founder is away" alarm that completes the meter WARDEN-367

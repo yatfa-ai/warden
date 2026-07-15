@@ -4,6 +4,7 @@ import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover
 import { Button } from '@/components/ui/button';
 import {
   rankAttention,
+  pickCalloutTop,
   attentionReason,
   type AttentionRollup,
   type AttentionItem,
@@ -33,6 +34,13 @@ interface Props {
    * so the badge's row bell can reflect + toggle the same set. */
   mutedAlertKeys: string[];
   onToggleMuteAlertKey: (key: string) => void;
+  /** WARDEN-482: the pane the human is currently focused on. The directed callout must
+   * never PROMOTE the pane the human is already reading (the "trains the human to
+   * ignore it" product-killer), so pickCalloutTop excludes it when choosing the
+   * callout target. The sectioned rundown still lists it unchanged — no information
+   * loss, it just isn't the promoted answer. Optional + trailing so existing callers
+   * that don't pass it get the old behavior (callout promotes ranked[0]). */
+  focusedPaneKey?: string | null;
 }
 
 /**
@@ -59,6 +67,7 @@ export function AttentionBadge({
   attentionDesktopAlerts,
   mutedAlertKeys,
   onToggleMuteAlertKey,
+  focusedPaneKey,
 }: Props) {
   const [open, setOpen] = useState(false);
 
@@ -75,13 +84,21 @@ export function AttentionBadge({
 
   // The directed answer (WARDEN-384): the ONE pane a human should go to first,
   // "you're needed HERE, because X" — promoted above the flat rundown so the human
-  // doesn't have to scan to find "first." top is null only when no pane/health agent
-  // needs attention (e.g. just directives/errors counts remain), in which case the
-  // sectioned rundown alone is the directed answer. The callout is gated to ≥2
-  // deep-linkable items: with exactly one pane needing attention the rundown's lone
-  // row already IS the answer, so promoting it would just duplicate that single pane
-  // as both the callout and the row beneath it.
-  const { top, ranked } = rankAttention(rollup);
+  // doesn't have to scan to find "first." calloutTop is null only when focus exclusion
+  // leaves no eligible pane (WARDEN-482) or no pane/health agent needs attention (e.g.
+  // just directives/errors counts remain), in which case the sectioned rundown alone is
+  // the directed answer. The callout is gated to ≥2 deep-linkable items: with exactly
+  // one pane needing attention the rundown's lone row already IS the answer, so
+  // promoting it would just duplicate that single pane as both the callout and the row
+  // beneath it.
+  //
+  // WARDEN-482: calloutTop is focus-EXCLUDED — it is never the pane the human is
+  // already reading (pickCalloutTop skips focusedPaneKey). The rundown (`ranked`,
+  // unchanged) still lists the focused pane, so nothing is lost — it just isn't the
+  // PROMOTED answer. The exclusion is applied locally here (not inside the shared
+  // rankAttention, which also feeds the ungated return-banner callout).
+  const { ranked } = rankAttention(rollup);
+  const calloutTop = pickCalloutTop(ranked, focusedPaneKey);
 
   const { critical, warning, stuck, erroring, waiting, blocked, directives, errors, total } = rollup;
   // Severity cue: red when something is broken (critical/stuck/erroring agent or a
@@ -119,9 +136,9 @@ export function AttentionBadge({
           <TriangleAlert className={cn('size-3.5', tone)} />
           <span className="text-sm font-semibold">{total} need attention</span>
         </div>
-        {top && ranked.length >= 2 && (
+        {calloutTop && ranked.length >= 2 && (
           <div className="px-1.5 pt-1.5">
-            <Callout top={top} onClick={() => openChat(top.id)} />
+            <Callout top={calloutTop} onClick={() => openChat(calloutTop.id)} />
           </div>
         )}
         {/*

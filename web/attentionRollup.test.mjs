@@ -30,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-attention-test-'));
 const tmpFile = join(tmpDir, 'attentionRollup.mjs');
 writeFileSync(tmpFile, code);
-const { buildAttentionRollup, EMPTY_ATTENTION_ROLLUP, rankAttention, attentionReason, hasReturnContent } = await import(tmpFile);
+const { buildAttentionRollup, EMPTY_ATTENTION_ROLLUP, rankAttention, pickCalloutTop, attentionReason, hasReturnContent } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -316,6 +316,64 @@ test('top identity uses key || id so the deep-link opens the correct pane', () =
   const { top } = rankAttention(r);
   assert.equal(top.id, 'pane-key', 'id is the key when present (matches the badge row keying)');
   assert.equal(top.name, 'My Agent');
+});
+
+console.log('\npickCalloutTop (WARDEN-482): the directed callout never promotes the pane the human is reading');
+// The popover's "you're needed HERE" callout is focus-EXCLUDED: the entrant matching
+// focusedPaneKey is skipped, so the callout promotes the NEXT needful pane. The rundown
+// (`ranked`) still lists the focused pane — only the PROMOTED answer changes. Applied
+// locally here (NOT in shared rankAttention, which also feeds the ungated return banner).
+test('focusedPaneKey null → returns ranked[0] (bit-for-bit the old `top`)', () => {
+  const r = roll(health(), stats(), [stateRow('w1', 'waiting'), stateRow('s1', 'stuck')]);
+  const { ranked } = rankAttention(r);
+  assert.deepEqual(ranked.map((x) => x.id), ['w1', 's1']);
+  assert.equal(pickCalloutTop(ranked, null)?.id, 'w1', 'no focus → promote the top');
+  assert.equal(pickCalloutTop(ranked, undefined)?.id, 'w1', 'undefined focus → promote the top');
+});
+test('focused on the TOP-ranked pane → callout promotes the NEXT needful pane (not the one being read)', () => {
+  const r = roll(health(), stats(), [stateRow('w1', 'waiting'), stateRow('s1', 'stuck')]);
+  const { ranked } = rankAttention(r);
+  assert.equal(pickCalloutTop(ranked, 'w1')?.id, 's1', 'w1 is focused → promote s1');
+});
+test('focused on a NON-top ranked pane → the top is still promoted (focus elsewhere does not demote it)', () => {
+  const r = roll(health(), stats(), [stateRow('w1', 'waiting'), stateRow('s1', 'stuck')]);
+  const { ranked } = rankAttention(r);
+  assert.equal(pickCalloutTop(ranked, 's1')?.id, 'w1', 's1 focused but w1 is top → still w1');
+});
+test('focused on a pane NOT in the ranked list → returns ranked[0] (nothing to exclude)', () => {
+  const r = roll(health(), stats(), [stateRow('w1', 'waiting'), stateRow('s1', 'stuck')]);
+  const { ranked } = rankAttention(r);
+  assert.equal(pickCalloutTop(ranked, 'some-other-pane')?.id, 'w1');
+});
+test('an empty ranked list → null (no eligible callout target)', () => {
+  assert.equal(pickCalloutTop([], null), null);
+  assert.equal(pickCalloutTop([], 'w1'), null);
+});
+test('only ONE ranked item and it is the focused pane → null (callout hides; rundown-only)', () => {
+  // In the badge this is also gated by `ranked.length >= 2`, so the callout hides either
+  // way — but pickCalloutTop alone correctly yields null when exclusion empties the list.
+  const r = roll(health(), stats(), [stateRow('w1', 'waiting')]);
+  const { ranked } = rankAttention(r);
+  assert.equal(ranked.length, 1);
+  assert.equal(pickCalloutTop(ranked, 'w1'), null);
+});
+test('the rundown is UNCHANGED by pickCalloutTop (the focused pane still lists; no information loss)', () => {
+  const r = roll(health(), stats(), [stateRow('w1', 'waiting'), stateRow('s1', 'stuck'), stateRow('e1', 'erroring')]);
+  const { ranked } = rankAttention(r);
+  const snapshot = ranked.map((x) => x.id);
+  pickCalloutTop(ranked, 'w1'); // focus on the top
+  assert.deepEqual(ranked.map((x) => x.id), snapshot, 'ranked array is not mutated/filtered');
+  assert.ok(snapshot.includes('w1'), 'the focused pane is still listed in the rundown');
+});
+test('identity is the SAME key || id space as rankAttention (a keyed row is excluded by its key)', () => {
+  const r = roll(health(), stats(), [
+    stateRow('raw-id', 'waiting', { key: 'pane-key', name: 'My Agent' }),
+    stateRow('s1', 'stuck'),
+  ]);
+  const { ranked } = rankAttention(r);
+  assert.equal(ranked[0].id, 'pane-key', 'id is the key when present');
+  assert.equal(pickCalloutTop(ranked, 'pane-key')?.id, 's1', 'excluded by key, not raw id');
+  assert.equal(pickCalloutTop(ranked, 'raw-id')?.id, 'pane-key', 'raw-id does not match → top stays');
 });
 
 console.log('\nattentionReason (WARDEN-436): the "because X" line, shared by the popover + return-banner callouts');
