@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { toast } from 'sonner';
 import {
   Dialog,
   DialogContent,
@@ -8,7 +9,15 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { copyText } from '@/lib/clipboard';
 import { Loader2Icon, SearchIcon } from 'lucide-react';
 
 interface SearchResult {
@@ -37,15 +46,36 @@ interface Props {
 // Command/cmdk list primitive to reach for instead, so the raw element is
 // contained here in its own component rather than inlined in the results map.
 function SearchResultRow({ result, onSelect }: { result: SearchResult; onSelect: (file: string, line?: number) => void }) {
+  // Copy via the Electron-safe helper + a sonner success/error toast — the same
+  // pattern CollectionsSection/ActivityTimeline use for their copy actions.
+  const handleCopy = async (text: string) => {
+    const ok = await copyText(text);
+    if (ok) toast.success('Copied');
+    else toast.error('Copy failed');
+  };
+
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(result.file, result.line)}
-      className="flex flex-col w-full text-left mb-1 p-2 rounded hover:bg-accent transition-colors"
-    >
-      <span className="text-xs text-muted-foreground font-mono truncate">{result.file}:{result.line}</span>
-      <span className="text-sm font-mono whitespace-pre-wrap break-words">{result.text}</span>
-    </button>
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <button
+          type="button"
+          onClick={() => onSelect(result.file, result.line)}
+          className="flex flex-col w-full text-left mb-1 p-2 rounded hover:bg-accent transition-colors"
+        >
+          <span className="text-xs text-muted-foreground font-mono truncate">{result.file}:{result.line}</span>
+          <span className="text-sm font-mono whitespace-pre-wrap break-words">{result.text}</span>
+        </button>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={() => onSelect(result.file, result.line)}>
+          Open in file viewer
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onSelect={() => handleCopy(result.text)}>Copy matched line</ContextMenuItem>
+        <ContextMenuItem onSelect={() => handleCopy(result.file)}>Copy file path</ContextMenuItem>
+        <ContextMenuItem onSelect={() => handleCopy(`${result.file}:${result.line}`)}>Copy file:line</ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
