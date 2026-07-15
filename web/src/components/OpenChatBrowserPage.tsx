@@ -165,6 +165,13 @@ interface Props {
   // this true so the offending (heaviest) session floats to the top. The page
   // mounts fresh each open, so this seeds the local sortUsage state once.
   initialSortUsage?: boolean;
+  // "Hide offline hosts" display pref (WARDEN-164, extended to this surface in
+  // WARDEN-458). When ON, SSH hosts whose last polled status is 'offline'
+  // collapse out of the host scope-selector chip row behind an "Offline (N)"
+  // expander — byte-for-byte the sidebar's predicate. THIS_MACHINE and
+  // online/unknown hosts are never hidden. Off by default, so the chip row is
+  // unchanged unless the human opts in. Visibility only — never deselects.
+  hideOfflineHosts?: boolean;
 }
 
 // Full-page replacement for the former Open Chat browser modal. Mirrors the
@@ -173,7 +180,7 @@ interface Props {
 // sets chatBrowserOpen; the back button / Escape clears it. Per WARDEN-68 Rule 7
 // the browser is a real UI surface (unbounded list + search), so it must be a
 // page, not a blocking Dialog.
-export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResume, onDiscoverHost, hostStatuses, timestampFormat, budget, initialSortUsage }: Props) {
+export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResume, onDiscoverHost, hostStatuses, timestampFormat, budget, initialSortUsage, hideOfflineHosts }: Props) {
   const [selected, setSelected] = useState<string[] | undefined>(undefined);
   const [query, setQuery] = useState('');
   const [resumingId, setResumingId] = useState<string | null>(null);
@@ -194,6 +201,10 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
   // burned the most tokens surface to the top — the flagship "which session
   // spent the most?" question. Off by default (recency first). (WARDEN-367.)
   const [sortUsage, setSortUsage] = useState(!!initialSortUsage);
+  // "Offline (N)" expander for collapsed offline host chips (WARDEN-458). Local
+  // UI state for whether the offline group is expanded. Collapsed by default so
+  // downed hosts stay out of the way until the human goes looking for one.
+  const [offlineExpanded, setOfflineExpanded] = useState(false);
 
   // Load persisted host selection once.
   useEffect(() => { setSelected(loadDiscoverHosts()); }, []);
@@ -434,6 +445,36 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
     finally { setResumingId(null); }
   };
 
+  // "Hide offline hosts" (WARDEN-458): mirror the sidebar's WARDEN-164 predicate
+  // byte-for-byte so both surfaces agree on what "offline" means. Hidden ONLY
+  // when the pref is ON AND host ≠ THIS_MACHINE AND status === 'offline'.
+  // Derived on every render so the 30s status poll drives it: a recovered host
+  // re-appears inline, a dropped one collapses away. When OFF (default),
+  // isOfflineHidden is always false → visibleHosts === hosts, no expander.
+  const hideOffline = hideOfflineHosts === true;
+  const isOfflineHidden = (h: string) =>
+    hideOffline && h !== THIS_MACHINE && hostStatuses[h]?.status === 'offline';
+  const offlineHosts = hosts.filter(isOfflineHidden);
+  const visibleHosts = hosts.filter((h) => !isOfflineHidden(h));
+
+  // One host scope-selector chip. Shared by the inline row and the expanded
+  // offline group so the two stay identical (same StatusDot + toggleHost).
+  const renderHostChip = (h: string) => {
+    const on = effective.includes(h);
+    const st = hostStatuses[h];
+    return (
+      <Button key={h} size="xs" variant={on ? 'secondary' : 'outline'} onClick={() => toggleHost(h)} className="gap-1">
+        <StatusDot
+          size="size-1.5"
+          tone={st?.status === 'online' ? 'green' : st?.status === 'offline' ? 'red' : 'muted'}
+          variant={st?.status === 'online' ? 'solid' : st?.status === 'offline' ? 'square' : 'ring'}
+          label={st?.status ? st.status.charAt(0).toUpperCase() + st.status.slice(1) : 'Unknown'}
+        />
+        {h === THIS_MACHINE ? 'this machine' : h}
+      </Button>
+    );
+  };
+
   return (
     <div className="flex flex-col flex-1 min-h-0">
       <header className="flex items-center gap-2 px-3 h-11 border-b shrink-0">
@@ -467,21 +508,24 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
       <div className="border-b shrink-0">
         <div className="mx-auto max-w-3xl w-full px-4 pt-4 pb-3 flex flex-col gap-3">
           <div className="flex flex-wrap gap-1.5">
-            {hosts.map((h) => {
-              const on = effective.includes(h);
-              const st = hostStatuses[h];
-              return (
-                <Button key={h} size="xs" variant={on ? 'secondary' : 'outline'} onClick={() => toggleHost(h)} className="gap-1">
-                  <StatusDot
-                    size="size-1.5"
-                    tone={st?.status === 'online' ? 'green' : st?.status === 'offline' ? 'red' : 'muted'}
-                    variant={st?.status === 'online' ? 'solid' : st?.status === 'offline' ? 'square' : 'ring'}
-                    label={st?.status ? st.status.charAt(0).toUpperCase() + st.status.slice(1) : 'Unknown'}
-                  />
-                  {h === THIS_MACHINE ? 'this machine' : h}
+            {visibleHosts.map(renderHostChip)}
+            {offlineHosts.length > 0 && (
+              <>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  onClick={() => setOfflineExpanded((v) => !v)}
+                  className="gap-1"
+                  title={offlineExpanded ? 'Hide offline hosts' : 'Show offline hosts'}
+                  aria-expanded={offlineExpanded}
+                >
+                  <span aria-hidden="true">{offlineExpanded ? '▾' : '▸'}</span>
+                  <StatusDot size="size-1.5" tone="red" variant="square" label="Offline" />
+                  Offline ({offlineHosts.length})
                 </Button>
-              );
-            })}
+                {offlineExpanded && offlineHosts.map(renderHostChip)}
+              </>
+            )}
           </div>
           <div className="flex gap-1.5 items-center">
             <Input placeholder="Search live + history sessions…" value={query} onChange={(e) => setQuery(e.target.value)} className="text-xs flex-1" />
