@@ -15,7 +15,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import type { Chat } from '@/lib/types';
-import type { PaneLayout, TerminalCursorStyle, OnExitBehavior, HostOptionsMap, Snippet } from '@/lib/storage';
+import type { PaneLayout, TerminalCursorStyle, OnExitBehavior, Snippet } from '@/lib/storage';
 import type { ThemeId } from '@/lib/theme';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
 
@@ -71,12 +71,6 @@ interface Props {
   // Settings toggle live-updates already-open pane headers, mirroring the
   // sidebar's live update.
   showHostTags?: boolean;
-  // WARDEN-261: per-host Seamless-copy toggle (hostOptions[host].seamlessCopy)
-  // + the per-host dismissal of the "copy impaired" hint. Pure pass-through to
-  // PaneTile; App owns both (persisted client-side localStorage prefs).
-  hostOptions: HostOptionsMap;
-  copyHintDismissed: Record<string, boolean>;
-  onDismissCopyHint: (host: string) => void;
   // Saved instruction snippets (WARDEN-323): pure pass-through to PaneTile —
   // App owns the persisted list. PaneTile renders a "Snippets" submenu in each
   // pane's context menu for one-click send to that pane's agent.
@@ -89,7 +83,7 @@ interface Props {
 
 function colsFor(n: number) { return n <= 1 ? 1 : Math.ceil(Math.sqrt(n)); }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, hostOptions, copyHintDismissed, onDismissCopyHint, snippets, timestampFormat }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, snippets, timestampFormat }: Props) {
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
   // WARDEN-334: the 1-based line a grep result selected, fed to FileViewer's
@@ -283,9 +277,6 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     copyOnSelect={copyOnSelect}
                     onExitBehavior={onExitBehavior}
                     showHostTags={showHostTags}
-                    hostOptions={hostOptions}
-                    copyHintDismissed={copyHintDismissed}
-                    onDismissCopyHint={onDismissCopyHint}
                     onSpawned={onSpawned}
                     snippets={snippets}
                     timestampFormat={timestampFormat}

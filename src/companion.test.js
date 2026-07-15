@@ -31,9 +31,9 @@ import {
   CompanionRpcError, getChannel, discover, capturePanes, hasSession, spawnSession, killSession,
   isCompanionTransportEnabled, loadManifest,
   projectSpawnModel, _resetChannelCacheForTests,
-  resize as companionResize, mouse as companionMouse,
+  resize as companionResize,
 } from './companion.js';
-import { probeSession, hasSession as tmuxHasSession, resize as tmuxResize, disableMouse as tmuxDisableMouse, detectMouse as tmuxDetectMouse, parseMouseState } from './tmux.js';
+import { probeSession, hasSession as tmuxHasSession, resize as tmuxResize } from './tmux.js';
 import { classifyProbe } from './sessionRecovery.js';
 import { buildChat, parseActivityTimestamp } from './chatMeta.js';
 import { buildCaptureScript, parseCaptureSentinels } from './chats.js';
@@ -396,19 +396,13 @@ const TEST_MANIFEST = {
 
 // Build a fake transport whose ping reports the test version (a healthy channel).
 const healthyTransport = (extra = {}) => fakeTransport((req) => {
-  if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'discover', 'capturePanes', 'hasSession', 'spawnSession', 'killSession', 'resize', 'mouse'] } };
+  if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'discover', 'capturePanes', 'hasSession', 'spawnSession', 'killSession', 'resize'] } };
   if (req.method === 'discover') return { id: req.id, ok: true, result: { containers: extra.containers ?? [] } };
   if (req.method === 'capturePanes') return { id: req.id, ok: true, result: { panes: extra.panes ?? {} } };
   if (req.method === 'hasSession') return { id: req.id, ok: true, result: { exists: extra.exists ?? true } };
   if (req.method === 'spawnSession') return { id: req.id, ok: true, result: {} };
   if (req.method === 'killSession') return { id: req.id, ok: true, result: {} };
   if (req.method === 'resize') return { id: req.id, ok: true, result: { ok: true, code: 0, stdout: '', stderr: '' } };
-  // mouse: detect returns stdout (`mouse off`); disable returns empty stdout.
-  if (req.method === 'mouse') {
-    const p = req.params || {};
-    const detect = p.mode === 'detect';
-    return { id: req.id, ok: true, result: { ok: true, code: 0, stdout: detect ? (extra.mouseStdout ?? 'mouse off\n') : '', stderr: '' } };
-  }
   return { id: req.id, ok: false, error: 'unknown method' };
 });
 
@@ -1234,14 +1228,13 @@ describe('killSession() via companion (companion-or-fail, best-effort)', () => {
   });
 });
 
-// WARDEN-409 (slice 4): the resize / mouse RPC clients. These one-line control-
-// plane tmux-option ops route over the persistent channel (zero per-open / per-
-// resize SSH handshakes). The contract under test: they return the SAME raw
+// WARDEN-409 (slice 4): the resize RPC client. This one-line control-plane
+// tmux-option op routes over the persistent channel (zero per-open / per-resize
+// SSH handshakes). The contract under test: it returns the SAME raw
 // {host, ok, code, stdout, stderr} shape runTmux produces (so the existing call
-// sites are unchanged), never fall back to raw SSH, and — critically for mouse
-// detect — carry stdout back so parseMouseState can read it.
+// site is unchanged) and never falls back to raw SSH.
 
-describe('resize() / mouse() via companion (companion-or-fail, raw result shape)', () => {
+describe('resize() via companion (companion-or-fail, raw result shape)', () => {
   beforeEach(() => _resetChannelCacheForTests());
 
   it('resize returns the raw {host, ok, code, stdout, stderr} shape on success', async () => {
@@ -1252,27 +1245,6 @@ describe('resize() / mouse() via companion (companion-or-fail, raw result shape)
     assert.strictEqual(res.code, 0);
     assert.strictEqual(res.stdout, '');
     assert.strictEqual(res.stderr, '');
-  });
-
-  it('mouse detect carries stdout back (the bytes parseMouseState reads)', async () => {
-    // The make-or-break detail: detect MUST return stdout so JS parseMouseState
-    // sees the SAME `mouse off`/`mouse on` bytes the default runTmux path carries.
-    const t = fakeTransport((req) => {
-      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER } };
-      if (req.method === 'mouse') return { id: req.id, ok: true, result: { ok: true, code: 0, stdout: 'mouse on\n', stderr: '' } };
-      return { id: req.id, ok: false, error: 'unknown method' };
-    });
-    const { deps } = fakeDeps({ spawnChannel: () => t });
-    const res = await companionMouse('prod', { container: 'p-worker', mode: 'detect' }, {}, {}, deps);
-    assert.strictEqual(res.ok, true);
-    assert.strictEqual(res.stdout, 'mouse on\n', 'detect stdout flows back verbatim for parseMouseState');
-  });
-
-  it('mouse disable returns empty stdout (set -g mouse off writes nothing)', async () => {
-    const { deps } = fakeDeps({ spawnChannel: () => healthyTransport() });
-    const res = await companionMouse('prod', { container: 'p-worker', mode: 'disable' }, {}, {}, deps);
-    assert.strictEqual(res.ok, true);
-    assert.strictEqual(res.stdout, '');
   });
 
   it('resize sends {container, session} with the target fallback applied on the JS side', async () => {
@@ -1295,21 +1267,6 @@ describe('resize() / mouse() via companion (companion-or-fail, raw result shape)
     assert.strictEqual(sent.container, null, 'no container -> null');
   });
 
-  it('mouse sends {container, mode}', async () => {
-    let sent = null;
-    const t = fakeTransport((req) => {
-      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER } };
-      if (req.method === 'mouse') { sent = req.params; return { id: req.id, ok: true, result: { ok: true, code: 0, stdout: '', stderr: '' } }; }
-      return { id: req.id, ok: false, error: 'unknown method' };
-    });
-    const { deps } = fakeDeps({ spawnChannel: () => t });
-    await companionMouse('prod', { container: 'p-worker', mode: 'detect' }, {}, {}, deps);
-    assert.deepStrictEqual(sent, { container: 'p-worker', mode: 'detect' });
-    // bare-tmux: container null.
-    await companionMouse('prod', { container: null, mode: 'disable' }, {}, {}, deps);
-    assert.deepStrictEqual(sent, { container: null, mode: 'disable' });
-  });
-
   it('bootstrap failure -> {ok:false, code:-1, actionable error}, NOT a raw-ssh fallback', async () => {
     const { deps } = fakeDeps({
       run: async () => ({ ok: false, code: 255, stderr: 'Permission denied (publickey).' }),
@@ -1329,9 +1286,9 @@ describe('resize() / mouse() via companion (companion-or-fail, raw result shape)
       spawnChannel: () => fakeTransport((req) =>
         req.method === 'ping'
           ? { id: req.id, ok: true, result: { version: TEST_VER } }
-          : null), // mouse never gets a reply
+          : null), // resize never gets a reply
     });
-    const res = await companionMouse('prod', { container: 'p-worker', mode: 'detect' }, {}, { timeout: 60 }, deps);
+    const res = await companionResize('prod', { container: 'p-worker', session: 'agent' }, {}, { timeout: 60 }, deps);
     assert.strictEqual(res.ok, false);
     assert.strictEqual(res.code, -1);
   });
@@ -1352,15 +1309,12 @@ describe('resize() / mouse() via companion (companion-or-fail, raw result shape)
     const res = await companionResize('(local)', { container: null, session: 'agent' }, {});
     assert.strictEqual(res.ok, false);
     assert.ok(/local/.test(res.stderr));
-    const m = await companionMouse('(local)', { container: null, mode: 'detect' }, {});
-    assert.strictEqual(m.ok, false);
-    assert.ok(/local/.test(m.stderr));
   });
 });
 
 // ---------------------- control-plane routing over the companion ----------------
-// WARDEN-409: the routing change lives in src/tmux.js (resize/disableMouse/
-// detectMouse), tested here alongside the rest of the transport surface. Drives
+// WARDEN-409: the routing change lives in src/tmux.js (resize), tested here
+// alongside the rest of the transport surface. Drives
 // the REAL exported functions through injected companion clients (no real ssh) and
 // asserts the parity contract: under the flag a REMOTE host routes through the
 // companion and returns the SAME result shape / tri-state the default runTmux path
@@ -1387,50 +1341,6 @@ describe('control-plane routing over the companion (WARDEN-409 parity)', () => {
     assert.strictEqual(runTmuxCalls, 0, 'remote resize under the flag does NOT call runTmux');
   });
 
-  it('disableMouse under the flag routes through the companion, NOT runTmux', async () => {
-    let runTmuxCalls = 0;
-    let rpcCalls = 0;
-    await tmuxDisableMouse(remoteChat, {}, {}, {
-      runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
-      companionMouse: async () => { rpcCalls++; return { host: 'prod-1', ok: true, code: 0, stdout: '', stderr: '' }; },
-    });
-    assert.strictEqual(rpcCalls, 1);
-    assert.strictEqual(runTmuxCalls, 0);
-  });
-
-  it('detectMouse under the flag reads companion stdout → parseMouseState (PARITY with runTmux)', async () => {
-    // The make-or-break parity: detectMouse must return the SAME tri-state over the
-    // companion as over runTmux. mouse on → true, mouse off → false, failure → null.
-    const on = await tmuxDetectMouse(remoteChat, {}, {}, {
-      companionMouse: async () => ({ host: 'prod-1', ok: true, code: 0, stdout: 'mouse on\n', stderr: '' }),
-    });
-    assert.strictEqual(on, true, 'mouse on -> true (copy impaired)');
-
-    const off = await tmuxDetectMouse(remoteChat, {}, {}, {
-      companionMouse: async () => ({ host: 'prod-1', ok: true, code: 0, stdout: 'mouse off\n', stderr: '' }),
-    });
-    assert.strictEqual(off, false, 'mouse off -> false (copy works)');
-
-    const dead = await tmuxDetectMouse(remoteChat, {}, {}, {
-      companionMouse: async () => ({ host: 'prod-1', ok: false, code: -1, stdout: '', stderr: 'boom' }),
-    });
-    assert.strictEqual(dead, null, 'a failed read -> null (no hint shown), never a false "on"');
-  });
-
-  it('detectMouse companion stdout feeds parseMouseState the SAME bytes runTmux would', async () => {
-    // Cross-check the parity claim concretely: the default path parses the raw
-    // runTmux stdout; the companion path must parse the SAME stdout. Both go
-    // through the one shared parseMouseState, so this asserts the stdout is
-    // forwarded unchanged (not re-shaped into a {value} field).
-    for (const stdout of ['mouse on\n', 'mouse off\n', 'on', 'off', '']) {
-      const want = parseMouseState(stdout);
-      const got = await tmuxDetectMouse(remoteChat, {}, {}, {
-        companionMouse: async () => ({ host: 'prod-1', ok: true, code: 0, stdout, stderr: '' }),
-      });
-      assert.strictEqual(got, want, `companion detectMouse parity broke for stdout ${JSON.stringify(stdout)}`);
-    }
-  });
-
   it('LOCAL still uses runTmux (never the companion), even under the flag', async () => {
     let runTmuxCalls = 0;
     let companionCalls = 0;
@@ -1438,16 +1348,8 @@ describe('control-plane routing over the companion (WARDEN-409 parity)', () => {
       runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
       companionResize: async () => { companionCalls++; return { host: '(local)', ok: true, code: 0, stdout: '', stderr: '' }; },
     });
-    await tmuxDisableMouse(localChat, {}, {}, {
-      runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
-      companionMouse: async () => { companionCalls++; return { host: '(local)', ok: true, code: 0, stdout: '', stderr: '' }; },
-    });
-    await tmuxDetectMouse(localChat, {}, {}, {
-      runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: 'mouse off\n', stderr: '' }; },
-      companionMouse: async () => { companionCalls++; return { host: '(local)', ok: true, code: 0, stdout: '', stderr: '' }; },
-    });
-    assert.strictEqual(runTmuxCalls, 3, 'local control-plane ops use runTmux');
-    assert.strictEqual(companionCalls, 0, 'local control-plane ops do NOT call the companion');
+    assert.strictEqual(runTmuxCalls, 1, 'local control-plane op uses runTmux');
+    assert.strictEqual(companionCalls, 0, 'local control-plane op does NOT call the companion');
   });
 });
 
@@ -1472,22 +1374,6 @@ describe('control-plane routing: the default path (flag off) is byte-for-byte un
     assert.strictEqual(companionCalls, 0, 'flag OFF -> companion not consulted');
     assert.deepStrictEqual(captured, ['set-option', '-t', 'agent', 'window-size', 'latest'], 'argv byte-for-byte unchanged');
     assert.strictEqual(r, undefined, 'resize still returns nothing (await-only)');
-  });
-
-  it('flag OFF -> disableMouse / detectMouse use runTmux with the {timeout:3000} semantics', async () => {
-    delete process.env.WARDEN_COMPANION_TRANSPORT;
-    let disableArgs = null;
-    let detectArgs = null;
-    await tmuxDisableMouse(remoteChat, {}, {}, {
-      runTmux: async (_c, args, opts) => { disableArgs = { args, opts }; return { ok: true, code: 0, stdout: '', stderr: '' }; },
-    });
-    await tmuxDetectMouse(remoteChat, {}, {}, {
-      runTmux: async (_c, args, opts) => { detectArgs = { args, opts }; return { ok: true, code: 0, stdout: 'mouse off\n', stderr: '' }; },
-    });
-    assert.deepStrictEqual(disableArgs.args, ['set', '-g', 'mouse', 'off']);
-    assert.deepStrictEqual(detectArgs.args, ['show-options', '-g', 'mouse']);
-    assert.strictEqual(disableArgs.opts.timeout, 3000, 'best-effort timeout preserved');
-    assert.strictEqual(detectArgs.opts.timeout, 3000, 'best-effort timeout preserved');
   });
 });
 
@@ -1640,7 +1526,6 @@ function realBinaryTransport() {
       assert.ok(res.methods.includes('capturePanes'), 'ping advertises the capturePanes RPC');
       assert.ok(res.methods.includes('hasSession'), 'ping advertises the hasSession RPC (WARDEN-382)');
       assert.ok(res.methods.includes('resize'), 'ping advertises the resize RPC (WARDEN-409)');
-      assert.ok(res.methods.includes('mouse'), 'ping advertises the mouse RPC (WARDEN-409)');
     } finally {
       ch.kill();
     }
@@ -1788,14 +1673,10 @@ function realBinaryTransport() {
     }
   });
   // WARDEN-409 (slice 4) parity test: the Go companion runs the control-plane
-  // tmux options LOCALLY via bash -lc against a REAL tmux session and returns the
+  // tmux option LOCALLY via bash -lc against a REAL tmux session and returns the
   // raw {ok, code, stdout, stderr} shape. resize runs set-option window-size
-  // latest (ok:true against a live session); mouse detect runs show-options -g
-  // mouse and MUST return its stdout (the `mouse off` text) so parseMouseState
-  // reads the identical bytes the default runTmux path carries. mouse disable
-  // runs set -g mouse off (observable: a follow-up detect flips the value).
-  // Skipped unless tmux is available.
-  (canCapture ? it : it.skip)('resize/mouse: real binary runs the control-plane tmux options over stdio', async () => {
+  // latest (ok:true against a live session). Skipped unless tmux is available.
+  (canCapture ? it : it.skip)('resize: real binary runs the control-plane tmux option over stdio', async () => {
     const session = uniqueSession();
     const setup = spawnSync(TMUX_BIN, ['new-session', '-d', '-s', session], { encoding: 'utf8' });
     assert.strictEqual(setup.status, 0, `tmux new-session failed: ${setup.stderr}`);
@@ -1808,21 +1689,6 @@ function realBinaryTransport() {
         assert.strictEqual(rz.ok, true, 'resize against a live session -> ok:true');
         assert.strictEqual(rz.code, 0, 'resize exit code carried in the raw result');
         assert.strictEqual(rz.stdout, '', 'resize writes no stdout');
-
-        // mouse detect: show-options -g mouse -> stdout carries the mouse value.
-        const det = await ch.call('mouse', { container: '', mode: 'detect' }, { timeout: 8000 });
-        assert.strictEqual(det.ok, true, 'mouse detect -> ok:true');
-        // The default tmux value is parseable by the SHARED parseMouseState — the
-        // parity contract: the companion returns the SAME bytes runTmux would.
-        assert.ok(typeof det.stdout === 'string' && parseMouseState(det.stdout) !== null,
-          `detect stdout parses to a real on/off value; got: ${JSON.stringify(det.stdout)}`);
-
-        // mouse disable: set -g mouse off -> ok:true; a follow-up detect flips to off.
-        const dis = await ch.call('mouse', { container: '', mode: 'disable' }, { timeout: 8000 });
-        assert.strictEqual(dis.ok, true, 'mouse disable -> ok:true');
-        const after = await ch.call('mouse', { container: '', mode: 'detect' }, { timeout: 8000 });
-        assert.strictEqual(parseMouseState(after.stdout), false,
-          `after disable, detect reads mouse off; got: ${JSON.stringify(after.stdout)}`);
       } finally {
         ch.kill();
       }

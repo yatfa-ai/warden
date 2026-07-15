@@ -189,20 +189,4 @@ test('Retry re-attaches exactly once (detach then attach), then stays attached',
   assert.equal(c.detach, 1, 'the pre-Retry stream was torn down exactly once');
 });
 
-test('toggling Seamless copy (hostOptions change) does NOT re-attach', () => {
-  // seamlessCopy is derived from hostOptions[hostKey] inside the effect and read
-  // via a ref — toggling it must apply on the NEXT attach, never re-attach an
-  // open pane. attachEffectDeps doesn't even receive seamlessCopy, so a "toggle"
-  // is just a same-id/same-nonce render: no re-attach. (Mirrors the WARDEN-261
-  // contract that hostOptions stays out of the deps.)
-  const renders = [
-    { id: 'pane-1', host: 'myserver', chat: chat({ host: 'myserver' }), retryNonce: 0 },
-    { id: 'pane-1', host: 'myserver', chat: chat({ host: 'myserver' }), retryNonce: 0 }, // toggle Seamless
-    { id: 'pane-1', host: 'myserver', chat: chat({ host: 'myserver' }), retryNonce: 0 },
-  ];
-  const c = counts(simulate(renders));
-  assert.equal(c.attach, 1);
-  assert.equal(c.detach, 0);
-});
-
 console.log(`\n  ${passed} passed`);

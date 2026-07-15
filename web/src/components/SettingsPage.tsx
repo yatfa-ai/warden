@@ -21,7 +21,7 @@ import { ArrowLeft, Trash2 } from 'lucide-react';
 import { type Theme, type TerminalColorScheme, THEMES } from '@/lib/theme';
 import { type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
-import { type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type PresetNameIssue, type Snippet, type SnippetNameIssue, type HostOptionsMap, PRESET_NAME_MAX, validatePresetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, validateSnippetName, DEFAULT_TERMINAL_FONT_FAMILY } from '@/lib/storage';
+import { type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type PresetNameIssue, type Snippet, type SnippetNameIssue, PRESET_NAME_MAX, validatePresetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, validateSnippetName, DEFAULT_TERMINAL_FONT_FAMILY } from '@/lib/storage';
 import { hasWindowBridge } from '@/lib/electron';
 import { requestAlertPermission } from '@/lib/desktopAlerts';
 import { putJson } from '@/lib/api';
@@ -264,14 +264,6 @@ interface Props {
   setAlertDirective: (v: boolean) => void;
   alertError: boolean;
   setAlertError: (v: boolean) => void;
-  // WARDEN-261: per-host "Seamless copy" toggle. Pure client-side localStorage
-  // pref (like the terminal prefs), persisted by App's saveUi effect — NOT part
-  // of the backend `config` state / PUT /api/config body. Sent to the backend
-  // only as the transient `seamlessCopy` attach flag, which makes the backend
-  // disable tmux mouse on attach so xterm owns the selection. Applies on the
-  // next pane attach (no restart).
-  hostOptions: HostOptionsMap;
-  onSetHostSeamlessCopy: (host: string, seamlessCopy: boolean) => void;
   // Per-state Attention toggle (WARDEN-344): which pane states raise the badge +
   // desktop alert. Pure client-side localStorage pref (same channel/persistence as
   // attentionDesktopAlerts); never added to the backend `config`.
@@ -504,7 +496,7 @@ function SnippetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, attentionStates, setAttentionStates, alertCritical, setAlertCritical, alertWarning, setAlertWarning, alertDirective, setAlertDirective, alertError, setAlertError, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, timestampFormat, setTimestampFormat, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatPresetByHost, setDefaultNewChatPresetByHost, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, snippets, setSnippets, defaultShell, setDefaultShell, defaultShellByHost, setDefaultShellByHost, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin, closeToTray, setCloseToTray, hostOptions, onSetHostSeamlessCopy, resetUiPrefsToDefaults }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, attentionStates, setAttentionStates, alertCritical, setAlertCritical, alertWarning, setAlertWarning, alertDirective, setAlertDirective, alertError, setAlertError, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, timestampFormat, setTimestampFormat, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatPresetByHost, setDefaultNewChatPresetByHost, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, snippets, setSnippets, defaultShell, setDefaultShell, defaultShellByHost, setDefaultShellByHost, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin, closeToTray, setCloseToTray, resetUiPrefsToDefaults }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -992,28 +984,6 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                     </Select>
                   </div>
                 )}
-
-                {/* WARDEN-261 — Seamless copy (per host, opt-in, off by default). */}
-                <div className="flex flex-col gap-2">
-                  <Label>Seamless copy (per host)</Label>
-                  <div className="flex flex-col gap-1 rounded-md border bg-muted/30 p-2">
-                    {['(local)', ...config.hosts].map((host) => (
-                      <div key={host} className="flex items-center justify-between gap-2">
-                        <span className="text-xs truncate">
-                          {host === '(local)' ? 'this machine (local)' : host}
-                        </span>
-                        <Switch
-                          checked={!!hostOptions[host]?.seamlessCopy}
-                          onCheckedChange={(v) => onSetHostSeamlessCopy(host, v)}
-                          aria-label={`Seamless copy for ${host}`}
-                        />
-                      </div>
-                    ))}
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Disables tmux mouse on attach for that host, so selecting text and copying with the standard gesture (Cmd/Ctrl+C) works with no tmux knowledge. Off by default; takes effect on the next pane attach.
-                  </p>
-                </div>
 
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="pollIntervalMs">Dashboard Refresh Interval (ms)</Label>

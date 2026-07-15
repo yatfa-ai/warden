@@ -32,7 +32,7 @@ const { code } = await transformWithOxc(src, join(libDir, 'clipboard.ts'), {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-clipboard-test-'));
 const file = join(tmpDir, 'clipboard.mjs');
 writeFileSync(file, code);
-const { copyText } = await import(file);
+const { copyText, handleOsc52 } = await import(file);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -123,6 +123,85 @@ await testAsync('no clipboard API and no document → false (nothing to copy wit
   globalThis.document = undefined;
   const ok = await copyText('nowhere');
   assert.equal(ok, false);
+  restore();
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nOSC 52 clipboard handler (WARDEN-437)');
+// ---------------------------------------------------------------------------
+// handleOsc52 is the xterm parser handler for OSC 52 (the standard terminal
+// clipboard protocol). SET writes the decoded base64 to the system clipboard via
+// copyText; QUERY is ignored so a remote program can never read the local
+// clipboard. copyText runs async (fire-and-forgot inside handleOsc52), so each
+// case flushes pending promises before asserting what was (or wasn't) copied.
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
+// Wire the async Clipboard API path (navigator.clipboard.writeText) so we can
+// observe exactly what handleOsc52 copies; no document → no execCommand fallback.
+const clipCapture = () => {
+  let saved;
+  globalThis.document = undefined;
+  globalThis.navigator = { clipboard: { writeText: async (t) => { saved = t; } } };
+  return { get saved() { return saved; } };
+};
+
+await testAsync('SET (c;<base64>) decodes ASCII and writes the clipboard', async () => {
+  const clip = clipCapture();
+  const ok = handleOsc52('c;' + Buffer.from('hello', 'utf-8').toString('base64'));
+  await flush();
+  assert.equal(ok, true, 'always handled (suppresses any fallback)');
+  assert.equal(clip.saved, 'hello');
+  restore();
+});
+
+await testAsync('SET decodes multibyte UTF-8 (accents + emoji) correctly', async () => {
+  const clip = clipCapture();
+  const text = 'café — ☕ sélection';
+  handleOsc52('c;' + Buffer.from(text, 'utf-8').toString('base64'));
+  await flush();
+  assert.equal(clip.saved, text);
+  restore();
+});
+
+await testAsync('SET with several selectors (cps0;<base64>) still finds the payload', async () => {
+  const clip = clipCapture();
+  handleOsc52('cps0;' + Buffer.from('multi', 'utf-8').toString('base64'));
+  await flush();
+  assert.equal(clip.saved, 'multi');
+  restore();
+});
+
+await testAsync('QUERY (c;?) does NOT read/copy the clipboard (security)', async () => {
+  const clip = clipCapture();
+  const ok = handleOsc52('c;?');
+  await flush();
+  assert.equal(ok, true, 'a query is still claimed handled — no fallback may answer it');
+  assert.equal(clip.saved, undefined, 'a query must never trigger a clipboard write');
+  restore();
+});
+
+await testAsync('QUERY with no payload (bare "c") does NOT copy', async () => {
+  const clip = clipCapture();
+  handleOsc52('c');
+  await flush();
+  assert.equal(clip.saved, undefined);
+  restore();
+});
+
+await testAsync('empty payload (c;) does NOT copy', async () => {
+  const clip = clipCapture();
+  handleOsc52('c;');
+  await flush();
+  assert.equal(clip.saved, undefined);
+  restore();
+});
+
+await testAsync('malformed base64 is ignored (never throws, never copies)', async () => {
+  const clip = clipCapture();
+  const ok = handleOsc52('c;@@@not-base64@@@');
+  await flush();
+  assert.equal(ok, true);
+  assert.equal(clip.saved, undefined);
   restore();
 });
 

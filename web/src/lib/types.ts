@@ -53,11 +53,6 @@ export type StreamMsg =
   | { type: 'attached'; id: string }
   | { type: 'ended'; id: string; code?: number }
   | { type: 'attach_error'; id: string; error: string }
-  // WARDEN-261: pushed after attach when the host's tmux has mouse mode ON and
-  // Seamless copy is NOT enabled for that host — i.e. the pane's standard
-  // select+copy is impaired. Lets the pane show a dismissible hint. Only sent
-  // when mouse is on (off/unknown → no message), so its arrival implies mouseOn.
-  | { type: 'mouse_state'; id: string; mouseOn: boolean }
   // WARDEN-231: the bounded pre-attach probe classified this pane's session.
   // session_dead = host reachable but the tmux session is absent (recovery panel
   // with Open shell / Re-spawn / Close); host_unreachable = SSH can't deliver
@@ -69,10 +64,7 @@ export type StreamMsg =
 export type StreamReq =
   | { type: 'monitor'; id: string }
   | { type: 'unmonitor'; id: string }
-  // WARDEN-261: `seamlessCopy` (opt-in per host) tells the backend to disable
-  // tmux mouse on attach so xterm owns the selection and copy works with no
-  // tmux knowledge. Optional + absent = today's behavior (off by default).
-  | { type: 'attach'; id: string; cols: number; rows: number; host?: string; seamlessCopy?: boolean }
+  | { type: 'attach'; id: string; cols: number; rows: number; host?: string }
   | { type: 'detach'; id: string }
   | { type: 'input'; id: string; data: string }
   | { type: 'resize'; id: string; cols: number; rows: number };

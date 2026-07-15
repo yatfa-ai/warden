@@ -13,7 +13,7 @@ import { WebSocketServer } from 'ws';
 import { load, save, loadCatalog, saveCatalog, allSshHosts, sameCatalogEntry } from './config.js';
 import * as collections from './collections.js';
 import { capturePanes, resolveChatWithRefresh, catalogChats, discoverHost, discoverAll } from './chats.js';
-import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream, disableMouse, detectMouse, probeSession } from './tmux.js';
+import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream, probeSession } from './tmux.js';
 import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude, startConnectionPoolCleanup, validateHost } from './ssh.js';
 import { classifyProbe } from './sessionRecovery.js';
 import { Observer, readDirectives } from './observer.js';
@@ -3205,24 +3205,6 @@ streamWss.on('connection', (ws) => {
         send({ type: 'session_dead', id: m.id });
         appendEvent({ type: 'error', error: 'session dead', context: 'attach', id: m.id, host: chat.host, container: chat.container });
         return;
-      }
-
-      // WARDEN-261 — Seamless copy: if the client opted this host in
-      // (m.seamlessCopy), disable tmux mouse on attach so xterm owns the
-      // selection and the standard select+copy gesture works with no tmux
-      // knowledge. Otherwise detect the host's tmux mouse state and, when it's
-      // on (copy is impaired), push a mouse_state notice so the client can show
-      // a dismissible hint offering to enable Seamless copy. Both are best-
-      // effort + non-blocking (fired concurrently with the PTY attach) so a slow
-      // or unreachable host never delays or breaks the attach. Gated behind the
-      // probe above: a dead/unreachable session returns before this, so mouse
-      // state is only probed for a session we're actually going to attach.
-      if (m.seamlessCopy) {
-        disableMouse(chat, cfg).catch(() => { /* best-effort: copy degrades to today's behavior */ });
-      } else {
-        detectMouse(chat, cfg)
-          .then((on) => { if (on) send({ type: 'mouse_state', id: m.id, mouseOn: true }); })
-          .catch(() => { /* unreadable → no hint, never block attach */ });
       }
 
       let pty;

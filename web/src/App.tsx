@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
-import { loadUi, saveUi, persistUiState, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, STARTER_SNIPPETS, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type HostOptionsMap, type WorkspacePaneSet, type RecentlyClosedEntry, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
+import { loadUi, saveUi, persistUiState, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, STARTER_SNIPPETS, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type WorkspacePaneSet, type RecentlyClosedEntry, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
 import { displayName } from '@/lib/chatDisplay';
 import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThemeId, type Theme, type ThemeId, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
@@ -337,13 +337,6 @@ function App() {
   // UiState / saveUi. Loads from main on mount (stays false in a browser where
   // the bridge is absent). See WARDEN-330.
   const [closeToTray, setCloseToTrayState] = useState(false);
-  // WARDEN-261: per-host "Seamless copy" toggle + the per-host dismissal of the
-  // "copy may not grab selected text" hint. Both are pure client-side localStorage
-  // prefs (like terminalCursorStyle), persisted by the saveUi effect below. The
-  // toggle is sent to the backend only as the transient `seamlessCopy` attach
-  // flag (PaneTile); the dismissal never leaves the client.
-  const [hostOptions, setHostOptions] = useState<HostOptionsMap>(() => uiState.hostOptions ?? {});
-  const [copyHintDismissed, setCopyHintDismissed] = useState<Record<string, boolean>>(() => uiState.copyHintDismissed ?? {});
   const { prefs, reload: reloadNotificationPrefs } = useNotificationPrefs();
   // "Confirm before destructive actions" preference (default on). Gates both
   // destructive kill paths — force-kill (tmux session) and kill chat. Loaded
@@ -478,8 +471,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, hostOptions, copyHintDismissed }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, hostOptions, copyHintDismissed, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, restoreOnStartup, startedEmpty]);
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
   // workspace, so switching clears it (WARDEN-256: maximized resets on switch).
@@ -606,25 +599,6 @@ function App() {
     void persistCloseToTray(v);
   }, []);
 
-  // WARDEN-261: toggle Seamless copy for a host (Settings → per-host). Applies
-  // on the next pane attach (PaneTile reads hostOptions[host] at attach-send
-  // time), without a Warden restart. Drops the map entry when it has no
-  // remaining options so the persisted map stays tidy.
-  const setHostSeamlessCopy = (host: string, seamlessCopy: boolean) => {
-    setHostOptions((prev) => {
-      const merged: HostOptionsMap = { ...prev };
-      const next = { ...(prev[host] ?? {}), seamlessCopy };
-      if (Object.keys(next).length) merged[host] = next;
-      else delete merged[host];
-      return merged;
-    });
-  };
-  // WARDEN-261: silence the "copy may not grab selected text" hint for a host.
-  // Per-host: dismissing once stays silenced for that host across all its panes.
-  const dismissCopyHint = (host: string) => {
-    setCopyHintDismissed((prev) => ({ ...prev, [host]: true }));
-  };
-
   // Reset every UI PREF to its effective default value (the value loadUi()
   // yields post-coercion, so live React state / persisted state / a fresh
   // reload all agree) while leaving the WORKSPACE + panel layout untouched.
@@ -655,7 +629,7 @@ function App() {
   // next saveUi persist, and a fresh reload all agree (acceptance criterion #2).
   // This includes prefs added by tickets that landed after WARDEN-346 branched
   // (per-state attentionStates, per-severity alert routing, mutedAlertKeys,
-  // watchedChats, timestampFormat, hostOptions/copyHintDismissed, per-host
+  // watchedChats, timestampFormat, per-host
   // preset/cwd overrides, instruction snippets). Omitting any would leave it
   // stale in live React state and silently survive the "reset everything"
   // action — the next persist would then write the stale value right back.
@@ -698,9 +672,6 @@ function App() {
     setAlertError(true);
     setMutedAlertKeys([]);
     setWatchedChats([]);
-    // Per-host prefs (seamless copy + dismissed copy-hint)
-    setHostOptions({});
-    setCopyHintDismissed({});
   }, []);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
@@ -1518,8 +1489,6 @@ function App() {
           setLaunchAtLogin={setLaunchAtLogin}
           closeToTray={closeToTray}
           setCloseToTray={setCloseToTray}
-          hostOptions={hostOptions}
-          onSetHostSeamlessCopy={setHostSeamlessCopy}
           resetUiPrefsToDefaults={resetUiPrefsToDefaults}
         />
       ) : chatBrowserOpen ? (
@@ -1638,9 +1607,6 @@ function App() {
             copyOnSelect={copyOnSelect}
             onExitBehavior={onExitBehavior}
             showHostTags={displaySettings.showHostTags}
-            hostOptions={hostOptions}
-            copyHintDismissed={copyHintDismissed}
-            onDismissCopyHint={dismissCopyHint}
             snippets={snippets}
             timestampFormat={timestampFormat}
           />
