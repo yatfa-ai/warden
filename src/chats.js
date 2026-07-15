@@ -539,7 +539,10 @@ export function parseCaptureSentinels(stdout) {
 
 // Capture tmux pane content from multiple chats concurrently.
 // Groups by host to minimize SSH round-trips. Returns a map of chat key -> pane content.
-export async function capturePanes(chats, cfg = {}) {
+// `deps` is a test seam (defaults to {} in production, where capturePanesViaCompanion
+// bootstraps the real SSH channel) forwarded to the companion transport so the
+// WARDEN-413 skip path is drivable end-to-end with a fake channel. (WARDEN-413)
+export async function capturePanes(chats, cfg = {}, deps = {}) {
   const byHost = {};
   for (const c of chats) (byHost[c.host] ||= []).push(c);
   const out = {};
@@ -569,7 +572,7 @@ export async function capturePanes(chats, cfg = {}) {
         Object.assign(out, readPaneDeltas(host, list.map((c) => c.key)));
         return;
       }
-      const r = await capturePanesViaCompanion(host, list, cfg);
+      const r = await capturePanesViaCompanion(host, list, cfg, {}, deps);
       if (r.ok) Object.assign(out, r.panes);
       return;
     }

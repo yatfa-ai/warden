@@ -18,6 +18,29 @@ func uniqueSession() string {
 	return "warden-test-" + strings.ReplaceAll(time.Now().Format("150405.000000"), ".", "-")
 }
 
+// waitForRendered polls the pane until marker appears in its capture (or a short
+// timeout elapses). new-session -d returns before the shell has drawn its prompt,
+// so two back-to-back captures can straddle the render: capture #1 catches the
+// pre-prompt pane, capture #2 catches the rendered prompt — a spurious "change"
+// that breaks the heartbeat's empty-diff assertion (~5% flaky, WARDEN-413 review).
+// Waiting for a marker we send AFTER the prompt guarantees the pane is fully
+// rendered and STABLE before the test's captures begin. Mirrors the Node parity
+// test, which seeds content with an explicit send-keys marker before asserting.
+func waitForRendered(t *testing.T, session, marker string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		out, err := exec.Command("tmux", "capture-pane", "-t", session, "-p").Output()
+		if err == nil && strings.Contains(string(out), marker) {
+			// One more yield so any in-flight redraw flushes, then the pane is stable.
+			time.Sleep(30 * time.Millisecond)
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("marker %q never rendered in tmux session %s", marker, session)
+}
+
 // TestBuildActivityScript locks the byte-exact, sentinel-framed leading-line
 // capture script the companion runs host-side for activity (WARDEN-376). It must
 // run the SAME per-container command the default SSH discover path runs
@@ -238,6 +261,9 @@ func TestCaptureOncePushesInitialDelta(t *testing.T) {
 	}
 	defer exec.Command("tmux", "kill-session", "-t", session).Run()
 	exec.Command("tmux", "send-keys", "-t", session, "WARDEN_PUSH_MARKER_7").Run()
+	// Wait for the marker to render so the pane is stable before the back-to-back
+	// captures (eliminates the new-session render race — see waitForRendered).
+	waitForRendered(t, session, "WARDEN_PUSH_MARKER_7")
 
 	s := &paneSubscription{
 		panes:  []capturePaneReq{{Key: session, Container: "", Session: session}},
@@ -286,6 +312,13 @@ func TestCaptureOnceHeartbeat(t *testing.T) {
 		t.Fatalf("tmux new-session failed: %v; %s", err, out)
 	}
 	defer exec.Command("tmux", "kill-session", "-t", session).Run()
+	// Seed a marker and wait for it to render so both captures see a STABLE pane.
+	// Without this, capture #1 can straddle the shell's first prompt render, the
+	// content then differs on capture #2, and the heartbeat's empty-diff assertion
+	// fails (~5% flaky). The marker is drawn after the prompt, so once it is visible
+	// the pane is fully rendered. (WARDEN-413 test-stability fix.)
+	exec.Command("tmux", "send-keys", "-t", session, "WARDEN_HB_STABLE").Run()
+	waitForRendered(t, session, "WARDEN_HB_STABLE")
 
 	s := &paneSubscription{
 		panes:  []capturePaneReq{{Key: session, Container: "", Session: session}},

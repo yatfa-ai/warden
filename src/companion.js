@@ -805,10 +805,20 @@ const paneSubscriptions = new Map();
 // pane sets to the companion; the last sync always reflects the true union.
 const syncInFlight = new Map();
 
+// host -> Map(key -> lastSeenMs). What /api/agent-states is CURRENTLY watching,
+// with a TTL. /api/agent-states is stateless HTTP (no connection identity), so a
+// per-poller ref like the WS monitor path can't bound a subscription. The TTL
+// keeps it multi-tab correct instead: a key is subscribed while ANY poller
+// requests it within the TTL, and released only when the last poller stops. One
+// ref per watched key (balanced add/remove), composable with the WS monitor refs.
+const agentStateWatched = new Map();
+const AGENT_STATE_TTL_MS = 30_000; // ~3 polls at the 10s cadence; a pane that left every poller is released within this window.
+
 export function _resetPaneDeltaStateForTests() {
   paneDeltaCache.clear();
   paneSubscriptions.clear();
   syncInFlight.clear();
+  agentStateWatched.clear();
 }
 
 // Apply one paneDelta event to the host's cache entry. Exported (and pure aside
@@ -1001,6 +1011,84 @@ export function _getPaneSubscriptionsForTests() {
     for (const [k, v] of sub.entries()) out[host][k] = v.refs;
   }
   return out;
+}
+
+// _getAgentStateWatchedForTests exposes the TTL-tracked /api/agent-states watched
+// set (host -> {key: ms}) so the reconcile contract (subscribe-on-enter,
+// unsubscribe-on-leave, TTL eviction) is unit-testable. Not for production use.
+export function _getAgentStateWatchedForTests() {
+  const out = {};
+  for (const [host, watched] of agentStateWatched.entries()) {
+    out[host] = {};
+    for (const [k, ms] of watched.entries()) out[host][k] = ms;
+  }
+  return out;
+}
+
+// reconcilePaneSubscriptions aligns the companion pane-push subscription for the
+// REMOTE companion-enabled hosts in `chats` with what /api/agent-states is polling
+// RIGHT NOW: subscribe panes that just entered the polled set, and (via the TTL
+// sweep) release panes no poller has requested in a while. This is the WARDEN-413
+// production trigger — the path that makes the success measure true: once a
+// subscription delivers fresh deltas, capturePanes (chats.js) renders from the
+// in-memory cache and SKIPS the per-host capturePanes RPC, so an idle companion
+// host receives ZERO capturePanes RPCs per poll. LOCAL + flag-off hosts are
+// excluded (their poll path is unchanged).
+//
+// Ref-counted: each watched key carries exactly one agent-states ref (composable
+// with the WS monitor path's refs), so add/remove stay balanced however the polled
+// set churns. The TTL makes a stateless HTTP poll multi-tab correct — see
+// agentStateWatched. Best-effort: a subscription RPC failure surfaces a clear
+// error (CompanionTransportError carries the opt-out hint) but never breaks pane
+// rendering — capturePanes keeps polling until a real push arrives.
+export async function reconcilePaneSubscriptions(chats, cfg = {}, opts = {}, deps = {}) {
+  if (!isCompanionTransportEnabled()) return [];
+  const now = opts.now ?? Date.now();
+  // Group REMOTE chats by host (LOCAL is excluded — the companion serves remote
+  // hosts only, same guard as discover/capturePanes/hasSession). Dedupe by key per
+  // host: subscribePanes bumps a ref per descriptor, so a duplicate key would
+  // over-count refs and leak (TTL eviction under-decrements). Self-contained —
+  // does not rely on the caller deduping.
+  const byHost = new Map();
+  const seenKey = new Set();
+  for (const c of chats || []) {
+    if (c.host === LOCAL) continue;
+    const dedupe = `${c.host}\0${c.key}`;
+    if (seenKey.has(dedupe)) continue;
+    seenKey.add(dedupe);
+    if (!byHost.has(c.host)) byHost.set(c.host, []);
+    byHost.get(c.host).push(c);
+  }
+  const results = [];
+  // Subscribe panes NEWLY entering the polled set; refresh the TTL for every
+  // polled pane so a key stays watched while any poller keeps requesting it.
+  for (const [host, list] of byHost) {
+    let watched = agentStateWatched.get(host);
+    if (!watched) { watched = new Map(); agentStateWatched.set(host, watched); }
+    const added = [];
+    for (const c of list) {
+      if (!watched.has(c.key)) added.push(c); // first agent-states watch -> ref++
+      watched.set(c.key, now); // refresh TTL
+    }
+    if (added.length) results.push(subscribePanes(host, added, cfg, opts, deps));
+  }
+  // TTL sweep across ALL watched hosts (including ones absent from this poll): a
+  // key no poller has requested within the TTL is released — its ref-- stops the
+  // push for that pane (and the host's subscription empties when its last pane
+  // leaves). Runs on every non-empty poll, so eviction keeps pace with churn as
+  // long as any poller is active.
+  const hostsToDelete = [];
+  for (const [host, watched] of agentStateWatched) {
+    const removed = [];
+    for (const [k, lastSeen] of watched) if (now - lastSeen > AGENT_STATE_TTL_MS) removed.push(k);
+    for (const k of removed) {
+      watched.delete(k);
+      results.push(unsubscribePanes(host, [k], cfg, opts, deps));
+    }
+    if (watched.size === 0) hostsToDelete.push(host);
+  }
+  for (const h of hostsToDelete) agentStateWatched.delete(h);
+  return Promise.all(results);
 }
 
 // Pure model of per-tick ssh spawn cost, used by scripts/companion-benchmark.mjs

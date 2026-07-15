@@ -15,7 +15,7 @@
 //   - end-to-end stdio: spawn the REAL built companion binary and verify it
 //     answers ping over stdio (proves AC #4: NO network port), guarded by
 //     platform/binary presence so it skips cleanly elsewhere.
-import { describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -35,6 +35,7 @@ import {
   // WARDEN-413: pane-delta push (subscribePanes) — event routing, delta cache, subscriptions.
   applyPaneDelta, hasFreshPaneDelta, readPaneDeltas, PANE_DELTA_FRESH_MS,
   subscribePanes, unsubscribePanes,
+  reconcilePaneSubscriptions, _getAgentStateWatchedForTests,
   _resetPaneDeltaStateForTests, _getPaneSubscriptionsForTests,
 } from './companion.js';
 import { probeSession, hasSession as tmuxHasSession, resize as tmuxResize } from './tmux.js';
@@ -587,6 +588,193 @@ describe('subscribePanes / unsubscribePanes (WARDEN-413)', () => {
     channel._onLine(JSON.stringify({ event: 'paneDelta', panes: { k: 'pushed' } }));
     assert.ok(hasFreshPaneDelta('prod'));
     assert.deepStrictEqual(readPaneDeltas('prod', ['k']), { k: 'pushed' });
+  });
+});
+
+// ----------------------- reconcilePaneSubscriptions --------------------------
+// The /api/agent-states production trigger (WARDEN-413). Stateless HTTP has no
+// connection identity, so a per-poller ref can't bound a subscription; the TTL
+// keeps it multi-tab correct instead. A pane is subscribed when it ENTERS the
+// polled set and released only when the last poller stops requesting it. The
+// refs compose with the WS monitor path's refs (one ref per watched key).
+
+describe('reconcilePaneSubscriptions (WARDEN-413 /api/agent-states trigger)', () => {
+  let savedEnv;
+  beforeEach(() => {
+    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+    process.env.WARDEN_COMPANION_TRANSPORT = '1';
+    _resetChannelCacheForTests();
+    _resetPaneDeltaStateForTests();
+  });
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
+    _resetChannelCacheForTests();
+    _resetPaneDeltaStateForTests();
+  });
+
+  it('subscribes a REMOTE host panes when they enter the polled set', async () => {
+    const t = healthySubTransport();
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const chats = [
+      { host: 'prod', key: 'w1', container: 'w1', session: 'agent' },
+      { host: 'prod', key: 'w2', container: 'w2', session: 'agent' },
+    ];
+    await reconcilePaneSubscriptions(chats, {}, { now: 1000 }, deps);
+    // One agent-states ref per watched key; the companion got a subscribePanes for
+    // the union {w1,w2}.
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { w1: 1, w2: 1 });
+    assert.deepStrictEqual(_getAgentStateWatchedForTests().prod, { w1: 1000, w2: 1000 });
+  });
+
+  it('dedupes duplicate keys per host (no ref over-count / leak)', async () => {
+    const t = healthySubTransport();
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    // Same key twice for one host (e.g. a caller that didn't dedupe) must count
+    // as ONE ref, not two — else TTL eviction would under-decrement and leak.
+    await reconcilePaneSubscriptions([
+      { host: 'prod', key: 'w1', container: 'w1', session: 'agent' },
+      { host: 'prod', key: 'w1', container: 'w1', session: 'agent' },
+    ], {}, { now: 1000 }, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { w1: 1 }, 'duplicate key -> one ref');
+  });
+
+  it('steady-state: re-polling the SAME set issues NO new subscribe (refs stay 1)', async () => {
+    const sent = [];
+    const t = healthySubTransport();
+    const origWrite = t.write.bind(t);
+    t.write = (line) => { sent.push(JSON.parse(line)); origWrite(line); };
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const chats = [{ host: 'prod', key: 'w1', container: 'w1', session: 'agent' }];
+    await reconcilePaneSubscriptions(chats, {}, { now: 1000 }, deps);
+    const firstCount = sent.filter((s) => s.method === 'subscribePanes').length;
+    await reconcilePaneSubscriptions(chats, {}, { now: 11_000 }, deps);
+    await reconcilePaneSubscriptions(chats, {}, { now: 21_000 }, deps);
+    const afterCount = sent.filter((s) => s.method === 'subscribePanes').length;
+    assert.strictEqual(firstCount, 1, 'first reconcile subscribes once');
+    assert.strictEqual(afterCount, 1, 'no re-subscribe on steady-state polls');
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { w1: 1 }, 'ref stays 1 (balanced)');
+  });
+
+  it('a pane that LEAVES the polled set is released once its TTL elapses', async () => {
+    const t = healthySubTransport();
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    // Poll 1 (t=1000): w1 + w2 watched.
+    await reconcilePaneSubscriptions([
+      { host: 'prod', key: 'w1', container: 'w1', session: 'agent' },
+      { host: 'prod', key: 'w2', container: 'w2', session: 'agent' },
+    ], {}, { now: 1000 }, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { w1: 1, w2: 1 });
+    // Poll 2 (t=11000, within TTL): only w1. w2 is absent but NOT yet expired -> lingers.
+    await reconcilePaneSubscriptions([
+      { host: 'prod', key: 'w1', container: 'w1', session: 'agent' },
+    ], {}, { now: 11_000 }, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { w1: 1, w2: 1 }, 'w2 lingers within the TTL');
+    // Poll 3 (t=42000): w2's lastSeen (1000) is now >30s old -> released; w1 refreshed.
+    await reconcilePaneSubscriptions([
+      { host: 'prod', key: 'w1', container: 'w1', session: 'agent' },
+    ], {}, { now: 42_000 }, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { w1: 1 }, 'w2 released after TTL; w1 stays watched');
+  });
+
+  it('LOCAL hosts are never subscribed (companion serves remote hosts only)', async () => {
+    const t = healthySubTransport();
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    await reconcilePaneSubscriptions([
+      { host: '(local)', key: 'l1', session: 'l1' },
+      { host: 'prod', key: 'w1', container: 'w1', session: 'agent' },
+    ], {}, { now: 1000 }, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests(), { prod: { w1: 1 } }, 'no LOCAL entry');
+    assert.deepStrictEqual(_getAgentStateWatchedForTests(), { prod: { w1: 1000 } });
+  });
+
+  it('is a no-op when the companion transport flag is OFF (poll path unchanged)', async () => {
+    delete process.env.WARDEN_COMPANION_TRANSPORT;
+    const { deps } = fakeDeps({});
+    const res = await reconcilePaneSubscriptions([
+      { host: 'prod', key: 'w1', container: 'w1', session: 'agent' },
+    ], {}, { now: 1000 }, deps);
+    assert.deepStrictEqual(res, []);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests(), {}, 'no subscription created with the flag off');
+  });
+
+  it('two concurrent pollers keep a shared pane subscribed until BOTH stop (multi-tab)', async () => {
+    const t = healthySubTransport();
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    // Poller A watches a; poller B watches b - same host. Interleaved polls.
+    await reconcilePaneSubscriptions([{ host: 'prod', key: 'a', container: 'a', session: 'agent' }], {}, { now: 1000 }, deps);
+    await reconcilePaneSubscriptions([{ host: 'prod', key: 'b', container: 'b', session: 'b' }], {}, { now: 2_000 }, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { a: 1, b: 1 }, 'union watched');
+    // Poller A stops (only B polls now). a absent from B's poll but within TTL -> lingers.
+    await reconcilePaneSubscriptions([{ host: 'prod', key: 'b', container: 'b', session: 'b' }], {}, { now: 12_000 }, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { a: 1, b: 1 }, 'a lingers - only one poller dropped, TTL not elapsed');
+    // Time advances past a's TTL (last seen 1000) with only B polling -> a released, b stays.
+    await reconcilePaneSubscriptions([{ host: 'prod', key: 'b', container: 'b', session: 'b' }], {}, { now: 42_000 }, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { b: 1 }, 'a released only once aged out; b still live');
+  });
+});
+
+// ------------------ pollAgentStates: the real /api/agent-states poll -----------
+// WARDEN-413 success-gate proof. This is the reachability test the prior PR
+// lacked: it drives the REAL /api/agent-states poll core (pollAgentStates, exported
+// from server.js) end-to-end with a fake companion (the same stand-in pattern as
+// the parity tests). The subscription is established by the REAL production
+// trigger (reconcilePaneSubscriptions, which the handler calls), the paneDelta
+// arrives over the REAL channel event routing (NOT a hand-seeded cache), and the
+// REAL capturePanes gate issues ZERO RPCs on the steady-state poll. The contrast —
+// poll 1 captures once (bootstrap, no delta yet); poll 2 captures ZERO (live
+// subscription) — is the success measure: an idle companion host is never polled.
+
+describe('pollAgentStates: idle companion host receives ZERO capturePanes RPCs (WARDEN-413)', () => {
+  let server, savedEnv, savedHome, tempHome;
+  before(async () => {
+    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+    savedHome = process.env.HOME;
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-poll-'));
+    process.env.HOME = tempHome;
+    process.env.WARDEN_COMPANION_TRANSPORT = '1';
+    // Dynamic import so this suite stays out of server.js's module-scope side
+    // effects unless this describe runs. HOME is an isolated temp dir so server.js's
+    // own load() reads no real config (pollAgentStates takes cfg as a param anyway).
+    server = await import('./server.js');
+  });
+  after(async () => {
+    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+  beforeEach(() => { _resetChannelCacheForTests(); _resetPaneDeltaStateForTests(); });
+  afterEach(() => { _resetChannelCacheForTests(); _resetPaneDeltaStateForTests(); });
+
+  it('poll 1 bootstraps (1 RPC); after the push, poll 2 issues ZERO capturePanes RPCs', async () => {
+    let captureRpc = 0;
+    // capturePanes, IF polled, returns POLLED CONTENT (distinct from the pushed
+    // delta) so the two paths are unambiguous.
+    const t = healthySubTransport({ panes: { w1: 'POLLED CONTENT' } });
+    const origWrite = t.write.bind(t);
+    t.write = (line) => { try { if (JSON.parse(line).method === 'capturePanes') captureRpc++; } catch { /* non-JSON noise */ } origWrite(line); };
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const chats = [{ host: 'prod', key: 'w1', container: 'w1', session: 'agent', project: 'p', role: 'worker' }];
+
+    // --- Poll 1 (bootstrap): reconcile subscribes; no delta has been pushed yet,
+    // so capturePanes polls once (graceful bootstrap). This is the first poll after
+    // the host enters the watched set. ---
+    let agents = await server.pollAgentStates(chats, {}, deps);
+    assert.strictEqual(captureRpc, 1, 'bootstrap poll captures once (subscription just started, no delta yet)');
+    assert.ok(agents.some((a) => a.key === 'w1' && !a.captureError), 'the pane was captured on the bootstrap poll');
+
+    // --- The companion pushes the pane over the channel (REAL event routing -> cache). ---
+    const ch = await getChannel('prod', {}, deps);
+    ch._onLine(JSON.stringify({ event: 'paneDelta', panes: { w1: 'PUSHED IDLE CONTENT' } }));
+    assert.ok(hasFreshPaneDelta('prod'), 'precondition: the pushed delta made the host fresh');
+
+    // --- Poll 2 (steady state): the delta is fresh -> capturePanes renders from the
+    // in-memory cache and issues ZERO RPCs. This is the WARDEN-413 success gate: an
+    // idle host with a live subscription is never polled. ---
+    agents = await server.pollAgentStates(chats, {}, deps);
+    assert.strictEqual(captureRpc, 1, 'ZERO new capturePanes RPCs on the steady-state poll for an idle host with a live subscription');
   });
 });
 
