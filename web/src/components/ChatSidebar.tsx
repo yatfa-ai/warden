@@ -82,6 +82,13 @@ interface Props {
   // Timestamp format pref (WARDEN-213): routes every sidebar time display through
   // the shared formatTimestamp helper. Pure client-side localStorage pref.
   timestampFormat: TimestampFormat;
+  // File Viewer markdown view mode (WARDEN-480): the per-file FileViewer opened
+  // from a sidebar row (Ctrl/Cmd-click on a `path:line` token) shares the same
+  // global App-owned 'rendered' | 'source' toggle as PaneGrid's FileViewer, so a
+  // human's preference is consistent regardless of which surface opened the file.
+  // Read-only here (App owns/persists it); forwarded straight to the FileViewer.
+  fileViewerViewMode: 'rendered' | 'source';
+  onFileViewerViewModeChange: (mode: 'rendered' | 'source') => void;
   // Saved instruction snippets (WARDEN-323): threaded straight through to the
   // BroadcastDialog as an insert-only picker. Pure client-side localStorage pref;
   // owned by App (persisted by its saveUi effect), so this is a read-only prop
@@ -108,7 +115,7 @@ interface Props {
 
 const LABEL: Record<string, string> = { '(local)': 'this machine' };
 
-export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, snippets, watchedChats, onToggleWatch, agentFilter, agentSort, onFilterChange, onSortChange }: Props) {
+export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, snippets, watchedChats, onToggleWatch, agentFilter, agentSort, onFilterChange, onSortChange }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [offlineExpanded, setOfflineExpanded] = useState(false);
   const hostLabels = useHostLabels();
@@ -1137,6 +1144,8 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
         filePath={fileTarget?.path ?? ''}
         open={!!fileTarget}
         timestampFormat={timestampFormat}
+        viewMode={fileViewerViewMode}
+        onViewModeChange={onFileViewerViewModeChange}
         onOpenChange={(o) => { if (!o) setFileTarget(null); }}
       />
       <BroadcastDialog

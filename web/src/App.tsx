@@ -1768,6 +1768,8 @@ function App() {
               onOpenChatBrowser={() => setChatBrowserOpen(true)}
               hostStatuses={hostStatuses}
               timestampFormat={timestampFormat}
+              fileViewerViewMode={fileViewerViewMode}
+              onFileViewerViewModeChange={setFileViewerViewMode}
               snippets={snippets}
               watchedChats={watchedChatSet}
               onToggleWatch={toggleWatch}
