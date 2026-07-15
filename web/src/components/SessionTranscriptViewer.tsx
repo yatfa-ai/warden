@@ -10,14 +10,23 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
+import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { EyeIcon, AlertCircleIcon } from 'lucide-react';
 import { ObserverMarkdown } from './ObserverMarkdown';
 import { cn } from '@/lib/utils';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
+import { formatTokens } from '@/lib/formatTokens';
 
 // A single transcript message from GET /api/claude-session (one JSONL line mapped
 // through the server's extractTranscriptMessage: role + human text + timestamp).
-export interface TranscriptMessage { role: string; text: string; ts?: string }
+// `usage` is present only on assistant turns that spent tokens (WARDEN-474) — the
+// per-turn drill-down beneath the session-list total badge (WARDEN-367).
+export interface TranscriptMessage {
+  role: string;
+  text: string;
+  ts?: string;
+  usage?: { input: number; output: number; cacheCreation: number; cacheRead: number; total: number };
+}
 
 interface SessionTranscriptViewerProps {
   open: boolean;
@@ -92,6 +101,19 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
 
   const hostLabel = !session || session.host === '(local)' ? 'this machine' : session.host;
 
+  // Per-turn attribution (WARDEN-474): sum the VISIBLE turns' totals + call out the
+  // heaviest visible turn. This is a tail-window sum, NOT the whole-session total —
+  // the header states the "(of the messages shown)" caveat whenever the transcript
+  // is truncated, so it never masquerades as the session-wide spend (the list badge
+  // already shows that). Equal to the sum of the rendered chips by construction.
+  const visibleUsage = messages
+    .map((m) => m.usage)
+    .filter((u): u is NonNullable<TranscriptMessage['usage']> => !!u && u.total > 0);
+  const visibleTotal = visibleUsage.reduce((s, u) => s + u.total, 0);
+  const heaviest = visibleUsage.length
+    ? visibleUsage.reduce((max, u) => (u.total > max.total ? u : max))
+    : undefined;
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-4xl max-h-[80vh]">
@@ -133,6 +155,18 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
 
             {status === 'ready' && (
               <>
+                {visibleTotal > 0 && (
+                  <div className="flex flex-wrap items-center gap-x-2 rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-1.5 text-xs text-amber-300/90">
+                    <span className="font-medium tabular-nums">{formatTokens(visibleTotal)}</span>
+                    <span>
+                      across {visibleUsage.length} turn{visibleUsage.length === 1 ? '' : 's'}
+                      {truncated ? ' (of the messages shown)' : ''}
+                    </span>
+                    {heaviest ? (
+                      <span className="text-amber-300/70">· heaviest turn {formatTokens(heaviest.total)}</span>
+                    ) : null}
+                  </div>
+                )}
                 {truncated && (
                   <div className="rounded-md border border-yellow-500/30 bg-yellow-500/10 px-3 py-1.5 text-xs text-yellow-300">
                     Showing the most recent messages — the full transcript was too large to load at once.
@@ -156,6 +190,8 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
 
 function MessageBubble({ message, timestampFormat }: { message: TranscriptMessage; timestampFormat: TimestampFormat }) {
   const isUser = message.role === 'user';
+  const usage = message.usage;
+  const usageLabel = usage ? formatTokens(usage.total) : '';
   return (
     <div className={cn('flex', isUser ? 'justify-end' : 'justify-start')}>
       <div className={cn(
@@ -165,9 +201,30 @@ function MessageBubble({ message, timestampFormat }: { message: TranscriptMessag
         <div className="mb-1 flex items-center gap-2">
           <span className="text-xs font-medium text-muted-foreground">{isUser ? 'You' : 'Assistant'}</span>
           {message.ts && <span className="text-xs text-muted-foreground/70">{formatTs(message.ts, timestampFormat)}</span>}
+          {usage && usageLabel ? (
+            <IconTooltip label={<UsageBreakdown usage={usage} />}>
+              <span className="ml-auto text-[10px] text-amber-500/80 shrink-0 tabular-nums">{usageLabel}</span>
+            </IconTooltip>
+          ) : null}
         </div>
         <ObserverMarkdown>{message.text}</ObserverMarkdown>
       </div>
+    </div>
+  );
+}
+
+// Token breakdown shown on hover of a turn's token chip (WARDEN-474). Reuses the
+// list badge's exact "model-agnostic — not dollar cost" wording (WARDEN-367) and
+// shows the input/output/cache split that turns the chip's total into "where the
+// tokens went" — the drill-down a human opens the transcript to find.
+function UsageBreakdown({ usage }: { usage: NonNullable<TranscriptMessage['usage']> }) {
+  const f = (n: number) => n.toLocaleString();
+  return (
+    <div className="space-y-0.5">
+      <div>Tokens this turn (model-agnostic — not dollar cost):</div>
+      <div className="text-muted-foreground">input {f(usage.input)} · output {f(usage.output)}</div>
+      <div className="text-muted-foreground">cache write {f(usage.cacheCreation)} · cache read {f(usage.cacheRead)}</div>
+      <div className="font-medium">{f(usage.total)} total</div>
     </div>
   );
 }
