@@ -8,7 +8,7 @@ import { Popover as RadixPopover } from 'radix-ui';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
-import { GitCompare } from 'lucide-react';
+import { GitCompare, FileIcon } from 'lucide-react';
 import { DiffBlock } from '@/components/DiffBlock';
 import { DiffViewer } from '@/components/DiffViewer';
 import { CollisionCompareDialog } from '../CollisionCompareDialog';
@@ -86,6 +86,38 @@ function fileSlotLabel(file: GitFile): string {
   return file.status;
 }
 
+/** A compact "open this file in the FileViewer" affordance (WARDEN-478). A
+ *  role="button" <span> — NEVER a <button>: it lives inside GitChangedFile's
+ *  interactive <button> and CommitFile's role="button" row, where a nested real
+ *  <button> would nest interactive elements (a recurring WARDEN-68 concern in
+ *  this file). The <span> needs its own keydown (Enter/Space) since a non-button
+ *  doesn't synthesize a click from the keyboard, and stopPropagation on click +
+ *  keydown so triggering it never also opens the diff or toggles the commit's
+ *  inline diff. Mirrors GitStateBadge's span-trigger (the same nested-in-an-
+ *  interactive-row shape). Brightens on hover but is always visible so the new
+ *  path is discoverable (not hidden behind a hover the human may never do). */
+function OpenFileAffordance({ path, onOpenFile, className }: { path: string; onOpenFile: (path: string) => void; className?: string }) {
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      aria-label={`open ${path} in the file viewer`}
+      onClick={(e) => { e.stopPropagation(); onOpenFile(path); }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          e.stopPropagation();
+          onOpenFile(path);
+        }
+      }}
+      title={`open file: ${path}`}
+      className={cn('inline-flex items-center text-muted-foreground hover:text-foreground rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary transition-colors duration-150', className)}
+    >
+      <FileIcon className="size-3" />
+    </span>
+  );
+}
+
 /** A single changed-file row: status indicator (M/A/D/??) + truncated path.
  *  Interactive (a real <button>) only when `onOpen` is supplied — it opens the
  *  per-file DiffViewer and the click stops propagation so it never also opens the
@@ -98,7 +130,7 @@ function fileSlotLabel(file: GitFile): string {
  *  gray row, so it reads as a conflict rather than noise (WARDEN-186). A
  *  working-tree file colors its staged vs unstaged slots distinctly (WARDEN-369);
  *  clicking a STAGED file opens the staged-only diff (what will be committed). */
-export function GitChangedFile({ file, onOpen, onOpenConflict }: { file: GitFile; onOpen?: (path: string, staged?: boolean) => void; onOpenConflict?: (path: string) => void }) {
+export function GitChangedFile({ file, onOpen, onOpenConflict, onOpenFile }: { file: GitFile; onOpen?: (path: string, staged?: boolean) => void; onOpenConflict?: (path: string) => void; onOpenFile?: (path: string) => void }) {
   const segments = fileStatusSegments(file);
   // Whether clicking this row should open the STAGED-only diff. Only working-tree
   // files with a non-blank staged slot (X) qualify; committed files have no slot.
@@ -117,7 +149,11 @@ export function GitChangedFile({ file, onOpen, onOpenConflict }: { file: GitFile
           <span key={i} className={s.cls}>{s.text}</span>
         ))}
       </span>
-      <span className="truncate">{file.path}</span>
+      <span className="min-w-0 flex-1 truncate">{file.path}</span>
+      {/* WARDEN-478: an "open this file in the FileViewer" affordance — a sibling of
+          the path, shrunk to the right edge. The path's flex-1 + min-w-0 keep it
+          truncating so long paths never push this icon off the row. */}
+      {onOpenFile && <OpenFileAffordance path={file.path} onOpenFile={onOpenFile} className="shrink-0 ml-1" />}
     </>
   );
   if (onOpen || onOpenConflict) {
@@ -457,7 +493,7 @@ export function GitCollisionBadge({ collisions, chats, gitStatus, onOpenChat, sh
 /** One touched-file row inside an expanded commit. Click to fetch and reveal the
  *  committed diff for that file (`git show --format= <hash> -- <path>`). Owns its
  *  diff fetch state so a re-collapse/re-expand is instant. */
-function CommitFile({ chatId, hash, file }: { chatId: string; hash: string; file: GitFile }) {
+function CommitFile({ chatId, hash, file, onOpenFile }: { chatId: string; hash: string; file: GitFile; onOpenFile?: (path: string) => void }) {
   const [open, setOpen] = useState(false);
   const [diff, setDiff] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -493,7 +529,12 @@ function CommitFile({ chatId, hash, file }: { chatId: string; hash: string; file
         className="flex w-full items-center gap-1 rounded px-0.5 py-px text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
       >
         <div className="min-w-0 flex-1"><GitChangedFile file={file} /></div>
-        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{loading ? '…' : open ? '▾' : '▸'}</span>
+        {/* WARDEN-478: open this committed file in the FileViewer. The flex-1 path
+            wrapper above packs this icon + the toggle to the right edge. The inner
+            GitChangedFile is rendered WITHOUT onOpenFile so it stays a non-interactive
+            <span> (no nested affordance) — this row owns the only open-file control. */}
+        {onOpenFile && <OpenFileAffordance path={file.path} onOpenFile={onOpenFile} className="shrink-0" />}
+        <span className="shrink-0 text-[10px] text-muted-foreground">{loading ? '…' : open ? '▾' : '▸'}</span>
       </div>
       {open && (
         loading ? (
@@ -526,7 +567,7 @@ function CommitMessage({ message }: { message?: string }) {
 // to document.body via Radix Popover so it isn't clipped by the `truncate` name span
 // this badge sits inside (in ChatRow). stopPropagation on clicks keeps it from also
 // opening the chat pane (mirrors the other inline buttons in these rows).
-export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, inProgress, stashCount, diffstat, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, detached, headSha, upstream, className }: {
+export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, inProgress, stashCount, diffstat, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, detached, headSha, upstream, onOpenFile, className }: {
   branch: string;
   clean: boolean | null;
   commits?: GitCommit[];
@@ -571,6 +612,11 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   // detached) the badge renders a distinct muted "no remote" marker so the
   // durability risk (local-only work, no remote backup) is visible at a glance.
   upstream?: string | null;
+  // WARDEN-478: open a touched file's full content in the FileViewer from inside
+  // this badge's commit popovers. Threaded down to each CommitFile row (recent,
+  // outgoing, incoming) so a committed file is readable — with blame/history one
+  // click away — not just diffable. Optional: omitted call sites render unchanged.
+  onOpenFile?: (path: string) => void;
   className?: string;
 }) {
   const aheadCount = typeof ahead === 'number' ? ahead : 0;
@@ -766,7 +812,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
                       ) : (showCache[cm.hash]?.files?.length ?? 0) > 0 ? (
                         <div className="flex flex-col gap-0.5">
                           {showCache[cm.hash]!.files!.map((f) => (
-                            <CommitFile key={f.path} chatId={chatId} hash={cm.hash} file={f} />
+                            <CommitFile key={f.path} chatId={chatId} hash={cm.hash} file={f} onOpenFile={onOpenFile} />
                           ))}
                         </div>
                       ) : (
@@ -875,7 +921,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
                           ) : (showCache[cm.hash]?.files?.length ?? 0) > 0 ? (
                             <div className="flex flex-col gap-0.5">
                               {showCache[cm.hash]!.files!.map((f) => (
-                                <CommitFile key={f.path} chatId={chatId} hash={cm.hash} file={f} />
+                                <CommitFile key={f.path} chatId={chatId} hash={cm.hash} file={f} onOpenFile={onOpenFile} />
                               ))}
                             </div>
                           ) : (
@@ -950,7 +996,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
                           ) : (showCache[cm.hash]?.files?.length ?? 0) > 0 ? (
                             <div className="flex flex-col gap-0.5">
                               {showCache[cm.hash]!.files!.map((f) => (
-                                <CommitFile key={f.path} chatId={chatId} hash={cm.hash} file={f} />
+                                <CommitFile key={f.path} chatId={chatId} hash={cm.hash} file={f} onOpenFile={onOpenFile} />
                               ))}
                             </div>
                           ) : (
@@ -1043,7 +1089,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
  * row opens the per-file DiffViewer exactly like the inline list does. Rendered
  * portaled via Radix so it isn't clipped by the row's `truncate` name span.
  */
-function WhatsNewPopoverContent({ summary, files, diffstat, onOpenDiff, onOpenConflict }: {
+function WhatsNewPopoverContent({ summary, files, diffstat, onOpenDiff, onOpenConflict, onOpenFile }: {
   summary: WhatsNewSummary;
   files?: GitFile[];
   // WARDEN-411: working-tree edit magnitude (insertions/deletions), rendered as a
@@ -1052,6 +1098,8 @@ function WhatsNewPopoverContent({ summary, files, diffstat, onOpenDiff, onOpenCo
   diffstat?: DiffStat | null;
   onOpenDiff?: (path: string, staged?: boolean) => void;
   onOpenConflict?: (path: string) => void;
+  // WARDEN-478: open a catch-up-view dirty file in the FileViewer (mirrors onOpenDiff).
+  onOpenFile?: (path: string) => void;
 }) {
   const line = formatWhatsNewLine(summary);
   const hasFiles = (files?.length ?? 0) > 0;
@@ -1102,7 +1150,7 @@ function WhatsNewPopoverContent({ summary, files, diffstat, onOpenDiff, onOpenCo
           </div>
           <div className="flex flex-col gap-0.5">
             {files.map((file, i) => (
-              <GitChangedFile key={file.path + '-' + i} file={file} onOpen={onOpenDiff} onOpenConflict={onOpenConflict} />
+              <GitChangedFile key={file.path + '-' + i} file={file} onOpen={onOpenDiff} onOpenConflict={onOpenConflict} onOpenFile={onOpenFile} />
             ))}
           </div>
         </div>
@@ -1122,7 +1170,7 @@ function WhatsNewPopoverContent({ summary, files, diffstat, onOpenDiff, onOpenCo
  * no progress since the last visit (the caller passes the precomputed summary +
  * `since`; this double-checks the gate so a stale call site can't paint a "0").
  */
-export function WhatsNewMarker({ summary, since, files, diffstat, onOpenDiff, onOpenConflict }: {
+export function WhatsNewMarker({ summary, since, files, diffstat, onOpenDiff, onOpenConflict, onOpenFile }: {
   summary: WhatsNewSummary;
   // The raw lastSeen epoch (null = never visited). Used both to gate visibility
   // and to anchor the tooltip's "since your last visit" framing.
@@ -1133,6 +1181,8 @@ export function WhatsNewMarker({ summary, since, files, diffstat, onOpenDiff, on
   diffstat?: DiffStat | null;
   onOpenDiff?: (path: string, staged?: boolean) => void;
   onOpenConflict?: (path: string) => void;
+  // WARDEN-478: open a catch-up-view dirty file in the FileViewer.
+  onOpenFile?: (path: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const count = summary.newCommits.length;
@@ -1159,7 +1209,7 @@ export function WhatsNewMarker({ summary, since, files, diffstat, onOpenDiff, on
         </button>
       </RadixPopover.Trigger>
       <RadixPopover.Portal>
-        <WhatsNewPopoverContent summary={summary} files={files} diffstat={diffstat} onOpenDiff={onOpenDiff} onOpenConflict={onOpenConflict} />
+        <WhatsNewPopoverContent summary={summary} files={files} diffstat={diffstat} onOpenDiff={onOpenDiff} onOpenConflict={onOpenConflict} onOpenFile={onOpenFile} />
       </RadixPopover.Portal>
     </RadixPopover.Root>
   );

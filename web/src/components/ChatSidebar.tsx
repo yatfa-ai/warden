@@ -24,6 +24,7 @@ import { formatKillToast, runKillFanout } from '@/lib/kill';
 import { copyText } from '@/lib/clipboard';
 import { DiffViewer } from './DiffViewer';
 import { ConflictView } from './ConflictView';
+import { FileViewer } from './FileViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { RECENTLY_CLOSED_PREVIEW, type Snippet, type RecentlyClosedEntry } from '@/lib/storage';
 import { THIS_MACHINE, basename, chatType, displayName } from '@/lib/chatDisplay';
@@ -157,6 +158,11 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
   // list — opens the read-only ours-vs-theirs stage-blob view instead of the staged
   // diff, which is not a usable ours/theirs view for an unmerged path.
   const [conflictTarget, setConflictTarget] = useState<{ chatId: string; path: string } | null>(null);
+  // Per-file read dialog (WARDEN-478): which chatId + path is shown in the FileViewer,
+  // set by the per-agent git panel's "open file" affordance on a dirty/committed file
+  // row. Mirrors diffTarget/conflictTarget: read-only fetch + render, no new backend
+  // endpoint (FileViewer reads /api/read-file, /api/git-blame, /api/git-log internally).
+  const [fileTarget, setFileTarget] = useState<{ chatId: string; path: string } | null>(null);
   const { prefs } = useNotificationPrefs();
 
   // Multi-select broadcast (WARDEN-292): the set of selected agent ids, held at
@@ -836,11 +842,11 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
             {(active.length > 0 || idle.length > 0) && (
               <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">● live (tmux)</div>
             )}
-            {active.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path, staged) => setDiffTarget({ chatId: c.key || c.id, path, staged })} onOpenConflict={(path) => setConflictTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} note={agentNotes[c.id]} onSetNote={(text: string) => setNote(c.id, text)} isWatched={watchedChats.has(c.key || c.id)} onToggleWatch={() => onToggleWatch(c.key || c.id)} />)}
+            {active.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path, staged) => setDiffTarget({ chatId: c.key || c.id, path, staged })} onOpenConflict={(path) => setConflictTarget({ chatId: c.key || c.id, path })} onOpenFile={(path) => setFileTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} note={agentNotes[c.id]} onSetNote={(text: string) => setNote(c.id, text)} isWatched={watchedChats.has(c.key || c.id)} onToggleWatch={() => onToggleWatch(c.key || c.id)} />)}
             {idle.length > 0 && (
               <>
                 <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">idle</div>
-                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path, staged) => setDiffTarget({ chatId: c.key || c.id, path, staged })} onOpenConflict={(path) => setConflictTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} note={agentNotes[c.id]} onSetNote={(text: string) => setNote(c.id, text)} isWatched={watchedChats.has(c.key || c.id)} onToggleWatch={() => onToggleWatch(c.key || c.id)} />)}
+                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path, staged) => setDiffTarget({ chatId: c.key || c.id, path, staged })} onOpenConflict={(path) => setConflictTarget({ chatId: c.key || c.id, path })} onOpenFile={(path) => setFileTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} note={agentNotes[c.id]} onSetNote={(text: string) => setNote(c.id, text)} isWatched={watchedChats.has(c.key || c.id)} onToggleWatch={() => onToggleWatch(c.key || c.id)} />)}
               </>
             )}
             <div className="mt-3 mb-1 border-t border-border/50" />
@@ -1028,6 +1034,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
                 onFetchOutgoing={() => fetchGitLogOutgoing(id)}
                 onOpenDiff={(path, staged) => setDiffTarget({ chatId: id, path, staged })}
                 onOpenConflict={(path) => setConflictTarget({ chatId: id, path })}
+                onOpenFile={(path) => setFileTarget({ chatId: id, path })}
                 note={c ? agentNotes[c.id] : undefined}
                 onSetNote={c ? (text: string) => setNote(c.id, text) : undefined}
                 timestampFormat={timestampFormat}
@@ -1122,6 +1129,13 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
         filePath={conflictTarget?.path ?? ''}
         open={!!conflictTarget}
         onOpenChange={(o) => { if (!o) setConflictTarget(null); }}
+      />
+      <FileViewer
+        chatId={fileTarget?.chatId ?? ''}
+        filePath={fileTarget?.path ?? ''}
+        open={!!fileTarget}
+        timestampFormat={timestampFormat}
+        onOpenChange={(o) => { if (!o) setFileTarget(null); }}
       />
       <BroadcastDialog
         open={broadcastOpen}
