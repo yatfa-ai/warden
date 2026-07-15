@@ -224,6 +224,55 @@ const WATCH_REASON_LABEL: Record<WatchReason, string> = {
 };
 
 /**
+ * Pure: should the per-chat watch ping fire, given which pane the human is
+ * currently focused on AND whether Warden is visible? (WARDEN-426.) Suppresses
+ * the ping for the ONE pane the human is already reading — they can see it (a
+ * focused pane is, by definition, open, so it already appears in the OPEN-only
+ * AttentionBadge with its "because X" signal). Removing that single redundant
+ * ping is the PRECISE per-pane-focus gate that `fireWatchNotification`'s
+ * "deliberately NOT gated on document visibility" comment pointed at: the coarse
+ * window-visibility filter was rejected because it would lose signal while away;
+ * this gate loses no signal because it only suppresses when the human is BOTH
+ * focused on the pane AND present to see the in-app badge.
+ *
+ * CRITICAL — focus is STICKY, not a presence signal. `focused` is React workspace
+ * state set on pane open/click and NEVER cleared when Warden is hidden (the
+ * visibilitychange handler only refreshes the catalog). A human who focused a
+ * watched pane and then stepped away still has `focused === paneKey` while Warden
+ * is hidden and the watch poll keeps ticking. So the gate MUST consult
+ * `visibilityState`: when Warden is `hidden` the human is AWAY and the ping
+ * ALWAYS fires regardless of focus — that is the watch feature's whole purpose
+ * (watch this chat, step away, get pinged), and away the in-app badge is not
+ * visible to carry the signal. Suppressing on `focused === paneKey` ALONE would
+ * turn a false-positive suppression into a false-NEGATIVE (a missed ping) in
+ * precisely the watch feature's primary scenario.
+ *
+ * Fires unchanged when the human is away (`visibilityState === 'hidden'`),
+ * focused elsewhere, on a DIFFERENT pane, or has no focus context
+ * (`focusedPaneKey == null` — the loose check covers both `null` and the
+ * `undefined` an un-passed optional param yields) — those are exactly the cases
+ * where the ping is the only signal. Identity is the SAME `row.key ?? row.id`
+ * space the watch subsystem keys on (`indexByWatchKey`) and the ping deep-links
+ * to, so the comparison is apples-to-apples. Pure + dependency-free so it is
+ * unit-tested directly alongside `shouldFireAlert`. `visibilityState` is the live
+ * `document.visibilityState` the caller passes in (kept out of the module so the
+ * helper stays pure + dependency-free).
+ */
+export function shouldFireWatch(
+  focusedPaneKey: string | null | undefined,
+  row: AgentStateRow,
+  visibilityState: string,
+): boolean {
+  // Away → always fire. The watch ping exists to REACH the human when Warden is
+  // hidden; the sticky `focused` key is not a presence signal, so it cannot be
+  // allowed to suppress a ping the human will otherwise never see.
+  if (visibilityState === 'hidden') return true;
+  if (focusedPaneKey == null) return true;
+  const paneKey = row.key ?? row.id;
+  return paneKey !== focusedPaneKey;
+}
+
+/**
  * Pure: build the per-chat watch notification title + body. Sibling of
  * formatAlertMessage (above) for the targeted, per-chat channel (WARDEN-378).
  *
