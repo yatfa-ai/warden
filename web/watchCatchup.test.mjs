@@ -40,6 +40,7 @@ const {
   withoutKey,
   inAwayWindow,
   awayMisses,
+  reconcileAwayMisses,
   formatWatchMiss,
   formatCatchupSummary,
   loadWatchMissLog,
@@ -194,6 +195,91 @@ test('orders newest-first across keys', () => {
 });
 test('empty log → empty surface', () => {
   assert.deepEqual(awayMisses([], 0), []);
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nawayMisses urgency ranking: erroring > stuck > completed > waiting [WARDEN-476]');
+//
+// The sort changed from purely firedAt-desc to URGENCY (WATCH_REASON_PRIORITY) with a
+// firedAt-desc tiebreak (WARDEN-476 goal #2: a live "erroring" no longer ranks below a
+// trivial "finished a task"). Same-reason inputs still fall back to firedAt-desc, so the
+// prior newest-first behaviour is preserved for an equal-reason set.
+
+test('ranks a live erroring ABOVE a trivial completed (the goal #2 example)', () => {
+  const log = [
+    miss('done', { reason: 'completed', firedAt: 300 }), // later, but lower urgency
+    miss('err', { reason: 'erroring', firedAt: 100 }),   // earlier, but most urgent
+  ];
+  assert.deepEqual(awayMisses(log, 0).map((m) => m.key), ['err', 'done']);
+});
+test('full urgency order across reasons: erroring, stuck, completed, waiting', () => {
+  const log = [
+    miss('w', { reason: 'waiting', firedAt: 500 }),
+    miss('c', { reason: 'completed', firedAt: 400 }),
+    miss('s', { reason: 'stuck', firedAt: 300 }),
+    miss('e', { reason: 'erroring', firedAt: 200 }),
+  ];
+  assert.deepEqual(awayMisses(log, 0).map((m) => m.key), ['e', 's', 'c', 'w']);
+});
+test('same reason → firedAt-desc tiebreak (newest first) is preserved', () => {
+  const log = [
+    miss('old', { reason: 'erroring', firedAt: 10 }),
+    miss('new', { reason: 'erroring', firedAt: 300 }),
+    miss('mid', { reason: 'erroring', firedAt: 200 }),
+  ];
+  assert.deepEqual(awayMisses(log, 0).map((m) => m.key), ['new', 'mid', 'old']);
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nreconcileAwayMisses: suppress recovered, keep completed + no-snapshot [WARDEN-476]');
+//
+// The read-time reconciliation against the chats' CURRENT states: a watched chat that
+// needed the human while away but has since recovered does NOT appear as a current need.
+// 'completed' is exempt (it always lands on idle — the healthy state — so a naive
+// needs-you suppress would drop every completed miss); a key with no current snapshot is
+// kept (suppressing without confirming recovery would risk a false negative).
+
+// currentByKey builder: a key→AgentStateRow index of the watched chats' current states.
+const states = (entries) => Object.fromEntries(entries.map(([k, state]) => [k, row(k, { state })]));
+
+test('suppresses a miss whose chat recovered (current state no longer needs-you)', () => {
+  const misses = [miss('a', { reason: 'erroring', firedAt: 100 })];
+  assert.deepEqual(reconcileAwayMisses(misses, states([['a', 'active']])).map((m) => m.key), []);
+});
+test('KEEPS a miss whose chat is STILL needs-you (erroring → now waiting)', () => {
+  const misses = [miss('a', { reason: 'erroring', firedAt: 100 })];
+  assert.deepEqual(reconcileAwayMisses(misses, states([['a', 'waiting']])).map((m) => m.key), ['a']);
+});
+test('KEEPS a miss whose key has NO current snapshot (cannot confirm recovery)', () => {
+  const misses = [miss('a', { reason: 'erroring', firedAt: 100 })];
+  assert.deepEqual(reconcileAwayMisses(misses, states([['b', 'active']])).map((m) => m.key), ['a']);
+});
+test('KEEPS a completed miss though its landing state idle is not needs-you', () => {
+  const misses = [miss('a', { reason: 'completed', firedAt: 100 })];
+  assert.deepEqual(reconcileAwayMisses(misses, states([['a', 'idle']])).map((m) => m.key), ['a']);
+});
+test('null currentByKey is a no-op (keeps everything — the pre-poll default)', () => {
+  const misses = [miss('a', { reason: 'erroring' }), miss('b', { reason: 'waiting' })];
+  assert.equal(reconcileAwayMisses(misses, null).length, 2);
+});
+test('empty currentByKey keeps everything (every key absent → keep)', () => {
+  assert.equal(reconcileAwayMisses([miss('a', { reason: 'erroring' })], {}).length, 1);
+});
+test('mixed: drops only the recovered one and preserves the urgency order', () => {
+  // awayMisses would urgency-rank these erroring(0) < completed(2) < waiting(3); feed
+  // them pre-ranked and assert reconcile drops ONLY the recovered chat, preserving order.
+  const misses = [
+    miss('err', { reason: 'erroring', firedAt: 100 }),  // still erroring → keep
+    miss('done', { reason: 'completed', firedAt: 200 }), // completed → keep (lands idle)
+    miss('wait', { reason: 'waiting', firedAt: 300 }),   // recovered to active → drop
+  ];
+  const cur = states([['err', 'erroring'], ['done', 'idle'], ['wait', 'active']]);
+  assert.deepEqual(reconcileAwayMisses(misses, cur).map((m) => m.key), ['err', 'done']);
+});
+test('does not mutate the input array', () => {
+  const misses = [miss('a', { reason: 'erroring' })];
+  reconcileAwayMisses(misses, states([['a', 'active']]));
+  assert.equal(misses.length, 1);
 });
 
 // ---------------------------------------------------------------------------

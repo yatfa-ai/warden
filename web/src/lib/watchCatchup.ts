@@ -117,15 +117,41 @@ export function inAwayWindow(miss: WatchMiss, since: number): boolean {
   return miss.firedAt >= since;
 }
 
+// The persistent needs-you states a CURRENT snapshot can reconcile an away miss
+// against (WARDEN-476). Mirrors chatWatch.ts WATCH_DIRECT_STATES (:42) — keep in
+// sync. A watched chat whose current state is NOT one of these has RECOVERED since
+// the miss fired, so its away miss is suppressed at read-time (reconcileAwayMisses)
+// and the catch-up agrees with the live return-banner callout. Mirrored locally
+// (not imported) to preserve this module's dependency-free discipline — the same
+// way WATCH_MISS_REASON_LABEL below mirrors desktopAlerts' WATCH_REASON_LABEL.
+const WATCH_NEEDS_YOU_STATES: ReadonlySet<string> = new Set(['waiting', 'erroring', 'stuck']);
+
+// Urgency precedence for ranking surviving misses (WARDEN-476). Mirrors chatWatch.ts
+// WATCH_REASON_PRIORITY (:54) — keep in sync. The catch-up ranks survivors by the
+// SAME order the live pings FIRE in (diffWatchAlerts sorts its alerts by this table),
+// so the in-app catch-up is consistent with the live channel. Lower number = MORE
+// urgent (sorts first); a stable firedAt-desc tiebreak keeps same-reason misses
+// newest-first. NOTE this ranks 'waiting' LAST among survivors — see WARDEN-476's PR:
+// reusing the keyed fire-order table over attentionRollup's ATTENTION_RANK (which
+// promotes 'waiting' first) is the deliberate choice, for cross-channel consistency
+// with the order the pings themselves fire. Mirrored locally for the same
+// dependency-free reason as WATCH_NEEDS_YOU_STATES above.
+const WATCH_REASON_PRIORITY: Record<WatchReason, number> = {
+  erroring: 0, stuck: 1, completed: 2, waiting: 3,
+};
+
 /**
  * Pure: the unacknowledged away misses — the log filtered to the away window
- * (`firedAt >= since`), deduped to the NEWEST miss per chat key, newest-first.
- * This is the list the catch-up surface renders.
+ * (`firedAt >= since`), deduped to the NEWEST miss per chat key, then URGENCY-RANKED
+ * (WARDEN-476). This is the candidate list the catch-up surface renders AFTER
+ * reconcileAwayMisses suppresses the recovered ones.
  *
  * Dedup-by-newest (not oldest) means a chat that flapped (e.g. fired waiting, then
  * later erroring, while you were away) surfaces ONCE with its latest, most
- * actionable reason — never two rows for one chat. Newest-first ordering puts the
- * most-recent need at the top of the catch-up.
+ * actionable reason — never two rows for one chat. The urgency ranking (WATCH_REASON_PRIORITY)
+ * puts a live "erroring" ABOVE a trivial "finished a task" (goal #2): a stable
+ * firedAt-desc tiebreak keeps the prior newest-first behaviour for an equal-reason
+ * set, so this is behaviour-preserving for single-reason inputs.
  */
 export function awayMisses(log: WatchMiss[], since: number): WatchMiss[] {
   const inWindow = log.filter((m) => inAwayWindow(m, since));
@@ -133,7 +159,59 @@ export function awayMisses(log: WatchMiss[], since: number): WatchMiss[] {
   // entry seen for a key wins (the newest).
   const byKey = new Map<string, WatchMiss>();
   for (const m of inWindow) byKey.set(m.key, m);
-  return Array.from(byKey.values()).sort((a, b) => b.firedAt - a.firedAt);
+  // Rank by URGENCY (WARDEN-476): reuses the watch fire-order precedence so the
+  // catch-up is ordered the SAME way the live pings fire. The firedAt-desc tiebreak
+  // preserves the prior newest-first order for an equal-reason set.
+  return Array.from(byKey.values()).sort(
+    (a, b) => WATCH_REASON_PRIORITY[a.reason] - WATCH_REASON_PRIORITY[b.reason] || b.firedAt - a.firedAt,
+  );
+}
+
+/**
+ * Pure (WARDEN-476): reconcile the away misses against the chats' CURRENT states on
+ * return, suppressing any miss whose chat has since RECOVERED — so the catch-up only
+ * ever directs the human to a chat that STILL needs them, agreeing with the co-rendered
+ * live return-banner callout (whose rankAttention lead is recency-bound). Closes the
+ * last false-positive trust hole in the per-chat watch catch-up (Observer Job #1).
+ *
+ * READ-TIME only — the durable log is the bounded history and a chat can re-error after
+ * recovering (the next fire records a fresh miss), so the log is NEVER mutated here;
+ * it must stay queryable. This is a display reconciliation, not an ack.
+ *
+ * Suppression rule (suppress = drop from the catch-up THIS return):
+ *  - A miss whose key has a current snapshot that is NO LONGER a persistent needs-you
+ *    state (not in WATCH_NEEDS_YOU_STATES) is suppressed — the chat recovered while the
+ *    human was away, so directing them to it lands on a chat that needs nothing.
+ *  - A key with NO current snapshot (host blip / not yet fetched this poll) is KEPT —
+ *    suppressing without confirmation would risk a false NEGATIVE (silently dropping a
+ *    real need), the worse failure mode. On a normal return the agent-states poll has
+ *    run, so a current snapshot is present for every watched chat.
+ *  - A 'completed' miss is ALWAYS KEPT: completed is a TRANSIENT working→idle event
+ *    (detectWatchCompleted) whose landing state is 'idle' — the healthy/recovered
+ *    state — so a naive "current state not needs-you → suppress" would drop EVERY
+ *    completed miss. "Finished a task while you were away" is legitimate informational
+ *    catch-up; it is ranked LOWEST (WATCH_REASON_PRIORITY) instead, satisfying goal #2
+ *    without losing it.
+ *
+ * Order is PRESERVED (this is a filter, not a re-sort): pass it the urgency-ranked
+ * output of awayMisses and the survivors stay urgency-ranked. Pure + dependency-free.
+ *
+ * `currentByKey` is a key→AgentStateRow index of the watched chats' current states
+ * (built by the caller via indexByWatchKey, from useAttentionRollup's watched-states
+ * exposure). null/empty is a no-op suppressor (keeps every miss) — the safe default
+ * before any poll has landed.
+ */
+export function reconcileAwayMisses(
+  misses: WatchMiss[],
+  currentByKey: Record<string, AgentStateRow> | null,
+): WatchMiss[] {
+  if (!currentByKey) return misses;
+  return misses.filter((m) => {
+    if (m.reason === 'completed') return true; // informational; never recovered-away
+    const cur = currentByKey[m.key];
+    if (!cur) return true; // no current snapshot → can't confirm recovery → keep
+    return WATCH_NEEDS_YOU_STATES.has(cur.state); // keep only if still needs-you
+  });
 }
 
 // Reason → human phrasing for the catch-up line. Mirrors desktopAlerts'

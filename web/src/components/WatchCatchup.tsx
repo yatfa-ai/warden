@@ -11,7 +11,7 @@ import { formatCatchupSummary, formatWatchMiss, type WatchMiss } from '@/lib/wat
 import { cn } from '@/lib/utils';
 
 interface Props {
-  /** Unacknowledged away watch misses (newest-first, deduped per key). */
+  /** Unacknowledged away watch misses (urgency-ranked, deduped per key; recovered chats suppressed on return). */
   misses: WatchMiss[];
   /** Deep-link to the watched chat's pane + ack it (per-key). */
   onOpenMiss: (miss: WatchMiss) => void;

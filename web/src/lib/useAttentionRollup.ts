@@ -63,6 +63,15 @@ export interface AttentionRollupState {
   rollup: AttentionRollup;
   /** True only during the very first fetch (before any data has arrived). */
   loading: boolean;
+  /**
+   * WARDEN-476: the watched chats' CURRENT states — the watched subset of the open ∪
+   * watched rows fetched for the watch diff, exposed (pre-open-filter) so the per-chat
+   * watch catch-up can reconcile away misses against current pane state on return and
+   * suppress the ones whose chats have since recovered. Built from the SAME ~30s poll
+   * the watch diff already rides, so this adds ZERO SSH cost. Empty before the first
+   * successful poll lands; preserved (not blanked) on a transient fetch failure.
+   */
+  watchedStates: AgentStateRow[];
 }
 
 /**
@@ -143,6 +152,9 @@ export function useAttentionRollup(
   const [health, setHealth] = useState<HealthData | null>(null);
   const [stats, setStats] = useState<ActivityStats | null>(null);
   const [agentStates, setAgentStates] = useState<AgentStateRow[]>([]);
+  // WARDEN-476: the watched chats' current states (watched subset of the fetched rows),
+  // exposed for the catch-up's return-time reconciliation. See AttentionRollupState.
+  const [watchedStates, setWatchedStates] = useState<AgentStateRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [agentStatesLoaded, setAgentStatesLoaded] = useState(false);
   // The previous ROUTABLE sub-rollup (severity + per-agent-mute filtered), for the
@@ -214,7 +226,7 @@ export function useAttentionRollup(
     // resolves arbitrary ?panes= keys from the cache, so a watched-but-closed key
     // (its chat still in the catalog) resolves the same as an open one.
     const union = Array.from(new Set([...open, ...watched]));
-    if (!union.length) { setAgentStates([]); setAgentStatesLoaded(true); return; }
+    if (!union.length) { setAgentStates([]); setWatchedStates([]); setAgentStatesLoaded(true); return; }
     try {
       const res = await fetch(`/api/agent-states?panes=${encodeURIComponent(union.join(','))}`);
       if (res.ok) {
@@ -329,6 +341,15 @@ export function useAttentionRollup(
         // the human through the targeted watch ping, not the lumped badge.
         const openSet = new Set(open);
         setAgentStates(rows.filter((r) => openSet.has(r.key ?? r.id)));
+        // WARDEN-476: expose the watched chats' CURRENT states — the WATCHED subset of
+        // the pre-open-filter `rows` (which include watched-but-closed panes the open
+        // filter above just discarded). This is the data the per-chat watch catch-up
+        // reconciles away misses against on return, so a miss whose chat recovered is
+        // suppressed. It is already in-flight on THIS same poll (fetched for the watch
+        // diff above), so it adds zero SSH cost. Built before the open filter drops the
+        // watched-but-closed rows — those are exactly the chats the catch-up covers.
+        const watchedSet = new Set(watched);
+        setWatchedStates(rows.filter((r) => watchedSet.has(r.key ?? r.id)));
       }
     } catch {
       // A failed state poll must not blank the other halves or crash the badge.
@@ -443,5 +464,5 @@ export function useAttentionRollup(
     }
   }, [rollup, attentionDesktopAlerts, loading, agentStatesLoaded, severityPrefs, mutedSet]);
 
-  return { rollup, loading };
+  return { rollup, loading, watchedStates };
 }
