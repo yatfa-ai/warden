@@ -67,7 +67,7 @@ export function SessionRowSkeleton() {
   );
 }
 
-export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, onOpenConflict, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, isPinned, onTogglePin, selected, onToggleSelect, selectionActive, note, onSetNote, isWatched, onToggleWatch }: {
+export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, onOpenConflict, onOpenFile, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, isPinned, onTogglePin, selected, onToggleSelect, selectionActive, note, onSetNote, isWatched, onToggleWatch }: {
   c: Chat; open: boolean; onOpen: () => void; onKill: () => void;
   onRename: (session: string, kind: string, name: string, host?: string) => void;
   dim?: boolean;
@@ -85,6 +85,10 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
   // WARDEN-428: opens the read-only ours-vs-theirs ConflictView for a conflicted
   // file (UU/AA/UD/…) instead of the staged diff.
   onOpenConflict?: (path: string) => void;
+  // WARDEN-478: opens the file's full content in the FileViewer (read + blame +
+  // history) from any file row in this agent's git panel — dirty files, the
+  // catch-up popover, and committed files inside GitBranchBadge's commit lists.
+  onOpenFile?: (path: string) => void;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
   isPinned?: boolean; onTogglePin?: () => void;
   // WARDEN-292: multi-select for broadcast. `selected` is this row's membership
@@ -217,6 +221,7 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
                   outgoingCommits={outgoingCommits}
                   outgoingLoading={outgoingLoading}
                   onFetchOutgoing={onFetchOutgoing}
+                  onOpenFile={onOpenFile}
                   className="ml-1"
                 />
               )}
@@ -228,6 +233,7 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
                   diffstat={gitInfo?.diffstat}
                   onOpenDiff={onOpenDiff}
                   onOpenConflict={onOpenConflict}
+                  onOpenFile={onOpenFile}
                 />
               )}
             </>
@@ -241,7 +247,7 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
                 <div className="px-0.5"><DiffStatChip diffstat={gitInfo.diffstat} /></div>
               )}
               {gitInfo.files.map((file, i) => (
-                <GitChangedFile key={file.path + '-' + i} file={file} onOpen={onOpenDiff} onOpenConflict={onOpenConflict} />
+                <GitChangedFile key={file.path + '-' + i} file={file} onOpen={onOpenDiff} onOpenConflict={onOpenConflict} onOpenFile={onOpenFile} />
               ))}
             </div>
           )}
@@ -327,7 +333,7 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
 // the list mirrors the pane grid (no sidebar reorder) and hide/unhide is
 // abolished. Closing a row (× / "Close pane") is `onClose`, which removes the
 // pane and records it in the workspace's recently-closed recovery list.
-export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, onOpenConflict, onKill, note, onSetNote, timestampFormat, isWatched, onToggleWatch }: {
+export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, onOpenConflict, onOpenFile, onKill, note, onSetNote, timestampFormat, isWatched, onToggleWatch }: {
   id: string;
   c?: Chat;
   isOpen: boolean;
@@ -344,6 +350,8 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
   onOpenDiff?: (path: string, staged?: boolean) => void;
   // WARDEN-428: opens the read-only ours-vs-theirs ConflictView for a conflicted file.
   onOpenConflict?: (path: string) => void;
+  // WARDEN-478: opens the file's full content in the FileViewer (mirrors ChatRow).
+  onOpenFile?: (path: string) => void;
   onKill?: () => void;
   // WARDEN-305: per-agent note (mirrors pins; keyed by chat id).
   note?: string;
@@ -415,10 +423,10 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
         {!dead && !editing && showHostTags !== false && hostTag && <span className="text-[10px] text-muted-foreground">{hostTag}</span>}
         {!dead && !editing && showProjectBadges && c?.project && <span className="text-[10px] text-muted-foreground">{c.project}</span>}
         {!dead && !editing && (gitInfo?.branch || gitInfo?.detached) && (
-          <GitBranchBadge branch={gitInfo.branch ?? ''} chatId={id} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} ahead={gitInfo.ahead} behind={gitInfo.behind} inProgress={gitInfo.inProgress} stashCount={gitInfo.stashCount} diffstat={gitInfo.diffstat} detached={gitInfo.detached} headSha={gitInfo.headSha} upstream={gitInfo.upstream} incomingCommits={incomingCommits} incomingLoading={incomingLoading} onFetchIncoming={onFetchIncoming} outgoingCommits={outgoingCommits} outgoingLoading={outgoingLoading} onFetchOutgoing={onFetchOutgoing} />
+          <GitBranchBadge branch={gitInfo.branch ?? ''} chatId={id} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} ahead={gitInfo.ahead} behind={gitInfo.behind} inProgress={gitInfo.inProgress} stashCount={gitInfo.stashCount} diffstat={gitInfo.diffstat} detached={gitInfo.detached} headSha={gitInfo.headSha} upstream={gitInfo.upstream} incomingCommits={incomingCommits} incomingLoading={incomingLoading} onFetchIncoming={onFetchIncoming} outgoingCommits={outgoingCommits} outgoingLoading={outgoingLoading} onFetchOutgoing={onFetchOutgoing} onOpenFile={onOpenFile} />
         )}
         {!dead && !editing && whatsNew.show && (
-          <WhatsNewMarker summary={whatsNew.summary} since={whatsNew.since} files={gitInfo?.files} diffstat={gitInfo?.diffstat} onOpenDiff={onOpenDiff} onOpenConflict={onOpenConflict} />
+          <WhatsNewMarker summary={whatsNew.summary} since={whatsNew.since} files={gitInfo?.files} diffstat={gitInfo?.diffstat} onOpenDiff={onOpenDiff} onOpenConflict={onOpenConflict} onOpenFile={onOpenFile} />
         )}
         {/* WARDEN-378: per-chat "watch" toggle (mirrors ChatRow's). Shown even for a
             dead pane so a watched-but-dead chat can be unwatched; the row's own
@@ -448,7 +456,7 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
           {gitInfo.diffstat && gitInfo.diffstat.insertions + gitInfo.diffstat.deletions > 0 && (
             <div className="px-0.5"><DiffStatChip diffstat={gitInfo.diffstat} /></div>
           )}
-          {gitInfo.files.map((file, i) => (<GitChangedFile key={file.path + '-' + i} file={file} onOpen={onOpenDiff} onOpenConflict={onOpenConflict} />))}
+          {gitInfo.files.map((file, i) => (<GitChangedFile key={file.path + '-' + i} file={file} onOpen={onOpenDiff} onOpenConflict={onOpenConflict} onOpenFile={onOpenFile} />))}
         </div>
       )}
       {/* WARDEN-305: per-agent note — muted one-line subtext under the name, or an
