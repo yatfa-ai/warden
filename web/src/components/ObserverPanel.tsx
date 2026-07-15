@@ -629,6 +629,7 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
                           onApprove={decide}
                           onEdit={setEditState}
                           onDecline={decide}
+                          notifySuccess={prefs.notifySuccess}
                         />
                       );
                     return null;
@@ -922,51 +923,65 @@ function DirectiveCard({
   onApprove,
   onEdit,
   onDecline,
+  notifySuccess,
 }: {
   card: Extract<Item, { kind: 'card' }>;
   onApprove: (requestId: string, approved: boolean) => void;
   onEdit: (s: { open: boolean; requestId: string; value: string }) => void;
   onDecline: (requestId: string, approved: boolean) => void;
+  notifySuccess: boolean;
 }) {
   return (
     <div className="pl-9">
-      <div className={`flex flex-col gap-2 rounded-xl border bg-card p-3 ${card.resolved ? 'opacity-70' : ''}`}>
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          <Badge variant="secondary" className="gap-1">
-            <SendHorizontalIcon className="size-3" /> proposed directive
-          </Badge>
-          <span className="text-muted-foreground">
-            {card.container}
-            {card.role ? ` · ${card.role}` : ''}
-          </span>
-        </div>
-        <div className="whitespace-pre-wrap break-words rounded-lg border bg-muted/40 p-2 text-sm">{card.directive}</div>
-        {card.resolved ? (
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            {card.result === 'sent' ? (
-              <>
-                <CheckIcon className="size-3.5 text-green-500" /> Sent
-              </>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div className={`flex flex-col gap-2 rounded-xl border bg-card p-3 ${card.resolved ? 'opacity-70' : ''}`}>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <Badge variant="secondary" className="gap-1">
+                <SendHorizontalIcon className="size-3" /> proposed directive
+              </Badge>
+              <span className="text-muted-foreground">
+                {card.container}
+                {card.role ? ` · ${card.role}` : ''}
+              </span>
+            </div>
+            <div className="whitespace-pre-wrap break-words rounded-lg border bg-muted/40 p-2 text-sm">{card.directive}</div>
+            {card.resolved ? (
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                {card.result === 'sent' ? (
+                  <>
+                    <CheckIcon className="size-3.5 text-green-500" /> Sent
+                  </>
+                ) : (
+                  <>
+                    <XIcon className="size-3.5 text-destructive" /> Declined
+                  </>
+                )}
+              </div>
             ) : (
-              <>
-                <XIcon className="size-3.5 text-destructive" /> Declined
-              </>
+              <div className="flex flex-wrap gap-1.5">
+                <Button size="sm" onClick={() => onApprove(card.requestId, true)}>
+                  Approve &amp; send
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => onEdit({ open: true, requestId: card.requestId, value: card.directive })}>
+                  <PencilIcon /> Edit
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => onDecline(card.requestId, false)}>
+                  Decline
+                </Button>
+              </div>
             )}
           </div>
-        ) : (
-          <div className="flex flex-wrap gap-1.5">
-            <Button size="sm" onClick={() => onApprove(card.requestId, true)}>
-              Approve &amp; send
-            </Button>
-            <Button size="sm" variant="outline" onClick={() => onEdit({ open: true, requestId: card.requestId, value: card.directive })}>
-              <PencilIcon /> Edit
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => onDecline(card.requestId, false)}>
-              Decline
-            </Button>
-          </div>
-        )}
-      </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem onSelect={() => copyText(card.directive, notifySuccess)}>
+            <CopyIcon /> Copy directive
+          </ContextMenuItem>
+          <ContextMenuItem onSelect={() => copyText(`${card.container}${card.role ? ` · ${card.role}` : ''}`, notifySuccess)}>
+            <CopyIcon /> Copy agent
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
     </div>
   );
 }
