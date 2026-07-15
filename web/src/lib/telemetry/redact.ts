@@ -38,8 +38,12 @@
 //   • Prompts         — prompt / prompt-template fields. Dropped wholesale.
 //   • File paths      — absolute + home-relative, POSIX (`/…`, `~/…`) and
 //                       Windows (`C:\…`, `\\server\share\…`).
-//   • Hostnames       — FQDN (`host.corp.local`), `user@host` (email / SSH), and
-//                       scheme URLs (`ssh://`, `https://`, `postgres://` …).
+//   • Hostnames       — FQDN (`host.corp.local`), `user@host` (email / SSH),
+//                       scheme URLs (`ssh://`, `https://`, `postgres://` …), and
+//                       IP addresses (IPv4 `10.0.0.5` AND IPv6 `fe80::1` /
+//                       `2001:db8::1`). Persistent device identifiers such as MAC
+//                       addresses (`00:1A:2B:3C:4D:5E`) are scrubbed in the same
+//                       host/device pass — they reveal network topology too.
 //
 // Identifiers permitted ONLY at the extended tier: chat name + Claude session
 // name. CONTENT IS NEVER SENT — names only, never content.
@@ -222,7 +226,40 @@ export function scrubString(value: string): string {
   // 9. IPv4 addresses (4-octet — avoids dates / versions / times).
   out = out.replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[REDACTED:host]');
 
+  // 10. IPv6 addresses (+ MAC / device identifiers). Once IPs are treated as
+  //     host identifiers (rule 9), IPv6 must not ride out — `fe80::1`,
+  //     `2001:db8::1`, `::1`, and full 8-hextet forms all leak internal network
+  //     topology (link-local, ULA) the contract exists to prevent. The candidate
+  //     grabs any colon-hex run with ≥2 colons (optionally a trailing `%zone`);
+  //     the validator (looksLikeIPv6) keeps clock times (`12:34:56`) and short
+  //     hex spans out. The same pass catches MAC addresses (`00:1A:2B:3C:4D:5E`,
+  //     6 hex hextets) — a MAC is a persistent device identifier, so it is
+  //     redacted in the host/device pass rather than left to leak.
+  out = out.replace(
+    /[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,}(?:%[A-Za-z0-9._-]+)?/g,
+    (m) => (looksLikeIPv6(m) ? '[REDACTED:host]' : m),
+  );
+
   return out;
+}
+
+/**
+ * Validator for the IPv6 candidate (rule 10). Keeps false positives off clock
+ * times and ordinary hex spans: a token is an IPv6/host identifier if it uses
+ * `::` zero-compression, has ≥4 hextets (≥3 colons — full IPv6 and MACs), or —
+ * at exactly 3 hextets — carries a hex letter (so `12:34:56` survives but
+ * `2001:db8:feed` does not). A `%zone` scope id (`fe80::1%eth0`) is dropped
+ * before the check. The candidate already requires ≥2 colons, so a lone
+ * `label:value` (`key:ABCD`) and the inert `[REDACTED:host]` placeholder (one
+ * colon) never reach this function as real candidates.
+ */
+function looksLikeIPv6(token: string): boolean {
+  const addr = token.split('%')[0]; // drop a trailing %zone (link-local scope id)
+  const colonCount = (addr.match(/:/g) || []).length;
+  if (colonCount < 2) return false; // safety: not address-shaped
+  const hasCompression = addr.includes('::');
+  const hasHexLetter = /[a-fA-F]/.test(addr);
+  return hasCompression || colonCount >= 3 || hasHexLetter;
 }
 
 // Deep scrub of a single value. Builds a fresh copy at every level so the input

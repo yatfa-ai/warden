@@ -198,6 +198,49 @@ test('IPv4 address is scrubbed directly (dates / versions left alone)', () => {
   assert.equal(scrubString('version 1.2.3'), 'version 1.2.3');
 });
 
+test('IPv6 host addresses are scrubbed directly (compressed / full / loopback / zone)', () => {
+  // Once IPv4 is a host identifier, IPv6 is one too — internal topology
+  // (link-local, ULA) must never ride out in an error message.
+  assert.equal(scrubString('gateway fe80::1 up'), 'gateway [REDACTED:host] up');
+  assert.equal(scrubString('db 2001:db8:abcd:ef12::1 ready'), 'db [REDACTED:host] ready');
+  assert.equal(scrubString('ula fd00::1234 here'), 'ula [REDACTED:host] here');
+  assert.equal(scrubString('loopback ::1 down'), 'loopback [REDACTED:host] down');
+  // Full uncompressed 8-hextet form.
+  assert.equal(
+    scrubString('addr 2001:0db8:0000:0000:0000:0000:0000:0001 ok'),
+    'addr [REDACTED:host] ok',
+  );
+  // Link-local with a %zone scope id — the whole token (zone included) goes.
+  assert.equal(scrubString('zone fe80::1%eth0 dev'), 'zone [REDACTED:host] dev');
+});
+
+test('IPv6 addresses are absent from a payload driven through redact()', () => {
+  // The dangerous input the reviewer flagged, exercised end-to-end through the
+  // real transform — none of the three IPv6 shapes survive in the output.
+  const out = redact(
+    { type: 'network_error', error: { message: 'connect fe80::1 / 2001:db8:abcd:ef12::1 / ::1 refused' } },
+    { tier: 'extended' },
+  );
+  const s = JSON.stringify(out);
+  assert.doesNotMatch(s, /fe80::1/);
+  assert.doesNotMatch(s, /2001:db8:abcd:ef12::1/);
+  assert.doesNotMatch(s, /::1/);
+  assert.ok(out.error.message.includes('[REDACTED:host]'), 'host placeholder present in scrubbed message');
+});
+
+test('clock times / timestamps are NOT mistaken for IPv6 (no false positives)', () => {
+  // The colon syntax collides with crash-message timestamps; these must survive.
+  assert.equal(scrubString('at 12:34:56 elapsed'), 'at 12:34:56 elapsed'); // HH:MM:SS
+  assert.equal(scrubString('duration 8:30:45'), 'duration 8:30:45'); // H:MM:SS
+  assert.equal(scrubString('ratio 1:2 split'), 'ratio 1:2 split'); // single colon, no hex
+  assert.equal(scrubString('version 1.2.3'), 'version 1.2.3'); // dots, not colons
+});
+
+test('MAC addresses (persistent device identifiers) are scrubbed in the host pass', () => {
+  assert.equal(scrubString('mac 00:1A:2B:3C:4D:5E'), 'mac [REDACTED:host]');
+  assert.equal(scrubString('nic a0:b1:c2:d3:e4:f5'), 'nic [REDACTED:host]');
+});
+
 console.log('\ntier gating — chat/session names only at the extended tier');
 
 test('names are PRESENT at the extended tier', () => {
