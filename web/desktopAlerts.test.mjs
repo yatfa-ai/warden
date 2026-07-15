@@ -630,49 +630,85 @@ test('aggregate entrant (no name) renders its reason as the title with NO descri
 });
 
 // --- WARDEN-426: shouldFireWatch (focus-gate the per-chat watch ping) ----
-console.log('\nshouldFireWatch (WARDEN-426): suppress the ping ONLY for the focused pane');
-test('focused === pane key (matched by key) → suppress (false)', () => {
+// The helper takes the live document.visibilityState as its 3rd arg because
+// `focused` is STICKY: it is not cleared when Warden hides, so focus-on-the-pane
+// must NOT be allowed to suppress a ping while the human is away. The focus-
+// dimension cases below feed 'visible' (present human); the away dimension has
+// its own block immediately after.
+console.log('\nshouldFireWatch (WARDEN-426): when PRESENT (visible), suppress ONLY for the focused pane');
+test('present + focused === pane key (matched by key) → suppress (false)', () => {
   const row = { id: 'i', key: 'k', state: 'waiting', signal: 'press enter' };
-  assert.equal(shouldFireWatch('k', row), false);
+  assert.equal(shouldFireWatch('k', row, 'visible'), false);
 });
-test('focused !== pane key → fire (true)', () => {
+test('present + focused !== pane key → fire (true)', () => {
   const row = { id: 'i', key: 'k', state: 'waiting', signal: 'press enter' };
-  assert.equal(shouldFireWatch('other-pane', row), true);
+  assert.equal(shouldFireWatch('other-pane', row, 'visible'), true);
 });
-test('focused null (human is away) → fire (true)', () => {
+test('present + focused null → fire (true)', () => {
   const row = { id: 'i', key: 'k', state: 'waiting' };
-  assert.equal(shouldFireWatch(null, row), true);
+  assert.equal(shouldFireWatch(null, row, 'visible'), true);
 });
-test('focused undefined (no focus context threaded) → fire (true)', () => {
+test('present + focused undefined (no focus context threaded) → fire (true)', () => {
   const row = { id: 'i', key: 'k', state: 'waiting' };
-  assert.equal(shouldFireWatch(undefined, row), true);
+  assert.equal(shouldFireWatch(undefined, row, 'visible'), true);
 });
-test('a row with ONLY id (no key) is matched against focusedPaneKey by id', () => {
+test('present: a row with ONLY id (no key) is matched against focusedPaneKey by id', () => {
   const row = { id: 'container-1', state: 'stuck', signal: 'loop line' };
-  assert.equal(shouldFireWatch('container-1', row), false); // focused on it → suppress
-  assert.equal(shouldFireWatch('container-2', row), true);  // focused elsewhere → fire
+  assert.equal(shouldFireWatch('container-1', row, 'visible'), false); // focused on it → suppress
+  assert.equal(shouldFireWatch('container-2', row, 'visible'), true);  // focused elsewhere → fire
 });
-test('empty-string focused key is treated as "away" (fires)', () => {
+test('present + empty-string focused key fires (treated as no real focus)', () => {
   // A nullish check (== null) intentionally lets '' fall through to the comparison;
   // '' never equals a real pane key (which is non-empty), so this still fires —
-  // matching the "focused elsewhere / away" contract without special-casing ''.
+  // matching the "focused elsewhere" contract without special-casing ''.
   const row = { id: 'i', key: 'k', state: 'waiting' };
-  assert.equal(shouldFireWatch('', row), true);
+  assert.equal(shouldFireWatch('', row, 'visible'), true);
 });
 
-console.log('\nshouldFireWatch: the gate is reason-agnostic — every WatchReason suppresses equally');
-test('suppresses uniformly across waiting/erroring/stuck/completed when focused on that pane', () => {
+console.log('\nshouldFireWatch (WARDEN-426): when AWAY (hidden), ALWAYS fire — even if focused on that pane');
+// THIS is the regression guard for the sticky-focus false-negative: a human who
+// focused a watched pane and then stepped away still has focused===paneKey while
+// Warden is hidden, and the watch poll keeps ticking. The ping must still reach
+// them — that is the watch feature's whole purpose, and the in-app badge is not
+// visible to carry the signal while away. Feeding 'hidden' goes RED on a
+// shouldFireWatch that keys only on focus (it would return false) and GREEN here.
+test('away + focused === pane key → fire (true) [the sticky-focus regression guard]', () => {
+  const row = { id: 'i', key: 'k', state: 'waiting', signal: 'press enter' };
+  assert.equal(shouldFireWatch('k', row, 'hidden'), true);
+});
+test('away + focused !== pane key → fire (true)', () => {
+  const row = { id: 'i', key: 'k', state: 'waiting' };
+  assert.equal(shouldFireWatch('other-pane', row, 'hidden'), true);
+});
+test('away + focused null → fire (true)', () => {
+  const row = { id: 'i', key: 'k', state: 'waiting' };
+  assert.equal(shouldFireWatch(null, row, 'hidden'), true);
+});
+test('away: a row with ONLY id focused on it still fires (id match does not suppress while away)', () => {
+  const row = { id: 'container-1', state: 'stuck', signal: 'loop line' };
+  assert.equal(shouldFireWatch('container-1', row, 'hidden'), true);
+});
+
+console.log('\nshouldFireWatch: the gate is reason-agnostic — every WatchReason suppresses equally (when present)');
+test('present: suppresses uniformly across waiting/erroring/stuck/completed when focused on that pane', () => {
   const focus = 'k';
   for (const state of ['waiting', 'erroring', 'stuck', 'completed']) {
     const row = { id: 'i', key: 'k', state };
-    assert.equal(shouldFireWatch(focus, row), false, `${state} suppresses when focused`);
+    assert.equal(shouldFireWatch(focus, row, 'visible'), false, `${state} suppresses when present + focused`);
   }
 });
-test('fires uniformly across waiting/erroring/stuck/completed when focused elsewhere', () => {
+test('present: fires uniformly across waiting/erroring/stuck/completed when focused elsewhere', () => {
   const focus = 'other-pane';
   for (const state of ['waiting', 'erroring', 'stuck', 'completed']) {
     const row = { id: 'i', key: 'k', state };
-    assert.equal(shouldFireWatch(focus, row), true, `${state} fires when focused elsewhere`);
+    assert.equal(shouldFireWatch(focus, row, 'visible'), true, `${state} fires when present + focused elsewhere`);
+  }
+});
+test('away: fires uniformly across waiting/erroring/stuck/completed even when focused on that pane', () => {
+  const focus = 'k';
+  for (const state of ['waiting', 'erroring', 'stuck', 'completed']) {
+    const row = { id: 'i', key: 'k', state };
+    assert.equal(shouldFireWatch(focus, row, 'hidden'), true, `${state} fires when away + focused on it`);
   }
 });
 

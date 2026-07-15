@@ -132,10 +132,12 @@ export function useAttentionRollup(
   onOpenChat?: (id: string) => void,
   // WARDEN-426: the pane key the human is currently focused on. Suppresses the
   // per-chat watch ping when a watched pane transitions into a needs-you state
-  // WHILE the human is already reading that exact pane (they can already see it —
-  // it's in the OPEN-only AttentionBadge). Null/undefined = focused elsewhere or
-  // away → ping fires unchanged. Trailing + optional so existing call sites stay
-  // compatible.
+  // WHILE the human is present (Warden visible) AND already reading that exact
+  // pane (they can already see it — it's in the OPEN-only AttentionBadge). This
+  // is NOT, on its own, an away signal: `focused` is sticky workspace state that
+  // is not cleared when Warden hides, so the actual away check is the
+  // document.visibilityState passed at the call site (hidden → always fire). Trailing
+  // + optional so existing call sites stay compatible.
   focusedPaneKey?: string | null,
 ): AttentionRollupState {
   const [health, setHealth] = useState<HealthData | null>(null);
@@ -243,14 +245,29 @@ export function useAttentionRollup(
           }
           watchPrevRef.current = nextPrev;
           for (const a of alerts) {
-            // WARDEN-426: focus-gate the ping — if the human is already focused on
-            // this exact pane, skip BOTH the OS ping AND the catch-up record: a
-            // focused pane is open + visible (they can see it via the OPEN-only
-            // AttentionBadge) and the human is present, so recording would only
-            // become stale catch-up noise. The baseline (nextPrev above) advanced
-            // regardless, so suppressing this fire introduces no re-fire surprise
-            // on a later focus loss.
-            if (shouldFireWatch(focusedPaneRef.current, a.row)) {
+            // WARDEN-426: focus-gate the ping — if the human is BOTH focused on
+            // this exact pane AND present (Warden visible), skip the OS ping: a
+            // focused pane is open + visible, so they can already see it via the
+            // OPEN-only AttentionBadge. `shouldFireWatch` also takes the live
+            // document.visibilityState: `focused` is STICKY workspace state that
+            // is NOT cleared when Warden hides, so when the human is AWAY
+            // (hidden) the ping ALWAYS fires regardless of focus — that is the
+            // watch feature's purpose (watch, step away, get pinged) and the
+            // badge is not visible to carry the signal while away. Gating on
+            // focus alone would swallow the away-ping entirely (the baseline
+            // below already advanced → no later re-fire either).
+            //
+            // SCOPE NOTE: the gate wraps BOTH the OS ping AND the catch-up
+            // record (recordWatchMiss). That is correct ONLY because of the
+            // visibility short-circuit: away (hidden) → shouldFireWatch is true →
+            // the block runs and shouldRecordMiss(_, 'hidden') records the miss
+            // (WARDEN-417's recovery net stays armed for the away case). The
+            // only case both are skipped is present + focused-on-this-pane, where
+            // neither a transient ping NOR a catch-up record is wanted (the human
+            // saw it in the badge). The ticket's plan wrapped only the ping; the
+            // record rides along here because the two share the same "human is
+            // present and reading this exact pane" precondition.
+            if (shouldFireWatch(focusedPaneRef.current, a.row, document.visibilityState)) {
               // WARDEN-378: fire the OS notification. WARDEN-417: capture whether
               // the OS channel DELIVERED it (false on unsupported / denied /
               // restrictive-webview) so the catch-up records ONLY what the OS
