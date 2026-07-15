@@ -1053,7 +1053,14 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
               ) : reflogList && reflogList.length > 0 ? (
                 <ul className="max-h-40 overflow-auto">
                   {reflogList.map((op, i) => (
-                    <li key={op.hash || i} className="rounded px-1 py-0.5 text-left">
+                    /* WARDEN-460: key by index, NOT op.hash. A reflog records ops, and
+                       several ops point HEAD at the SAME commit — `git reset --hard HEAD~1`
+                       revisits a prior commit, so one hash can appear on multiple rows.
+                       Unlike stash refs (stash@{0}, stash@{1}, …), the reflog has no
+                       per-entry unique selector, so `op.hash || i` still collides on a
+                       duplicated (non-empty) hash. The list is a static snapshot fetched on
+                       expand/refresh, so positional keys are correct. */
+                    <li key={i} className="rounded px-1 py-0.5 text-left">
                       {/* The subject IS the operation (git's %gs), e.g. "reset: moving to HEAD~1" / "checkout: moving from main to feat". */}
                       <span className="block truncate text-[10px] text-foreground" title={op.subject}>{op.subject}</span>
                       {op.hash && <span className="block text-[10px] text-muted-foreground"><span className="font-mono">{op.hash}</span>{op.date ? ` · ${op.date}` : ''}</span>}
