@@ -24,7 +24,7 @@ import { ObserverTabs } from '@/components/ObserverTabs';
 import { SettingsPage } from '@/components/SettingsPage';
 import { OpenChatBrowserPage } from '@/components/OpenChatBrowserPage';
 import { GlobalSearchDialog } from '@/components/GlobalSearchDialog';
-import { HealthDashboard } from '@/components/HealthDashboard';
+import { HealthDashboard, type GroupMode } from '@/components/HealthDashboard';
 import { AttentionBadge, dotForState } from '@/components/AttentionBadge';
 import { WatchCatchup } from '@/components/WatchCatchup';
 import { StatusDot } from '@/components/StatusDot';
@@ -305,6 +305,13 @@ function App() {
   // ChatSidebar except for the change handlers. Pure client-side pref.
   const [agentFilter, setAgentFilter] = useState<AgentFilter>(() => uiState.agentFilter ?? 'all');
   const [agentSort, setAgentSort] = useState<AgentSort>(() => uiState.agentSort ?? 'manual');
+  // WARDEN-468: HealthDashboard "Group agents by: Health | Host" toggle
+  // (WARDEN-237). Was a HealthDashboard-local useState that silently reset to
+  // 'health' on every Warden restart. Now App-owned + persisted by the saveUi
+  // effect (the single writer), exactly like agentFilter/agentSort above — so a
+  // cross-host human's Host grouping survives reload. Forwarded read-only to
+  // HealthDashboard except for the change handler. Pure client-side pref.
+  const [healthGroupBy, setHealthGroupBy] = useState<GroupMode>(() => uiState.healthGroupBy ?? 'health');
   // Default agent type + host pre-filled in the ＋ new chat form, plus the
   // user-defined custom presets (named quick-fill commands beyond claude/shell).
   // All pure client-side prefs (like density/terminalFontSize): persisted by the
@@ -515,8 +522,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy, restoreOnStartup, startedEmpty]);
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
   // workspace, so switching clears it (WARDEN-256: maximized resets on switch).
@@ -694,6 +701,8 @@ function App() {
     // Sidebar fleet filter/sort (WARDEN-442): reset to the DEFAULT_UI values.
     setAgentFilter('all');
     setAgentSort('manual');
+    // Health group-by (WARDEN-468): reset to the DEFAULT_UI value ('health').
+    setHealthGroupBy('health');
     // Terminal
     setTerminalFontSize(14);
     setTerminalScrollback(10000);
@@ -1793,6 +1802,8 @@ function App() {
             onOpenChat={openChat}
             onClose={() => setHealthCollapsed(true)}
             timestampFormat={timestampFormat}
+            groupBy={healthGroupBy}
+            onGroupByChange={setHealthGroupBy}
           />
         </section>
       </main>

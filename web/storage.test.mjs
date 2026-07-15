@@ -535,6 +535,70 @@ test('the prefs survive an empty-mode mount (carried by the live spread, not the
   assert.equal(after.agentSort, 'activity');
 });
 
+console.log('\nhealthGroupBy (Health dashboard Group-by Health|Host toggle) round-trips through loadUi/saveUi — WARDEN-468');
+// WARDEN-468: the HealthDashboard "Group agents by: Health | Host" toggle
+// (WARDEN-237) silently reset to 'health' on every Warden restart because
+// groupBy was a component-local useState with no persistence. The fix lifts it
+// to App (mirroring agentFilter/agentSort in WARDEN-442) and adds it to App's
+// saveUi spread + the loadUi normalizer. These tests pin the storage half of
+// that contract — when the key IS in the live spread, persistUiState carries
+// it and loadUi returns it — guarding the persistence-boundary trap (a field
+// lifted to App but missing from EITHER the normalizer OR the saveUi spread is
+// stripped at the localStorage boundary and silently still resets).
+test('defaults to "health" when nothing is stored (the dashboard never starts in Host grouping — no regression)', () => {
+  reset();
+  assert.equal(loadUi().healthGroupBy, 'health');
+});
+test('"host" round-trips (the opt-in Host view survives reload — the headline fix)', () => {
+  reset();
+  saveUi({ ...loadUi(), healthGroupBy: 'host' });
+  assert.equal(loadUi().healthGroupBy, 'host');
+});
+test('"health" round-trips (switching back to Health persists too)', () => {
+  reset();
+  saveUi({ ...loadUi(), healthGroupBy: 'host' });
+  saveUi({ ...loadUi(), healthGroupBy: 'health' });
+  assert.equal(loadUi().healthGroupBy, 'health');
+});
+test('an out-of-allow-set value coerces back to "health" on load (defensive — a legacy/corrupt payload never selects a dead mode)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], healthGroupBy: 'bogus' }));
+  assert.equal(loadUi().healthGroupBy, 'health');
+  // Anything that is not literally the string 'host' coerces to 'health'.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], healthGroupBy: 42 }));
+  assert.equal(loadUi().healthGroupBy, 'health');
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], healthGroupBy: { x: 1 } }));
+  assert.equal(loadUi().healthGroupBy, 'health');
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], healthGroupBy: null }));
+  assert.equal(loadUi().healthGroupBy, 'health');
+});
+test('a missing field loads as "health"', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
+  assert.equal(loadUi().healthGroupBy, 'health');
+});
+test('the pref survives App\'s persistUiState write path (the WARDEN-468 regression guard)', () => {
+  // THE bug: App's saveUi spread OMITTED this key, so persistUiState received a
+  // `live` object lacking it, the written JSON lacked it, and reload reset to
+  // 'health'. This asserts the contract the fix relies on — when the key IS in
+  // the live spread (as App now includes it), persistUiState carries it and
+  // loadUi returns it. It exercises the exact write path App's saveUi effect
+  // uses, not just a direct saveUi.
+  reset();
+  const d0 = loadUi();
+  saveUi(persistUiState({ ...d0, healthGroupBy: 'host' }, 'previous', d0, false));
+  assert.equal(loadUi().healthGroupBy, 'host');
+});
+test('the pref survives an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
+  // healthGroupBy is NOT a workspace field, so persistUiState spreads it from
+  // `live`. Confirm an empty-launch still round-trips a freshly set value — the
+  // freeze must not drop it alongside the workspace.
+  reset();
+  const d0 = loadUi();
+  saveUi(persistUiState({ ...d0, healthGroupBy: 'host' }, 'empty', d0, true));
+  assert.equal(loadUi().healthGroupBy, 'host');
+});
+
 console.log('\ninitialWorkspace gates the workspace on mount');
 test('"previous" restores the last-saved workspace', () => {
   const disk = { ...loadUi(), workspaces: [{ id: 'w1', name: 'Workspace 1', openPanes: ['a'], focused: 'a', recentlyClosed: [] }], activeWorkspaceId: 'w1', paneHost: { a: 'host' } };
@@ -1492,6 +1556,7 @@ const overTunedLive = () => {
     defaultShellByHost: { 'host-a': 'fish' },
     agentFilter: 'filtering',
     agentSort: 'recent',
+    healthGroupBy: 'host',
     // workspace + layout (all non-default → must be PRESERVED). WARDEN-372 moved
     // the open panes + focus into per-workspace WorkspacePaneSet objects under
     // `workspaces` (+ activeWorkspaceId); paneHost stayed global. Seed a
@@ -1568,6 +1633,8 @@ test('every pref field of resetUiPrefsPreservingWorkspace(live) equals DEFAULT_U
   // agentFilter/agentSort are in DEFAULT_UI; the helper resets them too.
   assert.equal(r.agentFilter, 'all');
   assert.equal(r.agentSort, 'manual');
+  // healthGroupBy is in DEFAULT_UI (WARDEN-468); the helper resets it too.
+  assert.equal(r.healthGroupBy, 'health');
 });
 
 test('the workspace + panel-layout fields are copied from live (the workspace survives)', () => {
