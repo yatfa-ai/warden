@@ -17,6 +17,7 @@ import { IconTooltip } from '@/components/ui/icon-tooltip';
 import type { Chat } from '@/lib/types';
 import type { PaneLayout, TerminalCursorStyle, OnExitBehavior, HostOptionsMap, Snippet } from '@/lib/storage';
 import type { ThemeId } from '@/lib/theme';
+import type { TimestampFormat } from '@/lib/formatTimestamp';
 
 export interface OpenTile { id: string }
 
@@ -80,11 +81,15 @@ interface Props {
   // App owns the persisted list. PaneTile renders a "Snippets" submenu in each
   // pane's context menu for one-click send to that pane's agent.
   snippets: Snippet[];
+  // "Timestamp format" pref (WARDEN-422): pure pass-through to PaneTile and to
+  // this grid's own FileViewer — App owns the persisted pref; the FileViewer's
+  // blame view formats author-dates per the pref, mirroring every other surface.
+  timestampFormat: TimestampFormat;
 }
 
 function colsFor(n: number) { return n <= 1 ? 1 : Math.ceil(Math.sqrt(n)); }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, hostOptions, copyHintDismissed, onDismissCopyHint, snippets }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, hostOptions, copyHintDismissed, onDismissCopyHint, snippets, timestampFormat }: Props) {
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
   // WARDEN-334: the 1-based line a grep result selected, fed to FileViewer's
@@ -283,6 +288,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     onDismissCopyHint={onDismissCopyHint}
                     onSpawned={onSpawned}
                     snippets={snippets}
+                    timestampFormat={timestampFormat}
                   />
                 </div>
               );
@@ -298,6 +304,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
           filePath={filePath}
           line={fileLine}
           open={fileOpen}
+          timestampFormat={timestampFormat}
           onOpenChange={(open) => {
             setFileOpen(open);
             if (!open) {

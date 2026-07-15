@@ -11,6 +11,7 @@ import { hostKeyOf, attachEffectDeps } from '@/lib/paneAttach';
 import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBehavior, type HostOptionsMap, type Snippet } from '@/lib/storage';
 import { PANE_DRAG_MIME } from '@/lib/dnd';
 import { getThemeById, type ThemeId } from '@/lib/themes';
+import type { TimestampFormat } from '@/lib/formatTimestamp';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { Button } from '@/components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger, ContextMenuTrigger } from '@/components/ui/context-menu';
@@ -163,9 +164,13 @@ interface Props {
   // one visible agent). Read-only here; App owns the persisted list. The submenu
   // is hidden when the list is empty.
   snippets: Snippet[];
+  // "Timestamp format" pref (WARDEN-422): pure pass-through to this pane's
+  // FileViewer — App owns the persisted pref; the blame view formats author-dates
+  // per the pref, mirroring every other timestamp surface.
+  timestampFormat: TimestampFormat;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, hostOptions, copyHintDismissed, onDismissCopyHint, onSpawned, snippets }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, hostOptions, copyHintDismissed, onDismissCopyHint, onSpawned, snippets, timestampFormat }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -961,6 +966,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           filePath={viewerPath}
           line={viewerLine}
           open={viewerOpen}
+          timestampFormat={timestampFormat}
           onOpenChange={(o) => { setViewerOpen(o); if (!o) { setViewerPath(''); setViewerLine(undefined); } }}
         />
       )}
