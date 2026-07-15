@@ -20,8 +20,10 @@ import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { KillDialog } from './KillDialog';
+import { KeySendDialog } from './KeySendDialog';
 import { SelectionActionBar } from './sidebar/SidebarBits';
 import { formatKillToast, runKillFanout } from '@/lib/kill';
+import { formatKeySendToast, runKeySendFanout } from '@/lib/keysend';
 import { isSelectedAll, toggleGroupSelection } from '@/lib/selection';
 import { useHostStatuses } from '@/lib/useHostStatuses';
 import { useActivitySeries } from '@/lib/useActivitySeries';
@@ -222,6 +224,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
   // exactly like the sidebar's selectedIds.
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [killOpen, setKillOpen] = useState(false);
+  const [interruptOpen, setInterruptOpen] = useState(false);
   // Result-toast gating reuses the sidebar's notifyChatOps pref so a kill from
   // Fleet Health has the SAME UX contract (toast on success / partial failure) as
   // a kill from the sidebar (WARDEN-328).
@@ -466,6 +469,39 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
       }
     }
     // The kill's intent is discharged — clear the selection regardless of outcome.
+    setSelectedIds(new Set());
+    return summary;
+  };
+
+  // Fan a CONTROL KEY (Ctrl-C / Esc) out to every selected agent via the shared
+  // runKeySendFanout (@/lib/keysend; the non-destructive sibling of runKillFanout,
+  // WARDEN-492). Interrupt is the safe middle ground that DOES belong on a health
+  // surface: a human can non-destructively stop the stuck/erroring agents Fleet
+  // Health surfaces without killing them (broadcast-by-health stays out of scope).
+  //
+  // runKeySendFanout never throws; partial failure is encoded in the summary. The
+  // dashboard owns its own fetches, but interrupt is NON-DESTRUCTIVE — no session
+  // is destroyed, so (unlike kill) there is nothing to reconcile: a signaled agent
+  // reclassifies off stuck/erroring on the next health/classify tick and reflects
+  // here then. The result toast + selection clear stay here (view concerns).
+  const handleInterruptSelected = async (key: string) => {
+    const ids = Array.from(selectedIds);
+    const nameOf = (id: string) => {
+      const a = (healthData?.agents ?? []).find((c) => agentIdOf(c) === id);
+      return a ? displayName(a) : id;
+    };
+    const summary = await runKeySendFanout(ids, key, nameOf);
+    const outcome = formatKeySendToast(summary, key);
+    if (prefs.notifyChatOps) {
+      if (outcome.variant === 'success') {
+        toast.success(outcome.title);
+      } else {
+        // whitespace-pre-line so the per-agent failure list (joined with \n in
+        // formatKeySendToast) renders one failure per line instead of collapsing.
+        toast.error(outcome.title, { description: <span className="whitespace-pre-line">{outcome.description}</span> });
+      }
+    }
+    // The interrupt's intent is discharged — clear the selection regardless of outcome.
     setSelectedIds(new Set());
     return summary;
   };
@@ -794,6 +830,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
           count={selectedIds.size}
           onSelectAll={() => setSelectedIds(new Set(renderedIds))}
           onClear={clearSelection}
+          onInterrupt={() => setInterruptOpen(true)}
           onKill={() => setKillOpen(true)}
         />
       )}
@@ -807,6 +844,16 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
         onOpenChange={setKillOpen}
         targets={selectedChats}
         onKill={handleKillSelected}
+      />
+
+      {/* The confirm-and-interrupt safety gate (WARDEN-492). Non-destructive: the
+          session + scrollback survive, unlike Kill. The fan-out + result toast
+          live in handleInterruptSelected; nothing is sent until the Confirm. */}
+      <KeySendDialog
+        open={interruptOpen}
+        onOpenChange={setInterruptOpen}
+        targets={selectedChats}
+        onSend={handleInterruptSelected}
       />
 
       {/* Timestamp */}

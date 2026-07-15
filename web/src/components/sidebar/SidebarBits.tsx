@@ -46,24 +46,28 @@ export function SectionToggle({ expanded, onClick, label, title }: {
 
 /**
  * The contextual action bar for multi-select (WARDEN-292 broadcast + WARDEN-328
- * batch kill). Appears at the foot of a fleet view only when ≥1 agent is
- * selected, showing the live count and the selection actions: select-all
- * (within the current visible list), clear, "Send to N…" (confirm-and-send),
- * and "Kill N…" (confirm-and-stop, destructive). Built on shadcn <Button> per
- * the WARDEN-68 quality bar. shrink-0 so it stays pinned at the bottom while
- * the fleet list scrolls above it.
+ * batch kill + WARDEN-492 batch interrupt). Appears at the foot of a fleet view
+ * only when ≥1 agent is selected, showing the live count and the selection
+ * actions in a destructiveness gradient: select-all (within the current visible
+ * list), clear, "Send to N…" (confirm-and-send), "Interrupt N…" (confirm-and-
+ * signal, non-destructive), and "Kill N…" (confirm-and-stop, destructive). Built
+ * on shadcn <Button> per the WARDEN-68 quality bar. shrink-0 so it stays pinned
+ * at the bottom while the fleet list scrolls above it.
  *
- * `onSend` (broadcast) is OPTIONAL: a surface without broadcast omits it and
- * the "Send to N…" button is simply not rendered — Fleet Health (WARDEN-371)
- * reuses this bar for batch-kill only, since broadcast-by-health is deliberately
- * out of scope for that slice. The sidebar passes `onSend`, so its bar is
- * unchanged.
+ * `onSend` (broadcast) and `onInterrupt` (control-key send) are BOTH OPTIONAL: a
+ * surface without one simply omits it and the matching button is not rendered.
+ * Fleet Health (WARDEN-371) reuses this bar for batch-kill only — broadcast is
+ * deliberately out of scope there — but interrupt IS the safe middle ground that
+ * belongs on a health surface (stop the stuck/erroring agents without killing
+ * them), so Fleet Health passes `onInterrupt`. The sidebar passes both `onSend`
+ * and `onInterrupt`, so its bar is unchanged in shape.
  */
-export function SelectionActionBar({ count, onSelectAll, onClear, onSend, onKill }: {
+export function SelectionActionBar({ count, onSelectAll, onClear, onSend, onInterrupt, onKill }: {
   count: number;
   onSelectAll: () => void;
   onClear: () => void;
   onSend?: () => void;
+  onInterrupt?: () => void;
   onKill: () => void;
 }) {
   return (
@@ -73,6 +77,16 @@ export function SelectionActionBar({ count, onSelectAll, onClear, onSend, onKill
         <Button variant="ghost" size="xs" onClick={onSelectAll} title="select every agent in this list">All</Button>
         <Button variant="ghost" size="xs" onClick={onClear} title="clear the selection">Clear</Button>
         {onSend && <Button size="xs" onClick={onSend}>Send to {count}…</Button>}
+        {onInterrupt && (
+          <Button
+            variant="outline"
+            size="xs"
+            onClick={onInterrupt}
+            title="send Ctrl-C / Esc to each selected agent's foreground process (non-destructive — the session survives)"
+          >
+            Interrupt {count}…
+          </Button>
+        )}
         <Button variant="destructive" size="xs" onClick={onKill} title="stop each selected agent's tmux session">Kill {count}…</Button>
       </div>
     </div>

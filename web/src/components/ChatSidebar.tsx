@@ -19,8 +19,10 @@ import { CollectionsSection } from './CollectionsSection';
 import { CreateCollectionDialog } from './CreateCollectionDialog';
 import { BroadcastDialog } from './BroadcastDialog';
 import { KillDialog } from './KillDialog';
+import { KeySendDialog } from './KeySendDialog';
 import { summarizeBroadcast, formatBroadcastToast } from '@/lib/broadcast';
 import { formatKillToast, runKillFanout } from '@/lib/kill';
+import { formatKeySendToast, runKeySendFanout } from '@/lib/keysend';
 import { copyText } from '@/lib/clipboard';
 import { DiffViewer } from './DiffViewer';
 import { ConflictView } from './ConflictView';
@@ -172,6 +174,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [broadcastOpen, setBroadcastOpen] = useState(false);
   const [killOpen, setKillOpen] = useState(false);
+  const [interruptOpen, setInterruptOpen] = useState(false);
 
   const fetchHostSessions = async (host: string) => {
     setLoadingHost(host);
@@ -505,6 +508,43 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
     return summary;
   };
 
+  // Fan a CONTROL KEY (Ctrl-C / Esc) out to every selected agent via the shared
+  // runKeySendFanout (@/lib/keysend; the non-destructive sibling of runKillFanout,
+  // WARDEN-492). The fan-out itself (Promise.allSettled over /api/key +
+  // summarize) lives in @/lib/keysend so both interrupt surfaces (sidebar +
+  // Fleet Health) share one copy; this component keeps the view concerns (toast,
+  // selection clear) here.
+  //
+  // runKeySendFanout never throws — partial failure (one host unreachable, one
+  // session dead) is encoded in the summary, not aborted — and returns the
+  // summary so the result toast can surface it. Interrupt is NON-DESTRUCTIVE: no
+  // session is destroyed, so (unlike kill) there is nothing to reconcile — a
+  // signaled agent reclassifies off stuck/erroring on the next classifyPane
+  // tick. Stale ids are still signaled-at and reported as a per-agent failure.
+  const handleInterruptSelected = async (key: string) => {
+    const ids = Array.from(selectedIds);
+    const nameOf = (id: string) => {
+      const c = findChat(chats, id);
+      return c ? displayName(c) : id;
+    };
+    const summary = await runKeySendFanout(ids, key, nameOf);
+    const outcome = formatKeySendToast(summary, key);
+    if (prefs.notifyChatOps) {
+      if (outcome.variant === 'success') {
+        toast.success(outcome.title);
+      } else {
+        // whitespace-pre-line so the per-agent failure list (joined with \n in
+        // formatKeySendToast) renders one failure per line instead of collapsing.
+        toast.error(outcome.title, { description: <span className="whitespace-pre-line">{outcome.description}</span> });
+      }
+    }
+    // The interrupt's intent is discharged — clear the selection regardless of
+    // outcome. Failed targets remain visible in the toast; the human can
+    // re-select and retry if needed.
+    setSelectedIds(new Set());
+    return summary;
+  };
+
   const enterHost = (host: string) => {
     const status = hostStatuses[host];
     if (status?.status === 'offline') {
@@ -768,6 +808,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
             onSelectAll={() => selectAll(agents.map((c) => c.key || c.id))}
             onClear={clearSelection}
             onSend={() => setBroadcastOpen(true)}
+            onInterrupt={() => setInterruptOpen(true)}
             onKill={() => setKillOpen(true)}
           />
         )}
@@ -787,6 +828,12 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
           onOpenChange={setKillOpen}
           targets={selectedChats}
           onKill={handleKillSelected}
+        />
+        <KeySendDialog
+          open={interruptOpen}
+          onOpenChange={setInterruptOpen}
+          targets={selectedChats}
+          onSend={handleInterruptSelected}
         />
       </div>
     );
@@ -921,6 +968,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
             onSelectAll={() => selectAll(sortedHostChats.map((c) => c.key || c.id))}
             onClear={clearSelection}
             onSend={() => setBroadcastOpen(true)}
+            onInterrupt={() => setInterruptOpen(true)}
             onKill={() => setKillOpen(true)}
           />
         )}
@@ -936,6 +984,12 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
           onOpenChange={setKillOpen}
           targets={selectedChats}
           onKill={handleKillSelected}
+        />
+        <KeySendDialog
+          open={interruptOpen}
+          onOpenChange={setInterruptOpen}
+          targets={selectedChats}
+          onSend={handleInterruptSelected}
         />
       </div>
     );
@@ -1135,6 +1189,12 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
         onOpenChange={setKillOpen}
         targets={selectedChats}
         onKill={handleKillSelected}
+      />
+      <KeySendDialog
+        open={interruptOpen}
+        onOpenChange={setInterruptOpen}
+        targets={selectedChats}
+        onSend={handleInterruptSelected}
       />
     </div>
   );
