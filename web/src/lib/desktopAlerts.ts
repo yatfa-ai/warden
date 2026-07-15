@@ -437,3 +437,39 @@ export function formatInAppEntry(entry: NewAttentionEntry): { title: string; des
   const description = entry.signal ? `${entry.reason} — '${entry.signal}'` : entry.reason;
   return { title: entry.name, description };
 }
+
+// --- Token-spend budget alert (WARDEN-415) -----------------------------------
+//
+// The "while the founder is away" alarm that completes the meter WARDEN-367
+// shipped. Sibling of fireAttentionNotification / fireWatchNotification: same
+// Web Notifications channel + the same notificationsSupported / permission
+// guards. Takes PRE-FORMATTED title + body (computed by tokenBudget.ts's
+// formatBudgetMessageWith) rather than the BudgetState itself, so THIS module
+// stays runtime-import-free (the `import type` discipline above) and the
+// standalone desktopAlerts.test.mjs can still load it via the OXC transform.
+//
+// Uses a DISTINCT stable tag (`warden-budget`) so the budget alert never
+// replaces — and is never replaced by — an attention/watch ping; a repeat
+// crossing on the SAME breach replaces its prior ping (no stacking). The
+// debounce (one fire per crossing) lives in useTokenBudget, so in practice this
+// fires once per breach. Clicking deep-links to the All Sessions usage view
+// (via onOpenSessions) so the human lands on the offending session.
+export function fireBudgetNotification(
+  title: string,
+  body: string,
+  onOpenSessions?: () => void,
+): void {
+  if (!notificationsSupported()) return;
+  if (Notification.permission !== 'granted') return;
+  try {
+    const n = new Notification(title, { body, tag: 'warden-budget' });
+    n.onclick = () => {
+      if (onOpenSessions) onOpenSessions();
+      window.focus();
+      n.close();
+    };
+  } catch {
+    // A construction failure (e.g. a restrictive webview) must never crash the
+    // budget poll; the in-app toast + progress surface still cover the case.
+  }
+}

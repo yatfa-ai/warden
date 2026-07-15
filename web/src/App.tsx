@@ -8,6 +8,7 @@ import { applyDensity, type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
 import { stampLastSeen } from '@/lib/whatsNew';
 import { requestAlertPermission } from '@/lib/desktopAlerts';
+import { useTokenBudget } from '@/lib/useTokenBudget';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
@@ -1241,10 +1242,24 @@ function App() {
   // blocking Dialog modal — now a full-page view per WARDEN-68 Rule 7 (the browser
   // is an unbounded list + search, not a ≤200-symbol confirmation).
   const [chatBrowserOpen, setChatBrowserOpen] = useState(false);
+  // Whether the browser should open with sort-by-usage ON. Seeded true when the
+  // browser is opened as a token-budget deep-link (WARDEN-415) so the heaviest
+  // (offending) session floats to the top; the sidebar "Open chat…" button opens
+  // it false (recency first). The page mounts fresh each open, so this is read
+  // once as the local sortUsage initial. Reset on close.
+  const [chatBrowserSortUsage, setChatBrowserSortUsage] = useState(false);
   // Stable close handler for the browser page. useState's setter is stable, so
   // wrapping it here keeps `onClose` identity stable across chat-poll ticks —
   // otherwise the page's Escape keydown effect would re-subscribe on every poll.
-  const closeChatBrowser = useCallback(() => setChatBrowserOpen(false), []);
+  const closeChatBrowser = useCallback(() => { setChatBrowserOpen(false); setChatBrowserSortUsage(false); }, []);
+  // Token-spend budget alarm (WARDEN-415). The always-on hook polls /api/budget
+  // on a slow cadence and fires a debounced one-shot (toast + desktop) on a
+  // threshold crossing. onOpenSessions deep-links to the All Sessions usage view
+  // (heaviest first) so a click lands on the offending session. The desktop
+  // channel is gated on the same attentionDesktopAlerts opt-in the attention
+  // alerts respect.
+  const openSessionsView = useCallback(() => { setChatBrowserSortUsage(true); setChatBrowserOpen(true); }, []);
+  const { budget: tokenBudget } = useTokenBudget({ attentionDesktopAlerts, onOpenSessions: openSessionsView });
   // Host connectivity statuses. Polled at the App level (formerly inside
   // ChatSidebar) so they stay live while the full-page browser view — which
   // replaces ChatSidebar — is open. Fed to both ChatSidebar and the browser page.
@@ -1482,6 +1497,8 @@ function App() {
           onDiscoverHost={discoverHost}
           hostStatuses={hostStatuses}
           timestampFormat={timestampFormat}
+          budget={tokenBudget}
+          initialSortUsage={chatBrowserSortUsage}
         />
       ) : (
         <>

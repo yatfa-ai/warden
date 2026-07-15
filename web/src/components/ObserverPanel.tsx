@@ -659,7 +659,7 @@ export function ObserverPanel({ sessionId, onFocusAgent, onActivity, timestampFo
                           notifySuccess={prefs.notifySuccess}
                         />
                       );
-                    if (item.kind === 'tool') return <ToolChip key={message.id} name={item.name} arg={item.arg} />;
+                    if (item.kind === 'tool') return <ToolChip key={message.id} name={item.name} arg={item.arg} notifySuccess={prefs.notifySuccess} />;
                     if (item.kind === 'meta') return <MetaLine key={message.id} text={item.text} tone={item.tone} />;
                     if (item.kind === 'card')
                       return (
@@ -931,7 +931,7 @@ function ThinkingRow() {
   );
 }
 
-function ToolChip({ name, arg }: { name: string; arg?: string }) {
+function ToolChip({ name, arg, notifySuccess }: { name: string; arg?: string; notifySuccess: boolean }) {
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -942,11 +942,11 @@ function ToolChip({ name, arg }: { name: string; arg?: string }) {
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <ContextMenuItem onSelect={() => copyText(name)}>
+        <ContextMenuItem onSelect={() => copyText(name, notifySuccess)}>
           <CopyIcon /> Copy tool name
         </ContextMenuItem>
         {arg && (
-          <ContextMenuItem onSelect={() => copyText(arg)}>
+          <ContextMenuItem onSelect={() => copyText(arg, notifySuccess)}>
             <CopyIcon /> Copy argument
           </ContextMenuItem>
         )}

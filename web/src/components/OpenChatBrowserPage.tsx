@@ -12,6 +12,7 @@ import type { Chat } from '@/lib/types';
 import { THIS_MACHINE, basename, displayName, hostTagOf } from '@/lib/chatDisplay';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTokens } from '@/lib/formatTokens';
+import { budgetProgress, budgetOverPercent, type BudgetState } from '@/lib/tokenBudget';
 import type { ClaudeSession, SessionSearchResult, TokenUsage } from './ChatSidebar';
 
 // Loading placeholder for a session row (two skeleton bars). Local to this page —
@@ -54,7 +55,7 @@ interface DiscoverItem {
   tokenUsage?: TokenUsage | null; // history: per-session LLM token total (WARDEN-367)
 }
 
-function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFormat }: { it: DiscoverItem; resumingId: string | null; onOpen: () => void; onResume: () => void; onView: () => void; timestampFormat: TimestampFormat; }) {
+function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFormat, isBudgetOffender }: { it: DiscoverItem; resumingId: string | null; onOpen: () => void; onResume: () => void; onView: () => void; timestampFormat: TimestampFormat; isBudgetOffender?: boolean; }) {
   if (it.kind === 'live') {
     return (
       <Button variant="ghost" onClick={onOpen} className="w-full h-auto justify-start gap-2 px-2 py-1.5 text-xs font-normal hover:bg-accent">
@@ -68,7 +69,7 @@ function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFo
   }
   const isLoading = resumingId === it.id;
   return (
-    <div className="group flex items-center gap-2 px-2 py-1.5 rounded-md text-xs hover:bg-accent transition-colors">
+    <div className={`group flex items-center gap-2 px-2 py-1.5 rounded-md text-xs hover:bg-accent transition-colors${isBudgetOffender ? ' ring-1 ring-red-500/50 bg-red-500/5' : ''}`}>
       <StatusDot tone="cyan" variant="ring" label="History session (resumable)" />
       <div className="flex-1 min-w-0">
         <Button variant="ghost" onClick={onResume} disabled={isLoading} className="h-auto w-full justify-start px-1 py-0 truncate text-xs font-normal">{it.label}</Button>
@@ -78,6 +79,11 @@ function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFo
       {it.tokenUsage?.total ? (
         <IconTooltip label="Total tokens this session consumed (input + output + cache). Model-agnostic — not dollar cost.">
           <span className="text-[10px] text-amber-500/80 shrink-0 tabular-nums">{formatTokens(it.tokenUsage.total)}</span>
+        </IconTooltip>
+      ) : null}
+      {isBudgetOffender ? (
+        <IconTooltip label="Budget breach — heaviest session in the alert window (the row the alert deep-linked here). An older, out-of-window session may sit above it because this list sorts by lifetime total.">
+          <span className="text-[10px] text-red-400 shrink-0 font-medium" aria-label="budget offender">⚑ offender</span>
         </IconTooltip>
       ) : null}
       <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span>
@@ -95,6 +101,50 @@ function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFo
   );
 }
 
+// Spent/threshold progress chip for the token-spend budget (WARDEN-415). Renders
+// beside the fleet token summary so the budget is visible at a glance — not just
+// when it breaches. A thin bar fills to the threshold (clamped at full; the raw
+// ratio can exceed it), and the tone turns red once over budget. Distinct from
+// the loaded-window fleet total above: this consumes the BACKEND budget snapshot
+// (window-filtered, threshold-aware), so spent + threshold are always consistent.
+// Clicking the "usage" sort button remains the way to float heaviest sessions.
+function BudgetProgressChip({ budget, className }: { budget: BudgetState; className?: string }) {
+  const pct = budgetProgress(budget.fleetSpent, budget.threshold);
+  const over = budgetOverPercent(budget.fleetSpent, budget.threshold);
+  const breached = budget.alerted;
+  const windowLabel = budget.windowHours >= 24
+    ? `${Math.round(budget.windowHours / 24)}d`
+    : `${budget.windowHours}h`;
+  // Tone: red when breached/over, amber when approaching (>=80%), muted otherwise.
+  const tone = breached || over >= 100
+    ? 'text-red-400'
+    : over >= 80 ? 'text-amber-400' : 'text-muted-foreground';
+  const barTone = breached || over >= 100
+    ? 'bg-red-500/80'
+    : over >= 80 ? 'bg-amber-500/80' : 'bg-primary/60';
+  return (
+    <IconTooltip side="bottom" label={
+      <span className="whitespace-pre-line">
+        {`Token budget over the last ${windowLabel} — sum of each active session's full lifetime spend (model-agnostic — not dollar cost).\n\nSpent ${formatTokens(budget.fleetSpent)} of ${formatTokens(budget.threshold)} (${over}%).${budget.topOffender ? `\nHeaviest: ${budget.topOffender.summary || budget.topOffender.cwd || budget.topOffender.id} (${formatTokens(budget.topOffender.total)})` : ''}`}
+      </span>
+    }>
+      <span className={`shrink-0 flex items-center gap-1.5 text-[11px] tabular-nums font-medium ${tone} ${className || ''}`}>
+        <span className="inline-flex items-center gap-1">
+          {breached ? '⚑' : '☁'}
+          <span>{formatTokens(budget.fleetSpent)} / {formatTokens(budget.threshold)}</span>
+        </span>
+        <span className="relative inline-block w-12 h-1.5 rounded-full bg-muted overflow-hidden">
+          <span
+            className={`absolute inset-y-0 left-0 rounded-full ${barTone}`}
+            style={{ width: `${Math.round(pct * 100)}%` }}
+          />
+        </span>
+        <span>{over}%</span>
+      </span>
+    </IconTooltip>
+  );
+}
+
 interface Props {
   /** Return to the workspace (replaces the modal's onOpenChange(false)). */
   onClose: () => void;
@@ -107,6 +157,14 @@ interface Props {
   // Timestamp format pref (WARDEN-213): routes every row time + the transcript
   // viewer's message times through the shared formatTimestamp helper.
   timestampFormat: TimestampFormat;
+  // Token-spend budget snapshot (WARDEN-415). When enabled, a spent/threshold
+  // progress chip renders beside the fleet token summary so the budget is visible
+  // at a glance — not just when it breaches. Undefined when the hook isn't wired.
+  budget?: BudgetState;
+  // Initial sort-by-usage on mount. The budget breach alert deep-links here with
+  // this true so the offending (heaviest) session floats to the top. The page
+  // mounts fresh each open, so this seeds the local sortUsage state once.
+  initialSortUsage?: boolean;
 }
 
 // Full-page replacement for the former Open Chat browser modal. Mirrors the
@@ -115,7 +173,7 @@ interface Props {
 // sets chatBrowserOpen; the back button / Escape clears it. Per WARDEN-68 Rule 7
 // the browser is a real UI surface (unbounded list + search), so it must be a
 // page, not a blocking Dialog.
-export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResume, onDiscoverHost, hostStatuses, timestampFormat }: Props) {
+export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResume, onDiscoverHost, hostStatuses, timestampFormat, budget, initialSortUsage }: Props) {
   const [selected, setSelected] = useState<string[] | undefined>(undefined);
   const [query, setQuery] = useState('');
   const [resumingId, setResumingId] = useState<string | null>(null);
@@ -135,7 +193,7 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
   // Sort the history list by token usage (heaviest first) so the sessions that
   // burned the most tokens surface to the top — the flagship "which session
   // spent the most?" question. Off by default (recency first). (WARDEN-367.)
-  const [sortUsage, setSortUsage] = useState(false);
+  const [sortUsage, setSortUsage] = useState(!!initialSortUsage);
 
   // Load persisted host selection once.
   useEffect(() => { setSelected(loadDiscoverHosts()); }, []);
@@ -320,10 +378,18 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
         resume: { id: s.id, description: s.summary, cwd: s.cwd, host: s.host },
       });
     }
-    // Recency by default; when sortUsage is on, heavier token usage floats up
-    // (rows without usage sink but keep recency order as the tiebreak). Live
-    // sessions carry no tokenUsage, so under usage-sort they sit among the
+    // Recency by default; when sortUsage is on, heavier LIFETIME token usage
+    // floats up (rows without usage sink but keep recency order as the tiebreak).
+    // Live sessions carry no tokenUsage, so under usage-sort they sit among the
     // zero-usage rows by recency — an explicit trade for "heaviest first".
+    //
+    // WARDEN-415 conscious choice: this sort is window-AGNOSTIC (lifetime total),
+    // but the budget offender is the heaviest IN-WINDOW session — so an old,
+    // out-of-window session can land above it. Rather than sort by windowed
+    // spend (which the frontend can't compute — no per-turn timestamps), the
+    // offender row is marked with a ⚑ + red ring (isBudgetOffenderRow) so it is
+    // identifiable at any sort position. The human still lands in a heaviest-
+    // first view; the marker pins the exact row the alert pointed at.
     if (sortUsage) {
       out.sort((a, b) => {
         const d = (b.tokenUsage?.total || 0) - (a.tokenUsage?.total || 0);
@@ -345,6 +411,21 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
       return it.label.toLowerCase().includes(q) || it.sub.toLowerCase().includes(q);
     });
   }, [items, query]);
+
+  // The budget breach's heaviest in-window session (WARDEN-415). The alert's
+  // "View sessions" deep-link opens this page sorted by LIFETIME total
+  // (window-agnostic), so an old, out-of-window session with a larger lifetime
+  // total can float above the real offender. Marking the offender row (⚑ + red
+  // ring) makes it identifiable regardless of sort position — a conscious
+  // resolution of the in-window-vs-lifetime mismatch (true windowed spend would
+  // need per-turn timestamps the frontend doesn't carry; the backend's
+  // topOffender is the source of truth for "heaviest active session"). Only set
+  // while breached, and matched to history rows by id + host (the offender is
+  // always a resumable claude session). If the offender sits past the loaded
+  // page, "load more" reaches it — the marker then appears on it.
+  const budgetOffender = budget?.alerted ? (budget?.topOffender ?? null) : null;
+  const isBudgetOffenderRow = (it: DiscoverItem) =>
+    !!budgetOffender && !!it.resume && budgetOffender.id === it.resume.id && budgetOffender.host === it.resume.host;
 
   const handleResume = async (it: DiscoverItem) => {
     if (!it.resume || resumingId) return;
@@ -375,6 +456,9 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
               ☁ {formatTokens(fleetTotals.total)} · {fleetTotals.hostCount} host{fleetTotals.hostCount === 1 ? '' : 's'}
             </span>
           </IconTooltip>
+        )}
+        {budget?.enabled && budget.threshold > 0 && (
+          <BudgetProgressChip budget={budget} className={fleetTotals.total > 0 ? '' : 'ml-auto'} />
         )}
       </header>
 
@@ -435,6 +519,7 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
                 onResume={() => handleResume(it)}
                 onView={() => { if (it.resume) setViewing({ id: it.resume.id, host: it.resume.host, label: it.label }); }}
                 timestampFormat={timestampFormat}
+                isBudgetOffender={isBudgetOffenderRow(it)}
               />
             ))
           )}

@@ -20,6 +20,7 @@ import { Observer, readDirectives } from './observer.js';
 import { hasCredentials, resolveModel } from './llm.js';
 import { listSessions, createSession, renameSession, deleteSession } from './sessions.js';
 import { appendEvent, rotateEvents, readEvents, getStatsSince, getSeriesSince } from './activity.js';
+import { computeBudgetState, shouldFireBudgetAlert, resolveBudgetConfig, BUDGET_INTERVAL_MS } from './budget.js';
 import { buildSnapshot, diffLifecycles } from './lifecycle.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { classifyPane, stripAnsi } from './agentState.js';
@@ -458,6 +459,12 @@ app.get('/api/config', (_req, res) => res.json({
   // Fleet health attention thresholds (minutes of inactivity)
   healthWarningThresholdMin: cfg.healthWarningThresholdMin,
   healthCriticalThresholdMin: cfg.healthCriticalThresholdMin,
+  // Token-spend budget (WARDEN-415). Surfaced so the Settings page can edit the
+  // persisted config; the live computed snapshot comes from /api/budget.
+  tokenBudgetEnabled: cfg.tokenBudgetEnabled,
+  tokenBudgetThresholdTokens: cfg.tokenBudgetThresholdTokens,
+  tokenBudgetWindowHours: cfg.tokenBudgetWindowHours,
+  tokenBudgetPerSessionThresholdTokens: cfg.tokenBudgetPerSessionThresholdTokens,
   confirmDestructiveActions: cfg.confirmDestructiveActions,
   notifyChatOps: cfg.notifyChatOps,
   notifyErrors: cfg.notifyErrors,
@@ -476,6 +483,8 @@ app.put('/api/config', (req, res) => {
   const { hosts, pollIntervalMs, tmuxSession, connectTimeout,
           observerConfirmMode, observerAutoStart, observerSessionTimeout,
           healthWarningThresholdMin, healthCriticalThresholdMin,
+          tokenBudgetEnabled, tokenBudgetThresholdTokens,
+          tokenBudgetWindowHours, tokenBudgetPerSessionThresholdTokens,
           confirmDestructiveActions,
           notifyChatOps, notifyErrors, notifySuccess, notifyObserver,
           showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges,
@@ -536,6 +545,25 @@ app.put('/api/config', (req, res) => {
   if (warningMin > criticalMin) {
     cfg.healthWarningThresholdMin = criticalMin;
   }
+  // Token-spend budget (WARDEN-415). The master switch is a boolean; the three
+  // numeric knobs accept null (clears to default at read time) or a finite
+  // positive number. The per-session threshold is null-able too so it can be
+  // turned OFF independently (null → resolveBudgetConfig returns 0 → disabled).
+  if (typeof tokenBudgetEnabled === 'boolean') cfg.tokenBudgetEnabled = tokenBudgetEnabled;
+  if (tokenBudgetThresholdTokens === null ||
+      (typeof tokenBudgetThresholdTokens === 'number' &&
+       Number.isFinite(tokenBudgetThresholdTokens) && tokenBudgetThresholdTokens > 0)) {
+    cfg.tokenBudgetThresholdTokens = tokenBudgetThresholdTokens;
+  }
+  if (typeof tokenBudgetWindowHours === 'number' &&
+      Number.isFinite(tokenBudgetWindowHours) && tokenBudgetWindowHours > 0) {
+    cfg.tokenBudgetWindowHours = tokenBudgetWindowHours;
+  }
+  if (tokenBudgetPerSessionThresholdTokens === null ||
+      (typeof tokenBudgetPerSessionThresholdTokens === 'number' &&
+       Number.isFinite(tokenBudgetPerSessionThresholdTokens) && tokenBudgetPerSessionThresholdTokens > 0)) {
+    cfg.tokenBudgetPerSessionThresholdTokens = tokenBudgetPerSessionThresholdTokens;
+  }
   // Safety preference: confirm before destructive actions (force-kill, kill chat)
   if (typeof confirmDestructiveActions === 'boolean') cfg.confirmDestructiveActions = confirmDestructiveActions;
   // Notification preferences (toast categories). Only accept booleans so a
@@ -551,6 +579,10 @@ app.put('/api/config', (req, res) => {
   if (typeof showProjectBadges === 'boolean') cfg.showProjectBadges = showProjectBadges;
   if (typeof hideOfflineHosts === 'boolean') cfg.hideOfflineHosts = hideOfflineHosts;
   save(cfg); // persist to ~/.yatfa-warden/config.json
+  // Pick up the new budget config immediately rather than waiting up to 120s:
+  // enabling starts the poll (and seeds the cache); disabling stops it; a
+  // threshold/window change re-computes now so the next /api/budget read is fresh.
+  restartBudgetPoll();
   res.json({ ok: true });
 });
 
@@ -1229,6 +1261,46 @@ app.get('/api/claude-sessions-all', async (req, res) => {
     .map((r) => ({ host: r.value.host, sessions: r.value.sessions }));
   const { sessions, hasMore, totals } = mergeAndPaginateSessions(buckets, offset, limit);
   res.json({ sessions, hasMore, totals });
+});
+
+// GET /api/budget — the cached token-spend budget snapshot (WARDEN-415). Cheap
+// by design: the slow-cadence accumulator (tickBudget) computes this every
+// ~120s by reusing the existing per-session token fetch, so this handler only
+// reads the cache — no transcript reads, no SSH. Returns `enabled:false` with
+// zeroed fields when the budget is off (or before the first sweep lands) so the
+// frontend can render the progress surface + run the debounce check uniformly.
+// `windowHours` is derived from the cached windowMs so the UI speaks hours.
+app.get('/api/budget', (_req, res) => {
+  const b = budgetState;
+  if (!cfg.tokenBudgetEnabled || !b) {
+    const { threshold, perSessionThreshold, windowHours } = resolveBudgetConfig(cfg);
+    return res.json({
+      enabled: !!cfg.tokenBudgetEnabled,
+      threshold,
+      perSessionThreshold,
+      windowHours,
+      fleetSpent: 0,
+      sessionCount: 0,
+      fleetBreached: false,
+      perSessionBreached: false,
+      topOffender: null,
+      alerted: false,
+      evaluatedAt: null,
+    });
+  }
+  res.json({
+    enabled: true,
+    threshold: b.threshold,
+    perSessionThreshold: b.perSessionThreshold,
+    windowHours: b.windowMs / 3_600_000,
+    fleetSpent: b.fleetSpent,
+    sessionCount: b.sessionCount,
+    fleetBreached: b.fleetBreached,
+    perSessionBreached: b.perSessionBreached,
+    topOffender: b.topOffender,
+    alerted: b.alerted,
+    evaluatedAt: b.evaluatedAt,
+  });
 });
 
 // GET /api/claude-sessions-search?q= — full-content search across EVERY host's
@@ -3188,6 +3260,93 @@ function startLifecyclePoll() {
   tickLifecycle(); // seed the baseline immediately (fires once, emits nothing)
 }
 
+// ---- Token-spend budget slow-cadence accumulator (WARDEN-415) ---------------
+//
+// The backend owns the budget check on its OWN slow beat (BUDGET_INTERVAL_MS,
+// ~120s) — deliberately decoupled from the 2s monitor tick so it never joins the
+// per-tick capture cost. Each tick REUSES the existing per-session token totals
+// (localClaudeSessions / remoteClaudeSessions — the SAME functions
+// /api/claude-sessions-all uses; do NOT re-read transcripts with new logic),
+// filters to sessions active in the configured window, sums their lifetime
+// totals (semantics documented in budget.js), and caches the pure
+// computeBudgetState result. /api/budget returns the cache — instant, no SSH —
+// so the frontend's progress surface + debounce check stay cheap. One
+// unreachable host degrades to "no spend from it" via Promise.allSettled; it
+// never fails the whole sweep.
+let budgetState = null;
+let budgetTimer = null;
+// Re-entrancy guard, same rationale as lifecycleRunning: a sweep over slow hosts
+// can exceed the 120s beat, so an in-flight tick makes the next a no-op.
+let budgetRunning = false;
+// Per-host fetch ceiling. Sessions are mtime-sorted descending and the window is
+// recent, so window-active sessions sit at the front; this caps transcript reads
+// (local) + the grep+awk SSH pass (remote) on a very active host. 100 is far
+// above any realistic 24h session count.
+const BUDGET_PER_HOST_LIMIT = 100;
+
+async function tickBudget() {
+  // Self-gate: a disabled budget clears its own timer (and cache) so no sweep
+  // runs while off. This makes startBudgetPoll safe to call unconditionally at
+  // startup — it parks until the human opts in.
+  if (!cfg.tokenBudgetEnabled) {
+    if (budgetTimer) { clearInterval(budgetTimer); budgetTimer = null; }
+    budgetState = null;
+    return;
+  }
+  if (budgetRunning) return;
+  budgetRunning = true;
+  try {
+    const { threshold, perSessionThreshold, windowMs } = resolveBudgetConfig(cfg);
+    const hosts = [LOCAL, ...cfg.hosts];
+    // Reuse the existing session-usage fetch — single SSH pass per remote host
+    // returning the enriched header (cwd/summary + four token ints), identical
+    // to /api/claude-sessions-all. We only need mtime + tokenUsage.total +
+    // identity, so the same rows feed computeBudgetState directly.
+    const results = await Promise.allSettled(hosts.map(async (host) => {
+      const sessions = host === LOCAL
+        ? localClaudeSessions(BUDGET_PER_HOST_LIMIT)
+        : await remoteClaudeSessions(host, BUDGET_PER_HOST_LIMIT);
+      return sessions.map((s) => ({ ...s, host }));
+    }));
+    const sessions = results
+      .filter((r) => r.status === 'fulfilled')
+      .flatMap((r) => r.value);
+    budgetState = computeBudgetState(sessions, {
+      now: Date.now(),
+      windowMs,
+      threshold,
+      perSessionThreshold,
+    });
+  } catch {
+    // A transient failure leaves the previous cache in place (no blanking) so a
+    // blip doesn't flap the progress surface / re-arm the one-shot spuriously.
+  } finally {
+    budgetRunning = false;
+  }
+}
+
+function startBudgetPoll() {
+  // Always (re)seed the interval; tickBudget self-clears when disabled, so an
+  // idle parked timer is harmless and lets a later enable (PUT /api/config) wake
+  // it without a second start call.
+  if (!budgetTimer) budgetTimer = setInterval(tickBudget, BUDGET_INTERVAL_MS);
+  tickBudget(); // seed the cache immediately on enable
+}
+
+// React to a config change: enable → ensure the timer runs + recompute now;
+// disable → stop + clear the cache so /api/budget reports disabled honestly;
+// threshold/window tweak → recompute now so the next read is fresh.
+function restartBudgetPoll() {
+  if (cfg.tokenBudgetEnabled) {
+    if (!budgetTimer) budgetTimer = setInterval(tickBudget, BUDGET_INTERVAL_MS);
+    tickBudget();
+  } else if (budgetTimer) {
+    clearInterval(budgetTimer);
+    budgetTimer = null;
+    budgetState = null;
+  }
+}
+
 // Exported for HTTP-level integration tests (see src/server-hosts-status.test.js).
 // Not used by the running server — startServer() below drives the module-level
 // `server` directly.
@@ -3197,7 +3356,13 @@ function startLifecyclePoll() {
 // `server` is exported so stream-lifecycle tests (src/server-stream-reattach.test.js)
 // can listen the SAME http server that streamWss's upgrade handler is bound to —
 // app.listen() would create a different server with no WS routing.
-export { app, tickLifecycle, server };
+// tickBudget is exported so src/server-budget.test.js can drive a single budget
+// sweep deterministically (the running server drives it off a 120s setInterval
+// via startBudgetPoll, which is far too slow for a test). That test exercises
+// the integration glue the pure src/budget.test.js suite cannot reach:
+// localClaudeSessions → computeBudgetState → this cache → /api/budget, including
+// the '(local)' host tag and the window filter over a planted transcript.
+export { app, tickLifecycle, tickBudget, server };
 
 export function startServer(port = 7421, host = '127.0.0.1') {
   server.on('error', (e) => {
@@ -3216,6 +3381,10 @@ export function startServer(port = 7421, host = '127.0.0.1') {
     // Start cross-host lifecycle polling (captures agent start/stop/error on
     // hosts even when no Warden pane is open on them).
     startLifecyclePoll();
+    // Start the token-spend budget accumulator (WARDEN-415). Self-gates: parks
+    // until the human opts in via Settings; once enabled, reuses the existing
+    // session-usage fetch on a 120s beat and caches the result for /api/budget.
+    startBudgetPoll();
     // Lazy mode: no startup SSH. Connections open on demand (per-host discover / pane read).
   });
 }
