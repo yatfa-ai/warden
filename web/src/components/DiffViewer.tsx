@@ -10,6 +10,8 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Loader2Icon, FileIcon, GitCompare, AlertCircleIcon } from 'lucide-react';
 import { classifyDiffLine, DIFF_LINE_CLASS } from '@/lib/diff';
+import { DiffStatChip } from '@/components/sidebar/GitBadges';
+import type { DiffStat } from '@/components/sidebar/types';
 
 interface DiffViewerProps {
   chatId: string;
@@ -22,19 +24,27 @@ interface DiffViewerProps {
   // the agent's whole unpushed (outgoing) or incoming (incoming) set via
   // /api/git-range-diff instead of the single-file /api/git-diff. The modal is then
   // titled "Unpushed changes (↑N)" / "Incoming changes (↓N)" rather than a file path.
-  // `filePath` is ignored in this mode. One renderer for both — same classifyDiffLine
-  // coloring as every other committed diff (the "no second renderer" intent).
-  range?: 'outgoing' | 'incoming';
-  // The commit count for the title ("↑N"/"↓N") in range mode. Display-only.
+  // WARDEN-449: `worktree` adds the ± axis — the combined staged+unstaged change vs
+  // HEAD (`git diff HEAD`), titled "Uncommitted changes" with the `+N −M` magnitude
+  // chip inline (the SAME set WARDEN-411's --shortstat counts). `filePath` is ignored
+  // in this mode. One renderer for all three — same classifyDiffLine coloring as every
+  // other committed diff (the "no second renderer" intent).
+  range?: 'outgoing' | 'incoming' | 'worktree';
+  // The commit count for the title ("↑N"/"↓N") in range mode. Display-only. (Unused
+  // for worktree, which surfaces magnitude via `diffstat` instead of a commit count.)
   count?: number;
+  // WARDEN-449: the ± magnitude for the worktree title (`+N −M`). Reuses an in-scope
+  // GitBranchBadge prop — no new data path. Display-only; the modal fetches its own
+  // diff. Renders nothing when clean/unavailable (DiffStatChip's own guard).
+  diffstat?: DiffStat | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-export function DiffViewer({ chatId, filePath, staged, range, count, open, onOpenChange }: DiffViewerProps) {
-  // Range mode fetches /api/git-range-diff (net diff of the whole unpushed/incoming
-  // set); single-file mode fetches /api/git-diff for one working-tree file.
-  const isRange = range === 'outgoing' || range === 'incoming';
+export function DiffViewer({ chatId, filePath, staged, range, count, diffstat, open, onOpenChange }: DiffViewerProps) {
+  // Range mode fetches /api/git-range-diff (net diff of the whole unpushed/incoming/
+  // worktree set); single-file mode fetches /api/git-diff for one working-tree file.
+  const isRange = range === 'outgoing' || range === 'incoming' || range === 'worktree';
   const [diff, setDiff] = useState<string | null>(null);
   const [untracked, setUntracked] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -87,8 +97,12 @@ export function DiffViewer({ chatId, filePath, staged, range, count, open, onOpe
 
   const empty = !loading && !error && diff !== null && diff.length === 0;
   // Range mode titles the modal by the change set; single-file mode by the path.
+  // Worktree has no commit count — its magnitude is the `+N −M` chip rendered inline
+  // next to the title below (the SAME `git diff HEAD` set the chip counts).
   const title = isRange
-    ? (range === 'outgoing' ? `Unpushed changes (↑${count ?? 0})` : `Incoming changes (↓${count ?? 0})`)
+    ? (range === 'outgoing' ? `Unpushed changes (↑${count ?? 0})`
+      : range === 'incoming' ? `Incoming changes (↓${count ?? 0})`
+      : 'Uncommitted changes')
     : filePath;
 
   return (
@@ -98,6 +112,13 @@ export function DiffViewer({ chatId, filePath, staged, range, count, open, onOpe
           <DialogTitle className="flex items-center gap-2">
             {isRange ? <GitCompare className="w-4 h-4 shrink-0" /> : <FileIcon className="w-4 h-4 shrink-0" />}
             <span className="truncate">{title}</span>
+            {/* WARDEN-449: the ± magnitude chip inline next to the worktree title — the
+                same `+N −M` the GitBranchBadge tooltip shows, so the modal's magnitude
+                matches the dirty glyph's count. Renders nothing for a clean/all-untracked
+                tree (DiffStatChip's own guard), and nothing in the other range modes. */}
+            {range === 'worktree' && (
+              <DiffStatChip diffstat={diffstat} className="text-[11px]" />
+            )}
             {staged && !isRange && (
               <span className="shrink-0 rounded bg-green-500/15 px-1.5 py-px text-[10px] font-medium text-green-400" title="staged-only diff — exactly what will be committed (git diff --cached)">
                 staged
@@ -130,7 +151,9 @@ export function DiffViewer({ chatId, filePath, staged, range, count, open, onOpe
 
             {!loading && !error && empty && (
               <div className="flex items-center justify-center py-8 text-muted-foreground">
-                {isRange ? 'No net changes between the two tips.' : 'No changes — file matches HEAD.'}
+                {isRange
+                  ? (range === 'worktree' ? 'Working tree clean.' : 'No net changes between the two tips.')
+                  : 'No changes — file matches HEAD.'}
               </div>
             )}
 

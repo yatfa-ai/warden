@@ -19,6 +19,9 @@ import { spawnSync } from 'node:child_process';
  * Covers the acceptance criteria for the LOCAL host:
  *   - repo ahead of @{u} → range=outgoing returns the aggregated diff text
  *   - repo behind @{u}   → range=incoming returns the aggregated diff
+ *   - dirty worktree     → range=worktree returns the combined `git diff HEAD` (WARDEN-449)
+ *   - clean worktree     → range=worktree returns an empty diff (→ "Working tree clean.")
+ *   - unborn HEAD        → range=worktree returns 'no commits yet ...' (NOT 'no upstream configured')
  *   - no upstream / detached HEAD → { diff: null, error: 'no upstream configured' }, 200 not 500
  *   - output capped at 1MB via capDiff (the shared guard, asserted via the route)
  *   - invalid range value → clean error, not 500
@@ -48,6 +51,8 @@ let noUpstreamRepo;
 let detachedRepo;
 let bareOriginDetached;
 let nonGitDir;
+let dirtyRepo;
+let unbornRepo;
 
 function git(args, cwd) {
   const r = spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'inherit'] });
@@ -161,6 +166,38 @@ before(async () => {
   nonGitDir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-rangediff-nongit-'));
   fs.writeFileSync(path.join(nonGitDir, 'readme.txt'), 'not a repo\n');
 
+  // ---- dirtyRepo: a committed base + uncommitted staged AND unstaged tracked edits (± axis, WARDEN-449) ----
+  // `git diff HEAD` is the COMBINED diff (staged + unstaged vs HEAD) — the SAME set
+  // WARDEN-411's `git diff HEAD --shortstat` counts. Distinct content per file so the
+  // aggregated diff is assertable: dirty.txt is worktree-modified (unstaged), staged.txt
+  // is index-modified (staged). Both must surface in the ONE `git diff HEAD` — proving
+  // the worktree axis is the combined set, not just one slot.
+  dirtyRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-rangediff-dirty-'));
+  git(['init', '-q'], dirtyRepo);
+  git(['config', 'user.email', 'test@example.com'], dirtyRepo);
+  git(['config', 'user.name', 'Tester'], dirtyRepo);
+  fs.writeFileSync(path.join(dirtyRepo, 'dirty.txt'), 'base\n');
+  fs.writeFileSync(path.join(dirtyRepo, 'staged.txt'), 'base\n');
+  git(['add', '.'], dirtyRepo);
+  git(['commit', '-q', '-m', 'base'], dirtyRepo);
+  // Unstaged worktree edit on dirty.txt (HEAD has 'base', worktree has the change).
+  fs.writeFileSync(path.join(dirtyRepo, 'dirty.txt'), 'worktree-change\n');
+  // Staged edit on staged.txt (HEAD has 'base', index has the change, worktree clean here).
+  fs.writeFileSync(path.join(dirtyRepo, 'staged.txt'), 'staged-change\n');
+  git(['add', 'staged.txt'], dirtyRepo);
+
+  // ---- unbornRepo: a fresh repo with NO commits (unborn HEAD — the ± error case) ----
+  // `git diff HEAD` has no HEAD to compare against → exits non-zero → the range-aware
+  // worktree error 'no commits yet (nothing to compare against HEAD)' (NOT the misleading
+  // 'no upstream configured' the outgoing/incoming axes use). Has staged work so it's a
+  // realistic "agent's brand-new repo with WIP but no first commit yet."
+  unbornRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-rangediff-unborn-'));
+  git(['init', '-q'], unbornRepo);
+  git(['config', 'user.email', 'test@example.com'], unbornRepo);
+  git(['config', 'user.name', 'Tester'], unbornRepo);
+  fs.writeFileSync(path.join(unbornRepo, 'wip.txt'), 'work in progress\n');
+  git(['add', '.'], unbornRepo);
+
   // Catalog with LOCAL manual chats, resolved by bare session id (no ':'
   // prefix) so no host/tmux discovery runs.
   fs.writeFileSync(
@@ -172,6 +209,8 @@ before(async () => {
       { host: '(local)', session: 'warden-noupstream', cwd: noUpstreamRepo, cmd: 'bash', name: 'warden-noupstream' },
       { host: '(local)', session: 'warden-detached', cwd: detachedRepo, cmd: 'bash', name: 'warden-detached' },
       { host: '(local)', session: 'warden-nongit', cwd: nonGitDir, cmd: 'bash', name: 'warden-nongit' },
+      { host: '(local)', session: 'warden-dirty', cwd: dirtyRepo, cmd: 'bash', name: 'warden-dirty' },
+      { host: '(local)', session: 'warden-unborn', cwd: unbornRepo, cmd: 'bash', name: 'warden-unborn' },
     ]),
   );
 
@@ -189,7 +228,7 @@ after(async () => {
   if (httpServer) await new Promise((r) => httpServer.close(r));
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  for (const d of [aheadRepo, bareOriginAhead, behindRepo, bareOriginBehind, bigAheadRepo, bareOriginBig, noUpstreamRepo, detachedRepo, bareOriginDetached, nonGitDir, tempHome]) {
+  for (const d of [aheadRepo, bareOriginAhead, behindRepo, bareOriginBehind, bigAheadRepo, bareOriginBig, noUpstreamRepo, detachedRepo, bareOriginDetached, nonGitDir, dirtyRepo, unbornRepo, tempHome]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 });
@@ -240,6 +279,66 @@ describe('/api/git-range-diff range=incoming (behind — WARDEN-398)', () => {
     assert.ok(body.diff.includes('+++ b/b3.txt'), 'diff must include b3.txt');
     assert.ok(body.diff.includes('+behind 2'), 'diff must include b2.txt content');
     assert.ok(body.diff.includes('+behind 3'), 'diff must include b3.txt content');
+  });
+});
+
+describe('/api/git-range-diff range=worktree (uncommitted ± axis — WARDEN-449)', () => {
+  it('sanity: the dirty fixture actually has uncommitted tracked changes', () => {
+    // Confirms the fixture is dirty (HEAD differs from the worktree+index) so the case
+    // below is meaningful. `git diff HEAD --shortstat` is exactly the set the route runs.
+    const stat = git(['diff', 'HEAD', '--shortstat'], dirtyRepo).stdout.toString().trim();
+    assert.match(stat, /files? changed/, `expected a non-empty shortstat, got "${stat}"`);
+  });
+
+  it('returns the combined staged+unstaged diff vs HEAD for a dirty tree', async () => {
+    const res = await fetch(`${baseUrl}/api/git-range-diff?id=warden-dirty&range=worktree`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.error, null);
+    assert.ok(typeof body.diff === 'string' && body.diff.length > 0, 'diff must be non-empty text');
+    // `git diff HEAD` is the COMBINED set: BOTH the unstaged worktree edit (dirty.txt)
+    // AND the staged edit (staged.txt) surface in one unified diff — not just one slot.
+    // This is what makes the ± axis a true "full diff" vs the per-file /api/git-diff.
+    assert.ok(body.diff.includes('+++ b/dirty.txt'), 'combined diff must include the unstaged file');
+    assert.ok(body.diff.includes('+worktree-change'), 'combined diff must include the unstaged edit');
+    assert.ok(body.diff.includes('+++ b/staged.txt'), 'combined diff must include the staged file');
+    assert.ok(body.diff.includes('+staged-change'), 'combined diff must include the staged edit');
+  });
+
+  it('returns an empty diff (200, no error) for a clean tree', async () => {
+    // warden-noupstream is a clean repo (one commit, nothing dirty) → `git diff HEAD`
+    // is empty. The frontend renders an empty diff as the "Working tree clean." state,
+    // NOT an error (the success criterion: a clean tree shows the clean empty state).
+    const res = await fetch(`${baseUrl}/api/git-range-diff?id=warden-noupstream&range=worktree`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.diff, '');
+  });
+
+  it('returns "no commits yet ..." (NOT "no upstream configured") for an unborn HEAD', async () => {
+    // A fresh repo with no commits: `git diff HEAD` exits non-zero (no HEAD to compare
+    // against). The worktree error is RANGE-AWARE — it must NOT recycle the
+    // outgoing/incoming 'no upstream configured' string (a worktree diff has nothing to
+    // do with upstream). 200, never a 500 (the success criterion).
+    const res = await fetch(`${baseUrl}/api/git-range-diff?id=warden-unborn&range=worktree`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.diff, null);
+    assert.strictEqual(body.error, 'no commits yet (nothing to compare against HEAD)');
+    assert.notStrictEqual(body.error, 'no upstream configured');
+  });
+
+  it('does not regress: outgoing/incoming still say "no upstream configured" on an unborn HEAD', async () => {
+    // The range-aware error must leave the OTHER axes untouched — an unborn HEAD queried
+    // with outgoing/incoming still surfaces the original 'no upstream configured'.
+    for (const range of ['outgoing', 'incoming']) {
+      const res = await fetch(`${baseUrl}/api/git-range-diff?id=warden-unborn&range=${range}`);
+      assert.strictEqual(res.status, 200);
+      const body = await res.json();
+      assert.strictEqual(body.diff, null);
+      assert.strictEqual(body.error, 'no upstream configured');
+    }
   });
 });
 
