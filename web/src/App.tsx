@@ -6,6 +6,7 @@ import { displayName } from '@/lib/chatDisplay';
 import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThemeId, type Theme, type ThemeId, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
+import { type AgentFilter, type AgentSort } from '@/lib/agentFilter';
 import { stampLastSeen } from '@/lib/whatsNew';
 import { useWatchCatchup } from '@/lib/useWatchCatchup';
 import { requestAlertPermission } from '@/lib/desktopAlerts';
@@ -268,6 +269,16 @@ function App() {
   // threaded to every timestamp display via the shared formatTimestamp helper,
   // and never sent to the backend.
   const [timestampFormat, setTimestampFormat] = useState<TimestampFormat>(() => uiState.timestampFormat ?? 'relative');
+  // WARDEN-442: sidebar fleet Filter (all/yatfa/claude/manual) + Sort, shipped in
+  // WARDEN-91. These were ChatSidebar-local useState with their own save effect,
+  // which App's saveUi spread (which omits both keys) then clobbered on every
+  // unrelated state change — wiping them from disk so the controls reset to
+  // 'all'/'manual' on reload. Now App-owned and persisted by its saveUi effect
+  // (the single writer), like every other UiState pref. Seeded from loadUi; the
+  // 'all'/'manual' defaults already match DEFAULT_UI. Forwarded read-only to
+  // ChatSidebar except for the change handlers. Pure client-side pref.
+  const [agentFilter, setAgentFilter] = useState<AgentFilter>(() => uiState.agentFilter ?? 'all');
+  const [agentSort, setAgentSort] = useState<AgentSort>(() => uiState.agentSort ?? 'manual');
   // Default agent type + host pre-filled in the ＋ new chat form, plus the
   // user-defined custom presets (named quick-fill commands beyond claude/shell).
   // All pure client-side prefs (like density/terminalFontSize): persisted by the
@@ -471,8 +482,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, restoreOnStartup, startedEmpty]);
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
   // workspace, so switching clears it (WARDEN-256: maximized resets on switch).
@@ -647,6 +658,9 @@ function App() {
     setRestoreOnStartup('previous');
     setCopyOnSelect(false);
     setTimestampFormat('relative');
+    // Sidebar fleet filter/sort (WARDEN-442): reset to the DEFAULT_UI values.
+    setAgentFilter('all');
+    setAgentSort('manual');
     // Terminal
     setTerminalFontSize(14);
     setTerminalScrollback(10000);
@@ -1576,6 +1590,10 @@ function App() {
               snippets={snippets}
               watchedChats={watchedChatSet}
               onToggleWatch={toggleWatch}
+              agentFilter={agentFilter}
+              agentSort={agentSort}
+              onFilterChange={setAgentFilter}
+              onSortChange={setAgentSort}
             />
           </ErrorBoundary>
         </section>

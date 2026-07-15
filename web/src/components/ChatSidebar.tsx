@@ -25,7 +25,7 @@ import { copyText } from '@/lib/clipboard';
 import { DiffViewer } from './DiffViewer';
 import { ConflictView } from './ConflictView';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
-import { loadUi, saveUi, RECENTLY_CLOSED_PREVIEW, type Snippet, type RecentlyClosedEntry } from '@/lib/storage';
+import { RECENTLY_CLOSED_PREVIEW, type Snippet, type RecentlyClosedEntry } from '@/lib/storage';
 import { THIS_MACHINE, basename, chatType, displayName } from '@/lib/chatDisplay';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTokens } from '@/lib/formatTokens';
@@ -91,11 +91,22 @@ interface Props {
   // active state render consistently across the fleet list and the open-panes list.
   watchedChats: Set<string>;
   onToggleWatch: (key: string) => void;
+  // WARDEN-442: sidebar fleet Filter (all/yatfa/claude/manual) + Sort, shipped in
+  // WARDEN-91. Owned by App and persisted by its saveUi effect (these were
+  // previously ChatSidebar-local useState, which App's lossy saveUi spread then
+  // wiped on every unrelated state change — the controls silently reset on
+  // reload). Read-only here except for the two change handlers, which delegate to
+  // App so it stays the single writer of the `warden:ui` blob. Threaded to the
+  // AgentFilterSortControls in both the collapsed and expanded fleet views.
+  agentFilter: AgentFilter;
+  agentSort: AgentSort;
+  onFilterChange: (filter: AgentFilter) => void;
+  onSortChange: (sort: AgentSort) => void;
 }
 
 const LABEL: Record<string, string> = { '(local)': 'this machine' };
 
-export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, snippets, watchedChats, onToggleWatch }: Props) {
+export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, snippets, watchedChats, onToggleWatch, agentFilter, agentSort, onFilterChange, onSortChange }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [offlineExpanded, setOfflineExpanded] = useState(false);
   // WARDEN-372: "show more" affordance for the per-workspace recently-closed list
@@ -147,8 +158,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
   // diff, which is not a usable ours/theirs view for an unmerged path.
   const [conflictTarget, setConflictTarget] = useState<{ chatId: string; path: string } | null>(null);
   const { prefs } = useNotificationPrefs();
-  const [agentFilter, setAgentFilter] = useState<AgentFilter>('all');
-  const [agentSort, setAgentSort] = useState<AgentSort>('manual');
 
   // Multi-select broadcast (WARDEN-292): the set of selected agent ids, held at
   // the ChatSidebar level so it can span the active/idle fleet lists in whichever
@@ -550,21 +559,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
     fetchCollections();
   }, []);
 
-  // Load filter/sort from localStorage on mount
-  useEffect(() => {
-    const ui = loadUi();
-    if (ui.agentFilter) setAgentFilter(ui.agentFilter);
-    if (ui.agentSort) setAgentSort(ui.agentSort);
-  }, []);
-
-  // Save filter/sort to localStorage when changed
-  useEffect(() => {
-    const ui = loadUi();
-    ui.agentFilter = agentFilter;
-    ui.agentSort = agentSort;
-    saveUi(ui);
-  }, [agentFilter, agentSort]);
-
   // Fetch git status for open panes (lazy loading). WARDEN-372: this was keyed on
   // the abolished activeTabs; it now follows the active workspace's open panes.
   useEffect(() => {
@@ -829,8 +823,8 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
           <AgentFilterSortControls
             agentFilter={agentFilter}
             agentSort={agentSort}
-            onFilterChange={setAgentFilter}
-            onSortChange={setAgentSort}
+            onFilterChange={onFilterChange}
+            onSortChange={onSortChange}
             hideHostSort
           />
           <IconTooltip label="rescan" disabled={loadingHost === H}><button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => fetchHostSessions(H)} disabled={loadingHost === H}>
@@ -985,8 +979,8 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
         <AgentFilterSortControls
           agentFilter={agentFilter}
           agentSort={agentSort}
-          onFilterChange={setAgentFilter}
-          onSortChange={setAgentSort}
+          onFilterChange={onFilterChange}
+          onSortChange={onSortChange}
         />
         <Badge variant="secondary" className="text-xs @max-[18rem]:hidden">{filteredPanes.length}</Badge>
         <span className="@max-[20rem]:hidden"><UpdatedAgo at={lastRefreshAt} timestampFormat={timestampFormat} /></span>
