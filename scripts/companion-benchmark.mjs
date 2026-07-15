@@ -14,7 +14,7 @@
 //
 // WARDEN-276 (slice 2) adds a capture-pane leg: capture-pane is the HIGHEST-
 // frequency remote op (it fires on every observer poll — summarizeOpenChats,
-// readChats, suggestNextActions, alertChangedAgents — PLUS the 2s monitor tick),
+// readChats, alertChangedAgents — PLUS the 2s monitor tick),
 // so the same handshake collapse compounds at a much higher cadence than
 // discover. capturePanes() already batches every pane into ONE runWithPool ssh
 // spawn per host per tick (O(hosts), not O(hosts×panes)); the companion win is
@@ -112,7 +112,7 @@ What it proves:
 
 // How often capture-pane actually fires in warden — used to size the capture-pane
 // leg at its real (busy) polling cadence. The monitor ticks every 2s; the observer
-// polls on readChats/summarizeOpenChats/suggestNextActions/alertChangedAgents.
+// polls on readChats/summarizeOpenChats/alertChangedAgents.
 const MONITOR_TICK_MS = 2000;
 const CAPTURE_TICKS_PER_MIN = Math.round(60_000 / MONITOR_TICK_MS); // 30/min (monitor alone)
 
@@ -156,7 +156,7 @@ function printCaptureProjection(hosts, ticks) {
   console.log(`Part 1.b — capture-pane: handshake projection  (${hosts} host(s), ${ticks} tick(s))`);
   console.log('━'.repeat(72));
   console.log('capture-pane is the highest-frequency remote op: it fires on EVERY');
-  console.log('observer poll (summarizeOpenChats/readChats/suggestNextActions/');
+  console.log('observer poll (summarizeOpenChats/readChats/');
   console.log('alertChangedAgents) PLUS the 2s monitor tick. capturePanes() already');
   console.log('batches all panes/host into ONE ssh spawn (O(hosts)/tick, not O(panes)),');
   console.log('so the companion win is the per-tick HANDSHAKE, not a spawn reduction:');
