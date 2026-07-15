@@ -20,6 +20,11 @@ const {
   MIN_WIDTH,
   MIN_HEIGHT,
 } = require('./window-state.cjs');
+// Telemetry SOURCE layer (WARDEN-463) — turns main-process failure/freeze
+// signals into consent-gated base-tier events routed to `record()`. Off by
+// default; see the wiring block in app.whenReady() below. Pure/testable logic
+// lives in this CJS module (same pattern as window-state.cjs above).
+const { createTelemetrySource } = require('./telemetry-source.cjs');
 
 const PORT = parseInt(process.env.WARDEN_PORT || '7421', 10);
 const HOST = '127.0.0.1';
@@ -35,6 +40,25 @@ let win = null;
 let isQuitting = false;
 let closeToTray = false;
 let tray = null;
+
+// --- Telemetry SOURCE wiring (WARDEN-463, slice 4) -----------------------
+// Optional, OFF-by-default instrumentation (roadmap WARDEN-446 / design
+// WARDEN-443). It subscribes to main-process uncaught errors/rejections, to
+// renderer crash/unresponsive signals, and to an event-loop freeze heartbeat —
+// turning each into a schema-valid base-tier event routed to `record()`.
+//
+// TWO LAYERS OF "off = nothing", both dormant until slice 1 (WARDEN-457) ships:
+//   1. CONSENT defaults to off (telemetryBaseEnabled). With consent off the
+//      source subscribes to NOTHING and builds/records NOTHING. When slice 1's
+//      Settings consent pref lands, call `telemetry.setBaseConsent(...)` with
+//      the initial value AND on every change (the source re-evaluates on toggle).
+//   2. RECORD defaults to a guarded no-op. When slice 1's TelemetryClient lands,
+//      call `telemetry.setRecord(client.record.bind(client))`.
+// Until then this block is inert by construction — it cannot phone home.
+const telemetry = createTelemetrySource({
+  record: null, // → TelemetryClient.record(event) once slice 1 lands
+  now: () => Date.now(),
+});
 
 // Kill anything occupying the port (stale server from a previous run)
 function killStalePort() {
@@ -195,6 +219,13 @@ function createWindow() {
   win.loadURL(`http://${HOST}:${PORT}/?_t=${Date.now()}`);
   attachWindowStateCapture(win);
   win.on('closed', () => { win = null; });
+
+  // Telemetry source (WARDEN-463): attach the RENDERER signal taps —
+  // render-process-gone (→ crash) and unresponsive (→ performance-stall) — to
+  // this window's webContents. Re-attached per window (createWindow runs again
+  // if the window is recreated); with base consent off this subscribes to
+  // nothing. See the main-process block in app.whenReady() for the consent seam.
+  if (win.webContents) telemetry.attachRenderer(win.webContents);
 
   // Cache the persisted close-to-tray flag for the close intercept (avoids a
   // sync fs read on every close attempt) and, when ON, create the tray icon so
@@ -365,10 +396,24 @@ app.whenReady().then(() => {
   process.on('SIGTERM', cleanup);
   process.on('SIGINT', cleanup);
 
+  // Telemetry source (WARDEN-463): attach the MAIN-process signal taps. With
+  // base consent off (the default — see the seam below) this subscribes to
+  // nothing; it only begins capturing uncaughtExceptionMonitor / unhandled
+  // rejection once slice 1 turns consent on. The renderer taps are attached
+  // per-window inside createWindow() (win.webContents).
+  telemetry.attachMain(process);
+  // CONSENT SEAM (defaults off). When slice 1 / WARDEN-457 ships the Settings
+  // consent pref (telemetryBaseEnabled), read its initial value here and call
+  // telemetry.setBaseConsent(...) on every change. Left off until then.
+  telemetry.setBaseConsent(false);
+
   waitForServer(createWindow);
 });
 
 function cleanup() {
+  // Tear down the telemetry taps so no listener outlives quit (defensive; the
+  // process is exiting anyway).
+  try { telemetry.dispose(); } catch {}
   if (serverProcess) {
     try { serverProcess.kill('SIGTERM'); } catch {}
     // Force kill after 2s if still alive
