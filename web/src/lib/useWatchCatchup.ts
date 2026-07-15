@@ -14,9 +14,10 @@
 // `onOpenChat` is the SAME deep-link path fireWatchNotification.onclick and the
 // AttentionBadge rows already use (App's openChat), so a click lands straight on
 // the watched pane that needed the human. No new routing.
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   awayMisses,
+  reconcileAwayMisses,
   loadWatchMissLog,
   getWatchSeen,
   stampWatchSeen,
@@ -24,9 +25,15 @@ import {
   withoutKey,
   type WatchMiss,
 } from '@/lib/watchCatchup';
+import { indexByWatchKey } from '@/lib/chatWatch';
+import type { AgentStateRow } from '@/lib/types';
 
 export interface WatchCatchupState {
-  /** Unacknowledged away watch misses, newest-first, deduped per key. Empty → hide. */
+  /**
+   * Unacknowledged away watch misses, deduped per key, urgency-ranked (erroring >
+   * stuck > completed > waiting), with chats that have since recovered suppressed on
+   * return (WARDEN-476). Empty → hide the surface.
+   */
   misses: WatchMiss[];
   /** Deep-link to a watched chat's pane + acknowledge just that chat (per-key ack). */
   openMiss: (miss: WatchMiss) => void;
@@ -49,9 +56,12 @@ export interface WatchCatchupState {
  * channel lost the ping OR the human is away) is the single source of truth, so the
  * hook re-reads it on mount and on every visibility → visible transition — the two
  * moments a catch-up should appear (reopen after a close, and return-from-
- * backgrounded-tab). It does NOT re-read while present, because no new misses are
- * recorded for a present-and-delivered ping (shouldRecordMiss), so the surface is
- * stable between returns.
+ * backgrounded-tab). It does NOT re-read the LOG while present, because no new misses
+ * are recorded for a present-and-delivered ping (shouldRecordMiss). It DOES re-
+ * reconcile whenever the watched chats' CURRENT states refresh (the ~30s poll + the
+ * visibility→visible refetch), so a miss whose chat recovered is suppressed on return
+ * even though the recovery resolved a moment after the synchronous visibility re-read
+ * (WARDEN-476).
  *
  * Ack mirrors whatsNew's lastSeen-stamp-on-visit so an acknowledged alert never
  * recurs as stale noise. There are THREE ack paths, all funneling through one
@@ -62,20 +72,42 @@ export interface WatchCatchupState {
  * ping re-surface as stale noise); (2) the catch-up row's openMiss (which calls
  * ackKey); (3) the × advances the seen boundary past every recorded miss (ack-all).
  */
-export function useWatchCatchup(onOpenChat?: (id: string) => void): WatchCatchupState {
-  const [misses, setMisses] = useState<WatchMiss[]>(() =>
-    awayMisses(loadWatchMissLog(), getWatchSeen()),
-  );
+export function useWatchCatchup(
+  onOpenChat?: (id: string) => void,
+  // WARDEN-476: the watched chats' CURRENT states (exposed by useAttentionRollup as
+  // its watchedStates return — built from the same open ∪ watched poll the watch diff
+  // already rides, so zero extra SSH cost). Used at read-time to suppress away misses
+  // whose chats have since RECOVERED on return, so the catch-up agrees with the live
+  // return-banner callout. null/undefined before the first poll lands → no suppression
+  // (every miss kept — the safe default; reconcileAwayMisses is a no-op on an empty
+  // index). Trailing + optional so the existing call site stayed compatible pre-wire.
+  currentStates?: AgentStateRow[] | null,
+): WatchCatchupState {
+  // Live current-states as a ref so the stable `compute`/`recompute` closures read the
+  // freshest snapshot without their identity (and thus the visibility effect) churning
+  // on every ~30s poll. The companion [currentStates] effect below is what re-runs the
+  // reconciliation when a fresh poll lands.
+  const currentStatesRef = useRef<AgentStateRow[] | null>(currentStates ?? null);
+  currentStatesRef.current = currentStates ?? null;
+
+  // Window + dedup + urgency-rank the durable log, then suppress the recovered chats
+  // against the current snapshot (WARDEN-476). Pure end-to-end; reads currentStatesRef.
+  const compute = useCallback((): WatchMiss[] => {
+    const raw = awayMisses(loadWatchMissLog(), getWatchSeen());
+    return reconcileAwayMisses(raw, indexByWatchKey(currentStatesRef.current));
+  }, []);
+
+  const [misses, setMisses] = useState<WatchMiss[]>(() => compute());
 
   const recompute = useCallback(() => {
-    setMisses(awayMisses(loadWatchMissLog(), getWatchSeen()));
-  }, []);
+    setMisses(compute());
+  }, [compute]);
 
   // Mount (an app reopen recovers the prior session's unacked away misses) AND
   // return-from-away both re-read the durable log — the source of what fired while the
-  // human was gone. No re-read while present: the fire site records only when the OS
-  // channel lost the ping OR the human is away (shouldRecordMiss), so the surface is
-  // stable between returns.
+  // human was gone. The current-state reconciliation runs inside compute; the snapshot
+  // here may be one poll stale at the instant of return (the visibility→visible refetch
+  // resolves async), and the [currentStates] effect below re-reconciles once it lands.
   useEffect(() => {
     recompute();
     const onVisibility = () => {
@@ -84,6 +116,17 @@ export function useWatchCatchup(onOpenChat?: (id: string) => void): WatchCatchup
     document.addEventListener('visibilitychange', onVisibility);
     return () => document.removeEventListener('visibilitychange', onVisibility);
   }, [recompute]);
+
+  // WARDEN-476: re-reconcile when fresh watched states arrive. The return-time agent-
+  // states poll resolves ASYNC, AFTER the synchronous visibility recompute above; when
+  // the new snapshot lands (a new ~30s poll, or the visibility→visible refetch), re-run
+  // the reconciliation so a chat that recovered WHILE the human was away — or in the
+  // moment between return and the poll resolving — is suppressed against the CURRENT
+  // state, not the pre-return one. This is the path that makes the catch-up agree with
+  // the live return-banner callout on return.
+  useEffect(() => {
+    recompute();
+  }, [currentStates, recompute]);
 
   const ackKey = useCallback((key: string) => {
     // Per-key ack-on-open (WARDEN-417): drop every recorded miss for this chat so it

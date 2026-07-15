@@ -860,19 +860,14 @@ function App() {
     if (autoFocusNewPane) setFocused(id);
   }, [autoFocusNewPane, setOpenPanes, setFocused]);
 
-  // WARDEN-417: in-app catch-up for per-chat watch pings that fired while the human
-  // was away (the OS notification was unsupported / denied / cleared / lost). Reads
-  // the durable miss log written at the fire site in useAttentionRollup and surfaces
-  // the unacknowledged away misses on return, each deep-linking to its watched pane
-  // via the same openChat path. See useWatchCatchup / WatchCatchup.
-  const watchCatchup = useWatchCatchup(openChat);
-  // Wire the ack-on-open chokepoint: hand the hook's ackKey to the openChat ref above
-  // so EVERY open of a watched chat (sidebar, OS-toast click, search, observer, catch-
-  // up row) clears that chat's catch-up misses. ackKey is stable (its only dep is the
-  // stable recompute), so this effect runs once; until it does, the ref is a no-op.
-  useEffect(() => {
-    ackWatchMissRef.current = watchCatchup.ackKey;
-  }, [watchCatchup.ackKey]);
+  // WARDEN-417 / WARDEN-476: in-app catch-up for per-chat watch pings that fired while
+  // the human was away (the OS notification was unsupported / denied / cleared / lost).
+  // Reads the durable miss log written at the fire site in useAttentionRollup and
+  // surfaces the unacknowledged away misses on return — reconciled against the watched
+  // chats' CURRENT states (WARDEN-476) so a recovered chat no longer reads "needs you" —
+  // each deep-linking to its watched pane via the same openChat path. The
+  // useWatchCatchup call + ack-on-open wiring live BELOW the useAttentionRollup call,
+  // because the catch-up now consumes the rollup's `watchedStates` exposure; see there.
 
   // WARDEN-436: the live attention rollup is now owned by App (lifted UP from
   // AttentionBadge) so the SAME rollup feeds BOTH the header badge AND the
@@ -896,9 +891,22 @@ function App() {
   // matching a transient row sharing the old key.
   const focusedChat = chats.find((c) => (c.key || c.id) === focused) || null;
   const focusedPaneKey = focusedChat?.key || focusedChat?.id || null;
-  const { rollup: attentionRollup } = useAttentionRollup(
+  const { rollup: attentionRollup, watchedStates: watchedAgentStates } = useAttentionRollup(
     attentionDesktopAlerts, openPanes, attentionStates, attentionSeverityPrefs, mutedAlertKeys, watchedChats, openChat, focusedPaneKey,
   );
+  // WARDEN-417: surface the per-chat watch catch-up (unacked away misses, deep-linking
+  // to each watched pane via openChat). WARDEN-476: pass the rollup's watched-states
+  // exposure so the hook can suppress misses whose chats have since recovered on return
+  // — closing the last false-positive trust hole in the catch-up. Lives below the
+  // useAttentionRollup call precisely because it consumes that exposure.
+  const watchCatchup = useWatchCatchup(openChat, watchedAgentStates);
+  // Wire the ack-on-open chokepoint: hand the hook's ackKey to the openChat ref above
+  // so EVERY open of a watched chat (sidebar, OS-toast click, search, observer, catch-
+  // up row) clears that chat's catch-up misses. ackKey is stable (its only dep is the
+  // stable recompute), so this effect runs once; until it does, the ref is a no-op.
+  useEffect(() => {
+    ackWatchMissRef.current = watchCatchup.ackKey;
+  }, [watchCatchup.ackKey]);
   // The single directed "you're needed HERE, because X" answer — the banner's lead.
   // top is null when no pane/health agent currently needs attention (only raw
   // directive/error counts, which have no pane to deep-link). Recomputed only when
