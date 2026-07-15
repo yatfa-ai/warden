@@ -23,6 +23,12 @@ export interface Chat {
   cpuPct?: number;     // e.g. 42.3 (percent, no trailing %)
   memPct?: number;     // e.g. 15.7 (percent)
   memUsage?: string;   // e.g. "310.2MiB / 2GiB" (used / total display string)
+  // Per-agent token spend (WARDEN-466): the lifetime total of the budget session
+  // this chat joined to (by cwd+host), attached server-side in /api/health from
+  // the cached budgetState.sessionUsage map. Optional → chats that don't join
+  // (budget off, no usage, or no cwd+host match) render no token chip, identical
+  // graceful-N/A to a missing CPU/mem field. `total` is model-agnostic tokens.
+  tokenUsage?: { total: number };
 }
 
 export interface HealthData {

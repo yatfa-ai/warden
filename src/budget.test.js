@@ -135,6 +135,59 @@ describe('computeBudgetState — thresholds + offender', () => {
   });
 });
 
+describe('computeBudgetState — per-session usage map (WARDEN-466)', () => {
+  it('returns the per-session usage entries it previously computed and discarded', () => {
+    // The whole point of WARDEN-466: this distribution was summed into fleetSpent
+    // + reduced to the single topOffender, then thrown away. Now it comes back so
+    // /api/health can join each live agent's total to its row.
+    const b = compute([sess('a', 500_000, { cwd: '/p/a' }), sess('b', 300_000, { cwd: '/p/b' })]);
+    assert.deepEqual(b.sessionUsage, [
+      { id: 'a', host: 'h1', cwd: '/p/a', total: 500_000 },
+      { id: 'b', host: 'h1', cwd: '/p/b', total: 300_000 },
+    ]);
+  });
+
+  it('excludes out-of-window and zero-usage sessions (only real, active spend joins)', () => {
+    // 'old' is outside the 24h window; 'zero' has null usage. Neither can produce
+    // a chip, so neither appears — bounding the payload to joinable rows.
+    const b = compute([
+      sess('a', 400_000),
+      sess('old', 9_000_000, { old: true }),
+      sess('zero', null),
+    ]);
+    assert.deepEqual(b.sessionUsage, [{ id: 'a', host: 'h1', cwd: '/p', total: 400_000 }]);
+  });
+
+  it('keeps every usage-bearing session even on a cwd+host collision', () => {
+    // Two roles on one repo+host share cwd+host (the path-A collision). The map
+    // returns BOTH entries — the max rollup is the /api/health join's job, not
+    // the pure helper's. (The chat→session join keeps the heaviest.)
+    const b = compute([
+      sess('worker', 700_000, { cwd: '/repo', host: 'h1' }),
+      sess('reviewer', 300_000, { cwd: '/repo', host: 'h1' }),
+    ]);
+    assert.equal(b.sessionUsage.length, 2);
+    assert.deepEqual(b.sessionUsage.map((u) => u.id), ['worker', 'reviewer']);
+  });
+
+  it('is additive — existing fleetSpent / topOffender / breach fields are unchanged', () => {
+    const b = compute([sess('a', 1_200_000), sess('b', 900_000)]);
+    assert.equal(b.fleetSpent, 2_100_000);
+    assert.equal(b.fleetBreached, true);
+    assert.equal(b.alerted, true);
+    assert.equal(b.topOffender.id, 'a');
+    assert.equal(b.topOffender.total, 1_200_000);
+    assert.equal(b.sessionUsage.length, 2);
+  });
+
+  it('is defensive against null/empty/non-array input', () => {
+    for (const input of [null, undefined, [], [null, undefined]]) {
+      const b = compute(input);
+      assert.deepEqual(b.sessionUsage, []);
+    }
+  });
+});
+
 describe('shouldFireBudgetAlert — fire-once-per-crossing', () => {
   const st = (alerted) => ({ alerted });
   it('fires on the transition into an alerted state', () => {
