@@ -36,6 +36,13 @@ interface Props {
   // Timestamp format pref (WARDEN-213): routes the fleet last-activity + "Last
   // updated" times through the shared formatTimestamp helper. Pure client-side.
   timestampFormat: TimestampFormat;
+  // "Group agents by: Health | Host" mode (WARDEN-237). Lifted to App + persisted
+  // (WARDEN-468) so the toggle survives a Warden restart — App owns the single
+  // source of truth and this is read-only here except for the change handler.
+  // Health stays the default (DEFAULT_UI.healthGroupBy) so the dashboard is
+  // unchanged unless a human opts into the per-host view.
+  groupBy: GroupMode;
+  onGroupByChange: (mode: GroupMode) => void;
 }
 
 // Closed sits between idle and unknown: a dead session is non-critical and less
@@ -70,7 +77,7 @@ const HEALTH_DIST_COLOR: Record<HealthStateValue, string> = {
 const CLOSED_COLLAPSED_LIMIT = 5;
 const CLOSED_EXPANDED_LIMIT = 20;
 
-type GroupMode = 'health' | 'host';
+export type GroupMode = 'health' | 'host';
 
 // Compact "used" portion of a docker-stats MemUsage string like
 // "310.2MiB / 2GiB" → "310.2MiB" (everything before the first ' / '). Returns ''
@@ -191,13 +198,10 @@ function ResourceChip({ agent }: { agent: Chat }) {
   );
 }
 
-export function HealthDashboard({ onOpenChat, onClose, timestampFormat }: Props) {
+export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy, onGroupByChange: setGroupBy }: Props) {
   const [healthData, setHealthData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Host view is additive — Health stays the default so the existing dashboard
-  // is unchanged unless a human opts into the per-host view (WARDEN-237).
-  const [groupBy, setGroupBy] = useState<GroupMode>('health');
   const [collapsedHosts, setCollapsedHosts] = useState<Record<string, boolean>>({});
   // Closed-section expansion (WARDEN-245): collapsed shows the 5 most-recent dead
   // sessions; expanded shows up to 20. The true total is always surfaced so the

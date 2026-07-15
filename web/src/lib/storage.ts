@@ -464,6 +464,11 @@ export interface UiState {
   paneHost?: Record<string, string>;
   agentFilter?: AgentFilter;
   agentSort?: AgentSort;
+  // WARDEN-468: HealthDashboard "Group agents by: Health | Host" toggle
+  // (WARDEN-237). Was a HealthDashboard-local useState that reset to 'health' on
+  // every Warden restart; now App-owned + persisted so a cross-host human's Host
+  // grouping survives reload. Defensive allow-list normalizer in loadUi below.
+  healthGroupBy?: 'health' | 'host';
 }
 
 // Sanitize a raw customPresets value into a valid CustomPreset[]. Defensive:
@@ -747,7 +752,7 @@ const DEFAULT_UI: UiState = {
   restoreOnStartup: 'previous',
   defaultNewChatPreset: 'claude', defaultNewChatPresetByHost: {}, defaultNewChatHost: '(local)', customPresets: [], snippets: STARTER_SNIPPETS, defaultNewChatCwd: '', defaultNewChatCwdByHost: {},
   defaultShell: '', defaultShellByHost: {},
-  paneHost: {}, agentFilter: 'all', agentSort: 'manual',
+  paneHost: {}, agentFilter: 'all', agentSort: 'manual', healthGroupBy: 'health',
 };
 
 export function loadUi(): UiState {
@@ -885,6 +890,9 @@ export function loadUi(): UiState {
         // enum-ish pref) so a legacy payload never selects a dead filter.
         agentFilter: ['all', 'yatfa', 'claude', 'manual'].includes(v.agentFilter) ? v.agentFilter : 'all',
         agentSort: v.agentSort ?? 'manual',
+        // WARDEN-468: defensive allow-list — a legacy/corrupt value never selects
+        // a dead group mode (mirrors the agentFilter enum normalizer above).
+        healthGroupBy: v.healthGroupBy === 'host' ? 'host' : 'health',
       };
     }
   } catch (e) {
