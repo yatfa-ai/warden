@@ -27,8 +27,9 @@ import { useHostStatuses } from '@/lib/useHostStatuses';
 import { useActivitySeries } from '@/lib/useActivitySeries';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { buildAgentActivity, selectAgentSparkline } from '@/lib/agentSparkline';
-import { displayName } from '@/lib/chatDisplay';
+import { displayName, hostLabelFor } from '@/lib/chatDisplay';
 import { formatTokens } from '@/lib/formatTokens';
+import { useHostLabels } from '@/lib/hostLabels';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -236,6 +237,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
   const [healthData, setHealthData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const hostLabels = useHostLabels();
   const [collapsedHosts, setCollapsedHosts] = useState<Record<string, boolean>>({});
   // Closed-section expansion (WARDEN-245): collapsed shows the 5 most-recent dead
   // sessions; expanded shows up to 20. The true total is always surfaced so the
@@ -438,7 +440,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
       {/* Host/Project Info */}
       {showHost && agent.host !== '(local)' && (
         <span className="text-[10px] text-muted-foreground">
-          {agent.host}
+          {hostLabelFor(agent.host, hostLabels) || agent.host}
         </span>
       )}
 
@@ -669,7 +671,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
                   const status = hostStatuses[group.host];
                   const collapsed = !!collapsedHosts[group.host];
                   const dist = HEALTH_SECTION_ORDER.filter(s => group.counts[s] > 0);
-                  const hostLabel = group.host === '(local)' ? 'local' : group.host;
+                  const hostLabel = hostLabelFor(group.host, hostLabels) || (group.host === '(local)' ? 'local' : group.host);
                   // Per-host rolled-up CPU/mem (WARDEN-361): mean cpu, MAX mem, or
                   // null when no agent carries docker-stats. Rendered in the line-2
                   // distribution area so an overloaded host (≥90% mem) is red and

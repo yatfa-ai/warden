@@ -13,7 +13,8 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator,
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { StatusDot } from '@/components/StatusDot';
 import { cn } from '@/lib/utils';
-import { chatType, displayName, hostTagOf } from '@/lib/chatDisplay';
+import { chatType, displayName, hostTagOf, hostLabelFor } from '@/lib/chatDisplay';
+import { useHostLabels } from '@/lib/hostLabels';
 import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
 import type { Chat } from '@/lib/types';
 import type { GitCommit, GitFile, DiffStat } from './types';
@@ -106,6 +107,7 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
 }) {
   const isUser = c.kind === 'tmux';
   const canRename = isUser;
+  const hostLabels = useHostLabels();
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(c.name || c.key || c.id);
   // WARDEN-305: inline note editor state (independent of rename's editing/val).
@@ -118,7 +120,7 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
   };
   const type = chatType(c);
   const typeColor = TYPE_COLOR[type] || 'text-violet-400';
-  const hostTag = isUser ? (c.host === '(local)' ? 'local' : (c.host || '')) : null;
+  const hostTag = isUser ? (hostLabelFor(c.host, hostLabels) || (c.host === '(local)' ? 'local' : (c.host || ''))) : null;
   // WARDEN-198: when this agent's managed host is offline, render a distinct
   // "unreachable" state instead of the ambiguous idle/undiscovered gray dot.
   // Driven by the shared 30s host-status poll, so it self-clears on recovery.
@@ -363,7 +365,8 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
   isWatched?: boolean; onToggleWatch?: () => void;
 }) {
   const type = c ? chatType(c) : '?';
-  const hostTag = c ? hostTagOf(c.host) : '';
+  const hostLabels = useHostLabels();
+  const hostTag = c ? hostTagOf(c.host, hostLabels) : '';
   const dead = !c || c.active === false;
   const canRename = !!c && c.kind === 'tmux';
   const [editing, setEditing] = useState(false);

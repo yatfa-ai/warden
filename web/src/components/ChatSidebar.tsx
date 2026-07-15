@@ -27,7 +27,8 @@ import { ConflictView } from './ConflictView';
 import { FileViewer } from './FileViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { RECENTLY_CLOSED_PREVIEW, type Snippet, type RecentlyClosedEntry } from '@/lib/storage';
-import { THIS_MACHINE, basename, chatType, displayName } from '@/lib/chatDisplay';
+import { THIS_MACHINE, basename, chatType, displayName, hostLabelFor } from '@/lib/chatDisplay';
+import { useHostLabels } from '@/lib/hostLabels';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTokens } from '@/lib/formatTokens';
 import {
@@ -110,6 +111,7 @@ const LABEL: Record<string, string> = { '(local)': 'this machine' };
 export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, snippets, watchedChats, onToggleWatch, agentFilter, agentSort, onFilterChange, onSortChange }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [offlineExpanded, setOfflineExpanded] = useState(false);
+  const hostLabels = useHostLabels();
   // WARDEN-372: "show more" affordance for the per-workspace recently-closed list
   // (5 previewed → up to the 20-entry cap).
   const [showAllClosed, setShowAllClosed] = useState(false);
@@ -1066,7 +1068,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
                   >
                     <StatusDot tone={open ? 'green' : 'muted'} variant={open ? 'solid' : 'ring'} label={open ? 'Open' : 'Reopen'} />
                     <span className="truncate flex-1 text-left">{entry.name || entry.id}</span>
-                    {entry.host && entry.host !== '(local)' && <span className="text-[10px] text-muted-foreground/70 shrink-0">{entry.host}</span>}
+                    {entry.host && entry.host !== '(local)' && <span className="text-[10px] text-muted-foreground/70 shrink-0">{hostLabelFor(entry.host, hostLabels) || entry.host}</span>}
                     <span className="text-[10px] text-muted-foreground/70 shrink-0">{formatTimestamp(entry.closedAt, timestampFormat)}</span>
                   </Button>
                 );

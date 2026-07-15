@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
+import { hostLabelFor } from '@/lib/chatDisplay';
+import { useHostLabels } from '@/lib/hostLabels';
 import type { ActivityEvent } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -50,6 +52,7 @@ async function copyToClipboard(text: string) {
 
 export function ActivityTimeline({ timestampFormat }: { timestampFormat: TimestampFormat }) {
   const [filtered, setFiltered] = useState<ActivityEvent[]>([]);
+  const hostLabels = useHostLabels();
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [agentFilter, setAgentFilter] = useState<string>('all');
   const [hostFilter, setHostFilter] = useState<string>('all');
@@ -292,7 +295,7 @@ export function ActivityTimeline({ timestampFormat }: { timestampFormat: Timesta
                 </span>
                 <span className="text-xs text-muted-foreground">{formatTimestamp(event.timestamp, timestampFormat)}</span>
                 {event.host && (
-                  <span className="text-xs font-mono text-muted-foreground bg-muted px-1 rounded">{event.host}</span>
+                  <span className="text-xs font-mono text-muted-foreground bg-muted px-1 rounded">{hostLabelFor(event.host, hostLabels) || event.host}</span>
                 )}
               </div>
               {renderDetails()}

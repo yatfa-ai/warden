@@ -1,5 +1,6 @@
 import type { AgentFilter, AgentSort } from './agentFilter';
 import type { TimestampFormat } from './formatTimestamp';
+import type { HostLabels } from '@/lib/chatDisplay';
 
 // UI state persisted in localStorage.
 // workspaces = the browser-tab-style project pane-sets the user switches between;
@@ -474,6 +475,20 @@ export interface UiState {
   // every Warden restart; now App-owned + persisted so a cross-host human's Host
   // grouping survives reload. Defensive allow-list normalizer in loadUi below.
   healthGroupBy?: 'health' | 'host';
+  // WARDEN-490 — per-host display labels (friendly names). Keys are the raw host
+  // strings ('(local)' for this machine, the SSH host name for remote); values
+  // are the human's label, which replaces the raw host in every host-tag display
+  // surface (sidebar rows, pane header, Kill/Collision/Broadcast dialogs, Open
+  // Chat Browser, Activity timeline, Directive history, Observer tabs, Health
+  // dashboard, token-budget offender line, SessionTranscriptViewer). A host with
+  // no entry (or an empty/whitespace value, dropped on load by parseLabelsByHost)
+  // is byte-identical to today — including the intentional 'local' vs 'this
+  // machine' difference across surfaces. Pure client-side pref, persisted by
+  // App's saveUi effect; NEVER sent to the backend / /api/config or any SSH /
+  // telemetry path (a label is display-only — it must never leak into a backend
+  // payload). Mirrors the host-keyed shape of defaultNewChatCwdByHost /
+  // defaultShellByHost.
+  hostLabels?: HostLabels;
 }
 
 // Sanitize a raw customPresets value into a valid CustomPreset[]. Defensive:
@@ -593,6 +608,33 @@ function parseShellByHost(raw: unknown): Record<string, string> {
     const key = typeof k === 'string' ? k.trim() : '';
     const val = typeof v === 'string' ? v.trim() : '';
     if (!key || !val) continue; // empty key → drop; empty value → inherit global default
+    out[key] = val;
+  }
+  return out;
+}
+
+// Sanitize a raw hostLabels value (raw host key → friendly label) into a valid
+// HostLabels map (WARDEN-490). Mirrors parseCwdByHost/parseShellByHost's drop-
+// bad-entries discipline: each entry requires a non-empty trimmed-string KEY and
+// a trimmed-string VALUE, and entries whose value is empty/whitespace are
+// dropped — an empty label means "no label" (today's behavior), so it must never
+// persist as a blank that could blank a host's tag. Defensive: never throws on
+// malformed input (WARDEN-89) — it drops bad entries instead, so one corrupt
+// entry can never blank the label map. NOTE: this map is display-only; it never
+// reaches the backend (see the UiState.hostLabels comment).
+function parseLabelsByHost(raw: unknown): HostLabels {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    if (raw !== undefined && raw !== null) {
+      // A present-but-wrong-type value is genuine corruption worth surfacing.
+      console.warn('[loadUi] hostLabels is not an object; ignoring:', raw);
+    }
+    return {};
+  }
+  const out: HostLabels = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const key = typeof k === 'string' ? k.trim() : '';
+    const val = typeof v === 'string' ? v.trim() : '';
+    if (!key || !val) continue; // empty key → drop; empty label → no label (today's behavior)
     out[key] = val;
   }
   return out;
@@ -758,7 +800,7 @@ const DEFAULT_UI: UiState = {
   restoreOnStartup: 'previous',
   defaultNewChatPreset: 'claude', defaultNewChatPresetByHost: {}, defaultNewChatHost: '(local)', customPresets: [], snippets: STARTER_SNIPPETS, defaultNewChatCwd: '', defaultNewChatCwdByHost: {},
   defaultShell: '', defaultShellByHost: {},
-  paneHost: {}, agentFilter: 'all', agentSort: 'manual', healthGroupBy: 'health',
+  paneHost: {}, agentFilter: 'all', agentSort: 'manual', healthGroupBy: 'health', hostLabels: {},
 };
 
 export function loadUi(): UiState {
@@ -903,6 +945,10 @@ export function loadUi(): UiState {
         // WARDEN-468: defensive allow-list — a legacy/corrupt value never selects
         // a dead group mode (mirrors the agentFilter enum normalizer above).
         healthGroupBy: v.healthGroupBy === 'host' ? 'host' : 'health',
+        // WARDEN-490 — per-host display labels. Sanitized to a host→label map
+        // with empty values dropped (no label = today's behavior). Display-only;
+        // never sent to the backend.
+        hostLabels: parseLabelsByHost(v.hostLabels),
       };
     }
   } catch (e) {

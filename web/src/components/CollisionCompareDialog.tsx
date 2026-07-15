@@ -49,6 +49,7 @@ import { DiffBlock } from './DiffBlock';
 import { reduceCollisionDiffs, type CollisionDiffPanel, type GitDiffResult } from '@/lib/collisionCompare';
 import type { FileCollision } from '@/lib/gitStateSummary';
 import { displayName, hostTagOf } from '@/lib/chatDisplay';
+import { useHostLabels } from '@/lib/hostLabels';
 import { findChat } from '@/lib/agentFilter';
 import type { Chat } from '@/lib/types';
 
@@ -186,8 +187,9 @@ function AgentDiffPanel({ panel, chat, branch, onOpenChat }: {
 }) {
   // Default expanded (false = not collapsed) — see component docstring.
   const [collapsed, setCollapsed] = useState(false);
+  const hostLabels = useHostLabels();
   const name = displayName(chat);
-  const host = chat ? hostTagOf(chat.host || '') : '?';
+  const host = chat ? hostTagOf(chat.host || '', hostLabels) : '?';
 
   return (
     <section className="rounded-md border border-border">

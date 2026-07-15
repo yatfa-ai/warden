@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { hostLabelFor } from '@/lib/chatDisplay';
+import { useHostLabels } from '@/lib/hostLabels';
 import type { Directive } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -235,13 +237,14 @@ export function DirectiveHistory({ timestampFormat }: { timestampFormat: Timesta
 }
 
 function DirectiveEntry({ directive, timestampFormat }: { directive: Directive; timestampFormat: TimestampFormat }) {
+  const hostLabels = useHostLabels();
   return (
     <div className="py-2 px-3 rounded-lg border bg-card/50">
       <div className="flex items-center gap-2 mb-2 flex-wrap">
         <span className="text-xs font-semibold uppercase text-emerald-500">sent</span>
         <span className="text-xs text-muted-foreground">{formatTimestamp(directive.timestamp, timestampFormat)}</span>
         <span className="text-xs font-mono text-muted-foreground bg-muted px-1 rounded">
-          {directive.container}@{directive.host}
+          {directive.container}@{hostLabelFor(directive.host, hostLabels) || directive.host}
         </span>
         <span className="text-xs font-medium">{directive.role || 'agent'}</span>
       </div>

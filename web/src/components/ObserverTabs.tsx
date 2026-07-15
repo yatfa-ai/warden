@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { hostLabelFor } from '@/lib/chatDisplay';
+import { useHostLabels } from '@/lib/hostLabels';
 import { toast } from 'sonner';
 import { ObserverPanel } from './ObserverPanel';
 import { ActivityTimeline } from './ActivityTimeline';
@@ -41,6 +43,7 @@ interface Props {
 // conversations stay live. Open tabs + active tab persist in localStorage.
 export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, timestampFormat = 'relative' }: Props = {}) {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
+  const hostLabels = useHostLabels();
   const [openIds, setOpenIds] = useState<string[]>(() => loadObs().openIds);
   const [activeId, setActiveId] = useState<string | null>(() => loadObs().activeId);
   const [viewMode, setViewMode] = useState<'sessions' | 'activity' | 'directives'>(() => loadObs().viewMode || 'sessions');
@@ -253,7 +256,11 @@ export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, o
   const nameOf = (id: string) => sessions.find((s) => s.id === id)?.name || id.slice(0, 6);
   const hostLabel = (id: string) => {
     const session = sessions.find((s) => s.id === id);
-    return session?.host ? `@${session.host}` : '';
+    if (!session?.host) return '';
+    // WARDEN-490: a labeled host shows its friendly name; an unlabeled host keeps
+    // the exact raw string (including '@(local)') — byte-identical to today.
+    const label = hostLabelFor(session.host, hostLabels);
+    return label ? `@${label}` : `@${session.host}`;
   };
 
   return (
@@ -317,7 +324,7 @@ export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, o
                   key={id}
                   onClick={() => setActiveId(id)}
                   className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap shrink-0 transition-all duration-150 ease-out active:scale-95 ${activeId === id ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50'}`}
-                  title={session ? `${session.container || 'Unknown'}${session.project ? ` (${session.project})` : ''} @ ${session.host || 'local'}` : ''}
+                  title={session ? `${session.container || 'Unknown'}${session.project ? ` (${session.project})` : ''} @ ${hostLabelFor(session.host ?? '', hostLabels) || session.host || 'local'}` : ''}
                 >
                   {nameOf(id)}{hostLbl && <span className="ml-1 opacity-70">{hostLbl}</span>}
                   <span

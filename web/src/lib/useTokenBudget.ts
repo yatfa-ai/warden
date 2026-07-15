@@ -45,6 +45,8 @@ export interface UseTokenBudgetArgs {
   attentionDesktopAlerts?: boolean;
   /** Deep-link: open the All Sessions usage view (the offending session floats top). */
   onOpenSessions?: () => void;
+  /** Per-host display labels (WARDEN-490) so the offender line names the friendly host. */
+  hostLabels?: Record<string, string>;
 }
 
 export interface UseTokenBudgetResult {
@@ -54,7 +56,7 @@ export interface UseTokenBudgetResult {
 }
 
 export function useTokenBudget(
-  { attentionDesktopAlerts = false, onOpenSessions }: UseTokenBudgetArgs = {},
+  { attentionDesktopAlerts = false, onOpenSessions, hostLabels }: UseTokenBudgetArgs = {},
 ): UseTokenBudgetResult {
   const [budget, setBudget] = useState<BudgetState>(EMPTY_BUDGET);
   const [loading, setLoading] = useState(true);
@@ -63,6 +65,11 @@ export function useTokenBudget(
   // without rebuilding the interval (which would reset the cadence).
   const onOpenSessionsRef = useRef(onOpenSessions);
   onOpenSessionsRef.current = onOpenSessions;
+  // WARDEN-490: host labels only affect the offender line's wording (not poll
+  // cadence), so — like onOpenSessions — read via a ref to avoid rebuilding the
+  // interval when a label is edited.
+  const hostLabelsRef = useRef(hostLabels);
+  hostLabelsRef.current = hostLabels;
 
   // --- Debounce state (refs — updating them never re-renders) ---
   // prevRef: the last observed snapshot, for the crossing detector.
@@ -84,7 +91,7 @@ export function useTokenBudget(
   // breach whose toast was suppressed while hidden (desktop or none) and skips
   // one already toasted while visible.
   const deliver = (b: BudgetState): boolean => {
-    const { title, body } = formatBudgetMessageWith(b, formatTokens);
+    const { title, body } = formatBudgetMessageWith(b, formatTokens, hostLabelsRef.current);
     const open = () => onOpenSessionsRef.current?.();
     const channel = pickBudgetChannel(
       document.visibilityState === 'visible',

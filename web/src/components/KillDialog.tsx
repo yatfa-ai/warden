@@ -28,6 +28,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Loader2 } from 'lucide-react';
 import { chatType, displayName, hostTagOf } from '@/lib/chatDisplay';
+import { useHostLabels } from '@/lib/hostLabels';
 import type { Chat } from '@/lib/types';
 import type { KillSummary } from '@/lib/kill';
 
@@ -44,6 +45,7 @@ interface Props {
 
 export function KillDialog({ open, onOpenChange, targets, onKill }: Props) {
   const [killing, setKilling] = useState(false);
+  const hostLabels = useHostLabels();
 
   // Reset on every open so a previous attempt's spinner can't linger.
   useEffect(() => {
@@ -88,7 +90,7 @@ export function KillDialog({ open, onOpenChange, targets, onKill }: Props) {
                 {targets.map((c) => {
                   const name = displayName(c);
                   const type = chatType(c);
-                  const host = hostTagOf(c.host || '');
+                  const host = hostTagOf(c.host || '', hostLabels);
                   return (
                     <li key={c.key || c.id} className="flex items-center gap-2 px-2 py-1 text-xs">
                       <span className="truncate flex-1" title={name}>{name}</span>
