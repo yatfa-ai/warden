@@ -150,6 +150,11 @@ export function ActivityTimeline({ timestampFormat }: { timestampFormat: Timesta
       agent_session_down: 'text-amber-500',
       host_error: 'text-red-500',
       host_ok: 'text-sky-500',
+      // Human-initiated actions (WARDEN-484): distinct tints so a deliberate kill
+      // reads apart from an orange `ended`/crash row and a green auto `agent_started`.
+      killed: 'text-rose-500',
+      spawned: 'text-teal-500',
+      resumed: 'text-indigo-500',
     };
 
     const icons = {
@@ -166,6 +171,11 @@ export function ActivityTimeline({ timestampFormat }: { timestampFormat: Timesta
       agent_session_down: '⏹️',
       host_error: '🚫',
       host_ok: '✅',
+      // Human-initiated actions (WARDEN-484). `resumed` deliberately reuses no
+      // existing glyph — `agent_session_up` already owns ▶️, so resumed uses 🔁.
+      killed: '🛑',
+      spawned: '✨',
+      resumed: '🔁',
     };
 
     const renderDetails = () => {
@@ -241,6 +251,22 @@ export function ActivityTimeline({ timestampFormat }: { timestampFormat: Timesta
           return <div className="text-sm text-red-600">host unreachable</div>;
         case 'host_ok':
           return <div className="text-sm text-muted-foreground">host reachable</div>;
+        case 'killed':
+        case 'spawned':
+        case 'resumed': {
+          // Human-initiated action (WARDEN-484): "You stopped/started/resumed X".
+          // Verb is the only thing that varies by type; label prefers name, then
+          // container (the yatfa display name), then the host-scoped id.
+          const verb = event.type === 'killed' ? 'You stopped' : event.type === 'spawned' ? 'You started' : 'You resumed';
+          const label = event.name || event.container || event.id;
+          return (
+            <div className="text-sm flex items-center gap-1 flex-wrap">
+              <span className="text-muted-foreground">{verb}</span>
+              {label && <span className="font-medium">{label}</span>}
+              {event.role && <span className="text-muted-foreground text-xs">({event.role})</span>}
+            </div>
+          );
+        }
         default:
           return null;
       }

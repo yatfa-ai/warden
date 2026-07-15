@@ -2565,6 +2565,9 @@ app.post('/api/spawn', async (req, res) => {
   const r = await buildAndSpawn({ host, session, name: req.body?.name || session, cwd, cmd });
   if (r.error) return res.status(r.status).json({ error: r.error });
   saveCatalog([...catalog, { kind: 'tmux', host, session, name: r.chat.name, cwd, cmd }]);
+  // Record the human's own spawn action so a returning human can see the agents
+  // they brought up (WARDEN-484). Mirrors the existing attached/ended row shape.
+  appendEvent({ type: 'spawned', id: r.chat.id, host, container: r.chat.container ?? null, role: r.chat.role, name: r.chat.name });
   res.json({ ok: true, chat: r.chat });
 });
 
@@ -2598,6 +2601,9 @@ app.post('/api/resume', async (req, res) => {
   // different host may legitimately carry the same resume-<sid> session name.
   const catalog = loadCatalog().filter((c) => !sameCatalogEntry(c, host, session));
   saveCatalog([...catalog, { kind: 'tmux', host, session, name, cwd, cmd: chat.cmd }]);
+  // Record the human's own resume action (WARDEN-484). container is always null
+  // here (resume spawns a bare-tmux session), matching the existing row shape.
+  appendEvent({ type: 'resumed', id: out.id, host, container: null, role: out.role, name });
   res.json({ ok: true, chat: out });
 });
 
@@ -2612,6 +2618,13 @@ app.post('/api/kill', async (req, res) => {
   // Composite identity: only drop the killed chat's own host+session entry — a
   // different host may carry the same session name and must be left intact.
   if (chat.kind === 'tmux') saveCatalog(loadCatalog().filter((c) => !sameCatalogEntry(c, chat.host, chat.session)));
+  // Record the human's deliberate kill — the authoritative signal that lets a
+  // returning human tell an agent THEY stopped apart from one that crashed. Emitted
+  // here rather than via the attach-PTY onExit handler, which stays silent for
+  // client-killed sessions (server.js:3339) — so this ALWAYS lands, even with no
+  // attach-viewer open (WARDEN-484). yatfa chats carry no `name`, so fall back to
+  // the container (the agent's display name) for a friendlier label.
+  appendEvent({ type: 'killed', id: chat.id, host: chat.host, container: chat.container ?? null, role: chat.role, name: chat.name ?? chat.container ?? null });
   res.json({ ok: true });
 });
 
