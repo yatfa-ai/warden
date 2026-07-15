@@ -1501,6 +1501,7 @@ function App() {
           onDiscoverHost={discoverHost}
           hostStatuses={hostStatuses}
           timestampFormat={timestampFormat}
+          hideOfflineHosts={displaySettings.hideOfflineHosts}
           budget={tokenBudget}
           initialSortUsage={chatBrowserSortUsage}
         />
