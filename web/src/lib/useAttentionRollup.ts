@@ -38,6 +38,7 @@ import {
   type AttentionSeverityPrefs,
 } from '@/lib/desktopAlerts';
 import { diffWatchAlerts, indexByWatchKey } from '@/lib/chatWatch';
+import { recordWatchMiss, shouldRecordMiss } from '@/lib/watchCatchup';
 import type { HealthData, ActivityStats, AgentStateRow, AgentStatesData } from '@/lib/types';
 
 // Recent-error / recent-directive window. ActivityStats counts raw events in the
@@ -229,7 +230,18 @@ export function useAttentionRollup(
           }
           watchPrevRef.current = nextPrev;
           for (const a of alerts) {
-            fireWatchNotification(a.row, a.reason, onOpenChatRef.current);
+            // WARDEN-378: fire the OS notification. WARDEN-417: capture whether the OS
+            // channel DELIVERED it (false on unsupported / denied / restrictive-webview)
+            // so the catch-up can record ONLY what the OS lost — not a duplicate channel.
+            const delivered = fireWatchNotification(a.row, a.reason, onOpenChatRef.current);
+            // WARDEN-417: durably record the ping for the in-app catch-up surfaced on
+            // return (watchCatchup) when the OS channel LOST it (delivered === false) OR
+            // the human is away (hidden — a delivered ping may yet be cleared / DND'd, the
+            // success criterion's "cleared" case). A ping the OS delivered to a PRESENT
+            // human is NOT recorded: they saw it, so recording would only become stale
+            // catch-up noise (the success criterion's converse). shouldRecordMiss is the
+            // pure, unit-tested gate that carries BOTH measurable outcomes. Never throws.
+            if (shouldRecordMiss(delivered, document.visibilityState)) recordWatchMiss(a.row, a.reason);
           }
         }
         // The rollup (AttentionBadge) stays OPEN-only (WARDEN-344): a watched-but-

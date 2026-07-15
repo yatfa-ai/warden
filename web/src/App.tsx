@@ -7,6 +7,7 @@ import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThe
 import { applyDensity, type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
 import { stampLastSeen } from '@/lib/whatsNew';
+import { useWatchCatchup } from '@/lib/useWatchCatchup';
 import { requestAlertPermission } from '@/lib/desktopAlerts';
 import { useTokenBudget } from '@/lib/useTokenBudget';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray } from '@/lib/electron';
@@ -21,6 +22,7 @@ import { OpenChatBrowserPage } from '@/components/OpenChatBrowserPage';
 import { GlobalSearchDialog } from '@/components/GlobalSearchDialog';
 import { HealthDashboard } from '@/components/HealthDashboard';
 import { AttentionBadge } from '@/components/AttentionBadge';
+import { WatchCatchup } from '@/components/WatchCatchup';
 import { StatusDot } from '@/components/StatusDot';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
@@ -792,7 +794,21 @@ function App() {
   // preserved (click-to-focus still works via xterm's native focus). Adding
   // autoFocusNewPane to the deps rebuilds this callback (and its callers) when
   // the pref toggles — a rare, deliberate action.
+  //
+  // WARDEN-417: openChat is the single chokepoint every "open a chat" path funnels
+  // through (sidebar, OS-watch-toast click, search, observer suggestion, catch-up
+  // row, reconnect), so acking the watch catch-up HERE means a watched chat opened
+  // via ANY path clears its recorded misses and can never re-surface as stale noise.
+  // A ref breaks the define-order cycle: openChat is defined before useWatchCatchup
+  // provides ackKey below, so openChat calls through a stable ref that the hook
+  // fills in once it mounts. Defaults to a no-op so an open before that point is safe.
+  const ackWatchMissRef = useRef<(key: string) => void>(() => {});
   const openChat = useCallback((id: string) => {
+    // WARDEN-417: ack-on-open — clear any catch-up miss for this chat first, so a
+    // ping the human is acting on (by opening the chat) is acknowledged regardless of
+    // which open path they used. No-op when there is nothing to ack (ackKey short-
+    // circuits), so non-watched chats pay only a cheap log scan.
+    ackWatchMissRef.current(id);
     // WARDEN-356: opening the pane counts as a visit to THIS agent — reset its
     // per-agent lastSeen so the "What's new since" marker reflects work landed
     // after THIS open. Stamped before the workspace search below so a visit
@@ -821,6 +837,20 @@ function App() {
   const handleFocusAgent = useCallback((id: string) => {
     openChat(id);
   }, [openChat]);
+
+  // WARDEN-417: in-app catch-up for per-chat watch pings that fired while the human
+  // was away (the OS notification was unsupported / denied / cleared / lost). Reads
+  // the durable miss log written at the fire site in useAttentionRollup and surfaces
+  // the unacknowledged away misses on return, each deep-linking to its watched pane
+  // via the same openChat path. See useWatchCatchup / WatchCatchup.
+  const watchCatchup = useWatchCatchup(openChat);
+  // Wire the ack-on-open chokepoint: hand the hook's ackKey to the openChat ref above
+  // so EVERY open of a watched chat (sidebar, OS-toast click, search, observer, catch-
+  // up row) clears that chat's catch-up misses. ackKey is stable (its only dep is the
+  // stable recompute), so this effect runs once; until it does, the ref is a no-op.
+  useEffect(() => {
+    ackWatchMissRef.current = watchCatchup.ackKey;
+  }, [watchCatchup.ackKey]);
 
   // WARDEN-378: toggle a chat's per-chat "watch" — marks it for a targeted,
   // reason-specific desktop ping when it newly needs the human. Turning watch ON
@@ -1417,6 +1447,11 @@ function App() {
           </div>
         </div>
       )}
+      <WatchCatchup
+        misses={watchCatchup.misses}
+        onOpenMiss={watchCatchup.openMiss}
+        onDismiss={watchCatchup.dismiss}
+      />
       {settingsOpen ? (
         <SettingsPage
           onClose={() => setSettingsOpen(false)}

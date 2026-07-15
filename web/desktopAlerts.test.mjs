@@ -30,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-desktop-alerts-test-'));
 const tmpFile = join(tmpDir, 'desktopAlerts.mjs');
 writeFileSync(tmpFile, code);
-const { shouldFireAlert, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage, diffNewAttention, formatInAppEntry } = await import(tmpFile);
+const { shouldFireAlert, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage, diffNewAttention, formatInAppEntry, fireWatchNotification } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -350,6 +350,104 @@ test('falls back to id when name is absent', () => {
   const { body } = formatWatchMessage(r, 'stuck');
   assert.ok(body.includes('container-1'), 'falls back to id for the name');
 });
+
+// --- WARDEN-417: fireWatchNotification return contract (delivered vs lost) --------
+//
+// fireWatchNotification now returns whether the OS channel DELIVERED the ping: `false`
+// on each silent no-op (Notifications unsupported / permission denied / restrictive
+// webview rejecting `new Notification`), `true` only when a Notification was actually
+// constructed. The catch-up records only when this returns false (or the human is away
+// — see watchCatchup.shouldRecordMiss), so this contract is the recoverable-vs-delivered
+// signal that keeps the catch-up a recovery net, not a second OS channel.
+//
+// The function touches the Notification + window globals, so (unlike the pure helpers
+// above) we drive it with a minimal Notification shim. The three no-op cases are exactly
+// the silent-failure modes the ticket enumerates (unsupported / denied / cleared); the
+// success case asserts a real construct + the onclick deep-link. globals restored after.
+const savedWindow = globalThis.window;
+const savedNotification = globalThis.Notification;
+let lastNotification = null;
+const makeNotificationShim = (opts = {}) => {
+  // A constructor that RETURNS its instance object (so `new` yields it) — avoids `this`
+  // entirely, which keeps oxlint's no-this-in-sfc quiet while still satisfying the
+  // `new Notification(title, options)` + `n.onclick = ...` shape fireWatchNotification uses.
+  function NotificationCtor(title, options) {
+    if (opts.throws) throw new Error('construction rejected');
+    const instance = { title, options, onclick: null, close: () => {} };
+    lastNotification = instance;
+    return instance;
+  }
+  NotificationCtor.permission = opts.permission ?? 'granted';
+  NotificationCtor.requestPermission = async () => NotificationCtor.permission;
+  return NotificationCtor;
+};
+const restoreGlobals = () => {
+  globalThis.window = savedWindow;
+  globalThis.Notification = savedNotification;
+  lastNotification = null;
+};
+
+console.log('\nfireWatchNotification (WARDEN-417): returns delivered=true only on a real construct');
+test('returns true (delivered) when permission granted + construction succeeds', () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted' });
+  lastNotification = null;
+  const delivered = fireWatchNotification({ id: 'w', key: 'w', name: 'w', state: 'waiting', signal: null }, 'waiting');
+  assert.equal(delivered, true);
+  assert.ok(lastNotification, 'a Notification was constructed');
+  restoreGlobals();
+});
+test('returns false (lost) when permission is denied — no construction', () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'denied' });
+  lastNotification = null;
+  const delivered = fireWatchNotification({ id: 'w', key: 'w', name: 'w', state: 'waiting' }, 'waiting');
+  assert.equal(delivered, false);
+  assert.equal(lastNotification, null, 'no Notification constructed when denied');
+  restoreGlobals();
+});
+test('returns false (lost) when a restrictive webview rejects new Notification (catch)', () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted', throws: true });
+  lastNotification = null;
+  const delivered = fireWatchNotification({ id: 'w', key: 'w', name: 'w', state: 'waiting' }, 'waiting');
+  assert.equal(delivered, false);
+  restoreGlobals();
+});
+test('returns false (lost) when the Notifications API is unsupported (no Notification global)', () => {
+  globalThis.window = { focus() {} };
+  delete globalThis.Notification;
+  const delivered = fireWatchNotification({ id: 'w', key: 'w', name: 'w', state: 'waiting' }, 'waiting');
+  assert.equal(delivered, false);
+  restoreGlobals();
+});
+test('onclick deep-links to the watched chat via onOpenChat + focuses the window', () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted' });
+  let opened = null;
+  let focused = 0;
+  globalThis.window.focus = () => { focused += 1; };
+  fireWatchNotification({ id: 'w', key: 'watched-key', name: 'w', state: 'waiting' }, 'waiting', (id) => { opened = id; });
+  assert.ok(lastNotification?.onclick, 'onclick handler was wired on construction');
+  lastNotification.onclick();
+  assert.equal(opened, 'watched-key', 'onclick deep-links to the watched chat key');
+  assert.equal(focused, 1, 'onclick focuses the Warden window');
+  restoreGlobals();
+});
+test('a distinct tag per chat key so two watched chats never replace each other', () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted' });
+  fireWatchNotification({ id: 'a', key: 'a', name: 'a', state: 'waiting' }, 'waiting');
+  const tagA = lastNotification.options.tag;
+  fireWatchNotification({ id: 'b', key: 'b', name: 'b', state: 'waiting' }, 'waiting');
+  const tagB = lastNotification.options.tag;
+  assert.notEqual(tagA, tagB, 'distinct tags per chat');
+  assert.equal(tagA, 'warden-watch:a');
+  assert.equal(tagB, 'warden-watch:b');
+  restoreGlobals();
+});
+// The lost→record linkage itself (shouldRecordMiss(delivered, visibility)) is exercised
+// directly in watchCatchup.test.mjs — fed by exactly this true/false return value.
 
 // --- WARDEN-402: diffNewAttention (the in-app ping's "WHICH agent is newly needy") ----
 //
