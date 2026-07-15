@@ -87,6 +87,34 @@ function uniqueSession() {
       else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
     }
   });
+
+  // WARDEN-440: the 2s pane monitor funnels every open LOCAL pane through
+  // capturePanes' LOCAL branch. The previous implementation ran a SYNCHRONOUS
+  // `for` loop of spawnSync capture-panes, holding the event loop for N × spawn
+  // cost per tick. This test exercises the refactored CONCURRENT async path
+  // (Promise.all of async runLocalTmux) against several real local panes and
+  // asserts EVERY pane's content is captured — the failure mode a naive
+  // concurrent rewrite hits (race drops all but the last pane, or only one key).
+  it('LOCAL path captures MANY panes concurrently — every pane keyed, no drops (WARDEN-440)', async () => {
+    const names = [uniqueSession(), uniqueSession(), uniqueSession()];
+    // Set up three real detached sessions, each with its own marker.
+    for (const n of names) {
+      const setup = spawnSync(TMUX_BIN, ['new-session', '-d', '-s', n], { encoding: 'utf8' });
+      assert.strictEqual(setup.status, 0, `tmux new-session failed for ${n}: ${setup.stderr}`);
+      spawnSync(TMUX_BIN, ['send-keys', '-t', n, `MARK_${n}`], { encoding: 'utf8' });
+    }
+    try {
+      const out = await capturePanes(names.map(makeLocalChat), {});
+      // Every pane must be present and carry its own marker — proving the
+      // concurrent fan-out populated each key, not just one.
+      for (const n of names) {
+        assert.ok(out[n], `pane ${n} was captured (got keys: ${JSON.stringify(Object.keys(out))})`);
+        assert.ok(out[n].includes(`MARK_${n}`), `pane ${n} carries its own marker; got:\n${out[n]}`);
+      }
+    } finally {
+      for (const n of names) spawnSync(TMUX_BIN, ['kill-session', '-t', n], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'ignore'] });
+    }
+  });
 });
 
 describe('resolveChat', () => {
