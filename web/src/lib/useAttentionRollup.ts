@@ -34,6 +34,7 @@ import {
   fireWatchNotification,
   applySeverityPrefs,
   diffNewAttention,
+  excludeFocusedPane,
   formatInAppEntry,
   ATTENTION_SEVERITY_DEFAULTS,
   type AttentionSeverityPrefs,
@@ -92,8 +93,19 @@ function fireAttentionInApp(
   prev: AttentionRollup,
   next: AttentionRollup,
   onOpenChat?: (id: string) => void,
+  // WARDEN-482: the pane the human is currently focused on (focusedPaneRef.current at
+  // the call site). The entrant matching this key is the pane the human is already
+  // reading, so its toast is suppressed by excludeFocusedPane before the loop — the
+  // symmetric "not-after" focus-gate to the watch ping's WARDEN-421 gate. Aggregate
+  // (no-key) entrants still toast. Only ever passed on the VISIBLE branch below, which
+  // is exactly when focus is meaningful.
+  focusedPaneKey?: string | null,
 ): void {
-  const entries = diffNewAttention(prev, next);
+  // WARDEN-482: drop the entrant for the focused pane BEFORE toasting — the pure,
+  // unit-tested excludeFocusedPane. (See desktopAlerts.ts: a focused pane is open +
+  // visible, so it already appears in the OPEN-only AttentionBadge with its "because
+  // X" signal; pinging it is the "fires when nothing's needed" product-killer.)
+  const entries = excludeFocusedPane(diffNewAttention(prev, next), focusedPaneKey);
   for (const entry of entries) {
     const { title, description } = formatInAppEntry(entry);
     // Themed tone maps 1:1 to the badge's red/amber severity split (WARDEN-68): a
@@ -436,7 +448,7 @@ export function useAttentionRollup(
     // shouldFireAlert already returns false when prev is null (its missing-input guard).
     if (prev && shouldFireAlert(prev, routable)) {
       if (document.visibilityState === 'visible') {
-        fireAttentionInApp(prev, routable, onOpenChatRef.current);
+        fireAttentionInApp(prev, routable, onOpenChatRef.current, focusedPaneRef.current);
       } else {
         fireAttentionNotification(routable);
       }

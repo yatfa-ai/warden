@@ -229,6 +229,37 @@ export function rankAttention(rollup: AttentionRollup): {
   return { top: ranked.length > 0 ? ranked[0] : null, ranked };
 }
 
+/**
+ * Pure: pick the directed-callout target from a `rankAttention` result, EXCLUDING the
+ * pane the human is already focused on (WARDEN-482). The popover's "you're needed HERE,
+ * because X" callout must never PROMOTE the pane the human is staring at — that is the
+ * roadmap's named product-killer ("it trains the human to ignore it"). The sectioned
+ * rundown (`ranked`, rendered unchanged by the badge) still lists every ranked item
+ * including the focused pane, so this loses NO information — it only chooses what the
+ * promoted callout names.
+ *
+ * Returns the first ranked item whose `id` is not the focused pane, or `null` when
+ * focus exclusion (or an empty list) leaves no eligible item — in which case the badge's
+ * `calloutTop && ranked.length >= 2` gate hides the callout and reverts to rundown-only,
+ * identical to today's `ranked.length < 2` gate.
+ *
+ * CRITICAL — applied LOCALLY here, NOT folded into the shared `rankAttention` helper.
+ * `rankAttention` also feeds the "While you were away" return-banner callout (App.tsx),
+ * which must stay UNGATED: `focusedPaneKey` is sticky workspace state that is NOT cleared
+ * across absence, so gating the return-banner callout on it would mislead (the human was
+ * away — the focused key is stale). Keeping this a sibling keeps that surface unchanged.
+ *
+ * `focusedPaneKey == null` (no focus context) → behaves as `ranked[0] ?? null` (every
+ * `r.id !== null` is true), i.e. bit-for-bit the old `top`. Pure + dependency-free so it
+ * is unit-tested directly alongside rankAttention.
+ */
+export function pickCalloutTop(
+  ranked: AttentionItem[],
+  focusedPaneKey?: string | null,
+): AttentionItem | null {
+  return ranked.find((r) => r.id !== focusedPaneKey) ?? null;
+}
+
 // ─── Return-banner support (Observer Intelligence roadmap WARDEN-8, Job #2) ────
 //
 // WARDEN-436 promotes the ranked "you're needed HERE, because X" callout

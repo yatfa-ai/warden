@@ -30,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-desktop-alerts-test-'));
 const tmpFile = join(tmpDir, 'desktopAlerts.mjs');
 writeFileSync(tmpFile, code);
-const { shouldFireAlert, shouldFireWatch, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage, diffNewAttention, formatInAppEntry, fireWatchNotification } = await import(tmpFile);
+const { shouldFireAlert, shouldFireWatch, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage, diffNewAttention, excludeFocusedPane, formatInAppEntry, fireWatchNotification } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -627,6 +627,74 @@ test('aggregate entrant (no name) renders its reason as the title with NO descri
   const { title, description } = formatInAppEntry(e);
   assert.equal(title, '2 recent errors');
   assert.equal(description, undefined);
+});
+
+// --- WARDEN-482: excludeFocusedPane (focus-gate the live in-app attention ping) ----
+//
+// fireAttentionInApp loops diffNewAttention's entrants and fires a sonner toast for
+// each. The entrant whose key === the pane the human is ALREADY reading must NOT toast
+// — pinging the pane they're staring at is the roadmap's named product-killer. This
+// filter is the symmetric "not-after" gate to shouldFireWatch (WARDEN-421/426) which
+// closed the same trust bar for the watch ping. The `toast(...)` delivery itself lives
+// in useAttentionRollup.ts (it imports 'sonner' + React + the `@/` alias, so it cannot
+// load under the OXC test transform — exactly why fireAttentionNotification's delivery
+// is untested too); only this pure filter is exercised, mirroring the discipline above.
+//
+// Minimal NewAttentionEntry builder — excludeFocusedPane reads only `key`.
+const entry = (key, extra = {}) => ({ key, name: key || 'summary', reason: 'x', tone: 'critical', ...extra });
+const AGG = { key: '', name: '', reason: '2 recent errors', tone: 'critical' }; // aggregate (no pane identity)
+
+console.log('\nexcludeFocusedPane (WARDEN-482): drop the entrant for the focused pane, keep the rest');
+test('the entrant whose key === focusedPaneKey is dropped (no toast for the pane being read)', () => {
+  const out = excludeFocusedPane([entry('a'), entry('b'), entry('c')], 'b');
+  assert.deepEqual(out.map((e) => e.key), ['a', 'c']);
+});
+test('a NON-focused entrant still toasts alongside the focused one', () => {
+  const out = excludeFocusedPane([entry('focused'), entry('other')], 'focused');
+  assert.deepEqual(out.map((e) => e.key), ['other']);
+});
+test('an aggregate (key: "") entrant STILL toasts even when a focus key is set (names no single pane)', () => {
+  const out = excludeFocusedPane([entry('focused'), AGG], 'focused');
+  assert.deepEqual(out.map((e) => e.key), ['']); // aggregate survives; focused dropped
+});
+test('only the ONE matching entrant is dropped — every other named pane still toasts', () => {
+  const out = excludeFocusedPane([entry('a'), entry('b'), entry('c'), entry('d')], 'c');
+  assert.deepEqual(out.map((e) => e.key), ['a', 'b', 'd']);
+});
+
+console.log('\nexcludeFocusedPane: no focus context → nothing dropped (every entrant toasts)');
+test('focusedPaneKey null → all entrants survive (no focus context)', () => {
+  const es = [entry('a'), entry('b'), AGG];
+  assert.equal(excludeFocusedPane(es, null), es, 'returns the SAME array reference (no copy, no drop)');
+});
+test('focusedPaneKey undefined → all entrants survive', () => {
+  const es = [entry('a'), AGG];
+  assert.deepEqual(excludeFocusedPane(es, undefined).map((e) => e.key), ['a', '']);
+});
+test('focusedPaneKey not matching any entrant → all survive', () => {
+  const out = excludeFocusedPane([entry('a'), entry('b')], 'not-open');
+  assert.deepEqual(out.map((e) => e.key), ['a', 'b']);
+});
+test('an empty-string focused key behaves as no real focus → all survive (aggregates are NEVER dropped)', () => {
+  // App derives focusedPaneKey as `a.key || a.id || null`, so '' is unreachable; but the
+  // `e.key &&` guard makes it harmless regardless: aggregates (key '') always survive and
+  // no named pane has key '' to match. Asserted to pin the ticket's "aggregates still
+  // toast" guarantee as unconditional, not just for the real null/non-empty inputs.
+  const out = excludeFocusedPane([entry('a'), AGG], '');
+  assert.deepEqual(out.map((e) => e.key), ['a', ''], 'named + aggregate both survive under an empty focus key');
+});
+
+console.log('\nexcludeFocusedPane: integration with diffNewAttention (the real entrant shape)');
+test('a real diff where the focused pane is the new entrant → its toast is suppressed', () => {
+  // prev healthy; next: the focused pane 'w1' newly waiting + an unrelated 's1' stuck.
+  const next = roll({ waiting: [pane('w1', 'press enter', 'waiting')], stuck: [pane('s1', 'loop', 'stuck')] });
+  const out = excludeFocusedPane(diffNewAttention(roll(), next), 'w1');
+  assert.deepEqual(out.map((e) => e.key), ['s1'], 'focused w1 dropped; s1 still pings');
+});
+test('a real diff with an aggregate delta + a focused named entrant → aggregate survives', () => {
+  const next = roll({ waiting: [pane('w1', null, 'waiting')], errors: 2 });
+  const out = excludeFocusedPane(diffNewAttention(roll(), next), 'w1');
+  assert.deepEqual(out.map((e) => e.key), [''], 'named focused entrant dropped; aggregate error delta still toasts');
 });
 
 // --- WARDEN-426: shouldFireWatch (focus-gate the per-chat watch ping) ----
