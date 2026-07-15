@@ -1661,6 +1661,7 @@ function App() {
           hostStatuses={hostStatuses}
           timestampFormat={timestampFormat}
           hideOfflineHosts={displaySettings.hideOfflineHosts}
+          showHostTags={displaySettings.showHostTags}
           budget={tokenBudget}
           initialSortUsage={chatBrowserSortUsage}
         />

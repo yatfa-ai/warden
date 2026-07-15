@@ -55,14 +55,14 @@ interface DiscoverItem {
   tokenUsage?: TokenUsage | null; // history: per-session LLM token total (WARDEN-367)
 }
 
-function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFormat, isBudgetOffender }: { it: DiscoverItem; resumingId: string | null; onOpen: () => void; onResume: () => void; onView: () => void; timestampFormat: TimestampFormat; isBudgetOffender?: boolean; }) {
+function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFormat, showHostTags, isBudgetOffender }: { it: DiscoverItem; resumingId: string | null; onOpen: () => void; onResume: () => void; onView: () => void; timestampFormat: TimestampFormat; showHostTags?: boolean; isBudgetOffender?: boolean; }) {
   if (it.kind === 'live') {
     return (
       <Button variant="ghost" onClick={onOpen} className="w-full h-auto justify-start gap-2 px-2 py-1.5 text-xs font-normal hover:bg-accent">
         <StatusDot tone="green" variant="solid" label="Live session" />
         <span className="truncate flex-1">{it.label}</span>
         {it.time ? <span className="text-[10px] text-muted-foreground shrink-0">{formatTimestamp(it.time, timestampFormat)}</span> : null}
-        <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span>
+        {showHostTags !== false && it.hostTag ? <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span> : null}
         <span className="text-[10px] text-green-500/80 shrink-0">live</span>
       </Button>
     );
@@ -86,7 +86,7 @@ function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFo
           <span className="text-[10px] text-red-400 shrink-0 font-medium" aria-label="budget offender">⚑ offender</span>
         </IconTooltip>
       ) : null}
-      <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span>
+      {showHostTags !== false && it.hostTag ? <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span> : null}
       <IconTooltip label="view transcript (read-only)">
         <Button variant="ghost" size="icon-xs" onClick={onView} aria-label="View transcript" className="text-muted-foreground hover:text-foreground">
           <EyeIcon />
@@ -157,6 +157,10 @@ interface Props {
   // Timestamp format pref (WARDEN-213): routes every row time + the transcript
   // viewer's message times through the shared formatTimestamp helper.
   timestampFormat: TimestampFormat;
+  // Show host badges (local/hostname) pref (WARDEN-434). One showHostTags toggle
+  // governs all three surfaces (sidebar, pane, this page). `!== false` semantics
+  // so undefined/default → shown — mirrors the sibling surfaces.
+  showHostTags?: boolean;
   // Token-spend budget snapshot (WARDEN-415). When enabled, a spent/threshold
   // progress chip renders beside the fleet token summary so the budget is visible
   // at a glance — not just when it breaches. Undefined when the hook isn't wired.
@@ -180,7 +184,7 @@ interface Props {
 // sets chatBrowserOpen; the back button / Escape clears it. Per WARDEN-68 Rule 7
 // the browser is a real UI surface (unbounded list + search), so it must be a
 // page, not a blocking Dialog.
-export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResume, onDiscoverHost, hostStatuses, timestampFormat, budget, initialSortUsage, hideOfflineHosts }: Props) {
+export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResume, onDiscoverHost, hostStatuses, timestampFormat, showHostTags, budget, initialSortUsage, hideOfflineHosts }: Props) {
   const [selected, setSelected] = useState<string[] | undefined>(undefined);
   const [query, setQuery] = useState('');
   const [resumingId, setResumingId] = useState<string | null>(null);
@@ -383,7 +387,11 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
       if (liveResumeSid8.has(s.id.slice(0, 8))) continue; // already shown as live
       out.push({
         id: 'hist:' + s.host + ':' + s.id, kind: 'history',
-        label: s.summary || `${basename(s.cwd) || 'session'} · ${hostTagOf(s.host)}`,
+        // When the session has no summary, fall back to "cwd · host". The host
+        // segment is gated by showHostTags so a hidden-host-tags user never sees
+        // the hostname in the label either (the sidebar's displayName/processCwdLabel
+        // never carries host; this keeps that promise on this surface). WARDEN-434.
+        label: s.summary || `${basename(s.cwd) || 'session'}${showHostTags !== false ? ' · ' + hostTagOf(s.host) : ''}`,
         hostTag: hostTagOf(s.host), sub: `${hostTagOf(s.host)} · ${basename(s.cwd)}`,
         time: s.mtime, snippet: s.snippet, tokenUsage: s.tokenUsage,
         resume: { id: s.id, description: s.summary, cwd: s.cwd, host: s.host },
@@ -410,7 +418,7 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
       out.sort((a, b) => b.time - a.time);
     }
     return out;
-  }, [effective, chats, allSessions, contentResults, query, sortUsage]);
+  }, [effective, chats, allSessions, contentResults, query, sortUsage, showHostTags]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -563,6 +571,7 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
                 onResume={() => handleResume(it)}
                 onView={() => { if (it.resume) setViewing({ id: it.resume.id, host: it.resume.host, label: it.label }); }}
                 timestampFormat={timestampFormat}
+                showHostTags={showHostTags}
                 isBudgetOffender={isBudgetOffenderRow(it)}
               />
             ))
