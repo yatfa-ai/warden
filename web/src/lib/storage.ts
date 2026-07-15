@@ -62,17 +62,6 @@ export type TerminalCursorStyle =
   | 'blink-bar'
   | 'steady-bar';
 
-// WARDEN-261 — per-host options. Host-keyed (the chat's `host`: '(local)' or an
-// SSH alias) so the Seamless-copy toggle is independent per host. Pure client-
-// side pref like the other terminal prefs: persisted here, sent to the backend
-// only as a transient attach flag (not via /api/config), so the backend never
-// owns or persists it. `seamlessCopy` disabled tmux mouse on attach for that
-// host's tmux so xterm owns the selection and the standard copy gesture works.
-export interface HostOptions {
-  seamlessCopy?: boolean;
-}
-export type HostOptionsMap = Record<string, HostOptions>;
-
 // A user-defined spawn preset: a named quick-fill command beyond the two
 // built-in claude/shell presets (e.g. "codex" → "codex"). Pure client-side pref;
 // never sent to the backend. `name` is also a valid `defaultNewChatPreset` value.
@@ -475,14 +464,6 @@ export interface UiState {
   paneHost?: Record<string, string>;
   agentFilter?: AgentFilter;
   agentSort?: AgentSort;
-  // WARDEN-261: per-host options map. Host-keyed (chat `host` → options). Pure
-  // client-side pref like terminalCursorStyle; sent to the backend only as the
-  // transient `seamlessCopy` attach flag, never via /api/config.
-  hostOptions?: HostOptionsMap;
-  // WARDEN-261: per-host dismissal of the "copy may not grab selected text"
-  // hint. Host-keyed; once dismissed, the hint stays silenced for that host.
-  // Pure client-side pref like terminalCursorStyle; never sent to the backend.
-  copyHintDismissed?: Record<string, boolean>;
 }
 
 // Sanitize a raw customPresets value into a valid CustomPreset[]. Defensive:
@@ -645,42 +626,6 @@ function parsePresetByHost(
   return out;
 }
 
-// Sanitize a raw hostOptions value into a valid HostOptionsMap. Defensive: never
-// throws (WARDEN-89) — drops bad entries instead, so one corrupt host can never
-// blank another host's options. Keys are strings (host names); each value must
-// be an object whose `seamlessCopy` (if present) is coerced to a boolean.
-// Mirrors parseCustomPresets's drop-bad-entries discipline.
-function parseHostOptions(raw: unknown): HostOptionsMap {
-  if (!raw || typeof raw !== 'object') {
-    if (raw !== undefined && raw !== null) {
-      console.warn('[loadUi] hostOptions is not an object; ignoring:', raw);
-    }
-    return {};
-  }
-  const out: HostOptionsMap = {};
-  for (const [host, val] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof host !== 'string' || !host) continue;
-    if (!val || typeof val !== 'object') continue;
-    const v = val as Record<string, unknown>;
-    const entry: HostOptions = {};
-    if (typeof v.seamlessCopy === 'boolean') entry.seamlessCopy = v.seamlessCopy;
-    // An entry with no recognized fields is dropped (never persists empty junk).
-    if (Object.keys(entry).length) out[host] = entry;
-  }
-  return out;
-}
-
-// Sanitize a raw copyHintDismissed value into Record<host, boolean>. Defensive:
-// drops non-boolean values so a corrupt entry can't survive (WARDEN-89).
-function parseDismissedMap(raw: unknown): Record<string, boolean> {
-  if (!raw || typeof raw !== 'object') return {};
-  const out: Record<string, boolean> = {};
-  for (const [host, val] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof host === 'string' && host && typeof val === 'boolean') out[host] = val;
-  }
-  return out;
-}
-
 // Sanitize a raw mutedAlertKeys value into a de-duplicated string[] of non-empty
 // chat keys (WARDEN-364). Defensive: never throws on malformed input (WARDEN-89)
 // — drops non-string / blank / duplicate entries instead, so one corrupt value
@@ -803,7 +748,6 @@ const DEFAULT_UI: UiState = {
   defaultNewChatPreset: 'claude', defaultNewChatPresetByHost: {}, defaultNewChatHost: '(local)', customPresets: [], snippets: STARTER_SNIPPETS, defaultNewChatCwd: '', defaultNewChatCwdByHost: {},
   defaultShell: '', defaultShellByHost: {},
   paneHost: {}, agentFilter: 'all', agentSort: 'manual',
-  hostOptions: {}, copyHintDismissed: {},
 };
 
 export function loadUi(): UiState {
@@ -936,8 +880,6 @@ export function loadUi(): UiState {
         // parseSnippets (which returns [] defensively) rather than re-seeding.
         snippets: v.snippets == null ? STARTER_SNIPPETS : parseSnippets(v.snippets),
         paneHost: (v.paneHost && typeof v.paneHost === 'object') ? v.paneHost : {},
-        hostOptions: parseHostOptions(v.hostOptions),
-        copyHintDismissed: parseDismissedMap(v.copyHintDismissed),
         // WARDEN-372: 'active'/'hidden' filter cases are abolished — a stored
         // value naming either coerces back to 'all' (defensive, like every other
         // enum-ish pref) so a legacy payload never selects a dead filter.

@@ -38,10 +38,9 @@
 // are reported below.
 //
 // WARDEN-409 (slice 4) adds the attach-path CONTROL-PLANE leg: the one-line
-// tmux-option commands resize (set-option window-size latest) and mouse (set -g
-// mouse off / show-options -g mouse) fire on every pane OPEN (resize + mouse) and
-// every in-session RESIZE (resize again). Each is a raw-SSH spawn on the default
-// path; the companion collapses them to resize/mouse RPCs over the persistent
+// tmux-option command resize (set-option window-size latest) fires on every pane
+// OPEN and every in-session RESIZE (resize again). It is a raw-SSH spawn on the
+// default path; the companion collapses it to a resize RPC over the persistent
 // channel — after this slice the ONLY remaining raw-SSH path on the attach flow
 // is the live interactive PTY itself. All four legs are reported below.
 //
@@ -71,7 +70,6 @@ import {
   spawnSession as companionSpawnSession,
   killSession as companionKillSession,
   resize as companionResize,
-  mouse as companionMouse,
   _resetChannelCacheForTests,
   projectSpawnModel,
 } from '../src/companion.js';
@@ -249,30 +247,29 @@ function printLifecycleProjection(hosts, ticks) {
 }
 
 // Slice 4 (WARDEN-409): the attach-path control-plane leg. resize (set-option
-// window-size latest) and mouse (set -g mouse off / show-options -g mouse) are
-// one-line tmux-option commands that fire on every pane OPEN (resize + mouse =
-// 2 raw-SSH spawns) and every in-session RESIZE (resize again = 1 spawn). Routing
-// them over the persistent companion channel collapses ALL of these to RPCs —
-// 0 handshakes/open, 0/resize. After this slice the only raw-SSH path left on the
-// attach flow is the live interactive PTY (open drops ~3 spawns → ~1). This sizes
-// the win per attach event: each `ticks` value is one pane open, conservatively
-// followed by one in-session resize.
+// window-size latest) is a one-line tmux-option command that fires on every pane
+// OPEN (1 raw-SSH spawn) and every in-session RESIZE (resize again = 1 spawn).
+// Routing it over the persistent companion channel collapses ALL of these to
+// RPCs — 0 handshakes/open, 0/resize. After this slice the only raw-SSH path
+// left on the attach flow is the live interactive PTY (open drops ~3 spawns →
+// ~1). This sizes the win per attach event: each `ticks` value is one pane open,
+// conservatively followed by one in-session resize.
 function printControlPlaneProjection(hosts, ticks) {
   const opens = Math.max(0, ticks);
   const resizes = opens; // one in-session resize per opened pane (conservative)
-  const perOpen = 2;   // resize + mouse
+  const perOpen = 1;   // resize
   const perResize = 1; // resize again
   const before = hosts * (perOpen * opens + perResize * resizes);
   console.log('━'.repeat(72));
-  console.log(`Part 1.e — attach-path control-plane (resize + mouse): handshake projection  (${hosts} host(s), ${opens} open(s))`);
+  console.log(`Part 1.e — attach-path control-plane (resize): handshake projection  (${hosts} host(s), ${opens} open(s))`);
   console.log('━'.repeat(72));
-  console.log('resize + mouse are the interactive-pane control-plane tmux options: resize');
+  console.log('resize is the interactive-pane control-plane tmux option: resize');
   console.log('(set-option window-size latest) fires on every OPEN and every in-session');
-  console.log('RESIZE; mouse (disable/detect) fires on every OPEN. Each is a raw-SSH spawn');
-  console.log('on the default path; the companion serves both over the persistent channel:');
+  console.log('RESIZE. It is a raw-SSH spawn on the default path; the companion serves');
+  console.log('it over the persistent channel:');
   console.log();
   console.log('  DEFAULT path (runTmux, no companion):');
-  console.log(`    per open   : resize + mouse = ${perOpen} handshakes  →  ${hosts} × ${perOpen} × ${opens} = ${hosts * perOpen * opens}`);
+  console.log(`    per open   : window-size    = ${perOpen} handshake   →  ${hosts} × ${perOpen} × ${opens} = ${hosts * perOpen * opens}`);
   console.log(`    per resize : window-size    = ${perResize} handshake   →  ${hosts} × ${perResize} × ${resizes} = ${hosts * perResize * resizes}`);
   console.log(`    total      = ${before} handshakes`);
   console.log('  COMPANION path:');
@@ -280,7 +277,7 @@ function printControlPlaneProjection(hosts, ticks) {
   console.log(`    total = 0 handshakes (control-plane rides the channel)`);
   console.log();
   console.log(`  ▶ handshakes saved over ${opens} open(s): ${before} → 0  (−${before})`);
-  console.log(`  ▶ per pane OPEN: ~2 control-plane spawns → 0  (the PTY is the only raw-SSH spawn left).`);
+  console.log(`  ▶ per pane OPEN: ~1 control-plane spawn → 0  (the PTY is the only raw-SSH spawn left).`);
   console.log(`  ▶ per in-session RESIZE while typing: 1 spawn → 0.`);
   console.log();
   console.log('This is the roadmap\'s "attach-path control-plane" success-metric leg: the');
@@ -638,18 +635,17 @@ async function liveLifecycleBenchmark(host, ticks) {
 }
 
 // Slice 4 (WARDEN-409): the attach-path control-plane live leg. Same shape as the
-// has-session leg — default side runs the two control-plane commands (resize +
-// mouse detect) via a fresh ControlMaster-disabled ssh per open; companion side
-// runs the real resize + mouse RPCs over the persistent channel (0 handshakes/
-// open after bootstrap). The target container is discovered once up front
-// (default path) so both sides hit the same session; if the host has no
-// discoverable chats the leg is skipped.
+// has-session leg — default side runs the control-plane command (resize) via a
+// fresh ControlMaster-disabled ssh per open; companion side runs the real resize
+// RPC over the persistent channel (0 handshakes/open after bootstrap). The target
+// container is discovered once up front (default path) so both sides hit the same
+// session; if the host has no discoverable chats the leg is skipped.
 async function liveControlPlaneBenchmark(host, ticks) {
   console.log('━'.repeat(72));
   console.log(`Part 2.e — attach-path control-plane: LIVE ControlMaster-disabled replay  (host: ${host}, ${ticks} open(s))`);
   console.log('━'.repeat(72));
-  console.log('Default side: one fresh ssh handshake per control-plane op (resize + mouse) per open.');
-  console.log('Companion side: resize + mouse RPCs over slice 1\'s channel — 0 handshakes/open.');
+  console.log('Default side: one fresh ssh handshake per control-plane op (resize) per open.');
+  console.log('Companion side: resize RPC over slice 1\'s channel — 0 handshakes/open.');
   console.log();
 
   // Discover once (default path) to get a container + session both sides target.
@@ -660,11 +656,9 @@ async function liveControlPlaneBenchmark(host, ticks) {
     return;
   }
   const target = chats[0];
-  // The default control-plane path builds these (src/tmux.js resize/disable/detectMouse):
+  // The default control-plane path builds this (src/tmux.js resize):
   //   resize : docker exec <container> tmux set-option -t <session> window-size latest
-  //   mouse  : docker exec <container> tmux show-options -g mouse
   const resizeCmd = `docker exec ${target.container} tmux set-option -t ${target.session} window-size latest`;
-  const mouseCmd = `docker exec ${target.container} tmux show-options -g mouse`;
   console.log(`targeting container '${target.container}' session '${target.session}'\n`);
 
   const defaultSpawns = { val: 0 };
@@ -673,36 +667,33 @@ async function liveControlPlaneBenchmark(host, ticks) {
   const countingRun = (...a) => { companionSpawns.val++; return sshRun(...a); };
   const companionDeps = { spawn: countingSpawn, run: countingRun };
 
-  // ---- DEFAULT: N opens, each TWO ControlMaster-disabled ssh ops (resize + mouse) ----
-  console.log(`▶ default path: ${ticks} open(s), resize + mouse handshake each …`);
+  // ---- DEFAULT: N opens, each ONE ControlMaster-disabled ssh op (resize) ----
+  console.log(`▶ default path: ${ticks} open(s), resize handshake each …`);
   const defaultSamples = [];
   for (let i = 0; i < ticks; i++) {
     const t0 = process.hrtime.bigint();
     await sshRunNoMaster(host, resizeCmd, 30000, defaultSpawns);
-    await sshRunNoMaster(host, mouseCmd, 30000, defaultSpawns);
     const ms = Number(process.hrtime.bigint() - t0) / 1e6;
     defaultSamples.push({ ms, ok: true });
-    process.stdout.write(`   open ${i + 1}/${ticks}: ${ms.toFixed(0).padStart(6)} ms  (resize + mouse)\n`);
+    process.stdout.write(`   open ${i + 1}/${ticks}: ${ms.toFixed(0).padStart(6)} ms  (resize)\n`);
   }
 
-  // ---- COMPANION: bootstrap once, then N opens (resize + mouse RPCs) over the channel ----
-  console.log(`▶ companion path: bootstrap + ${ticks} open(s) (resize + mouse) over the channel …`);
+  // ---- COMPANION: bootstrap once, then N opens (resize RPC) over the channel ----
+  console.log(`▶ companion path: bootstrap + ${ticks} open(s) (resize) over the channel …`);
   _resetChannelCacheForTests();
   const cfg = { connectTimeout: 10 };
   const bootT0 = process.hrtime.bigint();
   // The first call bootstraps (probe + upload + channel) AND does the op.
   await companionResize(host, { container: target.container, session: target.session }, cfg, { timeout: 30000 }, companionDeps);
-  await companionMouse(host, { container: target.container, mode: 'detect' }, cfg, { timeout: 30000 }, companionDeps);
   const bootMs = Number(process.hrtime.bigint() - bootT0) / 1e6;
-  console.log(`   bootstrap + 1st open: ${bootMs.toFixed(0).padStart(6)} ms  (resize + mouse)`);
+  console.log(`   bootstrap + 1st open: ${bootMs.toFixed(0).padStart(6)} ms  (resize)`);
   const companionSamples = [{ ms: bootMs, ok: true }];
   for (let i = 1; i < ticks; i++) {
     const t0 = process.hrtime.bigint();
     await companionResize(host, { container: target.container, session: target.session }, cfg, { timeout: 30000 }, companionDeps);
-    await companionMouse(host, { container: target.container, mode: 'detect' }, cfg, { timeout: 30000 }, companionDeps);
     const ms = Number(process.hrtime.bigint() - t0) / 1e6;
     companionSamples.push({ ms, ok: true });
-    process.stdout.write(`   open ${i + 1}/${ticks}: ${ms.toFixed(0).padStart(6)} ms  (resize + mouse)\n`);
+    process.stdout.write(`   open ${i + 1}/${ticks}: ${ms.toFixed(0).padStart(6)} ms  (resize)\n`);
   }
   _resetChannelCacheForTests();
 
@@ -713,9 +704,9 @@ async function liveControlPlaneBenchmark(host, ticks) {
   console.log();
   console.log('── results ──────────────────────────────────────────────────');
   console.log(`  spawns (ssh processes started):`);
-  console.log(`     default   : ${defaultSpawns.val}  (≈ ${ticks * 2} handshakes — resize + mouse per open)`);
+  console.log(`     default   : ${defaultSpawns.val}  (≈ ${ticks} handshakes — resize per open)`);
   console.log(`     companion : ${companionSpawns.val}  (bootstrap only; control-plane rides the channel, 0/open)`);
-  console.log(`  per-open wall-clock (handshake + remote work, 2 ops):`);
+  console.log(`  per-open wall-clock (handshake + remote work, 1 op):`);
   console.log(`     default   : avg ${def.avg.toFixed(0)} ms  (p95 ${def.p95.toFixed(0)} ms) over ${def.n}`);
   if (steady.n > 0) {
     console.log(`     companion : avg ${steady.avg.toFixed(0)} ms  (p95 ${steady.p95.toFixed(0)} ms) over ${steady.n} steady open(s)`);
@@ -723,7 +714,7 @@ async function liveControlPlaneBenchmark(host, ticks) {
     console.log(`  ▶ handshake cost eliminated per open: ~${Math.max(0, saved).toFixed(0)} ms`);
   }
   console.log('────────────────────────────────────────────────────────────');
-  console.log('Note: resize + mouse fire on every pane open (+ resize on every in-session');
+  console.log('Note: resize fires on every pane open (+ resize on every in-session');
   console.log('resize), so this per-open handshake win lands on the primary attach surface.');
   console.log();
 }

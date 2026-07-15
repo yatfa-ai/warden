@@ -7,8 +7,9 @@ import { streamApi } from '@/lib/stream';
 import type { Chat } from '@/lib/types';
 import { findPathCandidates } from '@/lib/path-links';
 import { hostTagOf } from '@/lib/chatDisplay';
+import { handleOsc52 } from '@/lib/clipboard';
 import { hostKeyOf, attachEffectDeps } from '@/lib/paneAttach';
-import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBehavior, type HostOptionsMap, type Snippet } from '@/lib/storage';
+import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBehavior, type Snippet } from '@/lib/storage';
 import { PANE_DRAG_MIME } from '@/lib/dnd';
 import { getThemeById, type ThemeId } from '@/lib/themes';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
@@ -142,18 +143,6 @@ interface Props {
   // pane grid is no longer ambiguous. Pure pass-through from App via PaneGrid —
   // one toggle governs both surfaces. Undefined/true → shown, false → hidden.
   showHostTags?: boolean;
-  // WARDEN-261: per-host "Seamless copy" toggle. When on for THIS pane's host,
-  // the attach message carries `seamlessCopy` so the backend disables tmux mouse
-  // and xterm owns the selection (standard select+copy works with no tmux
-  // knowledge). Pure client-side pref (App owns it); read via a ref at
-  // attach-send time so a Settings toggle applies on the next attach without
-  // re-attaching already-open panes.
-  hostOptions: HostOptionsMap;
-  // WARDEN-261: per-host dismissal of the "copy may not grab selected text"
-  // hint. When the backend reports tmux mouse is ON (mouse_state) and Seamless
-  // copy is off, the hint shows — unless this host was dismissed.
-  copyHintDismissed: Record<string, boolean>;
-  onDismissCopyHint: (host: string) => void;
   // WARDEN-231: a new chat was spawned from this pane's recovery panel (open-
   // shell or re-spawn). App refreshes the chat list and opens/focuses the new
   // pane; the dead pane is replaced/closed.
@@ -170,7 +159,7 @@ interface Props {
   timestampFormat: TimestampFormat;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, hostOptions, copyHintDismissed, onDismissCopyHint, onSpawned, snippets, timestampFormat }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, onSpawned, snippets, timestampFormat }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -237,31 +226,18 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const wasEverActiveRef = useRef(false);   // has this pane's agent ever been active:true?
   const exitHandledRef = useRef(false);     // one-shot: the exit action fires once per live→exited transition
   const [agentExited, setAgentExited] = useState(false);   // 'dim' overlay state
-  // WARDEN-261 / WARDEN-365: this pane's host key — the chat's host ('(local)' or
-  // an SSH alias), falling back to the restore hint then '(local)'. Used to look
-  // up the Seamless-copy toggle and to key the per-host hint dismissal. Derived
-  // via hostKeyOf (the shared, unit-tested seam) so the derivation and its
-  // "send-time only, never a dep" contract live in one place.
+  // WARDEN-365: this pane's resolved host key — the chat's host ('(local)' or an
+  // SSH alias), falling back to the restore hint then '(local)'. Derived via
+  // hostKeyOf (the shared, unit-tested seam) and read at send-time only — it and
+  // `host` are INPUTS to the attach message, not TRIGGERS, so the attach effect's
+  // deps stay [id, retryNonce] (attachEffectDeps). A parent re-render or a
+  // transient chats.find() miss (which flips hostKey) therefore never tears down
+  // + re-binds a live PTY — the 0.1.11 regression was hostKey sitting in the deps.
   const hostKey = hostKeyOf(chat, host);
-  // WARDEN-261: tmux mouse state for this pane's host. Set true when the backend
-  // pushes a `mouse_state` notice after attach (mouse is ON → copy impaired).
-  // Drives the dismissible hint; false/unknown → no hint.
-  const [mouseOn, setMouseOn] = useState(false);
-  // WARDEN-365: host, hostKey, and hostOptions are all INPUTS to the attach
-  // message, not TRIGGERS — mirrored into refs and read at send-time so the
-  // attach effect's deps stay [id, retryNonce] (attachEffectDeps). A parent
-  // re-render, a transient chats.find() miss (which flips hostKey), or a
-  // Seamless-copy toggle therefore never tears down + re-binds a live PTY — the
-  // 0.1.11 regression was hostKey (and the latent host) sitting in the deps.
-  // hostOptions already followed this pattern (WARDEN-261); host/hostKey now do
-  // too. Assigned during render, the same latest-value mirror pattern as
-  // copyOnSelectRef above / openPanesRef in App.tsx.
-  const hostOptionsRef = useRef(hostOptions);
-  hostOptionsRef.current = hostOptions;
+  // host is read via a ref at send-time (the attach `host` field). It is NOT a
+  // trigger — same latest-value mirror pattern as copyOnSelectRef above.
   const hostRef = useRef(host);
   hostRef.current = host;
-  const hostKeyRef = useRef(hostKey);
-  hostKeyRef.current = hostKey;
 
   // Defensive clamp: the global font size can briefly fall outside 8–24 while a
   // user types into the Settings field (coerced on blur). xterm must never receive
@@ -316,6 +292,13 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     term.unicode.activeVersion = '11';
     term.open(wrapRef.current!);
     termRef.current = term; fitRef.current = fit; searchRef.current = search;
+    // WARDEN-437: route OSC 52 clipboard sequences to the system clipboard. On a
+    // host whose tmux has mouse on (e.g. macmini) xterm never owns the selection,
+    // so the pane's select + Ctrl/Cmd+C copy grabs nothing — but modern tmux
+    // (set-clipboard=external) already emits an OSC 52 sequence on a drag-select-
+    // and-release, and the byte-transparent PTY transport delivers it here. The
+    // handler honors SET and ignores QUERY (never reads the local clipboard).
+    const osc52 = term.parser.registerOscHandler(52, handleOsc52);
     term.onData((d) => streamApi.send({ type: 'input', id, data: d }));
     term.onResize(() => streamApi.send({ type: 'resize', id, cols: term.cols, rows: term.rows }));
     // WARDEN-285: copy-on-select. Registered once at mount; the handler reads the
@@ -473,6 +456,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     return () => {
       clearTimeout(t); ro.disconnect();
       selectionDisposable.dispose();
+      osc52.dispose();
       linkProvider.dispose(); hideTooltip();
       if (tooltipElRef.current) tooltipElRef.current = null;
       term.dispose(); termRef.current = null;
@@ -496,10 +480,6 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
         setPhase((p) => (p === 'connecting' || p === 'connected' ? 'session_dead' : p));
       }
       else if (m.type === 'attach_error') { term.write('\r\n[error: ' + m.error + ']\r\n'); setPhase('error'); }
-      // WARDEN-261: backend reports this host's tmux has mouse ON (copy impaired)
-      // and Seamless copy is off → show the dismissible hint. Only sent when
-      // mouse is on, so arrival implies impairment.
-      else if (m.type === 'mouse_state') setMouseOn(!!m.mouseOn);
     });
   }, [id]);
 
@@ -508,26 +488,17 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     // Fresh attach attempt: reset the phase machine + per-attempt bookkeeping.
     setPhase('connecting');
     setElapsed(0);
-    setMouseOn(false);
     try { fitRef.current?.fit(); } catch {}
-    // WARDEN-365: read host + hostKey from REFS at send-time, not from the
-    // render-scoped props. The effect's deps are [id, retryNonce] (see
-    // attachEffectDeps below) — host, hostKey, cols/rows, and seamlessCopy are
-    // INPUTS to the attach message, not TRIGGERS. Reading them via refs means a
-    // parent re-render, a transient chats.find() miss (hostKey flips), or a
-    // Seamless-copy toggle NEVER tears down + re-binds a live PTY — the 0.1.11
-    // regression. Mirrors hostOptionsRef. The first attach reads whatever
-    // host/hostKey are current at mount (paneHost is persisted for restored
-    // panes and set by openChat before a freshly-opened pane mounts), so the
-    // single attach binds the correct host.
+    // WARDEN-365: read host from its REF at send-time, not from the render-scoped
+    // prop. The effect's deps are [id, retryNonce] (see attachEffectDeps below) —
+    // host and cols/rows are INPUTS to the attach message, not TRIGGERS. Reading
+    // host via the ref means a parent re-render or a transient chats.find() miss
+    // NEVER tears down + re-binds a live PTY — the 0.1.11 regression. The first
+    // attach reads whatever host is current at mount (paneHost is persisted for
+    // restored panes and set by openChat before a freshly-opened pane mounts), so
+    // the single attach binds the correct host.
     const sendHost = hostRef.current;
-    const sendHostKey = hostKeyRef.current;
-    // WARDEN-261: tell the backend whether to disable tmux mouse for this host
-    // (Seamless copy). Read from the ref so a Settings toggle applies on the NEXT
-    // attach — hostOptions is deliberately NOT a dep, so toggling never re-
-    // attaches (kills/recreates the PTY of) an already-open pane.
-    const seamlessCopy = !!hostOptionsRef.current[sendHostKey]?.seamlessCopy;
-    streamApi.send({ type: 'attach', id, host: sendHost, cols: term?.cols ?? 100, rows: term?.rows ?? 30, seamlessCopy });
+    streamApi.send({ type: 'attach', id, host: sendHost, cols: term?.cols ?? 100, rows: term?.rows ?? 30 });
 
     // Elapsed-seconds counter so a slow host reads as "connecting… Ns". Stops
     // itself once we leave 'connecting' (probe settled, watchdog fired, or a
@@ -823,21 +794,6 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           <Btn title="prev" onClick={() => doSearch('prev')}>↑</Btn>
           <Btn title="next" onClick={() => doSearch('next')}>↓</Btn>
           <Btn title="close search" onClick={() => setShowSearch(false)}>×</Btn>
-        </div>
-      )}
-      {/* WARDEN-261: dismissible "copy impaired" hint. Shown only when the
-          backend reports this host's tmux mouse is ON (mouse_state) AND Seamless
-          copy is off for this host AND the user hasn't dismissed it. Non-blocking
-          (a thin strip, not a modal); dismissal is persisted per host by App. */}
-      {mouseOn && !copyHintDismissed[hostKey] && (
-        <div className="flex items-center gap-2 px-2 py-1 compact:py-0.5 bg-amber-500/10 border-b border-amber-500/30 text-xs text-amber-700 dark:text-amber-300 shrink-0">
-          <span className="flex-1 truncate">
-            Copy may not grab selected text — tmux mouse is on for this host. Enable <strong>Seamless copy</strong> in Settings to fix it.
-          </span>
-          <Button variant="ghost" size="icon" className="size-5"
-            aria-label="Dismiss copy hint"
-            title="Dismiss (silenced for this host)"
-            onClick={(e) => { stop(e); onDismissCopyHint(hostKey); }}>×</Button>
         </div>
       )}
       {/* terminal surface — now wrapped in its OWN themed context menu (WARDEN-380).

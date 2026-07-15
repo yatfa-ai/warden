@@ -1,10 +1,9 @@
 import type { Chat } from '@/lib/types';
 
 /**
- * The host key for a pane — used for the Seamless-copy lookup and the per-host
- * "copy impaired" hint dismissal (WARDEN-261). Derivation: the chat's host wins
- * (e.g. 'myserver' or '(local)'), falling back to the restore hint (`host` prop)
- * then '(local)'.
+ * The host key for a pane — its resolved host (the chat's host wins, e.g.
+ * 'myserver' or '(local)', falling back to the restore hint (`host` prop) then
+ * '(local)').
  *
  * SEND-TIME / RENDER-TIME value only — it must NEVER appear in the attach
  * effect's dependency array. `chat` is supplied by the parent grid via
@@ -43,10 +42,10 @@ export interface AttachTriggerInputs {
    */
   host?: string;
   /**
-   * The Seamless-copy host key ({@link hostKeyOf}). A SEND-TIME input (read via
-   * `hostKeyRef`), NOT a trigger. Accepted here so the test can prove the 0.1.11
+   * The pane's resolved host key ({@link hostKeyOf}). A SEND-TIME input (read via
+   * a ref), NOT a trigger. Accepted here so the test can prove the 0.1.11
    * regression — `hostKey` flipping on a transient `chats.find()` miss — no
-   * longer re-attaches a live pane.
+   * longer re-attaches a live pane (WARDEN-365).
    */
   hostKey: string;
 }
@@ -63,7 +62,7 @@ export interface AttachTriggerInputs {
  * pane lifetime" contract lives in exactly one place and cannot be silently
  * re-widened by an inline edit.
  *
- * Re-adding `host` / `hostKey` / `seamlessCopy` to the returned tuple
+ * Re-adding `host` / `hostKey` to the returned tuple
  * re-introduces the 0.1.11 regression — do not.
  */
 export function attachEffectDeps(inputs: AttachTriggerInputs): readonly [string, number] {

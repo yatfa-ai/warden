@@ -1415,8 +1415,6 @@ const overTunedLive = () => {
     snippets: [{ name: 'custom-snippet', text: 'do the thing' }],
     defaultShell: 'zsh',
     defaultShellByHost: { 'host-a': 'fish' },
-    hostOptions: { 'host-a': { seamlessCopy: true } },
-    copyHintDismissed: { 'host-a': true },
     agentFilter: 'filtering',
     agentSort: 'recent',
     // workspace + layout (all non-default → must be PRESERVED). WARDEN-372 moved
@@ -1492,8 +1490,6 @@ test('every pref field of resetUiPrefsPreservingWorkspace(live) equals DEFAULT_U
   assert.deepEqual(r.defaultNewChatPresetByHost, {});
   assert.deepEqual(r.defaultNewChatCwdByHost, {});
   assert.deepEqual(r.snippets, STARTER_SNIPPETS);
-  assert.deepEqual(r.hostOptions, {});
-  assert.deepEqual(r.copyHintDismissed, {});
   // agentFilter/agentSort are in DEFAULT_UI; the helper resets them too.
   assert.equal(r.agentFilter, 'all');
   assert.equal(r.agentSort, 'manual');
@@ -1552,7 +1548,6 @@ test('round-trip: saveUi(resetUiPrefsPreservingWorkspace(live)) then loadUi() yi
   assert.deepEqual(after.attentionStates, { stuck: true, erroring: true, waiting: true, blocked: true });
   assert.deepEqual(after.mutedAlertKeys, []);
   assert.deepEqual(after.watchedChats, []);
-  assert.deepEqual(after.hostOptions, {});
   assert.deepEqual(after.snippets, STARTER_SNIPPETS);
   // Workspace + layout survive the same reload — the core "reset is
   // non-destructive to the open session" invariant. WARDEN-372 model: the
