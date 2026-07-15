@@ -1,8 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
+import { toast } from 'sonner';
 import { Plus, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
+import { copyText } from '@/lib/clipboard';
 import { PANE_DRAG_MIME } from '@/lib/dnd';
 import type { WorkspacePaneSet } from '@/lib/storage';
 
@@ -90,63 +99,90 @@ export function WorkspaceTabs({ workspaces, activeWorkspaceId, onSelect, onCreat
         const active = ws.id === activeWorkspaceId;
         const editing = editingId === ws.id;
         const over = dragOverId === ws.id;
+        // Copy the tab name via the shared Electron-safe clipboard util — never
+        // bare navigator.clipboard, which fails silently in Electron (see
+        // ActivityTimeline.tsx for the rationale). Mirrors CollectionsSection.
+        const handleCopyName = async () => {
+          const ok = await copyText(ws.name);
+          if (ok) toast.success('Copied'); else toast.error('Copy failed');
+        };
         return (
-          <div
-            key={ws.id}
-            // Structural chip container (the visual tab). The interactive
-            // affordances inside are real shadcn <Button>/<Input>; this div only
-            // groups them + serves as the drop target, so it carries role=tab.
-            role="tab"
-            aria-selected={active}
-            onDragOver={(e) => onChipDragOver(e, ws.id)}
-            onDragLeave={() => { if (dragOverId === ws.id) setDragOverId(null); }}
-            onDrop={(e) => onChipDrop(e, ws.id)}
-            className={cn(
-              'group inline-flex items-center gap-0.5 rounded-md px-0.5 min-w-0 shrink-0 transition-colors',
-              active ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
-              over && 'ring-2 ring-primary ring-offset-1 ring-offset-background',
-            )}
-          >
-            {editing ? (
-              <Input
-                ref={inputRef}
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onBlur={commitRename}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
-                  else if (e.key === 'Escape') { e.preventDefault(); cancelRename(); }
-                }}
-                className="h-6 w-28 text-xs px-1.5"
-                aria-label={`Rename ${ws.name}`}
-              />
-            ) : (
-              <Button
-                variant="ghost"
-                size="xs"
-                onClick={() => onSelect(ws.id)}
-                onDoubleClick={() => startRename(ws)}
-                className="max-w-40 min-w-0"
-                title={ws.name}
+          <ContextMenu key={ws.id}>
+            <ContextMenuTrigger asChild disabled={editing}>
+              {/*
+                Structural chip container (the visual tab). The interactive
+                affordances inside are real shadcn <Button>/<Input>; this div only
+                groups them + serves as the drop target, so it carries role=tab.
+                asChild merges the radix trigger onto this div (no extra wrapper),
+                so the onDragOver/onDrop drop-target handlers and role=tab are
+                preserved. disabled while renaming so a right-click inside the
+                <Input> falls through to the native text-edit menu instead of this
+                themed one (radix honors disabled on the trigger without disabling
+                pointer events).
+              */}
+              <div
+                role="tab"
+                aria-selected={active}
+                onDragOver={(e) => onChipDragOver(e, ws.id)}
+                onDragLeave={() => { if (dragOverId === ws.id) setDragOverId(null); }}
+                onDrop={(e) => onChipDrop(e, ws.id)}
+                className={cn(
+                  'group inline-flex items-center gap-0.5 rounded-md px-0.5 min-w-0 shrink-0 transition-colors',
+                  active ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
+                  over && 'ring-2 ring-primary ring-offset-1 ring-offset-background',
+                )}
               >
-                <span className="truncate">{ws.name}</span>
-              </Button>
-            )}
-            {/* Close: removed only when more than one workspace remains. Hidden
-                until hover/active so the strip stays calm; still keyboard-reachable. */}
-            {!editing && workspaces.length > 1 && (
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                onClick={(e) => { e.stopPropagation(); onClose(ws.id); }}
-                className={cn('shrink-0', active ? 'opacity-70' : 'opacity-0 group-hover:opacity-70')}
-                title="Close workspace"
-                aria-label={`Close ${ws.name}`}
-              >
-                <X />
-              </Button>
-            )}
-          </div>
+                {editing ? (
+                  <Input
+                    ref={inputRef}
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onBlur={commitRename}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
+                      else if (e.key === 'Escape') { e.preventDefault(); cancelRename(); }
+                    }}
+                    className="h-6 w-28 text-xs px-1.5"
+                    aria-label={`Rename ${ws.name}`}
+                  />
+                ) : (
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    onClick={() => onSelect(ws.id)}
+                    onDoubleClick={() => startRename(ws)}
+                    className="max-w-40 min-w-0"
+                    title={ws.name}
+                  >
+                    <span className="truncate">{ws.name}</span>
+                  </Button>
+                )}
+                {/* Close: removed only when more than one workspace remains. Hidden
+                    until hover/active so the strip stays calm; still keyboard-reachable. */}
+                {!editing && workspaces.length > 1 && (
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    onClick={(e) => { e.stopPropagation(); onClose(ws.id); }}
+                    className={cn('shrink-0', active ? 'opacity-70' : 'opacity-0 group-hover:opacity-70')}
+                    title="Close workspace"
+                    aria-label={`Close ${ws.name}`}
+                  >
+                    <X />
+                  </Button>
+                )}
+              </div>
+            </ContextMenuTrigger>
+            <ContextMenuContent>
+              {/* Surfaces the double-click-only rename affordance; no new logic. */}
+              <ContextMenuItem onSelect={() => startRename(ws)}>Rename</ContextMenuItem>
+              <ContextMenuItem onSelect={handleCopyName}>Copy name</ContextMenuItem>
+              <ContextMenuSeparator />
+              {/* Mirrors the in-component invariant that hides the X for a single
+                  workspace: the menu must not offer to close the last workspace. */}
+              <ContextMenuItem variant="destructive" disabled={workspaces.length <= 1} onSelect={() => onClose(ws.id)}>Close</ContextMenuItem>
+            </ContextMenuContent>
+          </ContextMenu>
         );
       })}
       <Button
