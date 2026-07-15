@@ -4,7 +4,42 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
+
+// tmuxAvailable reports whether a real tmux is on PATH (the subscribe watcher's
+// captureOnce drives a live tmux session, mirroring the Node e2e parity tests).
+func tmuxAvailable() bool {
+	out, err := exec.Command("tmux", "-V").Output()
+	return err == nil && len(strings.TrimSpace(string(out))) > 0
+}
+
+func uniqueSession() string {
+	return "warden-test-" + strings.ReplaceAll(time.Now().Format("150405.000000"), ".", "-")
+}
+
+// waitForRendered polls the pane until marker appears in its capture (or a short
+// timeout elapses). new-session -d returns before the shell has drawn its prompt,
+// so two back-to-back captures can straddle the render: capture #1 catches the
+// pre-prompt pane, capture #2 catches the rendered prompt — a spurious "change"
+// that breaks the heartbeat's empty-diff assertion (~5% flaky, WARDEN-413 review).
+// Waiting for a marker we send AFTER the prompt guarantees the pane is fully
+// rendered and STABLE before the test's captures begin. Mirrors the Node parity
+// test, which seeds content with an explicit send-keys marker before asserting.
+func waitForRendered(t *testing.T, session, marker string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		out, err := exec.Command("tmux", "capture-pane", "-t", session, "-p").Output()
+		if err == nil && strings.Contains(string(out), marker) {
+			// One more yield so any in-flight redraw flushes, then the pane is stable.
+			time.Sleep(30 * time.Millisecond)
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("marker %q never rendered in tmux session %s", marker, session)
+}
 
 // TestBuildActivityScript locks the byte-exact, sentinel-framed leading-line
 // capture script the companion runs host-side for activity (WARDEN-376). It must
@@ -144,4 +179,172 @@ func TestBuildResizeScript(t *testing.T) {
 			t.Fatalf("expected shellQuoted container; got: %s", got)
 		}
 	})
+}
+
+// ------------------------------- subscribePanes --------------------------------
+// WARDEN-413 (problem #3 of roadmap WARDEN-270): the host PUSHES pane-output
+// deltas instead of being polled. The watcher's change detection is a pure
+// content-hash diff (hashContent + diffPanes); the push path (captureOnce +
+// loop) drives the SAME batched capturePanes capture used by the RPC. These tests
+// pin the diff contract (the part that decides what gets pushed) and the
+// capture→push path against a live tmux session.
+
+func TestHashContent(t *testing.T) {
+	// Deterministic: same input -> same digest.
+	if hashContent("hello") != hashContent("hello") {
+		t.Fatal("hashContent is not deterministic for identical input")
+	}
+	// Distinct: different input -> different digest (the change signal must not
+	// collide for realistic pane content).
+	if hashContent("line1") == hashContent("line2") {
+		t.Fatal("hashContent collided for distinct inputs")
+	}
+	// Empty content is a valid, stable digest (an empty pane is a real state).
+	if hashContent("") == "" {
+		t.Fatal("hashContent('') returned an empty digest")
+	}
+}
+
+func TestDiffPanes(t *testing.T) {
+	t.Run("initial capture marks every pane changed (seeds the cache)", func(t *testing.T) {
+		hashes := map[string]string{}
+		changed := diffPanes(map[string]string{"a": "x", "b": "y"}, hashes)
+		if len(changed) != 2 {
+			t.Fatalf("expected both panes changed on first diff; got %d", len(changed))
+		}
+		if changed["a"] != "x" || changed["b"] != "y" {
+			t.Fatalf("changed map carries the content; got %v", changed)
+		}
+		if len(hashes) != 2 {
+			t.Fatalf("hashes seeded for every pane; got %d", len(hashes))
+		}
+	})
+
+	t.Run("unchanged content yields no changes", func(t *testing.T) {
+		hashes := map[string]string{"a": hashContent("x")}
+		changed := diffPanes(map[string]string{"a": "x"}, hashes)
+		if len(changed) != 0 {
+			t.Fatalf("stable pane must not be re-pushed; got %v", changed)
+		}
+	})
+
+	t.Run("only the changed pane is pushed", func(t *testing.T) {
+		hashes := map[string]string{"a": hashContent("x"), "b": hashContent("y")}
+		changed := diffPanes(map[string]string{"a": "x", "b": "CHANGED"}, hashes)
+		if len(changed) != 1 || changed["b"] != "CHANGED" {
+			t.Fatalf("expected only b changed; got %v", changed)
+		}
+	})
+
+	t.Run("a pane that left the set is dropped from hashes", func(t *testing.T) {
+		hashes := map[string]string{"a": hashContent("x"), "b": hashContent("y")}
+		diffPanes(map[string]string{"a": "x"}, hashes) // b vanished
+		if _, ok := hashes["b"]; ok {
+			t.Fatalf("vanished pane b must be dropped from hashes; got %v", hashes)
+		}
+	})
+}
+
+// TestCaptureOncePushesInitialDelta drives the watcher's push path (captureOnce
+// -> capturePanesList -> diffPanes -> writeLine) against a REAL tmux session: an
+// empty hash map means the first capture marks every pane changed and pushes the
+// full content — the "initial capture" that seeds warden's cache within ~one
+// interval of the ACK. No ticker/timing involved; one batched capture. Skipped
+// without tmux.
+func TestCaptureOncePushesInitialDelta(t *testing.T) {
+	if !tmuxAvailable() {
+		t.Skip("tmux not available")
+	}
+	session := uniqueSession()
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", session).Output(); err != nil {
+		t.Fatalf("tmux new-session failed: %v; %s", err, out)
+	}
+	defer exec.Command("tmux", "kill-session", "-t", session).Run()
+	exec.Command("tmux", "send-keys", "-t", session, "WARDEN_PUSH_MARKER_7").Run()
+	// Wait for the marker to render so the pane is stable before the back-to-back
+	// captures (eliminates the new-session render race — see waitForRendered).
+	waitForRendered(t, session, "WARDEN_PUSH_MARKER_7")
+
+	s := &paneSubscription{
+		panes:  []capturePaneReq{{Key: session, Container: "", Session: session}},
+		hashes: map[string]string{},
+	}
+	var emitted []paneDeltaEvent
+	writeLine := func(v any) {
+		if e, ok := v.(paneDeltaEvent); ok {
+			emitted = append(emitted, e)
+		}
+	}
+	lastEmit := time.Now()
+	s.captureOnce(writeLine, &lastEmit, lastEmit)
+
+	if len(emitted) != 1 {
+		t.Fatalf("expected one paneDelta on the initial capture; got %d", len(emitted))
+	}
+	if emitted[0].Event != "paneDelta" {
+		t.Fatalf("event name is paneDelta; got %q", emitted[0].Event)
+	}
+	content, ok := emitted[0].Panes[session]
+	if !ok {
+		t.Fatalf("paneDelta pushed the pane under its key %q; got %v", session, emitted[0].Panes)
+	}
+	if !strings.Contains(content, "WARDEN_PUSH_MARKER_7") {
+		t.Fatalf("pushed content includes the marker; got:\n%s", content)
+	}
+
+	// A second capture with no content change pushes nothing (the diff is empty
+	// and the heartbeat is not yet due) — this is the idle case: no paneDelta.
+	s.captureOnce(writeLine, &lastEmit, lastEmit)
+	if len(emitted) != 1 {
+		t.Fatalf("an unchanged pane with no heartbeat due must NOT be re-pushed; got %d events", len(emitted))
+	}
+}
+
+// TestCaptureOnceHeartbeat: once the heartbeat interval elapses with no change,
+// captureOnce pushes an EMPTY-panes paneDelta — the liveness heartbeat that keeps
+// warden out of its poll backstop without re-transferring pane content.
+func TestCaptureOnceHeartbeat(t *testing.T) {
+	if !tmuxAvailable() {
+		t.Skip("tmux not available")
+	}
+	session := uniqueSession()
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", session).Output(); err != nil {
+		t.Fatalf("tmux new-session failed: %v; %s", err, out)
+	}
+	defer exec.Command("tmux", "kill-session", "-t", session).Run()
+	// Seed a marker and wait for it to render so both captures see a STABLE pane.
+	// Without this, capture #1 can straddle the shell's first prompt render, the
+	// content then differs on capture #2, and the heartbeat's empty-diff assertion
+	// fails (~5% flaky). The marker is drawn after the prompt, so once it is visible
+	// the pane is fully rendered. (WARDEN-413 test-stability fix.)
+	exec.Command("tmux", "send-keys", "-t", session, "WARDEN_HB_STABLE").Run()
+	waitForRendered(t, session, "WARDEN_HB_STABLE")
+
+	s := &paneSubscription{
+		panes:  []capturePaneReq{{Key: session, Container: "", Session: session}},
+		hashes: map[string]string{},
+	}
+	var emitted []paneDeltaEvent
+	writeLine := func(v any) {
+		if e, ok := v.(paneDeltaEvent); ok {
+			emitted = append(emitted, e)
+		}
+	}
+	// loop() keeps lastEmit and the tick time in SEPARATE variables; mirror that
+	// here so advancing the tick does not also advance lastEmit.
+	lastEmit := time.Now()
+	s.captureOnce(writeLine, &lastEmit, lastEmit) // initial: pushes full content
+	if len(emitted) != 1 || len(emitted[0].Panes) != 1 {
+		t.Fatalf("initial push carries the pane; got %v", emitted)
+	}
+	// Advance the tick time past the heartbeat interval with no content change.
+	// lastEmit is unchanged (the prior push reset it), so the heartbeat is now due.
+	now := lastEmit.Add(subscribeHeartbeat + time.Second)
+	s.captureOnce(writeLine, &lastEmit, now)
+	if len(emitted) != 2 {
+		t.Fatalf("a heartbeat-due idle tick must push an empty paneDelta; got %d events", len(emitted))
+	}
+	if len(emitted[1].Panes) != 0 {
+		t.Fatalf("heartbeat paneDelta carries NO panes (liveness only); got %v", emitted[1].Panes)
+	}
 }

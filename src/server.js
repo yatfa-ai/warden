@@ -26,6 +26,7 @@ import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { classifyPane, stripAnsi } from './agentState.js';
 import { checkHost } from './hostStatus.js';
 import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, buildDockerGitArgv } from './gitStatus.js';
+import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep } from './companion.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = load();
@@ -213,33 +214,50 @@ app.get('/api/agent-states', async (req, res) => {
     }
     if (chats.length === 0) return res.json({ agents: [], total: 0, timestamp: Date.now() });
 
-    const panes = await capturePanes(chats, cfg);
-
-    const agents = chats.map((c) => {
-      const base = {
-        id: c.container || c.session,
-        key: c.key,
-        host: c.host,
-        project: c.project,
-        role: c.role,
-        name: c.name || c.key || (c.container || c.session),
-      };
-      // A MISSING key means capturePanes silently dropped this chat (host SSH
-      // failed → `if (!res.ok) return;` per host). Surface it as capture_failed so
-      // the badge can still name the agent instead of omitting it (WARDEN-89).
-      if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
-        return { ...base, state: 'capture_failed', captureError: true, signal: null };
-      }
-      const clean = stripAnsi(panes[c.key] || '');
-      const { state, signal } = classifyPane(clean, c);
-      return { ...base, state, signal, captureError: false };
-    });
-
+    const agents = await pollAgentStates(chats, cfg);
     res.json({ agents, total: agents.length, timestamp: Date.now() });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
+
+// pollAgentStates is the /api/agent-states poll core: it reconciles the companion
+// pane-push subscriptions for the polled hosts, captures their pane content, and
+// classifies each. Exported (and deps-injected) so the WARDEN-413 success gate is
+// drivable end-to-end: reconcile establishes the subscription → the companion
+// pushes paneDelta events over the channel → capturePanes (chats.js) renders from
+// the in-memory delta cache and SKIPS the per-host capturePanes RPC, so an idle
+// companion host receives ZERO capturePanes RPCs per poll. The reconcile is
+// awaited (not fire-and-forget like the WS monitor path) because /api/agent-states
+// is a request/response HTTP call whose caller awaits the result anyway — sending
+// subscribe before capture gives clean ordering, and on steady-state polls
+// reconcile issues NO RPC (the pane set is unchanged), so the cost is ~0. The
+// first poll after a host enters the set still polls once (the push hasn't arrived
+// yet) — the graceful bootstrap. LOCAL + flag-off hosts are unchanged.
+// `deps` is a test seam (defaults to {} in production). (WARDEN-413)
+export async function pollAgentStates(chats, cfg = {}, deps = {}) {
+  await reconcilePaneSubscriptions(chats, cfg, {}, deps);
+  const panes = await capturePanes(chats, cfg, deps);
+  return chats.map((c) => {
+    const base = {
+      id: c.container || c.session,
+      key: c.key,
+      host: c.host,
+      project: c.project,
+      role: c.role,
+      name: c.name || c.key || (c.container || c.session),
+    };
+    // A MISSING key means capturePanes silently dropped this chat (host SSH
+    // failed → `if (!res.ok) return;` per host). Surface it as capture_failed so
+    // the badge can still name the agent instead of omitting it (WARDEN-89).
+    if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
+      return { ...base, state: 'capture_failed', captureError: true, signal: null };
+    }
+    const clean = stripAnsi(panes[c.key] || '');
+    const { state, signal } = classifyPane(clean, c);
+    return { ...base, state, signal, captureError: false };
+  });
+}
 app.get('/api/pane', async (req, res) => {
   const r = await resolve(String(req.query.id || ''));
   if (r.error) return res.status(404).json(r);
@@ -3166,11 +3184,53 @@ streamWss.on('connection', (ws) => {
   const startMonitor = () => { if (!monitorTimer) { monitorTimer = setInterval(tickMonitor, 2000); tickMonitor(); } };
   const stopMonitorIfEmpty = () => { if (monitorTimer && !monitors.size) { clearInterval(monitorTimer); monitorTimer = null; } };
 
+  // WARDEN-413: keep companion pane-push subscriptions in sync with the monitored
+  // set. capturePanes (chats.js) renders a companion host from the pushed delta
+  // cache and SKIPS the per-tick RPC when the subscription is live, so an idle
+  // companion host receives ZERO capturePanes RPCs per monitor tick. Subscriptions
+  // are ref-counted across connections in companion.js: each connection subscribes
+  // its own panes on monitor and drops them on unmonitor/close, so two tabs
+  // watching the same host share one subscription whose pane set is the union.
+  // LOCAL + flag-off hosts are excluded (their poll path is unchanged).
+  const syncMonitorSubscription = async (chat, subscribe) => {
+    if (!chat || !isCompanionTransportEnabled() || chat.host === LOCAL) return;
+    try {
+      if (subscribe) await subscribePanes(chat.host, [chat], cfg);
+      else await unsubscribePanes(chat.host, [chat.key], cfg);
+    } catch { /* subscriptions are a pure optimization; the poll path still works */ }
+  };
+
   ws.on('message', async (data) => {
     let m;
     try { m = JSON.parse(data.toString()); } catch { return; }
-    if (m.type === 'monitor') { monitors.add(String(m.id)); await resolve(String(m.id)); startMonitor(); }
-    else if (m.type === 'unmonitor') { monitors.delete(String(m.id)); stopMonitorIfEmpty(); }
+    if (m.type === 'monitor') {
+      const id = String(m.id);
+      // Subscribe only on a NEWLY-added pane so monitor/unmonitor stay balanced
+      // per connection (a duplicate monitor must not double-count the ref, or a
+      // later single unmonitor/close would leak the subscription). monitors is a
+      // Set, so has()-before-add tells us whether this is the first watch.
+      const isNew = !monitors.has(id);
+      monitors.add(id);
+      await resolve(id);
+      startMonitor();
+      if (isNew) {
+        // Subscribe this pane's host to pushed deltas (skip-on-tick gate). resolve()
+        // seeded the cache, so the chat is findable by key here. Fire-and-forget:
+        // until the delta arrives, capturePanes keeps polling (graceful bootstrap).
+        const chat = cache.find((c) => c.key === id || c.id === id);
+        syncMonitorSubscription(chat, true);
+      }
+    }
+    else if (m.type === 'unmonitor') {
+      const id = String(m.id);
+      const wasPresent = monitors.has(id);
+      monitors.delete(id);
+      stopMonitorIfEmpty();
+      if (wasPresent) {
+        const chat = cache.find((c) => c.key === id || c.id === id);
+        syncMonitorSubscription(chat, false);
+      }
+    }
     else if (m.type === 'attach') {
       if (attaches.has(m.id)) return;
       // Lazy restore: if the client knows the host (stored when the pane was first
@@ -3266,6 +3326,24 @@ streamWss.on('connection', (ws) => {
   ws.on('close', () => {
     for (const [, a] of attaches) { try { a.pty.kill(); } catch { /* noop */ } }
     if (monitorTimer) clearInterval(monitorTimer);
+    // WARDEN-413: drop this connection's monitored pane refs so a shared
+    // subscription is released only when its LAST watcher closes (ref-counted in
+    // companion.js). Best-effort + fire-and-forget: a transport hiccup here must
+    // not block teardown, and capturePanes falls back to polling either way.
+    if (isCompanionTransportEnabled()) {
+      const byHost = {};
+      for (const k of monitors) {
+        // Match the monitor handler's key||id lookup so a host-prefixed monitor id
+        // (chat.id) still resolves, and drop the ref by chat.KEY — subscribePanes
+        // keys refs by chat.key (describePanes), so the add/drop stay balanced
+        // whatever id form the client sent. (WARDEN-413 reviewer minor finding.)
+        const chat = cache.find((c) => c.key === k || c.id === k);
+        if (chat && chat.host !== LOCAL) (byHost[chat.host] ||= []).push(chat.key);
+      }
+      for (const [host, keys] of Object.entries(byHost)) {
+        unsubscribePanes(host, keys, cfg).catch(() => {});
+      }
+    }
   });
 });
 
@@ -3473,6 +3551,12 @@ export function startServer(port = 7421, host = '127.0.0.1') {
     // until the human opts in via Settings; once enabled, reuses the existing
     // session-usage fetch on a 120s beat and caches the result for /api/budget.
     startBudgetPoll();
+    // Start the background pane-delta TTL sweep (WARDEN-413). When the last pane
+    // closes the frontend stops polling, so the request-driven reconcile can't age
+    // out subscriptions; this decoupled sweep releases them via unsubscribePanes.
+    // Self-gates on the companion flag (no-op when off); unref'd so it never keeps
+    // the event loop alive.
+    startPaneDeltaSweep(cfg);
     // Lazy mode: no startup SSH. Connections open on demand (per-host discover / pane read).
   });
 }

@@ -15,7 +15,7 @@
 //   - end-to-end stdio: spawn the REAL built companion binary and verify it
 //     answers ping over stdio (proves AC #4: NO network port), guarded by
 //     platform/binary presence so it skips cleanly elsewhere.
-import { describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -32,6 +32,12 @@ import {
   isCompanionTransportEnabled, loadManifest,
   projectSpawnModel, _resetChannelCacheForTests,
   resize as companionResize,
+  // WARDEN-413: pane-delta push (subscribePanes) — event routing, delta cache, subscriptions.
+  applyPaneDelta, hasFreshPaneDelta, readPaneDeltas, PANE_DELTA_FRESH_MS,
+  subscribePanes, unsubscribePanes,
+  reconcilePaneSubscriptions, _getAgentStateWatchedForTests,
+  _resetPaneDeltaStateForTests, _getPaneSubscriptionsForTests,
+  startPaneDeltaSweep, _stopPaneDeltaSweepForTests,
 } from './companion.js';
 import { probeSession, hasSession as tmuxHasSession, resize as tmuxResize } from './tmux.js';
 import { classifyProbe } from './sessionRecovery.js';
@@ -319,6 +325,9 @@ function fakeTransport(handler) {
     onExit(cb) { exitCb = cb; },
     kill() {},
     _die(err) { if (exitCb) exitCb(err); }, // test hook to simulate process exit
+    // Test hook (WARDEN-413): inject an unsolicited line as if the companion
+    // pushed it (subscribePanes paneDelta events arrive without a request).
+    _inject(line) { setImmediate(() => { if (lineCB) lineCB(line); }); },
   };
 }
 
@@ -373,6 +382,464 @@ describe('CompanionChannel.call (RPC round-trip via fake transport)', () => {
     assert.ok(ch.dead, 'channel marked dead');
     await assert.rejects(() => ch.call('ping', {}, { timeout: 100}),
       (e) => /channel is dead/.test(e.message));
+  });
+});
+
+// --------------------------- event routing (WARDEN-413) ----------------------
+// Unsolicited event lines (subscribePanes paneDelta pushes) carry an `event`
+// field and NO id. _onLine must dispatch them to a registered handler instead of
+// dropping them as an unknown id, while leaving request/response RPC framing
+// byte-for-byte unchanged — a strictly additive protocol addition.
+
+describe('CompanionChannel event routing (WARDEN-413)', () => {
+  // _inject emits via setImmediate; await one macrotask so the handler has run.
+  const tick = () => new Promise((r) => setImmediate(r));
+
+  it('dispatches an {event} line to the onEvent handler (not treated as a response)', async () => {
+    const events = [];
+    const t = fakeTransport(() => null); // never sends RPC responses
+    const ch = new CompanionChannel('h', t);
+    ch.onEvent((msg) => events.push(msg));
+    // Simulate the companion pushing an unsolicited paneDelta.
+    t._inject('{"event":"paneDelta","panes":{"k":"v"}}');
+    await tick();
+    assert.strictEqual(events.length, 1, 'event dispatched to handler');
+    assert.strictEqual(events[0].event, 'paneDelta');
+    assert.deepStrictEqual(events[0].panes, { k: 'v' });
+  });
+
+  it('an event line with no handler is dropped silently (never throws)', async () => {
+    const t = fakeTransport(() => null);
+    // Constructing the channel wires the transport's onLine callback (the side
+    // effect under test); no onEvent handler is registered.
+    new CompanionChannel('h', t);
+    await assert.doesNotReject(async () => { t._inject('{"event":"paneDelta","panes":{}}'); await tick(); });
+  });
+
+  it('a handler that throws does not break the channel (next RPC still resolves)', async () => {
+    const t = fakeTransport((req) => ({ id: req.id, ok: true, result: {} }));
+    const ch = new CompanionChannel('h', t);
+    ch.onEvent(() => { throw new Error('boom'); });
+    t._inject('{"event":"paneDelta","panes":{}}');
+    await tick();
+    // Channel survived — a follow-up RPC still works.
+    const res = await ch.call('ping', {}, { timeout: 500 });
+    assert.deepStrictEqual(res, {});
+  });
+
+  it('offEvent stops dispatch (and request/response RPCs are unaffected)', async () => {
+    const events = [];
+    const t = fakeTransport((req) => ({ id: req.id, ok: true, result: {} }));
+    const ch = new CompanionChannel('h', t);
+    ch.onEvent((msg) => events.push(msg));
+    ch.offEvent();
+    t._inject('{"event":"paneDelta","panes":{}}');
+    await tick();
+    assert.strictEqual(events.length, 0, 'offEvent removed the handler');
+    const res = await ch.call('ping', {}, { timeout: 500 });
+    assert.deepStrictEqual(res, {});
+  });
+});
+
+// --------------------------- paneDelta cache (WARDEN-413) --------------------
+// The freshness/skip contract: a payload or heartbeat refreshes liveness; an idle
+// host whose last push aged past PANE_DELTA_FRESH_MS is no longer "fresh" so
+// capturePanes resumes polling (the liveness backstop). In-memory only.
+
+describe('paneDelta cache: freshness + read (the capturePanes skip gate)', () => {
+  beforeEach(() => _resetPaneDeltaStateForTests());
+
+  it('applyPaneDelta stores content + refreshes liveness; readPaneDeltas returns only present keys', () => {
+    const now = 1_000_000;
+    applyPaneDelta('prod', { event: 'paneDelta', panes: { a: 'aa', b: 'bb' } }, now);
+    assert.ok(hasFreshPaneDelta('prod', now), 'just-applied delta is fresh');
+    assert.deepStrictEqual(readPaneDeltas('prod', ['a', 'b', 'missing']), { a: 'aa', b: 'bb' });
+  });
+
+  it('an empty-panes paneDelta is a heartbeat: refreshes liveness without changing content', () => {
+    applyPaneDelta('prod', { event: 'paneDelta', panes: { a: 'aa' } }, 1000);
+    // Heartbeat at a later time: no content, but liveness refreshes.
+    applyPaneDelta('prod', { event: 'paneDelta', panes: {} }, 5000);
+    assert.deepStrictEqual(readPaneDeltas('prod', ['a']), { a: 'aa' }, 'content preserved across heartbeat');
+    assert.ok(hasFreshPaneDelta('prod', 5000), 'heartbeat kept it fresh');
+  });
+
+  it('a host with no delta is not fresh (capturePanes polls)', () => {
+    assert.ok(!hasFreshPaneDelta('prod', 1000), 'never-pushed host is not fresh');
+  });
+
+  it('freshness expires after PANE_DELTA_FRESH_MS with no push (liveness backstop -> poll)', () => {
+    applyPaneDelta('prod', { event: 'paneDelta', panes: { a: 'aa' } }, 1000);
+    const stale = 1000 + PANE_DELTA_FRESH_MS + 1;
+    assert.ok(!hasFreshPaneDelta('prod', stale), 'aged-out delta is not fresh -> capturePanes resumes polling');
+  });
+
+  it('a non-paneDelta event does not refresh the cache', () => {
+    applyPaneDelta('prod', { event: 'somethingElse', panes: { a: 'aa' } }, 1000);
+    assert.ok(!hasFreshPaneDelta('prod', 1000), 'unrelated event ignored');
+  });
+});
+
+// ----------------------- subscribePanes / unsubscribePanes -------------------
+// The push subscription: ref-counted across callers, feature-detected via ping
+// methods (stale binary degrades to poll), and companion-or-fail on transport
+// errors (never breaks pane rendering — capturePanes keeps polling).
+
+// Extend healthyTransport to also ACK subscribePanes/unsubscribePanes and to
+// advertise them in ping methods (a WARDEN-413-aware companion).
+const healthySubTransport = (extra = {}) => {
+  const methods = ['ping', 'discover', 'capturePanes', 'hasSession', 'subscribePanes', 'unsubscribePanes'];
+  return fakeTransport((req) => {
+    if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods } };
+    if (req.method === 'discover') return { id: req.id, ok: true, result: { containers: extra.containers ?? [] } };
+    if (req.method === 'capturePanes') return { id: req.id, ok: true, result: { panes: extra.panes ?? {} } };
+    if (req.method === 'subscribePanes') return { id: req.id, ok: true, result: { subscribed: (req.params?.panes || []).length } };
+    if (req.method === 'unsubscribePanes') return { id: req.id, ok: true, result: { unsubscribed: true } };
+    return { id: req.id, ok: false, error: 'unknown method' };
+  });
+};
+
+describe('subscribePanes / unsubscribePanes (WARDEN-413)', () => {
+  beforeEach(() => { _resetChannelCacheForTests(); _resetPaneDeltaStateForTests(); });
+
+  it('subscribePanes sends the pane list and returns {ok:true, subscribed:true}', async () => {
+    let sent = null;
+    const t = healthySubTransport();
+    t._record = (line) => { sent = JSON.parse(line); };
+    const origWrite = t.write.bind(t);
+    t.write = (line) => { try { t._record(line); } catch {} origWrite(line); };
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const res = await subscribePanes('prod', [
+      { key: 'p-worker', container: 'p-worker', session: 'agent' },
+    ], {}, {}, deps);
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.subscribed, true);
+    assert.ok(sent && sent.method === 'subscribePanes');
+    assert.deepStrictEqual(sent.params.panes, [{ key: 'p-worker', container: 'p-worker', session: 'agent' }]);
+  });
+
+  it('feature-detect: a stale binary (no subscribePanes in methods) degrades to poll, no RPC sent', async () => {
+    const seen = [];
+    const stale = fakeTransport((req) => {
+      seen.push(req.method);
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'discover', 'capturePanes', 'hasSession'] } };
+      return { id: req.id, ok: true, result: {} };
+    });
+    const { deps } = fakeDeps({ spawnChannel: () => stale });
+    const res = await subscribePanes('prod', [{ key: 'k', container: 'k', session: 'agent' }], {}, {}, deps);
+    assert.strictEqual(res.ok, false, 'unsupported -> ok:false');
+    assert.strictEqual(res.unsupported, true, 'flagged unsupported so the caller keeps polling');
+    assert.ok(!seen.includes('subscribePanes'), 'never sent subscribePanes to a stale binary');
+  });
+
+  it('ref-counts across callers: two subscribes for the same key sync the union, one unsubscribe keeps it live', async () => {
+    const sent = [];
+    const t = healthySubTransport();
+    const origWrite = t.write.bind(t);
+    t.write = (line) => { sent.push(JSON.parse(line)); origWrite(line); };
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+
+    // Two "connections" each monitor panes on the same host.
+    await subscribePanes('prod', [{ key: 'a', container: 'a', session: 'agent' }], {}, {}, deps);
+    await subscribePanes('prod', [{ key: 'b', container: 'b', session: 'agent' }], {}, {}, deps);
+    // The live subscription set is the UNION {a,b}.
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { a: 1, b: 1 });
+
+    // Connection A closes (unsubscribes a); b must stay subscribed.
+    await unsubscribePanes('prod', ['a'], {}, {}, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { b: 1 }, 'b stays live after a closes');
+    // The last sync sent the reduced set {b} only.
+    const lastSub = [...sent].reverse().find((s) => s.method === 'subscribePanes');
+    assert.ok(lastSub, 'a subscribePanes sync happened');
+    assert.deepStrictEqual(lastSub.params.panes.map((p) => p.key), ['b']);
+
+    // Last connection closes -> unsubscribePanes sent, set empties.
+    await unsubscribePanes('prod', ['b'], {}, {}, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests(), {}, 'subscription released when last watcher closes');
+  });
+
+  it('unsubscribePanes on a host that empties its set sends unsubscribePanes + clears the delta cache', async () => {
+    const sent = [];
+    const t = healthySubTransport();
+    const origWrite = t.write.bind(t);
+    t.write = (line) => { sent.push(JSON.parse(line)); origWrite(line); };
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    await subscribePanes('prod', [{ key: 'k', container: 'k', session: 'agent' }], {}, {}, deps);
+    applyPaneDelta('prod', { event: 'paneDelta', panes: { k: 'cached' } });
+    assert.ok(hasFreshPaneDelta('prod'));
+
+    await unsubscribePanes('prod', ['k'], {}, {}, deps);
+    assert.ok(sent.some((s) => s.method === 'unsubscribePanes'), 'unsubscribePanes sent');
+    assert.ok(!hasFreshPaneDelta('prod'), 'delta cache cleared -> capturePanes resumes polling');
+  });
+
+  it('LOCAL host is refused (companion serves remote hosts only)', async () => {
+    const res = await subscribePanes('(local)', [{ key: 'k', session: 'k' }]);
+    assert.strictEqual(res.ok, false);
+    assert.ok(/local/.test(res.error));
+  });
+
+  it('a paneDelta pushed over the channel lands in the delta cache (event handler wired on subscribe)', async () => {
+    const t = healthySubTransport();
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const channel = await getChannel('prod', {}, deps);
+    await subscribePanes('prod', [{ key: 'k', container: 'k', session: 'agent' }], {}, {}, deps);
+    // Simulate the companion pushing an unsolicited paneDelta event line. It must
+    // route through _onLine (the `event` branch) into the delta cache.
+    channel._onLine(JSON.stringify({ event: 'paneDelta', panes: { k: 'pushed' } }));
+    assert.ok(hasFreshPaneDelta('prod'));
+    assert.deepStrictEqual(readPaneDeltas('prod', ['k']), { k: 'pushed' });
+  });
+});
+
+// ----------------------- reconcilePaneSubscriptions --------------------------
+// The /api/agent-states production trigger (WARDEN-413). Stateless HTTP has no
+// connection identity, so a per-poller ref can't bound a subscription; the TTL
+// keeps it multi-tab correct instead. A pane is subscribed when it ENTERS the
+// polled set and released only when the last poller stops requesting it. The
+// refs compose with the WS monitor path's refs (one ref per watched key).
+
+describe('reconcilePaneSubscriptions (WARDEN-413 /api/agent-states trigger)', () => {
+  let savedEnv;
+  beforeEach(() => {
+    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+    process.env.WARDEN_COMPANION_TRANSPORT = '1';
+    _resetChannelCacheForTests();
+    _resetPaneDeltaStateForTests();
+  });
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
+    _resetChannelCacheForTests();
+    _resetPaneDeltaStateForTests();
+  });
+
+  it('subscribes a REMOTE host panes when they enter the polled set', async () => {
+    const t = healthySubTransport();
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const chats = [
+      { host: 'prod', key: 'w1', container: 'w1', session: 'agent' },
+      { host: 'prod', key: 'w2', container: 'w2', session: 'agent' },
+    ];
+    await reconcilePaneSubscriptions(chats, {}, { now: 1000 }, deps);
+    // One agent-states ref per watched key; the companion got a subscribePanes for
+    // the union {w1,w2}.
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { w1: 1, w2: 1 });
+    assert.deepStrictEqual(_getAgentStateWatchedForTests().prod, { w1: 1000, w2: 1000 });
+  });
+
+  it('dedupes duplicate keys per host (no ref over-count / leak)', async () => {
+    const t = healthySubTransport();
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    // Same key twice for one host (e.g. a caller that didn't dedupe) must count
+    // as ONE ref, not two — else TTL eviction would under-decrement and leak.
+    await reconcilePaneSubscriptions([
+      { host: 'prod', key: 'w1', container: 'w1', session: 'agent' },
+      { host: 'prod', key: 'w1', container: 'w1', session: 'agent' },
+    ], {}, { now: 1000 }, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { w1: 1 }, 'duplicate key -> one ref');
+  });
+
+  it('steady-state: re-polling the SAME set issues NO new subscribe (refs stay 1)', async () => {
+    const sent = [];
+    const t = healthySubTransport();
+    const origWrite = t.write.bind(t);
+    t.write = (line) => { sent.push(JSON.parse(line)); origWrite(line); };
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const chats = [{ host: 'prod', key: 'w1', container: 'w1', session: 'agent' }];
+    await reconcilePaneSubscriptions(chats, {}, { now: 1000 }, deps);
+    const firstCount = sent.filter((s) => s.method === 'subscribePanes').length;
+    await reconcilePaneSubscriptions(chats, {}, { now: 11_000 }, deps);
+    await reconcilePaneSubscriptions(chats, {}, { now: 21_000 }, deps);
+    const afterCount = sent.filter((s) => s.method === 'subscribePanes').length;
+    assert.strictEqual(firstCount, 1, 'first reconcile subscribes once');
+    assert.strictEqual(afterCount, 1, 'no re-subscribe on steady-state polls');
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { w1: 1 }, 'ref stays 1 (balanced)');
+  });
+
+  it('a pane that LEAVES the polled set is released once its TTL elapses', async () => {
+    const t = healthySubTransport();
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    // Poll 1 (t=1000): w1 + w2 watched.
+    await reconcilePaneSubscriptions([
+      { host: 'prod', key: 'w1', container: 'w1', session: 'agent' },
+      { host: 'prod', key: 'w2', container: 'w2', session: 'agent' },
+    ], {}, { now: 1000 }, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { w1: 1, w2: 1 });
+    // Poll 2 (t=11000, within TTL): only w1. w2 is absent but NOT yet expired -> lingers.
+    await reconcilePaneSubscriptions([
+      { host: 'prod', key: 'w1', container: 'w1', session: 'agent' },
+    ], {}, { now: 11_000 }, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { w1: 1, w2: 1 }, 'w2 lingers within the TTL');
+    // Poll 3 (t=42000): w2's lastSeen (1000) is now >30s old -> released; w1 refreshed.
+    await reconcilePaneSubscriptions([
+      { host: 'prod', key: 'w1', container: 'w1', session: 'agent' },
+    ], {}, { now: 42_000 }, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { w1: 1 }, 'w2 released after TTL; w1 stays watched');
+  });
+
+  it('LOCAL hosts are never subscribed (companion serves remote hosts only)', async () => {
+    const t = healthySubTransport();
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    await reconcilePaneSubscriptions([
+      { host: '(local)', key: 'l1', session: 'l1' },
+      { host: 'prod', key: 'w1', container: 'w1', session: 'agent' },
+    ], {}, { now: 1000 }, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests(), { prod: { w1: 1 } }, 'no LOCAL entry');
+    assert.deepStrictEqual(_getAgentStateWatchedForTests(), { prod: { w1: 1000 } });
+  });
+
+  it('is a no-op when the companion transport flag is OFF (poll path unchanged)', async () => {
+    delete process.env.WARDEN_COMPANION_TRANSPORT;
+    const { deps } = fakeDeps({});
+    const res = await reconcilePaneSubscriptions([
+      { host: 'prod', key: 'w1', container: 'w1', session: 'agent' },
+    ], {}, { now: 1000 }, deps);
+    assert.deepStrictEqual(res, []);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests(), {}, 'no subscription created with the flag off');
+  });
+
+  it('two concurrent pollers keep a shared pane subscribed until BOTH stop (multi-tab)', async () => {
+    const t = healthySubTransport();
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    // Poller A watches a; poller B watches b - same host. Interleaved polls.
+    await reconcilePaneSubscriptions([{ host: 'prod', key: 'a', container: 'a', session: 'agent' }], {}, { now: 1000 }, deps);
+    await reconcilePaneSubscriptions([{ host: 'prod', key: 'b', container: 'b', session: 'b' }], {}, { now: 2_000 }, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { a: 1, b: 1 }, 'union watched');
+    // Poller A stops (only B polls now). a absent from B's poll but within TTL -> lingers.
+    await reconcilePaneSubscriptions([{ host: 'prod', key: 'b', container: 'b', session: 'b' }], {}, { now: 12_000 }, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { a: 1, b: 1 }, 'a lingers - only one poller dropped, TTL not elapsed');
+    // Time advances past a's TTL (last seen 1000) with only B polling -> a released, b stays.
+    await reconcilePaneSubscriptions([{ host: 'prod', key: 'b', container: 'b', session: 'b' }], {}, { now: 42_000 }, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { b: 1 }, 'a released only once aged out; b still live');
+  });
+
+  it('a pane whose pollers ALL stop is released by the EMPTY-set sweep (the background-timer path)', async () => {
+    const sent = [];
+    const t = healthySubTransport();
+    const origWrite = t.write.bind(t);
+    t.write = (line) => { sent.push(JSON.parse(line)); origWrite(line); };
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    // A pane is polled (t=1000): subscribed.
+    await reconcilePaneSubscriptions([{ host: 'prod', key: 'w1', container: 'w1', session: 'agent' }], {}, { now: 1000 }, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { w1: 1 });
+    // The user closes ALL panes -> the frontend stops polling entirely, so NO pane
+    // is in the polled set and the request-driven reconcile never runs. The
+    // background sweep (startPaneDeltaSweep) calls reconcile with an EMPTY set;
+    // advancing now past the TTL must age w1 out and fire unsubscribePanes. This
+    // is the cleanup-leak fix (the tests above always poll at least one pane, so
+    // they exercise the request-driven sweep — not this decoupled path).
+    const before = sent.filter((s) => s.method === 'unsubscribePanes').length;
+    await reconcilePaneSubscriptions([], {}, { now: 42_000 }, deps);
+    assert.ok(
+      sent.filter((s) => s.method === 'unsubscribePanes').length > before,
+      'empty-set sweep fired unsubscribePanes for the closed pane'
+    );
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests(), {}, 'subscription released once aged out');
+    assert.deepStrictEqual(_getAgentStateWatchedForTests(), {}, 'watched entry evicted');
+  });
+});
+
+// ----------------------- startPaneDeltaSweep (WARDEN-413) ---------------------
+// The background TTL-sweep timer: arms once when the companion flag is on (so the
+// empty-set cleanup path the test above proves actually FIRES in production, even
+// when no client is polling), self-gates off when the flag is off, and is
+// idempotent. No real elapsed time is needed here — the eviction LOGIC is proven
+// by the empty-set reconcile test above; this asserts the timer is armed under the
+// right conditions (the production wiring in startServer calls this unconditionally).
+
+describe('startPaneDeltaSweep: background TTL sweep (WARDEN-413 cleanup-leak fix)', () => {
+  let savedEnv;
+  beforeEach(() => {
+    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+    process.env.WARDEN_COMPANION_TRANSPORT = '1';
+    _resetChannelCacheForTests();
+    _resetPaneDeltaStateForTests();
+  });
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
+    _stopPaneDeltaSweepForTests();
+    _resetChannelCacheForTests();
+    _resetPaneDeltaStateForTests();
+  });
+
+  it('arms one idempotent timer when the flag is on; null when off', () => {
+    const t1 = startPaneDeltaSweep({});
+    assert.ok(t1, 'flag on -> arms a timer');
+    assert.strictEqual(startPaneDeltaSweep({}), t1, 'idempotent: second start returns the SAME timer');
+    // Stopping clears the idempotency guard, so a subsequent start arms a NEW one.
+    _stopPaneDeltaSweepForTests();
+    const t2 = startPaneDeltaSweep({});
+    assert.notStrictEqual(t1, t2, 'after stop, a new start arms a fresh timer');
+    _stopPaneDeltaSweepForTests();
+    // Flag off -> no timer (the startServer call site relies on this self-gate).
+    delete process.env.WARDEN_COMPANION_TRANSPORT;
+    assert.strictEqual(startPaneDeltaSweep({}), null, 'flag off -> no timer');
+  });
+});
+
+// ------------------ pollAgentStates: the real /api/agent-states poll -----------
+// WARDEN-413 success-gate proof. This is the reachability test the prior PR
+// lacked: it drives the REAL /api/agent-states poll core (pollAgentStates, exported
+// from server.js) end-to-end with a fake companion (the same stand-in pattern as
+// the parity tests). The subscription is established by the REAL production
+// trigger (reconcilePaneSubscriptions, which the handler calls), the paneDelta
+// arrives over the REAL channel event routing (NOT a hand-seeded cache), and the
+// REAL capturePanes gate issues ZERO RPCs on the steady-state poll. The contrast —
+// poll 1 captures once (bootstrap, no delta yet); poll 2 captures ZERO (live
+// subscription) — is the success measure: an idle companion host is never polled.
+
+describe('pollAgentStates: idle companion host receives ZERO capturePanes RPCs (WARDEN-413)', () => {
+  let server, savedEnv, savedHome, tempHome;
+  before(async () => {
+    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+    savedHome = process.env.HOME;
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-poll-'));
+    process.env.HOME = tempHome;
+    process.env.WARDEN_COMPANION_TRANSPORT = '1';
+    // Dynamic import so this suite stays out of server.js's module-scope side
+    // effects unless this describe runs. HOME is an isolated temp dir so server.js's
+    // own load() reads no real config (pollAgentStates takes cfg as a param anyway).
+    server = await import('./server.js');
+  });
+  after(async () => {
+    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+  beforeEach(() => { _resetChannelCacheForTests(); _resetPaneDeltaStateForTests(); });
+  afterEach(() => { _resetChannelCacheForTests(); _resetPaneDeltaStateForTests(); });
+
+  it('poll 1 bootstraps (1 RPC); after the push, poll 2 issues ZERO capturePanes RPCs', async () => {
+    let captureRpc = 0;
+    // capturePanes, IF polled, returns POLLED CONTENT (distinct from the pushed
+    // delta) so the two paths are unambiguous.
+    const t = healthySubTransport({ panes: { w1: 'POLLED CONTENT' } });
+    const origWrite = t.write.bind(t);
+    t.write = (line) => { try { if (JSON.parse(line).method === 'capturePanes') captureRpc++; } catch { /* non-JSON noise */ } origWrite(line); };
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const chats = [{ host: 'prod', key: 'w1', container: 'w1', session: 'agent', project: 'p', role: 'worker' }];
+
+    // --- Poll 1 (bootstrap): reconcile subscribes; no delta has been pushed yet,
+    // so capturePanes polls once (graceful bootstrap). This is the first poll after
+    // the host enters the watched set. ---
+    let agents = await server.pollAgentStates(chats, {}, deps);
+    assert.strictEqual(captureRpc, 1, 'bootstrap poll captures once (subscription just started, no delta yet)');
+    assert.ok(agents.some((a) => a.key === 'w1' && !a.captureError), 'the pane was captured on the bootstrap poll');
+
+    // --- The companion pushes the pane over the channel (REAL event routing -> cache). ---
+    const ch = await getChannel('prod', {}, deps);
+    ch._onLine(JSON.stringify({ event: 'paneDelta', panes: { w1: 'PUSHED IDLE CONTENT' } }));
+    assert.ok(hasFreshPaneDelta('prod'), 'precondition: the pushed delta made the host fresh');
+
+    // --- Poll 2 (steady state): the delta is fresh -> capturePanes renders from the
+    // in-memory cache and issues ZERO RPCs. This is the WARDEN-413 success gate: an
+    // idle host with a live subscription is never polled. ---
+    agents = await server.pollAgentStates(chats, {}, deps);
+    assert.strictEqual(captureRpc, 1, 'ZERO new capturePanes RPCs on the steady-state poll for an idle host with a live subscription');
   });
 });
 
@@ -1689,6 +2156,77 @@ function realBinaryTransport() {
         assert.strictEqual(rz.ok, true, 'resize against a live session -> ok:true');
         assert.strictEqual(rz.code, 0, 'resize exit code carried in the raw result');
         assert.strictEqual(rz.stdout, '', 'resize writes no stdout');
+      } finally {
+        ch.kill();
+      }
+    } finally {
+      spawnSync(TMUX_BIN, ['kill-session', '-t', session], { encoding: 'utf8' });
+    }
+  });
+
+  // WARDEN-413 parity test: subscribePanes flips capture from PULL to PUSH. The Go
+  // companion starts a watcher that re-captures on a short interval, content-hashes
+  // each pane, and emits unsolicited {"event":"paneDelta",...} lines for ONLY the
+  // changed panes — so an idle host emits nothing per tick (just an occasional
+  // heartbeat), and a changed pane is pushed within ~one tick. This drives the REAL
+  // binary against a LIVE tmux session and asserts the push contract end-to-end:
+  // initial content is pushed, a content change is pushed, and RPC framing (ping)
+  // still works in parallel. Skipped unless tmux is available.
+  (canCapture ? it : it.skip)('subscribePanes: real binary pushes paneDelta events when content changes', async () => {
+    const session = uniqueSession();
+    const setup = spawnSync(TMUX_BIN, ['new-session', '-d', '-s', session], { encoding: 'utf8' });
+    assert.strictEqual(setup.status, 0, `tmux new-session failed: ${setup.stderr}`);
+    try {
+      spawnSync(TMUX_BIN, ['send-keys', '-t', session, 'WARDEN_PUSH_FIRST'], { encoding: 'utf8' });
+      const ch = new CompanionChannel('local-binary', realBinaryTransport());
+      // Collect unsolicited paneDelta events the watcher pushes.
+      const events = [];
+      ch.onEvent((msg) => { if (msg.event === 'paneDelta') events.push(msg); });
+      try {
+        // Subscribe; the watcher's immediate first capture should push the initial
+        // content (every pane is "changed" against an empty hash map).
+        const ack = await ch.call('subscribePanes', { panes: [{ key: session, container: '', session }] }, { timeout: 8000 });
+        assert.ok(ack && ack.subscribed === 1, 'subscribe ACK reports the pane count');
+
+        // Normalize pane content for substring checks: strip ANSI escapes and join
+        // wrapped lines, so a long prompt+marker that wraps at the terminal width
+        // can't split the marker across a newline (the change is still pushed —
+        // only the assertion needs to be wrap-agnostic).
+        const norm = (s) => (s || '').replace(/\r?\n/g, '');
+        // Wait for the initial push (the watcher ticks ~1s; allow headroom).
+        const waitFor = (predicate, ms = 4000) => new Promise((resolve) => {
+          const end = Date.now() + ms;
+          const step = () => { if (predicate() || Date.now() > end) resolve(); else setTimeout(step, 50); };
+          step();
+        });
+        await waitFor(() => events.some((e) => e.panes && e.panes[session] && norm(e.panes[session]).includes('WARDEN_PUSH_FIRST')));
+        const initial = events.find((e) => e.panes && e.panes[session] && norm(e.panes[session]).includes('WARDEN_PUSH_FIRST'));
+        assert.ok(initial, 'initial paneDelta pushed the pane content');
+        assert.strictEqual(initial.event, 'paneDelta');
+
+        // Change the pane content; a NEW paneDelta must arrive carrying only the
+        // changed pane — this is the push that lets the monitor tick skip polling.
+        spawnSync(TMUX_BIN, ['send-keys', '-t', session, 'WARDEN_PUSH_SECOND'], { encoding: 'utf8' });
+        await waitFor(() => events.some((e) => e.panes && e.panes[session] && norm(e.panes[session]).includes('WARDEN_PUSH_SECOND')));
+        const changed = events.find((e) => e.panes && e.panes[session] && norm(e.panes[session]).includes('WARDEN_PUSH_SECOND'));
+        assert.ok(changed, 'a content change pushed a new paneDelta within ~one tick');
+
+        // RPC framing is unaffected by the background push: a ping still resolves.
+        const ping = await ch.call('ping', {}, { timeout: 4000 });
+        assert.ok(ping && Array.isArray(ping.methods) && ping.methods.includes('subscribePanes'),
+          'ping still works alongside pushes and advertises subscribePanes');
+
+        // unsubscribePanes stops the watcher (no further pushes).
+        const before = events.length;
+        await ch.call('unsubscribePanes', {}, { timeout: 4000 });
+        spawnSync(TMUX_BIN, ['send-keys', '-t', session, 'WARDEN_PUSH_AFTER_UNSUB'], { encoding: 'utf8' });
+        await new Promise((r) => setTimeout(r, 1500)); // over a tick
+        const afterUnsub = events.filter((e) => e.panes && e.panes[session] && norm(e.panes[session]).includes('WARDEN_PUSH_AFTER_UNSUB'));
+        assert.strictEqual(afterUnsub.length, 0, 'no pushes after unsubscribePanes (watcher stopped)');
+        assert.ok(events.length <= before + 1, 'unsubscribe stopped the watcher (at most one in-flight push)');
+
+        // The very first event must carry the event field and NO id (unsolicited).
+        assert.ok(!('id' in events[0]) || events[0].id === undefined, 'unsolicited events carry no id');
       } finally {
         ch.kill();
       }
