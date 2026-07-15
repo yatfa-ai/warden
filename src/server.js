@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { load, save, loadCatalog, saveCatalog, allSshHosts, sameCatalogEntry } from './config.js';
+import { applyCompanionToggle } from './companion.js';
 import * as collections from './collections.js';
 import { capturePanes, resolveChatWithRefresh, catalogChats, discoverHost, discoverAll } from './chats.js';
 import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream, probeSession } from './tmux.js';
@@ -31,6 +32,15 @@ import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcil
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = load();
 const LOCAL = '(local)';
+
+// WARDEN-439: the companion transport is a persisted Settings toggle that drives
+// the WARDEN_COMPANION_TRANSPORT env-var gate every remote routing site reads.
+// Snapshot ONCE whether the operator set that env var before warden started: if
+// so it's an explicit override (the UI toggle is inert, the env var wins); if
+// not, the persisted toggle drives the gate, applied here at boot and live on
+// every PUT /api/config so a flip takes effect on the next op, not on restart.
+const companionEnvOverridden = process.env.WARDEN_COMPANION_TRANSPORT !== undefined;
+applyCompanionToggle(cfg.companionTransportEnabled, { override: companionEnvOverridden });
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -485,6 +495,12 @@ app.get('/api/config', (_req, res) => res.json({
   tokenBudgetThresholdTokens: cfg.tokenBudgetThresholdTokens,
   tokenBudgetWindowHours: cfg.tokenBudgetWindowHours,
   tokenBudgetPerSessionThresholdTokens: cfg.tokenBudgetPerSessionThresholdTokens,
+  // Companion transport (WARDEN-439). companionTransportOverridden is true when
+  // WARDEN_COMPANION_TRANSPORT was operator-set at boot — in that case the env
+  // var wins and the UI toggle is inert, so the page shows an "overridden" note
+  // instead of letting the toggle look broken.
+  companionTransportEnabled: cfg.companionTransportEnabled,
+  companionTransportOverridden: companionEnvOverridden,
   confirmDestructiveActions: cfg.confirmDestructiveActions,
   notifyChatOps: cfg.notifyChatOps,
   notifyErrors: cfg.notifyErrors,
@@ -505,6 +521,7 @@ app.put('/api/config', (req, res) => {
           healthWarningThresholdMin, healthCriticalThresholdMin,
           tokenBudgetEnabled, tokenBudgetThresholdTokens,
           tokenBudgetWindowHours, tokenBudgetPerSessionThresholdTokens,
+          companionTransportEnabled,
           confirmDestructiveActions,
           notifyChatOps, notifyErrors, notifySuccess, notifyObserver,
           showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges,
@@ -584,6 +601,9 @@ app.put('/api/config', (req, res) => {
        Number.isFinite(tokenBudgetPerSessionThresholdTokens) && tokenBudgetPerSessionThresholdTokens > 0)) {
     cfg.tokenBudgetPerSessionThresholdTokens = tokenBudgetPerSessionThresholdTokens;
   }
+  // Companion transport toggle (WARDEN-439). Boolean master switch; everything
+  // else (the remote-routing decision) is read from the env-var gate it drives.
+  if (typeof companionTransportEnabled === 'boolean') cfg.companionTransportEnabled = companionTransportEnabled;
   // Safety preference: confirm before destructive actions (force-kill, kill chat)
   if (typeof confirmDestructiveActions === 'boolean') cfg.confirmDestructiveActions = confirmDestructiveActions;
   // Notification preferences (toast categories). Only accept booleans so a
@@ -599,6 +619,11 @@ app.put('/api/config', (req, res) => {
   if (typeof showProjectBadges === 'boolean') cfg.showProjectBadges = showProjectBadges;
   if (typeof hideOfflineHosts === 'boolean') cfg.hideOfflineHosts = hideOfflineHosts;
   save(cfg); // persist to ~/.yatfa-warden/config.json
+  // WARDEN-439: apply the companion toggle LIVE so a flip takes effect on the
+  // next op, not after a restart. No-op when the env var is an operator override
+  // (companionEnvOverridden) — then the env var already wins and the toggle is
+  // inert by design.
+  applyCompanionToggle(cfg.companionTransportEnabled, { override: companionEnvOverridden });
   // Pick up the new budget config immediately rather than waiting up to 120s:
   // enabling starts the poll (and seeds the cache); disabling stops it; a
   // threshold/window change re-computes now so the next /api/budget read is fresh.

@@ -55,6 +55,14 @@ const DEFAULTS = {
   tokenBudgetThresholdTokens: 2_000_000,
   tokenBudgetWindowHours: 24,
   tokenBudgetPerSessionThresholdTokens: 1_000_000,
+  // Companion transport (WARDEN-439 / roadmap WARDEN-270). A persistent RPC
+  // channel to a remote host that collapses per-op SSH handshakes into one
+  // connection — the biggest lever for cutting ssh-process churn on a
+  // remote-heavy fleet. Was reachable only via the WARDEN_COMPANION_TRANSPORT=1
+  // env var; now a first-class Settings toggle. Default OFF (experimental);
+  // the env var remains an explicit operator override (force on/off regardless
+  // of the UI). Remote-only by design — local hosts never route through it.
+  companionTransportEnabled: false,
   // Safety
   confirmDestructiveActions: true, // boolean - confirm before destructive kills (force-kill tmux session, kill chat)
   notifyChatOps: true,           // chat operations (session kill, chat kill, resume, rename)
