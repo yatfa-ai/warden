@@ -55,6 +55,18 @@ const WATCH_REASON_PRIORITY: Record<WatchReason, number> = {
   erroring: 0, stuck: 1, completed: 2, waiting: 3,
 };
 
+// WARDEN-452: per-key cooldown window for the LIVE watch-ping channel. A watched
+// chat that FLAPS (e.g. erroring → active → erroring) re-enters its needs-state on
+// every poll, and each re-entry pings anew once the prior toast is dismissed / DND'd
+// / auto-timed-out — the Web Notifications `tag` only REPLACES a still-displayed
+// notification, so a long step-away from a flaky watched chat spams repeats of the
+// SAME underlying "this agent is struggling" episode. This collapses a flapping key
+// to ONE ping per episode window (escalations override + reset), matching the
+// discipline the catch-up side already applies (watchCatchup.awayMisses dedups
+// newest-per-key). ~5 min: long enough to silence a flap, short enough that a chat
+// STILL struggling after it gets a (justified) reminder ping.
+export const WATCH_PING_COOLDOWN_MS = 5 * 60 * 1000;
+
 /**
  * Did a watched agent just complete a task? The transcript-less fallback of
  * detectCompleted (src/observer.js:366): a working state → idle flip. The
@@ -118,6 +130,96 @@ export function diffWatchAlerts(
   }
   alerts.sort((a, b) => WATCH_REASON_PRIORITY[a.reason] - WATCH_REASON_PRIORITY[b.reason]);
   return alerts;
+}
+
+/**
+ * The last watch ping that fired for a key — the cooldown's per-key tracker
+ * (WARDEN-452). Sibling of the caller's watchPrevRef discipline: a {key → entry} map
+ * the caller stashes in a ref and advances each fire, so a FLAPPING watched chat
+ * re-fires ONE ping per episode window, not one per re-entry.
+ */
+export interface WatchLastFired {
+  /** The reason that last fired — to detect a higher-urgency escalation since. */
+  reason: WatchReason;
+  /** Epoch-ms the last fire happened — the anchor the cooldown window is measured from. */
+  firedAt: number;
+}
+
+/** Per-key last-fired map: { key → { reason, firedAt } }. */
+export type WatchLastFiredMap = Record<string, WatchLastFired>;
+
+/**
+ * Pure: gate a diff's watch alerts through a per-key cooldown so a flapping watched
+ * chat produces ONE ping per episode window — escalations override + reset (WARDEN-452).
+ *
+ * Sibling of diffWatchAlerts (above): diffWatchAlerts decides a chat newly entered a
+ * needs-you state (change-into-state only); THIS decides whether that fresh alert may
+ * actually FIRE given what already fired for that key recently. Without it, a watched
+ * chat that flaps (erroring → active → erroring each poll) re-enters its needs-state
+ * on every poll, and each re-entry pings anew once the prior toast is gone (the Web
+ * Notifications `tag` only replaces a STILL-DISPLAYED notification). This collapses
+ * such a key to one ping per window — the live channel as disciplined as the catch-up
+ * side (watchCatchup.awayMisses dedups newest-per-key).
+ *
+ * Gate rule (lower WATCH_REASON_PRIORITY number = MORE urgent — mind the direction):
+ *  - No prior fire for the key → FIRE; anchor the window at `now`.
+ *  - A HIGHER-URGENCY escalation (priority[reason] < priority[last.reason]) → FIRE
+ *    immediately AND reset the anchor to `now`. A genuinely worse state is never a
+ *    false negative.
+ *  - Same-or-lower urgency (priority[reason] >= priority[last.reason]) WITHIN the
+ *    window → SUPPRESS: a re-entry into the same need-episode is the flap noise this
+ *    collapses. The anchor is NOT advanced, so the window stays measured from the
+ *    last ACTUAL fire — a continuously-flapping key re-pings once the window elapses
+ *    (a new episode), never silenced indefinitely.
+ *  - Same-or-lower urgency AFTER the window → FIRE; re-anchor at `now`.
+ *
+ * `completed` (priority 2) deliberately participates in the uniform rule rather than
+ * being special-cased: a `waiting` (3) → `completed` (2) flip counts as an escalation
+ * and fires/reset. Semantically `completed` is a different KIND of need (the agent
+ * finished a task, not a degradation), but firing on it is correct — it is genuinely
+ * new, actionable information ("review what I finished"), and special-casing it to
+ * suppress would risk a false negative on a real signal. The single priority rule
+ * keeps the gate explainable; the converse (`completed` → `waiting`) is a same-or-
+ * lower-urgency re-entry and is suppressed within the window like any other.
+ *
+ * Returns the subset that may fire PLUS the updated last-fired map. `lastFired` is
+ * treated immutably — a NEW map is returned (the input is never mutated), and every
+ * prior anchor is carried forward so a key with no alert this diff (stable needs-
+ * state, or momentarily recovered) KEEPS its anchor for the next diff. The caller
+ * prunes un-watched keys (mirroring watchPrevRef's rebuild-from-watched) so a stale
+ * anchor can't suppress a fresh re-watch's first ping. `now` is a parameter (not
+ * Date.now()) so the unit test pins the clock, the discipline toWatchMiss follows.
+ *
+ * Pure + dependency-free (reads only the `import type`-erased shapes defined here) so
+ * web/chatWatch.test.mjs loads it standalone alongside diffWatchAlerts via Vite's OXC
+ * transform. At most one alert per key per diff (diffWatchAlerts' contract), so the
+ * per-alert update never races itself within one call.
+ */
+export function applyWatchCooldown(
+  alerts: WatchAlert[],
+  lastFired: WatchLastFiredMap | null,
+  now: number,
+  cooldownMs: number = WATCH_PING_COOLDOWN_MS,
+): { fire: WatchAlert[]; lastFired: WatchLastFiredMap } {
+  const prev = lastFired || {};
+  // Carry forward every prior anchor: a key that produced no alert this diff (stable
+  // needs-state, or momentarily recovered) must KEEP its last-fire time so the window
+  // is measured correctly when it next re-enters. The caller prunes un-watched keys.
+  const next: WatchLastFiredMap = { ...prev };
+  const fire: WatchAlert[] = [];
+  for (const a of alerts) {
+    const last = prev[a.key];
+    const isEscalation = !!last
+      && WATCH_REASON_PRIORITY[a.reason] < WATCH_REASON_PRIORITY[last.reason];
+    const elapsed = last ? now - last.firedAt : Infinity;
+    if (!last || isEscalation || elapsed >= cooldownMs) {
+      fire.push(a);
+      next[a.key] = { reason: a.reason, firedAt: now };
+    }
+    // else: suppressed — next[a.key] retains the carried-forward prior anchor (the
+    // window is NOT slid forward, so a continuous flap re-pings once it elapses).
+  }
+  return { fire, lastFired: next };
 }
 
 /**
