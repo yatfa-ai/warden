@@ -86,6 +86,15 @@ before(async () => {
   fs.mkdirSync(emptyDir, { recursive: true });
   fs.writeFileSync(path.join(emptyDir, 'sess-view-empty.jsonl'), '');
 
+  // A session with per-turn token usage on its assistant turns (WARDEN-474), so the
+  // usage crosses the local API boundary and is attributable turn-by-turn. The user
+  // line carries no usage; the assistant turns do (one plain, one with cache reads).
+  writeSession(tempHome, 'projD', 'sess-view-tokens', [
+    { type: 'user', cwd: '/repo/tokens', message: { role: 'user', content: 'do the work' } },
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'starting' }], usage: { input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } },
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'finishing' }], usage: { input_tokens: 200, output_tokens: 10, cache_creation_input_tokens: 500, cache_read_input_tokens: 2000 } } },
+  ], 3000);
+
   const server = await import('./server.js');
   extractTranscriptMessage = server.extractTranscriptMessage;
   buildTranscriptView = server.buildTranscriptView;
@@ -141,6 +150,46 @@ describe('extractTranscriptMessage', () => {
   });
 });
 
+describe('extractTranscriptMessage — per-turn usage (WARDEN-474)', () => {
+  it('surfaces message.usage with the correct field mapping + total on an assistant line', () => {
+    const line = jsonlLine({ type: 'assistant', timestamp: '2026-07-10T10:00:00Z', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }], usage: {
+      input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 2000, cache_read_input_tokens: 8000,
+    } } });
+    const msg = extractTranscriptMessage(line);
+    assert.strictEqual(msg.role, 'assistant');
+    assert.strictEqual(msg.text, 'done');
+    assert.strictEqual(msg.ts, '2026-07-10T10:00:00Z');
+    assert.deepStrictEqual(msg.usage, { input: 100, output: 50, cacheCreation: 2000, cacheRead: 8000, total: 10150 });
+    // DONE criterion: total equals the sum of its parts.
+    assert.strictEqual(msg.usage.total, msg.usage.input + msg.usage.output + msg.usage.cacheCreation + msg.usage.cacheRead);
+  });
+
+  it('coerces string/null usage fields via tok() without throwing', () => {
+    const line = jsonlLine({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'x' }], usage: {
+      input_tokens: '120', output_tokens: null, cache_creation_input_tokens: 30, cache_read_input_tokens: undefined,
+    } } });
+    assert.deepStrictEqual(extractTranscriptMessage(line).usage, { input: 120, output: 0, cacheCreation: 30, cacheRead: 0, total: 150 });
+  });
+
+  it('returns no usage on a user line (and a tool_result line stays null)', () => {
+    const userLine = jsonlLine({ type: 'user', message: { role: 'user', content: 'hi' } });
+    const userMsg = extractTranscriptMessage(userLine);
+    assert.ok(!('usage' in userMsg), 'a user line must carry no usage key');
+    // A tool_result line maps to null (no renderable text) — no usage either.
+    const toolLine = jsonlLine({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: 'b64' }] } });
+    assert.strictEqual(extractTranscriptMessage(toolLine), null);
+  });
+
+  it('omits the usage key when a turn carries an all-zero usage object', () => {
+    // Mirrors parseJsonlTokenUsage's null-for-zero contract: a turn that spent no
+    // tokens renders no chip. The key is absent (not { total: 0 }) so the message
+    // stays {role, text, ts} exactly.
+    const line = jsonlLine({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'free' }], usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } });
+    const msg = extractTranscriptMessage(line);
+    assert.ok(!('usage' in msg), 'an all-zero usage object must not attach a usage key');
+  });
+});
+
 describe('buildTranscriptView', () => {
   it('takes cwd from the head window and messages from the body window, in order', () => {
     const head = jsonlLine({ cwd: '/repo/x' }) + '\n';
@@ -182,6 +231,19 @@ describe('buildTranscriptView', () => {
     // The oldest 5 (m0..m4) are dropped; the tail (m504) is last.
     assert.strictEqual(view.messages[0].text, 'm5');
     assert.strictEqual(view.messages[499].text, 'm504');
+  });
+
+  it('carries per-turn usage through to the returned messages (WARDEN-474)', () => {
+    const body = [
+      jsonlLine({ type: 'user', message: { role: 'user', content: 'go' } }),
+      jsonlLine({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'a' }], usage: { input_tokens: 10, output_tokens: 5 } } }),
+      jsonlLine({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'b' }], usage: { input_tokens: 20, output_tokens: 0, cache_read_input_tokens: 100 } } }),
+    ].join('\n');
+    const view = buildTranscriptView('', body);
+    assert.strictEqual(view.messages.length, 3);
+    assert.ok(!('usage' in view.messages[0]), 'user message carries no usage');
+    assert.deepStrictEqual(view.messages[1].usage, { input: 10, output: 5, cacheCreation: 0, cacheRead: 0, total: 15 });
+    assert.deepStrictEqual(view.messages[2].usage, { input: 20, output: 0, cacheCreation: 0, cacheRead: 100, total: 120 });
   });
 
   it('handles an empty body with no crash and no truncation', () => {
@@ -236,6 +298,18 @@ describe('parseSessionReadOutput', () => {
     assert.strictEqual(view.messages.length, 1);
     assert.strictEqual(view.messages[0].text, 'raw');
   });
+
+  it('preserves per-turn usage through the remote (parsed stdout) path (WARDEN-474)', () => {
+    // The remote read funnels through buildTranscriptView → extractTranscriptMessage
+    // just like the local path, so the single parse fix reaches a remote host's
+    // transcripts. Verify usage survives the delimited head/body split.
+    const head = jsonlLine({ cwd: '/repo/remote' });
+    const body = jsonlLine({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'hi' }], usage: { input_tokens: 7, output_tokens: 3 } } }) + '\n';
+    const stdout = `___SZ\t42\n___HEAD\n${head}\n___BODY\n${body}`;
+    const view = parseSessionReadOutput(stdout);
+    assert.strictEqual(view.messages.length, 1);
+    assert.deepStrictEqual(view.messages[0].usage, { input: 7, output: 3, cacheCreation: 0, cacheRead: 0, total: 10 });
+  });
 });
 
 describe('/api/claude-session HTTP endpoint (real Express app from server.js)', () => {
@@ -258,6 +332,18 @@ describe('/api/claude-session HTTP endpoint (real Express app from server.js)', 
       assert.ok(typeof m.text === 'string' && m.text.length > 0);
       assert.ok('ts' in m);
     }
+  });
+
+  it('carries per-turn token usage across the API boundary (local) (WARDEN-474)', async () => {
+    const body = await (await fetch(`${baseUrl}/api/claude-session?id=sess-view-tokens`)).json();
+    assert.strictEqual(body.cwd, '/repo/tokens');
+    assert.ok(Array.isArray(body.messages));
+    assert.strictEqual(body.messages.length, 3);
+    // First message is the user line — no usage key.
+    assert.ok(!('usage' in body.messages[0]));
+    // Two assistant turns carry usage whose totals are the sum of their parts.
+    assert.deepStrictEqual(body.messages[1].usage, { input: 100, output: 50, cacheCreation: 0, cacheRead: 0, total: 150 });
+    assert.deepStrictEqual(body.messages[2].usage, { input: 200, output: 10, cacheCreation: 500, cacheRead: 2000, total: 2710 });
   });
 
   it('does NOT create a catalog entry or spawn a process (pure read)', async () => {

@@ -1132,11 +1132,12 @@ async function remoteSearchClaudeSessions(host, q) {
 // difference is we map EVERY line into a {role, text, ts} message and bound the
 // result instead of returning one snippet.
 
-// Map one JSONL line into a transcript message {role, text, ts} for the read-only
-// viewer, reusing extractMessageText's human-text extraction + null-skip semantics
-// (tool_result blobs, summary records, malformed JSON → null → skipped). Adds the
-// role + timestamp extractMessageText doesn't surface. Exported so the message
-// mapping is unit-testable like extractMessageText.
+// Map one JSONL line into a transcript message {role, text, ts, usage?} for the
+// read-only viewer, reusing extractMessageText's human-text extraction + null-skip
+// semantics (tool_result blobs, summary records, malformed JSON → null → skipped).
+// Adds the role + timestamp extractMessageText doesn't surface, plus an optional
+// per-turn token `usage` (WARDEN-474) when the line carries message.usage. Exported
+// so the message mapping is unit-testable like extractMessageText.
 export function extractTranscriptMessage(line) {
   const text = extractMessageText(line);
   // null = not a renderable message (tool_result/summary/malformed); an empty
@@ -1146,7 +1147,25 @@ export function extractTranscriptMessage(line) {
   let j;
   try { j = JSON.parse(line); } catch { return null; }
   const role = (j && j.message && j.message.role) || (j && j.type) || 'unknown';
-  return { role, text, ts: (j && j.timestamp) || '' };
+  // Per-turn token attribution (WARDEN-474): when this line carries message.usage,
+  // surface it with the SAME tok() coercion parseJsonlTokenUsage uses, so a per-turn
+  // total is methodologically identical to the session-total badge (WARDEN-367).
+  // Only a turn that actually spent tokens (total > 0) attaches a usage object —
+  // mirroring parseJsonlTokenUsage's null-for-zero contract — so a user/tool row
+  // (no message.usage) and an all-zero turn render no token chip (graceful empty,
+  // same contract as formatTokens). The key is ABSENT (not undefined-valued) when
+  // there is no usage, so the object stays {role, text, ts} for every non-spend turn.
+  const msg = { role, text, ts: (j && j.timestamp) || '' };
+  const u = j && j.message && j.message.usage;
+  if (u && typeof u === 'object') {
+    const input = tok(u.input_tokens);
+    const output = tok(u.output_tokens);
+    const cacheCreation = tok(u.cache_creation_input_tokens);
+    const cacheRead = tok(u.cache_read_input_tokens);
+    const total = input + output + cacheCreation + cacheRead;
+    if (total > 0) msg.usage = { input, output, cacheCreation, cacheRead, total };
+  }
+  return msg;
 }
 
 // Build the bounded {cwd, messages, truncated} view from a head window (for cwd,
@@ -1425,7 +1444,11 @@ app.get('/api/claude-sessions-search', async (req, res) => {
 // over SSH via buildSessionReadScript (same hosts the search already reaches). The
 // output is bounded (a tail window + a message cap) so a huge transcript can't
 // blow up the UI or the remote transfer. Response on success:
-//   { host, cwd, messages: [{role, text, ts}], truncated? }
+//   { host, cwd, messages: [{role, text, ts, usage?}], truncated? }
+// where each message may carry an optional `usage` (WARDEN-474) — the per-turn
+// token breakdown {input, output, cacheCreation, cacheRead, total} for assistant
+// turns that spent tokens (absent on user/tool rows). It is the drill-down beneath
+// the session-list total badge (WARDEN-367), not a re-derivation of it.
 // An unreachable host degrades to { host, error: 'host unreachable' } (run()'s
 // default timeout means it never hangs) rather than failing the request.
 app.get('/api/claude-session', async (req, res) => {
