@@ -11,6 +11,15 @@ export type GitCommit = { hash: string; subject: string; author: string; date: s
 // lazy detail behind the eager `stashCount` in /api/git-status. Read-only.
 export type GitStash = { ref: string; subject: string; date: string };
 
+// One row from /api/git-reflog (a parsed %h|%gs|%cr `git reflog` line) — the
+// agent's OPERATION history: the non-commit git ops that leave no commit AND no
+// dirty file (`reset --hard`, `checkout`, an abandoned rebase, a force-push), so
+// they are diagnosable only here. `subject` is git's %gs — the operation itself
+// (e.g. "reset: moving to HEAD~1", "checkout: moving from main to feat"). The
+// fourth read-only axis alongside commit history / working-tree state / shelved
+// WIP; fetched lazily on expand (no always-on badge). (WARDEN-460.)
+export type GitReflogEntry = { hash: string; subject: string; date: string };
+
 // One per-session token-usage ledger, summed from every assistant turn's
 // `message.usage` across the transcript (model-agnostic raw token counts, NOT
 // dollar cost). `total = input+output+cacheCreation+cacheRead`. Optional +

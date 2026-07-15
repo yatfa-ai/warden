@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseDiffStat, isConflictStatus, isDetachedHead, normalizeHeadSha, parseUpstream, buildDockerGitArgv } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseReflog, parseDiffStat, isConflictStatus, isDetachedHead, normalizeHeadSha, parseUpstream, buildDockerGitArgv } from './gitStatus.js';
 
 describe('parseGitStatusPorcelain', () => {
   it('parses the most common case: unstaged modification as the FIRST file', () => {
@@ -531,6 +531,69 @@ describe('parseStashList', () => {
   it('tolerates CRLF line endings (e.g. over SSH)', () => {
     assert.deepEqual(parseStashList('stash@{0}|WIP on main: msg|1 hour ago\r\n'), [
       { ref: 'stash@{0}', subject: 'WIP on main: msg', date: '1 hour ago' },
+    ]);
+  });
+});
+
+describe('parseReflog', () => {
+  // `git reflog -n N --pretty=format:%h|%gs|%cr` emits `<hash>|<subject>|<date>`
+  // where <subject> is git's %gs — the OPERATION ("reset: moving to HEAD~1",
+  // "checkout: moving from main to feat", "commit: …"). The subject sits in the
+  // MIDDLE and may contain '|', so we peel the hash off the front and the date off
+  // the back — same approach as parseStashList (WARDEN-460).
+
+  it('parses a normal hash|subject|date line', () => {
+    assert.deepEqual(parseReflog('abc1234|reset: moving to HEAD~1|5 minutes ago\n'), [
+      { hash: 'abc1234', subject: 'reset: moving to HEAD~1', date: '5 minutes ago' },
+    ]);
+  });
+
+  it('parses multiple entries (newest first, matching git order)', () => {
+    const out = 'aaa1111|checkout: moving from main to feat|2 minutes ago\nbbb2222|commit: fix the bug|1 hour ago\n';
+    assert.deepEqual(parseReflog(out), [
+      { hash: 'aaa1111', subject: 'checkout: moving from main to feat', date: '2 minutes ago' },
+      { hash: 'bbb2222', subject: 'commit: fix the bug', date: '1 hour ago' },
+    ]);
+  });
+
+  it('keeps a literal "|" inside the subject', () => {
+    const out = 'abc1234|commit: fix a | b | c|3 hours ago\n';
+    assert.deepEqual(parseReflog(out), [
+      { hash: 'abc1234', subject: 'commit: fix a | b | c', date: '3 hours ago' },
+    ]);
+  });
+
+  it('handles a subject with no "|" (whole tail is subject, empty date)', () => {
+    assert.deepEqual(parseReflog('abc1234|commit: no date pipe here\n'), [
+      { hash: 'abc1234', subject: 'commit: no date pipe here', date: '' },
+    ]);
+  });
+
+  it('handles a line with no separators at all', () => {
+    assert.deepEqual(parseReflog('abc1234\n'), [
+      { hash: 'abc1234', subject: '', date: '' },
+    ]);
+  });
+
+  it('returns [] for empty / whitespace-only output', () => {
+    assert.deepEqual(parseReflog(''), []);
+    assert.deepEqual(parseReflog('   \n  \n'), []);
+  });
+
+  it('handles undefined / null input without throwing', () => {
+    assert.deepEqual(parseReflog(undefined), []);
+    assert.deepEqual(parseReflog(null), []);
+  });
+
+  it('accepts a Buffer input', () => {
+    assert.deepEqual(parseReflog(Buffer.from('abc1234|commit: msg|1 hour ago\n')), [
+      { hash: 'abc1234', subject: 'commit: msg', date: '1 hour ago' },
+    ]);
+  });
+
+  it('tolerates CRLF line endings (e.g. over SSH)', () => {
+    assert.deepEqual(parseReflog('abc1234|reset: moving to HEAD~1|1 hour ago\r\n'), [
+      { hash: 'abc1234', subject: 'reset: moving to HEAD~1', date: '1 hour ago' },
     ]);
   });
 });

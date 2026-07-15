@@ -339,3 +339,41 @@ export function parseStashList(output) {
       return { ref, subject, date };
     });
 }
+
+/**
+ * Parse `git reflog -n N --pretty=format:%h|%gs|%cr` output into
+ * `[{ hash, subject, date }]`.
+ *
+ * `%h` is the abbreviated commit hash, `%gs` the reflog subject — i.e. the
+ * OPERATION the agent performed (`"reset: moving to HEAD~1"`,
+ * `"checkout: moving from main to feat"`, `"commit: …"`, `"rebase finished: …"`,
+ * `"pull: …"`), and `%cr` the relative committer date. The subject sits in the
+ * MIDDLE and MAY contain the `|` separator (a commit message can carry a pipe),
+ * so — like `parseStashList` — we peel the hash off the front and the date off
+ * the back, leaving everything between as the subject. CRLF (over SSH) is
+ * tolerated per line.
+ *
+ * Empty / undefined input → `[]` (no entries), never throws. Exported for unit
+ * tests. See WARDEN-460.
+ *
+ * @param {string|Buffer|undefined} output - Raw stdout from `git reflog --pretty`.
+ * @returns {Array<{ hash: string, subject: string, date: string }>}
+ */
+export function parseReflog(output) {
+  const raw = (output ?? '').toString();
+  return raw
+    .split('\n')
+    .map((line) => line.replace(/\r$/, '')) // tolerate CRLF (e.g. over SSH)
+    .filter((line) => line.trim())           // drop the trailing empty line + blanks
+    .map((line) => {
+      const firstPipe = line.indexOf('|');
+      if (firstPipe === -1) return { hash: line, subject: '', date: '' };
+      const hash = line.slice(0, firstPipe);
+      const tail = line.slice(firstPipe + 1);
+      const lastPipe = tail.lastIndexOf('|');
+      if (lastPipe === -1) return { hash, subject: tail, date: '' };
+      const date = tail.slice(lastPipe + 1);
+      const subject = tail.slice(0, lastPipe);
+      return { hash, subject, date };
+    });
+}
