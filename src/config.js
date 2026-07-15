@@ -80,6 +80,14 @@ const DEFAULTS = {
   //                              code — server.js WARDEN-457).
   telemetryBaseEnabled: false,
   telemetryExtendedEnabled: false,
+  // Telemetry receiver endpoint (WARDEN-461). OFF by default: an empty string
+  // means "unconfigured" and the transport (telemetry-send.js) sends NOTHING —
+  // it is the last gate that makes "off by default / halts all traffic" real on
+  // the wire. Set this to your self-hostable receiver's ingest URL via Settings
+  // (PUT /api/config). No hardcoded SaaS host is ever used; events go only to
+  // this URL. Consent is a SEPARATE gate (slice 1) — even with an endpoint set,
+  // the transport no-ops unless consent is on.
+  telemetryEndpoint: '',
   // Safety
   confirmDestructiveActions: true, // boolean - confirm before destructive kills (force-kill tmux session, kill chat)
   notifyChatOps: true,           // chat operations (session kill, chat kill, resume, rename)
