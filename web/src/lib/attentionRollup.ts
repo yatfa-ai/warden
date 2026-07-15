@@ -228,3 +228,60 @@ export function rankAttention(rollup: AttentionRollup): {
 
   return { top: ranked.length > 0 ? ranked[0] : null, ranked };
 }
+
+// ─── Return-banner support (Observer Intelligence roadmap WARDEN-8, Job #2) ────
+//
+// WARDEN-436 promotes the ranked "you're needed HERE, because X" callout
+// (WARDEN-384) into the "While you were away" return banner as its lead. Two
+// pure helpers below serve that banner and stay here — alongside buildAttentionRollup
+// / rankAttention — so attentionRollup.test.mjs can cover them the same way, and so
+// the popover Callout and the return banner share IDENTICAL phrasing (no drift
+// between the two surfaces that present the same directed answer).
+
+// State → short reason when no concrete `signal` is available. Phrased as the
+// "why it needs you" so the callout line always reads as a complete reason. Shared
+// by the popover Callout (AttentionBadge) and the return-banner callout (App) so
+// the "because X" wording is identical wherever the ranked answer is shown.
+const ATTENTION_REASON_FALLBACK: Record<string, string> = {
+  waiting: 'waiting for your input',
+  erroring: 'emitting errors',
+  stuck: 'stuck in a loop',
+  critical: 'critical health',
+  blocked: 'blocked on another agent',
+  warning: 'needs attention',
+};
+
+/**
+ * The "because X" reason line for a ranked attention item: the concrete triggering
+ * `signal` when one flows (a pane state's repeating line / matched prompt), else a
+ * short human-readable fallback keyed off the state (health-group agents carry no
+ * signal line of their own), else a generic default. An empty-string signal is
+ * treated as absent (it is not a useful reason).
+ *
+ * Pure + dependency-free (only the `import type` at the top of this file, erased at
+ * transpile), so attentionRollup.test.mjs can exercise it standalone.
+ */
+export function attentionReason(item: AttentionItem): string {
+  const fallback = ATTENTION_REASON_FALLBACK[item.state];
+  return item.signal || fallback || 'needs attention';
+}
+
+/**
+ * Whether the "While you were away" return banner has anything to surface at all:
+ * recent activity events since close (`activityTotal`) OR a current ranked
+ * attention lead (`top`).
+ *
+ * WARDEN-436 broadened the banner's visibility beyond the original "activity events
+ * since close" gate (`total > 0`). The ranked `top` reflects CURRENT pane/health
+ * state, which is INDEPENDENT of the since-close event tally — e.g. an agent that
+ * became stuck / waiting / critical with ZERO directives or errors since close
+ * produces a non-null `top` but `activityTotal === 0`, so under the old gate the
+ * banner (and the callout inside it) would never render. This predicate fires on
+ * EITHER, satisfying the roadmap's "where am I needed — across everything" goal.
+ *
+ * This is the CONTENT check only; the >60s-away return trigger + dismiss state are
+ * composed by the caller (App), so this stays pure + unit-testable.
+ */
+export function hasReturnContent(activityTotal: number, top: AttentionItem | null): boolean {
+  return activityTotal > 0 || top !== null;
+}
