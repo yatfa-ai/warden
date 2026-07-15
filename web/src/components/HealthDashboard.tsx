@@ -47,6 +47,13 @@ interface Props {
   // unchanged unless a human opts into the per-host view.
   groupBy: GroupMode;
   onGroupByChange: (mode: GroupMode) => void;
+  // Per-host expand/collapse state inside Host grouping (WARDEN-237). Lifted to
+  // App + persisted (WARDEN-500) so which hosts a human collapses survives a
+  // Warden restart — App owns the single source of truth and this is read-only
+  // here except for the change handler. Completes the persistence WARDEN-468
+  // started for the grouping toggle itself. Default {} = every host expanded.
+  collapsedHosts: Record<string, boolean>;
+  onCollapsedHostsChange: (next: Record<string, boolean>) => void;
 }
 
 // Closed sits between idle and unknown: a dead session is non-critical and less
@@ -235,12 +242,11 @@ function TokenChip({ agent }: { agent: Chat }) {
   );
 }
 
-export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy, onGroupByChange: setGroupBy }: Props) {
+export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy, onGroupByChange: setGroupBy, collapsedHosts, onCollapsedHostsChange: setCollapsedHosts }: Props) {
   const [healthData, setHealthData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const hostLabels = useHostLabels();
-  const [collapsedHosts, setCollapsedHosts] = useState<Record<string, boolean>>({});
   // Closed-section expansion (WARDEN-245): collapsed shows the 5 most-recent dead
   // sessions; expanded shows up to 20. The true total is always surfaced so the
   // cap is never silent.
@@ -773,7 +779,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
                         </span>
                       <Button
                         variant="ghost"
-                        onClick={() => setCollapsedHosts(prev => ({ ...prev, [group.host]: !prev[group.host] }))}
+                        onClick={() => setCollapsedHosts({ ...collapsedHosts, [group.host]: !collapsedHosts[group.host] })}
                         aria-expanded={!collapsed}
                         aria-label={`${hostLabel}: ${group.agents.length} agent${group.agents.length !== 1 ? 's' : ''}${collapsed ? ', expand' : ', collapse'}`}
                         title={collapsed ? 'Expand host' : 'Collapse host'}

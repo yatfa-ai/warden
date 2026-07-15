@@ -475,6 +475,14 @@ export interface UiState {
   // every Warden restart; now App-owned + persisted so a cross-host human's Host
   // grouping survives reload. Defensive allow-list normalizer in loadUi below.
   healthGroupBy?: 'health' | 'host';
+  // WARDEN-500: the per-host expand/collapse state INSIDE Host grouping (which
+  // hosts are collapsed). Was a HealthDashboard-local useState that reset to {}
+  // on every Warden restart — so the durable grouping choice (WARDEN-468) survived
+  // reload but the expansion state beneath it did not. Now App-owned + persisted
+  // (completing WARDEN-468's slice). key = host, value = collapsed. Default {} =
+  // every host expanded = byte-for-byte today's behavior. Defensive drop-bad-
+  // entries normalizer (parseCollapsedHosts) in loadUi below.
+  healthCollapsedHosts?: Record<string, boolean>;
   // WARDEN-490 — per-host display labels (friendly names). Keys are the raw host
   // strings ('(local)' for this machine, the SSH host name for remote); values
   // are the human's label, which replaces the raw host in every host-tag display
@@ -640,6 +648,36 @@ function parseLabelsByHost(raw: unknown): HostLabels {
   return out;
 }
 
+// Sanitize a raw healthCollapsedHosts value (host key → collapsed?) into a
+// valid Record<string,boolean> (WARDEN-500 — mirrors parseCwdByHost's
+// drop-bad-entries model). The per-host expand/collapse state inside Health's
+// Host grouping was a HealthDashboard-local useState that reset to {} on every
+// Warden restart; now App-owned + persisted so a cross-host human's collapsed
+// hosts survive reload (completing the persistence WARDEN-468 started for the
+// grouping toggle itself). Defensive: never throws on malformed input
+// (WARDEN-89) — it drops bad entries instead, so one corrupt entry can never
+// blank the whole collapse map. Each entry requires a non-empty trimmed-string
+// KEY and a strictly-boolean VALUE; anything else is dropped. A non-object
+// payload (string/array/number) degrades to {} (every host expanded — byte-for-
+// byte today's default, zero regression for fresh installs).
+function parseCollapsedHosts(raw: unknown): Record<string, boolean> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    if (raw !== undefined && raw !== null) {
+      // A present-but-wrong-type value is genuine corruption worth surfacing.
+      console.warn('[loadUi] healthCollapsedHosts is not an object; ignoring:', raw);
+    }
+    return {};
+  }
+  const out: Record<string, boolean> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const key = typeof k === 'string' ? k.trim() : '';
+    if (!key) continue; // empty/whitespace key → drop
+    if (typeof v !== 'boolean') continue; // non-boolean value → drop
+    out[key] = v;
+  }
+  return out;
+}
+
 // Sanitize a raw defaultNewChatPresetByHost value (host key → preset name) into a
 // valid Record<string,string> (WARDEN-352 — mirrors parseCwdByHost). CRITICAL
 // DIFFERENCE from parseCwdByHost: cwd values are arbitrary path strings (a
@@ -800,7 +838,7 @@ const DEFAULT_UI: UiState = {
   restoreOnStartup: 'previous',
   defaultNewChatPreset: 'claude', defaultNewChatPresetByHost: {}, defaultNewChatHost: '(local)', customPresets: [], snippets: STARTER_SNIPPETS, defaultNewChatCwd: '', defaultNewChatCwdByHost: {},
   defaultShell: '', defaultShellByHost: {},
-  paneHost: {}, agentFilter: 'all', agentSort: 'manual', healthGroupBy: 'health', hostLabels: {},
+  paneHost: {}, agentFilter: 'all', agentSort: 'manual', healthGroupBy: 'health', healthCollapsedHosts: {}, hostLabels: {},
 };
 
 export function loadUi(): UiState {
@@ -945,6 +983,10 @@ export function loadUi(): UiState {
         // WARDEN-468: defensive allow-list — a legacy/corrupt value never selects
         // a dead group mode (mirrors the agentFilter enum normalizer above).
         healthGroupBy: v.healthGroupBy === 'host' ? 'host' : 'health',
+        // WARDEN-500: defensive drop-bad-entries parse — a corrupt map never blanks
+        // the whole collapse state. Mirrors parseCwdByHost/parseShellByHost: require
+        // string keys + boolean values, drop anything else; a non-object → {}.
+        healthCollapsedHosts: parseCollapsedHosts(v.healthCollapsedHosts),
         // WARDEN-490 — per-host display labels. Sanitized to a host→label map
         // with empty values dropped (no label = today's behavior). Display-only;
         // never sent to the backend.

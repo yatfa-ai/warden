@@ -655,6 +655,81 @@ test('the pref survives an empty-mode mount (carried by the live spread, not the
   assert.equal(loadUi().fileViewerViewMode, 'source');
 });
 
+console.log('\nhealthCollapsedHosts (Health dashboard per-host collapse state inside Host grouping) round-trips through loadUi/saveUi — WARDEN-500');
+// WARDEN-500: the per-host expand/collapse state inside Health's Host grouping
+// (WARDEN-237) silently reset to {} on every Warden restart because it was a
+// component-local useState with no persistence — so the durable grouping toggle
+// (WARDEN-468) survived reload but the collapsed hosts beneath it did not. The
+// fix lifts it to App (mirroring healthGroupBy in WARDEN-468) and adds it to
+// App's saveUi spread + the loadUi normalizer. These tests pin the storage half
+// of that contract and the persistence-boundary trap (a field lifted to App but
+// missing from EITHER the normalizer OR the saveUi spread is stripped at the
+// localStorage boundary and silently still resets).
+test('defaults to {} when nothing is stored (every host expanded — byte-for-byte today\'s behavior, zero regression)', () => {
+  reset();
+  assert.deepEqual(loadUi().healthCollapsedHosts, {});
+});
+test('a collapsed-host map round-trips (the headline fix — collapsed hosts survive reload)', () => {
+  reset();
+  saveUi({ ...loadUi(), healthCollapsedHosts: { 'host-a': true, 'host-b': false } });
+  assert.deepEqual(loadUi().healthCollapsedHosts, { 'host-a': true, 'host-b': false });
+});
+test('an empty map round-trips as {} (expanding every host persists nothing)', () => {
+  reset();
+  saveUi({ ...loadUi(), healthCollapsedHosts: {} });
+  assert.deepEqual(loadUi().healthCollapsedHosts, {});
+});
+test('a non-object coerces to {} (defensive, no throw)', () => {
+  reset();
+  // A string is not a plain map → {}.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], healthCollapsedHosts: 'bogus' }));
+  assert.deepEqual(loadUi().healthCollapsedHosts, {});
+  // An array is an object but NOT a plain map → {}.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], healthCollapsedHosts: [['host-a', true]] }));
+  assert.deepEqual(loadUi().healthCollapsedHosts, {});
+  // A number → {}.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], healthCollapsedHosts: 42 }));
+  assert.deepEqual(loadUi().healthCollapsedHosts, {});
+});
+test('entries with non-boolean values are dropped (never carry a non-boolean collapse flag; one corrupt entry never blanks the map)', () => {
+  reset();
+  // 'host-a'→'yes' (string), 'host-c'→1 (number, not strict boolean), 'host-d'→{x:1} dropped;
+  // 'host-b'→true kept. Mirrors defaultShellByHost's drop-bad-entries model.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], healthCollapsedHosts: { 'host-a': 'yes', 'host-b': true, 'host-c': 1, 'host-d': { x: 1 } } }));
+  assert.deepEqual(loadUi().healthCollapsedHosts, { 'host-b': true });
+});
+test('entries with empty/whitespace keys are dropped', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], healthCollapsedHosts: { '': true, '   ': true, 'host-a': true } }));
+  assert.deepEqual(loadUi().healthCollapsedHosts, { 'host-a': true });
+});
+test('a missing field loads as {}', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
+  assert.deepEqual(loadUi().healthCollapsedHosts, {});
+});
+test('the pref survives App\'s persistUiState write path (the WARDEN-500 regression guard)', () => {
+  // THE bug: App's saveUi spread OMITTED this key, so persistUiState received a
+  // `live` object lacking it, the written JSON lacked it, and reload reset to {}.
+  // This asserts the contract the fix relies on — when the key IS in the live
+  // spread (as App now includes it), persistUiState carries it and loadUi returns
+  // it. It exercises the exact write path App's saveUi effect uses, not just a
+  // direct saveUi.
+  reset();
+  const d0 = loadUi();
+  saveUi(persistUiState({ ...d0, healthCollapsedHosts: { 'host-a': true } }, 'previous', d0, false));
+  assert.deepEqual(loadUi().healthCollapsedHosts, { 'host-a': true });
+});
+test('the pref survives an empty-mode mount (carried by the live spread, not the frozen workspace)', () => {
+  // healthCollapsedHosts is NOT a workspace field, so persistUiState spreads it
+  // from `live`. Confirm an empty-launch still round-trips a freshly set value —
+  // the freeze must not drop it alongside the workspace.
+  reset();
+  const d0 = loadUi();
+  saveUi(persistUiState({ ...d0, healthCollapsedHosts: { 'host-a': true } }, 'empty', d0, true));
+  assert.deepEqual(loadUi().healthCollapsedHosts, { 'host-a': true });
+});
+
 console.log('\ninitialWorkspace gates the workspace on mount');
 test('"previous" restores the last-saved workspace', () => {
   const disk = { ...loadUi(), workspaces: [{ id: 'w1', name: 'Workspace 1', openPanes: ['a'], focused: 'a', recentlyClosed: [] }], activeWorkspaceId: 'w1', paneHost: { a: 'host' } };
@@ -1670,6 +1745,7 @@ const overTunedLive = () => {
     agentSort: 'recent',
     healthGroupBy: 'host',
     fileViewerViewMode: 'source',
+    healthCollapsedHosts: { 'host-a': true },
     // workspace + layout (all non-default → must be PRESERVED). WARDEN-372 moved
     // the open panes + focus into per-workspace WorkspacePaneSet objects under
     // `workspaces` (+ activeWorkspaceId); paneHost stayed global. Seed a
@@ -1709,6 +1785,7 @@ test('every pref field of resetUiPrefsPreservingWorkspace(live) equals DEFAULT_U
   assert.deepEqual(live.snippets, [{ name: 'custom-snippet', text: 'do the thing' }]);
   assert.equal(live.defaultShell, 'zsh', 'guard: live default shell was non-default');
   assert.deepEqual(live.defaultShellByHost, { 'host-a': 'fish' }, 'guard: live per-host shell override was non-default');
+  assert.deepEqual(live.healthCollapsedHosts, { 'host-a': true }, 'guard: live health collapse map was non-default');
 
   const r = resetUiPrefsPreservingWorkspace(live);
   // Every pref snaps to its DEFAULT_UI value.
@@ -1749,6 +1826,9 @@ test('every pref field of resetUiPrefsPreservingWorkspace(live) equals DEFAULT_U
   // healthGroupBy is in DEFAULT_UI (WARDEN-468); the helper resets it too.
   assert.equal(r.healthGroupBy, 'health');
   assert.equal(r.fileViewerViewMode, 'rendered');
+  // healthCollapsedHosts is in DEFAULT_UI (WARDEN-500); the helper resets it too
+  // (to {} = every host expanded).
+  assert.deepEqual(r.healthCollapsedHosts, {});
 });
 
 test('the workspace + panel-layout fields are copied from live (the workspace survives)', () => {
