@@ -510,6 +510,13 @@ export const LOCAL_ENV = process.platform === 'win32'
 // Find tmux on this machine. Linux/macOS: 'tmux'. Windows: ABSOLUTE path preferred —
 // node-pty's winpty doesn't reliably resolve a bare 'tmux' from PATH when spawning
 // (it reports "File not found: "), so we use the full MSYS2 path.
+//
+// Load-time one-shot (WARDEN-440): this `spawnSync('where', ...)` runs ONCE at
+// module import on win32. It is the documented "extreme necessity" exception to
+// the async-spawn rule — it executes before the server starts serving, so it can
+// never block a request or timer, and it must resolve before any tmux op can be
+// issued. Synchronous here is safe; the hot local-tmux transport itself
+// (runLocalTmux) is fully async.
 const TMUX_BIN = (() => {
   if (process.platform !== 'win32') return 'tmux';
   const msys = 'C:/msys64/usr/bin/tmux.exe';
@@ -529,14 +536,42 @@ export function toMsysPath(p) {
   return p.replace(/^([A-Za-z]):[\\/]/, (_m, d) => `/${d.toLowerCase()}/`).replace(/\\/g, '/');
 }
 
-// Run tmux locally with argv. Returns {ok, code, stdout, stderr}. `opts.timeout`
-// (ms) bounds the call — spawnSync sends SIGTERM to the tmux process if it
-// exceeds the budget, which is how the has-session liveness probe stays bounded
-// for local chats too (WARDEN-231). Without it a local probe could never hang,
-// but threading the option keeps the contract symmetric with the remote path.
+// Run tmux locally with argv. Returns a Promise of {ok, code, stdout, stderr}.
+//
+// ASYNC (WARDEN-440): uses async `spawn()` — NOT `spawnSync` — so the Node event
+// loop is NEVER held while tmux runs. The local tmux path (read/send/spawn/kill/
+// probe/resize via runTmux, the 2s pane monitor's per-pane capture, the catalog
+// alive/list-sessions sweep) all flow through here, so a single synchronous
+// `spawnSync` anywhere on it froze the ENTIRE server (every HTTP request, WS
+// frame, and timer queued behind it) for the child's duration — see WARDEN-88
+// Anti-Pattern 1B. `opts.timeout` (ms) reproduces spawnSync's bounded behavior:
+// we SIGTERM the child when the budget is exceeded (only armed for a positive
+// finite timeout, so an absent timeout never fires a 0ms kill). Shape mirrors
+// the remote `run()` path so runTmux's local and remote branches stay symmetric.
 export function runLocalTmux(args, opts = {}) {
-  const r = spawnSync(TMUX_BIN, args, { env: LOCAL_ENV, windowsHide: true, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024, timeout: opts.timeout });
-  return { ok: r.status === 0, code: r.status ?? -1, stdout: r.stdout || '', stderr: r.stderr || '' };
+  return new Promise((resolve) => {
+    const child = spawn(TMUX_BIN, args, { env: LOCAL_ENV, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    const ms = Number.isFinite(opts.timeout) ? opts.timeout : null;
+    const timer = ms && ms > 0 ? setTimeout(() => child.kill('SIGTERM'), ms) : null;
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', (err) => {
+      if (timer) clearTimeout(timer);
+      resolve({ ok: false, code: -1, stdout, stderr: stderr + String(err) });
+    });
+    // Resolve on 'close' (NOT 'exit'): 'close' fires only AFTER the stdio streams
+    // have fully drained, so stdout/stderr hold the COMPLETE output. 'exit' can
+    // fire while buffered pipe data is still being read — for a large capture
+    // (e.g. full-scrollback `capture-pane -S - -E -`, which can exceed the 64KB
+    // pipe buffer) that would truncate the tail and lose the most-recent content.
+    // The old spawnSync returned complete stdout; 'close' preserves that.
+    child.on('close', (code) => {
+      if (timer) clearTimeout(timer);
+      resolve({ ok: code === 0, code: code ?? -1, stdout, stderr });
+    });
+  });
 }
 
 // Local live pane: spawn tmux attach in a local PTY (node-pty).
@@ -576,21 +611,49 @@ export function attachTmux(chat, args, { cols = 100, rows = 30 } = {}) {
 // Find the `claude` binary on this machine / host → returns the full path or null.
 // claude is often in a dir added by .zshrc (e.g. ~/.local/bin), which `bash -lc`
 // (what tmux's shell runs) does NOT source — so we try zsh interactive login first.
-export async function detectClaude(host) {
+//
+// `deps` is an optional test seam (production callers omit it): inject
+// `runWithPool` to drive the remote candidate probes deterministically without
+// spawning real ssh — mirroring the deps seams on runWithPool/discover so the
+// WARDEN-440 concurrency (all probes in flight at once, not serial) is assertable.
+export async function detectClaude(host, deps = {}) {
+  const run = deps.runWithPool ?? runWithPool;
   if (host === '(local)') {
     const exe = process.env.CLAUDE_CODE_EXECPATH;
     if (exe && fs.existsSync(exe)) return exe;
-    try { if (spawnSync('claude', ['--version'], { env: LOCAL_ENV, windowsHide: true }).status === 0) return 'claude'; } catch { /* noop */ }
-    return null;
+    // ASYNC spawn (WARDEN-440): `claude --version` is a Node CLI cold-start; a
+    // synchronous spawnSync here held the event loop for its duration on every
+    // /api/claude-sessions hit. stdio is ignored — we only care about exit status.
+    const ok = await new Promise((resolve) => {
+      const child = spawn('claude', ['--version'], { env: LOCAL_ENV, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore'] });
+      child.on('error', () => resolve(false));
+      child.on('exit', (code) => resolve(code === 0));
+    });
+    return ok ? 'claude' : null;
   }
-  for (const cmd of ['zsh -lic "command -v claude" 2>/dev/null', 'bash -lc "command -v claude" 2>/dev/null']) {
-    const r = await runWithPool(host, cmd, { timeout: 8000 }, {});
+  // Run the candidate probes CONCURRENTLY (WARDEN-440): the previous serial loop
+  // issued up to 3 SSH probes in series, each on an 8s timeout — a single slow or
+  // wedged host stalled /api/claude-sessions + /api/resume for ~10–24s (WARDEN-88
+  // Anti-Pattern 1A). Promise.all collapses that to ≈ one timeout (≤8s) regardless
+  // of how many probes miss. Priority is preserved by evaluating results in order
+  // (zsh login → bash login → explicit path search) and returning the first
+  // `/`-prefixed hit — the same preference the serial short-circuit expressed.
+  // Each probe is caught so a transport error on one candidate can't reject the
+  // whole search; runWithPool already resolves (never throws) on failure, this is
+  // belt-and-suspenders.
+  const cmds = [
+    'zsh -lic "command -v claude" 2>/dev/null',
+    'bash -lc "command -v claude" 2>/dev/null',
+    'for p in ~/.local/bin/claude /opt/homebrew/bin/claude /usr/local/bin/claude ~/bin/claude ~/n/bin/claude; do [ -x "$p" ] && { echo "$p"; break; }; done',
+  ];
+  const results = await Promise.all(cmds.map((cmd) =>
+    run(host, cmd, { timeout: 8000 }, {}).catch(() => ({ ok: false, code: -1, stdout: '', stderr: '' })),
+  ));
+  for (const r of results) {
     const p = (r.stdout || '').trim().split(/\r?\n/).pop().trim();
     if (p.startsWith('/')) return p;
   }
-  const r = await runWithPool(host, 'for p in ~/.local/bin/claude /opt/homebrew/bin/claude /usr/local/bin/claude ~/bin/claude ~/n/bin/claude; do [ -x "$p" ] && { echo "$p"; break; }; done', { timeout: 8000 }, {});
-  const p2 = (r.stdout || '').trim();
-  return p2.startsWith('/') ? p2 : null;
+  return null;
 }
 
 export function attachInteractiveTmux(chat, args) {

@@ -107,33 +107,36 @@ describe('probeSession (real local tmux)', { skip: !tmuxPresent && 'tmux not ins
   const session = `warden-test-probe-${process.pid}-${Math.random().toString(36).slice(2, 6)}`;
   const chat = { host: LOCAL, session };
 
-  after(() => { try { runLocalTmux(['kill-session', '-t', session]); } catch { /* best effort */ } });
+  after(async () => { try { await runLocalTmux(['kill-session', '-t', session]); } catch { /* best effort */ } });
 
   it('an existing session probes ok → classifyProbe null (alive)', async () => {
-    runLocalTmux(['new-session', '-d', '-s', session, 'sleep', '3600']);
+    await runLocalTmux(['new-session', '-d', '-s', session, 'sleep', '3600']);
     const probe = await probeSession(chat, {});
     assert.strictEqual(probe.ok, true);
     assert.strictEqual(classifyProbe(probe), null);
   });
 
   it('an absent session probes !ok → classifyProbe session_dead', async () => {
-    runLocalTmux(['kill-session', '-t', session]); // now dead
+    await runLocalTmux(['kill-session', '-t', session]); // now dead
     const probe = await probeSession(chat, {});
     assert.strictEqual(probe.ok, false);
     assert.strictEqual(classifyProbe(probe), 'session_dead');
   });
 
   it('honors a bounded timeout option without breaking a fast probe', async () => {
-    runLocalTmux(['new-session', '-d', '-s', session, 'sleep', '3600']);
+    await runLocalTmux(['new-session', '-d', '-s', session, 'sleep', '3600']);
     const probe = await probeSession(chat, {}, { timeout: 5000 });
     assert.strictEqual(probe.ok, true);
-    runLocalTmux(['kill-session', '-t', session]);
+    await runLocalTmux(['kill-session', '-t', session]);
   });
 });
 
 describe('runLocalTmux threads the timeout option', () => {
-  it('accepts {timeout} and still returns the raw result shape for a fast call', () => {
-    const r = runLocalTmux(['has-session', '-t', `definitely-absent-${Math.random().toString(36).slice(2, 8)}`], { timeout: 5000 });
+  it('accepts {timeout} and still returns the raw result shape for a fast call', async () => {
+    // runLocalTmux is async (WARDEN-440): the local tmux transport no longer
+    // holds the event loop. The result shape is unchanged — {ok, code, stdout,
+    // stderr} — and a positive {timeout} is still honored (armed as a SIGTERM).
+    const r = await runLocalTmux(['has-session', '-t', `definitely-absent-${Math.random().toString(36).slice(2, 8)}`], { timeout: 5000 });
     assert.strictEqual(r.ok, false);
     assert.ok(typeof r.code === 'number');
     assert.ok('stdout' in r && 'stderr' in r);
@@ -201,7 +204,7 @@ describe('/api/respawn HTTP endpoint (real Express app from server.js)', () => {
     if (httpServer) await new Promise((r) => httpServer.close(r));
     // Clean up any tmux session we created.
     for (const s of [session, nocmdSession, claudeSession]) {
-      try { runLocalTmux(['kill-session', '-t', s]); } catch { /* best effort */ }
+      try { await runLocalTmux(['kill-session', '-t', s]); } catch { /* best effort */ }
     }
     if (originalExecPath === undefined) delete process.env.CLAUDE_CODE_EXECPATH;
     else process.env.CLAUDE_CODE_EXECPATH = originalExecPath;
@@ -212,7 +215,7 @@ describe('/api/respawn HTTP endpoint (real Express app from server.js)', () => {
 
   it('recreates a dead chat session under the same name by re-running its cmd', async () => {
     // The catalog session does not exist yet (dead). Respawn must recreate it.
-    assert.strictEqual(runLocalTmux(['has-session', '-t', session]).ok, false);
+    assert.strictEqual((await runLocalTmux(['has-session', '-t', session])).ok, false);
     const res = await fetch(`${baseUrl}/api/respawn`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -222,7 +225,7 @@ describe('/api/respawn HTTP endpoint (real Express app from server.js)', () => {
     assert.ok(res.ok, `expected 2xx, got ${res.status}: ${JSON.stringify(body)}`);
     assert.strictEqual(body.ok, true);
     // The session must now actually be alive.
-    assert.strictEqual(runLocalTmux(['has-session', '-t', session]).ok, true);
+    assert.strictEqual((await runLocalTmux(['has-session', '-t', session])).ok, true);
   });
 
   it('is idempotent on a live session (kill + recreate leaves it alive)', async () => {
@@ -232,7 +235,7 @@ describe('/api/respawn HTTP endpoint (real Express app from server.js)', () => {
       body: JSON.stringify({ id: `${LOCAL}:${session}` }),
     });
     assert.ok(res.ok, `expected 2xx, got ${res.status}`);
-    assert.strictEqual(runLocalTmux(['has-session', '-t', session]).ok, true);
+    assert.strictEqual((await runLocalTmux(['has-session', '-t', session])).ok, true);
   });
 
   it('rejects a cmd-less chat with 400 (only cmd-carrying chats can re-spawn)', async () => {
@@ -263,7 +266,7 @@ describe('/api/respawn HTTP endpoint (real Express app from server.js)', () => {
     // With the fix, resolveClaudeCmd substitutes the absolute path, the fake
     // binary runs, and it records $0 == the absolute path. Asserting the marker
     // equals fakeClaude (an absolute path, not the bare word) proves the call.
-    assert.strictEqual(runLocalTmux(['has-session', '-t', claudeSession]).ok, false);
+    assert.strictEqual((await runLocalTmux(['has-session', '-t', claudeSession])).ok, false);
     const res = await fetch(`${baseUrl}/api/respawn`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -272,7 +275,7 @@ describe('/api/respawn HTTP endpoint (real Express app from server.js)', () => {
     const body = await res.json();
     assert.ok(res.ok, `expected 2xx, got ${res.status}: ${JSON.stringify(body)}`);
     assert.strictEqual(body.ok, true);
-    assert.strictEqual(runLocalTmux(['has-session', '-t', claudeSession]).ok, true);
+    assert.strictEqual((await runLocalTmux(['has-session', '-t', claudeSession])).ok, true);
     // The fake claude writes its invocation ($0) to the marker once it starts.
     // Poll briefly — hasSession returning true slightly races the echo flushing.
     let invoked = '';

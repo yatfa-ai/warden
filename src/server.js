@@ -112,7 +112,9 @@ async function resolve(id) {
 // Verify tmux is available (local exec or remote host). Returns null or an error string.
 async function preflightTmux(host) {
   if (host === LOCAL) {
-    const r = runLocalTmux(['-V']);
+    // runLocalTmux is async (WARDEN-440) so this `tmux -V` probe never blocks the
+    // event loop while serving the spawn/resume request that triggered preflight.
+    const r = await runLocalTmux(['-V']);
     return r.ok ? null : 'tmux not found on this machine. Install it (Linux/macOS: tmux; Windows: MSYS2 tmux).';
   }
   const r = await run(host, 'command -v tmux >/dev/null 2>&1 && echo OK || echo MISSING', { timeout: 8000 });

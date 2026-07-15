@@ -101,12 +101,15 @@ describe('stream attach lifecycle identity guard (real server + local PTY)', { s
 
   // Each test starts from a clean, alive tmux session regardless of what the
   // previous test did to it (test A kills it; test B must not inherit that).
-  beforeEach(() => {
-    try { runLocalTmux(['kill-session', '-t', session]); } catch { /* best effort */ }
-    runLocalTmux(['new-session', '-d', '-s', session, 'sleep', '3600']);
+  // runLocalTmux is async (WARDEN-440): the local tmux transport returns a
+  // promise, so each call must be awaited or new-session won't exist by the time
+  // the next test connects (→ spurious session_dead). See session-recovery.test.js.
+  beforeEach(async () => {
+    try { await runLocalTmux(['kill-session', '-t', session]); } catch { /* best effort */ }
+    await runLocalTmux(['new-session', '-d', '-s', session, 'sleep', '3600']);
   });
-  afterEach(() => {
-    try { runLocalTmux(['kill-session', '-t', session]); } catch { /* best effort */ }
+  afterEach(async () => {
+    try { await runLocalTmux(['kill-session', '-t', session]); } catch { /* best effort */ }
   });
 
   after(async () => {
@@ -126,7 +129,7 @@ describe('stream attach lifecycle identity guard (real server + local PTY)', { s
       assert.strictEqual(c.ofType('ended').length, 0, 'no ended before the session ends');
       // Killing the tmux session makes the `tmux attach` viewer PTY exit cleanly
       // — a natural exit of the live entry (not a pty.kill()).
-      runLocalTmux(['kill-session', '-t', session]);
+      await runLocalTmux(['kill-session', '-t', session]);
       await c.waitForN('ended', 1);
       // Drain any trailing events, then assert the SINGLE natural exit produced
       // exactly one ended (no doubling from any path).
@@ -163,7 +166,7 @@ describe('stream attach lifecycle identity guard (real server + local PTY)', { s
       // PTY2 must still be the LIVE entry — proof PTY1's late onExit neither
       // sent an ended nor `delete`d PTY2's entry. Killing the tmux session makes
       // PTY2 exit naturally; that must be the ONLY ended for the whole sequence.
-      runLocalTmux(['kill-session', '-t', session]);
+      await runLocalTmux(['kill-session', '-t', session]);
       await c.waitForN('ended', 1);
       // Drain so any hypothetical orphaned/stale PTY onExit would land here too.
       await new Promise((r) => setTimeout(r, 800));

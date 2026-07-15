@@ -177,18 +177,19 @@ export function comparePinned(a, b, pins) {
   return pa - pb;
 }
 
-// Resolve ALL alive local tmux session names in ONE spawnSync — a single
-// `list-sessions` — instead of one `has-session` spawnSync per catalog chat.
-// The per-chat loop ran synchronously inside a `.map`, so it blocked the Node
-// event loop for ~N × (process-spawn cost) on every discovery; on Windows/MSYS2
-// each spawnSync is a heavy tmux.exe fork, and with the 60s lifecycle poll
-// (WARDEN-147) PLUS the frontend's own 60s local re-discover, that froze the
-// whole server whenever a tick landed — every HTTP request (open settings, etc.)
-// queued behind it. One call regardless of N; membership tested in JS. Returns
-// an empty Set when no tmux server is running (list-sessions exits non-zero) so
-// every catalog chat correctly reads inactive.
-function localAliveSessions() {
-  const res = runLocalTmux(['list-sessions', '-F', '#{session_name}']);
+// Resolve ALL alive local tmux session names in ONE async `list-sessions` — a
+// single tmux spawn — instead of one `has-session` per catalog chat. The per-chat
+// loop ran synchronously inside a `.map`, so it blocked the Node event loop for
+// ~N × (process-spawn cost) on every discovery; on Windows/MSYS2 each spawn is a
+// heavy tmux.exe fork, and with the 60s lifecycle poll (WARDEN-147) PLUS the
+// frontend's own 60s local re-discover, that froze the whole server whenever a
+// tick landed — every HTTP request (open settings, etc.) queued behind it. One
+// call regardless of N; membership tested in JS. Returns an empty Set when no
+// tmux server is running (list-sessions exits non-zero) so every catalog chat
+// correctly reads inactive. ASYNC since WARDEN-440: the single list-sessions
+// spawn goes through async runLocalTmux so it never blocks the event loop.
+async function localAliveSessions() {
+  const res = await runLocalTmux(['list-sessions', '-F', '#{session_name}']);
   if (!res.ok) return new Set();
   return new Set((res.stdout || '').split('\n').map((s) => s.replace(/\r$/, '').trim()).filter(Boolean));
 }
@@ -356,11 +357,12 @@ export async function discoverAll(hosts, cfg, opts = {}) {
     const byHost = {};
     for (const e of catalog) (byHost[e.host || LOCAL] ||= []).push(e);
     await Promise.all(Object.entries(byHost).map(async ([host, entries]) => {
-      // Local: ONE spawnSync (list-sessions) resolves every catalog chat's
-      // alive/dead state via Set membership — not N blocking has-session calls.
+      // Local: ONE async list-sessions (runLocalTmux) resolves every catalog
+      // chat's alive/dead state via Set membership — not N blocking has-session
+      // calls.
       let actives;
       if (host === LOCAL) {
-        const alive = localAliveSessions();
+        const alive = await localAliveSessions();
         actives = entries.map((e) => ({ e, active: alive.has(e.session) }));
       } else {
         actives = (await discoverManual(host, entries, cfg)).map((e) => ({ e, active: e.active }));
@@ -384,7 +386,10 @@ export async function discoverAll(hosts, cfg, opts = {}) {
       if (opts.activity !== false && activeLocalSessions.length > 0) {
         await Promise.all(
           activeLocalSessions.map(obj =>
-            Promise.resolve(runLocalTmux(['capture-pane', '-t', obj.session, '-p', '-S', '-', '-E', '-']))
+            // runLocalTmux is async (WARDEN-440): each capture-pane runs as a
+            // non-blocking concurrent spawn, so this per-active-session sweep
+            // never holds the event loop.
+            runLocalTmux(['capture-pane', '-t', obj.session, '-p', '-S', '-', '-E', '-'])
               .then(activityRes => {
                 if (activityRes.ok) {
                   // Shared timestamp parse — same helper the companion + remote
@@ -459,15 +464,16 @@ export async function discoverHost(host, cfg) {
 
   if (host === LOCAL) {
     const entries = loadCatalog().filter((e) => (e.host || LOCAL) === LOCAL);
-    // ONE spawnSync (list-sessions) resolves every local catalog chat's
+    // ONE async list-sessions (runLocalTmux) resolves every local catalog chat's
     // alive/dead state — not N blocking has-session calls (this runs on the
     // frontend's 60s /api/discover refresh for THIS_MACHINE too).
-    const alive = localAliveSessions();
+    const alive = await localAliveSessions();
     const objs = entries.map((e) => ({
       e, o: toCatalogChat(LOCAL, e, alive.has(e.session), null),
     })).map((x) => x.o);
     await Promise.all(objs.filter((o) => o.active).map((o) =>
-      Promise.resolve(runLocalTmux(['capture-pane', '-t', o.session, '-p', '-S', '-', '-E', '-']))
+      // runLocalTmux is async (WARDEN-440): concurrent, non-blocking captures.
+      runLocalTmux(['capture-pane', '-t', o.session, '-p', '-S', '-', '-E', '-'])
         .then((r) => {
           if (r.ok) {
             // Shared timestamp parse — same helper every discovery path uses
@@ -545,10 +551,17 @@ export async function capturePanes(chats, cfg = {}) {
   const out = {};
   await Promise.all(Object.entries(byHost).map(async ([host, list]) => {
     if (host === LOCAL) {
-      for (const c of list) {
-        const r = runLocalTmux(['capture-pane', '-t', c.session || c.container, '-p', '-e', '-S', '-60', '-E', '-']);
+      // WARDEN-440: capture each LOCAL pane via async runLocalTmux, concurrently.
+      // The previous `for` loop awaited a SYNCHRONOUS runLocalTmux per pane, so
+      // with N open local panes the 2s pane monitor held the event loop for
+      // N × (tmux spawn cost) every tick — every other request (open Settings,
+      // type into a pane) queued behind it. Async + Promise.all collapses that to
+      // ≈ one spawn of wall-clock AND frees the event loop entirely: spawns run
+      // off-thread, so HTTP/WS/timers stay responsive during monitor ticks.
+      await Promise.all(list.map(async (c) => {
+        const r = await runLocalTmux(['capture-pane', '-t', c.session || c.container, '-p', '-e', '-S', '-60', '-E', '-']);
         if (r.ok) out[c.key] = r.stdout;
-      }
+      }));
       return;
     }
     // Experimental companion transport (WARDEN-276): for REMOTE hosts, when
