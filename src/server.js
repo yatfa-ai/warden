@@ -26,7 +26,7 @@ import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { classifyPane, stripAnsi } from './agentState.js';
 import { checkHost } from './hostStatus.js';
 import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, buildDockerGitArgv } from './gitStatus.js';
-import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions } from './companion.js';
+import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep } from './companion.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = load();
@@ -3549,6 +3549,12 @@ export function startServer(port = 7421, host = '127.0.0.1') {
     // until the human opts in via Settings; once enabled, reuses the existing
     // session-usage fetch on a 120s beat and caches the result for /api/budget.
     startBudgetPoll();
+    // Start the background pane-delta TTL sweep (WARDEN-413). When the last pane
+    // closes the frontend stops polling, so the request-driven reconcile can't age
+    // out subscriptions; this decoupled sweep releases them via unsubscribePanes.
+    // Self-gates on the companion flag (no-op when off); unref'd so it never keeps
+    // the event loop alive.
+    startPaneDeltaSweep(cfg);
     // Lazy mode: no startup SSH. Connections open on demand (per-host discover / pane read).
   });
 }

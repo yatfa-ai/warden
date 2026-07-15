@@ -812,13 +812,19 @@ const syncInFlight = new Map();
 // requests it within the TTL, and released only when the last poller stops. One
 // ref per watched key (balanced add/remove), composable with the WS monitor refs.
 const agentStateWatched = new Map();
-const AGENT_STATE_TTL_MS = 30_000; // ~3 polls at the 10s cadence; a pane that left every poller is released within this window.
+const AGENT_STATE_TTL_MS = 30_000; // ~1 poll at the 30s /api/agent-states cadence. A pane that left every poller is aged out ~2 polls later (the strict `>` evicts one tick past the TTL).
+
+// Background TTL-sweep timer (started by startPaneDeltaSweep). Held at module
+// scope so startPaneDeltaSweep is idempotent and _resetPaneDeltaStateForTests can
+// tear it down so a real interval never bleeds across describe blocks.
+let paneDeltaSweepTimer = null;
 
 export function _resetPaneDeltaStateForTests() {
   paneDeltaCache.clear();
   paneSubscriptions.clear();
   syncInFlight.clear();
   agentStateWatched.clear();
+  if (paneDeltaSweepTimer) { clearInterval(paneDeltaSweepTimer); paneDeltaSweepTimer = null; }
 }
 
 // Apply one paneDelta event to the host's cache entry. Exported (and pure aside
@@ -1075,8 +1081,10 @@ export async function reconcilePaneSubscriptions(chats, cfg = {}, opts = {}, dep
   // TTL sweep across ALL watched hosts (including ones absent from this poll): a
   // key no poller has requested within the TTL is released — its ref-- stops the
   // push for that pane (and the host's subscription empties when its last pane
-  // leaves). Runs on every non-empty poll, so eviction keeps pace with churn as
-  // long as any poller is active.
+  // leaves). This request-driven sweep covers the case where SOME pane is still
+  // polled; the no-poller-active case (frontend stopped polling entirely once the
+  // last pane closed) is covered by the background sweep (startPaneDeltaSweep),
+  // which calls this with an empty set on its own timer. (WARDEN-413)
   const hostsToDelete = [];
   for (const [host, watched] of agentStateWatched) {
     const removed = [];
@@ -1089,6 +1097,38 @@ export async function reconcilePaneSubscriptions(chats, cfg = {}, opts = {}, dep
   }
   for (const h of hostsToDelete) agentStateWatched.delete(h);
   return Promise.all(results);
+}
+
+// ----------------------- background TTL sweep (WARDEN-413) --------------------
+// reconcilePaneSubscriptions is request-driven: it runs when /api/agent-states
+// polls. But when the last pane closes, the frontend stops polling ENTIRELY
+// (useAttentionRollup returns before the fetch once the open∪watched union is
+// empty) and the handler short-circuits on an empty polled set BEFORE reconcile.
+// So the request-driven TTL sweep never fires, and every previously-subscribed
+// pane would keep being re-captured by its companion at 1Hz FOREVER — the
+// optimization inverting on the exact "user walked away" fleet it protects.
+//
+// This background sweep closes that leak: on its OWN timer, decoupled from any
+// request, it calls reconcilePaneSubscriptions([]) — an EMPTY polled set, so the
+// "subscribe newly-entered" pass is a no-op but the TTL sweep across ALL watched
+// hosts still runs, releasing stale keys via unsubscribePanes. Idempotent (one
+// timer per process); the timer is unref'd so it never keeps the event loop alive
+// on its own. Flag off -> no timer (self-gated, so the call site in startServer is
+// unconditional). `opts.interval` is for tests; production uses the TTL cadence.
+export function startPaneDeltaSweep(cfg = {}, opts = {}, deps = {}) {
+  if (paneDeltaSweepTimer) return paneDeltaSweepTimer;
+  if (!isCompanionTransportEnabled()) return null;
+  const interval = opts.interval ?? AGENT_STATE_TTL_MS;
+  const tick = () => { reconcilePaneSubscriptions([], cfg, {}, deps).catch(() => {}); };
+  paneDeltaSweepTimer = setInterval(tick, interval);
+  if (typeof paneDeltaSweepTimer.unref === 'function') paneDeltaSweepTimer.unref();
+  return paneDeltaSweepTimer;
+}
+
+// Test-only: clear the background sweep timer (and reset the idempotency guard) so
+// a real interval never bleeds across describe blocks.
+export function _stopPaneDeltaSweepForTests() {
+  if (paneDeltaSweepTimer) { clearInterval(paneDeltaSweepTimer); paneDeltaSweepTimer = null; }
 }
 
 // Pure model of per-tick ssh spawn cost, used by scripts/companion-benchmark.mjs

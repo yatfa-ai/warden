@@ -37,6 +37,7 @@ import {
   subscribePanes, unsubscribePanes,
   reconcilePaneSubscriptions, _getAgentStateWatchedForTests,
   _resetPaneDeltaStateForTests, _getPaneSubscriptionsForTests,
+  startPaneDeltaSweep, _stopPaneDeltaSweepForTests,
 } from './companion.js';
 import { probeSession, hasSession as tmuxHasSession, resize as tmuxResize } from './tmux.js';
 import { classifyProbe } from './sessionRecovery.js';
@@ -711,6 +712,70 @@ describe('reconcilePaneSubscriptions (WARDEN-413 /api/agent-states trigger)', ()
     // Time advances past a's TTL (last seen 1000) with only B polling -> a released, b stays.
     await reconcilePaneSubscriptions([{ host: 'prod', key: 'b', container: 'b', session: 'b' }], {}, { now: 42_000 }, deps);
     assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { b: 1 }, 'a released only once aged out; b still live');
+  });
+
+  it('a pane whose pollers ALL stop is released by the EMPTY-set sweep (the background-timer path)', async () => {
+    const sent = [];
+    const t = healthySubTransport();
+    const origWrite = t.write.bind(t);
+    t.write = (line) => { sent.push(JSON.parse(line)); origWrite(line); };
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    // A pane is polled (t=1000): subscribed.
+    await reconcilePaneSubscriptions([{ host: 'prod', key: 'w1', container: 'w1', session: 'agent' }], {}, { now: 1000 }, deps);
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests().prod, { w1: 1 });
+    // The user closes ALL panes -> the frontend stops polling entirely, so NO pane
+    // is in the polled set and the request-driven reconcile never runs. The
+    // background sweep (startPaneDeltaSweep) calls reconcile with an EMPTY set;
+    // advancing now past the TTL must age w1 out and fire unsubscribePanes. This
+    // is the cleanup-leak fix (the tests above always poll at least one pane, so
+    // they exercise the request-driven sweep — not this decoupled path).
+    const before = sent.filter((s) => s.method === 'unsubscribePanes').length;
+    await reconcilePaneSubscriptions([], {}, { now: 42_000 }, deps);
+    assert.ok(
+      sent.filter((s) => s.method === 'unsubscribePanes').length > before,
+      'empty-set sweep fired unsubscribePanes for the closed pane'
+    );
+    assert.deepStrictEqual(_getPaneSubscriptionsForTests(), {}, 'subscription released once aged out');
+    assert.deepStrictEqual(_getAgentStateWatchedForTests(), {}, 'watched entry evicted');
+  });
+});
+
+// ----------------------- startPaneDeltaSweep (WARDEN-413) ---------------------
+// The background TTL-sweep timer: arms once when the companion flag is on (so the
+// empty-set cleanup path the test above proves actually FIRES in production, even
+// when no client is polling), self-gates off when the flag is off, and is
+// idempotent. No real elapsed time is needed here — the eviction LOGIC is proven
+// by the empty-set reconcile test above; this asserts the timer is armed under the
+// right conditions (the production wiring in startServer calls this unconditionally).
+
+describe('startPaneDeltaSweep: background TTL sweep (WARDEN-413 cleanup-leak fix)', () => {
+  let savedEnv;
+  beforeEach(() => {
+    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+    process.env.WARDEN_COMPANION_TRANSPORT = '1';
+    _resetChannelCacheForTests();
+    _resetPaneDeltaStateForTests();
+  });
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
+    _stopPaneDeltaSweepForTests();
+    _resetChannelCacheForTests();
+    _resetPaneDeltaStateForTests();
+  });
+
+  it('arms one idempotent timer when the flag is on; null when off', () => {
+    const t1 = startPaneDeltaSweep({});
+    assert.ok(t1, 'flag on -> arms a timer');
+    assert.strictEqual(startPaneDeltaSweep({}), t1, 'idempotent: second start returns the SAME timer');
+    // Stopping clears the idempotency guard, so a subsequent start arms a NEW one.
+    _stopPaneDeltaSweepForTests();
+    const t2 = startPaneDeltaSweep({});
+    assert.notStrictEqual(t1, t2, 'after stop, a new start arms a fresh timer');
+    _stopPaneDeltaSweepForTests();
+    // Flag off -> no timer (the startServer call site relies on this self-gate).
+    delete process.env.WARDEN_COMPANION_TRANSPORT;
+    assert.strictEqual(startPaneDeltaSweep({}), null, 'flag off -> no timer');
   });
 });
 
