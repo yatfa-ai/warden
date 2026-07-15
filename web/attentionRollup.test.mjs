@@ -30,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-attention-test-'));
 const tmpFile = join(tmpDir, 'attentionRollup.mjs');
 writeFileSync(tmpFile, code);
-const { buildAttentionRollup, EMPTY_ATTENTION_ROLLUP, rankAttention } = await import(tmpFile);
+const { buildAttentionRollup, EMPTY_ATTENTION_ROLLUP, rankAttention, attentionReason, hasReturnContent } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -316,6 +316,59 @@ test('top identity uses key || id so the deep-link opens the correct pane', () =
   const { top } = rankAttention(r);
   assert.equal(top.id, 'pane-key', 'id is the key when present (matches the badge row keying)');
   assert.equal(top.name, 'My Agent');
+});
+
+console.log('\nattentionReason (WARDEN-436): the "because X" line, shared by the popover + return-banner callouts');
+// Minimal AttentionItem builder — attentionReason only reads id/state/signal, so the
+// name is irrelevant to these cases.
+const item = (state, extra = {}) => ({ id: 'x', state, ...extra });
+test('a concrete signal is the reason (the triggering line / matched prompt)', () => {
+  assert.equal(attentionReason(item('waiting', { signal: 'press enter to continue' })), 'press enter to continue');
+});
+test('no signal → state-keyed fallback phrased as "why it needs you"', () => {
+  assert.equal(attentionReason(item('waiting')), 'waiting for your input');
+  assert.equal(attentionReason(item('erroring')), 'emitting errors');
+  assert.equal(attentionReason(item('stuck')), 'stuck in a loop');
+  assert.equal(attentionReason(item('blocked')), 'blocked on another agent');
+});
+test('health-group agents (critical/warning, no signal of their own) get their fallback', () => {
+  assert.equal(attentionReason(item('critical')), 'critical health');
+  assert.equal(attentionReason(item('warning')), 'needs attention');
+});
+test('an empty-string signal is treated as absent (not a useful reason) → fallback', () => {
+  assert.equal(attentionReason(item('stuck', { signal: '' })), 'stuck in a loop');
+});
+test('unknown state + no signal → generic default', () => {
+  assert.equal(attentionReason(item('mystery')), 'needs attention');
+});
+test('a real ranked top carries its signal through attentionReason (integration)', () => {
+  const r = roll(health(), stats(), [stateRow('w1', 'waiting', { signal: 'awaiting your decision' })]);
+  const { top } = rankAttention(r);
+  assert.equal(attentionReason(top), 'awaiting your decision');
+});
+
+console.log('\nhasReturnContent (WARDEN-436): the return banner fires on activity OR a ranked top');
+test('no activity and no ranked top → nothing to surface (banner hidden)', () => {
+  assert.equal(hasReturnContent(0, null), false);
+});
+test('activity events since close → surface (the original total>0 gate)', () => {
+  assert.equal(hasReturnContent(5, null), true);
+});
+test('no activity but a ranked top → surface (the broadened gate — agent needs you NOW)', () => {
+  assert.equal(hasReturnContent(0, item('waiting')), true);
+});
+test('both activity and a ranked top → surface', () => {
+  assert.equal(hasReturnContent(3, item('stuck')), true);
+});
+test('the broadened gate is what unblocks the stuck-with-zero-events case', () => {
+  // An agent that became stuck/waiting/critical AFTER close with ZERO directives or
+  // errors since close: total 0, but top != null. The OLD gate (total>0 only) hid
+  // the banner entirely; hasReturnContent surfaces it.
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck', { signal: 'repeating line' })]);
+  assert.equal(r.total, 1, 'rollup total reflects the stuck pane');
+  const { top } = rankAttention(r);
+  assert.notEqual(top, null);
+  assert.equal(hasReturnContent(0, top), true, 'zero activity events, but ranked top → still surface');
 });
 
 console.log(`\n✓ ATTENTION ROLLUP TESTS PASS (${passed})`);

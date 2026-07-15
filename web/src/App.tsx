@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
 import { loadUi, saveUi, persistUiState, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, STARTER_SNIPPETS, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type WorkspacePaneSet, type RecentlyClosedEntry, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
@@ -9,8 +9,11 @@ import { type TimestampFormat } from '@/lib/formatTimestamp';
 import { type AgentFilter, type AgentSort } from '@/lib/agentFilter';
 import { stampLastSeen } from '@/lib/whatsNew';
 import { useWatchCatchup } from '@/lib/useWatchCatchup';
-import { requestAlertPermission } from '@/lib/desktopAlerts';
+import { requestAlertPermission, type AttentionSeverityPrefs } from '@/lib/desktopAlerts';
 import { useTokenBudget } from '@/lib/useTokenBudget';
+import { useAttentionRollup } from '@/lib/useAttentionRollup';
+import { rankAttention, hasReturnContent, attentionReason, type AttentionItem } from '@/lib/attentionRollup';
+import { cn } from '@/lib/utils';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
@@ -22,14 +25,24 @@ import { SettingsPage } from '@/components/SettingsPage';
 import { OpenChatBrowserPage } from '@/components/OpenChatBrowserPage';
 import { GlobalSearchDialog } from '@/components/GlobalSearchDialog';
 import { HealthDashboard } from '@/components/HealthDashboard';
-import { AttentionBadge } from '@/components/AttentionBadge';
+import { AttentionBadge, dotForState } from '@/components/AttentionBadge';
 import { WatchCatchup } from '@/components/WatchCatchup';
 import { StatusDot } from '@/components/StatusDot';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS } from '@/lib/pollInterval';
 import { toast } from 'sonner';
+
+// WARDEN-436: the return banner may FIRST appear only within this window after the
+// human returns (>60s away). It covers the rollup's cold-start window (the first
+// /api/health + /api/agent-states polls fire on mount but take a round-trip to
+// resolve — the callout fills in as they land). Matches the slowest poll cadence
+// (AGENT_STATE_POLL_MS) so a slow first fetch can still latch the banner. After the
+// window the banner never appears ambiently; a pane that LATER needs attention
+// updates the header badge, not a spontaneous banner. See the windowed latch below.
+const RETURN_BANNER_WINDOW_MS = 30_000;
 
 // Canonical id of this machine's own tmux host (mirrors LOCAL in src/chats.js). Local agents
 // are auto-discovered on mount so their dots are live without a click; remote SSH hosts stay
@@ -167,7 +180,20 @@ function App() {
   const [newActivity, setNewActivity] = useState<Set<string>>(new Set());
   const [streamConn, setStreamConn] = useState(false);
   const [activitySinceClose, setActivitySinceClose] = useState<any>(null);
-  const [showActivityBanner, setShowActivityBanner] = useState(false);
+  // WARDEN-436: the return banner now surfaces the ranked "you're needed HERE"
+  // callout as its lead. Visibility is split into two concerns:
+  //  - returnedAfterAbsence: the user-initiated RETURN trigger (set once on mount
+  //    when >60s elapsed since warden:lastClose). This is the conservative,
+  //    never-ambient gate — the banner can ONLY ever show right after a return.
+  //  - bannerDismissed: the human clicked × — suppresses the banner until the next
+  //    return (so it never re-pops ambiently mid-session).
+  // The actual show/hide is DERIVED below (returnedAfterAbsence && !dismissed &&
+  // hasReturnContent(...)) so the ranked callout can fill in once the rollup
+  // arrives without an imperative setShow, and so the gate broadening — also fire
+  // on a non-null ranked top, not just since-close activity events — lives in one
+  // pure, unit-tested predicate (hasReturnContent).
+  const [returnedAfterAbsence, setReturnedAfterAbsence] = useState(false);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
   const [externalViewMode, setExternalViewMode] = useState<'sessions' | 'activity' | 'directives' | null>(null);
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
   const [externalSearchQuery, setExternalSearchQuery] = useState<{ paneId: string; query: string } | null>(null);
@@ -392,19 +418,26 @@ function App() {
     // false default when the IPC bridge is absent). WARDEN-330.
     void getCloseToTray().then(setCloseToTrayState);
 
-    // Check for activity since last close
+    // Check for activity since last close — the "While you were away" return
+    // digest. The RETURN trigger (returnedAfterAbsence) fires whenever >60s
+    // elapsed since warden:lastClose, REGARDLESS of whether any activity events
+    // occurred: WARDEN-436 broadened the banner so it also surfaces the ranked
+    // "you're needed HERE" callout (current rollup state) even when nothing
+    // happened while away. The since-close event tally is fetched separately and
+    // shown as secondary context beneath the callout. (The actual show/hide is
+    // derived in render from returnedAfterAbsence + hasReturnContent.)
     const checkActivitySinceClose = async () => {
       const lastCloseStr = localStorage.getItem('warden:lastClose');
       if (lastCloseStr) {
         const lastClose = parseInt(lastCloseStr, 10);
         const now = Date.now();
         if (now - lastClose > 60000) { // Only show if closed for more than 1 minute
+          setReturnedAfterAbsence(true);
           try {
             const res = await fetch(`/api/activity/stats?after=${new Date(lastClose).toISOString()}`);
             const stats = await res.json();
             if (stats.total > 0) {
               setActivitySinceClose(stats);
-              setShowActivityBanner(true);
             }
           } catch (e) {
             console.error('Failed to fetch activity stats:', e);
@@ -837,6 +870,79 @@ function App() {
     ackWatchMissRef.current = watchCatchup.ackKey;
   }, [watchCatchup.ackKey]);
 
+  // WARDEN-436: the live attention rollup is now owned by App (lifted UP from
+  // AttentionBadge) so the SAME rollup feeds BOTH the header badge AND the
+  // "While you were away" return banner — single source of truth, and the
+  // /api/health (10s) + /api/agent-states (30s) polling still runs exactly ONCE.
+  // (Option A from WARDEN-427: the alternative — a second hook instance in App —
+  // would double that polling, which the codebase treats as an SSH-cost concern;
+  // see useAttentionRollup.ts header.) The desktop-alert routing + watch-ping side
+  // effects inside the hook keep working unchanged from this new call site;
+  // AttentionBadge now receives the rollup as a prop instead of computing it.
+  const attentionSeverityPrefs = useMemo<AttentionSeverityPrefs>(
+    () => ({ alertCritical, alertWarning, alertDirective, alertError }),
+    [alertCritical, alertWarning, alertDirective, alertError],
+  );
+  // The chat the observer should bind to when "observe focused" is clicked, AND
+  // (WARDEN-426) the focused pane's identity for focus-gating the per-chat watch
+  // ping. Hoisted above the lifted useAttentionRollup call (WARDEN-436) so the
+  // focus-gate survives the lift — the hook consumes focusedPaneKey below. Derived
+  // from chats (not `focused` raw) so a STALE focused key (a chat since closed/
+  // re-keyed) resolves to null → the ping fires unchanged rather than spuriously
+  // matching a transient row sharing the old key.
+  const focusedChat = chats.find((c) => (c.key || c.id) === focused) || null;
+  const focusedPaneKey = focusedChat?.key || focusedChat?.id || null;
+  const { rollup: attentionRollup } = useAttentionRollup(
+    attentionDesktopAlerts, openPanes, attentionStates, attentionSeverityPrefs, mutedAlertKeys, watchedChats, openChat, focusedPaneKey,
+  );
+  // The single directed "you're needed HERE, because X" answer — the banner's lead.
+  // top is null when no pane/health agent currently needs attention (only raw
+  // directive/error counts, which have no pane to deep-link). Recomputed only when
+  // the rollup reference changes (the hook's own useMemo already stabilizes it).
+  const attentionTop = useMemo<AttentionItem | null>(
+    () => rankAttention(attentionRollup).top,
+    [attentionRollup],
+  );
+  // The since-close activity tally — STABLE: fetched once on mount
+  // (checkActivitySinceClose), never re-fetched, so it can't drive a later pop-in.
+  const activityTotalSinceClose = activitySinceClose?.total ?? 0;
+
+  // ── Return-banner visibility: a windowed latch (WARDEN-436 conservative constraint)
+  //
+  // The banner may FIRST appear only within RETURN_BANNER_WINDOW_MS of the human
+  // returning. Once it has appeared it stays until dismissed; if the fleet was
+  // healthy at return and nothing surfaced within the window, it NEVER appears.
+  // This keeps the banner a strictly user-initiated RETURN digest, never an ambient
+  // surface: a pane that becomes stuck/critical LATER (well after return, mid-work)
+  // updates the header AttentionBadge — NOT a spontaneous full-width banner.
+  //
+  // Within the window the banner DISPLAYS the LIVE attentionTop ("needed right now",
+  // per WARDEN-427 decision #3): if the rollup is cold at first paint the callout
+  // fills in as the first poll resolves, falling back to the tally alone. Intended
+  // tradeoff (review nit): because the latch watches the LIVE top, a pane that turns
+  // stuck/critical up to ~30s AFTER return can surface in the banner mid-work. This
+  // is bounded (one window, strictly return-initiated) and is the cost of decision
+  // #3 wanting live "needed right now" state to fill in rather than a strictly
+  // at-return-instant snapshot.
+  const [returnWindowActive, setReturnWindowActive] = useState(false);
+  const [bannerShownOnce, setBannerShownOnce] = useState(false);
+  useEffect(() => {
+    if (!returnedAfterAbsence) return;
+    // Open the return window once the return is detected.
+    setReturnWindowActive(true);
+    const timer = window.setTimeout(() => setReturnWindowActive(false), RETURN_BANNER_WINDOW_MS);
+    return () => window.clearTimeout(timer);
+  }, [returnedAfterAbsence]);
+  useEffect(() => {
+    // Latch "shown" the first time content appears WHILE the return window is open.
+    // The latch is what freezes the decision: after the window, a newly-non-null
+    // attentionTop can no longer trigger the banner (returnWindowActive is false).
+    if (returnWindowActive && !bannerShownOnce && hasReturnContent(activityTotalSinceClose, attentionTop)) {
+      setBannerShownOnce(true);
+    }
+  }, [returnWindowActive, bannerShownOnce, activityTotalSinceClose, attentionTop]);
+  const showReturnBanner = bannerShownOnce && !bannerDismissed;
+
   // WARDEN-378: toggle a chat's per-chat "watch" — marks it for a targeted,
   // reason-specific desktop ping when it newly needs the human. Turning watch ON
   // also requests OS notification permission (if not already granted) so the ping
@@ -1244,13 +1350,8 @@ function App() {
   // "System" (which updates resolvedThemeId via listenSystemThemeChange) —
   // changes this prop and re-themes already-open panes live via PaneTile's effect.
   const terminalThemeId = resolveTerminalThemeId(terminalColorScheme, resolvedThemeId);
-  // The chat the observer should bind to when "observe focused" is clicked.
-  const focusedChat = chats.find((c) => (c.key || c.id) === focused) || null;
-  // WARDEN-426: the focused pane's identity, for focus-gating the per-chat watch
-  // ping. Derived from focusedChat (not `focused` directly) so a STALE focused key
-  // (a chat that's since closed/re-keyed) resolves to null → the ping fires
-  // unchanged rather than spuriously matching a transient row sharing the old key.
-  const focusedPaneKey = focusedChat?.key || focusedChat?.id || null;
+  // focusedChat + focusedPaneKey are derived above the lifted useAttentionRollup
+  // call (WARDEN-426/436); focusedChat is reused below for the observer bind.
   // Selectable host list for the Open Chat browser's multiselect chips: this
   // machine plus every configured SSH host.
   const hosts = [THIS_MACHINE, ...sshHosts];
@@ -1402,38 +1503,77 @@ function App() {
 
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">
-      {showActivityBanner && activitySinceClose && (
-        <div className="flex items-center justify-between px-3 py-2 bg-blue-50 dark:bg-blue-950 border-b border-blue-200 dark:border-blue-800">
-          <div className="flex items-center gap-3 text-sm">
-            <span className="font-medium text-blue-900 dark:text-blue-100">While you were away:</span>
-            <span className="text-blue-700 dark:text-blue-300">
-              {activitySinceClose.directive_sent > 0 && (
-                <span className="mr-3">{activitySinceClose.directive_sent} directive{activitySinceClose.directive_sent !== 1 ? 's' : ''} sent</span>
-              )}
-              {activitySinceClose.attached > 0 && (
-                <span className="mr-3">{activitySinceClose.attached} session{activitySinceClose.attached !== 1 ? 's' : ''} attached</span>
-              )}
-              {activitySinceClose.error > 0 && (
-                <span className="mr-3 text-red-600 dark:text-red-400">{activitySinceClose.error} error{activitySinceClose.error !== 1 ? 's' : ''}</span>
-              )}
-              {activitySinceClose.total > 0 && (
-                <span className="text-blue-600 dark:text-blue-400">{activitySinceClose.total} total event{activitySinceClose.total !== 1 ? 's' : ''}</span>
-              )}
-            </span>
+      {showReturnBanner && (
+        <div className="flex items-center justify-between gap-3 px-3 py-2 bg-blue-50 dark:bg-blue-950 border-b border-blue-200 dark:border-blue-800">
+          {/*
+            WARDEN-436 — the ranked "you're needed HERE, because X" callout is the
+            banner's LEAD (one-click deep-link into the pane that needs the human,
+            via the same openChat the header badge uses). The since-close event
+            tally is demoted to secondary context on its right. The banner renders
+            the callout whenever the rollup's top is non-null (no >=2 gate — the
+            banner has no rundown beneath it, unlike the badge popover); it fills in
+            as soon as the rollup arrives (the first ~poll after return) and falls
+            back to the tally alone in the first seconds or when no pane needs
+            attention.
+            Layout (WARDEN-436 review fix): the right cluster (View Activity + ×)
+            is shrink-0 so the dismiss × is ALWAYS reachable; the callout Button is
+            `shrink min-w-0` (overriding the <Button> base `shrink-0`) so a long
+            agent name TRUNCATES instead of forcing the row wider and stranding ×
+            off-screen at narrow viewports. The name is capped (`max-w-40`) +
+            truncate; "You're needed in" is shrink-0 (label never clips); the reason
+            is `max-w-sm` + truncate. Statically reasoned from the flex/overflow
+            model — not browser-measured here (worker sandbox blocks Chromium;
+            deferred to the reviewer sandbox per WARDEN-130/WARDEN-68).
+          */}
+          <div className="flex items-center gap-3 text-sm min-w-0">
+            {attentionTop && (
+              <Button
+                variant="ghost"
+                onClick={() => openChat(attentionTop.id)}
+                aria-label={`You're needed in ${attentionTop.name ?? attentionTop.id}. Open it.`}
+                className="shrink min-w-0 gap-2 h-auto py-1 px-2.5 rounded-md bg-white/80 dark:bg-blue-900/50 hover:bg-white dark:hover:bg-blue-900/70 text-blue-900 dark:text-blue-50 font-normal"
+              >
+                <span className={cn('size-2 rounded-full shrink-0', dotForState(attentionTop.state))} aria-hidden />
+                <span className="text-sm whitespace-nowrap shrink-0">You&rsquo;re needed in</span>
+                <span className="text-sm font-semibold max-w-40 truncate">{attentionTop.name ?? attentionTop.id}</span>
+                <span className="text-xs text-blue-700/90 dark:text-blue-200/80 max-w-sm truncate">{attentionReason(attentionTop)}</span>
+                <span className="text-xs text-blue-600 dark:text-blue-300 shrink-0 whitespace-nowrap">open →</span>
+              </Button>
+            )}
+            {activitySinceClose && (
+              <span className="text-blue-700 dark:text-blue-300 min-w-0">
+                <span className="font-medium text-blue-900 dark:text-blue-100 mr-2">While you were away:</span>
+                {activitySinceClose.directive_sent > 0 && (
+                  <span className="mr-3">{activitySinceClose.directive_sent} directive{activitySinceClose.directive_sent !== 1 ? 's' : ''} sent</span>
+                )}
+                {activitySinceClose.attached > 0 && (
+                  <span className="mr-3">{activitySinceClose.attached} session{activitySinceClose.attached !== 1 ? 's' : ''} attached</span>
+                )}
+                {activitySinceClose.error > 0 && (
+                  <span className="mr-3 text-red-600 dark:text-red-400">{activitySinceClose.error} error{activitySinceClose.error !== 1 ? 's' : ''}</span>
+                )}
+                {activitySinceClose.total > 0 && (
+                  <span className="text-blue-600 dark:text-blue-400">{activitySinceClose.total} total event{activitySinceClose.total !== 1 ? 's' : ''}</span>
+                )}
+              </span>
+            )}
           </div>
-          <div className="flex items-center gap-2">
-            <button
+          <div className="flex items-center gap-2 shrink-0">
+            <Button
+              variant="ghost"
               onClick={openActivityTab}
-              className="text-xs px-2 py-1 bg-blue-200 dark:bg-blue-800 text-blue-900 dark:text-blue-100 rounded hover:bg-blue-300 dark:hover:bg-blue-700 transition-colors"
+              className="h-auto px-2 py-1 text-xs rounded bg-blue-200 dark:bg-blue-800 text-blue-900 dark:text-blue-100 hover:bg-blue-300 dark:hover:bg-blue-700"
             >
               View Activity
-            </button>
-            <button
-              onClick={() => setShowActivityBanner(false)}
-              className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200"
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() => setBannerDismissed(true)}
+              aria-label="Dismiss return banner"
+              className="h-auto px-1.5 py-1 text-base leading-none text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200"
             >
               ×
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -1553,7 +1693,7 @@ function App() {
             label={streamConn ? 'Connected' : 'Disconnected'}
             className="transition-colors duration-300 ease-in-out"
           />
-          <AttentionBadge onOpenChat={openChat} onOpenActivity={openActivityTab} attentionDesktopAlerts={attentionDesktopAlerts} openPanes={openPanes} attentionStates={attentionStates} alertCritical={alertCritical} alertWarning={alertWarning} alertDirective={alertDirective} alertError={alertError} mutedAlertKeys={mutedAlertKeys} onToggleMuteAlertKey={toggleMuteAlertKey} watchedChats={watchedChats} focusedPaneKey={focusedPaneKey} />
+          <AttentionBadge rollup={attentionRollup} onOpenChat={openChat} onOpenActivity={openActivityTab} attentionDesktopAlerts={attentionDesktopAlerts} mutedAlertKeys={mutedAlertKeys} onToggleMuteAlertKey={toggleMuteAlertKey} />
           <IconTooltip label="global search (Ctrl+Shift+F)" side="bottom"><button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⌕</button></IconTooltip>
           <IconTooltip label="toggle health panel" side="bottom"><button onClick={() => setHealthCollapsed(!healthCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{healthCollapsed ? '◂' : '▸'} Health</button></IconTooltip>
           <IconTooltip label="toggle observer" side="bottom"><button onClick={() => setObserverCollapsed(!observerCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>

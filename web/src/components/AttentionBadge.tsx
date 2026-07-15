@@ -2,46 +2,37 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { TriangleAlert, Bell, BellOff } from 'lucide-react';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { Button } from '@/components/ui/button';
-import { useAttentionRollup } from '@/lib/useAttentionRollup';
-import { rankAttention, type AttentionRollupOptions, type AttentionItem } from '@/lib/attentionRollup';
-import type { AttentionSeverityPrefs } from '@/lib/desktopAlerts';
+import {
+  rankAttention,
+  attentionReason,
+  type AttentionRollup,
+  type AttentionItem,
+} from '@/lib/attentionRollup';
 import type { AttentionAgent } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 interface Props {
+  /**
+   * The live, already-aggregated attention rollup. WARDEN-436 lifted the
+   * `useAttentionRollup` call UP to App so the SAME rollup feeds BOTH the header
+   * badge AND the "While you were away" return banner (single source of truth, no
+   * duplicate /api/health + /api/agent-states polling). This component consumes it
+   * read-only: it derives its own `rankAttention` rundown + the directed callout
+   * from the rollup it's handed.
+   */
+  rollup: AttentionRollup;
   /** Open the agent's chat pane (reuses App's openChat). */
   onOpenChat: (id: string) => void;
   /** Open the observer panel's Activity tab (reuses App's openActivityTab). */
   onOpenActivity: () => void;
-  /** Opt-in desktop alerts (WARDEN-259). Forwarded to useAttentionRollup so the
-   * existing poll keeps running while hidden AND fires an OS notification on a
-   * rollup increase while Warden is unfocused. */
+  /** Opt-in desktop alerts (WARDEN-259). Now used only for the per-row mute bell
+   * affordance (the routing decision itself moved to App with the lifted hook). */
   attentionDesktopAlerts: boolean;
-  /** Pane keys currently open in the workspace — passed to /api/agent-states so the
-   * rich pane-state classification (stuck/erroring/waiting/blocked) covers only what
-   * the human is watching (WARDEN-344). */
-  openPanes: string[];
-  /** Per-state toggle: silence a noisy state (e.g. "waiting") without losing others
-   * (WARDEN-344). */
-  attentionStates?: AttentionRollupOptions['enabledStates'];
-  /** WARDEN-364 — per-severity routing + per-agent mute for the desktop channel.
-   * Forwarded to useAttentionRollup so the alert effect decides over the routable
-   * sub-rollup. The in-app badge itself always consumes the UNFILTERED rollup. */
-  alertCritical: boolean;
-  alertWarning: boolean;
-  alertDirective: boolean;
-  alertError: boolean;
+  /** WARDEN-364 — per-agent mute set for the desktop channel's row bell. The
+   * routing/mute DECISION now runs in App's lifted useAttentionRollup; this stays
+   * so the badge's row bell can reflect + toggle the same set. */
   mutedAlertKeys: string[];
   onToggleMuteAlertKey: (key: string) => void;
-  /** Per-chat "watch" pane keys (WARDEN-378) — unioned into the ?panes= poll so a
-   * watched chat is classified even when its pane isn't open, and diffed for a
-   * targeted ping when it newly needs the human. */
-  watchedChats?: string[];
-  /** WARDEN-426 — the pane key the human is currently focused on. Forwarded to
-   * useAttentionRollup so the watch ping is suppressed for a watched pane the
-   * human is already reading (they can see it via this badge). Null = focused
-   * elsewhere / away → ping fires unchanged. */
-  focusedPaneKey?: string | null;
 }
 
 /**
@@ -49,9 +40,10 @@ interface Props {
  * extended in WARDEN-344 to surface agents that are STUCK / ERRORING / WAITING-ON-YOU
  * / BLOCKED — the cases /api/health's inactivity-only classification reads as Healthy.
  *
- * Aggregates — via useAttentionRollup — critical + warning fleet-health agents,
- * stuck/erroring/waiting/blocked pane states, pending directives, and recent errors
- * into one glanceable count. Renders nothing when there is nothing to act on
+ * Aggregates — via the `rollup` prop (WARDEN-436 lifted useAttentionRollup up to App,
+ * so the same rollup feeds both this badge and the return banner with no duplicate
+ * polling) — critical + warning fleet-health agents, stuck/erroring/waiting/blocked
+ * pane states, pending directives, and recent errors into one glanceable count. Renders nothing when there is nothing to act on
  * (total === 0), so a healthy fleet shows no badge. Clicking opens a popover whose
  * rows deep-link into the existing agent pane and Activity tab via the handlers
  * passed from App (no new routing).
@@ -61,28 +53,13 @@ interface Props {
  * links to the Activity tab rather than a specific event.
  */
 export function AttentionBadge({
+  rollup,
   onOpenChat,
   onOpenActivity,
   attentionDesktopAlerts,
-  openPanes,
-  attentionStates,
-  alertCritical,
-  alertWarning,
-  alertDirective,
-  alertError,
   mutedAlertKeys,
   onToggleMuteAlertKey,
-  watchedChats,
-  focusedPaneKey,
 }: Props) {
-  // Memoize the severity-prefs object so its reference is stable across renders
-  // (keeps the hook's gate-effect dep list quiet on unrelated re-renders). Keyed
-  // on the four primitives, so it only changes when one actually flips.
-  const severityPrefs = useMemo<AttentionSeverityPrefs>(
-    () => ({ alertCritical, alertWarning, alertDirective, alertError }),
-    [alertCritical, alertWarning, alertDirective, alertError],
-  );
-  const { rollup } = useAttentionRollup(attentionDesktopAlerts, openPanes, attentionStates, severityPrefs, mutedAlertKeys, watchedChats ?? [], onOpenChat, focusedPaneKey);
   const [open, setOpen] = useState(false);
 
   // The mute affordance is only meaningful while the desktop-alert channel is on
@@ -345,10 +322,11 @@ function LinkRow({ label, dot, onClick }: { label: string; dot: string; onClick:
  * so it reads as the answer, not another list row.
  */
 function Callout({ top, onClick }: { top: AttentionItem; onClick: () => void }) {
-  // The "because X": the triggering signal when one flows (pane states), else a
-  // short human-readable fallback keyed off the state (health-group agents carry
-  // no signal line of their own).
-  const reason = top.signal || REASON_FALLBACK[top.state] || 'needs attention';
+  // The "because X": the shared attentionReason helper (WARDEN-436) — the concrete
+  // signal when one flows (pane states), else a state-keyed fallback (health-group
+  // agents carry no signal of their own). Shared with the return-banner callout so
+  // the phrasing is identical across both surfaces.
+  const reason = attentionReason(top);
   return (
     <Button variant="ghost" onClick={onClick} className={cn(rowClass(), 'rounded-md border border-border bg-muted/40 py-2')}>
       <span className={cn('size-2 rounded-full shrink-0 mt-0.5', dotForState(top.state))} aria-hidden />
@@ -363,21 +341,12 @@ function Callout({ top, onClick }: { top: AttentionItem; onClick: () => void }) 
   );
 }
 
-// State → short reason when no concrete `signal` is available. Phrased as the
-// "why it needs you" so the callout line always reads as a complete reason.
-const REASON_FALLBACK: Record<string, string> = {
-  waiting: 'waiting for your input',
-  erroring: 'emitting errors',
-  stuck: 'stuck in a loop',
-  critical: 'critical health',
-  blocked: 'blocked on another agent',
-  warning: 'needs attention',
-};
-
 // Callout urgency dot — red for live-failure / severe states, amber for the
 // "act on this" / mild ones, mirroring the rundown Section dots so the promoted
-// answer reads as part of the same attention system.
-function dotForState(state: string): string {
+// answer reads as part of the same attention system. Exported (WARDEN-436) so the
+// return-banner callout — which presents the SAME ranked `top` — reuses the exact
+// state→color mapping and the two surfaces stay visually consistent.
+export function dotForState(state: string): string {
   return state === 'erroring' || state === 'stuck' || state === 'critical'
     ? 'bg-red-500'
     : 'bg-yellow-500';
