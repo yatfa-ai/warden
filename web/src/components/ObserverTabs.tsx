@@ -15,7 +15,6 @@ import type { TimestampFormat } from '@/lib/formatTimestamp';
 
 interface Props {
   externalViewMode?: 'sessions' | 'activity' | 'directives' | null;
-  onFocusAgent?: (id: string) => void;
   // The currently-focused chat pane, used to bind a new observer session to
   // the agent the user is looking at ("observe this agent").
   focusedChat?: Chat | null;
@@ -40,7 +39,7 @@ interface Props {
 // Manages persisted observer sessions as tabs. Every open tab keeps its own
 // ObserverPanel (and WS) mounted; inactive ones are display:none so their
 // conversations stay live. Open tabs + active tab persist in localStorage.
-export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, timestampFormat = 'relative' }: Props = {}) {
+export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, timestampFormat = 'relative' }: Props = {}) {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [openIds, setOpenIds] = useState<string[]>(() => loadObs().openIds);
   const [activeId, setActiveId] = useState<string | null>(() => loadObs().activeId);
@@ -332,7 +331,7 @@ export function ObserverTabs({ externalViewMode, onFocusAgent, focusedChat, onRe
           <div className="flex-1 min-h-0">
             {openIds.map((id) => (
               <div key={id} className={activeId === id ? 'h-full' : 'hidden'}>
-                <ObserverPanel sessionId={id} onFocusAgent={onFocusAgent} onActivity={() => bumpActivity(id)} timestampFormat={timestampFormat} />
+                <ObserverPanel sessionId={id} onActivity={() => bumpActivity(id)} timestampFormat={timestampFormat} />
               </div>
             ))}
           </div>

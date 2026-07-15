@@ -38,8 +38,6 @@ You operate ONLY through these tools:
 - read_chats({ids, open_only?, lines?, changed_only?}): read several panes in ONE batched call — much cheaper than several read_chat round trips when you must read multiple agents in full. Pass ids (array of substrings) OR open_only: true to read all open panes at once. Returns each pane's raw content per pane; capture failures are reported per pane, never dropped. Set changed_only: true on a follow-up to get back only panes whose content changed since the last read.
 - send_directive({id, directive}): propose a message to an agent. The user MUST approve every send; you propose and wait for the gate.
 - summarize_chats({per_agent_lines?, changed_only?}): structured, size-bounded summary of every open chat — one entry per pane with role, state (active/idle/stuck/erroring/blocked/waiting), last action, errors, current step, and goal. Failed captures are flagged per-entry, never omitted. Use this when the user asks "what's happening", "what are they working on", or you need a complete picture to advise well. Set changed_only: true to get back only agents whose state or content changed since the last read.
-- analyze_agents(): detect patterns across all open tabs. Returns structured insights about which agents are stuck, erroring, idle, or need coordination. Use this to answer "what needs attention?" or diagnose workflow issues.
-- suggest_next_actions(): analyze all open agent tabs and suggest prioritized, concrete next actions for the human. Classifies agent states (stuck, erroring, waiting, blocked, idle, active) and identifies urgent issues requiring immediate attention. Returns sorted suggestions with urgency levels.
 - alert_changes(): on-demand check that reports ONLY open agents newly entering a state worth alerting on since the last read — idle, erroring, stuck (repeating output), or completed-a-task. It diffs against the last-read cache, so only CHANGES surface (no re-reading everything). Use this when the user asks "what needs attention", "who finished", or "what changed". NOTE: the first call on a cold cache establishes a baseline and returns no alerts — call summarize_chats first, then alert_changes later to see what changed.
 - write_file({path, content, append?}): save TEXT to a file under the warden data dir (~/.yatfa-warden/), e.g. reports/summary.md or snapshots/agent-X.md. Use this to persist observations, findings, snapshots, or reports worth keeping between turns — it is your only durable output channel besides send_directive (which only talks to agents). path is relative to the data dir; set append: true to add to a file instead of overwriting. Writes are confined to the data dir.
 
@@ -64,14 +62,6 @@ When using summarize_chats, the tool returns STRUCTURED per-agent state (not raw
 - Triage by state: erroring/stuck agents need attention first; blocked agents depend on others; waiting agents need your input; idle agents may be done or stalled.
 - captureError: true means that pane could not be captured (host unreachable). The entry is still present — flag it to the user; do NOT assume the agent is idle.
 - Be concrete: name the agents, cite the errors/currentStep you read, and recommend the next action.
-
-When using analyze_agents, prioritize:
-1. Stuck agents (repeating output) — need human intervention or restart
-2. Erroring agents — surface the error type and suggest next steps
-3. Coordination blockers — which agents are waiting on others
-4. Idle agents — what input they need to proceed
-
-Be specific. Name the agents, state the problem, and suggest concrete actions.
 
 Be concise. Highlight what needs attention NOW.`;
 
@@ -124,16 +114,6 @@ export const TOOLS = [
       },
       required: [],
     },
-  },
-  {
-    name: 'analyze_agents',
-    description: 'Analyze all open agent tabs for actionable patterns and states. Returns structured insights about stuck agents, errors, idle agents, and coordination needs. Use this when the user asks "what needs attention", "is anyone stuck", or you need to diagnose issues.',
-    input_schema: { type: 'object', properties: {}, required: [] },
-  },
-  {
-    name: 'suggest_next_actions',
-    description: 'Analyze all open agent tabs and suggest prioritized, concrete next actions for the human. Classifies agent states (stuck, erroring, waiting, blocked, idle, active) and identifies urgent issues requiring immediate attention. Returns sorted suggestions with urgency levels.',
-    input_schema: { type: 'object', properties: {}, required: [] },
   },
   {
     name: 'alert_changes',
@@ -853,119 +833,6 @@ export async function readChats(ids, openOnly, openTabs, lastChats, capturePanes
   }
 }
 
-// Pure, dependency-injected core of the suggest_next_actions tool. capturePanes is
-// passed in so the classification logic is unit-testable without SSH/tmux
-// (mock.module is unavailable on the project's Node version). Behavior is identical
-// to the inlined tool handler.
-export async function suggestNextActions(openTabs, lastChats, capturePanes, cfg) {
-  const open = new Set(openTabs || []);
-  if (open.size === 0) return { error: 'no tabs are open. open some agent panes first.' };
-
-  // Filter to only open tabs
-  const openChats = lastChats.filter(c =>
-    open.has(c.container || c.session) || open.has(c.key)
-  );
-
-  if (openChats.length === 0) {
-    return { error: 'open tabs do not match any discovered chats. try refreshing with list_chats.' };
-  }
-
-  try {
-    const panes = await capturePanes(openChats, cfg);
-
-    // Classification patterns (regex-based, no LLM calls).
-    // NOTE: BLOCKED_RE is scoped to coordination/dependency language (other agents,
-    // external dependencies) — it deliberately does NOT match the bare fragment
-    // "waiting for", which would otherwise swallow "waiting for user" (a human-input
-    // signal classified as 'waiting' below). The two states stay distinct, matching
-    // the ticket spec: waiting = human input, blocked = other agents/dependencies.
-    const ERROR_RE = /error|failed|exception|traceback|panic/i;
-    const WAITING_RE = /please|respond|continue\?|input|press enter|waiting for user/i;
-    const BLOCKED_RE = /blocked by|blocked on|depends on|waiting for (?:the |an |a )?(?:agent|worker|planner|reviewer|researcher|dependency|approval from)/i;
-    const ACTIVE_RE = /running|processing|building|installing|downloading|executing|working on|implement/i;
-
-    const suggestions = [];
-
-    for (const c of openChats) {
-      const pane = panes[c.key] || '';
-      const agentId = c.container || c.session;
-      const role = c.role || 'agent';
-      const project = c.project || 'unknown';
-
-      let state = 'idle';
-      let urgency = 'informational';
-      let action = 'No action needed - agent is idle.';
-
-      // Detect repeating output (stuck agent) using line-by-line comparison
-      const lines = pane.split('\n');
-      const last3 = lines.slice(-3).join('\n');
-      const prev3 = lines.slice(-6, -3).join('\n');
-      const stuck = last3 === prev3 && last3.length > 50;
-
-      // Classify agent state using regex patterns. BLOCKED is checked before WAITING:
-      // because BLOCKED_RE is scoped to coordination signals, no human-input pane can
-      // match it, so genuine waiting input always reaches the WAITING branch.
-      if (ERROR_RE.test(pane)) {
-        state = 'erroring';
-        urgency = 'urgent';
-        action = `Agent encountered an error. Review the pane content and investigate the failure. Consider sending a directive to retry or fix the issue.`;
-      } else if (stuck) {
-        state = 'stuck';
-        urgency = 'urgent';
-        action = `Agent appears stuck (repeating output detected). Interrupt and redirect with a new directive, or terminate if needed.`;
-      } else if (BLOCKED_RE.test(pane)) {
-        state = 'blocked';
-        urgency = 'important';
-        action = `Agent is blocked on a dependency. Check what it's waiting for and unblock it, or redirect to other work.`;
-      } else if (WAITING_RE.test(pane)) {
-        state = 'waiting';
-        urgency = 'important';
-        action = `Agent is waiting for input. Respond to its request or provide the needed information.`;
-      } else if (ACTIVE_RE.test(pane) && c.active) {
-        state = 'active';
-        urgency = 'informational';
-        action = `Agent is actively working. No immediate action needed, but monitor for completion or issues.`;
-      } else if (pane.trim().length > 100) {
-        state = 'idle';
-        urgency = 'informational';
-        action = `Agent has output but appears inactive. Check if it completed its task or needs direction.`;
-      } else {
-        state = 'idle';
-        urgency = 'informational';
-        action = `Agent is idle with minimal output. Consider assigning work or checking if it needs direction.`;
-      }
-
-      suggestions.push({
-        agentId: agentId,
-        agentName: agentId,
-        role,
-        project,
-        host: c.host,
-        state,
-        urgency,
-        action,
-        pane_excerpt: pane.slice(-200).trim(), // Last 200 chars for context
-      });
-    }
-
-    // Sort by urgency: urgent > important > informational
-    const urgencyOrder = { urgent: 0, important: 1, informational: 2 };
-    suggestions.sort((a, b) => urgencyOrder[a.urgency] - urgencyOrder[b.urgency]);
-
-    return {
-      suggestions,
-      summary: {
-        total: suggestions.length,
-        urgent: suggestions.filter(s => s.urgency === 'urgent').length,
-        important: suggestions.filter(s => s.urgency === 'important').length,
-        informational: suggestions.filter(s => s.urgency === 'informational').length,
-      },
-    };
-  } catch (e) {
-    return { error: e.message };
-  }
-}
-
 // Pure, dependency-injected core of the alert_changes tool (WARDEN-166 AC #3).
 // An ON-DEMAND trigger — never called by a background loop (WARDEN-75). It
 // captures every open pane (concurrent via capturePanes — WARDEN-88), classifies
@@ -1241,74 +1108,6 @@ export class Observer {
       const out = { ...res };
       delete out.observedState;
       return out;
-    }
-    if (name === 'analyze_agents') {
-      const open = new Set(this.effectiveOpenTabs());
-      if (open.size === 0) return { error: 'no tabs are open. open some agent panes first.' };
-
-      // Filter to only open tabs
-      const openChats = this.lastChats.filter(c =>
-        open.has(c.container || c.session) || open.has(c.key)
-      );
-
-      if (openChats.length === 0) {
-        return { error: 'open tabs do not match any discovered chats. try refreshing with list_chats.' };
-      }
-
-      try {
-        const panes = await capturePanes(openChats, this.cfg);
-
-        const insights = openChats.map(c => {
-          const pane = panes[c.key] || '';
-          const lines = pane.split('\n');
-
-          // Detect repeating output (stuck agent)
-          const last3 = lines.slice(-3).join('\n');
-          const prev3 = lines.slice(-6, -3).join('\n');
-          const stuck = last3 === prev3 && last3.length > 50;
-
-          // Detect errors
-          const hasError = /error|exception|failed|traceback|fatal/i.test(pane);
-          const errorLines = lines.filter(l => /error|exception|failed/i.test(l)).slice(-2);
-
-          // Detect idle/waiting
-          const isIdle = /prompt|waiting|input|approval|press|continue/i.test(pane);
-
-          // Detect coordination signals
-          const mentionsAgent = /agent|worker|planner|reviewer|researcher/i.test(pane);
-          const blocked = /blocked|waiting on|depends|need.*from/i.test(pane);
-
-          return {
-            id: c.container || c.session,
-            host: c.host,
-            role: c.role,
-            state: stuck ? 'stuck' : (hasError ? 'erroring' : (isIdle ? 'idle' : 'active')),
-            signals: {
-              stuck,
-              hasError,
-              errorSample: errorLines.join('; '),
-              isIdle,
-              mentionsAgent,
-              blocked,
-            },
-          };
-        });
-
-        const summary = {
-          total: insights.length,
-          stuck: insights.filter(i => i.state === 'stuck').length,
-          erroring: insights.filter(i => i.state === 'erroring').length,
-          idle: insights.filter(i => i.state === 'idle').length,
-          active: insights.filter(i => i.state === 'active').length,
-        };
-
-        return { insights, summary };
-      } catch (e) {
-        return { error: e.message };
-      }
-    }
-    if (name === 'suggest_next_actions') {
-      return suggestNextActions(this.effectiveOpenTabs(), this.lastChats, capturePanes, this.cfg);
     }
     if (name === 'alert_changes') {
       // On-demand change-awareness trigger (WARDEN-166). Always reads transcript
