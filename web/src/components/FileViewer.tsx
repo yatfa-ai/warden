@@ -9,11 +9,21 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 import { DiffBlock } from './DiffBlock';
 import { MarkdownBody } from './MarkdownBody';
 import { tokenizeCode, languageFromPath, type Leaf } from '@/lib/highlight';
 import { Loader2Icon, FileIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon } from 'lucide-react';
 import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
+import { copyText } from '@/lib/clipboard';
+import { basename } from '@/lib/chatDisplay';
+import { toast } from 'sonner';
 
 interface FileViewerProps {
   chatId: string;
@@ -270,175 +280,216 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, onOp
     [content, sourceLang],
   );
 
+  // The content currently on screen, used by the "Copy file content" menu item.
+  // In normal view that's the fetched `content`, but while viewing a historical
+  // commit snapshot (viewAtCommit !== null, WARDEN-354) the on-screen text is the
+  // fetched `blobContent` instead. null while loading / in error / empty — the copy
+  // item is disabled then, never copying an empty string (a no-op copy is not the
+  // same as a silent copy of "").
+  const displayedContent = viewAtCommit ? blobContent : content;
+
+  // Copy text to the clipboard through the shared Electron-safe helper, surfacing
+  // the boolean result via toast — never bare navigator.clipboard, which rejects
+  // silently in Electron (WARDEN-285). Matches CollectionsSection / WorkspaceTabs.
+  const handleCopy = async (text: string) => {
+    const ok = await copyText(text);
+    if (ok) toast.success('Copied');
+    else toast.error('Copy failed');
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[80vh]">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2 pr-8">
-            <FileIcon className="w-4 h-4 shrink-0" />
-            <span className="truncate">{filePath}</span>
-            <div className="ml-auto flex items-center gap-2">
-              {isMarkdown && (
-                <Button
-                  type="button"
-                  variant={viewMode === 'rendered' ? 'default' : 'outline'}
-                  size="sm"
-                  className="h-7 shrink-0 gap-1.5 text-xs"
-                  onClick={() => setViewMode((m) => (m === 'rendered' ? 'source' : 'rendered'))}
-                  title={viewMode === 'rendered' ? 'Show raw markdown source' : 'Show rendered documentation'}
-                  aria-pressed={viewMode === 'rendered'}
-                >
-                  {viewMode === 'rendered' ? (
-                    <BookOpenIcon className="w-3.5 h-3.5" />
-                  ) : (
-                    <Code2Icon className="w-3.5 h-3.5" />
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <DialogContent className="max-w-4xl max-h-[80vh]">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 pr-8">
+                <FileIcon className="w-4 h-4 shrink-0" />
+                <span className="truncate">{filePath}</span>
+                <div className="ml-auto flex items-center gap-2">
+                  {isMarkdown && (
+                    <Button
+                      type="button"
+                      variant={viewMode === 'rendered' ? 'default' : 'outline'}
+                      size="sm"
+                      className="h-7 shrink-0 gap-1.5 text-xs"
+                      onClick={() => setViewMode((m) => (m === 'rendered' ? 'source' : 'rendered'))}
+                      title={viewMode === 'rendered' ? 'Show raw markdown source' : 'Show rendered documentation'}
+                      aria-pressed={viewMode === 'rendered'}
+                    >
+                      {viewMode === 'rendered' ? (
+                        <BookOpenIcon className="w-3.5 h-3.5" />
+                      ) : (
+                        <Code2Icon className="w-3.5 h-3.5" />
+                      )}
+                      {viewMode === 'rendered' ? 'Rendered' : 'Source'}
+                    </Button>
                   )}
-                  {viewMode === 'rendered' ? 'Rendered' : 'Source'}
-                </Button>
-              )}
-              <Button
-                type="button"
-                variant={history ? 'default' : 'outline'}
-                size="sm"
-                className="h-7 shrink-0 gap-1.5 text-xs"
-                onClick={() => {
-                  setHistory((h) => {
-                    const next = !h;
-                    if (next) setAnnotate(false); // history + annotate are exclusive view modes
-                    else setViewAtCommit(null); // leaving history → drop any at-commit snapshot
-                    return next;
-                  });
-                }}
-                title={history ? 'Hide file commit history' : 'Show commit history for this file (every commit that touched it, across renames)'}
-                aria-pressed={history}
-              >
-                <HistoryIcon className="w-3.5 h-3.5" />
-                History
-              </Button>
-              <Button
-                type="button"
-                variant={annotate ? 'default' : 'outline'}
-                size="sm"
-                className="h-7 shrink-0 gap-1.5 text-xs"
-                onClick={() => {
-                  setAnnotate((a) => {
-                    const next = !a;
-                    if (next) { setHistory(false); setViewAtCommit(null); } // annotate forces history off → drop any snapshot
-                    return next;
-                  });
-                }}
-                title={annotate ? 'Hide per-line git blame' : 'Show per-line git blame (which commit last touched each line)'}
-                aria-pressed={annotate}
-              >
-                <GitCommitHorizontalIcon className="w-3.5 h-3.5" />
-                Annotate
-              </Button>
-            </div>
-          </DialogTitle>
-        </DialogHeader>
-
-        <ScrollArea className="h-[60vh] w-full rounded-md border bg-muted/50">
-          <div className="p-4">
-            {viewAtCommit ? (
-              <CommitBlobView
-                commit={viewAtCommit}
-                filePath={filePath}
-                content={blobContent}
-                loading={blobLoading}
-                error={blobError}
-                viewMode={viewMode}
-                isMarkdown={isMarkdown}
-                onBack={() => setViewAtCommit(null)}
-              />
-            ) : (
-              <>
-            {loading && (
-              <div className="flex items-center justify-center gap-2 py-8 text-muted-foreground">
-                <Loader2Icon className="w-5 h-5 animate-spin" />
-                <span>Loading file...</span>
-              </div>
-            )}
-
-            {error && (
-              <div className="flex items-center gap-2 py-8 text-red-400">
-                <AlertCircleIcon className="w-5 h-5" />
-                <span>{error}</span>
-              </div>
-            )}
-
-            {!loading && !error && content !== null && !annotate && !history && !hasLine && (
-              isMarkdown && viewMode === 'rendered' ? (
-                <div className="flex flex-col gap-2 text-sm leading-relaxed">
-                  <MarkdownBody>{content}</MarkdownBody>
+                  <Button
+                    type="button"
+                    variant={history ? 'default' : 'outline'}
+                    size="sm"
+                    className="h-7 shrink-0 gap-1.5 text-xs"
+                    onClick={() => {
+                      setHistory((h) => {
+                        const next = !h;
+                        if (next) setAnnotate(false); // history + annotate are exclusive view modes
+                        else setViewAtCommit(null); // leaving history → drop any at-commit snapshot
+                        return next;
+                      });
+                    }}
+                    title={history ? 'Hide file commit history' : 'Show commit history for this file (every commit that touched it, across renames)'}
+                    aria-pressed={history}
+                  >
+                    <HistoryIcon className="w-3.5 h-3.5" />
+                    History
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={annotate ? 'default' : 'outline'}
+                    size="sm"
+                    className="h-7 shrink-0 gap-1.5 text-xs"
+                    onClick={() => {
+                      setAnnotate((a) => {
+                        const next = !a;
+                        if (next) { setHistory(false); setViewAtCommit(null); } // annotate forces history off → drop any snapshot
+                        return next;
+                      });
+                    }}
+                    title={annotate ? 'Hide per-line git blame' : 'Show per-line git blame (which commit last touched each line)'}
+                    aria-pressed={annotate}
+                  >
+                    <GitCommitHorizontalIcon className="w-3.5 h-3.5" />
+                    Annotate
+                  </Button>
                 </div>
-              ) : (
-                <pre className="text-sm font-mono whitespace-pre-wrap break-words">
-                  {tokenLines ? (
-                    tokenLines.map((line, i) => (
-                      <div key={i}><HighlightedLine leaves={line} /></div>
-                    ))
-                  ) : (
-                    content
-                  )}
-                </pre>
-              )
-            )}
+              </DialogTitle>
+            </DialogHeader>
 
-            {!loading && !error && content !== null && !annotate && !history && hasLine && (
-              <div className="text-sm font-mono">
-                {content.split('\n').map((text, i) => {
-                  const n = i + 1;
-                  const isTarget = n === line;
-                  return (
-                    <div key={n} ref={isTarget ? highlightRef : undefined}
-                      className={`flex ${isTarget ? 'bg-primary/20 ring-1 ring-inset ring-primary/40 rounded-sm' : ''}`}>
-                      <span className="select-none pr-3 text-right text-muted-foreground/40 min-w-[2.5rem]">{n}</span>
-                      <span className="whitespace-pre-wrap break-words flex-1">
-                        {tokenLines ? <HighlightedLine leaves={tokenLines[i] ?? []} /> : text}
-                      </span>
+            <ScrollArea className="h-[60vh] w-full rounded-md border bg-muted/50">
+              <div className="p-4">
+                {viewAtCommit ? (
+                  <CommitBlobView
+                    commit={viewAtCommit}
+                    filePath={filePath}
+                    content={blobContent}
+                    loading={blobLoading}
+                    error={blobError}
+                    viewMode={viewMode}
+                    isMarkdown={isMarkdown}
+                    onBack={() => setViewAtCommit(null)}
+                  />
+                ) : (
+                  <>
+                {loading && (
+                  <div className="flex items-center justify-center gap-2 py-8 text-muted-foreground">
+                    <Loader2Icon className="w-5 h-5 animate-spin" />
+                    <span>Loading file...</span>
+                  </div>
+                )}
+
+                {error && (
+                  <div className="flex items-center gap-2 py-8 text-red-400">
+                    <AlertCircleIcon className="w-5 h-5" />
+                    <span>{error}</span>
+                  </div>
+                )}
+
+                {!loading && !error && content !== null && !annotate && !history && !hasLine && (
+                  isMarkdown && viewMode === 'rendered' ? (
+                    <div className="flex flex-col gap-2 text-sm leading-relaxed">
+                      <MarkdownBody>{content}</MarkdownBody>
                     </div>
-                  );
-                })}
+                  ) : (
+                    <pre className="text-sm font-mono whitespace-pre-wrap break-words">
+                      {tokenLines ? (
+                        tokenLines.map((line, i) => (
+                          <div key={i}><HighlightedLine leaves={line} /></div>
+                        ))
+                      ) : (
+                        content
+                      )}
+                    </pre>
+                  )
+                )}
+
+                {!loading && !error && content !== null && !annotate && !history && hasLine && (
+                  <div className="text-sm font-mono">
+                    {content.split('\n').map((text, i) => {
+                      const n = i + 1;
+                      const isTarget = n === line;
+                      return (
+                        <div key={n} ref={isTarget ? highlightRef : undefined}
+                          className={`flex ${isTarget ? 'bg-primary/20 ring-1 ring-inset ring-primary/40 rounded-sm' : ''}`}>
+                          <span className="select-none pr-3 text-right text-muted-foreground/40 min-w-[2.5rem]">{n}</span>
+                          <span className="whitespace-pre-wrap break-words flex-1">
+                            {tokenLines ? <HighlightedLine leaves={tokenLines[i] ?? []} /> : text}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {!loading && !error && content !== null && annotate && (
+                  <AnnotatedContent
+                    content={content}
+                    blame={blame}
+                    blameLoading={blameLoading}
+                    blameError={blameError}
+                    chatId={chatId}
+                    filePath={filePath}
+                    timestampFormat={timestampFormat}
+                  />
+                )}
+
+                {!loading && !error && content !== null && history && (
+                  <HistoryContent
+                    commits={commits}
+                    historyLoading={historyLoading}
+                    historyError={historyError}
+                    chatId={chatId}
+                    filePath={filePath}
+                    onViewAtCommit={setViewAtCommit}
+                  />
+                )}
+
+                {!loading && !error && content === null && (
+                  <div className="flex items-center justify-center py-8 text-muted-foreground">
+                    No content
+                  </div>
+                )}
+                  </>
+                )}
               </div>
-            )}
+            </ScrollArea>
 
-            {!loading && !error && content !== null && annotate && (
-              <AnnotatedContent
-                content={content}
-                blame={blame}
-                blameLoading={blameLoading}
-                blameError={blameError}
-                chatId={chatId}
-                filePath={filePath}
-                timestampFormat={timestampFormat}
-              />
-            )}
-
-            {!loading && !error && content !== null && history && (
-              <HistoryContent
-                commits={commits}
-                historyLoading={historyLoading}
-                historyError={historyError}
-                chatId={chatId}
-                filePath={filePath}
-                onViewAtCommit={setViewAtCommit}
-              />
-            )}
-
-            {!loading && !error && content === null && (
-              <div className="flex items-center justify-center py-8 text-muted-foreground">
-                No content
-              </div>
-            )}
-              </>
-            )}
-          </div>
-        </ScrollArea>
-
-        <DialogClose asChild>
-          <Button variant="outline" className="w-full sm:w-auto">Close</Button>
-        </DialogClose>
-      </DialogContent>
+            <DialogClose asChild>
+              <Button variant="outline" className="w-full sm:w-auto">Close</Button>
+            </DialogClose>
+          </DialogContent>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          {/* Copies the FULL path regardless of the header's truncation
+              (FileViewer.tsx span.truncate) — the most natural "copy path" target. */}
+          <ContextMenuItem onSelect={() => handleCopy(filePath)}>Copy file path</ContextMenuItem>
+          {/* Mirrors the "Copy name" vocabulary of the collection-card / workspace-tab siblings. */}
+          <ContextMenuItem onSelect={() => handleCopy(basename(filePath))}>Copy filename</ContextMenuItem>
+          {/* Copies whatever is on screen: the live file, or — while viewing a
+              historical snapshot (WARDEN-354) — that commit's blob. Disabled while
+              nothing is loaded so it can never silently copy an empty string. */}
+          <ContextMenuItem
+            disabled={displayedContent === null}
+            onSelect={() => { if (displayedContent !== null) handleCopy(displayedContent); }}
+          >
+            Copy file content
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          {/* Closing a read-only viewer is non-destructive, so default variant
+              (not destructive). Same close affordance as the bottom Close button. */}
+          <ContextMenuItem onSelect={() => onOpenChange(false)}>Close</ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
     </Dialog>
   );
 }
