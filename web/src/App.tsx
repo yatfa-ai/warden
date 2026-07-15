@@ -904,7 +904,12 @@ function App() {
   //
   // Within the window the banner DISPLAYS the LIVE attentionTop ("needed right now",
   // per WARDEN-427 decision #3): if the rollup is cold at first paint the callout
-  // fills in as the first poll resolves, falling back to the tally alone.
+  // fills in as the first poll resolves, falling back to the tally alone. Intended
+  // tradeoff (review nit): because the latch watches the LIVE top, a pane that turns
+  // stuck/critical up to ~30s AFTER return can surface in the banner mid-work. This
+  // is bounded (one window, strictly return-initiated) and is the cost of decision
+  // #3 wanting live "needed right now" state to fill in rather than a strictly
+  // at-return-instant snapshot.
   const [returnWindowActive, setReturnWindowActive] = useState(false);
   const [bannerShownOnce, setBannerShownOnce] = useState(false);
   useEffect(() => {
@@ -1495,8 +1500,16 @@ function App() {
             banner has no rundown beneath it, unlike the badge popover); it fills in
             as soon as the rollup arrives (the first ~poll after return) and falls
             back to the tally alone in the first seconds or when no pane needs
-            attention. Layout is statically reasoned (flex: callout + right cluster
-            shrink-0; tally min-w-0 absorbs overflow) — not browser-measured here.
+            attention.
+            Layout (WARDEN-436 review fix): the right cluster (View Activity + ×)
+            is shrink-0 so the dismiss × is ALWAYS reachable; the callout Button is
+            `shrink min-w-0` (overriding the <Button> base `shrink-0`) so a long
+            agent name TRUNCATES instead of forcing the row wider and stranding ×
+            off-screen at narrow viewports. The name is capped (`max-w-40`) +
+            truncate; "You're needed in" is shrink-0 (label never clips); the reason
+            is `max-w-sm` + truncate. Statically reasoned from the flex/overflow
+            model — not browser-measured here (worker sandbox blocks Chromium;
+            deferred to the reviewer sandbox per WARDEN-130/WARDEN-68).
           */}
           <div className="flex items-center gap-3 text-sm min-w-0">
             {attentionTop && (
@@ -1504,12 +1517,11 @@ function App() {
                 variant="ghost"
                 onClick={() => openChat(attentionTop.id)}
                 aria-label={`You're needed in ${attentionTop.name ?? attentionTop.id}. Open it.`}
-                className="shrink-0 gap-2 h-auto py-1 px-2.5 rounded-md bg-white/80 dark:bg-blue-900/50 hover:bg-white dark:hover:bg-blue-900/70 text-blue-900 dark:text-blue-50 font-normal"
+                className="shrink min-w-0 gap-2 h-auto py-1 px-2.5 rounded-md bg-white/80 dark:bg-blue-900/50 hover:bg-white dark:hover:bg-blue-900/70 text-blue-900 dark:text-blue-50 font-normal"
               >
                 <span className={cn('size-2 rounded-full shrink-0', dotForState(attentionTop.state))} aria-hidden />
-                <span className="text-sm whitespace-nowrap">
-                  You&rsquo;re needed in <span className="font-semibold">{attentionTop.name ?? attentionTop.id}</span>
-                </span>
+                <span className="text-sm whitespace-nowrap shrink-0">You&rsquo;re needed in</span>
+                <span className="text-sm font-semibold max-w-40 truncate">{attentionTop.name ?? attentionTop.id}</span>
                 <span className="text-xs text-blue-700/90 dark:text-blue-200/80 max-w-sm truncate">{attentionReason(attentionTop)}</span>
                 <span className="text-xs text-blue-600 dark:text-blue-300 shrink-0 whitespace-nowrap">open →</span>
               </Button>
@@ -1533,19 +1545,21 @@ function App() {
             )}
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            <button
+            <Button
+              variant="ghost"
               onClick={openActivityTab}
-              className="text-xs px-2 py-1 bg-blue-200 dark:bg-blue-800 text-blue-900 dark:text-blue-100 rounded hover:bg-blue-300 dark:hover:bg-blue-700 transition-colors"
+              className="h-auto px-2 py-1 text-xs rounded bg-blue-200 dark:bg-blue-800 text-blue-900 dark:text-blue-100 hover:bg-blue-300 dark:hover:bg-blue-700"
             >
               View Activity
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
               onClick={() => setBannerDismissed(true)}
-              className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200"
               aria-label="Dismiss return banner"
+              className="h-auto px-1.5 py-1 text-base leading-none text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200"
             >
               ×
-            </button>
+            </Button>
           </div>
         </div>
       )}
