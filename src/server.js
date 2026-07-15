@@ -1875,12 +1875,20 @@ export function stripCommitSubject(raw) {
 // compare against lastSeen (WARDEN-356) — the relative `%ar` is coarse and would
 // mislabel already-seen commits as new as it ages, so the filter must use `%ct`.
 const GIT_LOG_PRETTY = '%h|%s|%an|%ar|%ct';
+// WARDEN-498: the commit-message search window. Browse caps at 50 (limit clamped to
+// [1,50] in the handler), but search exists to FIND a commit that may sit far down
+// history, so it uses this larger ceiling instead. A few hundred covers a long project
+// history without an unbounded scan; still bounded so a huge repo can't exhaust argv
+// or the response. Absent `grep` never reaches this path (browse keeps `limit`).
+const GIT_LOG_GREP_MAX = 200;
 
 // Recent commit history (git log) for a chat's repo. All transports go through
 // runGit (WARDEN-235): manual-local async runLocalGit, manual-remote SSH, and yatfa
 // containers via `docker exec … git -C <cwd>`. A non-git or no-cwd repo yields an
 // empty list (never a 500). limit is clamped to [1, 50]. An optional `path` filters
-// to file-history mode (git log --follow -- <path>, WARDEN-319).
+// to file-history mode (git log --follow -- <path>, WARDEN-319). An optional `grep`
+// searches commit MESSAGES (git log --grep=<term> -i, WARDEN-498) over a wider
+// window (GIT_LOG_GREP_MAX) so an old commit is findable.
 app.get('/api/git-log', async (req, res) => {
   const chatId = String(req.query.id || '');
   const limit = Math.min(Math.max(parseInt(String(req.query.limit || '5'), 10) || 5, 1), 50);
@@ -1900,6 +1908,16 @@ app.get('/api/git-log', async (req, res) => {
   // isSafeRelativePath the per-file git-show route uses (WARDEN-151). Absent `path`
   // → byte-for-byte today's behavior (existing callers send none).
   const filePath = String(req.query.path || '').trim();
+  // Optional commit-message search (WARDEN-498): when present, splice
+  // `git log --grep=<term> -i` so a human can find WHEN a change landed by message
+  // instead of scrolling the per-agent commit lists. Mirrors how `path` was added
+  // (WARDEN-319): parsed here, length-capped (≤128) to bound argv, passed as a SINGLE
+  // argv element locally and shellQuote'd remotely (WARDEN-122 — the `=` stays one
+  // argument; never let it reach a shell). `-i` makes it case-insensitive; `--grep`
+  // matches the full message (subject + body) by default — exactly what WARDEN-387/388
+  // made visible. Absent `grep` → byte-for-byte today's behavior (existing callers send
+  // none).
+  const grep = String(req.query.grep || '').trim().slice(0, 128);
   const { chat, error } = await resolve(chatId);
   if (error) return res.status(404).json({ error });
 
@@ -1920,7 +1938,14 @@ app.get('/api/git-log', async (req, res) => {
     // stays brace-expansion-safe; the remote branch shellQuotes each arg for the same
     // reason (WARDEN-122). yatfa chats run this inside the container (WARDEN-235).
     // range=incoming/outgoing splices in the corresponding rev; absent → HEAD log.
+    // WARDEN-498: a present `grep` splices `--grep=<term>` + `-i` (case-insensitive,
+    // matches subject AND body) as the FIRST log options — before the limit/range/pretty
+    // args — and widens the window to GIT_LOG_GREP_MAX (an old commit may sit beyond the
+    // 50-commit browse cap; the point of search is to FIND it). Absent `grep` →
+    // searchLimit === limit, so the browse path is byte-for-byte unchanged.
+    const searchLimit = grep ? GIT_LOG_GREP_MAX : limit;
     const args = ['log'];
+    if (grep) args.push(`--grep=${grep}`, '-i');
     if (filePath) {
       // File-history mode (WARDEN-319): --follow tracks the file across renames and
       // yields every commit that touched it (newest first). incoming/outgoing is a
@@ -1929,10 +1954,10 @@ app.get('/api/git-log', async (req, res) => {
       // and the pathspec must be the single path after `--` (--follow requires exactly
       // one pathspec); `--` terminates option parsing so a path named like a flag
       // can't inject options — same WARDEN-122 discipline as git-show's per-file path.
-      args.push(`-${limit}`, '--follow', `--pretty=format:${GIT_LOG_PRETTY}`, '--', filePath);
+      args.push(`-${searchLimit}`, '--follow', `--pretty=format:${GIT_LOG_PRETTY}`, '--', filePath);
     } else {
       if (rangeRev) args.push(rangeRev);
-      args.push(`-${limit}`, `--pretty=format:${GIT_LOG_PRETTY}`);
+      args.push(`-${searchLimit}`, `--pretty=format:${GIT_LOG_PRETTY}`);
     }
     const r = await runGit(chat, args, cwd);
     const raw = r.ok ? r.stdout.trim() : '';
