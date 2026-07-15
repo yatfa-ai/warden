@@ -28,6 +28,7 @@ import { useActivitySeries } from '@/lib/useActivitySeries';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { buildAgentActivity, selectAgentSparkline } from '@/lib/agentSparkline';
 import { displayName } from '@/lib/chatDisplay';
+import { formatTokens } from '@/lib/formatTokens';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -192,6 +193,39 @@ function ResourceChip({ agent }: { agent: Chat }) {
     <span
       className={`text-[10px] tabular-nums ${resourceTone(agent.cpuPct, agent.memPct)}`}
       title={resourceTitle(agent)}
+    >
+      {label}
+    </span>
+  );
+}
+
+/**
+ * Per-agent token spend (WARDEN-466): the lifetime total of the budget session
+ * this chat joined to, surfaced beside CPU/mem so the cost dimension lives at the
+ * SAME surface as the kill button. A runaway that is cheap on CPU but burning
+ * tokens is now visible at the moment the human decides to stop it.
+ *
+ * Mirrors the proven per-session chip in OpenChatBrowserPage exactly
+ * (text-[10px] text-amber-500/80 tabular-nums + formatTokens) so cost reads in
+ * the same color vocabulary everywhere it appears (WARDEN-68 — reuse, no new
+ * styling). Rendered ONLY when the chat carries a joined tokenUsage — budget off,
+ * no usage, or no cwd+host match render nothing, identical graceful-N/A to a
+ * missing CPU/mem field. The number is model-agnostic tokens (dollar cost is out
+ * of scope). `tabular-nums` keeps the digits steady as the total ticks.
+ *
+ * Join limitation (path A, noted in the tooltip): the total comes from a budget
+ * session matched by cwd+host (NOT id — a chat id is a container/tmux key, never
+ * the claude uuid). A fleet running multiple roles for one repo on one host
+ * shares cwd+host, so this may show the heaviest role's spend against a sibling —
+ * stale-but-plausible, pure observability, never a mutation.
+ */
+function TokenChip({ agent }: { agent: Chat }) {
+  const label = formatTokens(agent.tokenUsage?.total);
+  if (!label) return null;
+  return (
+    <span
+      className="text-[10px] text-amber-500/80 shrink-0 tabular-nums"
+      title={`Token spend (lifetime total of the budget session this agent joined): ${label}. Matched by cwd + host — multiple roles on one repo/host may share this number (heaviest shown).`}
     >
       {label}
     </span>
@@ -426,6 +460,12 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
           cache-carried from discover (zero SSH on this 10s poll). Renders nothing
           when the chat has no resource fields. */}
       <ResourceChip agent={agent} />
+
+      {/* Per-agent token spend (WARDEN-466): the joined budget-session lifetime
+          total, surfaced beside CPU/mem at the kill-decision surface. Renders
+          nothing when the chat doesn't join a budget session (budget off / no
+          usage / no cwd+host match). */}
+      <TokenChip agent={agent} />
     </div>
     );
   };

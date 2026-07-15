@@ -130,4 +130,35 @@ describe('/api/budget + tickBudget integration (real server.js)', () => {
     assert.strictEqual(body.sessionCount, 1);
     assert.strictEqual(body.topOffender.id, BREACH_ID);
   });
+
+  it('joins a live agent to its budget session token total via cwd+host (WARDEN-466)', async () => {
+    // The cost dimension meets the kill-decision surface: a catalog chat whose
+    // cwd matches the breach transcript joins (cwd+host — NOT id; chat.id is a
+    // tmux key, never the claude uuid) and /api/health attaches the session's
+    // lifetime total as agent.tokenUsage. Pure cache read — zero SSH.
+    const catalogFile = path.join(tempHome, '.yatfa-warden', 'chats.json');
+    fs.writeFileSync(catalogFile, JSON.stringify([
+      { kind: 'tmux', host: '(local)', session: 'breach-agent', name: 'breach-agent', cwd: `/tmp/${BREACH_ID}` },
+    ]));
+    // Seed the in-memory cache from the catalog (lazy mode loads from disk on
+    // /api/chats); /api/health reads that cache directly. Then sweep the budget.
+    await fetch(`${baseUrl}/api/chats`);
+    await tickBudget();
+
+    const health = await (await fetch(`${baseUrl}/api/health`)).json();
+    const agent = health.agents.find((a) => a.cwd === `/tmp/${BREACH_ID}` && a.host === '(local)');
+    assert.ok(agent, 'the planted catalog chat must appear in /api/health');
+    assert.ok(agent.tokenUsage, 'the agent must carry a joined tokenUsage');
+    assert.strictEqual(agent.tokenUsage.total, BREACH_TOTAL);
+
+    // /api/budget echoes the per-session map the join is built from, so the
+    // budget snapshot now carries the distribution it used to discard.
+    const budget = await (await fetch(`${baseUrl}/api/budget`)).json();
+    assert.ok(Array.isArray(budget.sessionUsage) && budget.sessionUsage.length > 0,
+      'sessionUsage must be a non-empty array after a sweep');
+    const entry = budget.sessionUsage.find((u) => u.cwd === `/tmp/${BREACH_ID}`);
+    assert.ok(entry, 'sessionUsage must contain the in-window breach session');
+    assert.strictEqual(entry.host, '(local)');
+    assert.strictEqual(entry.total, BREACH_TOTAL);
+  });
 });

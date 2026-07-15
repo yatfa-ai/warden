@@ -22,6 +22,18 @@ export interface BudgetTopOffender {
   total: number;
 }
 
+// One window-active session's usage entry (WARDEN-466) — the per-session
+// distribution computeBudgetState used to compute-and-discard. Now returned so
+// /api/health can join each live agent's total beside CPU/mem. cwd+host is the
+// chat→session join key (NOT id — a chat id is a container/tmux key, never the
+// claude uuid). Only usage-bearing sessions appear (0-total rows omitted).
+export interface BudgetSessionUsage {
+  id: string;
+  host: string;
+  cwd: string;
+  total: number;
+}
+
 // The /api/budget snapshot. Mirrors src/budget.js's computeBudgetState (with
 // windowMs translated to windowHours for the UI). `enabled` reflects the master
 // config switch; when false (or before the first sweep lands) every other field
@@ -38,6 +50,12 @@ export interface BudgetState {
   fleetBreached: boolean;
   perSessionBreached: boolean;
   topOffender: BudgetTopOffender | null;
+  /**
+   * Per-session usage distribution (WARDEN-466) — the map /api/health joins each
+   * live agent on (cwd+host). Empty until the first sweep lands or when no
+   * window-active session has usage.
+   */
+  sessionUsage: BudgetSessionUsage[];
   /** True when EITHER threshold is breached — what the debounce keys on. */
   alerted: boolean;
   /** ms-since-epoch of the last sweep, or null before the first lands. */
@@ -54,6 +72,7 @@ export const EMPTY_BUDGET: BudgetState = {
   fleetBreached: false,
   perSessionBreached: false,
   topOffender: null,
+  sessionUsage: [],
   alerted: false,
   evaluatedAt: null,
 };

@@ -159,6 +159,17 @@ app.get('/api/discover', async (req, res) => {
   }
 });
 
+// Join key for the cwd+host budget-session join (WARDEN-466). A single shared
+// helper keeps the map-build and lookup sites identical BY CONSTRUCTION — two
+// hand-typed literals are how an invisible separator byte slipped in before.
+// '\0' is the canonical record separator (cf. `find -print0` / `xargs -0`): it
+// is the POSIX path terminator and cannot occur in a hostname either, so it
+// also closes the `/a b`+`c` vs `/a`+`b c` space-join collision edge for free.
+// The escape is visible in source (no literal NUL byte in the file); the NUL
+// exists only at runtime inside these in-memory Map keys, which are never
+// serialized, logged, or sent to the client.
+function cwdHostKey(cwd, host) { return `${cwd}\0${host}`; }
+
 // Health endpoint for fleet health monitoring
 app.get('/api/health', (_req, res) => {
   try {
@@ -166,14 +177,48 @@ app.get('/api/health', (_req, res) => {
     // catalog chats report UNKNOWN until their host is clicked.
     const chats = cache;
 
+    // Per-agent token spend (WARDEN-466): join each live agent to its budget
+    // session's lifetime token total so the cost dimension sits beside CPU/mem
+    // at the kill-decision surface. Reads ONLY the cached budgetState.sessionUsage
+    // map (rebuilt every 120s by tickBudget) — zero SSH, no new fetch. The join
+    // key is cwd+host (NOT id): a chat's id is a container/tmux key, never the
+    // claude uuid a budget session carries (WARDEN-466's correction), so id would
+    // never match. cwd+host is the viable existing-field key both sides carry.
+    //
+    // Multi-role collision caveat (path A, accepted): a yatfa fleet commonly runs
+    // worker/reviewer/… for the SAME repo on ONE host — those chats share cwd+host
+    // and collide. We keep the MAX total per key so the chip shows the heaviest
+    // spender (a stale-but-plausible number — pure read-only observability, never
+    // a mutation). The limitation is noted in the chip tooltip.
+    const usageByCwdHost = new Map();
+    const sessionUsage = budgetState?.sessionUsage;
+    if (Array.isArray(sessionUsage)) {
+      for (const u of sessionUsage) {
+        if (!u || !u.cwd || !(u.total > 0)) continue;
+        const key = cwdHostKey(u.cwd, u.host);
+        const prev = usageByCwdHost.get(key);
+        if (prev == null || u.total > prev) usageByCwdHost.set(key, u.total);
+      }
+    }
+
     // Calculate health state for each agent
-    const agentsWithHealth = chats.map(chat => ({
-      ...chat,
-      healthState: getHealthState(chat, chat.lastActivity, {
-        healthyMin: cfg.healthWarningThresholdMin,
-        warningMin: cfg.healthCriticalThresholdMin,
-      })
-    }));
+    const agentsWithHealth = chats.map(chat => {
+      const agent = {
+        ...chat,
+        healthState: getHealthState(chat, chat.lastActivity, {
+          healthyMin: cfg.healthWarningThresholdMin,
+          warningMin: cfg.healthCriticalThresholdMin,
+        })
+      };
+      // Attach the joined token total when this chat's cwd+host matches a budget
+      // session (the chip source for HealthDashboard; absent → no chip, the same
+      // graceful-N/A as a missing CPU/mem field).
+      if (chat.cwd) {
+        const total = usageByCwdHost.get(cwdHostKey(chat.cwd, chat.host));
+        if (total != null) agent.tokenUsage = { total };
+      }
+      return agent;
+    });
 
     // Group by health state
     const groups = groupByHealth(agentsWithHealth);
@@ -1329,6 +1374,8 @@ app.get('/api/budget', (_req, res) => {
       fleetBreached: false,
       perSessionBreached: false,
       topOffender: null,
+      // Empty until the first sweep lands (WARDEN-466) — no sessions to join yet.
+      sessionUsage: [],
       alerted: false,
       evaluatedAt: null,
     });
@@ -1343,6 +1390,8 @@ app.get('/api/budget', (_req, res) => {
     fleetBreached: b.fleetBreached,
     perSessionBreached: b.perSessionBreached,
     topOffender: b.topOffender,
+    // Per-session usage distribution (WARDEN-466) — the map /api/health joins on.
+    sessionUsage: Array.isArray(b.sessionUsage) ? b.sessionUsage : [],
     alerted: b.alerted,
     evaluatedAt: b.evaluatedAt,
   });

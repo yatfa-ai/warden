@@ -72,21 +72,32 @@ export function computeBudgetState(sessions, opts) {
   let fleetSpent = 0;
   let topOffender = null;
   let topTotal = 0;
+  // Per-session usage distribution (WARDEN-466). The same numbers this loop
+  // already sums into fleetSpent + reduces to the single topOffender — returned
+  // verbatim so /api/health can join each LIVE agent's token total beside its
+  // CPU/mem at the kill-decision surface (see server.js /api/health's cwd+host
+  // join). Only sessions with real usage contribute (a 0-total row renders no
+  // chip), which also bounds the payload to the rows that matter. Additive: the
+  // existing fleetSpent / topOffender / breach fields are unchanged.
+  const sessionUsage = [];
   for (const s of active) {
     const total = num(s?.tokenUsage?.total);
     fleetSpent += total;
-    // The offender is the single heaviest window-active session (the specific
-    // runaway a per-session alarm points at). Only sessions with real usage can
-    // be the offender; ties resolve to the first-seen (stable).
-    if (total > 0 && total > topTotal) {
-      topTotal = total;
-      topOffender = {
-        id: s.id,
-        host: s.host,
-        cwd: s.cwd,
-        summary: s.summary,
-        total,
-      };
+    if (total > 0) {
+      sessionUsage.push({ id: s.id, host: s.host, cwd: s.cwd, total });
+      // The offender is the single heaviest window-active session (the specific
+      // runaway a per-session alarm points at). Only sessions with real usage can
+      // be the offender; ties resolve to the first-seen (stable).
+      if (total > topTotal) {
+        topTotal = total;
+        topOffender = {
+          id: s.id,
+          host: s.host,
+          cwd: s.cwd,
+          summary: s.summary,
+          total,
+        };
+      }
     }
   }
 
@@ -106,6 +117,10 @@ export function computeBudgetState(sessions, opts) {
     fleetBreached,
     topOffender,
     perSessionBreached,
+    // Per-session usage entries (WARDEN-466) — the distribution the fleetSpent
+    // sum + topOffender reduction are derived from. Additive; consumers that
+    // ignore it are unaffected.
+    sessionUsage,
     // `alerted` is the single boolean the debounce keys on — true when EITHER
     // threshold is breached. Recovery (both back under) clears it, re-arming the
     // one-shot for the next breach.
