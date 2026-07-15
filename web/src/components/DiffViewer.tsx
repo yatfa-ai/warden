@@ -10,7 +10,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Loader2Icon, FileIcon, GitCompare, AlertCircleIcon } from 'lucide-react';
 import { classifyDiffLine, DIFF_LINE_CLASS } from '@/lib/diff';
-import { DiffStatChip } from '@/components/sidebar/GitBadges';
+import { DiffStatChip } from '@/components/sidebar/DiffStatChip';
 import type { DiffStat } from '@/components/sidebar/types';
 
 interface DiffViewerProps {
@@ -152,7 +152,7 @@ export function DiffViewer({ chatId, filePath, staged, range, count, diffstat, o
             {!loading && !error && empty && (
               <div className="flex items-center justify-center py-8 text-muted-foreground">
                 {isRange
-                  ? (range === 'worktree' ? 'Working tree clean.' : 'No net changes between the two tips.')
+                  ? (range === 'worktree' ? 'No tracked changes vs HEAD.' : 'No net changes between the two tips.')
                   : 'No changes — file matches HEAD.'}
               </div>
             )}

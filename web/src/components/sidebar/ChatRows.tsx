@@ -17,7 +17,8 @@ import { chatType, displayName, hostTagOf } from '@/lib/chatDisplay';
 import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
 import type { Chat } from '@/lib/types';
 import type { GitCommit, GitFile, DiffStat } from './types';
-import { GitBranchBadge, GitChangedFile, WhatsNewMarker, DiffStatChip } from './GitBadges';
+import { GitBranchBadge, GitChangedFile, WhatsNewMarker } from './GitBadges';
+import { DiffStatChip } from './DiffStatChip';
 import { getLastSeen, summarizeWhatsNew, hasUnreviewedProgress } from '@/lib/whatsNew';
 
 // Compute the per-agent "What's new since your last visit" summary for a row

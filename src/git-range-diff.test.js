@@ -20,7 +20,7 @@ import { spawnSync } from 'node:child_process';
  *   - repo ahead of @{u} → range=outgoing returns the aggregated diff text
  *   - repo behind @{u}   → range=incoming returns the aggregated diff
  *   - dirty worktree     → range=worktree returns the combined `git diff HEAD` (WARDEN-449)
- *   - clean worktree     → range=worktree returns an empty diff (→ "Working tree clean.")
+ *   - clean worktree     → range=worktree returns an empty diff (→ "No tracked changes vs HEAD.")
  *   - unborn HEAD        → range=worktree returns 'no commits yet ...' (NOT 'no upstream configured')
  *   - no upstream / detached HEAD → { diff: null, error: 'no upstream configured' }, 200 not 500
  *   - output capped at 1MB via capDiff (the shared guard, asserted via the route)
@@ -307,7 +307,7 @@ describe('/api/git-range-diff range=worktree (uncommitted ± axis — WARDEN-449
 
   it('returns an empty diff (200, no error) for a clean tree', async () => {
     // warden-noupstream is a clean repo (one commit, nothing dirty) → `git diff HEAD`
-    // is empty. The frontend renders an empty diff as the "Working tree clean." state,
+    // is empty. The frontend renders an empty diff as the "No tracked changes vs HEAD." state,
     // NOT an error (the success criterion: a clean tree shows the clean empty state).
     const res = await fetch(`${baseUrl}/api/git-range-diff?id=warden-noupstream&range=worktree`);
     assert.strictEqual(res.status, 200);
