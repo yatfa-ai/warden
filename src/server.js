@@ -2183,6 +2183,110 @@ app.get('/api/git-cat-file', async (req, res) => {
   }
 });
 
+// ---- Per-side conflict content (WARDEN-428) --------------------------------
+// Read-only ours-vs-theirs view for a conflicted path (UU/AA/UD/…). When an agent
+// is stuck mid-merge/rebase/cherry-pick, clicking a conflicted file from the
+// changed-files list opens THIS — the two conflicting sides from git's stage
+// blobs — instead of the generic `git diff --cached`, which for an unmerged path
+// is not a usable ours/theirs view. Completes WARDEN-186's conflict-STATE
+// visibility (the red `!XY` badge) with conflict-CONTENT.
+//
+//   GET /api/git-conflict?id=<chatId>&path=<file>
+//     → { ours: string|null, theirs: string|null, path: string, error: string|null }
+//
+// `ours`   = `git show :2:<path>` (stage 2 = HEAD / the current branch).
+// `theirs` = `git show :3:<path>` (stage 3 = MERGE_HEAD / the branch being merged).
+// Stage blobs :2:/:3: exist by definition for any unmerged path (that is exactly
+// what UNMERGED_STATUS_CODES means), so this is uniform across every conflict code.
+//
+// Mirrors /api/git-cat-file (a blob READ, not a diff), NOT /api/git-diff: resolve
+// → gitCwd guard → isSafeRelativePath (the cat-file/read-file guard, NOT
+// isPathWithinCwd — a stage blob is read by git, not from the host fs) →
+// isBinaryFile extension check → size pre-check via `git cat-file -s :2:`/`:3:`
+// against GIT_DIFF_MAX_BYTES → `git show :N:<path>` → isBinaryBlob NUL-byte
+// defense-in-depth. `${stage}:${filePath}` is safe as one argv element after
+// `git -C <cwd>` / the shellQuoted remote form (filePath is isSafeRelativePath-
+// checked), mirroring cat-file's `${hash}:${filePath}`.
+//
+// Edge cases: if a stage blob is absent (modify/delete UD/DU, or both-deleted DD)
+// that side returns null cleanly — a one-sided conflict still renders the present
+// side. When BOTH sides are absent we distinguish a non-git cwd (soft-fail → null
+// sides, null error, mirroring cat-file's rev-parse --is-inside-work-tree probe)
+// from a real repo where both blobs are genuinely absent (DD / path not conflicted
+// → a helpful 'no conflict content' error). Every failure path returns 200 with a
+// populated `error` / null sides — never a 500.
+//
+// Read-only contract: `git show :N:` and `git cat-file -s :N:` are strictly
+// read-only — identical in kind to the already-shipped `git show <hash>:<path>`
+// (cat-file) and `git diff` (git-diff). No merge/checkout/add/rm. This stays on
+// the WARDEN-199 read-only line the git-status/log/diff/show/cat-file/blame set
+// already honors.
+app.get('/api/git-conflict', async (req, res) => {
+  const chatId = String(req.query.id || '');
+  const filePath = String(req.query.path || '').trim();
+  const { chat, error } = await resolve(chatId);
+  if (error) return res.status(404).json({ ours: null, theirs: null, path: filePath, error });
+
+  // Empty path → nothing to read; unsafe path → 'invalid path' (never 500),
+  // mirroring cat-file's guards exactly.
+  if (!filePath) return res.json({ ours: null, theirs: null, path: '', error: 'path is required' });
+  if (!isSafeRelativePath(filePath)) return res.json({ ours: null, theirs: null, path: filePath, error: 'invalid path' });
+
+  try {
+    const cwd = gitCwd(chat);
+    if (!cwd) return res.json({ ours: null, theirs: null, path: filePath, error: 'no cwd' });
+
+    // Binary by extension: mirror /api/git-cat-file (a conflicted .png is still a
+    // .png). Checked before any git call so we never transfer garbled bytes.
+    if (isBinaryFile(filePath)) {
+      return res.json({ ours: null, theirs: null, path: filePath, error: 'cannot read binary files' });
+    }
+
+    // Read each stage blob (:2: ours, :3: theirs) independently. A side whose
+    // `cat-file -s` fails is absent (modify/delete conflict, or DD both-deleted) →
+    // that side stays undefined (→ null) cleanly; the present side still renders.
+    // An oversize or binary side aborts the whole response with a clean error
+    // (mirroring cat-file: a truncation would mislead, and a conflict view needs
+    // both sides to be honest). `sides[stage]` may legitimately be '' (an empty
+    // file), so the absence → null mapping below uses `!== undefined`, NOT a
+    // truthiness test that would collapse '' to null.
+    const sides = {};
+    for (const stage of ['2', '3']) {
+      const sizeR = await runGit(chat, ['cat-file', '-s', `:${stage}:${filePath}`], cwd);
+      if (!sizeR.ok) continue; // stage blob absent → side stays undefined (→ null)
+      const size = parseInt(sizeR.stdout || '', 10);
+      if (Number.isNaN(size)) continue;
+      if (size > GIT_DIFF_MAX_BYTES) {
+        return res.json({ ours: null, theirs: null, path: filePath, error: 'file too large (max 1MB)' });
+      }
+      const r = await runGit(chat, ['show', `:${stage}:${filePath}`], cwd);
+      if (!r.ok) continue; // blob vanished between -s and show → treat as absent
+      const raw = r.stdout || '';
+      // Defense-in-depth: a non-binary extension whose stage content is binary
+      // (e.g. an extension-less blob) decodes to garbled UTF-8. NUL = binary.
+      if (isBinaryBlob(raw)) {
+        return res.json({ ours: null, theirs: null, path: filePath, error: 'cannot read binary files' });
+      }
+      sides[stage] = raw;
+    }
+    const ours = sides['2'] !== undefined ? sides['2'] : null;
+    const theirs = sides['3'] !== undefined ? sides['3'] : null;
+
+    // Both sides absent: distinguish a non-git cwd (soft-fail → null error,
+    // mirroring cat-file's rev-parse probe) from a real repo where both stage
+    // blobs are genuinely absent (DD both-deleted, or the path isn't conflicted).
+    if (ours === null && theirs === null) {
+      const probe = await runGit(chat, ['rev-parse', '--is-inside-work-tree'], cwd);
+      const isRepo = probe.ok && (probe.stdout || '').trim() === 'true';
+      return res.json({ ours: null, theirs: null, path: filePath, error: isRepo ? 'no conflict content' : null });
+    }
+
+    res.json({ ours, theirs, path: filePath, error: null });
+  } catch (e) {
+    res.json({ ours: null, theirs: null, path: filePath, error: e.message });
+  }
+});
+
 // Shelved work-in-progress detail (git stash list). Mirrors /api/git-log: local
 // chats run git via spawnSync, remote chats run over SSH with shellQuote(cwd).
 // We reuse git-log's --pretty pipe format (`%gd|%s|%cr`) so the subject (which
