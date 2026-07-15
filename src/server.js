@@ -26,7 +26,7 @@ import { buildSnapshot, diffLifecycles } from './lifecycle.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { classifyPane, stripAnsi } from './agentState.js';
 import { checkHost } from './hostStatus.js';
-import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, buildDockerGitArgv } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseReflog, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, buildDockerGitArgv } from './gitStatus.js';
 import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep } from './companion.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -2378,6 +2378,50 @@ app.get('/api/git-stash', async (req, res) => {
     res.json({ stashes, error: null });
   } catch (e) {
     res.json({ stashes: [], error: e.message });
+  }
+});
+
+// Git reflog — an agent's operation history (WARDEN-460). The fourth read-only
+// "axis" alongside commit history (/api/git-log), working-tree state
+// (/api/git-status), and shelved WIP (/api/git-stash): the NON-commit git
+// operations an autonomous agent performs that leave no commit AND no dirty file
+// — `git reset --hard` to a clean tree, `git checkout` to another branch, an
+// abandoned/aborted rebase, a force-push, a cherry-pick rewind. Those live ONLY
+// in the reflog, so when a human opens an agent that looks "clean" but is on a
+// surprising branch (or whose commits seem to have vanished after a reset), this
+// is what makes it diagnosable in-UI. It is also the recovery handle the detached
+// -HEAD tooltip already gestures at ("at risk if reflog expires") but never
+// exposed. Mirrors /api/git-stash's transport/shape exactly. Read-only by
+// construction: `git reflog` (the read form) only, never `git reflog expire`/
+// `delete` (the WARDEN-199 read-only line the whole git-status/log/diff/show/
+// cat-file/conflict/stash/blame set holds).
+//
+//   GET /api/git-reflog?id=<chatId>  → { entries: [{ hash, subject, date }], error }
+app.get('/api/git-reflog', async (req, res) => {
+  const chatId = String(req.query.id || '');
+  const { chat, error } = await resolve(chatId);
+  if (error) return res.status(404).json({ error });
+
+  try {
+    const cwd = gitCwd(chat);
+    if (!cwd) return res.json({ entries: [], error: 'no cwd' });
+
+    // abbreviated hash | reflog subject (the OPERATION, e.g. "reset: moving to
+    // HEAD~1") | relative committer date. The subject may itself contain '|'. We
+    // reuse git-stash's `%gd|%s|%cr` pipe format so `parseReflog` peels the subject
+    // front/back exactly like `parseStashList`. runGit passes --pretty as one argv
+    // element (no shell on LOCAL) so '|' isn't read as a pipe; the remote branch
+    // shellQuotes it (WARDEN-122). yatfa chats run this inside the container
+    // (WARDEN-235). Capped at the last 50 entries — the recent operation window a
+    // human needs to answer "what did this agent just do to its repo?".
+    const pretty = '%h|%gs|%cr';
+    const r = await runGit(chat, ['reflog', '-n', '50', `--pretty=format:${pretty}`], cwd);
+    const raw = r.ok ? r.stdout.trim() : '';
+
+    const entries = raw ? parseReflog(raw) : [];
+    res.json({ entries, error: null });
+  } catch (e) {
+    res.json({ entries: [], error: e.message });
   }
 });
 

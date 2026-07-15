@@ -18,7 +18,7 @@ import { displayName } from '@/lib/chatDisplay';
 import { type ProjectGitAgent, type FileCollision } from '@/lib/gitStateSummary';
 import { formatWhatsNewLine, type WhatsNewSummary } from '@/lib/whatsNew';
 import type { Chat } from '@/lib/types';
-import type { GitCommit, GitFile, GitStash, DiffStat } from './types';
+import type { GitCommit, GitFile, GitStash, GitReflogEntry, DiffStat } from './types';
 import { DiffStatChip } from './DiffStatChip';
 
 /**
@@ -625,6 +625,16 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   const [stashList, setStashList] = useState<GitStash[] | undefined>(undefined);
   const [stashLoading, setStashLoading] = useState(false);
 
+  // Lazy reflog detail (WARDEN-460): the agent's operation history — resets,
+  // checkouts, abandoned rebases, force-pushes (the non-commit ops that leave no
+  // commit AND no dirty file, diagnosable only in the reflog). Unlike stash this
+  // has no eager count prop (the roadmap keeps it off the always-on badge), so we
+  // fetch it on every first-open of the expanded view, guarded by `=== undefined`
+  // so a repeat open reuses the cache. undefined = not yet fetched, [] = fetched-
+  // but-empty (a fresh repo with no commits, or a non-git cwd soft-fail).
+  const [reflogList, setReflogList] = useState<GitReflogEntry[] | undefined>(undefined);
+  const [reflogLoading, setReflogLoading] = useState(false);
+
   // WARDEN-398: the aggregated range-diff modal target. Set by the "View full diff"
   // affordance in the outgoing (↑N) or incoming (↓N) section; null while closed.
   // WARDEN-449: extended to the ± (worktree) axis — `git diff HEAD`, no count (the
@@ -665,6 +675,22 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
     }
   };
 
+  // Always fetch (mirrors fetchStash); dedup is at the call site (onOpenChange
+  // guards on reflogList === undefined, and the refresh button is disabled while
+  // loading). Read-only — /api/git-reflog never mutates the repo.
+  const fetchReflog = async () => {
+    setReflogLoading(true);
+    try {
+      const r = await fetch(`/api/git-reflog?id=${encodeURIComponent(chatId)}`);
+      const j = await r.json();
+      setReflogList(Array.isArray(j.entries) ? j.entries : []);
+    } catch {
+      setReflogList([]);
+    } finally {
+      setReflogLoading(false);
+    }
+  };
+
   const toggleCommit = (hash: string) => {
     if (expandedHash === hash) {
       setExpandedHash(null);
@@ -687,6 +713,10 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
       if (behindCount > 0 && incomingCommits === undefined && !incomingLoading) onFetchIncoming?.();
       if (aheadCount > 0 && outgoingCommits === undefined && !outgoingLoading) onFetchOutgoing?.();
       if (stashN > 0 && stashList === undefined && !stashLoading) fetchStash();
+      // WARDEN-460: the reflog (operation history) is the diagnostic for a repo
+      // that looks clean but has done something surprising, so it has no count
+      // gate — fetch it on every first open (guarded so repeat opens reuse cache).
+      if (reflogList === undefined && !reflogLoading) fetchReflog();
     }}>
       <RadixPopover.Trigger asChild>
         <button
@@ -994,6 +1024,44 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
                 </ul>
               ) : (
                 <div className="px-1 py-1 text-[10px] text-muted-foreground">no stashes</div>
+              )}
+            </div>
+          )}
+          {/* WARDEN-460: read-only "recent operations" (git reflog). The fourth axis
+              alongside commits / working-tree / stash: the non-commit ops (reset,
+              checkout, abandoned rebase, force-push) that leave no commit AND no dirty
+              file. Rendered once the lazy fetch has started (no count gate — the reflog
+              is the diagnostic for a repo that LOOKS clean), reusing the stash row
+              styling. Expanded-view-only; no always-on badge. */}
+          {(reflogList !== undefined || reflogLoading) && (
+            <div className="mt-1.5 border-t border-border pt-1.5">
+              <div className="mb-0.5 flex items-center justify-between gap-2 px-0.5">
+                <span className="truncate text-[10px] font-medium text-muted-foreground">⏱ recent operations</span>
+                <IconTooltip label="refresh operations" disabled={reflogLoading}>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); fetchReflog(); }}
+                    className="shrink-0 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+                    disabled={reflogLoading}
+                  >↻</button>
+                </IconTooltip>
+              </div>
+              {reflogLoading && reflogList === undefined ? (
+                <div className="flex items-center gap-1.5 px-1 py-1">
+                  <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">loading…</span>
+                </div>
+              ) : reflogList && reflogList.length > 0 ? (
+                <ul className="max-h-40 overflow-auto">
+                  {reflogList.map((op, i) => (
+                    <li key={op.hash || i} className="rounded px-1 py-0.5 text-left">
+                      {/* The subject IS the operation (git's %gs), e.g. "reset: moving to HEAD~1" / "checkout: moving from main to feat". */}
+                      <span className="block truncate text-[10px] text-foreground" title={op.subject}>{op.subject}</span>
+                      {op.hash && <span className="block text-[10px] text-muted-foreground"><span className="font-mono">{op.hash}</span>{op.date ? ` · ${op.date}` : ''}</span>}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="px-1 py-1 text-[10px] text-muted-foreground">no operations</div>
               )}
             </div>
           )}
