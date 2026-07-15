@@ -1091,9 +1091,10 @@ export function persistUiState(
 // observerWidth. (WARDEN-372 folded the former flat activeTabs/hiddenTabs/
 // openPanes/focused working set into `workspaces`/`activeWorkspaceId`; paneHost
 // stayed global.) Everything else in DEFAULT_UI is a PREF and gets the default —
-// including agentFilter/agentSort (a pre-existing App saveUi-effect inconsistency
-// leaves those unpersisted, but the helper resets them for completeness so the
-// object is a true DEFAULT_UI base).
+// including agentFilter/agentSort (WARDEN-442 made these App-owned and added them
+// to App's saveUi spread, so they now persist like every other pref; previously
+// they were ChatSidebar-local and the spread omitted them, so they reset on
+// reload).
 //
 // NOTE on terminalFontFamily: DEFAULT_UI.terminalFontFamily is '' (the "blank
 // means default stack" sentinel), so this helper returns '' for it — correct
