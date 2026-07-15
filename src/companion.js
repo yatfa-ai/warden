@@ -10,11 +10,18 @@
 // stdin, responses leave on its stdout. "No one can reach your warden" stays
 // literally true.
 //
-// This whole path is GATED behind WARDEN_COMPANION_TRANSPORT=1 (experimental).
-// The default discover()/runWithPool() SSH path is untouched and remains the
-// default until a later cutover slice. Companion-or-fail: on bootstrap failure
-// this path surfaces a clear, actionable error and NEVER silently falls back to
-// raw SSH — opt out by unsetting WARDEN_COMPANION_TRANSPORT.
+// This whole path is GATED behind the companion transport being enabled
+// (experimental). The default discover()/runWithPool() SSH path is untouched
+// and remains the default. Companion-or-fail: on bootstrap failure this path
+// surfaces a clear, actionable error and NEVER silently falls back to raw SSH.
+//
+// Enablement (WARDEN-439): historically an env-var-only opt-in
+// (WARDEN_COMPANION_TRANSPORT=1). It is now a persisted Settings toggle
+// (config.companionTransportEnabled) that drives this same gate — applied at
+// server boot and live on every PUT /api/config, so a flip takes effect on the
+// next op, not on a restart. The env var remains an explicit OPERATOR OVERRIDE
+// (set it to '1'/'0' to force the choice regardless of the UI). See
+// applyCompanionToggle below.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -30,6 +37,21 @@ const COMPANION_DIR = '$HOME/.warden'; // expands on the remote host
 // ----------------------------- opt-in + manifest -----------------------------
 
 export function isCompanionTransportEnabled(env = process.env) {
+  return env.WARDEN_COMPANION_TRANSPORT === '1';
+}
+
+// WARDEN-439: drive the env-var gate above from the persisted Settings toggle.
+// The toggle (config.companionTransportEnabled) is applied at server boot and
+// on every PUT /api/config, so the routing sites that call
+// isCompanionTransportEnabled() pick up a flip on the next op without a restart.
+//
+// `override` MUST reflect whether the operator set WARDEN_COMPANION_TRANSPORT
+// before warden started (snapshot once at boot). When true, the env var is an
+// explicit operator choice and the UI toggle is inert — never clobber it. When
+// false, write the gate from the persisted toggle. Returns the resulting
+// enabled state so callers (GET /api/config) can report it without a re-read.
+export function applyCompanionToggle(enabled, { override = false, env = process.env } = {}) {
+  if (!override) env.WARDEN_COMPANION_TRANSPORT = enabled ? '1' : '0';
   return env.WARDEN_COMPANION_TRANSPORT === '1';
 }
 

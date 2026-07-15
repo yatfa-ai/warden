@@ -28,8 +28,18 @@ let baseUrl;
 let originalHome;
 let tempHome;
 let configPath;
+let companionEnvOverriddenAtBoot;
+let originalCompanionEnv;
 
 before(async () => {
+  // WARDEN-439: capture the ambient WARDEN_COMPANION_TRANSPORT BEFORE importing
+  // server.js — server.js snapshots the operator-override flag AND, when not
+  // overridden, writes the gate ('0'/'1') at import time, so reading it after
+  // the import would always see it set. Also restore it in after() so the value
+  // server.js writes here never leaks to other test files in this process.
+  originalCompanionEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+  companionEnvOverriddenAtBoot = originalCompanionEnv !== undefined;
+
   originalHome = process.env.HOME;
   tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-config-'));
   process.env.HOME = tempHome;
@@ -53,6 +63,8 @@ after(async () => {
   if (httpServer) await new Promise((r) => httpServer.close(r));
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
+  if (originalCompanionEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+  else process.env.WARDEN_COMPANION_TRANSPORT = originalCompanionEnv;
   try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 });
 
@@ -149,5 +161,77 @@ describe('/api/config clamps an inverted threshold pair so it cannot lie (WARDEN
     const after = await (await fetch(`${baseUrl}/api/config`)).json();
     assert.strictEqual(after.healthWarningThresholdMin, 15, 'no clamp when already well-ordered');
     assert.strictEqual(after.healthCriticalThresholdMin, 120);
+  });
+});
+
+describe('/api/config companion transport toggle (WARDEN-439)', () => {
+  it('GET exposes companionTransportEnabled defaulting to false + the override flag', async () => {
+    const body = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.ok('companionTransportEnabled' in body, 'toggle field present in GET');
+    assert.strictEqual(body.companionTransportEnabled, false, 'safe default is OFF (experimental)');
+    assert.strictEqual(
+      body.companionTransportOverridden,
+      companionEnvOverriddenAtBoot,
+      'override flag mirrors the boot-time env snapshot',
+    );
+  });
+
+  it('PUT companionTransportEnabled: true flips the live gate AND persists', async () => {
+    const res = await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ companionTransportEnabled: true }),
+    });
+    assert.strictEqual(res.status, 200);
+    // GET round-trips the whitelisted value.
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.companionTransportEnabled, true);
+    // It persisted to disk (survives a restart).
+    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    assert.strictEqual(onDisk.companionTransportEnabled, true);
+    // The live env-var gate flipped (the routing sites read this) — UNLESS the
+    // operator overrode it at boot, in which case the override wins and the
+    // toggle is inert by design.
+    if (!companionEnvOverriddenAtBoot) {
+      assert.strictEqual(process.env.WARDEN_COMPANION_TRANSPORT, '1', 'live gate is ON');
+    } else {
+      // Operator set the var before boot → it's '1' or '0' but NOT driven here.
+      assert.ok(['1', '0'].includes(process.env.WARDEN_COMPANION_TRANSPORT));
+    }
+  });
+
+  it('PUT companionTransportEnabled: false restores the live gate to OFF', async () => {
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ companionTransportEnabled: true }),
+    });
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ companionTransportEnabled: false }),
+    });
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.companionTransportEnabled, false);
+    if (!companionEnvOverriddenAtBoot) {
+      assert.strictEqual(process.env.WARDEN_COMPANION_TRANSPORT, '0', 'live gate is OFF');
+    }
+  });
+
+  it('PUT with a non-boolean is ignored by the type guard (no mutation)', async () => {
+    // Seed ON first so the guard's "left unchanged" is observable.
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ companionTransportEnabled: true }),
+    });
+    const res = await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ companionTransportEnabled: 'true' }),
+    });
+    assert.strictEqual(res.status, 200);
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.companionTransportEnabled, true, 'left unchanged, not overwritten by a string');
   });
 });

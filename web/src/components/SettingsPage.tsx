@@ -76,6 +76,12 @@ interface ConfigData {
   tokenBudgetThresholdTokens: number | null;
   tokenBudgetWindowHours: number | null;
   tokenBudgetPerSessionThresholdTokens: number | null;
+  // Companion transport (WARDEN-439). Experimental master switch that routes
+  // remote tmux ops through a persistent RPC channel instead of a fresh ssh per
+  // op. companionTransportOverridden is true when WARDEN_COMPANION_TRANSPORT was
+  // operator-set at boot — then the env var wins and the toggle is inert.
+  companionTransportEnabled: boolean;
+  companionTransportOverridden: boolean;
   confirmDestructiveActions: boolean;
   notifyChatOps: boolean;
   notifyErrors: boolean;
@@ -298,6 +304,7 @@ const SETTINGS_SECTIONS = [
   { id: 'safety', label: 'Safety' },
   { id: 'attention', label: 'Attention thresholds' },
   { id: 'tokenbudget', label: 'Token budget' },
+  { id: 'performance', label: 'Performance' },
   { id: 'display', label: 'Display' },
   { id: 'appearance', label: 'Appearance' },
   { id: 'newchats', label: 'New Chats' },
@@ -512,6 +519,8 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
     tokenBudgetThresholdTokens: 2_000_000,
     tokenBudgetWindowHours: 24,
     tokenBudgetPerSessionThresholdTokens: 1_000_000,
+    companionTransportEnabled: false,
+    companionTransportOverridden: false,
     confirmDestructiveActions: true,
     notifyChatOps: true,
     notifyErrors: true,
@@ -599,6 +608,8 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
             typeof configData.tokenBudgetPerSessionThresholdTokens === 'number'
               ? configData.tokenBudgetPerSessionThresholdTokens
               : 1_000_000,
+          companionTransportEnabled: configData.companionTransportEnabled ?? false,
+          companionTransportOverridden: configData.companionTransportOverridden ?? false,
           confirmDestructiveActions: configData.confirmDestructiveActions ?? true,
           notifyChatOps: configData.notifyChatOps ?? true,
           notifyErrors: configData.notifyErrors ?? true,
@@ -1341,6 +1352,44 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                     </p>
                   </div>
                 </div>
+              </SettingsSection>
+
+              {/* Performance — WARDEN-439. The companion transport collapses the
+                  per-op SSH handshake on remote hosts into one persistent RPC
+                  channel, the biggest lever for cutting ssh-process churn on a
+                  remote-heavy fleet. Experimental; remote-only by design (local
+                  hosts are unaffected). Default OFF. */}
+              <SettingsSection title="Performance" className={cn(activeSection !== 'performance' && 'hidden')}>
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="companionTransportEnabled"
+                    checked={config.companionTransportEnabled ?? false}
+                    disabled={config.companionTransportOverridden}
+                    onCheckedChange={(checked) =>
+                      setConfig({ ...config, companionTransportEnabled: checked === true })
+                    }
+                  />
+                  <Label
+                    htmlFor="companionTransportEnabled"
+                    className={cn('cursor-pointer', config.companionTransportOverridden && 'cursor-not-allowed opacity-60')}
+                  >
+                    Companion transport <Badge variant="secondary">experimental</Badge>
+                  </Label>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Route remote tmux ops (discover, capture, spawn, kill, liveness, resize) through a
+                  single persistent SSH channel instead of a fresh ssh process per operation — so the
+                  per-op ssh process count on remote hosts drops to near zero. Takes effect on the next
+                  operation. Local hosts are unaffected (remote-only by design).
+                </p>
+                {config.companionTransportOverridden && (
+                  <p className="text-xs text-muted-foreground">
+                    <Badge variant="outline">env override</Badge>{' '}
+                    The <code className="text-[11px]">WARDEN_COMPANION_TRANSPORT</code> environment
+                    variable is set, so it overrides this toggle — the on/off state above is inert.
+                    Unset the variable and restart Warden to control it here.
+                  </p>
+                )}
               </SettingsSection>
 
               {/* Display */}

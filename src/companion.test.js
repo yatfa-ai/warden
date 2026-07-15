@@ -29,7 +29,7 @@ import {
   targetForUname, remoteBinaryPath, buildProbeScript, buildUploadScript, parseProbe,
   encodeRequest, mapCompanionContainers, CompanionChannel, CompanionTransportError,
   CompanionRpcError, getChannel, discover, capturePanes, hasSession, spawnSession, killSession,
-  isCompanionTransportEnabled, loadManifest,
+  isCompanionTransportEnabled, applyCompanionToggle, loadManifest,
   projectSpawnModel, _resetChannelCacheForTests,
   resize as companionResize,
 } from './companion.js';
@@ -242,6 +242,62 @@ describe('isCompanionTransportEnabled', () => {
     assert.strictEqual(isCompanionTransportEnabled({ WARDEN_COMPANION_TRANSPORT: '0' }), false);
     assert.strictEqual(isCompanionTransportEnabled({ WARDEN_COMPANION_TRANSPORT: undefined }), false);
     assert.strictEqual(isCompanionTransportEnabled({}), false);
+  });
+});
+
+// WARDEN-439: the persisted Settings toggle drives the same env-var gate above
+// via applyCompanionToggle (called at boot + on PUT /api/config). It must write
+// the gate from the toggle UNLESS the operator set the env var as an override.
+describe('applyCompanionToggle', () => {
+  it('writes the gate ON from the toggle when enabled (no override)', () => {
+    const env = {}; // operator did not set the var
+    assert.strictEqual(applyCompanionToggle(true, { env }), true);
+    assert.strictEqual(env.WARDEN_COMPANION_TRANSPORT, '1');
+    assert.strictEqual(isCompanionTransportEnabled(env), true);
+  });
+
+  it('writes the gate OFF from the toggle when disabled (no override)', () => {
+    const env = {};
+    assert.strictEqual(applyCompanionToggle(false, { env }), false);
+    assert.strictEqual(env.WARDEN_COMPANION_TRANSPORT, '0');
+    assert.strictEqual(isCompanionTransportEnabled(env), false);
+  });
+
+  it('a live flip (disabled → enabled) updates the gate for the next op', () => {
+    // Boot: toggle off.
+    const env = {};
+    applyCompanionToggle(false, { env });
+    assert.strictEqual(isCompanionTransportEnabled(env), false);
+    // PUT: flip on — the gate must follow without a restart.
+    applyCompanionToggle(true, { env });
+    assert.strictEqual(isCompanionTransportEnabled(env), true);
+  });
+
+  it('never clobbers an operator env-var override (force ON)', () => {
+    // Operator set WARDEN_COMPANION_TRANSPORT=1 before warden started: override.
+    const env = { WARDEN_COMPANION_TRANSPORT: '1' };
+    // User turns the toggle OFF in Settings — the override must win.
+    assert.strictEqual(applyCompanionToggle(false, { override: true, env }), true);
+    assert.strictEqual(env.WARDEN_COMPANION_TRANSPORT, '1', 'operator var left intact');
+  });
+
+  it('never clobbers an operator env-var override (force OFF)', () => {
+    const env = { WARDEN_COMPANION_TRANSPORT: '0' };
+    // User turns the toggle ON in Settings — the override must win.
+    assert.strictEqual(applyCompanionToggle(true, { override: true, env }), false);
+    assert.strictEqual(env.WARDEN_COMPANION_TRANSPORT, '0', 'operator var left intact');
+  });
+
+  it('defaults to process.env when no env is passed', () => {
+    const saved = process.env.WARDEN_COMPANION_TRANSPORT;
+    try {
+      delete process.env.WARDEN_COMPANION_TRANSPORT;
+      assert.strictEqual(applyCompanionToggle(true), true);
+      assert.strictEqual(process.env.WARDEN_COMPANION_TRANSPORT, '1');
+    } finally {
+      if (saved === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+      else process.env.WARDEN_COMPANION_TRANSPORT = saved;
+    }
   });
 });
 
