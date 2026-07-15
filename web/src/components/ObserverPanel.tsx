@@ -12,7 +12,6 @@ import {
   SendHorizontalIcon,
   SparklesIcon,
   SquareIcon,
-  TargetIcon,
   UserIcon,
   XIcon,
 } from 'lucide-react';
@@ -72,23 +71,10 @@ type Item =
       resolved?: boolean;
       result?: string;
       ts: number;
-    }
-  | {
-      id: string;
-      kind: 'suggestion';
-      agentId: string;
-      agentName: string;
-      role?: string;
-      urgency: string;
-      state: string;
-      action: string;
-      dismissed?: boolean;
-      ts: number;
     };
 
 interface Props {
   sessionId: string;
-  onFocusAgent?: (id: string) => void;
   // WARDEN-332 — bumped on every incoming observer WS event (any message on this
   // session's conversation). Drives the parent ObserverTabs' idle-timeout: a
   // session the agent is actively producing output to is never idle. Read through
@@ -110,7 +96,7 @@ const STATUS_ERROR: ThreadMessageLike['status'] = { type: 'incomplete', reason: 
 
 // Map a timeline item onto assistant-ui's ThreadMessageLike. assistant-ui only
 // permits `status` on assistant-role messages, so every non-user entry (observer
-// text, tool chips, meta lines, directive/suggestion cards) maps to an assistant
+// text, tool chips, meta lines, directive cards) maps to an assistant
 // message; the rendered appearance is chosen by `kind` in the message renderer,
 // not by role. The text content doubles as the copy payload for each message.
 function convertMessage(item: Item): ThreadMessageLike {
@@ -145,19 +131,12 @@ function convertMessage(item: Item): ThreadMessageLike {
         content: [{ type: 'text' as const, text: item.directive }],
         status: STATUS_COMPLETE,
       };
-    case 'suggestion':
-      return {
-        id: item.id,
-        role: 'assistant',
-        content: [{ type: 'text' as const, text: item.action }],
-        status: STATUS_COMPLETE,
-      };
   }
 }
 
 // One observer conversation, bound to a persisted session (?sid=). History is
 // replayed on connect so a refresh/restore shows the prior conversation.
-export function ObserverPanel({ sessionId, onFocusAgent, onActivity, timestampFormat }: Props) {
+export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props) {
   const [items, setItems] = useState<Item[]>([]);
   const [busy, setBusy] = useState(false);
   const [conn, setConn] = useState(false);
@@ -411,19 +390,6 @@ export function ObserverPanel({ sessionId, onFocusAgent, onActivity, timestampFo
             ts: Date.now(),
           });
           return;
-        case 'suggestion_card':
-          pushItem({
-            id: nextId(),
-            kind: 'suggestion',
-            agentId: m.agentId,
-            agentName: m.agentName,
-            role: m.role,
-            urgency: m.urgency,
-            state: m.state,
-            action: m.action,
-            ts: Date.now(),
-          });
-          return;
         default:
           return;
       }
@@ -518,12 +484,6 @@ export function ObserverPanel({ sessionId, onFocusAgent, onActivity, timestampFo
     [],
   );
 
-  const dismissSuggestion = useCallback(
-    (id: string) =>
-      setItems((p) => p.map((it) => (it.id === id && it.kind === 'suggestion' ? { ...it, dismissed: true } : it))),
-    [],
-  );
-
   // Append-only regenerate: re-run the last user turn by re-sending it. No
   // history branching (sidesteps the ExternalStoreRuntime branching limitation).
   const regenerate = useCallback(() => {
@@ -564,7 +524,7 @@ export function ObserverPanel({ sessionId, onFocusAgent, onActivity, timestampFo
   });
 
   // id → item lookup so each assistant-ui message can render its full timeline
-  // entry (card fields, suggestion state, …) straight from React state.
+  // entry (card fields, …) straight from React state.
   const itemsById = useMemo(() => {
     const map = new Map<string, Item>();
     for (const it of items) map.set(it.id, it);
@@ -669,18 +629,6 @@ export function ObserverPanel({ sessionId, onFocusAgent, onActivity, timestampFo
                           onApprove={decide}
                           onEdit={setEditState}
                           onDecline={decide}
-                        />
-                      );
-                    if (item.kind === 'suggestion' && !item.dismissed)
-                      return (
-                        <SuggestionCard
-                          key={message.id}
-                          suggestion={item}
-                          onFocus={(agentId) => {
-                            onFocusAgent?.(agentId);
-                            dismissSuggestion(item.id);
-                          }}
-                          onDismiss={() => dismissSuggestion(item.id)}
                         />
                       );
                     return null;
@@ -1023,42 +971,6 @@ function DirectiveCard({
   );
 }
 
-function SuggestionCard({
-  suggestion: s,
-  onFocus,
-  onDismiss,
-}: {
-  suggestion: Extract<Item, { kind: 'suggestion' }>;
-  onFocus: (agentId: string) => void;
-  onDismiss: () => void;
-}) {
-  return (
-    <div className="pl-9">
-      <div className="flex flex-col gap-2 rounded-xl border bg-card p-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge variant={urgencyVariant(s.urgency)} className="capitalize">
-            {s.urgency}
-          </Badge>
-          <span className="text-xs font-medium">
-            {s.agentName}
-            {s.role ? ` · ${s.role}` : ''}
-          </span>
-          <span className="text-xs text-muted-foreground">{s.state}</span>
-        </div>
-        <div className="whitespace-pre-wrap break-words text-sm">{s.action}</div>
-        <div className="flex gap-1.5">
-          <Button size="sm" onClick={() => onFocus(s.agentId)}>
-            <TargetIcon /> Focus
-          </Button>
-          <Button size="sm" variant="ghost" onClick={onDismiss}>
-            Dismiss
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 /* -------------------------------- helpers -------------------------------- */
 
 async function copyText(text: string, notifySuccess: boolean) {
@@ -1077,17 +989,9 @@ const TOOL_LABELS: Record<string, string> = {
   read_chats: 'read chats',
   send_directive: 'compose directive',
   summarize_chats: 'summarize chats',
-  analyze_agents: 'analyze agents',
-  suggest_next_actions: 'suggest actions',
   alert_changes: 'alert changes',
 };
 
 function toolLabel(name: string): string {
   return TOOL_LABELS[name] ?? name.replace(/_/g, ' ');
-}
-
-function urgencyVariant(urgency: string): 'destructive' | 'default' | 'secondary' {
-  if (urgency === 'urgent') return 'destructive';
-  if (urgency === 'important') return 'default';
-  return 'secondary';
 }

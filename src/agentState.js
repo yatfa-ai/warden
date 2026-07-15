@@ -14,8 +14,8 @@
 // also exposing a `signal` (the line that triggered the state) so a badge row can
 // show WHY an agent needs attention.
 
-// Classification regexes — reused/extended from analyze_agents & suggest_next_actions
-// (WARDEN-74: regex over LLM). BLOCKED is coordination/dependency language only; the
+// Classification regexes — reused/extended from the summarize_chats classifier
+// (classifyPane; WARDEN-74: regex over LLM). BLOCKED is coordination/dependency language only; the
 // bare "waiting for" fragment is intentionally NOT matched, so human-input panes reach
 // the WAITING branch (waiting = human input, blocked = other agents/deps).
 export const SUMM_ERROR_RE = /error|failed|exception|traceback|panic|fatal/i;

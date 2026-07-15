@@ -10,7 +10,7 @@
 //   - an agent parked at a "press enter / waiting for user" prompt → 'waiting'.
 //   - a repeating stack trace / "error|failed|..." → 'erroring'.
 //   - coordination language ("blocked by", "depends on") → 'blocked'.
-// Precedence mirrors suggest_next_actions: erroring > stuck > blocked > waiting >
+// Precedence mirrors classifyPane / ATTENTION_RANK: erroring > stuck > blocked > waiting >
 // active (an error is more actionable than a loop, which beats a coordination wait).
 //
 // agentState.js is dependency-free (no fs/ssh/llm/node-pty), so it imports cleanly

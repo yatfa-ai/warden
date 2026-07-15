@@ -860,11 +860,6 @@ function App() {
     if (autoFocusNewPane) setFocused(id);
   }, [autoFocusNewPane, setOpenPanes, setFocused]);
 
-  // handle focus-agent callback from Observer suggestion cards
-  const handleFocusAgent = useCallback((id: string) => {
-    openChat(id);
-  }, [openChat]);
-
   // WARDEN-417: in-app catch-up for per-chat watch pings that fired while the human
   // was away (the OS notification was unsupported / denied / cleared / lost). Reads
   // the durable miss log written at the fire site in useAttentionRollup and surfaces
@@ -1793,7 +1788,7 @@ function App() {
             title="Drag to resize observer panel"
           />
           <ErrorBoundary>
-            <ObserverTabs externalViewMode={externalViewMode} onFocusAgent={handleFocusAgent} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} timestampFormat={timestampFormat} />
+            <ObserverTabs externalViewMode={externalViewMode} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} timestampFormat={timestampFormat} />
           </ErrorBoundary>
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden"
