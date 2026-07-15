@@ -6,7 +6,7 @@ import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { spawnSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer } from 'ws';
@@ -1471,18 +1471,52 @@ app.get('/api/claude-session', async (req, res) => {
   }
 });
 
-// Run git locally: captured stdout, inherited stderr, in a HIDDEN window. Centralizing
-// the spawn options (esp. windowsHide) keeps local git calls from flashing a visible
-// console window when warden runs as a packaged/detached app. Used by /api/git-status
-// and /api/git-log. Remote chats go through run() (ssh.js), which already hides.
-function runLocalGit(args, cwd) {
-  // 10MB maxBuffer (matching the docker-exec branches of runGit, and run() which is
-  // unbounded) so a LARGE diff/log output completes with status 0 and reaches the
-  // route's deliberate capDiff() guard intact. The pre-WARDEN-398 default (spawnSync's
-  // 1MB) killed git mid-output on any >1MB diff — so /api/git-range-diff (and any
-  // large /api/git-diff/git-show) saw a non-zero exit and reported a misleading error
-  // instead of the capped diff. capDiff remains the single 1MB truncation point.
-  return spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true, maxBuffer: 10 * 1024 * 1024 });
+// Run a command LOCALLY without blocking the event loop — the async, spawn-based
+// twin of the spawnSync calls that previously froze the whole server for the
+// duration of every local git / docker-exec / rg / grep on a request path
+// (WARDEN-441). Mirrors run() in ssh.js (spawn + Promise) so the LOCAL transports
+// are consistent with the remote path's existing async pattern. stdout/stderr are
+// accumulated as UTF-8 STRINGS and returned as { ok, code, stdout, stderr } — the
+// same shape runGit/runInContext already hand their callers — plus `error` (the
+// spawn Error, with .code e.g. 'ENOENT') when the binary could not be spawned, so
+// hasBinary() can distinguish an absent tool from a normal non-zero exit.
+//
+// stderr is CAPTURED (not inherited) so git/rg diagnostics ("fatal: not a git
+// repository") reach the caller via .stderr instead of spewing on the server
+// console — matching runLocalSearch's discipline and the remote run() path. Like
+// run(), output is UNBOUNDED: the route-level capDiff() guard and the streamed
+// search bounding remain the single truncation points (a spawnSync maxBuffer used
+// to mask a large diff as a non-zero exit; the async read completes with status 0
+// and lets capDiff truncate cleanly).
+function runLocalCapture(bin, args, { cwd, timeout } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(bin, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    const timer = timeout ? setTimeout(() => { try { child.kill('SIGTERM'); } catch { /* noop */ } }, timeout) : null;
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', (err) => {
+      if (timer) clearTimeout(timer);
+      resolve({ ok: false, code: -1, stdout, stderr, error: err });
+    });
+    child.on('exit', (code) => {
+      if (timer) clearTimeout(timer);
+      resolve({ ok: code === 0, code: code ?? -1, stdout, stderr });
+    });
+  });
+}
+
+// Run git locally, async (non-blocking). Used by /api/git-status, /api/git-log,
+// /api/git-diff, /api/git-blame and the manual-LOCAL branch of runGit. Captures
+// stdout/stderr as strings (see runLocalCapture) and centralizes windowsHide so a
+// local git call never flashes a visible console window when warden runs as a
+// packaged/detached app. Remote chats go through run() (ssh.js), which is already
+// async and hides. Returns { ok, code, stdout, stderr }.
+async function runLocalGit(args, cwd) {
+  return runLocalCapture('git', args, { cwd });
 }
 
 // Resolve the working directory for a chat's git operations (WARDEN-235).
@@ -1510,7 +1544,7 @@ export function gitCwd(chat) {
 //
 //   yatfa LOCAL   → docker exec <c> git -C <cwd> <args>   (argv, NO shell — safe)
 //   yatfa REMOTE  → ssh host 'docker exec <c> git -C <cwd> <args>'
-//   manual LOCAL  → spawnSync('git', args, {cwd})          (unchanged)
+//   manual LOCAL  → runLocalGit('git', args, {cwd})        (async, non-blocking)
 //   manual REMOTE → ssh host 'cd <cwd> && git <args>'      (unchanged)
 //
 // `-C <cwd>` (not a shell `cd`) targets git at the in-container dir with zero
@@ -1522,18 +1556,13 @@ export async function runGit(chat, args, cwd) {
   if (chat.container) {
     if (chat.host === LOCAL) {
       const argv = buildDockerGitArgv(chat.container, cwd, args);
-      const r = spawnSync(argv[0], argv.slice(1), {
-        stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
-        encoding: 'utf8', maxBuffer: 10 * 1024 * 1024,
-      });
-      return { ok: r.status === 0, code: r.status ?? -1, stdout: r.stdout || '', stderr: r.stderr || '' };
+      return runLocalCapture(argv[0], argv.slice(1));
     }
     const a = args.map(shellQuote).join(' ');
     return run(chat.host, `docker exec ${shellQuote(chat.container)} git -C ${shellQuote(cwd)} ${a} 2>/dev/null`, { timeout: 8000 });
   }
   if (chat.host === LOCAL) {
-    const r = runLocalGit(args, cwd);
-    return { ok: r.status === 0, code: r.status ?? -1, stdout: (r.stdout || '').toString(), stderr: (r.stderr || '').toString() };
+    return runLocalGit(args, cwd);
   }
   const a = args.map(shellQuote).join(' ');
   return run(chat.host, `cd ${shellQuote(cwd)} && git ${a} 2>/dev/null`, { timeout: 8000 });
@@ -1550,16 +1579,12 @@ export async function runGit(chat, args, cwd) {
 //   yatfa REMOTE  → ssh host 'docker exec <c> bash -lc <script>'
 //   manual REMOTE → ssh host '<script>'                 (run() already wraps bash -lc)
 //
-// Never called for manual-LOCAL: that path keeps the host-fs spawnSync/existsSync
+// Never called for manual-LOCAL: that path keeps the host-fs existsSync
 // implementation (the marker files and realpath are reachable on this machine).
 async function runInContext(chat, script, { timeout = 8000 } = {}) {
   if (chat.container) {
     if (chat.host === LOCAL) {
-      const r = spawnSync('docker', ['exec', chat.container, 'bash', '-lc', script], {
-        stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
-        encoding: 'utf8', maxBuffer: 10 * 1024 * 1024,
-      });
-      return { ok: r.status === 0, code: r.status ?? -1, stdout: r.stdout || '', stderr: r.stderr || '' };
+      return runLocalCapture('docker', ['exec', chat.container, 'bash', '-lc', script]);
     }
     return run(chat.host, `docker exec ${shellQuote(chat.container)} bash -lc ${shellQuote(script)}`, { timeout });
   }
@@ -1594,8 +1619,8 @@ export function buildInProgressScript(cwd) {
 // the operation name or null (graceful, never throws). Display only (WARDEN-28).
 async function detectInProgress(chat, cwd) {
   if (!chat.container && chat.host === LOCAL) {
-    const gitDirResult = runLocalGit(['rev-parse', '--git-dir'], cwd);
-    const gitDir = gitDirResult.stdout?.toString().trim() || '';
+    const gitDirResult = await runLocalGit(['rev-parse', '--git-dir'], cwd);
+    const gitDir = gitDirResult.stdout.trim() || '';
     if (!gitDir) return null;
     const gd = path.resolve(cwd, gitDir);
     if (fs.existsSync(path.join(gd, 'MERGE_HEAD'))) return 'merge';
@@ -1828,7 +1853,7 @@ export function stripCommitSubject(raw) {
 const GIT_LOG_PRETTY = '%h|%s|%an|%ar|%ct';
 
 // Recent commit history (git log) for a chat's repo. All transports go through
-// runGit (WARDEN-235): manual-local spawnSync, manual-remote SSH, and yatfa
+// runGit (WARDEN-235): manual-local async runLocalGit, manual-remote SSH, and yatfa
 // containers via `docker exec … git -C <cwd>`. A non-git or no-cwd repo yields an
 // empty list (never a 500). limit is clamped to [1, 50]. An optional `path` filters
 // to file-history mode (git log --follow -- <path>, WARDEN-319).
@@ -1898,7 +1923,7 @@ app.get('/api/git-log', async (req, res) => {
 // ---- Per-file git diff (WARDEN-151) ----------------------------------------
 // The depth layer between WARDEN-107 (which files changed) and WARDEN-39 (read
 // the current file): show WHAT an agent changed in one file. Mirrors
-// /api/git-status + /api/read-file: chat-scoped, cwd-contained, local spawnSync
+// /api/git-status + /api/read-file: chat-scoped, cwd-contained, local async runLocalGit
 // vs remote `run(host, script)`, with the same path-traversal discipline read-file
 // guards against. A diff target may be a DELETED file (status 'D') that no longer
 // exists on disk, so the containment check must tolerate a missing path — unlike
@@ -1963,13 +1988,13 @@ export function isPathWithinCwd(cwd, filePath) {
 //
 // `staged` (WARDEN-369) runs `git diff --cached` (index-vs-HEAD, exactly what will
 // be committed) instead of `git diff HEAD` (combined staged+unstaged). Read-only.
-export function getLocalGitDiff(cwd, filePath, staged) {
+export async function getLocalGitDiff(cwd, filePath, staged) {
   if (!isPathWithinCwd(cwd, filePath)) {
     return { error: 'path must be within working directory', status: 403 };
   }
 
-  const result = runLocalGit(staged ? ['diff', '--cached', '--', filePath] : ['diff', 'HEAD', '--', filePath], cwd);
-  let diff = capDiff(result.stdout ? result.stdout.toString() : '');
+  const result = await runLocalGit(staged ? ['diff', '--cached', '--', filePath] : ['diff', 'HEAD', '--', filePath], cwd);
+  let diff = capDiff(result.stdout || '');
 
   if (diff.length === 0) {
     // Empty diff is ambiguous: a clean tracked file vs an untracked ('??') file HEAD
@@ -1978,8 +2003,8 @@ export function getLocalGitDiff(cwd, filePath, staged) {
     // a non-zero exit here means untracked, not "outside repo".) For staged mode an
     // empty diff means "nothing staged for this path" — the file is tracked, so this
     // check returns tracked and the empty diff flows through unchanged.
-    const tracked = runLocalGit(['ls-files', '--error-unmatch', '--', filePath], cwd);
-    if (tracked.status !== 0) return { diff: null, untracked: true };
+    const tracked = await runLocalGit(['ls-files', '--error-unmatch', '--', filePath], cwd);
+    if (!tracked.ok) return { diff: null, untracked: true };
   }
 
   return { diff, untracked: false };
@@ -2043,7 +2068,7 @@ app.get('/api/git-diff', async (req, res) => {
     // — runs the diff in-context via docker-exec/ssh (getDeliveredGitDiff), so the
     // realpath containment + git diff resolve where the repo actually lives.
     const result = (!chat.container && chat.host === LOCAL)
-      ? getLocalGitDiff(cwd, filePath, staged)
+      ? await getLocalGitDiff(cwd, filePath, staged)
       : await getDeliveredGitDiff(chat, cwd, filePath, staged);
 
     if (result.status) return res.status(result.status).json({ diff: null, untracked: false, path: filePath, error: result.error });
@@ -2154,7 +2179,7 @@ function isSafeRelativePath(p) {
 }
 
 // Inspect a single commit (git show). Mirrors /api/git-log: local chats run git via
-// spawnSync, remote chats run over SSH with shellQuote(cwd)+shellQuote(hash). A
+// async runLocalGit, remote chats run over SSH with shellQuote(cwd)+shellQuote(hash). A
 // non-git / no-cwd / unknown-hash repo yields an empty result (never a 500).
 //
 //   GET /api/git-show?id=<chatId>&hash=<hash>           → { files: [{path,status}] }
@@ -2421,7 +2446,7 @@ app.get('/api/git-conflict', async (req, res) => {
 });
 
 // Shelved work-in-progress detail (git stash list). Mirrors /api/git-log: local
-// chats run git via spawnSync, remote chats run over SSH with shellQuote(cwd).
+// chats run git via async runLocalGit, remote chats run over SSH with shellQuote(cwd).
 // We reuse git-log's --pretty pipe format (`%gd|%s|%cr`) so the subject (which
 // may itself contain '|') is peeled front/back by the exported `parseStashList`
 // helper. A non-git / no-cwd / stash-free repo yields an empty list (never a
@@ -2502,7 +2527,7 @@ app.get('/api/git-reflog', async (req, res) => {
 // commit / author / date last touched each line. Strictly observational — `git
 // blame` only, no checkout or any mutating op (the WARDEN-199 line the roadmap
 // stays on the read-only side of). Mirrors /api/git-show's resolve → cwd guard →
-// isSafeRelativePath → local spawnSync vs remote run() → capDiff → never-500
+// isSafeRelativePath → local async runLocalGit vs remote run() → capDiff → never-500
 // shape. A non-git / no-cwd / binary / unblamable file yields an empty list.
 
 // `summary` is truncated per line so a giant commit message can't dominate the
@@ -2597,10 +2622,11 @@ app.get('/api/git-blame', async (req, res) => {
 
     let raw = '';
     if (!chat.container && chat.host === LOCAL) {
-      // manual-LOCAL: spawnSync on the host fs. `--line-porcelain` for the stable,
-      // machine-parseable per-line header block the parser above consumes.
-      const r = runLocalGit(['blame', '--line-porcelain', '--', filePath], cwd);
-      raw = capDiff(r.stdout?.toString() || '');
+      // manual-LOCAL: runLocalGit (async, non-blocking) on the host fs.
+      // `--line-porcelain` for the stable, machine-parseable per-line header block
+      // the parser above consumes.
+      const r = await runLocalGit(['blame', '--line-porcelain', '--', filePath], cwd);
+      raw = capDiff(r.stdout || '');
     } else {
       // container (local+remote) or manual-remote: buildGitBlameScript delivered
       // in-context via runInContext (docker-exec for yatfa, ssh for manual-remote)
@@ -2983,7 +3009,7 @@ app.post('/api/file-exists', async (req, res) => {
 // Completes the locate→read loop WARDEN-39 (file reading) started: lets a human
 // find a file by CONTENT (function name, error string, …) and open it in the
 // FileViewer, instead of having to know the exact path by hand. Mirrors the
-// read-file/git-status patterns: chat-scoped, cwd-contained, local spawnSync vs
+// read-file/git-status patterns: chat-scoped, cwd-contained, local async runLocalGit vs
 // remote `run(host, script)` split. The `query` is user input that runs in a
 // remote shell, so it carries the same injection surface read-file guards
 // against — it is shellQuoted and preceded by `--`, output is bounded, and
@@ -3044,24 +3070,24 @@ export function buildSearchScript(cwd, query) {
   return `cd ${shellQuote(cwd)} 2>/dev/null || exit 0; set +o pipefail; if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git grep -n -I -F -- ${q}; elif command -v rg >/dev/null 2>&1; then rg --line-number --no-heading -F -- ${q} .; else grep -rnI -F -- ${q} .; fi | cut -c1-${SEARCH_TRANSFER_LINE_LEN} | head -n ${SEARCH_MAX_RESULTS}`;
 }
 
-// spawnSync wrapper for tiny local PROBE commands only (git rev-parse,
-// `rg --version`): bounded (1MB maxBuffer + 10s timeout) with stderr CAPTURED
-// (not inherited) so probe noise ("fatal: not a git repository") never hits the
-// server console. The workspace search itself is NOT run through here — it is
-// streamed by streamBoundedSearch below so its output is bounded AT THE SOURCE
-// (a spawnSync maxBuffer, once exceeded, masks a many-match search as ENOBUFS→'').
-function runLocalSearch(bin, args, cwd) {
-  return spawnSync(bin, args, {
-    cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
-    encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 10000,
-  });
+// Async, non-blocking wrapper for tiny local PROBE commands only (git rev-parse,
+// `rg --version`): bounded by a 10s timeout (SIGTERM) with stderr CAPTURED (not
+// inherited) so probe noise ("fatal: not a git repository") never hits the server
+// console. The workspace search itself is NOT run through here — it is streamed by
+// streamBoundedSearch below so its output is bounded AT THE SOURCE. Delegates to
+// runLocalCapture (WARDEN-441): previously a spawnSync that froze the event loop
+// on every /api/search-files request while the probe ran.
+async function runLocalSearch(bin, args, cwd) {
+  return runLocalCapture(bin, args, { cwd, timeout: 10000 });
 }
 
 // PATH-presence probe — the local twin of the remote `command -v rg` gate that
-// decides whether the non-repo fallback runs ripgrep or plain grep. spawnSync so
-// an absent tool (ENOENT) is detected cleanly, not entangled with a streamed run.
-function hasBinary(bin) {
-  return runLocalSearch(bin, ['--version'], undefined).error?.code !== 'ENOENT';
+// decides whether the non-repo fallback runs ripgrep or plain grep. Async; an
+// absent tool surfaces as a spawn ENOENT (runLocalCapture's `error.code`), not
+// entangled with a streamed run.
+async function hasBinary(bin) {
+  const r = await runLocalSearch(bin, ['--version'], undefined);
+  return r.error?.code !== 'ENOENT';
 }
 
 // Stream a local search tool's stdout and bound it AT THE SOURCE — the local twin
@@ -3142,15 +3168,16 @@ export function streamBoundedSearch(bin, args, cwd, opts = {}) {
 // coverage parity with the remote buildSearchScript.
 export async function searchLocalRaw(cwd, query) {
   // Gate the rg/grep fallback to non-repos (mirrors remote `if git rev-parse…`).
-  // rev-parse output is tiny ("true"), so a spawnSync probe here is overflow-safe.
-  const gitCheck = runLocalSearch('git', ['rev-parse', '--is-inside-work-tree'], cwd);
-  const insideRepo = gitCheck.status === 0 && (gitCheck.stdout?.trim() === 'true');
+  // rev-parse output is tiny ("true"), and runLocalSearch is async + bounded by a
+  // 10s timeout, so this probe never blocks the event loop.
+  const gitCheck = await runLocalSearch('git', ['rev-parse', '--is-inside-work-tree'], cwd);
+  const insideRepo = gitCheck.ok && (gitCheck.stdout.trim() === 'true');
   if (insideRepo) {
     // git grep: status 1 = no matches (yields ''); 0 = matches. -I skips binaries.
     return streamBoundedSearch('git', ['grep', '-n', '-I', '-F', '--', query], cwd);
   }
   // Not a git repo → ripgrep (fast, respects .gitignore) then plain grep. -F = literal.
-  if (hasBinary('rg')) {
+  if (await hasBinary('rg')) {
     return streamBoundedSearch('rg', ['--line-number', '--no-heading', '-F', '--', query, '.'], cwd);
   }
   return streamBoundedSearch('grep', ['-rn', '-I', '-F', '--', query, '.'], cwd);
@@ -3159,7 +3186,7 @@ export async function searchLocalRaw(cwd, query) {
 // POST /api/search-files — content-search a chat's working directory (grep).
 // Body: { id: string, query: string }
 // Response: { results: [{ file, line, text }], query, error?: string }
-// Local chats run git/rg/grep via spawnSync; remote chats run buildSearchScript
+// Local chats run git/rg/grep via async runLocalGit/streamBoundedSearch; remote chats run buildSearchScript
 // over SSH. Mirrors /api/git-status's resolve → cwd guard → local/remote split.
 app.post('/api/search-files', async (req, res) => {
   const r = await resolve(String(req.body?.id || ''));
