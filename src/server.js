@@ -159,6 +159,17 @@ app.get('/api/discover', async (req, res) => {
   }
 });
 
+// Join key for the cwd+host budget-session join (WARDEN-466). A single shared
+// helper keeps the map-build and lookup sites identical BY CONSTRUCTION — two
+// hand-typed literals are how an invisible separator byte slipped in before.
+// '\0' is the canonical record separator (cf. `find -print0` / `xargs -0`): it
+// is the POSIX path terminator and cannot occur in a hostname either, so it
+// also closes the `/a b`+`c` vs `/a`+`b c` space-join collision edge for free.
+// The escape is visible in source (no literal NUL byte in the file); the NUL
+// exists only at runtime inside these in-memory Map keys, which are never
+// serialized, logged, or sent to the client.
+function cwdHostKey(cwd, host) { return `${cwd}\0${host}`; }
+
 // Health endpoint for fleet health monitoring
 app.get('/api/health', (_req, res) => {
   try {
@@ -184,7 +195,7 @@ app.get('/api/health', (_req, res) => {
     if (Array.isArray(sessionUsage)) {
       for (const u of sessionUsage) {
         if (!u || !u.cwd || !(u.total > 0)) continue;
-        const key = `${u.cwd} ${u.host}`;
+        const key = cwdHostKey(u.cwd, u.host);
         const prev = usageByCwdHost.get(key);
         if (prev == null || u.total > prev) usageByCwdHost.set(key, u.total);
       }
@@ -203,7 +214,7 @@ app.get('/api/health', (_req, res) => {
       // session (the chip source for HealthDashboard; absent → no chip, the same
       // graceful-N/A as a missing CPU/mem field).
       if (chat.cwd) {
-        const total = usageByCwdHost.get(`${chat.cwd} ${chat.host}`);
+        const total = usageByCwdHost.get(cwdHostKey(chat.cwd, chat.host));
         if (total != null) agent.tokenUsage = { total };
       }
       return agent;
