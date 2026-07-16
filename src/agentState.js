@@ -10,12 +10,13 @@
 // is unit-testable in isolation (the agentState.test.js sibling) and importable from
 // both observer.js (its original consumer) and server.js's new /api/agent-states
 // endpoint. No heuristics were added or changed here — this is the exact regex +
-// stuck-repeat logic that already classified Observer summarize_chats entries, now
+// stuck-repeat logic the Observer uses to classify panes (read_chats) and that
+// feeds the deterministic /api/agent-states path, now
 // also exposing a `signal` (the line that triggered the state) so a badge row can
 // show WHY an agent needs attention.
 
-// Classification regexes — reused/extended from the summarize_chats classifier
-// (classifyPane; WARDEN-74: regex over LLM). BLOCKED is coordination/dependency language only; the
+// Classification regexes — the pane-state classifier (classifyPane; WARDEN-74:
+// regex over LLM). BLOCKED is coordination/dependency language only; the
 // bare "waiting for" fragment is intentionally NOT matched, so human-input panes reach
 // the WAITING branch (waiting = human input, blocked = other agents/deps).
 export const SUMM_ERROR_RE = /error|failed|exception|traceback|panic|fatal/i;
@@ -35,9 +36,8 @@ export function stripAnsi(s) {
     .replace(/\r/g, '');
 }
 
-// Classify CLEANED pane text into the structured per-agent fields summarize_chats
-// promises per entry (WARDEN-165 criterion #2): state, errors, lastAction,
-// currentStep, goal — plus `signal` (the triggering line, for the Attention badge).
+// Classify CLEANED pane text into structured per-agent fields (WARDEN-165
+// criterion #2): state, errors, lastAction, currentStep, goal — plus `signal` (the triggering line, for the Attention badge).
 // All inference is regex-based — no LLM call.
 //
 // `c` is the chat object (role/project/active used for goal inference + the active
