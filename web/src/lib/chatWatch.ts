@@ -21,8 +21,21 @@
 // and desktopAlerts.ts.
 import type { AgentStateRow } from '@/lib/types';
 
-/** Why a watched chat newly needs the human. */
-export type WatchReason = 'waiting' | 'erroring' | 'stuck' | 'completed';
+/**
+ * Why a watched chat needs the human. Covers BOTH faces of "needs you":
+ *  - the transition-based watch PING (diffWatchAlerts) — the reason a chat NEWLY needs
+ *    you, so a once-per-transition ping can fire. Emits waiting/erroring/stuck/completed.
+ *  - the persistent CURRENT-state row indicator (WARDEN-514, currentWatchNeed) — why a
+ *    watched chat needs you RIGHT NOW, rendered at a glance on its row.
+ * `blocked` is a persistent needs-you state (parity with the AttentionBadge's enabled
+ * pane states) but is NOT a transition the ping fires on, so diffWatchAlerts never
+ * emits it — only currentWatchNeed returns it. `completed` is the inverse: a
+ * transition-only reason (a working→idle flip, detectWatchCompleted) that is never a
+ * CURRENT persistent state, so currentWatchNeed never returns it (a finished chat's
+ * current state is `idle` → null). One shared type keeps the ping + row wording in a
+ * single WATCH_REASON_LABEL vocabulary (WARDEN-514).
+ */
+export type WatchReason = 'waiting' | 'erroring' | 'stuck' | 'completed' | 'blocked';
 
 /** A single watched-chat transition that warrants a targeted ping. */
 export interface WatchAlert {
@@ -52,7 +65,12 @@ const WORKING_STATES = new Set(['active', 'stuck', 'erroring', 'blocked', 'waiti
 // finished", which beats a bare waiting. Determines only the ORDER alerts fire in,
 // never whether they fire.
 const WATCH_REASON_PRIORITY: Record<WatchReason, number> = {
-  erroring: 0, stuck: 1, completed: 2, waiting: 3,
+  // `blocked` (4) is unreachable on the ping path — diffWatchAlerts never emits it
+  // (blocked is not a transition the ping fires on, only a persistent current-state
+  // reason per WARDEN-514's currentWatchNeed) — so its slot here exists solely to
+  // satisfy the exhaustive Record<WatchReason, number>. Placed lowest (a "waiting on
+  // a dependency" state is the least actionable needs-you reason); never consulted.
+  erroring: 0, stuck: 1, completed: 2, waiting: 3, blocked: 4,
 };
 
 // WARDEN-452: per-key cooldown window for the LIVE watch-ping channel. A watched
@@ -237,4 +255,43 @@ export function indexByWatchKey(rows: AgentStateRow[] | null): Record<string, Ag
     }
   }
   return out;
+}
+
+// WARDEN-514: the persistent needs-you CURRENT states for a watched chat — the row
+// indicator's "does this watched chat need me right now?" set. The watch PING's
+// WATCH_DIRECT_STATES (waiting/erroring/stuck) PLUS 'blocked', for parity with the
+// AttentionBadge's enabled pane states (blocked reads "needs you" on the badge too).
+// 'active'/'idle' are NOT here — a happily-working or finished chat does not need you
+// right now. 'completed' is a TRANSITION (a working→idle flip, detectWatchCompleted),
+// not a current state: a finished chat's current state is 'idle', which is not here,
+// so a completed chat naturally renders the neutral watch glyph (the proposal's
+// "exclude the transient completed event"). Sibling of WATCH_DIRECT_STATES + blocked.
+const WATCH_NEED_STATES = new Set(['waiting', 'erroring', 'stuck', 'blocked']);
+
+/**
+ * Pure: does a watched chat's CURRENT state need the human right now, and if so why?
+ * (WARDEN-514.) Sibling of the transition-based diffWatchAlerts: THAT decides a chat
+ * NEWLY entered a needs-you state (change-into-state only, for the once-per-transition
+ * ping); THIS maps a chat's CURRENT state to the persistent reason the row indicator
+ * shows at a glance — so a watched-but-closed pane that currently needs the human is
+ * recognizable in Warden without relying on the transient OS toast.
+ *
+ *  - Returns the state as the reason for the persistent needs-you states (waiting /
+ *    erroring / stuck / blocked — WATCH_NEED_STATES). `blocked` is included for parity
+ *    with the AttentionBadge even though the transition ping never fires on it.
+ *  - Returns null for active / idle / any unrecognized state → neutral (the row renders
+ *    the unchanged watch glyph). `completed` is a transition, never a current state, so
+ *    it can never be the return (a finished chat is currently `idle` → null).
+ *
+ * There is no existing "current state → reason" mapper because the watch subsystem is
+ * transition-based (diffWatchAlerts); this is the current-state complement. Pure +
+ * dependency-free (reads only the AgentStateRow shape — an `import type` erased at
+ * transpile) so chatWatch.test.mjs loads it standalone alongside diffWatchAlerts.
+ */
+export function currentWatchNeed(row: AgentStateRow): WatchReason | null {
+  const s = row?.state;
+  // WATCH_NEED_STATES holds exactly the WatchReason persistent needs-you states, so the
+  // cast is sound; every other state (incl. the transition-only 'completed') → null.
+  if (s && WATCH_NEED_STATES.has(s)) return s as WatchReason;
+  return null;
 }

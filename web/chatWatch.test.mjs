@@ -31,7 +31,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-chat-watch-test-'));
 const tmpFile = join(tmpDir, 'chatWatch.mjs');
 writeFileSync(tmpFile, code);
-const { diffWatchAlerts, detectWatchCompleted, indexByWatchKey, applyWatchCooldown, WATCH_PING_COOLDOWN_MS } = await import(tmpFile);
+const { diffWatchAlerts, detectWatchCompleted, indexByWatchKey, applyWatchCooldown, WATCH_PING_COOLDOWN_MS, currentWatchNeed } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -363,6 +363,39 @@ test('composes with diffWatchAlerts: a flapping chat pings once per window end-t
   poll('active', 60_000 + cooldown + 10_000);
   poll('erroring', 60_000 + cooldown + 20_000);        // fires (2)
   assert.equal(pings, 2);
+});
+
+console.log('\ncurrentWatchNeed (WARDEN-514): current state → persistent needs-you reason');
+test('waiting → waiting', () => {
+  assert.equal(currentWatchNeed(row('a', 'waiting')), 'waiting');
+});
+test('erroring → erroring', () => {
+  assert.equal(currentWatchNeed(row('a', 'erroring')), 'erroring');
+});
+test('stuck → stuck', () => {
+  assert.equal(currentWatchNeed(row('a', 'stuck')), 'stuck');
+});
+test('blocked → blocked (parity with the AttentionBadge; NOT a transition ping)', () => {
+  assert.equal(currentWatchNeed(row('a', 'blocked')), 'blocked');
+});
+test('active → null (neutral — a working chat does not need you right now)', () => {
+  assert.equal(currentWatchNeed(row('a', 'active')), null);
+});
+test('idle → null (a finished chat is idle, never persistent "completed")', () => {
+  assert.equal(currentWatchNeed(row('a', 'idle')), null);
+});
+test('unrecognized state (e.g. capture_failed) → null', () => {
+  assert.equal(currentWatchNeed(row('a', 'capture_failed')), null);
+});
+test('guards a row with no state', () => {
+  assert.equal(currentWatchNeed({}), null);
+  assert.equal(currentWatchNeed({ state: undefined }), null);
+});
+test('blocked is NOT a transition ping reason (current-state only, WARDEN-514)', () => {
+  // diffWatchAlerts fires change-into waiting/erroring/stuck (WATCH_DIRECT_STATES) but
+  // NOT blocked — blocked is a persistent needs-you state surfaced only by
+  // currentWatchNeed on the row, never a once-per-transition OS ping.
+  assert.equal(diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'blocked') }, ['a']).length, 0);
 });
 
 console.log(`\n✓ CHAT WATCH TESTS PASS (${passed})`);

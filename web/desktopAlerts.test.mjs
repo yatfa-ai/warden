@@ -30,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-desktop-alerts-test-'));
 const tmpFile = join(tmpDir, 'desktopAlerts.mjs');
 writeFileSync(tmpFile, code);
-const { shouldFireAlert, shouldFireWatch, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage, diffNewAttention, excludeFocusedPane, formatInAppEntry, fireWatchNotification } = await import(tmpFile);
+const { shouldFireAlert, shouldFireWatch, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage, diffNewAttention, excludeFocusedPane, formatInAppEntry, fireWatchNotification, watchStateLabel } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -349,6 +349,31 @@ test('falls back to id when name is absent', () => {
   const r = { id: 'container-1', state: 'stuck', signal: 'loop line' };
   const { body } = formatWatchMessage(r, 'stuck');
   assert.ok(body.includes('container-1'), 'falls back to id for the name');
+});
+
+console.log('\nwatchStateLabel (WARDEN-514): row tooltip = reason vocabulary + quoted signal');
+test('returns the reason label alone when there is no signal', () => {
+  assert.equal(watchStateLabel('waiting'), 'waiting for your input');
+});
+test('quotes the signal verbatim after the label', () => {
+  assert.equal(watchStateLabel('waiting', 'press enter to continue'), "waiting for your input — 'press enter to continue'");
+});
+test('blocked reason has a human label (persistent current-state parity, WARDEN-514)', () => {
+  assert.equal(watchStateLabel('blocked'), 'blocked — waiting on a dependency');
+});
+test('blocked quotes its signal too', () => {
+  assert.equal(watchStateLabel('blocked', 'ticket #12'), "blocked — waiting on a dependency — 'ticket #12'");
+});
+test('omits the signal quote when the signal is empty/null', () => {
+  assert.equal(watchStateLabel('erroring', null), 'erroring');
+  assert.equal(watchStateLabel('stuck', ''), 'stuck (repeating output)');
+});
+test('uses the SAME vocabulary the watch ping body uses (one voice)', () => {
+  const r = { id: 'w', key: 'w', name: 'w', state: 'waiting', signal: 'press enter' };
+  // formatWatchMessage's body is "<name> · <watchStateLabel>"; the row tooltip is the
+  // label tail alone — identical wording, so toast + row indicator speak with one voice.
+  const { body } = formatWatchMessage(r, 'waiting');
+  assert.ok(body.endsWith(watchStateLabel('waiting', 'press enter')), 'ping body ends with the row tooltip text');
 });
 
 // --- WARDEN-417: fireWatchNotification return contract (delivered vs lost) --------
