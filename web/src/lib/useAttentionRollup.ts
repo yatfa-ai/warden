@@ -36,10 +36,12 @@ import {
   diffNewAttention,
   excludeFocusedPane,
   formatInAppEntry,
+  watchReasonTone,
+  formatWatchInApp,
   ATTENTION_SEVERITY_DEFAULTS,
   type AttentionSeverityPrefs,
 } from '@/lib/desktopAlerts';
-import { diffWatchAlerts, indexByWatchKey, applyWatchCooldown, type WatchLastFiredMap } from '@/lib/chatWatch';
+import { diffWatchAlerts, indexByWatchKey, applyWatchCooldown, type WatchLastFiredMap, type WatchReason } from '@/lib/chatWatch';
 import { recordWatchMiss, shouldRecordMiss } from '@/lib/watchCatchup';
 import type { HealthData, ActivityStats, AgentStateRow, AgentStatesData } from '@/lib/types';
 
@@ -136,6 +138,58 @@ function fireAttentionInApp(
         : {}),
     });
   }
+}
+
+/**
+ * Show the crafted in-app WATCH ping (WARDEN-530). Sibling of fireAttentionInApp (the
+ * fleet's at-Warden ping, WARDEN-402) for the per-chat watch channel: instead of the raw
+ * OS toast — which is fragile when Warden is the focused app (OSes routinely suppress
+ * banners for the focused window or under DND — the "a ping that misses a real need
+ * breaks trust" failure mode) — this renders a themed sonner toast, reason-specific and
+ * one-click deep-linkable, for a watched chat (open OR closed pane) that NEWLY needs the
+ * human WHILE they are looking at Warden. That closes the asymmetry with the fleet: a
+ * watched chat newly needing the human at-Warden previously produced only the raw OS
+ * toast, not the "beautiful notification" (WARDEN-68) the bar demands.
+ *
+ * The tone comes from the pure watchReasonTone (red for a broken agent, amber for
+ * waiting, green for completed), and the wording from the pure formatWatchInApp (agent
+ * name as the title, reason + verbatim signal as the description). A stable per-key
+ * sonner `id` (`warden-watch:<key>` — the SAME identity space fireWatchNotification's OS
+ * `tag` uses) means a still-visible ping for the same chat UPDATES rather than stacking.
+ * A one-click "Open" action deep-links via App's openChat — the same path the OS ping's
+ * click uses. Auto-dismisses (sonner's transience): fires ONCE per genuine new need (the
+ * transition detector + cooldown the caller already enforced) and then leaves.
+ *
+ * Fires ONLY on the VISIBLE branch of the watch fire-loop (the human is present and sees
+ * it), so — mirroring the fleet's visible path — NO catch-up miss is recorded: the human
+ * saw it, so recording it would only become stale catch-up noise. Never throws.
+ */
+function fireWatchInApp(
+  row: AgentStateRow,
+  reason: WatchReason,
+  onOpenChat?: (id: string) => void,
+): void {
+  const { title, description } = formatWatchInApp(row, reason);
+  // Themed tone maps reason → sonner variant (WARDEN-68): a broken agent (erroring/stuck)
+  // → error (red); waiting → warning (amber); completed → success (green). 'critical' maps
+  // to sonner's `error` (parallels the fleet's tone vocabulary); 'warning'/'success' map
+  // 1:1. Called as a METHOD on `toast` (not a destructured ref) so its internal binding is
+  // preserved.
+  const tone = watchReasonTone(reason);
+  const method: 'error' | 'warning' | 'success' = tone === 'critical' ? 'error' : tone;
+  const key = row.key || row.id;
+  toast[method](title, {
+    description,
+    // Noticeable but still transient — the same horizon the fleet's in-app ping uses.
+    duration: 6000,
+    // One stable ping per chat (the SAME identity space as the OS `tag`): a still-visible
+    // ping for the same chat updates instead of stacking.
+    ...(key ? { id: `warden-watch:${key}` } : {}),
+    // One-click deep-link to the watched pane — the same openChat path the OS ping uses.
+    ...(key && onOpenChat
+      ? { action: { label: 'Open', onClick: () => onOpenChat(key) } }
+      : {}),
+  });
 }
 
 export function useAttentionRollup(
@@ -311,40 +365,47 @@ export function useAttentionRollup(
           //    decides whether to actually ping given the human's focus + presence.
           for (const a of fireable) {
             // WARDEN-426: focus-gate the ping — if the human is BOTH focused on
-            // this exact pane AND present (Warden visible), skip the OS ping: a
-            // focused pane is open + visible, so they can already see it via the
-            // OPEN-only AttentionBadge. `shouldFireWatch` also takes the live
-            // document.visibilityState: `focused` is STICKY workspace state that
-            // is NOT cleared when Warden hides, so when the human is AWAY
-            // (hidden) the ping ALWAYS fires regardless of focus — that is the
-            // watch feature's purpose (watch, step away, get pinged) and the
-            // badge is not visible to carry the signal while away. Gating on
-            // focus alone would swallow the away-ping entirely (the baseline
-            // above already advanced → no later re-fire either).
+            // this exact pane AND present (Warden visible), skip the ping: a focused
+            // pane is open + visible, so they can already see it via the OPEN-only
+            // AttentionBadge. `shouldFireWatch` also takes the live
+            // document.visibilityState: `focused` is STICKY workspace state that is NOT
+            // cleared when Warden hides, so when the human is AWAY (hidden) the ping
+            // ALWAYS fires regardless of focus — that is the watch feature's purpose
+            // (watch, step away, get pinged) and the badge is not visible to carry the
+            // signal while away. Gating on focus alone would swallow the away-ping
+            // entirely (the baseline above already advanced → no later re-fire either).
             //
-            // SCOPE NOTE: the gate wraps BOTH the OS ping AND the catch-up
-            // record (recordWatchMiss). That is correct ONLY because of the
-            // visibility short-circuit: away (hidden) → shouldFireWatch is true →
-            // the block runs and shouldRecordMiss(_, 'hidden') records the miss
-            // (WARDEN-417's recovery net stays armed for the away case). The
-            // only case both are skipped is present + focused-on-this-pane, where
-            // neither a transient ping NOR a catch-up record is wanted (the human
-            // saw it in the badge). The ticket's plan wrapped only the ping; the
-            // record rides along here because the two share the same "human is
-            // present and reading this exact pane" precondition.
+            // WARDEN-530: with the gate passed, visibility now BRANCHES the delivery
+            // channel (mirrors the fleet's WARDEN-402 cutover for fireAttentionInApp):
+            //   - VISIBLE  → fireWatchInApp — the crafted, themed IN-APP sonner ping, the
+            //     reliable at-Warden signal (an OS banner is fragile when Warden is the
+            //     focused app: OSes suppress banners for the focused window or under DND).
+            //     NO catch-up record — the human is present and sees it, mirroring the
+            //     fleet's visible path (which records no miss).
+            //   - HIDDEN   → unchanged: fireWatchNotification (the OS away toast) + the
+            //     shouldRecordMiss/recordWatchMiss recovery net (WARDEN-417).
+            // The focus-gate wraps BOTH branches; the only case BOTH are skipped is
+            // present + focused-on-this-pane, where neither a transient ping NOR a
+            // catch-up record is wanted (the human saw it in the badge).
             if (shouldFireWatch(focusedPaneRef.current, a.row, document.visibilityState)) {
-              // WARDEN-378: fire the OS notification. WARDEN-417: capture whether
-              // the OS channel DELIVERED it (false on unsupported / denied /
-              // restrictive-webview) so the catch-up records ONLY what the OS
-              // lost — not a duplicate channel.
-              const delivered = fireWatchNotification(a.row, a.reason, onOpenChatRef.current);
-              // WARDEN-417: durably record the ping for the in-app catch-up
-              // surfaced on return (watchCatchup) when the OS channel LOST it
-              // (delivered === false) OR the human is away (hidden — a delivered
-              // ping may yet be cleared / DND'd). A ping the OS delivered to a
-              // PRESENT human is NOT recorded (they saw it). shouldRecordMiss is
-              // the pure, unit-tested gate carrying BOTH outcomes. Never throws.
-              if (shouldRecordMiss(delivered, document.visibilityState)) recordWatchMiss(a.row, a.reason);
+              if (document.visibilityState === 'visible') {
+                // WARDEN-530: the at-Warden crafted ping — reason-specific, themed, and
+                // one-click deep-linkable. No catch-up miss: the human is present.
+                fireWatchInApp(a.row, a.reason, onOpenChatRef.current);
+              } else {
+                // WARDEN-378: fire the OS notification. WARDEN-417: capture whether
+                // the OS channel DELIVERED it (false on unsupported / denied /
+                // restrictive-webview) so the catch-up records ONLY what the OS
+                // lost — not a duplicate channel.
+                const delivered = fireWatchNotification(a.row, a.reason, onOpenChatRef.current);
+                // WARDEN-417: durably record the ping for the in-app catch-up
+                // surfaced on return (watchCatchup) when the OS channel LOST it
+                // (delivered === false) OR the human is away (hidden — a delivered
+                // ping may yet be cleared / DND'd). A ping the OS delivered to a
+                // PRESENT human is NOT recorded (they saw it). shouldRecordMiss is
+                // the pure, unit-tested gate carrying BOTH outcomes. Never throws.
+                if (shouldRecordMiss(delivered, document.visibilityState)) recordWatchMiss(a.row, a.reason);
+              }
             }
           }
         }

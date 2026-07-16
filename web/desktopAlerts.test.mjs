@@ -30,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-desktop-alerts-test-'));
 const tmpFile = join(tmpDir, 'desktopAlerts.mjs');
 writeFileSync(tmpFile, code);
-const { shouldFireAlert, shouldFireWatch, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage, diffNewAttention, excludeFocusedPane, formatInAppEntry, fireWatchNotification, watchStateLabel } = await import(tmpFile);
+const { shouldFireAlert, shouldFireWatch, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage, watchReasonTone, formatWatchInApp, diffNewAttention, excludeFocusedPane, formatInAppEntry, fireWatchNotification, watchStateLabel } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -374,6 +374,76 @@ test('uses the SAME vocabulary the watch ping body uses (one voice)', () => {
   // label tail alone — identical wording, so toast + row indicator speak with one voice.
   const { body } = formatWatchMessage(r, 'waiting');
   assert.ok(body.endsWith(watchStateLabel('waiting', 'press enter')), 'ping body ends with the row tooltip text');
+});
+
+// --- WARDEN-530: watchReasonTone + formatWatchInApp (the in-app watch ping's pure pieces) ----
+//
+// fireWatchInApp (the crafted in-app sonner toast for the at-Warden watch case) lives in
+// useAttentionRollup.ts alongside the visibility branch — it imports the runtime 'sonner'
+// module, so (like fireAttentionInApp and fireWatchNotification's delivery) it CANNOT load
+// standalone under the OXC test transform. Its PURE inputs are testable here: the
+// reason→tone mapping (watchReasonTone) and the title+description wording (formatWatchInApp).
+//
+// The watch fire-loop's visibility branch (visible → fireWatchInApp, no catch-up; hidden →
+// fireWatchNotification + catch-up) is inline in the hook for the SAME reason the fleet's
+// WARDEN-402 branch is: the branch composes pure building blocks that ARE each verified —
+// shouldFireWatch (the focus+away gate, tested below), watchReasonTone + formatWatchInApp
+// (here), and watchCatchup.shouldRecordMiss (watchCatchup.test.mjs). The inline control
+// flow itself mirrors WARDEN-402's `document.visibilityState === 'visible'` branch exactly.
+console.log('\nwatchReasonTone (WARDEN-530): reason → themed tone, incl. completed → success');
+test('erroring → critical (broken agent — red)', () => {
+  assert.equal(watchReasonTone('erroring'), 'critical');
+});
+test('stuck → critical (broken agent — red)', () => {
+  assert.equal(watchReasonTone('stuck'), 'critical');
+});
+test('waiting → warning (needs your input — amber)', () => {
+  assert.equal(watchReasonTone('waiting'), 'warning');
+});
+test('completed → success (positive — green, NOT forced into red/amber)', () => {
+  assert.equal(watchReasonTone('completed'), 'success');
+});
+test('blocked → warning (mild state, shares amber with waiting — WARDEN-514 integration)', () => {
+  // blocked is never a transition ping (diffWatchAlerts doesn't fire on it), so the
+  // fire-loop never reaches watchReasonTone with blocked — but the pure fn is TOTAL over
+  // WatchReason, and blocked ("waiting on a dependency") is mild, so it shares warning
+  // with waiting, matching the row indicator's amber treatment of the pair.
+  assert.equal(watchReasonTone('blocked'), 'warning');
+});
+test('every WatchReason resolves to a defined tone (no reason falls through)', () => {
+  for (const reason of ['waiting', 'erroring', 'stuck', 'completed', 'blocked']) {
+    assert.ok(['critical', 'warning', 'success'].includes(watchReasonTone(reason)), `${reason} maps to a tone`);
+  }
+});
+
+console.log('\nformatWatchInApp (WARDEN-530): crafted title (agent name) + reason/signal description');
+test('names the agent as the title and carries the reason as the description', () => {
+  const r = { id: 'w', key: 'w', name: 'warden-worker', state: 'waiting', signal: null };
+  const { title, description } = formatWatchInApp(r, 'waiting');
+  assert.equal(title, 'warden-worker', 'title is the agent name (which chat)');
+  assert.ok(description.includes('waiting for your input'), 'description conveys the reason (why)');
+});
+test('quotes the triggering signal verbatim in the description', () => {
+  const r = { id: 'w', key: 'w', name: 'warden-worker', state: 'waiting', signal: 'press enter to continue' };
+  const { description } = formatWatchInApp(r, 'waiting');
+  assert.ok(description.includes("'press enter to continue'"), 'description quotes the signal');
+  assert.ok(description.includes('waiting for your input'), 'still conveys the reason alongside the signal');
+});
+test('completed uses its positive label in the description', () => {
+  const r = { id: 'w', key: 'w', name: 'w', state: 'idle', signal: null };
+  const { description } = formatWatchInApp(r, 'completed');
+  assert.ok(description.includes('finished a task'), 'completed → "finished a task"');
+});
+test('falls back to key for the title when name is absent', () => {
+  const r = { id: 'container-1', key: 'k1', state: 'stuck', signal: 'loop line' };
+  const { title } = formatWatchInApp(r, 'stuck');
+  assert.equal(title, 'k1', 'falls back to key for the name');
+});
+test('a description with no signal is just the reason label (no dangling quote)', () => {
+  const r = { id: 'e', key: 'e', name: 'e', state: 'erroring', signal: null };
+  const { description } = formatWatchInApp(r, 'erroring');
+  assert.equal(description, 'erroring');
+  assert.ok(!description.includes("'"), 'no signal quote when signal absent');
 });
 
 // --- WARDEN-417: fireWatchNotification return contract (delivered vs lost) --------

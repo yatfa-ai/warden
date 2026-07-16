@@ -313,6 +313,54 @@ export function watchStateLabel(reason: WatchReason, signal?: string | null): st
 }
 
 /**
+ * Pure: the severity TONE for a watch reason's crafted in-app toast (WARDEN-530).
+ * Sibling of the fleet's per-entrant `tone` split (critical/warning — see
+ * diffNewAttention), extended with a THIRD tone for the watch-only `completed` reason:
+ * a POSITIVE state ("finished a task") the fleet's red/amber split has no analog for.
+ * Mirrors the badge's own severity split for the broken/slowing reasons and adds
+ * success (green) for completed:
+ *   - erroring / stuck → 'critical'  (broken agent — red)
+ *   - waiting / blocked → 'warning'  (needs your input / mild — amber)
+ *   - completed        → 'success'   (positive — green)
+ *
+ * `blocked` (WARDEN-514) is never produced by the transition ping (diffWatchAlerts
+ * doesn't fire on blocked), so the fire-loop never reaches this with `blocked` — but the
+ * pure function is written to be TOTAL over WatchReason: blocked is a mild state ("waiting
+ * on a dependency"), so it shares `warning` (amber) with waiting, matching the row
+ * indicator's amber treatment of the milder waiting/blocked pair.
+ *
+ * `completed` is consciously mapped to success rather than forced into red/amber: the OS
+ * channel already fires it (this is parity with the existing channel, not new noise), and
+ * a green "finished a task" reads as crafted signal (WARDEN-68), not an alarm. Extracted
+ * PURE + dependency-free so the reason→tone mapping — incl. the completed→success call —
+ * is unit-tested directly (same discipline as formatInAppEntry / formatWatchMessage).
+ * Returns 'critical' (not 'error') so it parallels the fleet's tone vocabulary; the
+ * delivery side maps 'critical' → sonner's `error` variant (see fireWatchInApp).
+ */
+export function watchReasonTone(reason: WatchReason): 'critical' | 'warning' | 'success' {
+  if (reason === 'completed') return 'success';
+  if (reason === 'waiting' || reason === 'blocked') return 'warning';
+  return 'critical'; // erroring + stuck — broken agent
+}
+
+/**
+ * Pure: format a watched-chat alert into the crafted in-app sonner toast's title +
+ * description (WARDEN-530). Sibling of formatInAppEntry (the fleet's in-app formatter,
+ * WARDEN-402) for the per-chat watch channel: the agent's NAME leads as the title
+ * (WHICH chat needs you) and the reason — quoting the triggering signal verbatim when
+ * present — is the description (WHY), so the at-Warden ping is crafted and reason-
+ * specific rather than the lumped "Warden: <label>" title the OS toast carries. Pure so
+ * the wording is unit-tested directly (mirrors formatInAppEntry / formatWatchMessage's
+ * testability); the sonner `toast(...)` delivery itself lives in useAttentionRollup.ts.
+ */
+export function formatWatchInApp(row: AgentStateRow, reason: WatchReason): { title: string; description?: string } {
+  const name = row.name || row.key || row.id;
+  const label = WATCH_REASON_LABEL[reason] || reason;
+  const description = row.signal ? `${label} — '${row.signal}'` : label;
+  return { title: name, description };
+}
+
+/**
  * Show the per-chat watch desktop notification (WARDEN-378). Sibling of
  * fireAttentionNotification: same Web Notifications channel + the same
  * `notificationsSupported` / permission guards. Uses a DISTINCT `tag` per chat key
@@ -323,11 +371,15 @@ export function watchStateLabel(reason: WatchReason, signal?: string | null): st
  * callback (reuses App's openChat), so a click lands the human straight on the chat
  * that needs them. Never throws — some embedded webviews reject `new Notification`.
  *
- * Deliberately NOT gated on document visibility (unlike fireAttentionNotification):
- * the watch is opt-in per chat and has no always-on in-app surface, so suppressing
- * while Warden is visible would lose the signal entirely. The near-zero-false-signal
- * bar is met by the transition detector (fires once on entering a needs-you state,
- * never on persistent state), not by a visibility filter.
+ * Deliberately NOT gated on document visibility ITSELF (unlike fireAttentionNotification):
+ * the watch is opt-in per chat, so suppressing while Warden is visible would lose the
+ * signal entirely. The near-zero-false-signal bar is met by the transition detector
+ * (fires once on entering a needs-you state, never on persistent state), not by a
+ * visibility filter. WARDEN-530 adds the crafted in-app sibling fireWatchInApp for the
+ * AT-WARDEN (visible) case, and the caller now BRANCHES on visibility: visible → the
+ * in-app sonner ping, hidden → THIS OS toast (the away channel) + the catch-up net. So
+ * this function is now the HIDDEN-branch delivery; it is still not visibility-gated
+ * internally (the branch lives at the call site) so it stays the faithful away channel.
  *
  * Returns whether the OS channel DELIVERED the ping (WARDEN-417): `true` only when a
  * Notification was actually constructed (the OS accepted it); `false` on each of the
