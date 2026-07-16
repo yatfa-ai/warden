@@ -346,7 +346,7 @@ export interface FleetCommitGroup {
   commits: FleetCommitHit[];
 }
 
-export interface FleetCommitSearch {
+export interface FleetCommitSearchResult {
   // Matched agents in chats iteration order (empties dropped). Each group's
   // commits stay in the order /api/git-log returned them (newest first).
   groups: FleetCommitGroup[];
@@ -369,7 +369,7 @@ export interface FleetCommitSearch {
  * deterministic and tests assert deep equality — the convention the rest of this
  * module follows.
  */
-export function buildFleetCommitGroups(outcomes: FleetCommitOutcome[]): FleetCommitSearch {
+export function buildFleetCommitGroups(outcomes: FleetCommitOutcome[]): FleetCommitSearchResult {
   const groups: FleetCommitGroup[] = [];
   let errorCount = 0;
   for (const o of outcomes) {

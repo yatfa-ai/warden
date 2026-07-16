@@ -34,7 +34,7 @@ import { displayName } from '@/lib/chatDisplay';
 import {
   fleetCommitSearchEligible,
   buildFleetCommitGroups,
-  type FleetCommitSearch,
+  type FleetCommitSearchResult,
 } from '@/lib/gitStateSummary';
 import type { Chat } from '@/lib/types';
 
@@ -49,7 +49,7 @@ export function FleetCommitSearch({ chats, onOpenChat }: {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<FleetCommitSearch | null>(null);
+  const [result, setResult] = useState<FleetCommitSearchResult | null>(null);
 
   // The searchable fleet: active project agents, keyed + deduped by key, in
   // chats iteration order. Memoized so a stable array reference feeds the search
@@ -73,7 +73,9 @@ export function FleetCommitSearch({ chats, onOpenChat }: {
     }
     // No searchable agents → resolve immediately to an empty result rather than
     // spinning the loading state forever (e.g. a fresh install with no chats).
-    if (fleetN === 0) {
+    // `eligible.length` (not the `fleetN` alias) so the effect's only reactive
+    // inputs are query + eligible — both already deps — and exhaustive-deps stays clean.
+    if (eligible.length === 0) {
       setResult({ groups: [], errorCount: 0 });
       setLoading(false);
       return;
@@ -126,7 +128,7 @@ export function FleetCommitSearch({ chats, onOpenChat }: {
       setLoading(false);
     }, 300);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [query, eligible, fleetN]);
+  }, [query, eligible]);
 
   // Drop the search on close so a reopen starts fresh (mirrors GitBranchBadge's
   // close-clears-grep discipline).
