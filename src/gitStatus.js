@@ -377,3 +377,138 @@ export function parseReflog(output) {
       return { hash, subject, date };
     });
 }
+
+/**
+ * Derive `{ host, owner, repo, web }` from a single git remote URL.
+ *
+ * `git remote -v` prints the raw clone URL a checkout came from. That URL's
+ * SCHEME is irrelevant to "where does this live on the web" — GitHub/GitLab/
+ * Bitbucket serve their web UI over https regardless of whether the agent cloned
+ * via https, ssh (scp-like or explicit), or the dumb git:// protocol. So this
+ * parser resolves the WEB TARGET from the URL's structure, not its protocol:
+ *
+ *   https://github.com/owner/repo(.git)   → host github.com, owner, repo
+ *   git@github.com:owner/repo.git (scp)   → same (host stripped of the user@)
+ *   ssh://git@github.com:22/o/r.git       → same (port + user stripped)
+ *   ssh://git@gitlab.example.com:2222/g/s/p.git → host gitlab.example.com (self-hosted)
+ *   /path/to/repo  /  file:///path/to/repo → no host → all null (no web equivalent)
+ *
+ * `web` is built ONLY when host + owner + repo are all present (i.e. the path has
+ * at least two segments — the `owner/repo` convention every hosted web service
+ * uses). A single-segment path (`ssh://git@gitolite.io/myrepo`, a bare server) has
+ * no `owner/repo` structure → `web` null. This is what separates "self-hosted
+ * GitLab, linkify it" from "bare ssh server, nothing to open". For GitLab nested
+ * groups (`group/subgroup/project`) the FULL path is preserved in `web` (so the
+ * deep link resolves) while `owner`/`repo` are the first/last segments (display).
+ *
+ * `file://` and bare local paths carry no host and so return all-null — mirroring
+ * `parseAheadBehind`'s tolerance (empty/garbage never throws). The `web` URL has
+ * any trailing `.git` stripped and always uses `https://` (the web UI's scheme).
+ *
+ * Exported for unit tests so the URL→{host,owner,repo,web} mapping is locked
+ * independently of the route/transport. See WARDEN-528.
+ *
+ * @param {string|Buffer|undefined} input - One raw remote URL (as printed by `git remote -v`).
+ * @returns {{ host: string | null, owner: string | null, repo: string | null, web: string | null }}
+ */
+export function parseRemoteUrl(input) {
+  const url = (input ?? '').toString().trim();
+  const empty = { host: null, owner: null, repo: null, web: null };
+  if (!url) return empty;
+
+  let host = null;
+  let pathPart = null;
+
+  // 1. Scheme URL: <scheme>://[user[:pass]@]host[:port][/path]. A scheme is
+  //    letter-led and followed by `://` — the only forms git emits here are http,
+  //    https, ssh, and git (plus file for local clones). The host is the segment
+  //    after any userinfo and before an optional `:port`; the path is the rest.
+  const schemeMatch = url.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/(?:[^@/?#]*@)?([^/:?#]+)(?::\d+)?(?:\/(.*))?$/);
+  if (schemeMatch) {
+    const scheme = schemeMatch[1].toLowerCase();
+    // A `file://` remote is a LOCAL clone (file:///abs/path or file://host/path)
+    // — it has no web equivalent, so short-circuit to all-null before treating a
+    // `file://host/...` host as a web target.
+    if (scheme === 'file') return empty;
+    host = schemeMatch[2];
+    pathPart = schemeMatch[3] ?? null;
+  } else {
+    // 2. SCP-like ssh (no scheme): [user@]host:path. Distinguished from a local
+    //    path / Windows drive by requiring a dotted host (`host.tld`) before the
+    //    `:` — the overwhelmingly common real form (`git@github.com:owner/repo`).
+    //    Ports are NOT expressible in scp form (you'd use `ssh://`), so the colon
+    //    here unambiguously separates host from path.
+    const scpMatch = url.match(/^(?:[^@/:]+@)?([a-zA-Z0-9.-]+\.[a-zA-Z]{2,}):(.+)$/);
+    if (scpMatch) {
+      host = scpMatch[1];
+      pathPart = scpMatch[2];
+    } else {
+      // 3. Bare / relative local path → no host, no web equivalent.
+      return empty;
+    }
+  }
+
+  if (!host) return empty;
+  if (!pathPart) return { host, owner: null, repo: null, web: null };
+
+  // Strip a leading slash (scp paths have none; scheme paths do) and a trailing
+  // `.git` (the conventional clone suffix — not part of the repo's web identity).
+  const cleaned = pathPart.replace(/^\/+/, '').replace(/\.git$/i, '');
+  const segs = cleaned.split('/').filter((s) => s.length > 0);
+  // Need ≥2 segments to form `owner/repo`. A single segment (a bare-server repo
+  // like `myrepo`, or `~/repos/foo` collapsed) has no owner → no web link.
+  if (segs.length < 2) {
+    return { host, owner: null, repo: segs[0] || null, web: null };
+  }
+  const owner = segs[0];
+  const repo = segs[segs.length - 1];
+  // Preserve the FULL path (nested GitLab groups) so the deep link resolves; the
+  // `.git` was already stripped from the last segment above.
+  const web = `https://${host}/${segs.join('/')}`;
+  return { host, owner, repo, web };
+}
+
+/**
+ * Parse `git remote -v` output into `[{ name, url, host, owner, repo, web }]`.
+ *
+ * `git remote -v` prints TWO lines per remote — the fetch URL and the push URL —
+ * each tagged `(fetch)` / `(push)`:
+ *
+ *   origin\tgit@github.com:owner/repo.git (fetch)
+ *   origin\tgit@github.com:owner/repo.git (push)
+ *
+ * They are almost always identical; when they differ the FETCH url is the one
+ * that says "where this checkout came from", so the first line seen per remote
+ * name wins and the push duplicate is dropped. Each surviving URL is run through
+ * `parseRemoteUrl` for its `{ host, owner, repo, web }` (reusing that helper the
+ * way `parseStashCount` reuses `parseStashList`).
+ *
+ * Empty / undefined / non-git input → `[]`, never throws — same discipline as
+ * `parseGitStatusPorcelain` / `parseStashList`. Exported for unit tests. The
+ * route wraps the array as `{ remotes }`. See WARDEN-528.
+ *
+ * @param {string|Buffer|undefined} output - Raw stdout from `git remote -v`.
+ * @returns {Array<{ name: string, url: string, host: string | null, owner: string | null, repo: string | null, web: string | null }>}
+ */
+export function parseGitRemotes(output) {
+  const raw = (output ?? '').toString();
+  return raw
+    .split('\n')
+    .map((line) => line.replace(/\r$/, '')) // tolerate CRLF (e.g. over SSH)
+    .filter((line) => line.trim())           // drop the trailing empty line + blanks
+    .reduce((acc, line) => {
+      // `name<TAB>url (fetch|push)` — name and url are whitespace-separated; the
+      // trailing `(fetch)`/`(push)` tag is matched optionally so a defensive shape
+      // still parses. `.+?` is lazy so the tag (not the url) absorbs the trailing
+      // ` (fetch)`.
+      const m = line.match(/^(\S+)\s+(.+?)\s*(?:\((?:fetch|push)\))?$/);
+      if (!m) return acc;
+      const name = m[1];
+      // First (fetch) line per remote wins; drop the push duplicate.
+      if (acc.some((r) => r.name === name)) return acc;
+      const url = m[2].trim();
+      const { host, owner, repo, web } = parseRemoteUrl(url);
+      acc.push({ name, url, host, owner, repo, web });
+      return acc;
+    }, []);
+}

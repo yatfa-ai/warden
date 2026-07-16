@@ -20,6 +20,22 @@ export type GitStash = { ref: string; subject: string; date: string };
 // WIP; fetched lazily on expand (no always-on badge). (WARDEN-460.)
 export type GitReflogEntry = { hash: string; subject: string; date: string };
 
+// One row from /api/git-remote (a parsed `git remote -v` line, deduped to the
+// fetch URL per remote name). The coordination fact every OTHER git facet omits:
+// WHICH source host this checkout maps to. `url` is the raw clone URL; `host` /
+// `owner` / `repo` are parsed from it; `web` is the `https://{host}/{owner}/...`
+// URL the badge deep-links to (branch → /tree/<branch>, HEAD → /commit/<sha>),
+// or null when the remote has no web equivalent (a bare/file/single-segment
+// remote — nothing to open in a browser). Read-only throughout. (WARDEN-528.)
+export type GitRemote = {
+  name: string;
+  url: string;
+  host: string | null;
+  owner: string | null;
+  repo: string | null;
+  web: string | null;
+};
+
 // One per-session token-usage ledger, summed from every assistant turn's
 // `message.usage` across the transcript (model-agnostic raw token counts, NOT
 // dollar cost). `total = input+output+cacheCreation+cacheRead`. Optional +
