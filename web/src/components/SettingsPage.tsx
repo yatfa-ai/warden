@@ -358,7 +358,14 @@ function TelemetrySendingStatus({
   if (status.kind === 'off') return null;
   if (status.kind === 'unconfigured') {
     return (
-      <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs">
+      // role="status" (an aria-live=polite region): the whole point of this
+      // slice is that the status updates live as the user toggles base consent
+      // or edits the endpoint. The unconfigured notice is the state change most
+      // worth announcing — "you opted in, but nothing is being sent yet."
+      <div
+        role="status"
+        className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs"
+      >
         <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
         <p className="text-amber-800 dark:text-amber-200">
           <span className="font-medium">Enabled, but nothing is being sent.</span>{' '}
@@ -369,7 +376,12 @@ function TelemetrySendingStatus({
     );
   }
   return (
-    <div className="flex items-start gap-2 rounded-md border border-green-500/30 bg-green-500/5 px-3 py-2 text-xs">
+    // role="status": a live region so the transition INTO "configured" (user
+    // pastes a receiver URL) is announced alongside the unconfigured notice above.
+    <div
+      role="status"
+      className="flex items-start gap-2 rounded-md border border-green-500/30 bg-green-500/5 px-3 py-2 text-xs"
+    >
       <Send className="mt-0.5 size-3.5 shrink-0 text-green-600 dark:text-green-400" aria-hidden />
       <p className="text-muted-foreground">
         <span className="font-medium text-foreground">
