@@ -577,7 +577,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   ahead?: number | null;
   behind?: number | null;
   chatId: string;
-  inProgress?: { operation: string | null };
+  inProgress?: { operation: string | null; detail?: string | null };
   stashCount?: number | null;
   // WARDEN-411: net insertions/deletions of the working-tree edits vs HEAD, or
   // null when clean/unavailable. Surfaced in the badge tooltip so a hover shows
@@ -629,6 +629,18 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   // revert/bisect), or null when none is in progress. This is the highest-value
   // signal in the badge: a blocked agent produces nothing until noticed (WARDEN-186).
   const operation = inProgress?.operation || null;
+  // WARDEN-511: the operation's progress detail — rebase "N/M · onto <sha> ·
+  // stopped at <sha>", or the SHA being applied for merge/cherry-pick/revert.
+  // null when no detail is available (bisect, rebase-apply, or nothing in
+  // progress). Folded into the operation clause below so a hover tells a human
+  // WHERE the agent is stuck, not just that it is.
+  const detail = inProgress?.detail || null;
+  // The full operation clause, reused by both the tooltip (titleParts) and the
+  // on-surface ⚠ glyph's own title so they never drift. detail null → the plain
+  // "<op> in progress" rendering is unchanged from pre-WARDEN-511.
+  const inProgressTitle = operation
+    ? (detail ? `${operation} in progress · ${detail}` : `${operation} in progress`)
+    : null;
   // WARDEN-239: detached HEAD — render an amber ⎇ + short SHA instead of the
   // misleading "HEAD" label. ahead/behind stay null (no upstream), so the
   // ↑/↓ markers naturally don't render.
@@ -648,7 +660,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
     if (upstream) titleParts.push(`tracking ${upstream}`);
     else titleParts.push('no remote tracking — local-only, not backed up');
   }
-  if (operation) titleParts.push(`${operation} in progress`);
+  if (inProgressTitle) titleParts.push(inProgressTitle);
   if (clean === false) {
     // WARDEN-411: fold the magnitude into the dirty tooltip so a hover distinguishes
     // a 4-line WIP from a 1000-line rewrite without expanding the file list.
@@ -869,7 +881,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
           className={cn('inline-flex items-center gap-0.5 text-[10px] cursor-pointer', isDetached ? 'text-amber-400 hover:text-amber-300' : 'text-cyan-400 hover:text-cyan-300', className)}
           title={`${titleParts.join(' · ')} — click for recent commits`}
         >
-          {operation && <span className="text-red-400 font-medium" title={`${operation} in progress`}>⚠ {operation}</span>}
+          {operation && <span className="text-red-400 font-medium" title={inProgressTitle || `${operation} in progress`}>⚠ {operation}</span>}
           {isDetached ? (
             <>
               <span title="detached HEAD — commits not on a branch; at risk if reflog expires">⎇</span>
