@@ -13,7 +13,7 @@ Yatfa Warden is a desktop dashboard for **AI agent chats** — see every agent's
 - **Session resume** — pick from your Claude Code history on any host, click to resume.
 - **The Observer** — an AI assistant that watches your agents, summarizes what's happening, and drafts directives you approve before they reach an agent.
 - **Spawn / kill / hide** — spawn new Claude Code sessions or shells on any host. Force-kill stuck sessions. Hide agents you don't watch often.
-- **100% local** — no cloud, no sync, no telemetry. Your credentials stay on your machine.
+- **100% local** — no cloud, no sync, no third-party analytics. Optional, off-by-default telemetry (anonymous errors/crashes) can send to a self-hosted receiver only if you turn it on. Your credentials stay on your machine.
 
 ## Quick start
 
@@ -86,7 +86,7 @@ Stack: **Node.js** (backend: Express, ws, node-pty) + **React + TypeScript + Tai
 
 ## Privacy & security
 
-- **100% local.** Runs entirely on your machine. No data leaves your computer.
+- **100% local.** Runs entirely on your machine. No data leaves your computer unless you explicitly opt into optional telemetry (off by default).
 - **Credentials stay yours.** API keys, SSH keys — all stay in the app process.
 - **No remote access.** Binds to localhost only.
 - **Human-in-the-loop.** The observer drafts directives, but **you approve every one**.
