@@ -1,4 +1,13 @@
 import { useEffect, useState } from 'react';
+import { toast } from 'sonner';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
+import { copyText } from '@/lib/clipboard';
 
 interface SearchResult {
   key: string;
@@ -15,6 +24,55 @@ interface Props {
   openPanes: string[];
   onFocusPane: (id: string) => void;
   onJumpToMatch: (id: string, query: string) => void;
+}
+
+// WARDEN-488: a NATIVE <button> (not a <div onClick>) is required so
+// ContextMenuTrigger's `asChild` has a single child element to clone onto —
+// Radix `asChild` rejects fragments/multiple children. The native button also
+// gives the Enter/Space keyboard activation + screen-reader "button" role that
+// the previous <div role="button" tabIndex={0} onKeyDown> hand-rolled, so the
+// explicit onKeyDown handler is dropped (the browser activates the button on
+// Enter/Space for free); the aria-label is carried over so the accessible name
+// ("open search result in <name>") is preserved. Contained in its own component
+// (not inlined in the results map) for the same reason the sibling
+// WorkspaceSearchDialog's SearchResultRow is — the kit has no Command/cmdk list
+// primitive to reach for instead.
+function GlobalSearchResultRow({ result, onOpen }: { result: SearchResult; onOpen: (r: SearchResult) => void }) {
+  // Copy via the Electron-safe helper + a sonner success/error toast — the same
+  // pattern WorkspaceSearchDialog's SearchResultRow uses for its copy items.
+  const handleCopy = async (text: string) => {
+    const ok = await copyText(text);
+    if (ok) toast.success('Copied');
+    else toast.error('Copy failed');
+  };
+
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label={`open search result in ${result.name}`}
+          onClick={() => onOpen(result)}
+          className="w-full text-left mb-2 p-3 bg-muted rounded cursor-pointer hover:bg-muted/80 transition-colors"
+        >
+          <div className="flex justify-between items-center mb-1">
+            <span className="font-medium text-sm">{result.name}</span>
+            <span className="text-xs text-muted-foreground">{result.host}</span>
+          </div>
+          {result.context.before && <div className="text-xs text-muted-foreground mb-0.5">{result.context.before}</div>}
+          <div className="text-sm font-mono">{result.text}</div>
+          {result.context.after && <div className="text-xs text-muted-foreground mt-0.5">{result.context.after}</div>}
+        </button>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={() => onOpen(result)}>Open</ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onSelect={() => handleCopy(result.text)}>Copy matched line</ContextMenuItem>
+        <ContextMenuItem onSelect={() => handleCopy(result.name)}>Copy pane name</ContextMenuItem>
+        <ContextMenuItem onSelect={() => handleCopy(result.host)}>Copy host</ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  );
 }
 
 export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJumpToMatch }: Props) {
@@ -79,23 +137,7 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
             </div>
           )}
           {results.map((r, idx) => (
-            <div
-              key={`${r.key}-${idx}`}
-              role="button"
-              tabIndex={0}
-              aria-label={`open search result in ${r.name}`}
-              onClick={() => handleResultClick(r)}
-              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleResultClick(r); } }}
-              className="mb-2 p-3 bg-muted rounded cursor-pointer hover:bg-muted/80 transition-colors"
-            >
-              <div className="flex justify-between items-center mb-1">
-                <span className="font-medium text-sm">{r.name}</span>
-                <span className="text-xs text-muted-foreground">{r.host}</span>
-              </div>
-              {r.context.before && <div className="text-xs text-muted-foreground mb-0.5">{r.context.before}</div>}
-              <div className="text-sm font-mono">{r.text}</div>
-              {r.context.after && <div className="text-xs text-muted-foreground mt-0.5">{r.context.after}</div>}
-            </div>
+            <GlobalSearchResultRow key={`${r.key}-${idx}`} result={r} onOpen={handleResultClick} />
           ))}
         </div>
 
