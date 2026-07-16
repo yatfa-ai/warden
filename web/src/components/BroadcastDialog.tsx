@@ -33,6 +33,7 @@ import {
 } from '@/components/ui/select';
 import { Loader2 } from 'lucide-react';
 import { chatType, displayName, hostTagOf } from '@/lib/chatDisplay';
+import { useHostLabels } from '@/lib/hostLabels';
 import type { Chat } from '@/lib/types';
 import type { BroadcastSummary } from '@/lib/broadcast';
 import type { Snippet } from '@/lib/storage';
@@ -55,6 +56,7 @@ interface Props {
 export function BroadcastDialog({ open, onOpenChange, targets, snippets, onSend }: Props) {
   const [msg, setMsg] = useState('');
   const [sending, setSending] = useState(false);
+  const hostLabels = useHostLabels();
   // The snippet picker's selected value. Insert-only: picking a snippet fills
   // `msg`; this state only drives the picker's trigger label (so the user sees
   // which snippet they inserted) and resets every open alongside `msg`.
@@ -109,7 +111,7 @@ export function BroadcastDialog({ open, onOpenChange, targets, snippets, onSend 
                 {targets.map((c) => {
                   const name = displayName(c);
                   const type = chatType(c);
-                  const host = hostTagOf(c.host || '');
+                  const host = hostTagOf(c.host || '', hostLabels);
                   return (
                     <li key={c.key || c.id} className="flex items-center gap-2 px-2 py-1 text-xs">
                       <span className="truncate flex-1" title={name}>{name}</span>

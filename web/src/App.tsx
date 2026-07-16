@@ -2,7 +2,8 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
 import { loadUi, saveUi, persistUiState, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, STARTER_SNIPPETS, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type WorkspacePaneSet, type RecentlyClosedEntry, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/storage';
-import { displayName } from '@/lib/chatDisplay';
+import { displayName, type HostLabels } from '@/lib/chatDisplay';
+import { HostLabelsContext } from '@/lib/hostLabels';
 import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThemeId, type Theme, type ThemeId, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
@@ -320,6 +321,13 @@ function App() {
   // one global remembered choice surfaced only through the existing in-dialog
   // toggle. Pure client-side pref; never sent to the backend.
   const [fileViewerViewMode, setFileViewerViewMode] = useState<'rendered' | 'source'>(() => uiState.fileViewerViewMode ?? 'rendered');
+  // WARDEN-490 — per-host display labels (friendly names). A raw host string
+  // ('(local)' / SSH host) → the human's label, which replaces the raw host in
+  // every host-tag display surface via the HostLabelsContext provider below.
+  // Pure client-side pref (like healthGroupBy/defaultShellByHost): persisted by
+  // the saveUi effect below, never sent to the backend / /api/config. An empty
+  // map (or a host with no entry) = today's behavior.
+  const [hostLabels, setHostLabels] = useState<HostLabels>(() => uiState.hostLabels ?? {});
   // Default agent type + host pre-filled in the ＋ new chat form, plus the
   // user-defined custom presets (named quick-fill commands beyond claude/shell).
   // All pure client-side prefs (like density/terminalFontSize): persisted by the
@@ -530,8 +538,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy, fileViewerViewMode }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy, fileViewerViewMode, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy, fileViewerViewMode, hostLabels }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy, fileViewerViewMode, hostLabels, restoreOnStartup, startedEmpty]);
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
   // workspace, so switching clears it (WARDEN-256: maximized resets on switch).
@@ -711,6 +719,9 @@ function App() {
     setAgentSort('manual');
     // Health group-by (WARDEN-468): reset to the DEFAULT_UI value ('health').
     setHealthGroupBy('health');
+    // Per-host display labels (WARDEN-490): reset to the empty map (no labels =
+    // raw hosts everywhere, today's behavior).
+    setHostLabels({});
     // Terminal
     setTerminalFontSize(14);
     setTerminalScrollback(10000);
@@ -1400,7 +1411,7 @@ function App() {
   // channel is gated on the same attentionDesktopAlerts opt-in the attention
   // alerts respect.
   const openSessionsView = useCallback(() => { setChatBrowserSortUsage(true); setChatBrowserOpen(true); }, []);
-  const { budget: tokenBudget } = useTokenBudget({ attentionDesktopAlerts, onOpenSessions: openSessionsView });
+  const { budget: tokenBudget } = useTokenBudget({ attentionDesktopAlerts, onOpenSessions: openSessionsView, hostLabels });
   // Host connectivity statuses. Polled at the App level (formerly inside
   // ChatSidebar) so they stay live while the full-page browser view — which
   // replaces ChatSidebar — is open. Fed to both ChatSidebar and the browser page.
@@ -1522,6 +1533,7 @@ function App() {
   }, [applyLayoutClamp]);
 
   return (
+    <HostLabelsContext.Provider value={hostLabels}>
     <div className="h-screen flex flex-col bg-background text-foreground">
       {showReturnBanner && (
         <div className="flex items-center justify-between gap-3 px-3 py-2 bg-blue-50 dark:bg-blue-950 border-b border-blue-200 dark:border-blue-800">
@@ -1668,6 +1680,8 @@ function App() {
           setLaunchAtLogin={setLaunchAtLogin}
           closeToTray={closeToTray}
           setCloseToTray={setCloseToTray}
+          hostLabels={hostLabels}
+          setHostLabels={setHostLabels}
           resetUiPrefsToDefaults={resetUiPrefsToDefaults}
         />
       ) : chatBrowserOpen ? (
@@ -1754,6 +1768,8 @@ function App() {
               onOpenChatBrowser={() => setChatBrowserOpen(true)}
               hostStatuses={hostStatuses}
               timestampFormat={timestampFormat}
+              fileViewerViewMode={fileViewerViewMode}
+              onFileViewerViewModeChange={setFileViewerViewMode}
               snippets={snippets}
               watchedChats={watchedChatSet}
               onToggleWatch={toggleWatch}
@@ -1860,6 +1876,7 @@ function App() {
         onConfirm={confirmCloseWorkspace}
       />
     </div>
+    </HostLabelsContext.Provider>
   );
 }
 

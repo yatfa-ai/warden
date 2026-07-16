@@ -126,9 +126,15 @@ export function budgetOverPercent(spent: number, threshold: number): number {
 
 // The human label for a host in the offender line — '(local)' reads as "this
 // machine" to match OpenChatBrowserPage's hostTagOf. Inline (no import) so this
-// module stays runtime-import-free for the standalone test.
+// module stays runtime-import-free for the standalone test. WARDEN-490: an
+// optional label map lets the offender line show the human's friendly name
+// instead of the raw host; an absent/empty label is byte-identical to today
+// (including "this machine" for this host). Kept inline (rather than importing
+// hostLabelFor) so the module's no-runtime-import invariant holds.
 const THIS_MACHINE = '(local)';
-export function offenderHostLabel(host: string): string {
+export function offenderHostLabel(host: string, labels?: Record<string, string>): string {
+  const label = labels?.[host]?.trim();
+  if (label) return label;
   return host === THIS_MACHINE ? 'this machine' : host;
 }
 
@@ -150,10 +156,11 @@ export interface BudgetMessage {
 export function formatBudgetMessageWith(
   b: BudgetState,
   fmt: (n: number | null | undefined) => string,
+  labels?: Record<string, string>,
 ): BudgetMessage {
   const windowLabel = b.windowHours >= 24 ? `${Math.round(b.windowHours / 24)}d` : `${b.windowHours}h`;
   if (b.perSessionBreached && b.topOffender) {
-    const where = offenderHostLabel(b.topOffender.host);
+    const where = offenderHostLabel(b.topOffender.host, labels);
     const name = b.topOffender.summary || b.topOffender.cwd || b.topOffender.id;
     return {
       title: 'Token budget breached — possible runaway agent',

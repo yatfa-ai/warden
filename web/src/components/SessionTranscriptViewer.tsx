@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react';
+import { hostLabelFor } from '@/lib/chatDisplay';
+import { useHostLabels } from '@/lib/hostLabels';
 import {
   Dialog,
   DialogContent,
@@ -45,6 +47,7 @@ interface SessionTranscriptViewerProps {
 // since a capped transcript is bounded read-only content, not an unbounded surface.
 export function SessionTranscriptViewer({ open, onOpenChange, session, timestampFormat }: SessionTranscriptViewerProps) {
   const [status, setStatus] = useState<'loading' | 'ready' | 'error' | 'empty'>('loading');
+  const hostLabels = useHostLabels();
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
   const [cwd, setCwd] = useState('');
   const [truncated, setTruncated] = useState(false);
@@ -99,7 +102,10 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
     return () => { cancelled = true; };
   }, [open, session]);
 
-  const hostLabel = !session || session.host === '(local)' ? 'this machine' : session.host;
+  // WARDEN-490: a labeled host shows its friendly name; an unlabeled host keeps
+  // the exact prior string ('this machine' for this host) — byte-identical to
+  // today when there is no label.
+  const hostLabel = hostLabelFor(session?.host ?? '', hostLabels) || (!session || session.host === '(local)' ? 'this machine' : session.host);
 
   // Per-turn attribution (WARDEN-474): sum the VISIBLE turns' totals + call out the
   // heaviest visible turn. This is a tail-window sum, NOT the whole-session total —

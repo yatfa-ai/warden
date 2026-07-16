@@ -43,5 +43,35 @@ export function displayName(c?: Chat): string {
   return processCwdLabel(c);
 }
 
-// Host display tag: this machine reads "local".
-export function hostTagOf(host: string) { return host === THIS_MACHINE ? 'local' : host; }
+// A raw host string → optional friendly display label (WARDEN-490). Pure client-
+// side UiState pref (hostLabels); never leaves the machine (no /api/config, no
+// SSH/telemetry path). Keys are the raw host strings ('(local)' for this
+// machine, the SSH host name for remote); values are the human's label. An
+// absent or empty/whitespace entry for a host = no label → today's behavior.
+// Threaded to each display surface via HostLabelsContext (useHostLabels in
+// lib/hostLabels.ts) so the label reaches every surface without prop-drilling
+// through intermediate components.
+export type HostLabels = Record<string, string>;
+
+// Resolve a host's optional friendly label (WARDEN-490). Returns the trimmed
+// label, or '' (falsy) when the host has no label — so a caller falls through to
+// its own per-surface local-host string ('local' or 'this machine') EXACTLY as it
+// did before, preserving the intentional cross-surface difference for unlabeled
+// hosts. Pure + dependency-free (no React) so it and hostTagOf stay standalone-
+// testable, and so the deliberately import-free tokenBudget module can inline the
+// same one-line lookup without importing here.
+export function hostLabelFor(host: string, labels?: HostLabels): string {
+  return (labels?.[host] ?? '').trim();
+}
+
+// Host display tag: this machine reads "local" (unchanged for an unlabeled host).
+// With a label map (WARDEN-490), a host with a non-empty label shows that label
+// instead of the raw SSH name/IP — including THIS_MACHINE, so the human can name
+// "this machine" too. An absent/empty label is byte-identical to today: `labels`
+// is optional, so unchanged call sites keep working, and a host whose label is
+// blank/whitespace falls back to the raw host (or 'local' for this machine).
+export function hostTagOf(host: string, labels?: HostLabels): string {
+  const label = hostLabelFor(host, labels);
+  if (label) return label;
+  return host === THIS_MACHINE ? 'local' : host;
+}

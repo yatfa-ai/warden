@@ -1059,6 +1059,62 @@ test('the map survives an empty-mode mount (carried by the live spread, not the 
   assert.deepEqual(loadUi().defaultShellByHost, { 'prod-box': 'zsh' });
 });
 
+console.log('\nhostLabels (per-host display labels) round-trips through loadUi/saveUi — WARDEN-490');
+test('defaults to {} when nothing is stored', () => {
+  reset();
+  assert.deepEqual(loadUi().hostLabels, {});
+});
+test('a valid host→label map round-trips', () => {
+  reset();
+  saveUi({ ...loadUi(), hostLabels: { 'ec2-1-2-3': 'CI runner', '(local)': 'my mac' } });
+  assert.deepEqual(loadUi().hostLabels, { 'ec2-1-2-3': 'CI runner', '(local)': 'my mac' });
+});
+test('an empty map round-trips as {}', () => {
+  reset();
+  saveUi({ ...loadUi(), hostLabels: {} });
+  assert.deepEqual(loadUi().hostLabels, {});
+});
+test('a non-object coerces to {} (defensive, no throw)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], hostLabels: 'bogus' }));
+  assert.deepEqual(loadUi().hostLabels, {});
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], hostLabels: [['ec2', 'CI']] }));
+  assert.deepEqual(loadUi().hostLabels, {});
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], hostLabels: 42 }));
+  assert.deepEqual(loadUi().hostLabels, {});
+});
+test('entries with non-string values are dropped', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], hostLabels: { 'ec2-1-2-3': 'CI runner', 'num': 42, 'obj': { x: 1 } } }));
+  assert.deepEqual(loadUi().hostLabels, { 'ec2-1-2-3': 'CI runner' });
+});
+test('entries with empty/whitespace labels are dropped (empty label = no label = today\'s behavior)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], hostLabels: { 'ec2-1-2-3': 'CI runner', 'blank': '', 'ws': '   ', 'tab': '\t' } }));
+  assert.deepEqual(loadUi().hostLabels, { 'ec2-1-2-3': 'CI runner' });
+});
+test('entries with an empty-string key are dropped', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], hostLabels: { '': 'CI runner', 'ec2-1-2-3': 'CI runner' } }));
+  assert.deepEqual(loadUi().hostLabels, { 'ec2-1-2-3': 'CI runner' });
+});
+test('labels are trimmed on load', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], hostLabels: { 'ec2-1-2-3': '  CI runner  ' } }));
+  assert.deepEqual(loadUi().hostLabels, { 'ec2-1-2-3': 'CI runner' });
+});
+test('a missing field loads as {} (zero regression for an upgrade)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
+  assert.deepEqual(loadUi().hostLabels, {});
+});
+test('the map survives an empty-mode mount (carried by the live spread)', () => {
+  reset();
+  const d0 = loadUi();
+  saveUi(persistUiState({ ...d0, hostLabels: { 'ec2-1-2-3': 'CI runner' } }, 'empty', d0, true));
+  assert.deepEqual(loadUi().hostLabels, { 'ec2-1-2-3': 'CI runner' });
+});
+
 console.log('\ndefaultNewChatCwdByHost (per-host cwd overrides) round-trips through loadUi/saveUi — WARDEN-336');
 test('defaults to {} when nothing is stored', () => {
   reset();

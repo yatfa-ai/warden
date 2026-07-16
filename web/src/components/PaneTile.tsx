@@ -7,6 +7,7 @@ import { streamApi } from '@/lib/stream';
 import type { Chat } from '@/lib/types';
 import { findPathCandidates } from '@/lib/path-links';
 import { hostTagOf } from '@/lib/chatDisplay';
+import { useHostLabels } from '@/lib/hostLabels';
 import { handleOsc52 } from '@/lib/clipboard';
 import { hostKeyOf, attachEffectDeps } from '@/lib/paneAttach';
 import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBehavior, type Snippet } from '@/lib/storage';
@@ -166,6 +167,7 @@ interface Props {
 export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, onSpawned, snippets, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
+  const hostLabels = useHostLabels();
   const fitRef = useRef<FitAddon | null>(null);
   const searchRef = useRef<SearchAddon | null>(null);
   const [showSearch, setShowSearch] = useState(false);
@@ -684,7 +686,12 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       cwd: chat.cwd || '',
       cmd: 'bash',
       session: shellSession,
-      name: `shell @ ${chat.host === '(local)' ? 'local' : chat.host}`,
+      // WARDEN-490: routed through hostTagOf to dedup the inline (local) → 'local'
+      // logic, but deliberately WITHOUT a label — this `name` is sent to the
+      // backend (/api/spawn body), and a display label must never leave the
+      // machine. The friendly label still shows in this shell's PANE HEADER
+      // (hostTag above), which is pure display.
+      name: `shell @ ${hostTagOf(chat.host)}`,
     });
     setBusy(false);
     if (!res.ok || !res.data) { if (prefs.notifyErrors) toast.error(res.error || 'Failed to open shell'); return; }
@@ -741,7 +748,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // the `host` restore-hint prop is the fallback. hostTagOf('(local)') → 'local';
   // an undefined/empty host → '' (suppressed by the && guard at the render site).
   const isUserChat = !chat || chat.kind === 'tmux';
-  const hostTag = showHostTags !== false && isUserChat ? hostTagOf(chat?.host ?? host ?? '') : '';
+  const hostTag = showHostTags !== false && isUserChat ? hostTagOf(chat?.host ?? host ?? '', hostLabels) : '';
 
   return (
     <>

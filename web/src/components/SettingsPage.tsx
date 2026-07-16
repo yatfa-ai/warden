@@ -22,6 +22,7 @@ import { type Theme, type TerminalColorScheme, THEMES } from '@/lib/theme';
 import { type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
 import { type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type PresetNameIssue, type Snippet, type SnippetNameIssue, PRESET_NAME_MAX, validatePresetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, validateSnippetName, DEFAULT_TERMINAL_FONT_FAMILY } from '@/lib/storage';
+import { THIS_MACHINE, type HostLabels } from '@/lib/chatDisplay';
 import { hasWindowBridge } from '@/lib/electron';
 import { requestAlertPermission } from '@/lib/desktopAlerts';
 import { putJson } from '@/lib/api';
@@ -233,6 +234,17 @@ interface Props {
   // effect; never sent to the backend.
   defaultShellByHost: Record<string, string>;
   setDefaultShellByHost: (v: Record<string, string>) => void;
+  // Per-host display labels (WARDEN-490) — friendly names shown wherever a host
+  // tag appears (sidebar rows, pane header, Kill/Collision/Broadcast dialogs,
+  // Open Chat Browser, Activity timeline, Directive history, Observer tabs,
+  // Health dashboard, token-budget offender line, SessionTranscriptViewer).
+  // Pure client-side localStorage pref, persisted by App's saveUi effect; NEVER
+  // sent to the backend / /api/config (a label is display-only). Keys are raw
+  // host strings ('(local)' / SSH host); a blank/absent value = raw host. The
+  // Hosts section renders an inline editor for this even though the rest of the
+  // section touches `config` (backend) — labels are threaded in separately.
+  hostLabels: HostLabels;
+  setHostLabels: (v: HostLabels) => void;
   // "Remember window position and size" is an Electron-main-owned pref, NOT a
   // renderer localStorage pref: OS window bounds must be readable at
   // createWindow() time (before the renderer loads), so the flag + bounds live
@@ -509,7 +521,7 @@ function SnippetRow({
   );
 }
 
-export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, attentionStates, setAttentionStates, alertCritical, setAlertCritical, alertWarning, setAlertWarning, alertDirective, setAlertDirective, alertError, setAlertError, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, timestampFormat, setTimestampFormat, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatPresetByHost, setDefaultNewChatPresetByHost, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, snippets, setSnippets, defaultShell, setDefaultShell, defaultShellByHost, setDefaultShellByHost, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin, closeToTray, setCloseToTray, resetUiPrefsToDefaults }: Props) {
+export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density, setDensity, paneLayout, setPaneLayout, onExitBehavior, setOnExitBehavior, autoFocusNewPane, setAutoFocusNewPane, restoreOnStartup, setRestoreOnStartup, terminalFontSize, setTerminalFontSize, attentionDesktopAlerts, setAttentionDesktopAlerts, attentionStates, setAttentionStates, alertCritical, setAlertCritical, alertWarning, setAlertWarning, alertDirective, setAlertDirective, alertError, setAlertError, terminalScrollback, setTerminalScrollback, terminalFontFamily, setTerminalFontFamily, terminalColorScheme, setTerminalColorScheme, terminalCursorStyle, setTerminalCursorStyle, copyOnSelect, setCopyOnSelect, timestampFormat, setTimestampFormat, defaultNewChatPreset, setDefaultNewChatPreset, defaultNewChatPresetByHost, setDefaultNewChatPresetByHost, defaultNewChatHost, setDefaultNewChatHost, defaultNewChatCwd, setDefaultNewChatCwd, defaultNewChatCwdByHost, setDefaultNewChatCwdByHost, customPresets, setCustomPresets, snippets, setSnippets, defaultShell, setDefaultShell, defaultShellByHost, setDefaultShellByHost, hostLabels, setHostLabels, rememberWindowBounds, setRememberWindowBounds, launchAtLogin, setLaunchAtLogin, closeToTray, setCloseToTray, resetUiPrefsToDefaults }: Props) {
   const [config, setConfig] = useState<ConfigData>({
     hosts: [],
     pollIntervalMs: 1500,
@@ -900,6 +912,21 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
     setDefaultShellByHost(next);
   };
 
+  // Write a per-host display label (WARDEN-490). An empty/whitespace value means
+  // "no label" (show the raw host, today's behavior) — drop the key entirely so
+  // it never persists as a blank (matching the load-time sanitizer + the funnel's
+  // empty = no-label rule). Keys are the raw host strings ('(local)' / SSH host
+  // name) — the same every display surface keys on.
+  const setHostLabel = (host: string, value: string) => {
+    const next = { ...hostLabels };
+    if (value.trim() === '') {
+      delete next[host];
+    } else {
+      next[host] = value;
+    }
+    setHostLabels(next);
+  };
+
   return (
     <div className="flex flex-col flex-1 min-h-0">
       <header className="flex items-center gap-2 px-3 h-11 border-b shrink-0">
@@ -1008,6 +1035,38 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                     </Select>
                   </div>
                 )}
+
+                {/* Per-host display labels (WARDEN-490) — a friendly name for each
+                    host shown wherever a host tag appears (sidebar rows, pane
+                    header, Kill/Collision/Broadcast dialogs, Health dashboard,
+                    token-budget offender line, etc.). Pure client-side: never
+                    sent to the backend (it's a UiState pref, not config). Leave a
+                    host blank to show its raw name. Covers this machine plus every
+                    configured host; this machine is listed even though it isn't in
+                    config.hosts (it's always implied). */}
+                <div className="flex flex-col gap-2">
+                  <Label>Display label per host</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Give any host a friendly name (e.g. <code className="bg-muted px-1 rounded">CI runner</code>) shown wherever a host tag appears. Leave blank to show the raw host name. Local and remote alike. Stored on this machine only — never sent to the server.
+                  </p>
+                  <div className="flex flex-col gap-2 rounded-md border bg-muted/30 p-2">
+                    {[{ key: THIS_MACHINE, label: 'this machine (local)' }, ...config.hosts.filter((h) => h !== THIS_MACHINE).map((h) => ({ key: h, label: h }))].map(({ key, label }) => {
+                      const safeId = `hostLabel-${key.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+                      return (
+                        <div className="flex flex-col gap-1" key={`hostLabel-${key}`}>
+                          <Label htmlFor={safeId} className="text-xs font-normal text-muted-foreground">{label}</Label>
+                          <Input
+                            id={safeId}
+                            value={hostLabels[key] ?? ''}
+                            onChange={(e) => setHostLabel(key, e.target.value)}
+                            placeholder={`raw name (${key === THIS_MACHINE ? 'local' : key})`}
+                            className="h-8"
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
 
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="pollIntervalMs">Dashboard Refresh Interval (ms)</Label>

@@ -132,6 +132,21 @@ test('local host', () => {
 test('remote host verbatim', () => {
   assert.equal(offenderHostLabel('build-host'), 'build-host');
 });
+// WARDEN-490 — per-host display labels reach the offender line. Zero-regression:
+// an absent/empty label keeps "this machine" (local) / raw host (remote).
+test('labeled local host → the label', () => {
+  assert.equal(offenderHostLabel('(local)', { '(local)': 'my mac' }), 'my mac');
+});
+test('labeled remote host → the label', () => {
+  assert.equal(offenderHostLabel('ec2-1-2-3', { 'ec2-1-2-3': 'CI runner' }), 'CI runner');
+});
+test('empty/whitespace label → falls back to unlabeled (zero regression)', () => {
+  assert.equal(offenderHostLabel('(local)', { '(local)': '  ' }), 'this machine');
+  assert.equal(offenderHostLabel('ec2-1-2-3', { 'ec2-1-2-3': '' }), 'ec2-1-2-3');
+});
+test('host with no entry in the map → raw host', () => {
+  assert.equal(offenderHostLabel('build-host', { '(local)': 'my mac' }), 'build-host');
+});
 
 console.log('\nformatBudgetMessageWith: single wording source (toast + desktop)');
 test('per-session breach names the offending session', () => {
@@ -164,6 +179,26 @@ test('window hours render as days when >= 24', () => {
 test('window hours render as hours when < 24', () => {
   const m = formatBudgetMessageWith(b({ fleetBreached: true, fleetSpent: 2_500_000, alerted: true, windowHours: 6 }), fmt);
   assert.ok(m.body.includes('6h'), `6h renders as 6h: ${m.body}`);
+});
+// WARDEN-490 — the offender line localizes the host via the label map.
+test('per-session breach localizes the offender host via labels', () => {
+  const m = formatBudgetMessageWith(b({
+    perSessionBreached: true,
+    fleetBreached: false,
+    alerted: true,
+    topOffender: { id: 'abc', host: 'ec2-1-2-3', cwd: '/repo', summary: 'fix the bug', total: 1_100_000 },
+  }), fmt, { 'ec2-1-2-3': 'CI runner' });
+  assert.ok(m.body.includes('CI runner'), `body uses the label: ${m.body}`);
+  assert.ok(!m.body.includes('ec2-1-2-3'), `body hides the raw host: ${m.body}`);
+});
+test('per-session breach with NO label map keeps the raw host (zero regression)', () => {
+  const m = formatBudgetMessageWith(b({
+    perSessionBreached: true,
+    fleetBreached: false,
+    alerted: true,
+    topOffender: { id: 'abc', host: 'ec2-1-2-3', cwd: '/repo', summary: 'fix the bug', total: 1_100_000 },
+  }), fmt);
+  assert.ok(m.body.includes('ec2-1-2-3'), `body shows raw host: ${m.body}`);
 });
 
 console.log('\nEMPTY_BUDGET: a safe disabled default');

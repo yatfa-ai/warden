@@ -29,7 +29,8 @@ import { ConflictView } from './ConflictView';
 import { FileViewer } from './FileViewer';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { RECENTLY_CLOSED_PREVIEW, type Snippet, type RecentlyClosedEntry } from '@/lib/storage';
-import { THIS_MACHINE, basename, chatType, displayName } from '@/lib/chatDisplay';
+import { THIS_MACHINE, basename, chatType, displayName, hostLabelFor } from '@/lib/chatDisplay';
+import { useHostLabels } from '@/lib/hostLabels';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTokens } from '@/lib/formatTokens';
 import {
@@ -83,6 +84,13 @@ interface Props {
   // Timestamp format pref (WARDEN-213): routes every sidebar time display through
   // the shared formatTimestamp helper. Pure client-side localStorage pref.
   timestampFormat: TimestampFormat;
+  // File Viewer markdown view mode (WARDEN-480): the per-file FileViewer opened
+  // from a sidebar row (Ctrl/Cmd-click on a `path:line` token) shares the same
+  // global App-owned 'rendered' | 'source' toggle as PaneGrid's FileViewer, so a
+  // human's preference is consistent regardless of which surface opened the file.
+  // Read-only here (App owns/persists it); forwarded straight to the FileViewer.
+  fileViewerViewMode: 'rendered' | 'source';
+  onFileViewerViewModeChange: (mode: 'rendered' | 'source') => void;
   // Saved instruction snippets (WARDEN-323): threaded straight through to the
   // BroadcastDialog as an insert-only picker. Pure client-side localStorage pref;
   // owned by App (persisted by its saveUi effect), so this is a read-only prop
@@ -109,9 +117,10 @@ interface Props {
 
 const LABEL: Record<string, string> = { '(local)': 'this machine' };
 
-export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, snippets, watchedChats, onToggleWatch, agentFilter, agentSort, onFilterChange, onSortChange }: Props) {
+export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, snippets, watchedChats, onToggleWatch, agentFilter, agentSort, onFilterChange, onSortChange }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [offlineExpanded, setOfflineExpanded] = useState(false);
+  const hostLabels = useHostLabels();
   // WARDEN-372: "show more" affordance for the per-workspace recently-closed list
   // (5 previewed → up to the 20-entry cap).
   const [showAllClosed, setShowAllClosed] = useState(false);
@@ -681,7 +690,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
               variant={n ? 'solid' : 'ring'}
               label={n ? `${n} active chat${n !== 1 ? 's' : ''}` : 'No active chats'}
             />
-            <span className="flex-1 truncate">{LABEL[h] || h}</span>
+            <span className="flex-1 truncate">{hostLabelFor(h, hostLabels) || LABEL[h] || h}</span>
             {isLocal && <span className="text-[10px] text-cyan-400">local</span>}
             {!isLocal && (
               <StatusDot
@@ -705,7 +714,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
           <ContextMenuItem onSelect={() => enterHost(h)}>Open</ContextMenuItem>
           <ContextMenuItem onSelect={() => onDiscoverHost(h)}>Discover</ContextMenuItem>
           <ContextMenuSeparator />
-          <ContextMenuItem onSelect={() => handleCopy(LABEL[h] || h)}>Copy host name</ContextMenuItem>
+          <ContextMenuItem onSelect={() => handleCopy(hostLabelFor(h, hostLabels) || LABEL[h] || h)}>Copy host name</ContextMenuItem>
           {!isLocal && (
             <ContextMenuItem onSelect={() => handleCopy(`ssh ${h}`)}>Copy SSH address</ContextMenuItem>
           )}
@@ -872,7 +881,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
       <div className="flex flex-col h-full min-h-0 animate-in slide-in-from-right-2 duration-150">
         <div className="flex items-center gap-2 compact:gap-1 px-2 py-2 compact:py-1.5 border-b shrink-0">
           <IconTooltip label="back"><button className="text-xs text-muted-foreground hover:text-foreground px-1 rounded active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => setView({ kind: 'root' })}>‹</button></IconTooltip>
-          <span className="text-xs font-medium flex-1 truncate">{LABEL[H] || H}</span>
+          <span className="text-xs font-medium flex-1 truncate">{hostLabelFor(H, hostLabels) || LABEL[H] || H}</span>
           <AgentFilterSortControls
             agentFilter={agentFilter}
             agentSort={agentSort}
@@ -905,7 +914,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
             )}
             {info.claudeAvailable === false && (
               <div className="mx-1 my-2 px-2 py-2 text-[11px] text-yellow-400 bg-yellow-500/10 border border-yellow-500/30 rounded-md">
-                ⚠ claude not found on {LABEL[H] || H} — install it to resume sessions here.
+                ⚠ claude not found on {hostLabelFor(H, hostLabels) || LABEL[H] || H} — install it to resume sessions here.
               </div>
             )}
             <div className="px-2 pt-1 pb-1 flex items-baseline gap-2">
@@ -1120,7 +1129,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
                   >
                     <StatusDot tone={open ? 'green' : 'muted'} variant={open ? 'solid' : 'ring'} label={open ? 'Open' : 'Reopen'} />
                     <span className="truncate flex-1 text-left">{entry.name || entry.id}</span>
-                    {entry.host && entry.host !== '(local)' && <span className="text-[10px] text-muted-foreground/70 shrink-0">{entry.host}</span>}
+                    {entry.host && entry.host !== '(local)' && <span className="text-[10px] text-muted-foreground/70 shrink-0">{hostLabelFor(entry.host, hostLabels) || entry.host}</span>}
                     <span className="text-[10px] text-muted-foreground/70 shrink-0">{formatTimestamp(entry.closedAt, timestampFormat)}</span>
                   </Button>
                 );
@@ -1189,6 +1198,8 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
         filePath={fileTarget?.path ?? ''}
         open={!!fileTarget}
         timestampFormat={timestampFormat}
+        viewMode={fileViewerViewMode}
+        onViewModeChange={onFileViewerViewModeChange}
         onOpenChange={(o) => { if (!o) setFileTarget(null); }}
       />
       <BroadcastDialog

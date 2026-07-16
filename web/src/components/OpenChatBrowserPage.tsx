@@ -9,7 +9,8 @@ import { StatusDot } from '@/components/StatusDot';
 import type { Chat } from '@/lib/types';
 // Shared pure display helpers live in @/lib/chatDisplay so the sidebar and this
 // page render identical labels (no drift in chat names between the two surfaces).
-import { THIS_MACHINE, basename, displayName, hostTagOf } from '@/lib/chatDisplay';
+import { THIS_MACHINE, basename, displayName, hostTagOf, hostLabelFor } from '@/lib/chatDisplay';
+import { useHostLabels } from '@/lib/hostLabels';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTokens } from '@/lib/formatTokens';
 import { budgetProgress, budgetOverPercent, type BudgetState } from '@/lib/tokenBudget';
@@ -188,6 +189,7 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
   const [selected, setSelected] = useState<string[] | undefined>(undefined);
   const [query, setQuery] = useState('');
   const [resumingId, setResumingId] = useState<string | null>(null);
+  const hostLabels = useHostLabels();
   // The history session whose read-only transcript is open (null = viewer closed).
   // Lifted here (not per-row) so the viewer is a sibling dialog over the page.
   const [viewing, setViewing] = useState<{ id: string; host: string; label: string } | null>(null);
@@ -280,10 +282,10 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
     }
     const breakdown = Object.entries(byHost)
       .sort((a, b) => b[1] - a[1])
-      .map(([h, t]) => `${h === THIS_MACHINE ? 'this machine' : h}: ${formatTokens(t)}`)
+      .map(([h, t]) => `${hostLabelFor(h, hostLabels) || (h === THIS_MACHINE ? 'this machine' : h)}: ${formatTokens(t)}`)
       .join('\n');
     return { total, hostCount: Object.keys(byHost).length, breakdown };
-  }, [allSessions]);
+  }, [allSessions, hostLabels]);
 
   // Resolved selection: persisted → usual hosts → all hosts.
   const effective = useMemo(() => {
@@ -367,8 +369,8 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
       if (key && key.startsWith('resume-')) liveResumeSid8.add(key.slice(7));
       out.push({
         id: 'live:' + key, kind: 'live', label: displayName(c),
-        hostTag: hostTagOf(c.host),
-        sub: `${hostTagOf(c.host)}${c.cwd ? ' · ' + basename(c.cwd) : ''}`,
+        hostTag: hostTagOf(c.host, hostLabels),
+        sub: `${hostTagOf(c.host, hostLabels)}${c.cwd ? ' · ' + basename(c.cwd) : ''}`,
         time: c.lastActivity || 0, openId: key,
       });
     }
@@ -391,8 +393,8 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
         // segment is gated by showHostTags so a hidden-host-tags user never sees
         // the hostname in the label either (the sidebar's displayName/processCwdLabel
         // never carries host; this keeps that promise on this surface). WARDEN-434.
-        label: s.summary || `${basename(s.cwd) || 'session'}${showHostTags !== false ? ' · ' + hostTagOf(s.host) : ''}`,
-        hostTag: hostTagOf(s.host), sub: `${hostTagOf(s.host)} · ${basename(s.cwd)}`,
+        label: s.summary || `${basename(s.cwd) || 'session'}${showHostTags !== false ? ' · ' + hostTagOf(s.host, hostLabels) : ''}`,
+        hostTag: hostTagOf(s.host, hostLabels), sub: `${hostTagOf(s.host, hostLabels)} · ${basename(s.cwd)}`,
         time: s.mtime, snippet: s.snippet, tokenUsage: s.tokenUsage,
         resume: { id: s.id, description: s.summary, cwd: s.cwd, host: s.host },
       });
@@ -418,7 +420,7 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
       out.sort((a, b) => b.time - a.time);
     }
     return out;
-  }, [effective, chats, allSessions, contentResults, query, sortUsage, showHostTags]);
+  }, [effective, chats, allSessions, contentResults, query, sortUsage, showHostTags, hostLabels]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -478,7 +480,7 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
           variant={st?.status === 'online' ? 'solid' : st?.status === 'offline' ? 'square' : 'ring'}
           label={st?.status ? st.status.charAt(0).toUpperCase() + st.status.slice(1) : 'Unknown'}
         />
-        {h === THIS_MACHINE ? 'this machine' : h}
+        {hostLabelFor(h, hostLabels) || (h === THIS_MACHINE ? 'this machine' : h)}
       </Button>
     );
   };

@@ -31,7 +31,7 @@ const { code } = await transformWithOxc(src, libPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-chatdisplay-test-'));
 const tmpFile = join(tmpDir, 'chatDisplay.mjs');
 writeFileSync(tmpFile, code);
-const { basename, chatType, processCwdLabel, displayName } = await import(tmpFile);
+const { basename, chatType, processCwdLabel, displayName, hostTagOf, hostLabelFor } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -147,6 +147,45 @@ test('normalizes backslashes (Windows)', () => {
 });
 test('empty string → empty string', () => {
   assert.equal(basename(''), '');
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nhostTagOf / hostLabelFor — per-host display labels (WARDEN-490)');
+// ---------------------------------------------------------------------------
+// Zero-regression bar: a host with NO label (or an empty/whitespace label) is
+// byte-identical to today. THIS_MACHINE ('(local)') reads 'local'; any other
+// host reads as itself. A label map REPLACES the raw string (incl. this
+// machine), and an empty/whitespace label falls back to the unlabeled behavior.
+const LABELS = { '(local)': 'my mac', 'ec2-1-2-3': 'CI runner' };
+test('hostTagOf: (local) with no labels → "local" (unchanged)', () => {
+  assert.equal(hostTagOf('(local)'), 'local');
+});
+test('hostTagOf: remote host with no labels → raw host (unchanged)', () => {
+  assert.equal(hostTagOf('ec2-1-2-3'), 'ec2-1-2-3');
+});
+test('hostTagOf: (local) with a label → the label', () => {
+  assert.equal(hostTagOf('(local)', LABELS), 'my mac');
+});
+test('hostTagOf: remote host with a label → the label', () => {
+  assert.equal(hostTagOf('ec2-1-2-3', LABELS), 'CI runner');
+});
+test('hostTagOf: a host with no entry in the map → raw host (unchanged)', () => {
+  assert.equal(hostTagOf('build-box', LABELS), 'build-box');
+});
+test('hostTagOf: an empty/whitespace label → falls back to unlabeled (zero regression)', () => {
+  assert.equal(hostTagOf('(local)', { '(local)': '   ' }), 'local');
+  assert.equal(hostTagOf('build-box', { build_box: '', 'build-box': '  ' }), 'build-box');
+});
+test('hostTagOf: undefined labels (no provider) → today\'s behavior', () => {
+  assert.equal(hostTagOf('(local)', undefined), 'local');
+  assert.equal(hostTagOf('ec2-1-2-3', undefined), 'ec2-1-2-3');
+});
+test('hostLabelFor: returns the trimmed label or "" (falsy) when none', () => {
+  assert.equal(hostLabelFor('ec2-1-2-3', LABELS), 'CI runner');
+  assert.equal(hostLabelFor('(local)', LABELS), 'my mac');
+  assert.equal(hostLabelFor('build-box', LABELS), '');
+  assert.equal(hostLabelFor('ec2-1-2-3', undefined), '');
+  assert.equal(hostLabelFor('x', { x: '  hi  ' }), 'hi'); // trimmed
 });
 
 console.log(`\n✓ CHAT DISPLAY TESTS PASS (${passed})`);
