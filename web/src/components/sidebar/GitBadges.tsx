@@ -7,6 +7,7 @@ import { useState, useEffect } from 'react';
 import { Popover as RadixPopover } from 'radix-ui';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { GitCompare, FileIcon, Search, X } from 'lucide-react';
 import { DiffBlock } from '@/components/DiffBlock';
@@ -704,9 +705,13 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   const [grepInput, setGrepInput] = useState('');
   // searchResults is keyed by range: '' (recent), 'outgoing', 'incoming'. A key's value
   // is `undefined` while that range's fetch is pending (or not yet started for this
-  // term), and a GitCommit[] once resolved (possibly empty). `undefined` vs `[]` keeps
-  // "still loading" distinct from "fetched, no matches" so the empty state is honest.
-  const [searchResults, setSearchResults] = useState<Record<string, GitCommit[] | undefined>>({});
+  // term); `{ status: 'ok', commits }` once it resolved (possibly empty); or
+  // `{ status: 'error' }` if the fetch failed (non-ok HTTP, network, or bad JSON). The
+  // three states keep "loading", "fetched, no matches", and "fetch failed" distinct so
+  // the empty/error states are honest (WARDEN-89 — never let a failure masquerade as a
+  // barren history).
+  type GrepResult = { status: 'ok'; commits: GitCommit[] } | { status: 'error' };
+  const [searchResults, setSearchResults] = useState<Record<string, GrepResult | undefined>>({});
   const [searchLoading, setSearchLoading] = useState(false);
   const searching = grepInput.trim().length > 0;
 
@@ -732,20 +737,27 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
     if (behindCount > 0) ranges.push('incoming');
     const t = setTimeout(async () => {
       const settled = await Promise.all(
-        ranges.map(async (range): Promise<[string, GitCommit[]]> => {
+        ranges.map(async (range): Promise<[string, GrepResult]> => {
           try {
             const url = `/api/git-log?id=${encodeURIComponent(chatId)}&grep=${encodeURIComponent(q)}` + (range ? `&range=${range}` : '');
             const r = await fetch(url);
+            // WARDEN-89: fetch() resolves (does not reject) on a 4xx/5xx — gate on r.ok
+            // so a server error surfaces as { status: 'error' } instead of reading
+            // undefined `j.commits` as an empty list (false-empty disease).
+            if (!r.ok) throw new Error(`git-log grep HTTP ${r.status}`);
             const j = await r.json();
-            return [range, Array.isArray(j.commits) ? j.commits : []];
-          } catch {
-            return [range, []];
+            return [range, { status: 'ok', commits: Array.isArray(j.commits) ? j.commits : [] }];
+          } catch (error) {
+            // WARDEN-89: never swallow silently — log with the range + term so a network
+            // failure or bad JSON leaves a trace instead of looking like "no matches".
+            console.warn('[WARDEN-498 git-log grep] failed:', error, { range, q });
+            return [range, { status: 'error' }];
           }
         }),
       );
       if (cancelled) return;
-      const next: Record<string, GitCommit[] | undefined> = {};
-      for (const [range, commits] of settled) next[range] = commits;
+      const next: Record<string, GrepResult | undefined> = {};
+      for (const [range, result] of settled) next[range] = result;
       setSearchResults(next);
       setSearchLoading(false);
     }, 300);
@@ -758,10 +770,12 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   // to swap each list's data source without touching its row markup.
   const listFor = (range: '' | 'outgoing' | 'incoming', browse: GitCommit[] | undefined, browseLoading: boolean) => {
     if (searching) {
-      const hits = searchResults[range];
-      return { items: hits, loading: hits === undefined };
+      const hit = searchResults[range];
+      if (hit === undefined) return { items: undefined, loading: true, error: false };
+      if (hit.status === 'error') return { items: undefined, loading: false, error: true };
+      return { items: hit.commits, loading: false, error: false };
     }
-    return { items: browse, loading: !!browseLoading };
+    return { items: browse, loading: !!browseLoading, error: false };
   };
 
   // Resolve each section's render source once (browse cache vs grep results) so the JSX
@@ -896,14 +910,17 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
           {/* WARDEN-498: commit-message search across every visible list. Debounced
               (the effect at the top of the component fetches on a 300ms settle). A
               non-empty term swaps each section's data source to its grep results via
-              listFor; the ✕ clears it so the unfiltered browse lists return. Plain
-              <input> (not shadcn Input) so it matches the popover's dense text-[10px]
-              styling, exactly as the ↻ refresh is a plain <button>. stopPropagation keeps
-              typing/clearing from toggling the row/pane beneath. Searches the FULL message
-              (subject + body), case-insensitive, over a wider window than the browse cap. */}
-          <div className="mb-1 flex items-center gap-1 rounded-sm border border-border bg-background/50 px-1.5 py-0.5">
-            <Search className="size-3 shrink-0 text-muted-foreground" />
-            <input
+              listFor; the ✕ clears it so the unfiltered browse lists return. shadcn
+              <Input>/<Button> — never raw form elements (WARDEN-68); the leading Search
+              icon + trailing clear use the shadcn icon-input convention (relative
+              wrapper, absolutely-positioned affordances, padded input). Sizes are on the
+              Tailwind scale (text-xs), not arbitrary literals (WARDEN-68 Rule 2).
+              stopPropagation keeps typing/clearing from toggling the row/pane beneath.
+              Searches the FULL message (subject + body), case-insensitive, over a wider
+              window than the browse cap. */}
+          <div className="relative mb-1">
+            <Search className="pointer-events-none absolute left-1.5 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
+            <Input
               type="text"
               value={grepInput}
               onChange={(e) => setGrepInput(e.target.value)}
@@ -911,20 +928,26 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
               onKeyDown={(e) => e.stopPropagation()}
               placeholder="search commit messages…"
               aria-label="search commit messages"
-              className="min-w-0 flex-1 bg-transparent text-[10px] text-foreground placeholder:text-muted-foreground outline-none"
+              className="h-6 text-xs md:text-xs pl-6 pr-6"
             />
             {(searching || searchLoading) && (
-              <button
+              <Button
                 type="button"
+                variant="ghost"
+                size="icon-xs"
                 onClick={(e) => { e.stopPropagation(); setGrepInput(''); }}
                 onKeyDown={(e) => e.stopPropagation()}
                 aria-label="clear commit search"
                 title="clear search"
-                className="shrink-0 text-muted-foreground hover:text-foreground"
-              ><X className="size-3" /></button>
+                className="absolute right-0.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              >
+                <X className="size-3" />
+              </Button>
             )}
           </div>
-          {recent.loading && (!recent.items || recent.items.length === 0) ? (
+          {recent.error ? (
+            <div className="px-1 py-1 text-[10px] text-destructive">search failed — try again</div>
+          ) : recent.loading && (!recent.items || recent.items.length === 0) ? (
             <div className="flex items-center gap-1.5 px-1 py-1">
               <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">{searching ? 'searching…' : 'loading…'}</span>
             </div>
@@ -1026,7 +1049,9 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
                   full diff
                 </Button>
               </div>
-              {outList.loading && (!outList.items || outList.items.length === 0) ? (
+              {outList.error ? (
+                <div className="px-1 py-1 text-[10px] text-destructive">search failed — try again</div>
+              ) : outList.loading && (!outList.items || outList.items.length === 0) ? (
                 <div className="flex items-center gap-1.5 px-1 py-1">
                   <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">{searching ? 'searching…' : 'loading…'}</span>
                 </div>
@@ -1102,7 +1127,9 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
                   full diff
                 </Button>
               </div>
-              {incList.loading && (!incList.items || incList.items.length === 0) ? (
+              {incList.error ? (
+                <div className="px-1 py-1 text-[10px] text-destructive">search failed — try again</div>
+              ) : incList.loading && (!incList.items || incList.items.length === 0) ? (
                 <div className="flex items-center gap-1.5 px-1 py-1">
                   <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">{searching ? 'searching…' : 'loading…'}</span>
                 </div>
