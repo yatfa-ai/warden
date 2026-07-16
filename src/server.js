@@ -26,7 +26,7 @@ import { buildSnapshot, diffLifecycles } from './lifecycle.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { classifyPane, stripAnsi } from './agentState.js';
 import { checkHost } from './hostStatus.js';
-import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseReflog, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, parseGitRemotes, buildDockerGitArgv } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseReflog, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, parseGitRemotes, buildDockerGitArgv } from './gitStatus.js';
 import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep } from './companion.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1888,7 +1888,7 @@ app.get('/api/git-status', async (req, res) => {
 
   try {
     const cwd = gitCwd(chat);
-    if (!cwd) return res.json({ branch: null, detached: false, headSha: null, clean: null, cwd: '', ahead: null, behind: null, upstream: null, inProgress: { operation: null, detail: null }, stashCount: null, diffstat: null, files: null, error: 'no cwd' });
+    if (!cwd) return res.json({ branch: null, detached: false, headSha: null, headDate: null, clean: null, cwd: '', ahead: null, behind: null, upstream: null, inProgress: { operation: null, detail: null }, stashCount: null, diffstat: null, files: null, error: 'no cwd' });
 
     // branch / status / ahead-behind / detached / stash all run via runGit: argv
     // (no shell) for the LOCAL transports, ssh for the remote ones — and for yatfa
@@ -1944,6 +1944,21 @@ app.get('/api/git-status', async (req, res) => {
       headSha = normalizeHeadSha(shaResult.stdout, shaResult.code);
     }
 
+    // Last-commit freshness (WARDEN-545): `git log -1 --format=%cI HEAD` prints
+    // the strict ISO-8601 committer date of HEAD. Fetched UNCONDITIONALLY for any
+    // repo with a branch — deliberately NOT inside `if (detached)` above — so a
+    // normally-committing BRANCH agent that has gone quiet (committed days ago,
+    // silent since) is the one that lights up. `headSha` is detached-only (it
+    // merely relabels the "HEAD" string), but freshness must reach the branch
+    // agents that are its actual target; gating it on `if (detached)` would make
+    // the marker render only for detached-HEAD agents and defeat the purpose. A
+    // single rev, ~free. Nulls naturally on an unborn branch / non-git cwd
+    // (`git log` errors → non-zero exit → parseHeadDate returns null). Same
+    // runGit transport as the probes above, so it runs inside yatfa containers
+    // via `docker exec … git -C <cwd>` too (WARDEN-235).
+    const headDateR = await runGit(chat, ['log', '-1', '--format=%cI', 'HEAD'], cwd);
+    const headDate = parseHeadDate(headDateR.ok ? headDateR.stdout : '', headDateR.code);
+
     const inProgressState = await detectInProgress(chat, cwd);
 
     // Shelved WIP: `git stash list` emits one line per stash, empty when none.
@@ -1994,11 +2009,17 @@ app.get('/api/git-status', async (req, res) => {
       // (WARDEN-411), or null for a clean / non-git / detached repo. Gated on
       // `branch` like stashCount; parseDiffStat already nulls an all-untracked WIP.
       diffstat: branch ? diffstat : null,
+      // headDate: the last-commit freshness of HEAD (strict ISO-8601 committer
+      // date from `git log -1 --format=%cI`), gated on `branch` like the other
+      // derived fields so a non-git cwd reads null. Rendered as an always-on
+      // `· Nd` append on the badge so a human can spot a synced-but-stalled agent
+      // (WARDEN-545); fetched unconditionally above (not detached-only).
+      headDate: branch ? headDate : null,
       files: branch ? files : null,
       error: null,
     });
   } catch (e) {
-    res.json({ branch: null, detached: false, headSha: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, upstream: null, inProgress: { operation: null, detail: null }, stashCount: null, diffstat: null, files: null, error: e.message });
+    res.json({ branch: null, detached: false, headSha: null, headDate: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, upstream: null, inProgress: { operation: null, detail: null }, stashCount: null, diffstat: null, files: null, error: e.message });
   }
 });
 

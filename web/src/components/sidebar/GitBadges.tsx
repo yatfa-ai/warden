@@ -18,6 +18,7 @@ import { findChat } from '@/lib/agentFilter';
 import { displayName } from '@/lib/chatDisplay';
 import { type ProjectGitAgent, type FileCollision } from '@/lib/gitStateSummary';
 import { formatWhatsNewLine, type WhatsNewSummary } from '@/lib/whatsNew';
+import { formatRelative, formatAbsoluteFull } from '@/lib/formatTimestamp';
 import type { Chat } from '@/lib/types';
 import type { GitCommit, GitFile, GitStash, GitReflogEntry, GitRemote, DiffStat } from './types';
 import { DiffStatChip } from './DiffStatChip';
@@ -568,7 +569,7 @@ function CommitMessage({ message }: { message?: string }) {
 // to document.body via Radix Popover so it isn't clipped by the `truncate` name span
 // this badge sits inside (in ChatRow). stopPropagation on clicks keeps it from also
 // opening the chat pane (mirrors the other inline buttons in these rows).
-export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, inProgress, stashCount, diffstat, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, detached, headSha, upstream, onOpenFile, className }: {
+export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, inProgress, stashCount, diffstat, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, detached, headSha, headDate, upstream, onOpenFile, className }: {
   branch: string;
   clean: boolean | null;
   commits?: GitCommit[];
@@ -606,6 +607,14 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   // literal "HEAD" branch label. ahead/behind are null on detached (no @{u}).
   detached?: boolean;
   headSha?: string | null;
+  // WARDEN-545: the strict ISO-8601 committer date of HEAD (git %cI) — the last-
+  // commit FRESHNESS, threaded end-to-end from /api/git-status. Rendered as an
+  // always-on `· Nd` append on the un-expanded badge so a human scanning the
+  // sidebar can pick out a synced-but-stalled agent (committed days ago, silent
+  // since) without expanding its commit list; ahead/behind measure divergence
+  // from upstream, never recency. Stale (>7d) gets a warning tint. null when the
+  // repo has no commits / is non-git, or for a branch-less cwd.
+  headDate?: string | null;
   // WARDEN-243: the short upstream tracking branch (e.g. origin/feature), or null
   // when HEAD has no upstream — a named branch never `push -u`'d. ahead/behind are
   // null either way (no @{u}), so without this a non-tracking branch is a bare
@@ -646,6 +655,18 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   // ↑/↓ markers naturally don't render.
   const isDetached = detached === true;
   const sha = typeof headSha === 'string' ? headSha.trim() : '';
+  // WARDEN-545: last-commit freshness derived from headDate (strict ISO-8601 from
+  // git %cI). Date.parse → NaN when headDate is missing/invalid, so headFresh is
+  // false and no marker renders (a repo with no commits / non-git cwd). The marker
+  // is always-on for BOTH branch AND detached agents: headDate is fetched
+  // unconditionally server-side (gated on `branch`, which is the literal 'HEAD'
+  // for detached), so this proves the unconditional fetch reaches detached agents
+  // too — the whole point of the Refinement-1 fix. Stale (>7d) gets an amber tint
+  // so quiet agents pop; fresh stays muted so active ones recede into the row.
+  const STALE_HEAD_AGE_MS = 7 * 86400_000;
+  const headMs = typeof headDate === 'string' && headDate ? Date.parse(headDate) : NaN;
+  const headFresh = Number.isFinite(headMs);
+  const headStale = headFresh && Date.now() - headMs > STALE_HEAD_AGE_MS;
   // WARDEN-243: a named branch with NO upstream tracking (never `push -u`'d) is
   // local-only work with no remote backup — a durability risk a human glancing at
   // the badge needs to see. Distinct from a synced 0/0 branch (which HAS an
@@ -660,6 +681,9 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
     if (upstream) titleParts.push(`tracking ${upstream}`);
     else titleParts.push('no remote tracking — local-only, not backed up');
   }
+  // WARDEN-545: fold the exact last-commit time into the hover so a glance at the
+  // `· Nd` append can be resolved to a precise clock time without expanding.
+  if (headFresh) titleParts.push(`last commit ${formatAbsoluteFull(headMs)}`);
   if (inProgressTitle) titleParts.push(inProgressTitle);
   if (clean === false) {
     // WARDEN-411: fold the magnitude into the dirty tooltip so a hover distinguishes
@@ -949,6 +973,14 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
               {sha && <span className="font-mono">{sha}</span>}
             </>
           ) : branch}
+          {headFresh && (
+            // WARDEN-545: always-on `· Nd` last-commit freshness append. Stale
+            // (>7d) tints amber so a quiet agent pops while fresh ones stay muted.
+            // Rendered for branch AND detached agents (headDate is fetched
+            // unconditionally server-side), so a human scanning the un-expanded
+            // sidebar can pick out stalled agents without expanding a commit list.
+            <span className={headStale ? 'text-amber-400' : 'text-muted-foreground'}>· {formatRelative(headMs)}</span>
+          )}
           {clean === false && <span className="text-yellow-400">±</span>}
           {noUpstream && <span className="text-muted-foreground" title="no remote tracking — local-only work, not backed up remotely">🔒</span>}
           {aheadCount > 0 && <span className="text-amber-400">↑{aheadCount}</span>}
