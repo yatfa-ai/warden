@@ -3,7 +3,17 @@ import { hostLabelFor } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
 import type { Directive } from '@/lib/types';
 import { Button } from '@/components/ui/button';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuLabel,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { copyText } from '@/lib/clipboard';
+import { toast } from 'sonner';
 import { EmptyState } from './EmptyState';
 import { MarkdownBody } from './MarkdownBody';
 import { formatUpdatedAgo } from '@/lib/timelinePacing';
@@ -224,7 +234,13 @@ export function DirectiveHistory({ timestampFormat }: { timestampFormat: Timesta
                 </h3>
                 <div className="space-y-2">
                   {items.map((d, i) => (
-                    <DirectiveEntry key={`${d.timestamp}-${i}`} directive={d} timestampFormat={timestampFormat} />
+                    <DirectiveEntry
+                      key={`${d.timestamp}-${i}`}
+                      directive={d}
+                      timestampFormat={timestampFormat}
+                      setAgentFilter={setAgentFilter}
+                      setHostFilter={setHostFilter}
+                    />
                   ))}
                 </div>
               </div>
@@ -236,22 +252,78 @@ export function DirectiveHistory({ timestampFormat }: { timestampFormat: Timesta
   );
 }
 
-function DirectiveEntry({ directive, timestampFormat }: { directive: Directive; timestampFormat: TimestampFormat }) {
+function DirectiveEntry({
+  directive,
+  timestampFormat,
+  setAgentFilter,
+  setHostFilter,
+}: {
+  directive: Directive;
+  timestampFormat: TimestampFormat;
+  setAgentFilter: (v: string) => void;
+  setHostFilter: (v: string) => void;
+}) {
   const hostLabels = useHostLabels();
   return (
-    <div className="py-2 px-3 rounded-lg border bg-card/50">
-      <div className="flex items-center gap-2 mb-2 flex-wrap">
-        <span className="text-xs font-semibold uppercase text-emerald-500">sent</span>
-        <span className="text-xs text-muted-foreground">{formatTimestamp(directive.timestamp, timestampFormat)}</span>
-        <span className="text-xs font-mono text-muted-foreground bg-muted px-1 rounded">
-          {directive.container}@{hostLabelFor(directive.host, hostLabels) || directive.host}
-        </span>
-        <span className="text-xs font-medium">{directive.role || 'agent'}</span>
-      </div>
-      {/* Full directive text in a scrollable block — not a truncated snippet. */}
-      <div className="max-h-64 overflow-y-auto rounded-md bg-muted/30 p-2 text-sm">
-        <MarkdownBody>{directive.text}</MarkdownBody>
-      </div>
-    </div>
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div className="py-2 px-3 rounded-lg border bg-card/50">
+          <div className="flex items-center gap-2 mb-2 flex-wrap">
+            <span className="text-xs font-semibold uppercase text-emerald-500">sent</span>
+            <span className="text-xs text-muted-foreground">{formatTimestamp(directive.timestamp, timestampFormat)}</span>
+            <span className="text-xs font-mono text-muted-foreground bg-muted px-1 rounded">
+              {directive.container}@{hostLabelFor(directive.host, hostLabels) || directive.host}
+            </span>
+            <span className="text-xs font-medium">{directive.role || 'agent'}</span>
+          </div>
+          {/* Full directive text in a scrollable block — not a truncated snippet. */}
+          <div className="max-h-64 overflow-y-auto rounded-md bg-muted/30 p-2 text-sm">
+            <MarkdownBody>{directive.text}</MarkdownBody>
+          </div>
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem
+          onSelect={async () => {
+            await copyText(directive.text);
+            toast.success('Copied');
+          }}
+        >
+          Copy directive text
+        </ContextMenuItem>
+        <ContextMenuItem
+          onSelect={async () => {
+            await copyText(`${directive.container}@${directive.host}`);
+            toast.success('Copied');
+          }}
+        >
+          Copy agent@host
+        </ContextMenuItem>
+        <ContextMenuItem
+          onSelect={async () => {
+            await copyText(formatTimestamp(directive.timestamp, timestampFormat));
+            toast.success('Copied');
+          }}
+        >
+          Copy timestamp
+        </ContextMenuItem>
+        {/* Filter group only when the row carries a filterable identity — never
+            render an empty Filter label (the roadmap bans half-empty menus). */}
+        {(directive.container || directive.host) && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuLabel>Filter</ContextMenuLabel>
+            {directive.container && (
+              <ContextMenuItem onSelect={() => setAgentFilter(directive.container)}>
+                Filter to this agent
+              </ContextMenuItem>
+            )}
+            {directive.host && (
+              <ContextMenuItem onSelect={() => setHostFilter(directive.host)}>Filter to this host</ContextMenuItem>
+            )}
+          </>
+        )}
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
