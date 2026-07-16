@@ -4,12 +4,15 @@
 // states no longer read "needs attention"); this closes the miss half for the
 // per-chat watch (WARDEN-378), at the point a miss is most likely AND most costly.
 //
-// WARDEN-378's watch ping has a SINGLE delivery channel — fireWatchNotification over
-// the Web Notifications API — which silently no-ops when Notifications are
-// unsupported (embedded webview), denied, cleared, or lost to DND. So a watched
-// chat that newly needs the human while they are stepped away ("watch this chat,
-// step away" — the watch's headline scenario) can be silently lost: nothing is
-// recorded at the fire site, so on return there is no in-app trace it happened.
+// The watch ping's AWAY channel is fireWatchNotification over the Web Notifications
+// API — which silently no-ops when Notifications are unsupported (embedded webview),
+// denied, cleared, or lost to DND. So a watched chat that newly needs the human while
+// they are stepped away ("watch this chat, step away" — the watch's headline scenario)
+// can be silently lost: nothing is recorded at the fire site, so on return there is no
+// in-app trace it happened. (WARDEN-530 adds a crafted in-app sonner toast for the
+// AT-WARDEN visible case — but that fires only while the human is PRESENT and records no
+// miss, so it is out of scope for this away-recovery module; the catch-up stays the net
+// under the OS away channel.)
 //
 // This module records the watch alerts the OS channel did NOT reliably deliver —
 // either because fireWatchNotification no-op'd (Notifications unsupported / denied /
