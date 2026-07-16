@@ -38,7 +38,7 @@ import {
   type AgentFilter, type AgentSort,
 } from '@/lib/agentFilter';
 import { getLastSeen, WHATS_NEW_FETCH_LIMIT } from '@/lib/whatsNew';
-import type { Chat, Collection } from '@/lib/types';
+import type { Chat, Collection, AgentStateRow } from '@/lib/types';
 import { StatusDot } from '@/components/StatusDot';
 import type { GitCommit, GitFile, ClaudeSession, DiffStat } from './sidebar/types';
 import { ChatRow, OpenPaneRow, ChatRowSkeleton, SessionRowSkeleton } from './sidebar/ChatRows';
@@ -101,6 +101,15 @@ interface Props {
   // delegates to App. Threaded to every chat row so the watch affordance + its
   // active state render consistently across the fleet list and the open-panes list.
   watchedChats: Set<string>;
+  // WARDEN-514: per-key CURRENT-state lookup for watched chats (row.key ?? row.id →
+  // AgentStateRow). Threaded to each row so a watched chat that CURRENTLY needs the
+  // human (waiting/erroring/stuck/blocked) shows a persistent, state-aware indicator
+  // on its own row — even when its pane is closed (the header AttentionBadge is open-
+  // gated, so a watched-but-CLOSED pane never reaches it). Built by App from the
+  // rollup's already-fetched watchedStates exposure (zero extra SSH cost); read-only
+  // here. A watched key absent from the map (before the first poll / on a transient
+  // fetch blip) → the row degrades to the neutral watch glyph (the safe default).
+  watchedStates: Record<string, AgentStateRow>;
   onToggleWatch: (key: string) => void;
   // WARDEN-442: sidebar fleet Filter (all/yatfa/claude/manual) + Sort, shipped in
   // WARDEN-91. Owned by App and persisted by its saveUi effect (these were
@@ -117,7 +126,7 @@ interface Props {
 
 const LABEL: Record<string, string> = { '(local)': 'this machine' };
 
-export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, snippets, watchedChats, onToggleWatch, agentFilter, agentSort, onFilterChange, onSortChange }: Props) {
+export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, snippets, watchedChats, watchedStates, onToggleWatch, agentFilter, agentSort, onFilterChange, onSortChange }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [offlineExpanded, setOfflineExpanded] = useState(false);
   const hostLabels = useHostLabels();
@@ -803,11 +812,11 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
             {(active.length > 0 || idle.length > 0) && (
               <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">● matching agents</div>
             )}
-            {active.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} note={agentNotes[c.id]} onSetNote={(text: string) => setNote(c.id, text)} isWatched={watchedChats.has(c.key || c.id)} onToggleWatch={() => onToggleWatch(c.key || c.id)} />)}
+            {active.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} note={agentNotes[c.id]} onSetNote={(text: string) => setNote(c.id, text)} isWatched={watchedChats.has(c.key || c.id)} watchState={watchedStates[c.key || c.id]} onToggleWatch={() => onToggleWatch(c.key || c.id)} />)}
             {idle.length > 0 && (
               <>
                 <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">idle</div>
-                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} dim showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} note={agentNotes[c.id]} onSetNote={(text: string) => setNote(c.id, text)} isWatched={watchedChats.has(c.key || c.id)} onToggleWatch={() => onToggleWatch(c.key || c.id)} />)}
+                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromCollection(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} dim showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} note={agentNotes[c.id]} onSetNote={(text: string) => setNote(c.id, text)} isWatched={watchedChats.has(c.key || c.id)} watchState={watchedStates[c.key || c.id]} onToggleWatch={() => onToggleWatch(c.key || c.id)} />)}
               </>
             )}
             {agents.length === 0 && (
@@ -898,11 +907,11 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
             {(active.length > 0 || idle.length > 0) && (
               <div className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wider text-green-500/80 font-semibold">● live (tmux)</div>
             )}
-            {active.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path, staged) => setDiffTarget({ chatId: c.key || c.id, path, staged })} onOpenConflict={(path) => setConflictTarget({ chatId: c.key || c.id, path })} onOpenFile={(path) => setFileTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} note={agentNotes[c.id]} onSetNote={(text: string) => setNote(c.id, text)} isWatched={watchedChats.has(c.key || c.id)} onToggleWatch={() => onToggleWatch(c.key || c.id)} />)}
+            {active.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path, staged) => setDiffTarget({ chatId: c.key || c.id, path, staged })} onOpenConflict={(path) => setConflictTarget({ chatId: c.key || c.id, path })} onOpenFile={(path) => setFileTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} note={agentNotes[c.id]} onSetNote={(text: string) => setNote(c.id, text)} isWatched={watchedChats.has(c.key || c.id)} watchState={watchedStates[c.key || c.id]} onToggleWatch={() => onToggleWatch(c.key || c.id)} />)}
             {idle.length > 0 && (
               <>
                 <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">idle</div>
-                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path, staged) => setDiffTarget({ chatId: c.key || c.id, path, staged })} onOpenConflict={(path) => setConflictTarget({ chatId: c.key || c.id, path })} onOpenFile={(path) => setFileTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} note={agentNotes[c.id]} onSetNote={(text: string) => setNote(c.id, text)} isWatched={watchedChats.has(c.key || c.id)} onToggleWatch={() => onToggleWatch(c.key || c.id)} />)}
+                {idle.map((c) => <ChatRow key={c.id} c={c} open={openPanes.has(c.key || c.id)} onOpen={() => openFromHost(c.key || c.id)} hostStatus={hostStatuses[c.host]?.status} onKill={() => onKill(c.key || c.id)} onRename={onRename} dim gitInfo={gitStatus[c.key || c.id]} gitCommits={gitLog[c.key || c.id]} gitLogLoading={gitLogLoading[c.key || c.id]} onFetchGitLog={() => fetchGitLog(c.key || c.id)} incomingCommits={gitLogIncoming[c.key || c.id]} incomingLoading={gitLogIncomingLoading[c.key || c.id]} onFetchIncoming={() => fetchGitLogIncoming(c.key || c.id)} outgoingCommits={gitLogOutgoing[c.key || c.id]} outgoingLoading={gitLogOutgoingLoading[c.key || c.id]} onFetchOutgoing={() => fetchGitLogOutgoing(c.key || c.id)} onOpenDiff={(path, staged) => setDiffTarget({ chatId: c.key || c.id, path, staged })} onOpenConflict={(path) => setConflictTarget({ chatId: c.key || c.id, path })} onOpenFile={(path) => setFileTarget({ chatId: c.key || c.id, path })} showHostTags={showHostTags} showTypeBadges={showTypeBadges} showStatusIndicators={showStatusIndicators} showProjectBadges={showProjectBadges} isPinned={pinnedChatIds.has(c.id)} onTogglePin={() => togglePin(c.id)} selected={selectedIds.has(c.key || c.id)} onToggleSelect={() => toggleSelect(c.key || c.id)} selectionActive={selectedIds.size > 0} note={agentNotes[c.id]} onSetNote={(text: string) => setNote(c.id, text)} isWatched={watchedChats.has(c.key || c.id)} watchState={watchedStates[c.key || c.id]} onToggleWatch={() => onToggleWatch(c.key || c.id)} />)}
               </>
             )}
             <div className="mt-3 mb-1 border-t border-border/50" />
@@ -1102,6 +1111,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
                 onSetNote={c ? (text: string) => setNote(c.id, text) : undefined}
                 timestampFormat={timestampFormat}
                 isWatched={watchedChats.has(id)}
+                watchState={watchedStates[id]}
                 onToggleWatch={() => onToggleWatch(id)}
               />
             );

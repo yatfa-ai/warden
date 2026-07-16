@@ -137,7 +137,10 @@ const WATCH_NEEDS_YOU_STATES: ReadonlySet<string> = new Set(['waiting', 'errorin
 // with the order the pings themselves fire. Mirrored locally for the same
 // dependency-free reason as WATCH_NEEDS_YOU_STATES above.
 const WATCH_REASON_PRIORITY: Record<WatchReason, number> = {
-  erroring: 0, stuck: 1, completed: 2, waiting: 3,
+  // `blocked` (4) mirrors chatWatch.ts (WARDEN-514): unreachable on the catch-up path —
+  // a miss is a recorded TRANSITION ping, and the ping never fires on blocked — so its
+  // slot exists only to satisfy the exhaustive Record<WatchReason, number>.
+  erroring: 0, stuck: 1, completed: 2, waiting: 3, blocked: 4,
 };
 
 /**
@@ -222,6 +225,10 @@ const WATCH_MISS_REASON_LABEL: Record<WatchReason, string> = {
   erroring: 'erroring',
   stuck: 'stuck (repeating output)',
   completed: 'finished a task',
+  // WARDEN-514: mirrors desktopAlerts' WATCH_REASON_LABEL. Unreachable on the catch-up
+  // path (a miss is a recorded transition ping, and the ping never fires on blocked),
+  // but present so the mirror stays an exhaustive Record<WatchReason, string>.
+  blocked: 'blocked — waiting on a dependency',
 };
 
 /**

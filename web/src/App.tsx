@@ -10,6 +10,7 @@ import { type TimestampFormat } from '@/lib/formatTimestamp';
 import { type AgentFilter, type AgentSort } from '@/lib/agentFilter';
 import { stampLastSeen } from '@/lib/whatsNew';
 import { useWatchCatchup } from '@/lib/useWatchCatchup';
+import { indexByWatchKey } from '@/lib/chatWatch';
 import { requestAlertPermission, type AttentionSeverityPrefs } from '@/lib/desktopAlerts';
 import { useTokenBudget } from '@/lib/useTokenBudget';
 import { useAttentionRollup } from '@/lib/useAttentionRollup';
@@ -1373,6 +1374,15 @@ function App() {
   // WARDEN-378: O(1) "is this chat watched?" lookup for the sidebar rows (the watch
   // toggle's active state). A Set mirroring watchedChats, recomputed each render.
   const watchedChatSet = new Set(watchedChats);
+  // WARDEN-514: per-key CURRENT-state lookup for the watched rows — so a watched chat
+  // that needs the human right now (waiting/erroring/stuck/blocked) shows a persistent,
+  // state-aware indicator on its own row even when its pane is closed (the header
+  // AttentionBadge is open-gated, so a watched-but-CLOSED pane never reaches it). Built
+  // from the rollup's already-fetched `watchedStates` exposure (the watched subset incl.
+  // closed panes, pre-open-filter — useAttentionRollup), so this adds ZERO SSH cost: it
+  // rides the same open ∪ watched ~30s poll. keyed by row.key ?? row.id — the same key
+  // space watchedChats/openPanes use. Recomputed each render (mirrors watchedChatSet).
+  const watchedStateByKey = indexByWatchKey(watchedAgentStates);
   const tiles = openPanes.map((id) => ({ id }));
   // Resolved terminal theme id (which named theme's xterm palette to use).
   // 'auto' defers to the active (OS-resolved) app theme; 'dark'/'light' force it
@@ -1772,6 +1782,7 @@ function App() {
               onFileViewerViewModeChange={setFileViewerViewMode}
               snippets={snippets}
               watchedChats={watchedChatSet}
+              watchedStates={watchedStateByKey}
               onToggleWatch={toggleWatch}
               agentFilter={agentFilter}
               agentSort={agentSort}

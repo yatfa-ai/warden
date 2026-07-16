@@ -216,11 +216,16 @@ export function fireAttentionNotification(rollup: AttentionRollup): void {
 
 // Reason → human phrasing for the watch body. Conveys the concrete "why" so the
 // human knows what kind of attention the chat needs, not just that it needs some.
+// `blocked` (WARDEN-514) is never produced by the transition ping (diffWatchAlerts
+// doesn't fire on blocked), but the persistent CURRENT-state row indicator
+// (currentWatchNeed) DOES surface blocked, so its label lives in the SAME vocabulary
+// the ping uses — the row tooltip and the OS toast phrase a blocked chat identically.
 const WATCH_REASON_LABEL: Record<WatchReason, string> = {
   waiting: 'waiting for your input',
   erroring: 'erroring',
   stuck: 'stuck (repeating output)',
   completed: 'finished a task',
+  blocked: 'blocked — waiting on a dependency',
 };
 
 /**
@@ -287,6 +292,24 @@ export function formatWatchMessage(row: AgentStateRow, reason: WatchReason): { t
   const title = `Warden: ${label}`;
   const body = `${name} · ${label}${row.signal ? ` — '${row.signal}'` : ''}`;
   return { title, body };
+}
+
+/**
+ * Pure: the reason line for a watched chat's CURRENT needs-you state — the
+ * WATCH_REASON_LABEL phrasing plus, when the row carries a signal, the signal quoted
+ * verbatim (e.g. "waiting for your input — 'press enter to continue'"). (WARDEN-514.)
+ *
+ * Sibling of formatWatchMessage's body, MINUS the agent name: the row already shows the
+ * chat's name, so the row indicator's tooltip needs only the reason + signal. The row
+ * indicator (ChatRow/OpenPaneRow) calls this with the currentWatchNeed reason + the
+ * AgentStateRow's signal, so the in-row wording uses the SAME vocabulary the watch ping
+ * does — the product speaks with one voice across the transient OS toast and the
+ * persistent row indicator. Pure + dependency-free so it is unit-tested directly
+ * alongside formatWatchMessage.
+ */
+export function watchStateLabel(reason: WatchReason, signal?: string | null): string {
+  const label = WATCH_REASON_LABEL[reason] || reason;
+  return signal ? `${label} — '${signal}'` : label;
 }
 
 /**

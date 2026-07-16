@@ -16,11 +16,13 @@ import { cn } from '@/lib/utils';
 import { chatType, displayName, hostTagOf, hostLabelFor } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
 import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
-import type { Chat } from '@/lib/types';
+import type { Chat, AgentStateRow } from '@/lib/types';
 import type { GitCommit, GitFile, DiffStat } from './types';
 import { GitBranchBadge, GitChangedFile, WhatsNewMarker } from './GitBadges';
 import { DiffStatChip } from './DiffStatChip';
 import { getLastSeen, summarizeWhatsNew, hasUnreviewedProgress } from '@/lib/whatsNew';
+import { currentWatchNeed } from '@/lib/chatWatch';
+import { watchStateLabel } from '@/lib/desktopAlerts';
 
 // Compute the per-agent "What's new since your last visit" summary for a row
 // (WARDEN-356) from the git-log + git-status data the row already holds, plus
@@ -68,7 +70,69 @@ export function SessionRowSkeleton() {
   );
 }
 
-export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, onOpenConflict, onOpenFile, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, isPinned, onTogglePin, selected, onToggleSelect, selectionActive, note, onSetNote, isWatched, onToggleWatch }: {
+// WARDEN-514: the state-aware watch indicator shared by ChatRow + OpenPaneRow. When a
+// WATCHED chat's CURRENT state needs the human (waiting/erroring/stuck/blocked —
+// currentWatchNeed over the threaded watchState), the static blue Eye is replaced by a
+// themed, at-a-glance StatusDot (red + pulsing for the broken states erroring/stuck;
+// amber + solid for the milder waiting/blocked — the SAME red/amber split the
+// AttentionBadge's dotForState uses for these states), with a tooltip naming the reason
+// in the watch ping's own vocabulary (watchStateLabel) and quoting the triggering signal
+// verbatim. A happily-working/idle watched chat shows the neutral Eye glyph (unchanged).
+// Either way the control is the watch TOGGLE — clicking swaps back to unwatch.
+//
+// WCAG 1.4.1 (WARDEN-68): the needs-you signal is NOT color alone. The StatusDot (a dot)
+// replaces the Eye ICON (a shape change), and the pulse-vs-solid variant further
+// separates broken from waiting — so the binary "needs me / happy" never rests on hue
+// alone. The specific reason is always in the tooltip + the control's accessible name.
+// Built on the library primitives (StatusDot / Button / IconTooltip) — no raw <span>,
+// no magic sizes, no inline visual styles.
+function WatchToggle({ isWatched, watchState, onToggle }: {
+  isWatched?: boolean;
+  watchState?: AgentStateRow;
+  onToggle: () => void;
+}) {
+  // Only a WATCHED chat with a known CURRENT state can need the human: an unwatched chat
+  // has no row indicator, and a watched chat before the first poll / on a transient fetch
+  // blip has no watchState (the rollup preserves, not blanks, on failure) → degrades to
+  // the neutral Eye (the safe default, matching the catch-up's null-snapshot behavior).
+  const need = isWatched && watchState ? currentWatchNeed(watchState) : null;
+  if (need) {
+    const broken = need === 'erroring' || need === 'stuck';
+    const label = watchStateLabel(need, watchState?.signal);
+    return (
+      <IconTooltip label={label}>
+        <Button
+          variant="ghost"
+          size="xs"
+          className="px-0.5"
+          onClick={(e) => { e.stopPropagation(); onToggle(); }}
+          aria-label={label}
+          aria-pressed={true}
+        >
+          <StatusDot tone={broken ? 'red' : 'yellow'} variant={broken ? 'pulse' : 'solid'} label={label} />
+        </Button>
+      </IconTooltip>
+    );
+  }
+  // Neutral watch glyph (unchanged from WARDEN-378): blue Eye when watched (always
+  // visible so a watched chat is recognizable), hover/focus-revealed toggle when not.
+  return (
+    <IconTooltip label={isWatched ? 'unwatch — stop pinging me about this chat' : 'watch — ping me when this chat needs you'}>
+      <Button
+        variant="ghost"
+        size="xs"
+        className={cn('px-0.5', isWatched ? 'text-blue-500' : 'text-muted-foreground hover:text-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100')}
+        onClick={(e) => { e.stopPropagation(); onToggle(); }}
+        aria-label={isWatched ? 'unwatch this chat' : 'watch this chat'}
+        aria-pressed={isWatched}
+      >
+        <Eye className="size-3" />
+      </Button>
+    </IconTooltip>
+  );
+}
+
+export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, onOpenConflict, onOpenFile, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, isPinned, onTogglePin, selected, onToggleSelect, selectionActive, note, onSetNote, isWatched, watchState, onToggleWatch }: {
   c: Chat; open: boolean; onOpen: () => void; onKill: () => void;
   onRename: (session: string, kind: string, name: string, host?: string) => void;
   dim?: boolean;
@@ -104,6 +168,8 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
   // WARDEN-378: per-chat "watch" toggle state + handler. Optional so call sites that
   // don't surface watch (e.g. the full-page chat browser) render unchanged.
   isWatched?: boolean; onToggleWatch?: () => void;
+  // WARDEN-514: the chat's CURRENT AgentStateRow (when watched) → state-aware indicator.
+  watchState?: AgentStateRow;
 }) {
   const isUser = c.kind === 'tmux';
   const canRename = isUser;
@@ -263,25 +329,13 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
           ) : null}
         </span>
       )}
-      {/* WARDEN-378: per-chat "watch" toggle — opt this chat into a targeted ping when
-          it newly needs the human. Built on shadcn <Button> per WARDEN-68 (Rule 1 +
-          Rule 2: no raw <button>), mirroring the note affordance. The watched state
-          is always visible (blue eye) so a watched chat is recognizable at a glance;
-          unwatched is hover/focus-revealed to keep the default fleet list quiet.
-          aria-pressed exposes the toggle state to assistive tech. */}
+      {/* WARDEN-378/514: per-chat "watch" toggle — opt this chat into a targeted ping
+          when it newly needs the human. The watched state is always visible so a watched
+          chat is recognizable at a glance; when it CURRENTLY needs the human (WARDEN-514)
+          the static eye becomes a state-aware needs-you indicator (WatchToggle).
+          Unwatched is hover/focus-revealed to keep the default fleet list quiet. */}
       {!editing && onToggleWatch && (
-        <IconTooltip label={isWatched ? 'unwatch — stop pinging me about this chat' : 'watch — ping me when this chat needs you'}>
-          <Button
-            variant="ghost"
-            size="xs"
-            className={cn('px-0.5', isWatched ? 'text-blue-500' : 'text-muted-foreground hover:text-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100')}
-            onClick={(e) => { e.stopPropagation(); onToggleWatch(); }}
-            aria-label={isWatched ? 'unwatch this chat' : 'watch this chat'}
-            aria-pressed={isWatched}
-          >
-            <Eye className="size-3" />
-          </Button>
-        </IconTooltip>
+        <WatchToggle isWatched={isWatched} watchState={watchState} onToggle={onToggleWatch} />
       )}
       {!editing && onTogglePin && (
         <IconTooltip label={isPinned ? 'unpin' : 'pin'}>
@@ -335,7 +389,7 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
 // the list mirrors the pane grid (no sidebar reorder) and hide/unhide is
 // abolished. Closing a row (× / "Close pane") is `onClose`, which removes the
 // pane and records it in the workspace's recently-closed recovery list.
-export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, onOpenConflict, onOpenFile, onKill, note, onSetNote, timestampFormat, isWatched, onToggleWatch }: {
+export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, onOpenConflict, onOpenFile, onKill, note, onSetNote, timestampFormat, isWatched, watchState, onToggleWatch }: {
   id: string;
   c?: Chat;
   isOpen: boolean;
@@ -363,6 +417,8 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
   timestampFormat: TimestampFormat;
   // WARDEN-378: per-chat "watch" toggle state + handler (mirrors ChatRow).
   isWatched?: boolean; onToggleWatch?: () => void;
+  // WARDEN-514: the chat's CURRENT AgentStateRow (when watched) → state-aware indicator.
+  watchState?: AgentStateRow;
 }) {
   const type = c ? chatType(c) : '?';
   const hostLabels = useHostLabels();
@@ -431,22 +487,12 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
         {!dead && !editing && whatsNew.show && (
           <WhatsNewMarker summary={whatsNew.summary} since={whatsNew.since} files={gitInfo?.files} diffstat={gitInfo?.diffstat} onOpenDiff={onOpenDiff} onOpenConflict={onOpenConflict} onOpenFile={onOpenFile} />
         )}
-        {/* WARDEN-378: per-chat "watch" toggle (mirrors ChatRow's). Shown even for a
-            dead pane so a watched-but-dead chat can be unwatched; the row's own
-            dead-dim mutes it. The watched state is always visible (blue eye). */}
+        {/* WARDEN-378/514: per-chat "watch" toggle (mirrors ChatRow's). Shown even for a
+            dead pane so a watched-but-dead chat can be unwatched; the row's own dead-dim
+            mutes it. When the watched chat CURRENTLY needs the human (WARDEN-514) the eye
+            becomes a state-aware needs-you indicator (WatchToggle). */}
         {!editing && onToggleWatch && (
-          <IconTooltip label={isWatched ? 'unwatch — stop pinging me about this chat' : 'watch — ping me when this chat needs you'}>
-            <Button
-              variant="ghost"
-              size="xs"
-              className={cn('px-0.5', isWatched ? 'text-blue-500' : 'text-muted-foreground hover:text-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100')}
-              onClick={(e) => { e.stopPropagation(); onToggleWatch(); }}
-              aria-label={isWatched ? 'unwatch this chat' : 'watch this chat'}
-              aria-pressed={isWatched}
-            >
-              <Eye className="size-3" />
-            </Button>
-          </IconTooltip>
+          <WatchToggle isWatched={isWatched} watchState={watchState} onToggle={onToggleWatch} />
         )}
         {!editing && canRename && (
           <IconTooltip label="rename"><Button variant="ghost" size="xs" className="px-1 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); startEdit(); }} aria-label="rename">✎</Button></IconTooltip>
