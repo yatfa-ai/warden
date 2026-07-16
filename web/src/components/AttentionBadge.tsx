@@ -100,7 +100,7 @@ export function AttentionBadge({
   const { ranked } = rankAttention(rollup);
   const calloutTop = pickCalloutTop(ranked, focusedPaneKey);
 
-  const { critical, warning, stuck, erroring, waiting, blocked, directives, errors, total } = rollup;
+  const { critical, warning, stuck, erroring, waiting, blocked, custom, directives, errors, total } = rollup;
   // Severity cue: red when something is broken (critical/stuck/erroring agent or a
   // recent error), else amber (warnings / waiting / blocked / pending directives).
   // Color is supplementary only — the count + alert glyph already convey "needs
@@ -218,6 +218,21 @@ export function AttentionBadge({
               <Section title="Blocked" count={blocked.length} tone="text-yellow-500">
                 {blocked.map((a) => (
                   <AgentRow key={a.key || a.id} agent={a} dot="bg-yellow-500" detail={a.signal} onClick={() => openChat(a.key || a.id)} />
+                ))}
+              </Section>
+            )}
+            {custom.length > 0 && (
+              <Section title="Watch patterns" count={custom.length} tone="text-yellow-500">
+                {custom.map((a) => (
+                  <AgentRow
+                    key={a.key || a.id}
+                    agent={a}
+                    dot="bg-yellow-500"
+                    // detail = the matching line + the pattern name that matched it, so
+                    // the human sees both WHAT printed and WHICH of their rules tripped.
+                    detail={a.customMatch ? `'${a.customMatch.line}' (${a.customMatch.pattern})` : undefined}
+                    onClick={() => openChat(a.key || a.id)}
+                  />
                 ))}
               </Section>
             )}

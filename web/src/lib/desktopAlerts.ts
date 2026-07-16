@@ -141,12 +141,16 @@ export function applySeverityPrefs(
   const erroring = rollup.erroring;
   const waiting = rollup.waiting;
   const blocked = rollup.blocked;
+  // WARDEN-540: custom-pattern matches pass through UNCHANGED, like the other pane
+  // states — they are silenced via the per-pattern `enabled` flag (which prevents the
+  // match at the source), not via a severity toggle here.
+  const custom = rollup.custom;
   const directives = prefs.alertDirective ? rollup.directives : 0;
   const errors = prefs.alertError ? rollup.errors : 0;
   const total =
     critical.length + warning.length + directives + errors +
-    stuck.length + erroring.length + waiting.length + blocked.length;
-  return { critical, warning, stuck, erroring, waiting, blocked, directives, errors, total };
+    stuck.length + erroring.length + waiting.length + blocked.length + custom.length;
+  return { critical, warning, stuck, erroring, waiting, blocked, custom, directives, errors, total };
 }
 
 /**
@@ -157,19 +161,22 @@ export function applySeverityPrefs(
  * "N items need attention" wording. The body lists only the non-zero buckets.
  */
 export function formatAlertMessage(rollup: AttentionRollup): { title: string; body: string } {
-  const { critical, warning, stuck, erroring, waiting, blocked, directives, errors, total } = rollup;
+  const { critical, warning, stuck, erroring, waiting, blocked, custom, directives, errors, total } = rollup;
   const plural = (n: number, noun: string) => `${n} ${noun}${n !== 1 ? 's' : ''}`;
   const parts: string[] = [];
   // Red-tone buckets first (critical + the red pane states stuck/erroring), then
   // amber (warning + the amber pane states waiting/blocked), then event counts. Each
   // label reads as a bare noun (no plural-s); directives/errors pluralize. Only the
-  // non-zero buckets are listed. (WARDEN-344: stuck/erroring/waiting/blocked added.)
+  // non-zero buckets are listed. (WARDEN-344: stuck/erroring/waiting/blocked added.
+  // WARDEN-540: custom added — it counts toward `total`, so it must be listed for
+  // the body to agree with the title's count.)
   if (critical.length > 0) parts.push(`${critical.length} critical`);
   if (stuck.length > 0) parts.push(`${stuck.length} stuck`);
   if (erroring.length > 0) parts.push(`${erroring.length} erroring`);
   if (warning.length > 0) parts.push(`${warning.length} warning`);
   if (waiting.length > 0) parts.push(`${waiting.length} waiting`);
   if (blocked.length > 0) parts.push(`${blocked.length} blocked`);
+  if (custom.length > 0) parts.push(plural(custom.length, 'watch pattern'));
   if (directives > 0) parts.push(plural(directives, 'directive'));
   if (errors > 0) parts.push(plural(errors, 'error'));
   const title = `Warden: ${total} ${total === 1 ? 'item needs' : 'items need'} attention`;
@@ -226,6 +233,7 @@ const WATCH_REASON_LABEL: Record<WatchReason, string> = {
   stuck: 'stuck (repeating output)',
   completed: 'finished a task',
   blocked: 'blocked — waiting on a dependency',
+  custom: 'matched a watch pattern',
 };
 
 /**
@@ -290,6 +298,14 @@ export function formatWatchMessage(row: AgentStateRow, reason: WatchReason): { t
   const name = row.name || row.key || row.id;
   const label = WATCH_REASON_LABEL[reason] || reason;
   const title = `Warden: ${label}`;
+  // WARDEN-540: a custom-pattern ping names the pattern + quotes the matching line
+  // (row.signal is the classifyPane signal, NOT the match — the match lives in
+  // row.customMatch). The title carries the generic label; the body conveys the
+  // specific pattern name + line so the human knows exactly what tripped.
+  if (reason === 'custom' && row.customMatch) {
+    const body = `${name} · matched pattern '${row.customMatch.pattern}' — '${row.customMatch.line}'`;
+    return { title, body };
+  }
   const body = `${name} · ${label}${row.signal ? ` — '${row.signal}'` : ''}`;
   return { title, body };
 }
@@ -415,13 +431,14 @@ export interface NewAttentionEntry {
 // section language + the watch ping's wording so the product speaks with one voice:
 // the pane-state reasons read as the action the human must take; the health reasons
 // read as the bucket label (a Chat has no `signal` field, so the label IS the reason).
-const INAPP_REASON: Record<'critical' | 'warning' | 'stuck' | 'erroring' | 'waiting' | 'blocked', string> = {
+const INAPP_REASON: Record<'critical' | 'warning' | 'stuck' | 'erroring' | 'waiting' | 'blocked' | 'custom', string> = {
   critical: 'Critical — no recent activity',
   warning: 'Warning — slowing down',
   stuck: 'Stuck (repeating output)',
   erroring: 'Erroring',
   waiting: 'Waiting for your input',
   blocked: 'Blocked on a dependency',
+  custom: 'Matched a watch pattern',
 };
 
 // Minimal structural shape diffNewAttention reads off either a health Chat or a
@@ -472,6 +489,7 @@ export function diffNewAttention(
   for (const a of prev.erroring) prevKeys.add(alertAgentKey(a));
   for (const a of prev.waiting) prevKeys.add(alertAgentKey(a));
   for (const a of prev.blocked) prevKeys.add(alertAgentKey(a));
+  for (const a of prev.custom) prevKeys.add(alertAgentKey(a));
 
   const entries: NewAttentionEntry[] = [];
   const seen = new Set<string>(); // one entry per key: a key newly in two buckets surfaces once
@@ -494,6 +512,15 @@ export function diffNewAttention(
   for (const a of next.warning) addNamed(a, INAPP_REASON.warning, 'warning');
   for (const a of next.waiting) addNamed(a, INAPP_REASON.waiting, 'warning');
   for (const a of next.blocked) addNamed(a, INAPP_REASON.blocked, 'warning');
+  // WARDEN-540: a newly-matching watch pattern. Inlined (not via addNamed) so the
+  // entrant's signal is the MATCHING line (a.customMatch.line), not classifyPane's
+  // a.signal — the match is what the human asked to be told about.
+  for (const a of next.custom) {
+    const key = alertAgentKey(a);
+    if (!key || prevKeys.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    entries.push({ key, name: a.name || key, reason: INAPP_REASON.custom, signal: a.customMatch?.line || undefined, tone: 'warning' });
+  }
 
   // Aggregate count deltas: no per-agent identity → a labeled summary entry, no
   // deep-link. Clamped at 0 so a recovery (count down) never invents an entry; the

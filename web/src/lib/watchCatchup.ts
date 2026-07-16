@@ -68,11 +68,17 @@ export interface WatchMiss {
  * tests can pin the clock; production callers (recordWatchMiss) omit it.
  */
 export function toWatchMiss(row: AgentStateRow, reason: WatchReason, now: number): WatchMiss {
+  // WARDEN-540: for a custom-pattern ping the actionable signal is the matching line
+  // (row.signal is classifyPane's signal, not the match — the match lives in
+  // row.customMatch). Falls through to row.signal for every other reason, unchanged.
+  const signal = reason === 'custom' && row.customMatch
+    ? row.customMatch.line
+    : (row.signal || undefined);
   return {
     key: row.key || row.id || '',
     name: row.name || row.key || row.id || '',
     reason,
-    signal: row.signal || undefined,
+    signal,
     firedAt: now,
   };
 }
@@ -139,8 +145,10 @@ const WATCH_NEEDS_YOU_STATES: ReadonlySet<string> = new Set(['waiting', 'errorin
 const WATCH_REASON_PRIORITY: Record<WatchReason, number> = {
   // `blocked` (4) mirrors chatWatch.ts (WARDEN-514): unreachable on the catch-up path —
   // a miss is a recorded TRANSITION ping, and the ping never fires on blocked — so its
-  // slot exists only to satisfy the exhaustive Record<WatchReason, number>.
-  erroring: 0, stuck: 1, completed: 2, waiting: 3, blocked: 4,
+  // slot exists only to satisfy the exhaustive Record<WatchReason, number>. `custom`
+  // (2, WARDEN-540) mirrors chatWatch.ts's priority so a custom-pattern miss ranks in
+  // the SAME urgency tier here as the ping fired there (cross-channel consistency).
+  erroring: 0, stuck: 1, completed: 2, custom: 2, waiting: 3, blocked: 4,
 };
 
 /**
@@ -225,6 +233,10 @@ const WATCH_MISS_REASON_LABEL: Record<WatchReason, string> = {
   erroring: 'erroring',
   stuck: 'stuck (repeating output)',
   completed: 'finished a task',
+  // WARDEN-540: mirrors desktopAlerts' WATCH_REASON_LABEL. A custom-pattern ping IS
+  // recorded as a miss (the catch-up covers every transition ping the OS channel
+  // lost), so this phrasing is reachable — it reads identically to the lost toast.
+  custom: 'matched a watch pattern',
   // WARDEN-514: mirrors desktopAlerts' WATCH_REASON_LABEL. Unreachable on the catch-up
   // path (a miss is a recorded transition ping, and the ping never fires on blocked),
   // but present so the mirror stays an exhaustive Record<WatchReason, string>.

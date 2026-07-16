@@ -398,4 +398,89 @@ test('blocked is NOT a transition ping reason (current-state only, WARDEN-514)',
   assert.equal(diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'blocked') }, ['a']).length, 0);
 });
 
+// ─── user-authored output-pattern alerts (WARDEN-540) ─────────────────────────
+//
+// diffWatchAlerts fires a 'custom' ping when a watched key NEWLY carries a
+// customMatch (a user pattern matched this poll). Sibling of the state-transition
+// branches: change-into only, first-observation-is-baseline, never twice.
+const match = (pattern, line) => ({ pattern, line });
+
+console.log('\ncustom-pattern match: newly-present fires once (change-into only)');
+test('no prior customMatch → newly-present customMatch fires "custom"', () => {
+  const prev = { a: row('a', 'active') };
+  const cur = { a: row('a', 'active', { customMatch: match('Deploy', 'deploy failed') }) };
+  const alerts = diffWatchAlerts(prev, cur, ['a']);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].reason, 'custom');
+  // The alert's row carries the match so formatWatchMessage can name the pattern.
+  assert.deepEqual(alerts[0].row.customMatch, match('Deploy', 'deploy failed'));
+});
+test('first observation (no prior) is a baseline — customMatch present but NO fire', () => {
+  // A freshly-watched chat already matching should not immediately ping (the same
+  // first-observation-is-baseline rule the state path follows).
+  const alerts = diffWatchAlerts({}, { a: row('a', 'active', { customMatch: match('D', 'x') }) }, ['a']);
+  assert.equal(alerts.length, 0);
+});
+test('persistent customMatch (both have it) does NOT re-fire', () => {
+  const prev = { a: row('a', 'active', { customMatch: match('D', 'x') }) };
+  const cur = { a: row('a', 'active', { customMatch: match('D', 'x') }) };
+  assert.equal(diffWatchAlerts(prev, cur, ['a']).length, 0);
+});
+test('a custom match that CLEARS (had it, now gone) does NOT fire', () => {
+  // Recovery is not a needs-you signal — only the new-APPEARANCE fires.
+  const prev = { a: row('a', 'active', { customMatch: match('D', 'x') }) };
+  const cur = { a: row('a', 'active') };
+  assert.equal(diffWatchAlerts(prev, cur, ['a']).length, 0);
+});
+
+console.log('\ncustom takes the single per-key slot when both it + a state transition newly appear');
+test('custom wins precedence over an erroring onset (one alert, reason "custom")', () => {
+  // Both newly appear this tick: state flipped active→erroring AND a customMatch
+  // appeared. Precedence emits ONE alert (custom) — the user explicitly opted into
+  // the pattern, so its specific signal is the more useful ping. The erroring STATE
+  // is still on the row (the badge shows it); only the PING label is custom. This
+  // ADDS a signal without relaxing the erroring detection.
+  const prev = { a: row('a', 'active') };
+  const cur = { a: row('a', 'erroring', { customMatch: match('Deploy', 'deploy failed') }) };
+  const alerts = diffWatchAlerts(prev, cur, ['a']);
+  assert.equal(alerts.length, 1, 'exactly one alert per key per diff');
+  assert.equal(alerts[0].reason, 'custom');
+  assert.equal(alerts[0].row.state, 'erroring', 'the erroring state still flows on the row');
+});
+test('a pure state transition (no customMatch) still fires the state reason, unchanged', () => {
+  // Regression guard: custom precedence must not swallow a normal erroring ping when
+  // no pattern matched. Behavior identical to pre-WARDEN-540.
+  const alerts = diffWatchAlerts({ a: row('a', 'active') }, { a: row('a', 'erroring') }, ['a']);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].reason, 'erroring');
+});
+
+console.log('\ncustom participates in the cooldown (a flapping match collapses to one ping/episode)');
+test('a re-matching custom within the cooldown window is suppressed (flap collapse)', () => {
+  // Tick 1 fired custom; tick 2 cleared; tick 3 re-matched within 5 min → suppressed.
+  const now = 1_000_000;
+  const a1 = { key: 'a', reason: 'custom', row: row('a', 'active', { customMatch: match('D', 'x') }), fromState: 'active', toState: 'active' };
+  const { fire, lastFired } = applyWatchCooldown([a1], { a: { reason: 'custom', firedAt: now - 60_000 } }, now);
+  assert.equal(fire.length, 0, 'same-reason re-match within the window is suppressed');
+  assert.equal(lastFired.a.firedAt, now - 60_000, 'anchor not advanced (window measured from the real fire)');
+});
+test('a custom re-match AFTER the cooldown window re-fires (new episode)', () => {
+  const now = 1_000_000;
+  const a1 = { key: 'a', reason: 'custom', row: row('a', 'active', { customMatch: match('D', 'x') }), fromState: 'active', toState: 'active' };
+  const { fire } = applyWatchCooldown([a1], { a: { reason: 'custom', firedAt: now - WATCH_PING_COOLDOWN_MS - 1 } }, now);
+  assert.equal(fire.length, 1, 'a new episode re-fires once the window elapsed');
+});
+
+console.log('\ncurrentWatchNeed: a currently-matching pattern is a persistent needs-you signal');
+test('a row with customMatch → "custom" (precedence over the pane state)', () => {
+  assert.equal(currentWatchNeed(row('a', 'idle', { customMatch: match('D', 'x') })), 'custom');
+  // Even an erroring pane with a custom match surfaces 'custom' on the row glyph —
+  // the user's pattern is the specific signal worth showing at a glance.
+  assert.equal(currentWatchNeed(row('a', 'erroring', { customMatch: match('D', 'x') })), 'custom');
+});
+test('a row with no customMatch falls through to the pane state (unchanged)', () => {
+  assert.equal(currentWatchNeed(row('a', 'erroring')), 'erroring');
+  assert.equal(currentWatchNeed(row('a', 'idle')), null);
+});
+
 console.log(`\n✓ CHAT WATCH TESTS PASS (${passed})`);

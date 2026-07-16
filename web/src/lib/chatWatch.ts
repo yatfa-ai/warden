@@ -35,7 +35,7 @@ import type { AgentStateRow } from '@/lib/types';
  * current state is `idle` → null). One shared type keeps the ping + row wording in a
  * single WATCH_REASON_LABEL vocabulary (WARDEN-514).
  */
-export type WatchReason = 'waiting' | 'erroring' | 'stuck' | 'completed' | 'blocked';
+export type WatchReason = 'waiting' | 'erroring' | 'stuck' | 'completed' | 'blocked' | 'custom';
 
 /** A single watched-chat transition that warrants a targeted ping. */
 export interface WatchAlert {
@@ -70,7 +70,14 @@ const WATCH_REASON_PRIORITY: Record<WatchReason, number> = {
   // reason per WARDEN-514's currentWatchNeed) — so its slot here exists solely to
   // satisfy the exhaustive Record<WatchReason, number>. Placed lowest (a "waiting on
   // a dependency" state is the least actionable needs-you reason); never consulted.
-  erroring: 0, stuck: 1, completed: 2, waiting: 3, blocked: 4,
+  // `custom` (2, WARDEN-540) shares completed's tier: a user-authored pattern match
+  // is an informational needs-you signal ("your pattern matched"), same tier as "it
+  // finished." It TAKES PRECEDENCE in diffWatchAlerts when both a custom match and a
+  // state transition newly appear in one tick (the user explicitly opted into the
+  // pattern, so its specific signal wins the single per-key slot); this priority only
+  // governs CROSS-tick cooldown escalation, where an erroring onset (0 < 2) over a
+  // prior custom fire correctly counts as an escalation.
+  erroring: 0, stuck: 1, completed: 2, custom: 2, waiting: 3, blocked: 4,
 };
 
 // WARDEN-452: per-key cooldown window for the LIVE watch-ping channel. A watched
@@ -136,8 +143,24 @@ export function diffWatchAlerts(
     if (!p) continue; // first observation → baseline, no fire (diffAlerts: `if (!p) continue`)
     const curState = c.state;
     const priorState = p.state;
+    // WARDEN-540: a user-authored pattern newly matched this poll. The matcher runs
+    // server-side in pollAgentStates and attaches `customMatch` to the row; this is
+    // its transition-into-fire (sibling of the state-transition branches below). Fires
+    // ONLY on the NEWLY-PRESENT edge (prior had no customMatch, cur has one) — a
+    // persistent match never re-fires, and the first-observation baseline (`if (!p)
+    // continue` above) already suppressed a freshly-watched chat already matching.
+    const customNewlyMatched = !!c.customMatch && !p.customMatch;
     let reason: WatchReason | null = null;
-    if (WATCH_DIRECT_STATES.has(curState) && priorState !== curState) {
+    // Precedence: a custom match takes the single per-key slot over a state
+    // transition. The user EXPLICITLY opted into "ping me when X prints", so when X
+    // newly prints (possibly alongside an erroring/stuck onset that would also fire),
+    // the specific named signal is the more useful ping — and emitting only ONE alert
+    // per key per diff keeps the contract (the cooldown + OS `tag` collapse per key).
+    // This ADDS a signal; it relaxes none — the state still flows to the attention
+    // rollup (the badge shows the row; only the PING label is the custom one).
+    if (customNewlyMatched) {
+      reason = 'custom';
+    } else if (WATCH_DIRECT_STATES.has(curState) && priorState !== curState) {
       reason = curState as WatchReason;
     } else if (detectWatchCompleted(priorState, curState)) {
       reason = 'completed';
@@ -289,6 +312,11 @@ const WATCH_NEED_STATES = new Set(['waiting', 'erroring', 'stuck', 'blocked']);
  * transpile) so chatWatch.test.mjs loads it standalone alongside diffWatchAlerts.
  */
 export function currentWatchNeed(row: AgentStateRow): WatchReason | null {
+  // WARDEN-540: a currently-matching user pattern is a persistent needs-you signal —
+  // the human asked to be told when X prints, and X is on the pane right now. It
+  // takes precedence over the pane state (mirrors diffWatchAlerts' custom-takes-
+  // precedence rule) so the row glyph + tooltip agree with the ping that fired.
+  if (row?.customMatch) return 'custom';
   const s = row?.state;
   // WATCH_NEED_STATES holds exactly the WatchReason persistent needs-you states, so the
   // cast is sound; every other state (incl. the transition-only 'completed') → null.

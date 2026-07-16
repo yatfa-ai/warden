@@ -296,6 +296,81 @@ export const STARTER_SNIPPETS: Snippet[] = [
   { name: 'Summarize progress', text: 'summarize your progress so far' },
 ];
 
+// ─── User-authored output-pattern alerts (WARDEN-540) ─────────────────────────
+//
+// The persisted shape of one cfg.watchPatterns entry — "ping me when a watched
+// agent prints X." Unlike Snippets (client localStorage UiState), watchPatterns is
+// SERVER-side config: it round-trips through GET/PUT /api/config because the matcher
+// runs in pollAgentStates (backend) over captured pane text. The type + validation
+// live here (alongside Snippet) so the Settings form's maxLength + validation agree
+// with the backend sanitizer (src/agentState.js sanitizeWatchPatterns) on one bound.
+
+/**
+ * One user-authored watch pattern. `id` is the stable React key + the backend's
+ * dedup key; `mode` selects substring vs regex matching; `enabled` gates whether
+ * the matcher considers it.
+ */
+export interface WatchPattern {
+  /** Stable unique id (UI key + backend dedup). Generated client-side on create. */
+  id: string;
+  /** Human label shown in the alert body ("matched pattern '<name>'"). */
+  name: string;
+  /** The text to match — a substring (mode:'string') or a regex source (mode:'regex'). */
+  expression: string;
+  /** Match semantics: case-insensitive substring, or a case-insensitive regex. */
+  mode: 'string' | 'regex';
+  /** false → the matcher skips it (silence a pattern without deleting it). */
+  enabled: boolean;
+}
+
+// Caps MIRROR the backend sanitizer verbatim (src/agentState.js
+// WATCH_PATTERN_*_MAX) so the UI's maxLength + validatePatternName can never accept
+// a name/expression the PUT sanitizer would silently drop — the same discipline
+// SNIPPET_*_MAX keeps with parseSnippets. The matcher's per-line slice (200) is a
+// display bound, not a stored bound, so it is not mirrored here.
+export const WATCH_PATTERN_NAME_MAX = 64;
+export const WATCH_PATTERN_EXPRESSION_MAX = 500;
+export const WATCH_PATTERN_MAX_COUNT = 50;
+
+/** The validation outcome for a candidate pattern name. null = acceptable. */
+export type PatternNameIssue = 'empty' | 'too-long' | 'duplicate';
+
+/**
+ * Validate a candidate watch-pattern name against the SAME contract the backend
+ * sanitizer enforces (WARDEN-540). Mirrors validateSnippetName: trims first, then
+ * rejects empty / over-cap / duplicate (case-insensitive, with an `except` for the
+ * rename case). Pure + dependency-free so it is unit-tested directly.
+ */
+export function validatePatternName(
+  name: string,
+  existing: WatchPattern[],
+  except?: string,
+): PatternNameIssue | null {
+  const n = name.trim();
+  if (!n) return 'empty';
+  if (n.length > WATCH_PATTERN_NAME_MAX) return 'too-long';
+  const lower = n.toLowerCase();
+  if (existing.some((p) => p.id !== except && p.name.toLowerCase() === lower)) return 'duplicate';
+  return null;
+}
+
+/**
+ * Is a regex-source expression valid (compiles)? Used by the Settings form to
+ * surface a live "invalid regex" warning for mode:'regex' entries — the backend
+ * matcher is the defense-in-depth backstop (it try/catches and skips an invalid
+ * pattern rather than throwing), but authoring-time feedback is better than a
+ * silently-never-matching pattern. Pure + dependency-free (only `RegExp`).
+ */
+export function isValidRegex(expression: string): boolean {
+  if (!expression) return false;
+  try {
+    new RegExp(expression, 'i');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export interface UiState {
   // Browser-tab-style project pane-sets (WARDEN-256). Each workspace owns its own
   // openPanes + focused + recentlyClosed; switching the active workspace swaps the
