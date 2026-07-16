@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseReflog, parseDiffStat, isConflictStatus, isDetachedHead, normalizeHeadSha, parseUpstream, buildDockerGitArgv } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseReflog, parseDiffStat, isConflictStatus, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, buildDockerGitArgv } from './gitStatus.js';
 
 describe('parseGitStatusPorcelain', () => {
   it('parses the most common case: unstaged modification as the FIRST file', () => {
@@ -428,6 +428,63 @@ describe('parseUpstream', () => {
 
   it('tolerates CRLF line endings (e.g. over SSH)', () => {
     assert.equal(parseUpstream('origin/feature\r\n'), 'origin/feature');
+  });
+});
+
+describe('parseHeadDate', () => {
+  // `git log -1 --format=%cI HEAD` prints the strict ISO-8601 committer date of
+  // HEAD (e.g. 2026-07-08T14:30:00+02:00). We surface the trimmed ISO string on
+  // success and null for empty/non-zero — the last-commit FRESHNESS signal that
+  // lets a human pick out a synced-but-stalled agent without expanding its commit
+  // list (WARDEN-545). Mirrors normalizeHeadSha/parseUpstream's tolerance.
+
+  it('trims a normal strict ISO-8601 date on its own line', () => {
+    assert.equal(parseHeadDate('2026-07-08T14:30:00+02:00\n'), '2026-07-08T14:30:00+02:00');
+  });
+
+  it('trims a UTC ISO-8601 date (Z suffix)', () => {
+    assert.equal(parseHeadDate('2026-07-08T12:30:00Z\n'), '2026-07-08T12:30:00Z');
+  });
+
+  it('trims surrounding whitespace', () => {
+    assert.equal(parseHeadDate('  2026-07-08T14:30:00+02:00  \n'), '2026-07-08T14:30:00+02:00');
+  });
+
+  it('returns null for a non-zero exit code', () => {
+    // Unborn branch (no commits) / non-git cwd → `git log` errors (exit 128).
+    assert.equal(parseHeadDate('', 128), null);
+    assert.equal(parseHeadDate('2026-07-08T14:30:00+02:00\n', 1), null);
+  });
+
+  it('returns null for empty / whitespace-only output on a successful exit', () => {
+    assert.equal(parseHeadDate('', 0), null);
+    assert.equal(parseHeadDate('   \n', 0), null);
+  });
+
+  it('returns null for empty output with no exit code (the route .ok-gated call)', () => {
+    // The route calls parseHeadDate(headDateR.ok ? headDateR.stdout : '', headDateR.code)
+    // — when git log fails, headDateR.ok is false so '' + a non-zero code are
+    // passed. That must null (the exit-code gate catches it first).
+    assert.equal(parseHeadDate(''), null);
+  });
+
+  it('trusts the output when no exit code is supplied', () => {
+    // The remote run() path encodes exit-0 in its .ok flag, so the helper may be
+    // called with just stdout — it must not null a valid ISO date.
+    assert.equal(parseHeadDate('2026-07-08T12:30:00Z\n'), '2026-07-08T12:30:00Z');
+  });
+
+  it('handles undefined / null input without throwing', () => {
+    assert.equal(parseHeadDate(undefined), null);
+    assert.equal(parseHeadDate(null), null);
+  });
+
+  it('accepts a Buffer input', () => {
+    assert.equal(parseHeadDate(Buffer.from('2026-07-08T14:30:00+02:00\n')), '2026-07-08T14:30:00+02:00');
+  });
+
+  it('tolerates CRLF line endings (e.g. over SSH)', () => {
+    assert.equal(parseHeadDate('2026-07-08T14:30:00+02:00\r\n'), '2026-07-08T14:30:00+02:00');
   });
 });
 

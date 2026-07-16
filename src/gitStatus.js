@@ -149,6 +149,42 @@ export function parseUpstream(output, exitCode) {
   return name || null;
 }
 
+/**
+ * Normalize `git log -1 --format=%cI HEAD` output into a strict ISO-8601
+ * committer-date string (or null) — the last-commit FRESHNESS of HEAD.
+ *
+ * `%cI` is git's strict ISO-8601 committer date (e.g.
+ * "2026-07-08T14:30:00+02:00"). The field names a DATE, so — unlike the git-log
+ * route's `%ct` epoch — it is kept as an ISO STRING: the client converts with
+ * `new Date(headDate).getTime()` and there is no silent `* 1000` footgun (an
+ * epoch field would read as a date under this name).
+ *
+ * Tolerance mirrors `normalizeHeadSha`/`parseUpstream`: a non-zero exit / empty
+ * output → null, never throws. The caller MUST fetch this UNCONDITIONALLY for any
+ * repo that has a branch (gated on `branch` truthiness, like ahead/behind/
+ * upstream/stashCount/diffstat) — NOT inside the detached-HEAD branch — because
+ * the whole point is to flag a normally-committing BRANCH agent that has gone
+ * quiet (committed days ago, silent since); those agents are on a branch, not
+ * detached, and `headSha` (the short SHA) is the detached-only field. Nulls
+ * naturally on an unborn branch / non-git cwd (`git log` errors → non-zero exit
+ * → null). The optional `exitCode` lets a caller pass the raw exit status; when
+ * omitted the output is trusted, like `parseAheadBehind`. On success returns the
+ * trimmed ISO string.
+ *
+ * Surfaced so a human scanning the sidebar can pick out a synced-but-stalled
+ * agent without expanding its commit list — ahead/behind measure divergence from
+ * upstream, NEVER recency (WARDEN-545).
+ *
+ * @param {string|Buffer|undefined} output - Raw stdout from `git log -1 --format=%cI HEAD`.
+ * @param {number|null|undefined} [exitCode] - exit status; when omitted/unknown the output is trusted.
+ * @returns {string | null}
+ */
+export function parseHeadDate(output, exitCode) {
+  if (exitCode !== undefined && exitCode !== 0) return null;
+  const iso = (output ?? '').toString().trim();
+  return iso || null;
+}
+
 export function parseGitStatusPorcelain(output) {
   const raw = (output ?? '').toString();
   return raw

@@ -144,7 +144,7 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
   // WARDEN-198: per-host reachability from the 30s /api/hosts/status poll.
   // 'offline' → the row renders a distinct "unreachable" state.
   hostStatus?: 'online' | 'offline' | 'unknown';
-  gitInfo?: { branch: string | null; detached?: boolean; headSha?: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; upstream?: string | null; inProgress?: { operation: string | null; detail?: string | null }; stashCount?: number | null; diffstat?: DiffStat | null };
+  gitInfo?: { branch: string | null; detached?: boolean; headSha?: string | null; headDate?: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; upstream?: string | null; inProgress?: { operation: string | null; detail?: string | null }; stashCount?: number | null; diffstat?: DiffStat | null };
   gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
   // WARDEN-225: incoming (behind) commits + their own fetch/loader, threaded to
   // GitBranchBadge the same way the local gitLog trio is.
@@ -287,6 +287,7 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
                   diffstat={gitInfo.diffstat}
                   detached={gitInfo.detached}
                   headSha={gitInfo.headSha}
+                  headDate={gitInfo.headDate}
                   upstream={gitInfo.upstream}
                   incomingCommits={incomingCommits}
                   incomingLoading={incomingLoading}
@@ -402,7 +403,7 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
   onClose: () => void;
   onRename: (session: string, kind: string, name: string, host?: string) => void;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
-  gitInfo?: { branch: string | null; detached?: boolean; headSha?: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; upstream?: string | null; inProgress?: { operation: string | null; detail?: string | null }; stashCount?: number | null; diffstat?: DiffStat | null };
+  gitInfo?: { branch: string | null; detached?: boolean; headSha?: string | null; headDate?: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; upstream?: string | null; inProgress?: { operation: string | null; detail?: string | null }; stashCount?: number | null; diffstat?: DiffStat | null };
   gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
   // WARDEN-225: incoming (behind) commits + their own fetch/loader.
   incomingCommits?: GitCommit[]; incomingLoading?: boolean; onFetchIncoming?: () => void;
@@ -487,7 +488,7 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
         {!dead && !editing && showHostTags !== false && hostTag && <span className="text-[10px] text-muted-foreground">{hostTag}</span>}
         {!dead && !editing && showProjectBadges && c?.project && <span className="text-[10px] text-muted-foreground">{c.project}</span>}
         {!dead && !editing && (gitInfo?.branch || gitInfo?.detached) && (
-          <GitBranchBadge branch={gitInfo.branch ?? ''} chatId={id} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} ahead={gitInfo.ahead} behind={gitInfo.behind} inProgress={gitInfo.inProgress} stashCount={gitInfo.stashCount} diffstat={gitInfo.diffstat} detached={gitInfo.detached} headSha={gitInfo.headSha} upstream={gitInfo.upstream} incomingCommits={incomingCommits} incomingLoading={incomingLoading} onFetchIncoming={onFetchIncoming} outgoingCommits={outgoingCommits} outgoingLoading={outgoingLoading} onFetchOutgoing={onFetchOutgoing} onOpenFile={onOpenFile} />
+          <GitBranchBadge branch={gitInfo.branch ?? ''} chatId={id} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} ahead={gitInfo.ahead} behind={gitInfo.behind} inProgress={gitInfo.inProgress} stashCount={gitInfo.stashCount} diffstat={gitInfo.diffstat} detached={gitInfo.detached} headSha={gitInfo.headSha} headDate={gitInfo.headDate} upstream={gitInfo.upstream} incomingCommits={incomingCommits} incomingLoading={incomingLoading} onFetchIncoming={onFetchIncoming} outgoingCommits={outgoingCommits} outgoingLoading={outgoingLoading} onFetchOutgoing={onFetchOutgoing} onOpenFile={onOpenFile} />
         )}
         {!dead && !editing && whatsNew.show && (
           <WhatsNewMarker summary={whatsNew.summary} since={whatsNew.since} files={gitInfo?.files} diffstat={gitInfo?.diffstat} onOpenDiff={onOpenDiff} onOpenConflict={onOpenConflict} onOpenFile={onOpenFile} />
