@@ -480,7 +480,7 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
           variant={st?.status === 'online' ? 'solid' : st?.status === 'offline' ? 'square' : 'ring'}
           label={st?.status ? st.status.charAt(0).toUpperCase() + st.status.slice(1) : 'Unknown'}
         />
-        {h === THIS_MACHINE ? 'this machine' : h}
+        {hostLabelFor(h, hostLabels) || (h === THIS_MACHINE ? 'this machine' : h)}
       </Button>
     );
   };

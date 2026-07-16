@@ -650,7 +650,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
               variant={n ? 'solid' : 'ring'}
               label={n ? `${n} active chat${n !== 1 ? 's' : ''}` : 'No active chats'}
             />
-            <span className="flex-1 truncate">{LABEL[h] || h}</span>
+            <span className="flex-1 truncate">{hostLabelFor(h, hostLabels) || LABEL[h] || h}</span>
             {isLocal && <span className="text-[10px] text-cyan-400">local</span>}
             {!isLocal && (
               <StatusDot
@@ -674,7 +674,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
           <ContextMenuItem onSelect={() => enterHost(h)}>Open</ContextMenuItem>
           <ContextMenuItem onSelect={() => onDiscoverHost(h)}>Discover</ContextMenuItem>
           <ContextMenuSeparator />
-          <ContextMenuItem onSelect={() => handleCopy(LABEL[h] || h)}>Copy host name</ContextMenuItem>
+          <ContextMenuItem onSelect={() => handleCopy(hostLabelFor(h, hostLabels) || LABEL[h] || h)}>Copy host name</ContextMenuItem>
           {!isLocal && (
             <ContextMenuItem onSelect={() => handleCopy(`ssh ${h}`)}>Copy SSH address</ContextMenuItem>
           )}
@@ -834,7 +834,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
       <div className="flex flex-col h-full min-h-0 animate-in slide-in-from-right-2 duration-150">
         <div className="flex items-center gap-2 compact:gap-1 px-2 py-2 compact:py-1.5 border-b shrink-0">
           <IconTooltip label="back"><button className="text-xs text-muted-foreground hover:text-foreground px-1 rounded active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => setView({ kind: 'root' })}>‹</button></IconTooltip>
-          <span className="text-xs font-medium flex-1 truncate">{LABEL[H] || H}</span>
+          <span className="text-xs font-medium flex-1 truncate">{hostLabelFor(H, hostLabels) || LABEL[H] || H}</span>
           <AgentFilterSortControls
             agentFilter={agentFilter}
             agentSort={agentSort}
@@ -867,7 +867,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
             )}
             {info.claudeAvailable === false && (
               <div className="mx-1 my-2 px-2 py-2 text-[11px] text-yellow-400 bg-yellow-500/10 border border-yellow-500/30 rounded-md">
-                ⚠ claude not found on {LABEL[H] || H} — install it to resume sessions here.
+                ⚠ claude not found on {hostLabelFor(H, hostLabels) || LABEL[H] || H} — install it to resume sessions here.
               </div>
             )}
             <div className="px-2 pt-1 pb-1 flex items-baseline gap-2">
