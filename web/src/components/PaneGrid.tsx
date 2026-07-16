@@ -34,9 +34,12 @@ interface Props {
   onToggleMax: (id: string) => void;
   onClearNew: (id: string) => void;
   onForceKill: (id: string) => void;
-  // ＋ split (WARDEN-223): spawn a host shell pane derived from the focused
-  // pane (same host + cwd). App owns the spawn; PaneGrid only fires it.
-  onSplitShell?: () => void;
+  // ＋ split (WARDEN-223 → WARDEN-543): spawn a host shell pane derived from a
+  // source pane (same host + cwd). WARDEN-543 moved this off the grid-toolbar
+  // ＋split button onto each pane's own context menu, so the split acts on the
+  // right-clicked pane, not the focused one. App owns the spawn; PaneGrid binds
+  // this per-pane (onSplitShell?.(t.id)) when handing it to each PaneTile.
+  onSplitShell?: (id?: string) => void;
   onSpawned: (chat: Chat) => void;
   externalSearchQuery?: { paneId: string; query: string } | null;
   onToggleSidebar?: () => void;
@@ -253,17 +256,6 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
             <IconTooltip label="open file from chat directory"><Button variant="ghost" size="xs" onClick={handleFilePrompt}>📄 file</Button></IconTooltip>
           </>
         )}
-        {/* ＋ split (WARDEN-223): one-click spawn of a host shell pane derived
-            from the focused pane (same host + cwd). Host/cwd come from the
-            focused pane, so the button is disabled with an explanatory tooltip
-            when nothing is focused. The chat-picker dropdown this replaced is
-            gone — split is no longer "open another agent", it's a scratch shell. */}
-        <IconTooltip
-          label={focusedChat ? 'split — open a shell on this pane’s host' : 'focus a pane to split a shell next to it'}
-          disabled={!focusedChat}
-        >
-          <Button variant="ghost" size="xs" onClick={() => onSplitShell?.()} disabled={!focusedChat}>＋ split</Button>
-        </IconTooltip>
       </div>
       <div className="flex-1 min-h-0 p-1">
         {n === 0 ? (
@@ -278,7 +270,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                   <PaneTile id={t.id} label={nameOf(t.id)} focused={focused === t.id} maximized={effectiveMax === t.id}
                     hasNew={newActivity.has(t.id)} onClearNew={() => onClearNew(t.id)}
                     onFocus={() => onFocus(t.id)} onClose={() => onClose(t.id)} onToggleMax={() => onToggleMax(t.id)}
-                    onKill={() => onForceKill(t.id)} chat={chat} host={paneHost[t.id]}
+                    onKill={() => onForceKill(t.id)} onSplitShell={() => onSplitShell?.(t.id)} chat={chat} host={paneHost[t.id]}
                     externalSearchQuery={externalSearchQuery?.paneId === t.id ? externalSearchQuery.query : undefined}
                     fontSize={fontSize} onFontSizeChange={onFontSizeChange}
                     scrollback={scrollback}

@@ -1011,19 +1011,24 @@ function App() {
     openChat(chatKey);
   }, [openChat, discoverHost]);
 
-  // ＋ split (WARDEN-223): spawn a scratch shell pane next to the focused pane,
-  // derived entirely from it — same host, same cwd — like VSCode's integrated-
-  // terminal split. The shell `cmd` is resolved through the single Default shell
-  // setting (WARDEN-429): a per-host override (defaultShellByHost) wins, falling
-  // back to the global defaultShell, then blank; blank means "no explicit shell"
-  // so the host launches its own login shell. host/cwd are read from chatsRef so
-  // this callback isn't rebuilt on every poll. A yatfa pane has no cwd → empty →
-  // the host's default login dir, and its host is the SSH host, so the shell
-  // lands OUTSIDE the container (host-side tmux).
-  const handleSplitShell = useCallback(async () => {
-    const id = focused;
-    if (!id) return;
-    const fc = chatsRef.current.find((c) => (c.key || c.id) === id);
+  // ＋ split (WARDEN-223 → WARDEN-543): spawn a scratch shell pane derived
+  // entirely from a source pane — same host, same cwd — like VSCode's integrated-
+  // terminal split. WARDEN-543 relocated this off the grid-toolbar ＋split button
+  // (which acted on the FOCUSED pane) onto each pane's own context menu, so the
+  // split operates on the RIGHT-CLICKED pane, not whichever pane happens to be
+  // focused. The source pane id is therefore passed in explicitly; it falls back
+  // to `focused` so any other caller stays safe. The shell `cmd` is resolved
+  // through the single Default shell setting (WARDEN-429): a per-host override
+  // (defaultShellByHost) wins, falling back to the global defaultShell, then
+  // blank; blank means "no explicit shell" so the host launches its own login
+  // shell. host/cwd are read from chatsRef so this callback isn't rebuilt on
+  // every poll. A yatfa pane has no cwd → empty → the host's default login dir,
+  // and its host is the SSH host, so the shell lands OUTSIDE the container
+  // (host-side tmux).
+  const handleSplitShell = useCallback(async (id?: string) => {
+    const target = id ?? focused;
+    if (!target) return;
+    const fc = chatsRef.current.find((c) => (c.key || c.id) === target);
     if (!fc) return;
     const host = fc.host || THIS_MACHINE;
     const cwd = fc.cwd || '';

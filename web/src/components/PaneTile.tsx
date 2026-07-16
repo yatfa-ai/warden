@@ -104,6 +104,11 @@ interface Props {
   onClose: () => void;
   onToggleMax: () => void;
   onKill: () => void;     // force-kill the tmux session
+  // WARDEN-543: spawn a scratch shell pane derived from THIS pane (same host +
+  // cwd) — the per-pane split relocated out of the grid toolbar. Pure pass-
+  // through; App owns the spawn. Bound to this tile's id in PaneGrid, so the
+  // split always targets the right-clicked pane, not the focused one.
+  onSplitShell: () => void;
   chat?: Chat | null;     // chat metadata for export
   host?: string;          // host hint for restore (which host to discover)
   externalSearchQuery?: string;  // external search trigger from global search
@@ -164,7 +169,7 @@ interface Props {
   onFileViewerViewModeChange: (mode: 'rendered' | 'source') => void;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, onSpawned, snippets, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, onSpawned, snippets, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const hostLabels = useHostLabels();
@@ -920,6 +925,11 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
         <ContextMenuItem onSelect={() => onFontSizeChange(Math.max(8, safeFontSize - 1))}>Smaller font</ContextMenuItem>
         <ContextMenuItem onSelect={() => onFontSizeChange(Math.min(24, safeFontSize + 1))}>Bigger font</ContextMenuItem>
         <ContextMenuSeparator />
+        {/* WARDEN-543: per-pane split — spawn a shell on THIS pane's host/cwd
+            (not the focused pane's). Grouped with the pane-lifecycle actions
+            (Maximize / Close). Guarded like Download (disabled when this pane
+            has no spawnable chat). */}
+        <ContextMenuItem disabled={!chat} onSelect={() => onSplitShell()}>Split shell here</ContextMenuItem>
         <ContextMenuItem onSelect={() => onToggleMax()}>{maximized ? 'Restore' : 'Maximize'}</ContextMenuItem>
         <ContextMenuItem variant="destructive" onSelect={() => onClose()}>Close</ContextMenuItem>
       </ContextMenuContent>
