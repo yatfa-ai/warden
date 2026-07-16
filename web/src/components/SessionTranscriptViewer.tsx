@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useLayoutEffect } from 'react';
 import { hostLabelFor } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
 import {
@@ -13,7 +13,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
-import { EyeIcon, AlertCircleIcon } from 'lucide-react';
+import { EyeIcon, AlertCircleIcon, Loader2Icon } from 'lucide-react';
 import { ObserverMarkdown } from './ObserverMarkdown';
 import { cn } from '@/lib/utils';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
@@ -52,6 +52,25 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
   const [cwd, setCwd] = useState('');
   const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState('');
+  // Backwards pagination (WARDEN-510). `hasMore`/`prevCursor` come from the server's
+  // bounded byte-window read: hasMore means an older window still exists; prevCursor
+  // is the byte-offset cursor to fetch it. `loadingEarlier` is DISTINCT from the main
+  // loading state so a page fetch never replaces the visible list with skeletons.
+  const [hasMore, setHasMore] = useState(false);
+  const [prevCursor, setPrevCursor] = useState<number | null>(null);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const [earlierError, setEarlierError] = useState('');
+
+  // The scrollable element is the Radix ScrollArea viewport (data-slot). We reach it
+  // from the content wrapper via closest() so prepending older messages can preserve
+  // the user's reading position instead of jumping to the top.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const prevHeightRef = useRef(0);
+  const prevTopRef = useRef(0);
+  const restoreScrollRef = useRef(false);
+  // Guards against a stale earlier-page fetch applying after the session changes.
+  const activeSessionIdRef = useRef<string | null>(null);
+  const getViewport = () => scrollRef.current?.closest<HTMLElement>('[data-slot="scroll-area-viewport"]') ?? null;
 
   useEffect(() => {
     // Reset on close so reopening — possibly a DIFFERENT session — never paints the
@@ -63,15 +82,25 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
       setCwd('');
       setTruncated(false);
       setError('');
+      setHasMore(false);
+      setPrevCursor(null);
+      setLoadingEarlier(false);
+      setEarlierError('');
+      activeSessionIdRef.current = null;
       return;
     }
     if (!session) return;
     let cancelled = false;
+    activeSessionIdRef.current = session.id;
     setStatus('loading');
     setMessages([]);
     setCwd('');
     setTruncated(false);
     setError('');
+    setHasMore(false);
+    setPrevCursor(null);
+    setLoadingEarlier(false);
+    setEarlierError('');
 
     (async () => {
       try {
@@ -89,6 +118,8 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
         const msgs = Array.isArray(j.messages) ? j.messages : [];
         setCwd(typeof j.cwd === 'string' ? j.cwd : '');
         setTruncated(!!j.truncated);
+        setHasMore(!!j.hasMore);
+        setPrevCursor(typeof j.prevCursor === 'number' ? j.prevCursor : null);
         if (msgs.length === 0) { setStatus('empty'); return; }
         setMessages(msgs);
         setStatus('ready');
@@ -102,16 +133,65 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
     return () => { cancelled = true; };
   }, [open, session]);
 
+  // Fetch the next-older bounded window and PREPEND it. Each window stays within the
+  // server's caps; remote paging is one SSH call per page. The control is hidden once
+  // hasMore is false (the true start of the transcript has been reached).
+  const loadEarlier = async () => {
+    if (loadingEarlier || !hasMore || prevCursor == null || !session) return;
+    setEarlierError('');
+    setLoadingEarlier(true);
+    try {
+      const r = await fetch(`/api/claude-session?id=${encodeURIComponent(session.id)}&host=${encodeURIComponent(session.host)}&before=${prevCursor}`);
+      const j = await r.json();
+      // Bail if the session changed/closed while the fetch was in flight.
+      if (activeSessionIdRef.current !== session.id) return;
+      if (j.error) {
+        setEarlierError(j.error === 'host unreachable'
+          ? `Host “${session.host}” is unreachable.`
+          : j.error);
+        return;
+      }
+      const msgs = Array.isArray(j.messages) ? j.messages : [];
+      // Capture the viewport geometry RIGHT BEFORE the prepend so the layout effect
+      // below can offset the added height and hold the reading position steady.
+      const vp = getViewport();
+      prevHeightRef.current = vp?.scrollHeight ?? 0;
+      prevTopRef.current = vp?.scrollTop ?? 0;
+      restoreScrollRef.current = true;
+      setMessages((prev) => [...msgs, ...prev]);
+      setHasMore(!!j.hasMore);
+      setPrevCursor(typeof j.prevCursor === 'number' ? j.prevCursor : null);
+    } catch (e) {
+      setEarlierError(e instanceof Error ? e.message : 'Failed to load earlier messages');
+    } finally {
+      setLoadingEarlier(false);
+    }
+  };
+
+  // After a prepend commits, restore the scroll offset so older messages load above
+  // the current view without jumping. Runs on every messages change but only acts
+  // when restoreScrollRef was armed by loadEarlier (not on the initial load/reset).
+  useLayoutEffect(() => {
+    if (!restoreScrollRef.current) return;
+    restoreScrollRef.current = false;
+    const vp = getViewport();
+    if (!vp) return;
+    const added = vp.scrollHeight - prevHeightRef.current;
+    vp.scrollTop = prevTopRef.current + Math.max(0, added);
+  }, [messages]);
+
   // WARDEN-490: a labeled host shows its friendly name; an unlabeled host keeps
   // the exact prior string ('this machine' for this host) — byte-identical to
   // today when there is no label.
   const hostLabel = hostLabelFor(session?.host ?? '', hostLabels) || (!session || session.host === '(local)' ? 'this machine' : session.host);
 
   // Per-turn attribution (WARDEN-474): sum the VISIBLE turns' totals + call out the
-  // heaviest visible turn. This is a tail-window sum, NOT the whole-session total —
-  // the header states the "(of the messages shown)" caveat whenever the transcript
-  // is truncated, so it never masquerades as the session-wide spend (the list badge
-  // already shows that). Equal to the sum of the rendered chips by construction.
+  // heaviest visible turn. Recomputed from `messages` via .reduce, so prepending
+  // older windows (WARDEN-510) automatically WIDENS the summed badge — older JSONL
+  // lines carry their own per-turn usage. The "(of the messages shown)" qualifier is
+  // gated on `hasMore` (not `truncated`): it truthfully marks the sum as partial
+  // WHILE older pages remain, and drops once every message is loaded — so it stays
+  // correct across paginated loads (the session-wide total is the list badge's job).
   const visibleUsage = messages
     .map((m) => m.usage)
     .filter((u): u is NonNullable<TranscriptMessage['usage']> => !!u && u.total > 0);
@@ -134,7 +214,7 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
         </DialogHeader>
 
         <ScrollArea className="h-[60vh] w-full rounded-md border bg-muted/30">
-          <div className="flex flex-col gap-3 p-4">
+          <div ref={scrollRef} className="flex flex-col gap-3 p-4">
             {status === 'loading' && (
               <div className="flex flex-col gap-4">
                 {[0, 1, 2].map((i) => (
@@ -161,12 +241,40 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
 
             {status === 'ready' && (
               <>
+                {/* Load earlier messages (WARDEN-510): pages BACKWARDS through the
+                    transcript one bounded byte-window at a time, prepending older
+                    messages. Shown only while hasMore is true (disappears at the true
+                    start of the transcript). Uses a DISTINCT loading state so the list
+                    is never replaced by skeletons mid-fetch; scroll position is held. */}
+                {hasMore && (
+                  <div className="flex flex-col items-center gap-1">
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      onClick={loadEarlier}
+                      disabled={loadingEarlier}
+                      className="text-[11px] text-blue-400 hover:text-blue-300"
+                    >
+                      {loadingEarlier ? (
+                        <Loader2Icon className="size-3.5 animate-spin" />
+                      ) : (
+                        '↑ load earlier messages'
+                      )}
+                    </Button>
+                    {earlierError && (
+                      <span className="flex items-center gap-1 text-xs text-red-400">
+                        <AlertCircleIcon className="size-3.5 shrink-0" />
+                        {earlierError}
+                      </span>
+                    )}
+                  </div>
+                )}
                 {visibleTotal > 0 && (
                   <div className="flex flex-wrap items-center gap-x-2 rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-1.5 text-xs text-amber-300/90">
                     <span className="font-medium tabular-nums">{formatTokens(visibleTotal)}</span>
                     <span>
                       across {visibleUsage.length} turn{visibleUsage.length === 1 ? '' : 's'}
-                      {truncated ? ' (of the messages shown)' : ''}
+                      {hasMore ? ' (of the messages shown)' : ''}
                     </span>
                     {heaviest ? (
                       <span className="text-amber-300/70">· heaviest turn {formatTokens(heaviest.total)}</span>

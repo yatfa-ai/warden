@@ -35,6 +35,7 @@ import os from 'node:os';
 // ---- helpers under test (assigned from the dynamic import in before()) ----
 let extractTranscriptMessage;
 let buildTranscriptView;
+let transcriptWindow;
 let buildSessionReadScript;
 let parseSessionReadOutput;
 
@@ -95,9 +96,25 @@ before(async () => {
     { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'finishing' }], usage: { input_tokens: 200, output_tokens: 10, cache_creation_input_tokens: 500, cache_read_input_tokens: 2000 } } },
   ], 3000);
 
+  // A session LARGE enough to exercise byte-offset backwards paging (WARDEN-510):
+  // each assistant line is a fixed ~2KB body (an `idx:NNNN` marker for contiguity
+  // asserts + padding), so the file is ~1MB and a 400KB window holds ~200 messages —
+  // FEWER than the 500-message cap. That makes the BYTE cap bind first (the common
+  // large-transcript case), so paging is clean: at most ≤1 message lost per page
+  // boundary to a mid-line split, NOT the within-window 500-cap residual. (The
+  // existing sess-view-long fixture is only ~45KB — 506 tiny messages — so it fits in
+  // a single 400KB window and does NOT page; it stays the message-cap test.)
+  const pagedLines = [{ type: 'user', cwd: '/repo/paged', message: { role: 'user', content: 'begin' } }];
+  for (let i = 0; i < 500; i++) {
+    const idx = String(i).padStart(4, '0');
+    pagedLines.push({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: `idx:${idx} ` + 'x'.repeat(1900) }] } });
+  }
+  writeSession(tempHome, 'projP', 'sess-view-paged', pagedLines, 4000);
+
   const server = await import('./server.js');
   extractTranscriptMessage = server.extractTranscriptMessage;
   buildTranscriptView = server.buildTranscriptView;
+  transcriptWindow = server.transcriptWindow;
   buildSessionReadScript = server.buildSessionReadScript;
   parseSessionReadOutput = server.parseSessionReadOutput;
   ({ catalogPath } = await import('./config.js'));
@@ -246,11 +263,57 @@ describe('buildTranscriptView', () => {
     assert.deepStrictEqual(view.messages[2].usage, { input: 20, output: 0, cacheCreation: 0, cacheRead: 100, total: 120 });
   });
 
+  it('parses whichever body window it is given, in order (older-page slice) (WARDEN-510)', () => {
+    // buildTranscriptView is window-agnostic: paging feeds it a DIFFERENT byte range
+    // (an older window), and it returns exactly that window's messages in order. Build
+    // a full body, then hand it only the OLDER slice (representing bytes [0, ~half))
+    // and assert it returns the older messages — not the most-recent tail.
+    const full = [];
+    for (let i = 0; i < 10; i++) {
+      full.push(jsonlLine({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: `older-${i}` }] } }));
+    }
+    const fullText = full.join('\n') + '\n';
+    // The older window is the first half of the body bytes (a mid-line start is fine
+    // — the partial first line is skipped, same as the real byte-window read).
+    const olderSlice = fullText.slice(0, Math.floor(fullText.length / 2));
+    const view = buildTranscriptView('', olderSlice);
+    assert.ok(view.messages.length > 0, 'the older window yields its messages');
+    assert.ok(view.messages.length < 10, 'and only its own (not the whole body)');
+    // The slice's messages are the EARLY ones (older-0..), never the recent tail.
+    assert.strictEqual(view.messages[0].text, 'older-0');
+    assert.ok(!view.messages.some((m) => m.text === 'older-9'), 'the most-recent message is not in the older window');
+  });
+
   it('handles an empty body with no crash and no truncation', () => {
     const view = buildTranscriptView(jsonlLine({ cwd: '/r' }), '');
     assert.deepStrictEqual(view.messages, []);
     assert.strictEqual(view.cwd, '/r');
     assert.strictEqual(view.truncated, false);
+  });
+});
+
+describe('transcriptWindow — byte-offset cursor math (WARDEN-510)', () => {
+  it('first page (no before) reads the tail window and signals more when over the cap', () => {
+    // A 500KB file: the first page is the last 400KB → start at 100000, hasMore true,
+    // and prevCursor (the next-older `before`) is that start offset.
+    const w = transcriptWindow(500000, null);
+    assert.deepStrictEqual(w, { start: 100000, end: 500000, prevCursor: 100000, hasMore: true });
+  });
+
+  it('first page of a small file reads the whole thing with hasMore false', () => {
+    assert.deepStrictEqual(transcriptWindow(1000, null), { start: 0, end: 1000, prevCursor: 0, hasMore: false });
+  });
+
+  it('older page (before) reads the window ending at the cursor and walks back to the start', () => {
+    // 900KB file, three pages. Page 2 (before=500000) → [100000, 500000], still more;
+    // page 3 (before=100000) → [0, 100000], hasMore false (true start reached).
+    assert.deepStrictEqual(transcriptWindow(900000, 500000), { start: 100000, end: 500000, prevCursor: 100000, hasMore: true });
+    assert.deepStrictEqual(transcriptWindow(900000, 100000), { start: 0, end: 100000, prevCursor: 0, hasMore: false });
+  });
+
+  it('clamps a stale cursor (before > size) to the file size instead of reading past EOF', () => {
+    // A 1KB file shrank after the cursor was issued — degrade to the tail window.
+    assert.deepStrictEqual(transcriptWindow(1000, 99999), { start: 0, end: 1000, prevCursor: 0, hasMore: false });
   });
 });
 
@@ -268,6 +331,33 @@ describe('buildSessionReadScript', () => {
     // script embeds the id verbatim. Assert the shape so a quoting change is caught.
     const s = buildSessionReadScript('abc_123-XYZ');
     assert.ok(s.includes('~/.claude/projects/*/abc_123-XYZ.jsonl'));
+  });
+
+  it('emits a RANGED body read (no head) for an older page { before } (WARDEN-510)', () => {
+    // before=500000 → start=max(0, 500000-400000)=100000, window=400000. The script
+    // must do a ranged body read containing the offset, keep the ___BODY + ___SZ
+    // markers, and SKIP the head window (cwd is first-page-only). Assert the shape so
+    // a quoting/regression change is caught, mirroring the first-page assertions.
+    const s = buildSessionReadScript('sess-abc', { before: 500000 });
+    assert.ok(s.includes('~/.claude/projects/*/sess-abc.jsonl'), 'still globs the id');
+    // tail -c +N is 1-indexed: start 100000 → `tail -c +100001`; window → `head -c 400000`.
+    assert.ok(s.includes('tail -c +100001'), 'ranged body read starts at the computed byte offset (1-indexed)');
+    assert.ok(s.includes('head -c 400000'), 'bounded to one window width');
+    assert.ok(s.includes('___SZ'), 'still emits the size marker');
+    assert.ok(s.includes('___BODY'), 'still emits the body marker');
+    assert.ok(!s.includes('___HEAD'), 'older page skips the head window (cwd is first-page-only)');
+    assert.ok(!s.includes('tail -c 400000 "$1"'), 'must NOT use the first-page tail-whole-window read');
+    assert.ok(s.includes('___NOSESSION'), 'still emits a not-found marker');
+  });
+
+  it('computes the ranged window from `before` (clamped to the cap) — small cursor', () => {
+    // before=100000 → start=max(0,100000-400000)=0, window=100000. tail -c +1 reads
+    // from byte 1 (the file start); head -c 100000 bounds it. Confirms the offset is
+    // derived from the cursor, not hardcoded.
+    const s = buildSessionReadScript('s', { before: 100000 });
+    assert.ok(s.includes('tail -c +1'), 'a cursor under the cap reads from the file start');
+    assert.ok(s.includes('head -c 100000'));
+    assert.ok(!s.includes('___HEAD'));
   });
 });
 
@@ -309,6 +399,29 @@ describe('parseSessionReadOutput', () => {
     const view = parseSessionReadOutput(stdout);
     assert.strictEqual(view.messages.length, 1);
     assert.deepStrictEqual(view.messages[0].usage, { input: 7, output: 3, cacheCreation: 0, cacheRead: 0, total: 10 });
+  });
+
+  it('parses an older-page remote read (no ___HEAD) and surfaces hasMore/prevCursor (WARDEN-510)', () => {
+    // Exact stdout an older-page ranged read emits: ___SZ + ___BODY and NO ___HEAD
+    // (cwd is first-page-only). before=900000 on a 1MB file → window [500000,900000],
+    // prevCursor=500000, hasMore=true.
+    const body = jsonlLine({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'older' }] } }) + '\n';
+    const stdout = `___SZ\t1000000\n\n___BODY\n${body}`;
+    const view = parseSessionReadOutput(stdout, { before: 900000 });
+    assert.strictEqual(view.messages.length, 1);
+    assert.strictEqual(view.messages[0].text, 'older');
+    assert.strictEqual(view.cwd, '', 'older page has no head window → no cwd');
+    assert.strictEqual(view.prevCursor, 500000);
+    assert.strictEqual(view.hasMore, true);
+    assert.strictEqual(view.truncated, false, 'older page is not byte-truncated (bounded by construction)');
+  });
+
+  it('reports hasMore=false when the older-page window reaches the file start', () => {
+    // before=300000 (< the 400KB cap) → start clamps to 0 → the true start is reached.
+    const stdout = `___SZ\t1000000\n\n___BODY\n${jsonlLine({ type: 'user', message: { role: 'user', content: 'first' } })}\n`;
+    const view = parseSessionReadOutput(stdout, { before: 300000 });
+    assert.strictEqual(view.hasMore, false);
+    assert.strictEqual(view.prevCursor, 0);
   });
 });
 
@@ -385,5 +498,80 @@ describe('/api/claude-session HTTP endpoint (real Express app from server.js)', 
     const body = await (await fetch(`${baseUrl}/api/claude-session?id=sess-view-1`)).json();
     assert.strictEqual(body.host, '(local)');
     assert.ok(body.messages.length > 0);
+  });
+
+  it('exposes hasMore + prevCursor so the viewer can page backwards (WARDEN-510)', async () => {
+    // First page of an over-cap transcript: the byte window is the most-recent one,
+    // hasMore is true, and prevCursor is the positive byte offset to fetch the older
+    // window. A session that fits in one window (sess-view-1) reports hasMore false.
+    const big = await (await fetch(`${baseUrl}/api/claude-session?id=sess-view-paged`)).json();
+    assert.strictEqual(big.hasMore, true, 'over-cap transcript has an older window');
+    assert.ok(typeof big.prevCursor === 'number' && big.prevCursor > 0, 'prevCursor is a positive byte offset');
+    assert.ok(big.truncated === true, 'the first page is still flagged truncated (banner)');
+
+    const small = await (await fetch(`${baseUrl}/api/claude-session?id=sess-view-1`)).json();
+    assert.strictEqual(small.hasMore, false, 'a session that fits in one window has no older page');
+    assert.strictEqual(small.prevCursor, 0);
+  });
+
+  it('pages a long transcript backwards until the start — no overlap, near-full coverage (WARDEN-510)', async () => {
+    const idxOf = (text) => {
+      const m = /idx:(\d+)/.exec(text || '');
+      return m ? Number(m[1]) : null;
+    };
+    // Collect each page's message indices in FETCH order (newest page first). Each
+    // page is itself strictly increasing (file order); older pages hold smaller
+    // indices than newer ones. Byte windows are adjacent + disjoint, so NO index can
+    // appear in two pages; the only loss is ≤1 message per boundary to a mid-line split.
+    const pages = [];
+    let before = null;     // null = first (most-recent) page
+    let lastCursor = null;
+    let guard = 0;
+    while (guard++ < 10) {
+      const url = `${baseUrl}/api/claude-session?id=sess-view-paged` + (before != null ? `&before=${before}` : '');
+      const body = await (await fetch(url)).json();
+      assert.ok(Array.isArray(body.messages), 'messages is an array on every page');
+      const idxs = body.messages.map((m) => idxOf(m.text)).filter((i) => i !== null);
+      pages.push(idxs);
+      if (!body.hasMore) break;
+      assert.ok(typeof body.prevCursor === 'number' && body.prevCursor >= 0, 'prevCursor is a non-negative number while more remains');
+      // The cursor must strictly decrease or paging would never terminate.
+      if (lastCursor !== null) assert.ok(body.prevCursor < lastCursor, 'cursor moves strictly backwards');
+      lastCursor = body.prevCursor;
+      before = body.prevCursor;
+    }
+    // (1) Converged, and took more than one page.
+    assert.ok(pages.length >= 2, 'the transcript paged across multiple windows');
+    // (2) oldest-first ordering: strictly increasing indices (gaps allowed only at
+    //     page boundaries from mid-line splits).
+    const ordered = pages.slice().reverse().flat();
+    for (let i = 1; i < ordered.length; i++) {
+      assert.ok(ordered[i] > ordered[i - 1], `indices increase oldest→newest (${ordered[i - 1]} → ${ordered[i]})`);
+    }
+    // (3) No overlap: every index is unique (byte windows are disjoint by construction).
+    const seen = new Set(ordered);
+    assert.strictEqual(seen.size, ordered.length, 'no duplicate index across pages');
+    // (4) Coverage: nearly the full set recovered — loss is bounded by the page count
+    //     (≤1 boundary split per page), the documented residual for byte paging.
+    assert.ok(seen.size >= 500 - pages.length, `recovered ${seen.size}/500 (tolerance for boundary splits)`);
+    // (5) Every recovered index is a real one in [0, 500).
+    for (const i of seen) assert.ok(i >= 0 && i < 500, `recovered index in range (${i})`);
+  });
+
+  it('returns 400 for a malformed (non-base-10-integer) before cursor (WARDEN-510)', async () => {
+    for (const bad of ['not-a-number', '-5', '1.5', '0x10', '5abc']) {
+      const res = await fetch(`${baseUrl}/api/claude-session?id=sess-view-paged&before=${encodeURIComponent(bad)}`);
+      assert.strictEqual(res.status, 400, `before=${bad} must be rejected with 400`);
+    }
+  });
+
+  it('accepts before=0 without error (degenerate cursor → empty older window, hasMore false) (WARDEN-510)', async () => {
+    // before=0 reads the window [0,0) → empty body; prevCursor 0, hasMore false. The
+    // client never sends this (prevCursor is only returned while hasMore is true), but
+    // it must not crash or loop.
+    const body = await (await fetch(`${baseUrl}/api/claude-session?id=sess-view-paged&before=0`)).json();
+    assert.deepStrictEqual(body.messages, []);
+    assert.strictEqual(body.hasMore, false);
+    assert.strictEqual(body.prevCursor, 0);
   });
 });

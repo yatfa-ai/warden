@@ -1197,6 +1197,14 @@ export function extractTranscriptMessage(line) {
 // extractTranscriptMessage per line). Pure + exported so the bounding/tail logic
 // is unit-testable without disk or SSH. `truncated` is true when the message count
 // exceeded the cap (the oldest messages were dropped to keep the most recent).
+//
+// The 500-message cap is applied PER BODY WINDOW — a safety net for pathological
+// tiny-message files (e.g. a 400KB window of 1-line turns). For the common
+// large-transcript case the 400KB byte cap binds first, so this cap rarely fires;
+// when it does fire WITHIN a single page it is a known residual (≤ the oldest few
+// messages of that one window are dropped), accepted because encoding both a byte
+// cursor AND a message index would over-complicate the paging contract. The byte
+// paging in transcriptWindow fully solves the common case.
 export function buildTranscriptView(headText, bodyText) {
   const cwd = parseJsonlHead(headText || '').cwd;
   const messages = [];
@@ -1214,6 +1222,29 @@ export function buildTranscriptView(headText, bodyText) {
   return { cwd, messages, truncated };
 }
 
+// Compute the bounded byte window for ONE transcript page (WARDEN-510). `size` is
+// the JSONL file size in bytes; `before` is the END byte offset of the desired
+// window — the cursor a prior page returned — or null for the FIRST (most-recent)
+// page. Each window is a contiguous byte range [start, end] of the file, at most
+// SESSION_VIEW_MAX_BYTES wide, so no page reads more than ~400KB into Node or
+// transfers more than ~400KB over SSH (the same invariant the single-window tail
+// read already upholds). A byte-offset cursor is used (NOT a timestamp) because
+// extractTranscriptMessage frequently yields ts:'' and timestamps are never
+// guaranteed unique — a byte offset is exact and maps cleanly to both transports.
+//
+// Returns { start, end, prevCursor, hasMore }: prevCursor is the START of this
+// window (pass it as `before` to fetch the next-older window), and hasMore is true
+// while that older window would be non-empty (start > 0) — i.e. until the true
+// start of the transcript is reached, at which point the "Load earlier" control
+// disappears. Pure + exported so the cursor math is unit-testable without disk/SSH.
+export function transcriptWindow(size, before) {
+  // Clamp `before` to the file size so a stale cursor (file shrank between pages)
+  // degrades to the tail window instead of reading past EOF.
+  const end = before == null ? size : Math.min(before, size);
+  const start = Math.max(0, end - SESSION_VIEW_MAX_BYTES);
+  return { start, end, prevCursor: start, hasMore: start > 0 };
+}
+
 // Resolve a local session JSONL by id across every project dir (the session id IS
 // the basename; ids are unique per file). Returns the absolute path or null.
 function findLocalSessionFile(id) {
@@ -1228,46 +1259,88 @@ function findLocalSessionFile(id) {
 }
 
 // Read ONE local session into the bounded transcript view. Reads a head window
-// (8KB) for cwd and a tail window (SESSION_VIEW_MAX_BYTES) for the message body —
-// never the whole file, so a giant transcript stays cheap. Returns {notFound} when
-// the id matches no local file.
-function readLocalSessionTranscript(id) {
+// (8KB) for cwd and a body window for the message list — never the whole file, so
+// a giant transcript stays cheap. Returns {notFound} when the id matches no local
+// file. With `opts.before` (a byte-offset cursor from a prior page's prevCursor)
+// it reads the OLDER window [start, before] instead of the tail and SKIPS the head
+// read (cwd is only needed on the first page — the caller already has it). The
+// response carries prevCursor/hasMore so the caller can page further back.
+function readLocalSessionTranscript(id, opts = {}) {
+  const before = opts.before;
   const file = findLocalSessionFile(id);
   if (!file) return { notFound: true };
   let headText = '';
   let bodyText = '';
+  let win = { start: 0, end: 0, prevCursor: 0, hasMore: false };
+  // byteTruncated is a FIRST-PAGE signal only (file exceeds the body cap) — the
+  // banner + token qualifier depend on it. Older pages are bounded to the cap by
+  // construction, so their `truncated` reflects only the within-window message cap.
   let byteTruncated = false;
   try {
     const size = fs.statSync(file).size;
+    win = transcriptWindow(size, before);
+    if (before == null) byteTruncated = size > SESSION_VIEW_MAX_BYTES;
     const fd = fs.openSync(file, 'r');
     try {
-      // Head window (8KB) for cwd — the same head read localClaudeSessions uses.
-      const hlen = Math.min(size, 8192);
-      const hbuf = Buffer.alloc(hlen);
-      fs.readSync(fd, hbuf, 0, hlen, 0);
-      headText = hbuf.toString('utf8');
-      // Body tail window (bounded) for the message list.
-      byteTruncated = size > SESSION_VIEW_MAX_BYTES;
-      const blen = Math.min(size, SESSION_VIEW_MAX_BYTES);
-      const bbuf = Buffer.alloc(blen);
-      fs.readSync(fd, bbuf, 0, blen, size - blen);
-      bodyText = bbuf.toString('utf8');
+      // Head window (8KB) for cwd — only on the first page. The same head read
+      // localClaudeSessions uses; skipped on older pages (cwd already known).
+      if (before == null) {
+        const hlen = Math.min(size, 8192);
+        const hbuf = Buffer.alloc(hlen);
+        fs.readSync(fd, hbuf, 0, hlen, 0);
+        headText = hbuf.toString('utf8');
+      }
+      // Body window [start, end] for this page — bounded, never the whole file.
+      const blen = Math.max(0, win.end - win.start);
+      if (blen > 0) {
+        const bbuf = Buffer.alloc(blen);
+        fs.readSync(fd, bbuf, 0, blen, win.start);
+        bodyText = bbuf.toString('utf8');
+      }
     } finally {
       fs.closeSync(fd);
     }
   } catch { /* noop — empty windows yield an empty message list */ }
   const view = buildTranscriptView(headText, bodyText);
-  view.truncated = view.truncated || byteTruncated;
+  if (byteTruncated) view.truncated = true;
+  view.prevCursor = win.prevCursor;
+  view.hasMore = win.hasMore;
   return view;
 }
 
 // Remote (SSH) twin of readLocalSessionTranscript. ONE SSH call resolves the
 // (unique) file by its id basename, emits a size line, a head window (for cwd),
-// and a bounded tail window (for the body) — delimited so the server can split
-// them. `___NOSESSION` (and a zero exit) when the id matches no remote file.
-// Exported so the shell surface + shape is unit-testable like buildSessionSearchScript.
-// `id` is validated /^[\w-]+$/ at the endpoint, so it has no shell metacharacters.
-export function buildSessionReadScript(id) {
+// and a bounded body window — delimited so the server can split them. `___NOSESSION`
+// (and a zero exit) when the id matches no remote file. Exported so the shell
+// surface + shape is unit-testable like buildSessionSearchScript. `id` is validated
+// /^[\w-]+$/ at the endpoint, so it has no shell metacharacters.
+//
+// With `opts.before` (a byte-offset cursor from a prior page) it emits a RANGED
+// body read of the older window [start, before] in the SAME single invocation —
+// no head read (cwd is only needed on the first page) and still ONE SSH call per
+// page (the proposal's hard remote-cost requirement; no per-message round-trips).
+// `tail -c +N` is 1-indexed (byte N onward), so +1 maps the 0-indexed start; the
+// concrete numbers are computed here (not in shell) so only validated integers are
+// embedded. `before`/`start`/`window` are server-computed numbers, so no injection
+// surface is added beyond the already-validated id.
+export function buildSessionReadScript(id, opts = {}) {
+  const before = opts.before;
+  // Older page: ranged body read, no head window.
+  if (before != null) {
+    const start = Math.max(0, before - SESSION_VIEW_MAX_BYTES);
+    const window = Math.max(0, before - start);
+    return [
+      `set -- ~/.claude/projects/*/${id}.jsonl`,
+      'if [ -f "$1" ]; then',
+      '  sz=$(stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null)',
+      "  printf '___SZ\\t%s\\n' \"$sz\"",
+      `  printf '\\n___BODY\\n'; tail -c +${start + 1} "$1" | head -c ${window}`,
+      'else',
+      "  printf '___NOSESSION\\n'",
+      'fi',
+    ].join('\n');
+  }
+  // First page: head window (cwd) + tail window (most-recent body).
   return [
     `set -- ~/.claude/projects/*/${id}.jsonl`,
     'if [ -f "$1" ]; then',
@@ -1281,14 +1354,20 @@ export function buildSessionReadScript(id) {
   ].join('\n');
 }
 
-// Parse the remote read script's delimited output into {cwd, messages, truncated}
-// (or {notFound}). Splits the head/body windows on the ___HEAD/___BODY markers,
-// reads the byte size from ___SZ to flag byte-truncation, and detects the
-// ___NOSESSION not-found marker. Pure + exported so the remote parsing is
-// unit-testable without SSH (the found branch never emits ___NOSESSION, and the
+// Parse the remote read script's delimited output into {cwd, messages, truncated,
+// prevCursor, hasMore} (or {notFound}). Splits the head/body windows on the
+// ___HEAD/___BODY markers, reads the byte size from ___SZ to compute the page's
+// cursor via transcriptWindow (and flag byte-truncation on the first page), and
+// detects the ___NOSESSION not-found marker. Pure + exported so the remote parsing
+// is unit-testable without SSH (the found branch never emits ___NOSESSION, and the
 // not-found branch emits ONLY it, so the marker is unambiguous — same trust model
 // the search endpoint uses for ___SNIP).
-export function parseSessionReadOutput(stdout) {
+//
+// `opts.before` (the cursor this remote read used) flows through to transcriptWindow
+// so prevCursor/hasMore reflect the right page. An older-page script emits NO
+// ___HEAD marker (cwd is first-page-only), so the body is taken as everything after
+// ___BODY and the head stays empty.
+export function parseSessionReadOutput(stdout, opts = {}) {
   if (stdout.startsWith('___NOSESSION')) return { notFound: true };
   const HEAD = '___HEAD\n';
   const BODY = '___BODY\n';
@@ -1296,16 +1375,27 @@ export function parseSessionReadOutput(stdout) {
   const bodyIdx = stdout.indexOf(BODY);
   let headText = '';
   let bodyText = stdout;
-  if (headIdx !== -1 && bodyIdx !== -1) {
-    headText = stdout.slice(headIdx + HEAD.length, bodyIdx);
+  if (bodyIdx !== -1) {
+    // First page has both markers (head before body); an older page has only
+    // ___BODY. Take the head slice only when ___HEAD is present AND precedes the
+    // body, else leave it empty.
+    if (headIdx !== -1 && headIdx < bodyIdx) {
+      headText = stdout.slice(headIdx + HEAD.length, bodyIdx);
+    }
     bodyText = stdout.slice(bodyIdx + BODY.length);
   }
-  let byteTruncated = false;
+  const before = opts.before;
   const szm = stdout.match(/^___SZ\t(\d+)/);
   const size = szm ? Number(szm[1]) : 0;
-  if (size && size > SESSION_VIEW_MAX_BYTES) byteTruncated = true;
+  const win = transcriptWindow(size, before);
+  // First page only: flag byte-truncation when the file exceeds the body cap. Older
+  // pages are bounded by construction; their `truncated` reflects only the
+  // within-window message cap (buildTranscriptView).
+  const byteTruncated = before == null && size > SESSION_VIEW_MAX_BYTES;
   const view = buildTranscriptView(headText, bodyText);
-  view.truncated = view.truncated || byteTruncated;
+  if (byteTruncated) view.truncated = true;
+  view.prevCursor = win.prevCursor;
+  view.hasMore = win.hasMore;
   return view;
 }
 
@@ -1462,34 +1552,54 @@ app.get('/api/claude-sessions-search', async (req, res) => {
   res.json({ results: all.slice(0, SESSION_SEARCH_GLOBAL) });
 });
 
-// GET /api/claude-session?id=&host= — read-only transcript of ONE past session
-// across any host, WITHOUT resuming it (no live `claude` process, no tmux session,
-// no catalog entry). Local host reads the JSONL from disk; a remote host reads it
-// over SSH via buildSessionReadScript (same hosts the search already reaches). The
-// output is bounded (a tail window + a message cap) so a huge transcript can't
-// blow up the UI or the remote transfer. Response on success:
-//   { host, cwd, messages: [{role, text, ts, usage?}], truncated? }
+// GET /api/claude-session?id=&host=&before= — read-only transcript of ONE past
+// session across any host, WITHOUT resuming it (no live `claude` process, no tmux
+// session, no catalog entry). Local host reads the JSONL from disk; a remote host
+// reads it over SSH via buildSessionReadScript (same hosts the search already
+// reaches). The output is bounded (a byte window + a message cap) so a huge
+// transcript can't blow up the UI or the remote transfer. Response on success:
+//   { host, cwd, messages: [{role, text, ts, usage?}], truncated?, hasMore, prevCursor }
 // where each message may carry an optional `usage` (WARDEN-474) — the per-turn
 // token breakdown {input, output, cacheCreation, cacheRead, total} for assistant
 // turns that spent tokens (absent on user/tool rows). It is the drill-down beneath
 // the session-list total badge (WARDEN-367), not a re-derivation of it.
-// An unreachable host degrades to { host, error: 'host unreachable' } (run()'s
-// default timeout means it never hangs) rather than failing the request.
+//
+// `before` (WARDEN-510) is a byte-offset cursor for paging OLDER messages: omit it
+// for the first (most-recent) page; pass a prior page's `prevCursor` to fetch the
+// next-older window and prepend it. `hasMore` drives the "Load earlier messages"
+// control (false at the true start of the transcript); `prevCursor` is the cursor
+// for the next page. An unreachable host degrades to { host, error: 'host
+// unreachable' } (run()'s default timeout means it never hangs) rather than failing.
 app.get('/api/claude-session', async (req, res) => {
   const id = String(req.query.id || '');
   if (!/^[\w-]+$/.test(id)) return res.status(400).json({ error: 'invalid session id' });
   const host = String(req.query.host || LOCAL);
+  // Validate `before` as a base-10 non-negative integer (mirror the id-guard
+  // discipline); 400 on anything malformed so a stray cursor can't reach the read.
+  let before;
+  const beforeRaw = req.query.before;
+  if (beforeRaw !== undefined && String(beforeRaw) !== '') {
+    if (!/^\d+$/.test(String(beforeRaw))) return res.status(400).json({ error: 'invalid before cursor' });
+    before = Number(beforeRaw);
+  }
   try {
+    let view;
     if (host === LOCAL) {
-      const view = readLocalSessionTranscript(id);
-      if (view.notFound) return res.status(404).json({ error: 'session not found' });
-      return res.json({ host, cwd: view.cwd, messages: view.messages, truncated: view.truncated });
+      view = readLocalSessionTranscript(id, { before });
+    } else {
+      const rr = await run(host, buildSessionReadScript(id, { before }), { timeout: 15000 });
+      if (!rr.ok) return res.json({ host, error: 'host unreachable' });
+      view = parseSessionReadOutput(rr.stdout, { before });
     }
-    const rr = await run(host, buildSessionReadScript(id), { timeout: 15000 });
-    if (!rr.ok) return res.json({ host, error: 'host unreachable' });
-    const view = parseSessionReadOutput(rr.stdout);
     if (view.notFound) return res.status(404).json({ error: 'session not found' });
-    return res.json({ host, cwd: view.cwd, messages: view.messages, truncated: view.truncated });
+    return res.json({
+      host,
+      cwd: view.cwd,
+      messages: view.messages,
+      truncated: view.truncated,
+      hasMore: view.hasMore,
+      prevCursor: view.prevCursor,
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
