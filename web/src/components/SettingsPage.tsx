@@ -17,6 +17,7 @@ import {
 } from '@/components/ui/select';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { TelemetryTransparency } from '@/components/TelemetryTransparency';
 import { ArrowLeft, Trash2 } from 'lucide-react';
 import { type Theme, type TerminalColorScheme, THEMES } from '@/lib/theme';
 import { type Density } from '@/lib/density';
@@ -1548,6 +1549,18 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                     Leave blank for unconfigured (sends nothing). Events go only to this URL — a self-hosted receiver you control, never a third-party analytics service.
                   </p>
                 </div>
+
+                {/* WARDEN-526 — read-only "What telemetry sends" verifiability
+                    panel. Renders WARDEN-508's describeCollection (per-tier
+                    collection catalog) + previewPayload (exact redacted payload
+                    of a sample event) so an opt-in user can inspect precisely
+                    what is transmitted. Pure functions, no transport, no new
+                    consent flag; read-only. Placed last in the section so the
+                    flow reads: consent toggles → endpoint → inspect payload. */}
+                <TelemetryTransparency
+                  telemetryBaseEnabled={config.telemetryBaseEnabled}
+                  telemetryExtendedEnabled={config.telemetryExtendedEnabled}
+                />
               </SettingsSection>
 
               {/* Display */}
