@@ -26,7 +26,7 @@ import { buildSnapshot, diffLifecycles } from './lifecycle.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { classifyPane, stripAnsi } from './agentState.js';
 import { checkHost } from './hostStatus.js';
-import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseReflog, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, buildDockerGitArgv } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseReflog, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, parseGitRemotes, buildDockerGitArgv } from './gitStatus.js';
 import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep } from './companion.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1776,6 +1776,37 @@ app.get('/api/git-status', async (req, res) => {
     });
   } catch (e) {
     res.json({ branch: null, detached: false, headSha: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, upstream: null, inProgress: { operation: null }, stashCount: null, diffstat: null, files: null, error: e.message });
+  }
+});
+
+// Which remote repo a checkout points at + its web host URL (WARDEN-528). The one
+// coordination fact a multi-project human needs that every OTHER git facet omits:
+// `git status` exhaustively surfaces local state (branch/ahead/behind/diff/…) but
+// never WHICH source host the working tree maps to. `git remote -v` does, and from
+// its URLs we derive `{ host, owner, repo, web }` so the branch badge can show
+// `github · owner/repo` and deep-link the branch/HEAD/upstream to the host.
+//
+// Mirrors /api/git-status exactly: resolve(chatId) → 404 guard → gitCwd(chat) →
+// graceful `{ remotes: [] }` when no cwd / non-git / zero remotes (never 500).
+// `git remote -v` is read-only (no `-v` mutation path exists), and runGit routes
+// it through the same transport as the status probes (argv `docker exec … git -C`
+// for yatfa containers, ssh for manual-remote) so it lights up for every agent
+// kind. parseGitRemotes (gitStatus.js) dedupes the fetch/push duplicate per remote
+// and parses each URL; empty/non-git stdout → [].
+app.get('/api/git-remote', async (req, res) => {
+  const chatId = String(req.query.id || '');
+  const { chat, error } = await resolve(chatId);
+  if (error) return res.status(404).json({ error });
+
+  try {
+    const cwd = gitCwd(chat);
+    if (!cwd) return res.json({ remotes: [], error: 'no cwd' });
+
+    const remoteR = await runGit(chat, ['remote', '-v'], cwd);
+    const remotes = parseGitRemotes(remoteR.ok ? remoteR.stdout : '');
+    res.json({ remotes, error: null });
+  } catch (e) {
+    res.json({ remotes: [], error: e.message });
   }
 });
 

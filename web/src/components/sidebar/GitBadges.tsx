@@ -3,13 +3,13 @@
 // Groups: the changed-file row, the project-chip WIP/collision badges,
 // and the per-row branch badge (+ its expanded-commit file rows).
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Popover as RadixPopover } from 'radix-ui';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
-import { GitCompare, FileIcon, Search, X } from 'lucide-react';
+import { GitCompare, FileIcon, Search, X, ExternalLink } from 'lucide-react';
 import { DiffBlock } from '@/components/DiffBlock';
 import { DiffViewer } from '@/components/DiffViewer';
 import { CollisionCompareDialog } from '../CollisionCompareDialog';
@@ -19,7 +19,7 @@ import { displayName } from '@/lib/chatDisplay';
 import { type ProjectGitAgent, type FileCollision } from '@/lib/gitStateSummary';
 import { formatWhatsNewLine, type WhatsNewSummary } from '@/lib/whatsNew';
 import type { Chat } from '@/lib/types';
-import type { GitCommit, GitFile, GitStash, GitReflogEntry, DiffStat } from './types';
+import type { GitCommit, GitFile, GitStash, GitReflogEntry, GitRemote, DiffStat } from './types';
 import { DiffStatChip } from './DiffStatChip';
 
 /**
@@ -682,6 +682,15 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   const [reflogList, setReflogList] = useState<GitReflogEntry[] | undefined>(undefined);
   const [reflogLoading, setReflogLoading] = useState(false);
 
+  // WARDEN-528: which remote repo this checkout maps to + its web host URL — the one
+  // coordination fact every OTHER git facet omits. Lazily fetched on first open
+  // (mirrors reflog: undefined = not yet fetched, [] = fetched-but-empty so a repeat
+  // open reuses the cache). Read-only (/api/git-remote runs `git remote -v`, which
+  // never mutates); never gated on a count because the remote identity is relevant
+  // for EVERY repo (the deep-links + origin row render from it), not just a dirty one.
+  const [remoteList, setRemoteList] = useState<GitRemote[] | undefined>(undefined);
+  const [remoteLoading, setRemoteLoading] = useState(false);
+
   // WARDEN-398: the aggregated range-diff modal target. Set by the "View full diff"
   // affordance in the outgoing (↑N) or incoming (↓N) section; null while closed.
   // WARDEN-449: extended to the ± (worktree) axis — `git diff HEAD`, no count (the
@@ -829,6 +838,55 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
     }
   };
 
+  // Always fetch (mirrors fetchReflog); dedup is at the call site (onOpenChange
+  // guards on remoteList === undefined). Read-only — /api/git-remote runs
+  // `git remote -v`, which never mutates the repo.
+  const fetchRemote = async () => {
+    setRemoteLoading(true);
+    try {
+      const r = await fetch(`/api/git-remote?id=${encodeURIComponent(chatId)}`);
+      const j = await r.json();
+      setRemoteList(Array.isArray(j.remotes) ? j.remotes : []);
+    } catch {
+      setRemoteList([]);
+    } finally {
+      setRemoteLoading(false);
+    }
+  };
+
+  // WARDEN-528: resolve the ONE remote this badge speaks for + the deep-link URLs.
+  // A repo can have several remotes (origin, upstream, fork); the branch HEAD is on
+  // tracks a specific one (`origin/feature` → the `origin` remote), so prefer that —
+  // else the first remote with a web URL (conventionally `origin` in `git remote -v`
+  // order). The branch / HEAD / upstream labels below deep-link to THAT host. When
+  // there is no web-resolvable remote (non-git, SSH-only, or all bare paths) every
+  // link is null and the origin row renders nothing — the badge stays as today.
+  const primaryRemote = useMemo<GitRemote | null>(() => {
+    if (!remoteList || remoteList.length === 0) return null;
+    if (upstream) {
+      const remoteName = upstream.split('/')[0];
+      const tracked = remoteList.find((r) => r.name === remoteName);
+      if (tracked) return tracked;
+    }
+    return remoteList.find((r) => r.web) ?? remoteList[0];
+  }, [remoteList, upstream]);
+  const originWeb = primaryRemote?.web ?? null;
+  // Encode a ref for a /tree/ URL segment PRESERVING the path separator: a slash-
+  // bearing branch (`feature/x`, the common case) must stay `feature/x` in the href,
+  // not collapse to `feature%2Fx` (which hosts that don't decode %2F in the path
+  // won't resolve). Each segment is still encoded so spaces/`#`/`?` are safe.
+  const encodeTreeRef = (ref: string) => ref.split('/').map(encodeURIComponent).join('/');
+  // branch → {web}/tree/{branch}; detached sha → {web}/commit/{sha}; the upstream
+  // tracking ref (e.g. origin/feature) → {web}/tree/{feature} (remote prefix stripped,
+  // but a slash-bearing branch like feature/x is preserved). All URL-encoded. null
+  // when there is no web host to link to.
+  const branchHref = !isDetached && branch && branch !== 'HEAD' && originWeb
+    ? `${originWeb}/tree/${encodeTreeRef(branch)}` : null;
+  const shaHref = isDetached && sha && originWeb ? `${originWeb}/commit/${encodeURIComponent(sha)}` : null;
+  const upstreamBranch = upstream && upstream.includes('/') ? upstream.slice(upstream.indexOf('/') + 1) : upstream;
+  const upstreamHref = !isDetached && upstream && originWeb && upstreamBranch
+    ? `${originWeb}/tree/${encodeTreeRef(upstreamBranch)}` : null;
+
   const toggleCommit = (hash: string) => {
     if (expandedHash === hash) {
       setExpandedHash(null);
@@ -861,6 +919,9 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
       // that looks clean but has done something surprising, so it has no count
       // gate — fetch it on every first open (guarded so repeat opens reuse cache).
       if (reflogList === undefined && !reflogLoading) fetchReflog();
+      // WARDEN-528: the remote identity (which repo host this maps to) is relevant
+      // for every repo — not just a dirty one — so it has no count gate either.
+      if (remoteList === undefined && !remoteLoading) fetchRemote();
     }}>
       <RadixPopover.Trigger asChild>
         <button
@@ -892,7 +953,21 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
         >
           <div className="mb-1 flex items-center justify-between gap-2 px-0.5">
             <span className="truncate text-[10px] font-medium text-muted-foreground">
-              recent commits · {isDetached ? `detached${sha ? ` @ ${sha}` : ''}` : branch}
+              recent commits ·{' '}
+              {isDetached ? (
+                <>
+                  detached
+                  {sha && (shaHref ? (
+                    // WARDEN-528: deep-link the detached HEAD commit to {web}/commit/<sha>.
+                    <a href={shaHref} target="_blank" rel="noreferrer noopener" onClick={(e) => e.stopPropagation()} title={`open commit ${sha} on the host`} className="font-mono text-primary underline underline-offset-2 hover:opacity-80">{` @ ${sha}`}</a>
+                  ) : (
+                    ` @ ${sha}`
+                  ))}
+                </>
+              ) : branchHref ? (
+                // WARDEN-528: deep-link the branch to {web}/tree/<branch>.
+                <a href={branchHref} target="_blank" rel="noreferrer noopener" onClick={(e) => e.stopPropagation()} title={`open branch ${branch} on the host`} className="text-primary underline underline-offset-2 hover:opacity-80">{branch}</a>
+              ) : branch}
               {aheadCount > 0 && <span className="text-amber-400"> · ↑ {aheadCount} unpushed</span>}
             </span>
             <IconTooltip label="refresh" disabled={loading || incomingLoading || outgoingLoading}>
@@ -907,6 +982,52 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
               >↻</button>
             </IconTooltip>
           </div>
+          {/* WARDEN-528: the compact origin row — which source repo this checkout maps
+              to. Renders ONLY when a remote was resolved (non-git / SSH-only / all-bare
+              remotes render nothing, leaving the badge exactly as before). The host +
+              owner/repo (or the raw URL for a non-web remote) deep-link to the repo's
+              web home; when HEAD tracks an upstream, that ref links to its branch too.
+              stopPropagation on each anchor keeps a click from toggling the popover —
+              target="_blank" opens the system browser (mirrors MarkdownBody.tsx's <a>). */}
+          {primaryRemote && (
+            <div className="mb-1 flex flex-wrap items-center gap-x-1 gap-y-0.5 px-0.5 text-[10px] text-muted-foreground">
+              {originWeb ? (
+                <a
+                  href={originWeb}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  onClick={(e) => e.stopPropagation()}
+                  title={`open ${originWeb} in the browser`}
+                  className="inline-flex min-w-0 max-w-full items-center gap-0.5 text-primary underline underline-offset-2 hover:opacity-80"
+                >
+                  <ExternalLink className="size-2.5 shrink-0" />
+                  <span className="min-w-0 truncate">{primaryRemote.host}{primaryRemote.owner && primaryRemote.repo ? ` · ${primaryRemote.owner}/${primaryRemote.repo}` : ''}</span>
+                </a>
+              ) : (
+                // Non-web remote (bare/file/single-segment) — show the raw URL, not
+                // clickable (no browser target exists). Owner/repo are absent here.
+                <span className="inline-flex min-w-0 max-w-full items-center gap-0.5" title={primaryRemote.url}>
+                  <ExternalLink className="size-2.5 shrink-0 opacity-40" />
+                  <span className="min-w-0 truncate">{primaryRemote.url}</span>
+                </span>
+              )}
+              {upstreamHref && (
+                <>
+                  <span className="text-muted-foreground/60">·</span>
+                  <a
+                    href={upstreamHref}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    onClick={(e) => e.stopPropagation()}
+                    title={`open ${upstream} on ${primaryRemote.host} in the browser`}
+                    className="text-primary underline underline-offset-2 hover:opacity-80"
+                  >
+                    {upstream}
+                  </a>
+                </>
+              )}
+            </div>
+          )}
           {/* WARDEN-498: commit-message search across every visible list. Debounced
               (the effect at the top of the component fetches on a 300ms settle). A
               non-empty term swaps each section's data source to its grep results via
