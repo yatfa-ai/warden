@@ -23,7 +23,7 @@ const SERVER = path.join(__dirname, 'server.js');
 // activity logs at module load) touches only a temp dir, never the real
 // ~/.yatfa-warden. Top-level await lets us import AFTER setting HOME.
 process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-rf-home-'));
-const { isBinaryFile, buildReadFileScript } = await import('./server.js');
+const { isBinaryFile, buildReadFileScript, resolveLocalFile } = await import('./server.js');
 
 // --- Syntax guard: server.js MUST compile ---------------------------------
 // This is the exact failure QA reported ("Missing } in template expression").
@@ -135,5 +135,60 @@ describe('buildReadFileScript (remote SSH script)', () => {
     const r = runScript(tmp, 'pic.png');
     assert.equal(r.ok, false);
     assert.match(r.stdout, /ERROR cannot read binary files/);
+  });
+});
+
+// resolveLocalFile is the LOCAL twin of buildReadFileScript: the realpath +
+// cwd-containment + is-file resolution that powers /api/read-file (and
+// /api/file-exists) for local chats, returning the exact { status, error } the
+// HTTP handler re-emits. Untested before WARDEN-561 — these pin its contract in
+// isolation (fast, no server) so a regression in the local resolution path is
+// caught without needing the HTTP boot in read-file-http.test.js.
+describe('resolveLocalFile (local resolution twin)', () => {
+  let tmp;
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-rf-local-'));
+    fs.writeFileSync(path.join(tmp, 'hello.txt'), 'hello world\n');
+    fs.mkdirSync(path.join(tmp, 'sub'));
+  });
+
+  it('resolves an existing file under cwd', () => {
+    const r = resolveLocalFile(tmp, 'hello.txt');
+    assert.equal(r.ok, true);
+    assert.ok(r.resolvedPath && r.resolvedPath.endsWith('hello.txt'));
+  });
+
+  it('returns 404 "file not found" for a missing file', () => {
+    const r = resolveLocalFile(tmp, 'nope.txt');
+    assert.equal(r.ok, false);
+    assert.equal(r.status, 404);
+    assert.equal(r.error, 'file not found');
+  });
+
+  it('returns 400 "path is a directory" for a directory', () => {
+    const r = resolveLocalFile(tmp, 'sub');
+    assert.equal(r.ok, false);
+    assert.equal(r.status, 400);
+    assert.equal(r.error, 'path is a directory');
+  });
+
+  it('returns 403 "path must be within working directory" for traversal', () => {
+    const r = resolveLocalFile(tmp, '../../etc/passwd');
+    assert.equal(r.ok, false);
+    assert.equal(r.status, 403);
+    assert.equal(r.error, 'path must be within working directory');
+  });
+
+  it('blocks prefix-sibling traversal (separator-bearing containment guard)', () => {
+    // Same hole as the remote script test above: a sibling whose name merely
+    // extends the cwd must be rejected. cwd = .../<base>; request ../<base>-secret.txt.
+    const base = path.basename(tmp);
+    const sibling = `${tmp}-secret.txt`;
+    fs.writeFileSync(sibling, 'TOPSECRET\n');
+    const r = resolveLocalFile(tmp, `../${base}-secret.txt`);
+    assert.equal(r.ok, false, 'sibling extending the cwd name must be rejected');
+    assert.equal(r.status, 403);
+    assert.equal(r.error, 'path must be within working directory');
+    fs.rmSync(sibling, { force: true });
   });
 });
