@@ -99,6 +99,10 @@ interface ConfigData {
   // Extended is gated behind base: meaningful only when telemetryBaseEnabled.
   telemetryBaseEnabled: boolean;
   telemetryExtendedEnabled: boolean;
+  // Receiver endpoint (WARDEN-522). Empty string = unconfigured = sends nothing.
+  // The transport (telemetry-send.js) no-ops while this is blank, independent of
+  // the consent toggles. Persisted via /api/config so it survives a restart.
+  telemetryEndpoint: string;
 }
 
 interface Props {
@@ -553,6 +557,8 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
     // Telemetry consent (WARDEN-457) — off by default.
     telemetryBaseEnabled: false,
     telemetryExtendedEnabled: false,
+    // Receiver endpoint (WARDEN-522) — empty by default = unconfigured = no-op.
+    telemetryEndpoint: '',
   });
   const [availableHosts, setAvailableHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -646,6 +652,9 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
           // backend that does not return the fields stays safely OFF.
           telemetryBaseEnabled: configData.telemetryBaseEnabled ?? false,
           telemetryExtendedEnabled: configData.telemetryExtendedEnabled ?? false,
+          // Defensive ?? '' so an older backend that does not return the field
+          // stays safely unconfigured (empty = sends nothing).
+          telemetryEndpoint: configData.telemetryEndpoint ?? '',
         });
         setAvailableHosts(hostsData.hosts || []);
         setObserverAuthTokenSet(Boolean(configData.llm?.authTokenSet));
@@ -1524,6 +1533,19 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                     Extended tier (requires the base tier). Additionally includes
                     chat names and Claude session names to help diagnose reports.
                     Chat <em>content</em> is never sent — names only.
+                  </p>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="telemetryEndpoint">Receiver endpoint</Label>
+                  <Input
+                    id="telemetryEndpoint"
+                    value={config.telemetryEndpoint}
+                    onChange={(e) => setConfig({ ...config, telemetryEndpoint: e.target.value })}
+                    placeholder="https://your-receiver.example/ingest"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Leave blank for unconfigured (sends nothing). Events go only to this URL — a self-hosted receiver you control, never a third-party analytics service.
                   </p>
                 </div>
               </SettingsSection>
