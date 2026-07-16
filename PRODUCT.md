@@ -136,7 +136,7 @@ No server to set up. No cloud account. No network configuration. Download, run, 
 
 ## Privacy & security
 
-- **100% local.** warden runs entirely on your machine. No data leaves your computer. No cloud sync. No telemetry.
+- **100% local.** warden runs entirely on your machine. No data leaves your computer unless you opt into optional, off-by-default telemetry — anonymous error/crash reports sent only to a self-hosted receiver (no third-party analytics), with credentials, chat content, file paths, and hostnames redacted before collection.
 - **Your credentials stay yours.** API keys, SSH keys, tokens — all stay in the app process. Nothing is transmitted to any external service (except the LLM API you configure, e.g. GLM via Z.ai).
 - **No remote access.** The app binds to localhost only. No one can reach your warden from another machine.
 - **Human-in-the-loop.** The observer can draft directives, but **you approve every single one** before it reaches an agent. No autonomous actions without your explicit say-so.
