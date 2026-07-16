@@ -1,5 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -8,6 +18,7 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { copyText } from '@/lib/clipboard';
+import { Loader2Icon, SearchIcon } from 'lucide-react';
 
 interface SearchResult {
   key: string;
@@ -75,26 +86,64 @@ function GlobalSearchResultRow({ result, onOpen }: { result: SearchResult; onOpe
   );
 }
 
+// Cross-pane global search (the ⌕ toolbar button / Ctrl+Shift+F). WARDEN-549:
+// rebuilt from a hand-rolled `fixed inset-0` overlay onto the same shadcn
+// Dialog/Input/Button/ScrollArea primitives its sibling WorkspaceSearchDialog
+// uses, so the two search surfaces read as one system (WARDEN-68 "no raw HTML").
+// The pane-result data model and the WARDEN-488 right-click row are unchanged —
+// only the shell and the error handling were rebuilt.
+//
+// `onClose` (the existing prop wired at App.tsx) is mapped to the shadcn Dialog's
+// `onOpenChange` internally so App.tsx needs no change.
 export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJumpToMatch }: Props) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
   const [searching, setSearching] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
+  // Reset everything when the dialog closes — including `error`, so a stale
+  // failure message from a previous open doesn't linger (mirrors the sibling).
   useEffect(() => {
-    if (!open) { setQuery(''); setResults([]); return; }
+    if (!open) {
+      setQuery('');
+      setResults([]);
+      setError(null);
+    }
+  }, [open]);
+
+  // Focus the query input when the dialog opens — React-controlled via ref, not
+  // a DOM query, and Radix's own open-auto-focus is disabled so they don't race
+  // (mirrors the sibling and the WARDEN-68 file-path entry dialog pattern).
+  useEffect(() => {
+    if (open) inputRef.current?.focus();
   }, [open]);
 
   const doSearch = async () => {
-    if (!query.trim()) return;
+    const q = query.trim();
+    if (!q) return;
     setSearching(true);
+    setError(null);
     try {
-      const res = await fetch(`/api/search-pane?query=${encodeURIComponent(query)}&panes=${openPanes.join(',')}`);
+      const res = await fetch(`/api/search-pane?query=${encodeURIComponent(q)}&panes=${openPanes.join(',')}`);
       const data = await res.json();
-      setResults(data.results || []);
+      // /api/search-pane returns 500 { error: e.message } when capturePanes
+      // fails (e.g. a pane's host is unreachable). fetch resolves on HTTP
+      // errors, so check res.ok AND data.error — otherwise a real failure
+      // collapses into a fake "No results found" (the WARDEN-89 silent-error
+      // trap). Mirrors WorkspaceSearchDialog's doSearch exactly.
+      if (!res.ok || data.error) {
+        setError(data.error || 'Search failed');
+        setResults([]);
+      } else {
+        setResults(Array.isArray(data.results) ? data.results : []);
+      }
     } catch (e) {
-      console.error(e);
+      setError(e instanceof Error ? e.message : 'Search failed');
+      setResults([]);
+    } finally {
+      setSearching(false);
     }
-    setSearching(false);
   };
 
   const handleResultClick = (result: SearchResult) => {
@@ -103,49 +152,49 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
     onClose();
   };
 
-  if (!open) return null;
-
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-background border rounded-lg shadow-lg w-[600px] max-h-[500px] flex flex-col">
-        {/* Header */}
-        <div className="flex items-center gap-2 px-4 py-3 border-b">
-          <span className="text-lg">⌕</span>
-          <input
-            autoFocus
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent className="sm:max-w-2xl" onOpenAutoFocus={(e) => e.preventDefault()}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <SearchIcon className="w-4 h-4" />
+            Search across panes
+          </DialogTitle>
+          <DialogDescription>
+            Search text in every open pane — click a result to focus its pane and jump to the match.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex items-center gap-2">
+          <Input
+            ref={inputRef}
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => { setQuery(e.target.value); setError(null); }}
             onKeyDown={(e) => { if (e.key === 'Enter') doSearch(); }}
             placeholder="Search across all panes..."
-            className="flex-1 bg-background border rounded px-3 py-2"
           />
-          <button
-            onClick={doSearch}
-            disabled={searching || !query.trim()}
-            className="px-4 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 active:scale-95 transition-all duration-150 ease-out disabled:opacity-50"
-          >
-            {searching ? 'Searching...' : 'Search'}
-          </button>
-          <button onClick={onClose} className="text-muted-foreground hover:text-foreground px-2 active:scale-95 transition-all duration-150 ease-out">×</button>
+          <Button onClick={doSearch} disabled={searching || !query.trim()}>
+            {searching ? <Loader2Icon className="w-4 h-4 animate-spin" /> : 'Search'}
+          </Button>
         </div>
 
-        {/* Results */}
-        <div className="flex-1 overflow-y-auto px-4 py-3">
-          {results.length === 0 && !searching && (
-            <div className="text-muted-foreground text-center py-8">
-              {query.trim() ? 'No results found' : 'Enter a query to search'}
-            </div>
-          )}
-          {results.map((r, idx) => (
-            <GlobalSearchResultRow key={`${r.key}-${idx}`} result={r} onOpen={handleResultClick} />
-          ))}
-        </div>
+        {error && <p className="text-xs text-destructive">{error}</p>}
 
-        {/* Footer */}
-        <div className="px-4 py-2 border-t text-xs text-muted-foreground">
-          {results.length} result{results.length !== 1 ? 's' : ''} · Click to jump to match
-        </div>
-      </div>
-    </div>
+        {/* vh-sized scroll region like the sibling WorkspaceSearchDialog, so the
+            region flexes with the viewport instead of a fixed pixel height. */}
+        <ScrollArea className="h-[40vh] w-full rounded-md border">
+          <div className="p-2">
+            {results.length === 0 && !searching && !error && (
+              <div className="text-muted-foreground text-center py-8 text-sm">
+                {query.trim() ? 'No results found' : 'Enter a query to search across open panes'}
+              </div>
+            )}
+            {results.map((r, idx) => (
+              <GlobalSearchResultRow key={`${r.key}-${idx}`} result={r} onOpen={handleResultClick} />
+            ))}
+          </div>
+        </ScrollArea>
+      </DialogContent>
+    </Dialog>
   );
 }
