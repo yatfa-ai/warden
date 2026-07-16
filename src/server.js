@@ -688,6 +688,20 @@ app.put('/api/config', (req, res) => {
   if (typeof telemetryExtendedEnabled === 'boolean') cfg.telemetryExtendedEnabled = telemetryExtendedEnabled;
   cfg.telemetryExtendedEnabled = cfg.telemetryExtendedEnabled && cfg.telemetryBaseEnabled;
   save(cfg); // persist to ~/.yatfa-warden/config.json
+  // Forward the (now-clamped) telemetry prefs to the Electron main process over
+  // the fork's IPC channel so a consent/endpoint flip takes effect on the next
+  // signal without an app restart — the source + pipeline live in MAIN, but the
+  // PUT is serviced here in the server child. Guarded: process.send exists only
+  // when the server is forked by electron/main.cjs (standalone `node src/server`
+  // has no parent). WARDEN-524.
+  if (typeof process.send === 'function') {
+    process.send({
+      type: 'telemetry-config',
+      base: cfg.telemetryBaseEnabled === true,
+      extended: cfg.telemetryExtendedEnabled === true,
+      endpoint: typeof cfg.telemetryEndpoint === 'string' ? cfg.telemetryEndpoint : '',
+    });
+  }
   // WARDEN-439: apply the companion toggle LIVE so a flip takes effect on the
   // next op, not after a restart. No-op when the env var is an operator override
   // (companionEnvOverridden) — then the env var already wins and the toggle is

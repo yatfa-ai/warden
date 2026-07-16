@@ -23,8 +23,18 @@ const {
 // Telemetry SOURCE layer (WARDEN-463) — turns main-process failure/freeze
 // signals into consent-gated base-tier events routed to `record()`. Off by
 // default; see the wiring block in app.whenReady() below. Pure/testable logic
-// lives in this CJS module (same pattern as window-state.cjs above).
-const { createTelemetrySource } = require('./telemetry-source.cjs');
+// lives in this CJS module (same pattern as window-state.cjs above). The schema
+// constants + validator it exports (SCHEMA_VERSION, validateBaseEvent) are the
+// shared cross-module contract the pipeline threads.
+const { createTelemetrySource, SCHEMA_VERSION, validateBaseEvent } = require('./telemetry-source.cjs');
+// Telemetry PIPELINE assembly (WARDEN-486) + the CJS redact mirror + the pure
+// tier resolver (WARDEN-524). main.cjs constructs the pipeline with the REAL
+// injected implementations and binds the source's record sink to it — the
+// capstone wiring that turns the off-by-default modules into a functioning path:
+//   source signal → record() → resolveTier → redact (CJS mirror) → validate → send
+const { createTelemetryPipeline } = require('./telemetry-pipeline.cjs');
+const { redact: redactTelemetry } = require('./telemetry-redact.cjs');
+const { resolveTelemetryTier, readTelemetryPrefs } = require('./telemetry-config.cjs');
 
 const PORT = parseInt(process.env.WARDEN_PORT || '7421', 10);
 const HOST = '127.0.0.1';
@@ -41,24 +51,94 @@ let isQuitting = false;
 let closeToTray = false;
 let tray = null;
 
-// --- Telemetry SOURCE wiring (WARDEN-463, slice 4) -----------------------
+// --- Telemetry SOURCE + PIPELINE wiring (WARDEN-463 / WARDEN-486 / WARDEN-524) -
 // Optional, OFF-by-default instrumentation (roadmap WARDEN-446 / design
-// WARDEN-443). It subscribes to main-process uncaught errors/rejections, to
-// renderer crash/unresponsive signals, and to an event-loop freeze heartbeat —
-// turning each into a schema-valid base-tier event routed to `record()`.
+// WARDEN-443). The source subscribes to main-process uncaught errors/rejections,
+// to renderer crash/unresponsive signals, and to an event-loop freeze heartbeat —
+// turning each into a schema-valid base-tier event routed to `record()`, which is
+// bound to the assembled pipeline (redact → validate → transport) below.
 //
-// TWO LAYERS OF "off = nothing", both dormant until slice 1 (WARDEN-457) ships:
-//   1. CONSENT defaults to off (telemetryBaseEnabled). With consent off the
-//      source subscribes to NOTHING and builds/records NOTHING. When slice 1's
-//      Settings consent pref lands, call `telemetry.setBaseConsent(...)` with
-//      the initial value AND on every change (the source re-evaluates on toggle).
-//   2. RECORD defaults to a guarded no-op. When slice 1's TelemetryClient lands,
-//      call `telemetry.setRecord(client.record.bind(client))`.
-// Until then this block is inert by construction — it cannot phone home.
+// TWO LAYERS OF "off = nothing", both driven from the persisted prefs
+// (telemetryBaseEnabled / telemetryExtendedEnabled / telemetryEndpoint) — read at
+// boot and kept live over the fork's IPC channel on a Settings change:
+//   1. CONSENT defaults to off. With consent off the source subscribes to NOTHING
+//      and builds/records NOTHING. applyTelemetryConfig() calls
+//      `telemetry.setBaseConsent(base)` with the initial value AND on every live
+//      change (the source re-evaluates on toggle).
+//   2. RECORD is bound to the pipeline's entry point (telemetry.setRecord). The
+//      pipeline's own consent resolver (resolveTelemetryTier) is a SECOND off-gate,
+//      and the transport is the LAST — consent-off OR no-endpoint sends nothing.
 const telemetry = createTelemetrySource({
-  record: null, // → TelemetryClient.record(event) once slice 1 lands
+  // The source's record sink is bound to the pipeline's entry point below — a
+  // source signal then flows source → record() → pipeline (resolveTier → redact
+  // → validate → transport). record stays inert until baseConsent is read from
+  // the persisted config in app.whenReady() (the source only emits with consent
+  // on), so binding it captures nothing on its own.
+  record: null,
   now: () => Date.now(),
 });
+
+// The live telemetry prefs (off / empty-endpoint by default). Driven from the
+// persisted config at boot and, on a live Settings change, from the server child
+// over the fork's IPC channel (applyTelemetryConfig below). Held in a mutable
+// object so the pipeline's consent resolver reads the CURRENT value on every
+// record() without being re-wired.
+const telemetryPrefs = {
+  telemetryBaseEnabled: false,
+  telemetryExtendedEnabled: false,
+  telemetryEndpoint: '',
+};
+
+// The pipeline assembly (WARDEN-486). Constructed with the REAL injected
+// implementations: the CJS redact mirror (telemetry-redact.cjs), the source's
+// schema validator (validateBaseEvent) + version (SCHEMA_VERSION), and a consent
+// resolver that reads telemetryPrefs live. The transport (src/telemetry-send.js,
+// ESM) cannot be require()'d from CJS, so it is dynamically imported and
+// hot-swapped in app.whenReady() via the setSend seam; until then the pipeline's
+// default noop transport sends nothing — and nothing reaches it anyway until
+// baseConsent is read (also in app.whenReady()). The endpoint is pushed in via
+// setEndpoint (applyTelemetryConfig) so the transport's own final gate (consent +
+// endpoint) is the last line of defense for "off / unconfigured = nothing".
+const telemetryPipeline = createTelemetryPipeline({
+  consent: () => resolveTelemetryTier(telemetryPrefs),
+  redact: redactTelemetry,
+  validate: validateBaseEvent,
+  schemaVersion: SCHEMA_VERSION,
+});
+
+// Bind the source's record sink to the pipeline entry point — the wiring that was
+// deferred (record: null) until the pipeline landed. The source emits only with
+// baseConsent on (off by default), so this binding alone captures nothing until
+// app.whenReady() reads the persisted consent.
+telemetry.setRecord(telemetryPipeline.record);
+
+// Apply the current telemetry prefs to the source + pipeline. Called at boot
+// (prefs read from the persisted config) and on every live Settings change
+// (forwarded over the fork's IPC channel from the server child, where PUT
+// /api/config is serviced + persisted). Drives BOTH layers of the double gate:
+//   • the source's baseConsent — arms/disarms the uncaught / rejection / render /
+//     unresponsive / heartbeat signal subscriptions (the FIRST "off = nothing").
+//   • the pipeline's endpoint — threads to the transport's final gate (consent +
+//     endpoint), the LAST "off / unconfigured = nothing". The pipeline's consent
+//     resolver reads telemetryPrefs live, so the effective tier (and the
+//     extended-requires-base clamp mirrored in resolveTelemetryTier) is current
+//     on the next record() with no extra wiring.
+// Idempotent + defensive: a malformed/missing field is ignored, and the source's
+// setBaseConsent is itself a no-op when the value is unchanged.
+function applyTelemetryConfig(prefs) {
+  if (!prefs || typeof prefs !== 'object') return;
+  if (typeof prefs.telemetryBaseEnabled === 'boolean') {
+    telemetryPrefs.telemetryBaseEnabled = prefs.telemetryBaseEnabled;
+  }
+  if (typeof prefs.telemetryExtendedEnabled === 'boolean') {
+    telemetryPrefs.telemetryExtendedEnabled = prefs.telemetryExtendedEnabled;
+  }
+  if (typeof prefs.telemetryEndpoint === 'string') {
+    telemetryPrefs.telemetryEndpoint = prefs.telemetryEndpoint;
+  }
+  telemetry.setBaseConsent(telemetryPrefs.telemetryBaseEnabled === true);
+  telemetryPipeline.setEndpoint(telemetryPrefs.telemetryEndpoint || '');
+}
 
 // Kill anything occupying the port (stale server from a previous run)
 function killStalePort() {
@@ -377,14 +457,19 @@ ipcMain.handle('window:set-close-to-tray', (_event, on) => {
   return closeToTray;
 });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // Kill any stale server from a previous run
   killStalePort();
 
-  // Start the backend (ESM — can't require() it, so fork it)
+  // Start the backend (ESM — can't require() it, so fork it). The explicit 4th
+  // 'ipc' stdio slot documents + guarantees the fork's built-in IPC channel,
+  // which the server child uses to forward telemetry pref changes here (where
+  // the source + pipeline live) so a Settings flip takes effect on the next
+  // signal without a restart. stdout/stderr remain piped (fds 0–2 unchanged).
+  // WARDEN-524.
   serverProcess = fork(path.join(__dirname, '..', 'src', 'server.js'), [], {
     env: { ...process.env, PORT: String(PORT) },
-    stdio: 'pipe',
+    stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
   });
   serverProcess.stdout.on('data', (d) => console.log(`[server] ${d.toString().trim()}`));
   serverProcess.stderr.on('data', (d) => console.error(`[server] ${d.toString().trim()}`));
@@ -392,20 +477,52 @@ app.whenReady().then(() => {
     console.error(`[server] exited with code ${code}`);
   });
 
+  // Live telemetry-config channel (WARDEN-524). PUT /api/config is serviced
+  // inside the server child (which also persists + clamps the prefs); this
+  // listener forwards its telemetry-config messages to the main-process
+  // source/pipeline so a consent/endpoint toggle starts/stops capture
+  // immediately — the success criterion that a runtime change needs no restart.
+  serverProcess.on('message', (msg) => {
+    if (msg && msg.type === 'telemetry-config') {
+      applyTelemetryConfig({
+        telemetryBaseEnabled: msg.base,
+        telemetryExtendedEnabled: msg.extended,
+        telemetryEndpoint: msg.endpoint,
+      });
+    }
+  });
+
   // Clean up server when Electron is killed externally
   process.on('SIGTERM', cleanup);
   process.on('SIGINT', cleanup);
 
+  // Wire the real transport (src/telemetry-send.js — ESM, so dynamic import) and
+  // hot-swap it into the pipeline via the setSend seam. Dynamic import() of an
+  // ESM src/ file is supported inside the packaged asar since Electron 28
+  // (warden ships Electron 43) and electron/ is unbundled, so this is not
+  // transpiled. The pipeline was constructed with the default noop transport, so
+  // a load failure leaves telemetry inert (sends nothing) rather than half-wired
+  // — and nothing reaches the transport until baseConsent is applied below, so
+  // the ordering is safe. WARDEN-524.
+  try {
+    const transport = await import(path.join(__dirname, '..', 'src', 'telemetry-send.js'));
+    telemetryPipeline.setSend(transport.send);
+  } catch (e) {
+    console.warn('[warden:telemetry] transport module failed to load; telemetry stays inert', e);
+  }
+
   // Telemetry source (WARDEN-463): attach the MAIN-process signal taps. With
-  // base consent off (the default — see the seam below) this subscribes to
-  // nothing; it only begins capturing uncaughtExceptionMonitor / unhandled
-  // rejection once slice 1 turns consent on. The renderer taps are attached
-  // per-window inside createWindow() (win.webContents).
+  // base consent off (the default) this subscribes to nothing; it only begins
+  // capturing once applyTelemetryConfig turns consent on from the persisted
+  // pref. The renderer taps are attached per-window inside createWindow()
+  // (win.webContents).
   telemetry.attachMain(process);
-  // CONSENT SEAM (defaults off). When slice 1 / WARDEN-457 ships the Settings
-  // consent pref (telemetryBaseEnabled), read its initial value here and call
-  // telemetry.setBaseConsent(...) on every change. Left off until then.
-  telemetry.setBaseConsent(false);
+  // CONSENT + ENDPOINT, read from the persisted config at boot (the live-change
+  // channel is the fork's IPC, not re-reads). Replaces the old hardcoded
+  // `setBaseConsent(false)`: a user who opted in (base on + endpoint set) now
+  // captures for real, while off-by-default / consent-off / no-endpoint are all
+  // preserved (the transport is the last gate). WARDEN-524.
+  applyTelemetryConfig(readTelemetryPrefs());
 
   waitForServer(createWindow);
 });
