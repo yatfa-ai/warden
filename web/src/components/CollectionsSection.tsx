@@ -13,7 +13,9 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { CreateCollectionDialog } from './CreateCollectionDialog';
 import { copyText } from '@/lib/clipboard';
+import { countAgentsInCollection } from '@/lib/collections';
 import type { Collection, Chat } from '@/lib/types';
 
 interface Props {
@@ -24,12 +26,18 @@ interface Props {
   // derived state: refresh its duplicate-name list (CreateCollectionDialog) and,
   // on delete, reset the live view if the deleted collection was open. The
   // card list itself is refreshed inside CollectionsSection via fetchCollections.
-  onCollectionChange?: (change: { type: 'rename' | 'delete'; id: string }) => void;
+  // WARDEN-553: 'edit' also lets the host refresh the open-view snapshot when
+  // the edited collection is the one currently open (otherwise its membership
+  // list would render stale criteria while the card count updates).
+  onCollectionChange?: (change: { type: 'rename' | 'delete' | 'edit'; id: string }) => void;
 }
 
 export function CollectionsSection({ chats, onEnterCollection, onCreateCollection, onCollectionChange }: Props) {
   const [collections, setCollections] = useState<Collection[]>([]);
   const [loading, setLoading] = useState(false);
+  // WARDEN-553: the collection currently open in the Edit dialog (null when the
+  // dialog is closed). Drives CreateCollectionDialog's edit mode.
+  const [editTarget, setEditTarget] = useState<Collection | null>(null);
 
   const fetchCollections = async () => {
     setLoading(true);
@@ -87,6 +95,15 @@ export function CollectionsSection({ chats, onEnterCollection, onCreateCollectio
     }
   };
 
+  // WARDEN-553: an in-place criteria edit completed via CreateCollectionDialog's
+  // edit mode (PATCH). The dialog performs the request itself; this refreshes the
+  // card list and notifies the host so an open view of the edited collection
+  // refreshes its membership against the new criteria.
+  const handleCollectionEdited = (updated: Collection) => {
+    fetchCollections();
+    onCollectionChange?.({ type: 'edit', id: updated.id });
+  };
+
   // Count agents matching each collection's criteria
   const collectionCounts = new Map<string, number>();
   for (const collection of collections) {
@@ -95,6 +112,7 @@ export function CollectionsSection({ chats, onEnterCollection, onCreateCollectio
   }
 
   return (
+    <>
     <div className="mt-2 border-t border-border/50">
       <div className="flex items-center gap-2 px-2 py-2">
         <span className="text-xs text-muted-foreground flex-1">collections</span>
@@ -113,6 +131,7 @@ export function CollectionsSection({ chats, onEnterCollection, onCreateCollectio
                 onOpen={() => onEnterCollection(collection)}
                 onRename={renameCollection}
                 onDelete={deleteCollection}
+                onEdit={() => setEditTarget(collection)}
               />
             ))}
           </div>
@@ -122,16 +141,32 @@ export function CollectionsSection({ chats, onEnterCollection, onCreateCollectio
           no collections — create one to organize agents
         </div>
       )}
-    </div>
+      </div>
+      {/*
+        WARDEN-553: the in-place Edit dialog. CreateCollectionDialog is
+        parametrized for edit by passing `collection`; it pre-fills from the
+        target, PATCHes on save, and skips the target's own id in the
+        duplicate-name guard. existingCollections is this section's own list
+        (the source of truth for the guard) and is re-fetched on save above.
+      */}
+      <CreateCollectionDialog
+        open={!!editTarget}
+        onOpenChange={(o) => { if (!o) setEditTarget(null); }}
+        collection={editTarget}
+        onSaved={handleCollectionEdited}
+        existingCollections={collections}
+      />
+    </>
   );
 }
 
-function CollectionCard({ collection, agentCount, onOpen, onRename, onDelete }: {
+function CollectionCard({ collection, agentCount, onOpen, onRename, onDelete, onEdit }: {
   collection: Collection;
   agentCount: number;
   onOpen: () => void;
   onRename: (id: string, name: string) => Promise<{ ok: boolean; error?: string }>;
   onDelete: (id: string) => Promise<{ ok: boolean; error?: string }>;
+  onEdit: () => void;
 }) {
   const color = collection.metadata?.color;
   const description = collection.metadata?.description;
@@ -222,6 +257,7 @@ function CollectionCard({ collection, agentCount, onOpen, onRename, onDelete }: 
         <ContextMenuContent>
           <ContextMenuItem onSelect={() => onOpen()}>Open</ContextMenuItem>
           <ContextMenuItem onSelect={startEdit}>Rename</ContextMenuItem>
+          <ContextMenuItem onSelect={onEdit}>Edit…</ContextMenuItem>
           <ContextMenuSeparator />
           <ContextMenuItem onSelect={() => handleCopy(collection.name)}>Copy name</ContextMenuItem>
           <ContextMenuItem onSelect={() => handleCopy(JSON.stringify(collection.criteria ?? {}, null, 2))}>Copy criteria</ContextMenuItem>
@@ -240,50 +276,4 @@ function CollectionCard({ collection, agentCount, onOpen, onRename, onDelete }: 
       />
     </>
   );
-}
-
-// Count agents matching the collection's criteria
-function countAgentsInCollection(collection: Collection, chats: Chat[]): number {
-  if (!collection.criteria) return 0;
-
-  const { criteria } = collection;
-  let count = 0;
-
-  for (const chat of chats) {
-    let matches = true;
-
-    // Role filter
-    if (criteria.role && chat.role !== criteria.role) {
-      matches = false;
-    }
-
-    // Project filter
-    if (matches && criteria.project && chat.project !== criteria.project) {
-      matches = false;
-    }
-
-    // Host filter
-    if (matches && criteria.host && chat.host !== criteria.host) {
-      matches = false;
-    }
-
-    // Custom filter (array of strings, chat must match at least one)
-    if (matches && criteria.custom && Array.isArray(criteria.custom) && criteria.custom.length > 0) {
-      const customMatch = criteria.custom.some((value) => {
-        return (
-          chat.role === value ||
-          chat.project === value ||
-          chat.host === value ||
-          chat.name === value
-        );
-      });
-      if (!customMatch) {
-        matches = false;
-      }
-    }
-
-    if (matches) count++;
-  }
-
-  return count;
 }
