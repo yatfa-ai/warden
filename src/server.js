@@ -2154,11 +2154,13 @@ export function stripCommitSubject(raw) {
 // compare against lastSeen (WARDEN-356) — the relative `%ar` is coarse and would
 // mislabel already-seen commits as new as it ages, so the filter must use `%ct`.
 const GIT_LOG_PRETTY = '%h|%s|%an|%ar|%ct';
-// WARDEN-498: the commit-message search window. Browse caps at 50 (limit clamped to
-// [1,50] in the handler), but search exists to FIND a commit that may sit far down
-// history, so it uses this larger ceiling instead. A few hundred covers a long project
-// history without an unbounded scan; still bounded so a huge repo can't exhaust argv
-// or the response. Absent `grep` never reaches this path (browse keeps `limit`).
+// WARDEN-498: the commit-search window (shared by message grep AND WARDEN-559
+// pickaxe — both may need to reach far down history). Browse caps at 50 (limit
+// clamped to [1,50] in the handler), but search exists to FIND a commit that may
+// sit far down history, so it uses this larger ceiling instead. A few hundred
+// covers a long project history without an unbounded scan; still bounded so a huge
+// repo can't exhaust argv or the response. Absent `grep`/`pickaxe` never reaches
+// this path (browse keeps `limit`).
 const GIT_LOG_GREP_MAX = 200;
 
 // Recent commit history (git log) for a chat's repo. All transports go through
@@ -2167,7 +2169,11 @@ const GIT_LOG_GREP_MAX = 200;
 // empty list (never a 500). limit is clamped to [1, 50]. An optional `path` filters
 // to file-history mode (git log --follow -- <path>, WARDEN-319). An optional `grep`
 // searches commit MESSAGES (git log --grep=<term> -i, WARDEN-498) over a wider
-// window (GIT_LOG_GREP_MAX) so an old commit is findable.
+// window (GIT_LOG_GREP_MAX) so an old commit is findable. An optional `pickaxe`
+// searches commit-history DIFFS (git log -S<term>, or -G<term> with pickaxeRegex=1,
+// WARDEN-559) — finds the commit that ADDED or REMOVED a code string — over the same
+// wider window. All three filters are read-only flags to the permitted `git log`
+// subcommand; absent any ⇒ byte-for-byte today's behavior.
 app.get('/api/git-log', async (req, res) => {
   const chatId = String(req.query.id || '');
   const limit = Math.min(Math.max(parseInt(String(req.query.limit || '5'), 10) || 5, 1), 50);
@@ -2197,6 +2203,18 @@ app.get('/api/git-log', async (req, res) => {
   // made visible. Absent `grep` → byte-for-byte today's behavior (existing callers send
   // none).
   const grep = String(req.query.grep || '').trim().slice(0, 128);
+  // Optional content-history search (WARDEN-559): pickaxe — `git log -S<term>`
+  // (default) finds commits that ADDED or REMOVED the string (changed its occurrence
+  // count — the precise "where did this land" signal); `git log -G<term>`
+  // (pickaxeRegex=1) matches the regex against the diff (broader). Mirrors `grep`
+  // byte-for-byte: parsed here, length-capped (≤128) to bound argv, passed as a
+  // SINGLE argv element locally and shellQuote'd remotely (WARDEN-122 — the `=`-less
+  // `-S` stays one argument, never reaching a shell). Absent `pickaxe` → byte-for-byte
+  // today's behavior (existing callers send none); composes with `grep` (a user may
+  // want both), `range`, and `path` (the filePath branch below already uses
+  // searchLimit, so it widens automatically).
+  const pickaxe = String(req.query.pickaxe || '').trim().slice(0, 128);
+  const pickaxeRegex = req.query.pickaxeRegex === '1';
   const { chat, error } = await resolve(chatId);
   if (error) return res.status(404).json({ error });
 
@@ -2220,10 +2238,14 @@ app.get('/api/git-log', async (req, res) => {
     // WARDEN-498: a present `grep` splices `--grep=<term>` + `-i` (case-insensitive,
     // matches subject AND body) as the FIRST log options — before the limit/range/pretty
     // args — and widens the window to GIT_LOG_GREP_MAX (an old commit may sit beyond the
-    // 50-commit browse cap; the point of search is to FIND it). Absent `grep` →
+    // 50-commit browse cap; the point of search is to FIND it). WARDEN-559: a present
+    // `pickaxe` splices `-S<term>` (or `-G<term>` with pickaxeRegex) FIRST, alongside the
+    // grep splice — a hit may sit beyond the 50-commit browse cap too, so it also widens
+    // the window. The two splice independently (a user may pass both). Absent both ⇒
     // searchLimit === limit, so the browse path is byte-for-byte unchanged.
-    const searchLimit = grep ? GIT_LOG_GREP_MAX : limit;
+    const searchLimit = (grep || pickaxe) ? GIT_LOG_GREP_MAX : limit;
     const args = ['log'];
+    if (pickaxe) args.push(pickaxeRegex ? `-G${pickaxe}` : `-S${pickaxe}`);
     if (grep) args.push(`--grep=${grep}`, '-i');
     if (filePath) {
       // File-history mode (WARDEN-319): --follow tracks the file across renames and

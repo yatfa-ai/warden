@@ -311,6 +311,37 @@ export function fleetCommitSearchEligible(chats: FleetSearchChat[]): FleetSearch
   return out;
 }
 
+// The two fleet commit-search axes (WARDEN-534 = message, WARDEN-559 = content). The
+// AGGREGATION is mode-agnostic — a hit is just another FleetCommitLike and
+// buildFleetCommitGroups groups it identically — so the mode lives with the FETCH (which
+// param to splice), not with the grouping. Kept as a string union (not a const enum) so
+// it survives the TS→ESM test transform without runtime support.
+export type FleetCommitSearchMode = 'message' | 'content';
+
+/**
+ * Build the per-agent fetch base URL for the fleet commit search. `mode` selects the
+ * param: 'message' → `grep=` (`git log --grep`, WARDEN-498 — searches commit messages);
+ * 'content' → `pickaxe=` (`git log -S`/`-G`, WARDEN-559 — searches commit-history diffs
+ * to find the commit that ADDED or REMOVED a code string). When `pickaxeRegex` is set in
+ * content mode, appends `pickaxeRegex=1` (the broader `-G` diff-text match over the
+ * default `-S` count-change match). The component appends `&range=outgoing` to this base
+ * for the second (↑unpushed join) fetch. Extracted into the pure layer — not inlined in
+ * the React component — so the message⇄content URL swap is unit-testable without a
+ * React runner (this repo has none).
+ */
+export function buildFleetSearchBaseUrl(
+  key: string,
+  query: string,
+  mode: FleetCommitSearchMode,
+  pickaxeRegex = false,
+): string {
+  const id = `id=${encodeURIComponent(key)}`;
+  if (mode === 'content') {
+    return `/api/git-log?${id}&pickaxe=${encodeURIComponent(query)}${pickaxeRegex ? '&pickaxeRegex=1' : ''}`;
+  }
+  return `/api/git-log?${id}&grep=${encodeURIComponent(query)}`;
+}
+
 // Minimal slice of a /api/git-log commit row (the shape GIT_LOG_PRETTY parses to:
 // { hash, subject, author, date, epoch }). Defined locally so this module stays
 // decoupled from the React-layer GitCommit type and is testable with plain
