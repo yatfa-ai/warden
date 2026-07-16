@@ -43,6 +43,7 @@ import { StatusDot } from '@/components/StatusDot';
 import type { GitCommit, GitFile, ClaudeSession, DiffStat } from './sidebar/types';
 import { ChatRow, OpenPaneRow, ChatRowSkeleton, SessionRowSkeleton } from './sidebar/ChatRows';
 import { AgentFilterSortControls } from './sidebar/AgentFilterSortControls';
+import { FleetCommitSearch } from './sidebar/FleetCommitSearch';
 import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/SidebarBits';
 import { SessionTagChips, SessionTagFilterRow } from './sidebar/SessionTags';
 import { computeTagsInUse, filterSessionsByTags, addTag, removeTag } from '@/lib/sessionTags';
@@ -1060,6 +1061,13 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
           onFilterChange={onFilterChange}
           onSortChange={onSortChange}
         />
+        {/* WARDEN-534: fleet-wide commit search. A sidebar-level affordance that
+            fans the per-agent --grep (WARDEN-498) across EVERY active project
+            agent from one box, grouped by agent (name · project · ↑unpushed), so
+            one query finds where a change landed across the fleet. Root-header
+            placement (alongside the filter/sort controls) per the ticket's
+            placement note; the popover owns its own input + debounce + fan-out. */}
+        <FleetCommitSearch chats={chats} onOpenChat={onOpenChat} />
         <Badge variant="secondary" className="text-xs @max-[18rem]:hidden">{filteredPanes.length}</Badge>
         <span className="@max-[20rem]:hidden"><UpdatedAgo at={lastRefreshAt} timestampFormat={timestampFormat} /></span>
         <button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={onRefresh} disabled={loading} title="refresh">

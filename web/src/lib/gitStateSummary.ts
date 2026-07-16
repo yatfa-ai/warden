@@ -253,3 +253,136 @@ export function detectProjectFileCollisions(
 
   return { perProject, total };
 }
+
+// ---- Fleet-wide commit search aggregation (WARDEN-534) ----------------------
+//
+// The cross-agent HISTORY layer — the fleet-wide counterpart to the per-agent
+// commit-message grep shipped in WARDEN-498. Where summarizeProjectGitState +
+// detectProjectFileCollisions aggregate STATUS and COLLISIONS across the fleet,
+// this aggregates matched COMMITS: it turns N per-agent grep results into one
+// grouped-by-agent view (each group carrying the agent key + project, each row
+// carrying whether the commit is ↑unpushed) so a single sidebar-level query
+// finds WHERE a change landed across the fleet instead of N manual per-agent
+// greps.
+//
+// Pure (no React import, no fetch) so it is unit-testable directly via node,
+// mirroring summarizeProjectGitState / diff.ts. The fan-out (the actual fetches)
+// lives in the React component; this resolves the searchable population, then
+// joins + groups + counts. Ordering follows the same convention as the rest of
+// this module: outcomes are processed in the caller's iteration order
+// (= chats order), so the returned groups are deterministic and tests assert
+// deep equality.
+
+// Minimal slice of Chat the searchable-population gate reads. Defined locally
+// (like GitStateChat) so the helper stays decoupled and testable with plain
+// objects rather than the React-layer Chat type.
+export interface FleetSearchChat {
+  id: string;
+  key?: string;        // resolved first: searchable agents are keyed by key || id
+  project?: string;
+  active?: boolean | null;  // null = undiscovered; only active chats are searchable
+}
+
+// One searchable agent: the resolved identity (key || id) + its project. The
+// fleet fan-out fires a /api/git-log?grep= per one of these.
+export interface FleetSearchAgent {
+  key: string;
+  project: string;
+}
+
+/**
+ * Resolve the searchable fleet: active chats WITH a project (the same population
+ * summarizeProjectGitState aggregates over), keyed by `key || id`, deduped by key
+ * so the same repo is never grepped twice. Non-active / project-less chats are
+ * skipped — they are not represented by the fleet UI and grepping them would just
+ * produce N error rows (the WARDEN-89 population gate the ticket calls out).
+ * Emitted in chats iteration order so the downstream groups stay deterministic.
+ */
+export function fleetCommitSearchEligible(chats: FleetSearchChat[]): FleetSearchAgent[] {
+  const out: FleetSearchAgent[] = [];
+  const seen = new Set<string>();
+  for (const c of chats) {
+    if (!c.active || !c.project) continue;
+    const key = c.key || c.id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ key, project: c.project });
+  }
+  return out;
+}
+
+// Minimal slice of a /api/git-log commit row (the shape GIT_LOG_PRETTY parses to:
+// { hash, subject, author, date, epoch }). Defined locally so this module stays
+// decoupled from the React-layer GitCommit type and is testable with plain
+// objects — the same decoupling GitStateChat / GitStateStatus rely on.
+export interface FleetCommitLike {
+  hash: string;
+  subject: string;
+  author?: string;
+  date?: string;
+  epoch?: number;
+}
+
+// One agent's fan-out outcome. `ok: false` = that agent's fetch failed (host
+// unreachable / non-ok HTTP / network) — counted as an error but never dropped
+// silently, and never blanking the other agents' results (the Promise.allSettled
+// contract). `ok: true` carries the agent's grep matches (recent / HEAD-reachable)
+// plus the SET of hashes its outgoing (range=outgoing, @{u}..HEAD) grep matched —
+// the join key for ↑unpushed.
+export type FleetCommitOutcome =
+  | { ok: true; key: string; project: string; matches: FleetCommitLike[]; outgoingHashes: Set<string> }
+  | { ok: false; key: string; project: string };
+
+// One matched commit, marked with whether it is still ↑unpushed (local-only —
+// HEAD has it but @{u} doesn't).
+export type FleetCommitHit = FleetCommitLike & { unpushed: boolean };
+
+// One agent's matched commits (the rows under its group header). key + project
+// ride along so the React layer can join key → displayName / project without a
+// second lookup, mirroring how ProjectGitAgent carries key for the chip popovers.
+export interface FleetCommitGroup {
+  key: string;
+  project: string;
+  commits: FleetCommitHit[];
+}
+
+export interface FleetCommitSearch {
+  // Matched agents in chats iteration order (empties dropped). Each group's
+  // commits stay in the order /api/git-log returned them (newest first).
+  groups: FleetCommitGroup[];
+  // # of agents whose fetch failed — surfaced as a "(N unreachable)" note so a
+  // partial failure is honest, never a silent false-empty (WARDEN-89).
+  errorCount: number;
+}
+
+/**
+ * Turn N per-agent grep outcomes into the grouped-by-agent fleet view. Drops
+ * `ok` agents with no matches (no group for a barren repo); counts `ok: false`
+ * agents into `errorCount` without dropping the successful groups; and marks each
+ * hit ↑unpushed when its hash also appears in that agent's outgoing set — the
+ * precise per-commit join (a match present in BOTH the recent grep and the
+ * outgoing @{u}..HEAD grep is a commit HEAD has that @{u} doesn't = unpushed),
+ * preferred over the coarse aheadCount>0 signal because it works for agents whose
+ * git status isn't cached (every agent in the fleet, not just open panes).
+ *
+ * Outcomes are processed in caller (chats) order, so the returned groups are
+ * deterministic and tests assert deep equality — the convention the rest of this
+ * module follows.
+ */
+export function buildFleetCommitGroups(outcomes: FleetCommitOutcome[]): FleetCommitSearch {
+  const groups: FleetCommitGroup[] = [];
+  let errorCount = 0;
+  for (const o of outcomes) {
+    if (!o.ok) {
+      errorCount += 1;
+      continue;
+    }
+    if (o.matches.length === 0) continue;  // drop empties — no group for a barren repo
+    groups.push({
+      key: o.key,
+      project: o.project,
+      commits: o.matches.map((m) => ({ ...m, unpushed: o.outgoingHashes.has(m.hash) })),
+    });
+  }
+  return { groups, errorCount };
+}
