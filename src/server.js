@@ -546,6 +546,10 @@ app.get('/api/config', (_req, res) => res.json({
   // instead of letting the toggle look broken.
   companionTransportEnabled: cfg.companionTransportEnabled,
   companionTransportOverridden: companionEnvOverridden,
+  // Telemetry receiver endpoint (WARDEN-461). Surfaced so Settings can edit it;
+  // empty by default (unconfigured → transport sends nothing). This is a plain
+  // string URL — no secret, no masking needed.
+  telemetryEndpoint: cfg.telemetryEndpoint ?? '',
   confirmDestructiveActions: cfg.confirmDestructiveActions,
   notifyChatOps: cfg.notifyChatOps,
   notifyErrors: cfg.notifyErrors,
@@ -571,6 +575,7 @@ app.put('/api/config', (req, res) => {
           tokenBudgetEnabled, tokenBudgetThresholdTokens,
           tokenBudgetWindowHours, tokenBudgetPerSessionThresholdTokens,
           companionTransportEnabled,
+          telemetryEndpoint,
           confirmDestructiveActions,
           notifyChatOps, notifyErrors, notifySuccess, notifyObserver,
           showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges,
@@ -653,6 +658,10 @@ app.put('/api/config', (req, res) => {
   // Companion transport toggle (WARDEN-439). Boolean master switch; everything
   // else (the remote-routing decision) is read from the env-var gate it drives.
   if (typeof companionTransportEnabled === 'boolean') cfg.companionTransportEnabled = companionTransportEnabled;
+  // Telemetry receiver endpoint (WARDEN-461). Type-guarded string only — a
+  // malformed body can't corrupt the pref. An empty string is a valid value
+  // (clears the endpoint → transport sends nothing), so accept any string.
+  if (typeof telemetryEndpoint === 'string') cfg.telemetryEndpoint = telemetryEndpoint;
   // Safety preference: confirm before destructive actions (force-kill, kill chat)
   if (typeof confirmDestructiveActions === 'boolean') cfg.confirmDestructiveActions = confirmDestructiveActions;
   // Notification preferences (toast categories). Only accept booleans so a
