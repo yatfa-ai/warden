@@ -258,6 +258,38 @@ test('a real source-built base-tier error event flows through redact → validat
 });
 
 // ==========================================================================
+// Safety net — no redactor wired ⇒ NOTHING is sent (defaultRedact guard)
+// ==========================================================================
+// defaultRedact is the pipeline's fallback when no slice-2 redactor is injected.
+// It upholds "no un-redacted payload reaches transport, by construction" against
+// the one slip the deferred live-wiring of main.cjs could make: forgetting to
+// wire redact. It returns null for any structured payload → the default validator
+// (validateBaseEvent) rejects it → the event is dropped pre-send. This test pins
+// that guard so a future "redact is always injected, just `return payload`"
+// cleanup cannot pass the suite while silently sending un-redacted payloads.
+test('no redactor wired ⇒ nothing is sent (defaultRedact safety net holds)', () => {
+  // Consent is ON (base) and a real transport is wired; ONLY redact is absent, so
+  // the pipeline falls back to defaultRedact. The recorded event is schema-valid
+  // AND carries a credential — so it WOULD reach transport if defaultRedact passed
+  // it through. The only thing holding it back is defaultRedact returning null.
+  const send = fakeSend();
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), send });
+  pipeline.record(validEventWithCredential());
+  assert.equal(send.calls.length, 0, 'with no redactor wired, no payload reaches transport');
+});
+
+// Positive control for the guard above: the SAME event, with redact absent, is
+// schema-valid, so the only reason it is not sent is defaultRedact (not an
+// adjacent path like consent or validate). Proven by injecting the real redact
+// and watching the identical event flow through to transport.
+test('positive control: the same event DOES send once the real redact is wired', () => {
+  const send = fakeSend();
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  pipeline.record(validEventWithCredential());
+  assert.equal(send.calls.length, 1, 'with redact wired the schema-valid event flows');
+});
+
+// ==========================================================================
 // Schema-invalid events are dropped PRE-SEND (never sent)
 // ==========================================================================
 
