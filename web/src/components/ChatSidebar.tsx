@@ -81,6 +81,13 @@ interface Props {
   // Timestamp format pref (WARDEN-213): routes every sidebar time display through
   // the shared formatTimestamp helper. Pure client-side localStorage pref.
   timestampFormat: TimestampFormat;
+  // Rendered ⇄ Source view mode for markdown (WARDEN-480): App owns this as a
+  // persisted pref so the choice survives across opens/reloads. Forwarded straight
+  // into the per-file FileViewer dialog below — same controlled-prop contract the
+  // PaneGrid FileViewer instance uses. Read-only value here; the change handler
+  // writes back up to App.
+  fileViewerViewMode: 'rendered' | 'source';
+  onFileViewerViewModeChange: (mode: 'rendered' | 'source') => void;
   // Saved instruction snippets (WARDEN-323): threaded straight through to the
   // BroadcastDialog as an insert-only picker. Pure client-side localStorage pref;
   // owned by App (persisted by its saveUi effect), so this is a read-only prop
@@ -107,7 +114,7 @@ interface Props {
 
 const LABEL: Record<string, string> = { '(local)': 'this machine' };
 
-export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, snippets, watchedChats, onToggleWatch, agentFilter, agentSort, onFilterChange, onSortChange }: Props) {
+export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, snippets, watchedChats, onToggleWatch, agentFilter, agentSort, onFilterChange, onSortChange }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [offlineExpanded, setOfflineExpanded] = useState(false);
   // WARDEN-372: "show more" affordance for the per-workspace recently-closed list
@@ -1135,6 +1142,8 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
         filePath={fileTarget?.path ?? ''}
         open={!!fileTarget}
         timestampFormat={timestampFormat}
+        viewMode={fileViewerViewMode}
+        onViewModeChange={onFileViewerViewModeChange}
         onOpenChange={(o) => { if (!o) setFileTarget(null); }}
       />
       <BroadcastDialog
