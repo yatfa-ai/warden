@@ -26,7 +26,17 @@ import {
 } from '@/components/ui/dialog';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 import { Loader2Icon, FileIcon, AlertCircleIcon, GitBranch } from 'lucide-react';
+import { copyText } from '@/lib/clipboard';
+import { basename } from '@/lib/chatDisplay';
+import { toast } from 'sonner';
 
 interface ConflictViewProps {
   chatId: string;
@@ -92,59 +102,102 @@ export function ConflictView({ chatId, filePath, open, onOpenChange }: ConflictV
   const bothEmpty = !loading && !error && ours === null && theirs === null;
   const ready = !loading && !error && !bothEmpty && (ours !== null || theirs !== null);
 
+  // Copy text to the clipboard through the shared Electron-safe helper, surfacing
+  // the boolean result via toast — never bare navigator.clipboard, which rejects
+  // silently in Electron (WARDEN-285). Matches FileViewer / DiffViewer.
+  const handleCopy = async (text: string) => {
+    const ok = await copyText(text);
+    if (ok) toast.success('Copied');
+    else toast.error('Copy failed');
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-5xl max-h-[85vh] flex flex-col">
-        <DialogHeader className="shrink-0">
-          <DialogTitle className="flex items-center gap-2">
-            <FileIcon className="w-4 h-4 shrink-0" />
-            <span className="truncate" title={filePath}>{filePath || 'conflict'}</span>
-            <span className="shrink-0 rounded bg-red-500/15 px-1.5 py-px text-[10px] font-medium text-red-400" title="merge conflict — ours vs theirs (read-only)">
-              conflict
-            </span>
-          </DialogTitle>
-          <DialogDescription>
-            The two conflicting sides from git's stage blobs — <strong>ours</strong> (HEAD) and <strong>theirs</strong> (MERGE_HEAD). Read-only; resolving is out of scope.
-          </DialogDescription>
-        </DialogHeader>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <DialogContent className="sm:max-w-5xl max-h-[85vh] flex flex-col">
+            <DialogHeader className="shrink-0">
+              <DialogTitle className="flex items-center gap-2">
+                <FileIcon className="w-4 h-4 shrink-0" />
+                <span className="truncate" title={filePath}>{filePath || 'conflict'}</span>
+                <span className="shrink-0 rounded bg-red-500/15 px-1.5 py-px text-[10px] font-medium text-red-400" title="merge conflict — ours vs theirs (read-only)">
+                  conflict
+                </span>
+              </DialogTitle>
+              <DialogDescription>
+                The two conflicting sides from git's stage blobs — <strong>ours</strong> (HEAD) and <strong>theirs</strong> (MERGE_HEAD). Read-only; resolving is out of scope.
+              </DialogDescription>
+            </DialogHeader>
 
-        <ScrollArea className="flex-1 min-h-0 rounded-md border bg-muted/50">
-          <div className="p-3">
-            {loading && (
-              <div className="flex items-center justify-center gap-2 py-12 text-muted-foreground">
-                <Loader2Icon className="w-5 h-5 animate-spin" />
-                <span>Loading conflict…</span>
+            <ScrollArea className="flex-1 min-h-0 rounded-md border bg-muted/50">
+              <div className="p-3">
+                {loading && (
+                  <div className="flex items-center justify-center gap-2 py-12 text-muted-foreground">
+                    <Loader2Icon className="w-5 h-5 animate-spin" />
+                    <span>Loading conflict…</span>
+                  </div>
+                )}
+
+                {error && (
+                  <div className="flex items-center gap-2 py-12 text-red-400">
+                    <AlertCircleIcon className="w-5 h-5 shrink-0" />
+                    <span className="break-words">{error}</span>
+                  </div>
+                )}
+
+                {!loading && !error && bothEmpty && (
+                  <div className="flex items-center justify-center py-12 text-muted-foreground">
+                    No conflict content for this file.
+                  </div>
+                )}
+
+                {ready && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <ConflictPane label="ours" sublabel="HEAD" content={ours} tone="cyan" />
+                    <ConflictPane label="theirs" sublabel="MERGE_HEAD" content={theirs} tone="amber" />
+                  </div>
+                )}
               </div>
-            )}
+            </ScrollArea>
 
-            {error && (
-              <div className="flex items-center gap-2 py-12 text-red-400">
-                <AlertCircleIcon className="w-5 h-5 shrink-0" />
-                <span className="break-words">{error}</span>
-              </div>
-            )}
-
-            {!loading && !error && bothEmpty && (
-              <div className="flex items-center justify-center py-12 text-muted-foreground">
-                No conflict content for this file.
-              </div>
-            )}
-
-            {ready && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <ConflictPane label="ours" sublabel="HEAD" content={ours} tone="cyan" />
-                <ConflictPane label="theirs" sublabel="MERGE_HEAD" content={theirs} tone="amber" />
-              </div>
-            )}
-          </div>
-        </ScrollArea>
-
-        <div className="shrink-0 pt-2">
-          <DialogClose asChild>
-            <Button variant="outline" className="w-full sm:w-auto">Close</Button>
-          </DialogClose>
-        </div>
-      </DialogContent>
+            <div className="shrink-0 pt-2">
+              <DialogClose asChild>
+                <Button variant="outline" className="w-full sm:w-auto">Close</Button>
+              </DialogClose>
+            </div>
+          </DialogContent>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          {/* Copies the FULL path regardless of the header's truncation
+              (ConflictView.tsx span.truncate at the title) — the most natural
+              "copy path" target. Always enabled; a conflict always has a path. */}
+          <ContextMenuItem onSelect={() => handleCopy(filePath)}>Copy file path</ContextMenuItem>
+          {/* Mirrors the "Copy filename" vocabulary of the DiffViewer / FileViewer siblings. */}
+          <ContextMenuItem onSelect={() => handleCopy(basename(filePath))}>Copy filename</ContextMenuItem>
+          {/* Copies the `ours` (HEAD / stage blob `:2:`) content. Disabled when that
+              side is null (modify/delete or add/add where one side lacks a version) —
+              mirroring the visible "absent" pane, so copy never silently copies
+              nothing. Faithful mirror of DiffViewer's `diff === null` guard. */}
+          <ContextMenuItem
+            disabled={ours === null}
+            onSelect={() => { if (ours !== null) handleCopy(ours); }}
+          >
+            Copy "ours"
+          </ContextMenuItem>
+          {/* Copies the `theirs` (MERGE_HEAD / stage blob `:3:`) content. Same null
+              guard as ours. */}
+          <ContextMenuItem
+            disabled={theirs === null}
+            onSelect={() => { if (theirs !== null) handleCopy(theirs); }}
+          >
+            Copy "theirs"
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          {/* Closing a read-only viewer is non-destructive, so default variant
+              (not destructive). Same close affordance as the bottom Close button. */}
+          <ContextMenuItem onSelect={() => onOpenChange(false)}>Close</ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
     </Dialog>
   );
 }
