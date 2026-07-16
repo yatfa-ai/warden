@@ -93,6 +93,11 @@ interface ConfigData {
   showStatusIndicators?: boolean;
   showProjectBadges?: boolean;
   hideOfflineHosts?: boolean;
+  // Telemetry consent (WARDEN-457). Both off by default; persisted server-side
+  // via /api/config (NOT client localStorage) so consent survives a restart.
+  // Extended is gated behind base: meaningful only when telemetryBaseEnabled.
+  telemetryBaseEnabled: boolean;
+  telemetryExtendedEnabled: boolean;
 }
 
 interface Props {
@@ -305,6 +310,7 @@ const SETTINGS_SECTIONS = [
   { id: 'attention', label: 'Attention thresholds' },
   { id: 'tokenbudget', label: 'Token budget' },
   { id: 'performance', label: 'Performance' },
+  { id: 'telemetry', label: 'Telemetry' },
   { id: 'display', label: 'Display' },
   { id: 'appearance', label: 'Appearance' },
   { id: 'newchats', label: 'New Chats' },
@@ -532,6 +538,9 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
     showStatusIndicators: true,
     showProjectBadges: false,
     hideOfflineHosts: false,
+    // Telemetry consent (WARDEN-457) — off by default.
+    telemetryBaseEnabled: false,
+    telemetryExtendedEnabled: false,
   });
   const [availableHosts, setAvailableHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -621,6 +630,10 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
           showStatusIndicators: configData.showStatusIndicators ?? true,
           showProjectBadges: configData.showProjectBadges ?? false,
           hideOfflineHosts: configData.hideOfflineHosts ?? false,
+          // Telemetry consent (WARDEN-457) — defensive ?? false so an older
+          // backend that does not return the fields stays safely OFF.
+          telemetryBaseEnabled: configData.telemetryBaseEnabled ?? false,
+          telemetryExtendedEnabled: configData.telemetryExtendedEnabled ?? false,
         });
         setAvailableHosts(hostsData.hosts || []);
         setObserverAuthTokenSet(Boolean(configData.llm?.authTokenSet));
@@ -1390,6 +1403,70 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                     Unset the variable and restart Warden to control it here.
                   </p>
                 )}
+              </SettingsSection>
+
+              {/* Telemetry — optional, OFF by default, two consent tiers (WARDEN-457).
+                  No first-run prompt: consent lives here in Settings, both tiers
+                  default OFF, and nothing is sent in this build. Extended is
+                  gated behind base in the UI (disabled until base on) AND clamped
+                  again by the server on save. */}
+              <SettingsSection title="Telemetry" className={cn(activeSection !== 'telemetry' && 'hidden')}>
+                <p className="text-xs text-muted-foreground">
+                  Optional, off by default. Help improve warden by sending
+                  anonymous diagnostics. Nothing is sent until you turn a tier on,
+                  and the destination is a self-hosted receiver — no third-party
+                  analytics service. You can revoke either tier at any time.
+                </p>
+
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      id="telemetryBaseEnabled"
+                      checked={config.telemetryBaseEnabled}
+                      onCheckedChange={(v) =>
+                        setConfig({
+                          ...config,
+                          telemetryBaseEnabled: v,
+                          // Turning base off also revokes extended
+                          // (extended-requires-base). The server re-clamps on
+                          // save; this keeps the toggle honest in the meantime.
+                          telemetryExtendedEnabled: v && config.telemetryExtendedEnabled,
+                        })
+                      }
+                    />
+                    <Label htmlFor="telemetryBaseEnabled" className="cursor-pointer">
+                      Anonymous errors, crashes &amp; freezes
+                    </Label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Base tier. Anonymous error, crash, and event-loop-freeze
+                    reports — no chat content, no file paths, no hostnames, no
+                    credentials.
+                  </p>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      id="telemetryExtendedEnabled"
+                      checked={config.telemetryExtendedEnabled}
+                      disabled={!config.telemetryBaseEnabled}
+                      onCheckedChange={(v) =>
+                        // Disabled while base is off, so a toggle only arrives
+                        // with base on. Guard anyway: extended requires base.
+                        setConfig({ ...config, telemetryExtendedEnabled: v && config.telemetryBaseEnabled })
+                      }
+                    />
+                    <Label htmlFor="telemetryExtendedEnabled" className="cursor-pointer">
+                      Also include chat &amp; session names
+                    </Label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Extended tier (requires the base tier). Additionally includes
+                    chat names and Claude session names to help diagnose reports.
+                    Chat <em>content</em> is never sent — names only.
+                  </p>
+                </div>
               </SettingsSection>
 
               {/* Display */}

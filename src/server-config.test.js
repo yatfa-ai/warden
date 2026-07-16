@@ -235,3 +235,104 @@ describe('/api/config companion transport toggle (WARDEN-439)', () => {
     assert.strictEqual(after.companionTransportEnabled, true, 'left unchanged, not overwritten by a string');
   });
 });
+
+describe('/api/config telemetry consent — off by default, extended gated behind base (WARDEN-457)', () => {
+  // Default pair is off/off. The server-side extended-requires-base clamp is the
+  // load-bearing guard: a hand-crafted PUT enabling extended without base must be
+  // refused, so identifying data (names) can never leak just because a client
+  // asked for it. Mirrors the WARDEN-374 threshold-clamp pattern above.
+
+  it('GET exposes both tiers defaulting to false (off by default)', async () => {
+    // Re-PUT the safe default first so the block is self-contained.
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ telemetryBaseEnabled: false, telemetryExtendedEnabled: false }),
+    });
+    const body = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.ok('telemetryBaseEnabled' in body, 'base field present in GET');
+    assert.ok('telemetryExtendedEnabled' in body, 'extended field present in GET');
+    assert.strictEqual(body.telemetryBaseEnabled, false, 'base OFF by default');
+    assert.strictEqual(body.telemetryExtendedEnabled, false, 'extended OFF by default');
+  });
+
+  it('PUT telemetryBaseEnabled: true round-trips through GET and persists to disk', async () => {
+    const res = await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ telemetryBaseEnabled: true }),
+    });
+    assert.strictEqual(res.status, 200);
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.telemetryBaseEnabled, true);
+    assert.strictEqual(after.telemetryExtendedEnabled, false, 'extended stays off — not auto-enabled with base');
+    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    assert.strictEqual(onDisk.telemetryBaseEnabled, true, 'persists to config.json (survives restart)');
+  });
+
+  it('PUT telemetryExtendedEnabled: true while base OFF is clamped to false (server guard)', async () => {
+    // The core invariant: extended CANNOT be enabled without base, enforced
+    // server-side (not just the UI). A hand-crafted PUT must not bypass it.
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ telemetryBaseEnabled: false }),
+    });
+    const res = await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ telemetryExtendedEnabled: true }),
+    });
+    assert.strictEqual(res.status, 200);
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.telemetryBaseEnabled, false, 'base still off');
+    assert.strictEqual(after.telemetryExtendedEnabled, false, 'extended clamped to false without base');
+    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    assert.strictEqual(onDisk.telemetryExtendedEnabled, false, 'clamp persists to disk');
+  });
+
+  it('PUT telemetryExtendedEnabled: true WITH base ON is accepted', async () => {
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ telemetryBaseEnabled: true, telemetryExtendedEnabled: true }),
+    });
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.telemetryBaseEnabled, true);
+    assert.strictEqual(after.telemetryExtendedEnabled, true, 'extended accepted when base is on');
+  });
+
+  it('turning base OFF latches extended OFF (revoking base revokes the subordinate tier)', async () => {
+    // Seed both on, then revoke base with extended left at its on value on disk.
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ telemetryBaseEnabled: true, telemetryExtendedEnabled: true }),
+    });
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      // Only base in the body — the unconditional clamp must still force extended off.
+      body: JSON.stringify({ telemetryBaseEnabled: false }),
+    });
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.telemetryBaseEnabled, false);
+    assert.strictEqual(after.telemetryExtendedEnabled, false, 'extended latched off when base revoked');
+  });
+
+  it('PUT with non-booleans is ignored by the type guard (no mutation)', async () => {
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ telemetryBaseEnabled: true }),
+    });
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ telemetryBaseEnabled: 'true', telemetryExtendedEnabled: 1 }),
+    });
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.telemetryBaseEnabled, true, 'left unchanged, not overwritten by a string');
+    assert.strictEqual(after.telemetryExtendedEnabled, false, 'left unchanged, not overwritten by a number');
+  });
+});

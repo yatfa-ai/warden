@@ -557,6 +557,10 @@ app.get('/api/config', (_req, res) => res.json({
   showStatusIndicators: cfg.showStatusIndicators,
   showProjectBadges: cfg.showProjectBadges,
   hideOfflineHosts: cfg.hideOfflineHosts,
+  // Telemetry consent (WARDEN-457). Both off by default; persisted here (not
+  // client localStorage) so consent survives a restart. See config.js DEFAULTS.
+  telemetryBaseEnabled: cfg.telemetryBaseEnabled,
+  telemetryExtendedEnabled: cfg.telemetryExtendedEnabled,
 }));
 
 // PUT /api/config — update configuration and persist
@@ -570,7 +574,7 @@ app.put('/api/config', (req, res) => {
           confirmDestructiveActions,
           notifyChatOps, notifyErrors, notifySuccess, notifyObserver,
           showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges,
-          hideOfflineHosts, llm } = req.body;
+          hideOfflineHosts, telemetryBaseEnabled, telemetryExtendedEnabled, llm } = req.body;
   if (hosts && Array.isArray(hosts)) cfg.hosts = hosts;
   if (typeof pollIntervalMs === 'number') cfg.pollIntervalMs = pollIntervalMs;
   if (typeof tmuxSession === 'string') cfg.tmuxSession = tmuxSession;
@@ -663,6 +667,17 @@ app.put('/api/config', (req, res) => {
   if (typeof showStatusIndicators === 'boolean') cfg.showStatusIndicators = showStatusIndicators;
   if (typeof showProjectBadges === 'boolean') cfg.showProjectBadges = showProjectBadges;
   if (typeof hideOfflineHosts === 'boolean') cfg.hideOfflineHosts = hideOfflineHosts;
+  // Telemetry consent (WARDEN-457). Both are booleans. The SERVER enforces
+  // extended-requires-base (not just the UI) so a hand-crafted PUT cannot enable
+  // extended without base. The unconditional clamp at the end — mirroring the
+  // health-threshold ordering guard above — guarantees the persisted pair is
+  // always well-formed regardless of which fields were in the body: revoking
+  // base latches extended off, and a corrupt disk state (extended on, base off)
+  // self-heals on the next PUT. Consent persists to config.json, so revoking
+  // base revokes the subordinate tier on disk with it.
+  if (typeof telemetryBaseEnabled === 'boolean') cfg.telemetryBaseEnabled = telemetryBaseEnabled;
+  if (typeof telemetryExtendedEnabled === 'boolean') cfg.telemetryExtendedEnabled = telemetryExtendedEnabled;
+  cfg.telemetryExtendedEnabled = cfg.telemetryExtendedEnabled && cfg.telemetryBaseEnabled;
   save(cfg); // persist to ~/.yatfa-warden/config.json
   // WARDEN-439: apply the companion toggle LIVE so a flip takes effect on the
   // next op, not after a restart. No-op when the env var is an operator override
