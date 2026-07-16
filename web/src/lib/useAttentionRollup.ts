@@ -43,6 +43,7 @@ import {
 } from '@/lib/desktopAlerts';
 import { diffWatchAlerts, indexByWatchKey, applyWatchCooldown, type WatchLastFiredMap, type WatchReason } from '@/lib/chatWatch';
 import { recordWatchMiss, shouldRecordMiss } from '@/lib/watchCatchup';
+import { activeSnoozedKeys, type SnoozeMap } from '@/lib/snooze';
 import type { HealthData, ActivityStats, AgentStateRow, AgentStatesData } from '@/lib/types';
 
 // Recent-error / recent-directive window. ActivityStats counts raw events in the
@@ -61,6 +62,10 @@ const AGENT_STATE_POLL_MS = 30_000;
 // A stable empty array default for `mutedAlertKeys` so the memoized Set and the
 // effect dep list stay reference-stable when no caller passes a mute set.
 const EMPTY_MUTED_KEYS: readonly string[] = [];
+// WARDEN-551: a stable empty object default for `snoozedAlertKeys` so the
+// suppression effect's dep list stays reference-stable when no caller passes a
+// snooze map (mirrors EMPTY_MUTED_KEYS).
+const EMPTY_SNOOZED_KEYS: SnoozeMap = {};
 
 export interface AttentionRollupState {
   rollup: AttentionRollup;
@@ -198,6 +203,12 @@ export function useAttentionRollup(
   enabledStates?: AttentionRollupOptions['enabledStates'],
   severityPrefs: AttentionSeverityPrefs = ATTENTION_SEVERITY_DEFAULTS,
   mutedAlertKeys: readonly string[] = EMPTY_MUTED_KEYS,
+  // WARDEN-551: chat key → expiry (ms). A snoozed agent is suppressed on the
+  // desktop-alert channel EXACTLY like a permanent mute (unioned into mutedSet
+  // below) but only until its expiry, after which it auto-rearms. Suppression is
+  // computed inside the gate effect reading Date.now() FRESH, so an expired snooze
+  // drops out on the very next cadence tick — alerts resume with no manual un-mute.
+  snoozedAlertKeys: SnoozeMap = EMPTY_SNOOZED_KEYS,
   // WARDEN-378: pane keys the human opted into per-chat "watch" — unioned into the
   // ?panes= poll so a watched chat is classified even when its pane is NOT open, and
   // diffed for a targeted ping when it newly needs the human.
@@ -517,7 +528,19 @@ export function useAttentionRollup(
   // that raises total → fires.
   useEffect(() => {
     if (loading || !agentStatesLoaded) return;
-    const routable = applySeverityPrefs(rollup, severityPrefs, mutedSet);
+    // WARDEN-551: union the ACTIVE snoozes into the mute set, reading Date.now()
+    // FRESH here (not from a memoized value) so an expired snooze drops out on
+    // the very next cadence tick — the auto-rearm. The merged set is what
+    // applySeverityPrefs suppresses, so a snoozed agent's critical/warning
+    // increase fires no OS notification, identically to a permanent mute. When
+    // the snooze later expires, the key re-enters the routable set → a total
+    // increase vs the prior (suppressed) baseline → shouldFireAlert fires again
+    // IF the agent still needs attention, exactly the "alerts resume" value.
+    const suppressed = new Set(mutedSet);
+    for (const snoozedKey of activeSnoozedKeys(snoozedAlertKeys, Date.now())) {
+      suppressed.add(snoozedKey);
+    }
+    const routable = applySeverityPrefs(rollup, severityPrefs, suppressed);
     if (!primedRef.current) {
       primedRef.current = true;
       prevRoutableRef.current = routable;
@@ -535,7 +558,7 @@ export function useAttentionRollup(
         fireAttentionNotification(routable);
       }
     }
-  }, [rollup, attentionDesktopAlerts, loading, agentStatesLoaded, severityPrefs, mutedSet]);
+  }, [rollup, attentionDesktopAlerts, loading, agentStatesLoaded, severityPrefs, mutedSet, snoozedAlertKeys]);
 
   return { rollup, loading, watchedStates };
 }

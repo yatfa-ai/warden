@@ -412,6 +412,18 @@ export interface UiState {
   // identity, so mute applies to the health buckets only. Pure client-side pref;
   // never sent to the backend / /api/config.
   mutedAlertKeys?: string[];
+  // WARDEN-551 — time-boxed snooze: chat key → expiry (ms-since-epoch). A snoozed
+  // agent's desktop alerts are suppressed EXACTLY like a permanent mute, but only
+  // until its expiry — after which suppression auto-rearms (the key drops from
+  // the active set on the next attention cadence tick, no manual un-mute). This
+  // is the time-boxed twin of mutedAlertKeys above: deliberate temporary
+  // suppression that restores itself, closing the permanent-mute "forget → agent
+  // goes silently stale" gap. Mutually exclusive with mutedAlertKeys per key
+  // (App's setAlertMute clears one when setting the other), so an agent is either
+  // permanent-muted, snoozed, or un-muted — never both. Default {} = today's exact
+  // behavior (no snoozes → nothing suppressed beyond the existing mute set).
+  // Pure client-side pref; never sent to the backend / /api/config.
+  snoozedAlertKeys?: Record<string, number>;
   // Per-chat "watch" opt-in (WARDEN-378): pane keys the human marked "watch this
   // chat" for a targeted, reason-specific desktop ping when that chat newly needs
   // them. Global (not per-workspace) — a watched chat stays watched across workspace
@@ -815,6 +827,32 @@ function parseMutedKeys(raw: unknown): string[] {
   return out;
 }
 
+// Sanitize a raw snoozedAlertKeys value (chat key → expiry ms) into a valid
+// Record<string, number> (WARDEN-551 — mirrors parseMutedKeys's drop-bad-entries
+// discipline, the WARDEN-89 defensive norm). Each entry requires a non-empty
+// trimmed-string KEY and a finite, strictly-POSITIVE number VALUE; anything else
+// is dropped, so one corrupt entry can never blank the snooze set. Entries whose
+// expiry is already in the past (a positive number < now) are NOT dropped here —
+// they are harmless (activeSnoozedKeys excludes them and App's mount prune clears
+// them on the next launch), and dropping them at load would require reading the
+// clock inside the sanitizer, which this pure loader deliberately avoids.
+function parseSnoozedKeys(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    if (raw !== undefined && raw !== null) {
+      console.warn('[loadUi] snoozedAlertKeys is not an object; ignoring:', raw);
+    }
+    return {};
+  }
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const key = typeof k === 'string' ? k.trim() : '';
+    if (!key) continue; // empty/whitespace key → drop
+    if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) continue; // non-number / non-finite / non-positive → drop
+    out[key] = v;
+  }
+  return out;
+}
+
 // Sanitize a raw workspaces value into a valid, id-unique WorkspacePaneSet[].
 // Defensive: never throws on malformed input (WARDEN-89) — drops/replaces bad
 // entries instead, so one corrupt workspace can never blank the pane grid.
@@ -899,6 +937,8 @@ const DEFAULT_UI: UiState = {
   attentionStates: { stuck: true, erroring: true, waiting: true, blocked: true },
   alertCritical: true, alertWarning: true, alertDirective: true, alertError: true,
   mutedAlertKeys: [],
+  // WARDEN-551: no snoozes by default (empty = today's exact behavior).
+  snoozedAlertKeys: {},
   // WARDEN-378: no chats watched by default (opt-in per chat).
   watchedChats: [],
   terminalScrollback: 10000, terminalFontFamily: '',
@@ -979,6 +1019,10 @@ export function loadUi(): UiState {
         alertError: v.alertError !== false,
         // Sanitized to a de-duplicated string[] of non-empty keys.
         mutedAlertKeys: parseMutedKeys(v.mutedAlertKeys),
+        // WARDEN-551 — sanitized to a key → expiry map with non-number /
+        // non-positive entries dropped. Past-expiry survivors (positive but
+        // < now) are cleared on mount by App's prune effect, not here.
+        snoozedAlertKeys: parseSnoozedKeys(v.snoozedAlertKeys),
         // WARDEN-378: only string entries survive; a corrupt/non-array value
         // degrades to [] (no chats watched) — the conservative default.
         watchedChats: Array.isArray(v.watchedChats)
