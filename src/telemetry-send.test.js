@@ -78,6 +78,25 @@ describe('makePayload — the pure wire-payload seam', () => {
     const blob = JSON.stringify(headers) + body;
     assert.ok(!/sentry|posthog|amplitude|mixpanel|segment/i.test(blob), 'no third-party SaaS host anywhere');
   });
+
+  it('includes an Authorization: Bearer header IFF a non-empty authToken is passed (WARDEN-569)', () => {
+    const token = 'shared-secret-token';
+    const { headers } = makePayload({ schemaVersion: SCHEMA, events: EVENTS, authToken: token });
+    assert.strictEqual(headers['authorization'], `Bearer ${token}`);
+    // The schema handshake headers are untouched alongside the auth header.
+    assert.strictEqual(headers['content-type'], 'application/json');
+    assert.strictEqual(headers['x-telemetry-schema'], SCHEMA);
+  });
+
+  it('OMITS the Authorization header when authToken is empty (works against an open receiver)', () => {
+    const { headers } = makePayload({ schemaVersion: SCHEMA, events: EVENTS, authToken: '' });
+    assert.ok(!('authorization' in headers), 'no auth header for an empty token');
+  });
+
+  it('OMITS the Authorization header when authToken is omitted entirely (backward-compatible)', () => {
+    const { headers } = makePayload({ schemaVersion: SCHEMA, events: EVENTS });
+    assert.ok(!('authorization' in headers), 'no auth header when authToken is not supplied');
+  });
 });
 
 describe('(a) empty endpointUrl → zero fetchImpl calls', () => {
@@ -139,6 +158,42 @@ describe('(c) consent on + endpoint set + valid events → exactly ONE POST with
     assert.strictEqual(r.ok, true);
     assert.strictEqual(r.status, 201);
     assert.strictEqual(fetchImpl.count(), 1);
+  });
+});
+
+describe('(WARDEN-569) authToken threads onto the wire as Authorization: Bearer', () => {
+  it('send() with a non-empty authToken POSTs the Authorization: Bearer header', async () => {
+    const token = 'shared-secret-token';
+    const fetchImpl = fetchSeq([{ ok: true, status: 202 }]);
+    const r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, authToken: token, fetchImpl });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(fetchImpl.calls[0].opts.headers['authorization'], `Bearer ${token}`, 'bearer header on the wire');
+  });
+
+  it('send() with an empty authToken POSTs NO Authorization header (open-receiver compatible)', async () => {
+    const fetchImpl = fetchSeq([{ ok: true, status: 202 }]);
+    await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, authToken: '', fetchImpl });
+    assert.ok(!('authorization' in fetchImpl.calls[0].opts.headers), 'no auth header for an empty token');
+  });
+
+  it('send() with authToken omitted defaults to no Authorization header (backward-compatible)', async () => {
+    const fetchImpl = fetchSeq([{ ok: true, status: 202 }]);
+    await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl });
+    assert.ok(!('authorization' in fetchImpl.calls[0].opts.headers), 'omitting authToken sends no auth header');
+  });
+
+  it('a 401 (auth reject from the receiver) is a non-retryable drop — never loops', async () => {
+    // The receiver's auth gate returns 401; 401 is a 4xx (not 429/5xx), so the
+    // client DROPS the batch immediately on the first attempt — it does not burn
+    // the retry budget looping a misconfigured token. (WARDEN-569 fail-closed.)
+    const fetchImpl = fetchSeq([{ ok: false, status: 401 }, { ok: true, status: 200 }]);
+    const sleep = sleepRec();
+    const r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, authToken: 'wrong', fetchImpl, sleepImpl: sleep.fn });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.dropped, true, '401 drops the batch (fail-closed), never retries');
+    assert.strictEqual(r.attempts, 1, 'dropped on the first attempt — no retry loop');
+    assert.strictEqual(fetchImpl.count(), 1, 'only one fetch; the second response was never consumed');
+    assert.strictEqual(sleep.count(), 0, 'no backoff — 401 is not retried');
   });
 });
 

@@ -136,6 +136,10 @@ describe('telemetry-config IPC forward (WARDEN-524) — server fork → parent',
     assert.strictEqual(msg.base, true, 'base consent forwarded');
     assert.strictEqual(msg.extended, false, 'extended stays off when only base set');
     assert.strictEqual(msg.endpoint, endpoint, 'endpoint forwarded');
+    // Fresh config (no token on disk, no prior PUT) → auth token is empty. This
+    // runs first in the suite, before any token is persisted, so it reliably
+    // pins the open-receiver posture. (WARDEN-569)
+    assert.strictEqual(msg.authToken, '', 'no token configured → empty string forwarded');
   });
 
   it('forwards extended on when base is already on', async () => {
@@ -164,5 +168,16 @@ describe('telemetry-config IPC forward (WARDEN-524) — server fork → parent',
     const msg = await done;
     assert.strictEqual(msg.base, false, 'base off forwarded — capture stops on next signal');
     assert.strictEqual(msg.extended, false);
+  });
+
+  it('forwards the cleartext telemetry auth token to the parent on PUT (WARDEN-569)', async () => {
+    // The main-process transport needs the cleartext token to send it on the wire.
+    // This internal parent↔child IPC channel is the one path it reaches the sender
+    // through (GET /api/config masks it from the renderer; this forward does not).
+    const token = 'ipc-forwarded-bearer-token';
+    const done = nextTelemetryConfig();
+    await putConfig({ telemetryAuthToken: token });
+    const msg = await done;
+    assert.strictEqual(msg.authToken, token, 'cleartext auth token forwarded to the parent');
   });
 });

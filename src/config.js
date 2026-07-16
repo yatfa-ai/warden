@@ -97,6 +97,15 @@ const DEFAULTS = {
   // this URL. Consent is a SEPARATE gate (slice 1) — even with an endpoint set,
   // the transport no-ops unless consent is on.
   telemetryEndpoint: '',
+  // Telemetry receiver shared-secret auth token (WARDEN-569). EMPTY by default =
+  // sends no Authorization header (works against an AUTH_TOKEN-unset receiver).
+  // When set, the transport (telemetry-send.js) sends it as
+  // `Authorization: Bearer <token>` so a receiver that set AUTH_TOKEN accepts the
+  // batch. This is a SECRET: GET /api/config never returns it in cleartext (only a
+  // set + last-4 mask), and PUT only overwrites it on a non-empty value (no-clobber
+  // — mirroring llm.authToken / webhookSecret) so an untouched password field
+  // preserves the stored token.
+  telemetryAuthToken: '',
   // Webhook "push" delivery channel (WARDEN-555). OFF by default: sends nothing
   // until the user configures a URL and enables it. Delivers critical agent
   // alerts to the user's OWN webhook URL (ntfy/Discord/Slack/Telegram/Home

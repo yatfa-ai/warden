@@ -560,6 +560,14 @@ app.get('/api/config', (_req, res) => res.json({
   // empty by default (unconfigured → transport sends nothing). This is a plain
   // string URL — no secret, no masking needed.
   telemetryEndpoint: cfg.telemetryEndpoint ?? '',
+  // Telemetry receiver shared-secret (WARDEN-569). Same write-only secret
+  // treatment as the LLM auth token + webhook secret — NEVER return cleartext;
+  // the UI gets telemetryAuthTokenSet + a tail only, so the password field is
+  // write-only (no cleartext is seeded into it on load). The cleartext stays in
+  // server-side cfg so the transport can read it; it is just never returned to
+  // the renderer.
+  telemetryAuthTokenSet: Boolean(cfg.telemetryAuthToken),
+  telemetryAuthTokenTail: cfg.telemetryAuthToken ? String(cfg.telemetryAuthToken).slice(-4) : null,
   // Webhook push channel (WARDEN-555). Same write-only secret treatment as the
   // LLM auth token (lines above) — NEVER return cleartext; the UI gets
   // webhookSecretSet + a tail only, so the password field is write-only (no
@@ -601,7 +609,7 @@ app.put('/api/config', (req, res) => {
           tokenBudgetEnabled, tokenBudgetThresholdTokens,
           tokenBudgetWindowHours, tokenBudgetPerSessionThresholdTokens,
           companionTransportEnabled,
-          telemetryEndpoint,
+          telemetryEndpoint, telemetryAuthToken,
           webhookUrl, webhookEnabled, webhookSecret,
           webhookAlertAttention, webhookAlertBudget,
           confirmDestructiveActions,
@@ -691,6 +699,16 @@ app.put('/api/config', (req, res) => {
   // malformed body can't corrupt the pref. An empty string is a valid value
   // (clears the endpoint → transport sends nothing), so accept any string.
   if (typeof telemetryEndpoint === 'string') cfg.telemetryEndpoint = telemetryEndpoint;
+  // Telemetry auth token (WARDEN-569). NO-CLOBBER (mirrors llm.authToken /
+  // webhookSecret) — only overwrite the stored secret when a non-empty string
+  // arrives, so an untouched password field survives a save (GET never seeds
+  // cleartext into it). There is intentionally NO "clear the token" path via
+  // empty string here: the UI sends the field only when non-empty, and clearing
+  // the token is done by the receiver unsetting AUTH_TOKEN, not by blanking the
+  // client pref (an empty client token simply sends no Authorization header).
+  if (typeof telemetryAuthToken === 'string' && telemetryAuthToken.length > 0) {
+    cfg.telemetryAuthToken = telemetryAuthToken;
+  }
   // Webhook push channel (WARDEN-555). URL accepts any string (empty clears it
   // → sends nothing); enabled + category toggles are booleans; the secret is
   // NO-CLOBBER (mirrors llm.authToken at lines 608-609) — only overwrite the
@@ -750,6 +768,12 @@ app.put('/api/config', (req, res) => {
       base: cfg.telemetryBaseEnabled === true,
       extended: cfg.telemetryExtendedEnabled === true,
       endpoint: typeof cfg.telemetryEndpoint === 'string' ? cfg.telemetryEndpoint : '',
+      // Forward the cleartext auth token. This is the parent↔child IPC channel
+      // (main process ↔ server child, both in-app on the same host) — NOT the
+      // renderer. The main-process transport needs the cleartext to send it on
+      // the wire; GET /api/config masks it from the renderer, but this internal
+      // forward is the one path the token reaches the sender through. WARDEN-569.
+      authToken: typeof cfg.telemetryAuthToken === 'string' ? cfg.telemetryAuthToken : '',
     });
   }
   // WARDEN-439: apply the companion toggle LIVE so a flip takes effect on the

@@ -732,6 +732,15 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
   const [webhookSecretInput, setWebhookSecretInput] = useState('');
   const [testingWebhook, setTestingWebhook] = useState(false);
 
+  // Telemetry receiver auth token (WARDEN-569) — write-only, identical discipline
+  // to the webhook secret above: GET returns only a set + tail indicator, so the
+  // password input stays empty until the human types a new token; on save it is
+  // sent ONLY when non-empty, and an untouched field is omitted so the backend
+  // no-clobbers the stored token. Sent on the wire as `Authorization: Bearer`.
+  const [telemetryAuthTokenSet, setTelemetryAuthTokenSet] = useState(false);
+  const [telemetryAuthTokenTail, setTelemetryAuthTokenTail] = useState<string | null>(null);
+  const [telemetryAuthTokenInput, setTelemetryAuthTokenInput] = useState('');
+
   // Active section in the master-detail nav. The first section is selected by
   // default; switching shows only that section, so there's no cross-section
   // page-level scroll. Persisting across visits is intentionally not done.
@@ -825,6 +834,8 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
         setObserverAuthTokenTail(configData.llm?.authTokenTail ?? null);
         setWebhookSecretSet(Boolean(configData.webhookSecretSet));
         setWebhookSecretTail(configData.webhookSecretTail ?? null);
+        setTelemetryAuthTokenSet(Boolean(configData.telemetryAuthTokenSet));
+        setTelemetryAuthTokenTail(configData.telemetryAuthTokenTail ?? null);
       })
       .catch((err) => {
         console.error('Failed to load config:', err);
@@ -864,7 +875,13 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
       const webhookSecret = webhookSecretInput.trim();
       const webhookExtra: { webhookSecret?: string } = {};
       if (webhookSecret) webhookExtra.webhookSecret = webhookSecret;
-      const { ok, error } = await putJson('/api/config', { ...config, llm, ...webhookExtra });
+      // Telemetry auth token is write-only too (WARDEN-569): send it only when the
+      // human typed a new one; omit it on an untouched field so the backend
+      // no-clobbers the stored token.
+      const telemetryAuthToken = telemetryAuthTokenInput.trim();
+      const telemetryExtra: { telemetryAuthToken?: string } = {};
+      if (telemetryAuthToken) telemetryExtra.telemetryAuthToken = telemetryAuthToken;
+      const { ok, error } = await putJson('/api/config', { ...config, llm, ...webhookExtra, ...telemetryExtra });
       if (!ok) {
         throw new Error(error || 'Failed to save configuration');
       }
@@ -1826,6 +1843,22 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   />
                   <p className="text-xs text-muted-foreground">
                     Leave blank for unconfigured (sends nothing). Events go only to this URL — a self-hosted receiver you control, never a third-party analytics service.
+                  </p>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="telemetryAuthToken">Receiver auth token (optional)</Label>
+                  <Input
+                    id="telemetryAuthToken"
+                    type="password"
+                    value={telemetryAuthTokenInput}
+                    onChange={(e) => setTelemetryAuthTokenInput(e.target.value)}
+                    placeholder={telemetryAuthTokenSet ? `••••• set${telemetryAuthTokenTail ? ` (…${telemetryAuthTokenTail})` : ''}` : 'Not set'}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {telemetryAuthTokenSet
+                      ? `A token is saved${telemetryAuthTokenTail ? ` (ends …${telemetryAuthTokenTail})` : ''}. It is sent as Authorization: Bearer so a receiver that requires auth (AUTH_TOKEN) accepts your events. Type a new one to replace it; leave blank to keep it.`
+                      : 'Optional. Sent as Authorization: Bearer when your receiver is gated by a shared secret (AUTH_TOKEN). Leave blank if your receiver runs open.'}
                   </p>
                 </div>
 
