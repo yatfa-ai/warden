@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from 'react';
-import { TriangleAlert, Bell, BellOff } from 'lucide-react';
+import { TriangleAlert, Bell, BellOff, Clock } from 'lucide-react';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { Button } from '@/components/ui/button';
 import {
@@ -9,6 +9,7 @@ import {
   type AttentionRollup,
   type AttentionItem,
 } from '@/lib/attentionRollup';
+import { activeSnoozedKeys, formatSnoozeRemaining, type AlertMuteMode, type SnoozeMap } from '@/lib/snooze';
 import type { AttentionAgent } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -33,7 +34,17 @@ interface Props {
    * routing/mute DECISION now runs in App's lifted useAttentionRollup; this stays
    * so the badge's row bell can reflect + toggle the same set. */
   mutedAlertKeys: string[];
-  onToggleMuteAlertKey: (key: string) => void;
+  /** WARDEN-551 — chat key → snooze expiry (ms). The time-boxed twin of
+   * mutedAlertKeys: a snoozed agent is suppressed identically to a permanent
+   * mute until its expiry, then auto-rearms. The row bell reflects + sets snoozes
+   * through onSetAlertMute; the suppression decision itself runs in App's lifted
+   * useAttentionRollup (same as permanent mute). */
+  snoozedAlertKeys: SnoozeMap;
+  /** WARDEN-551/364 — unified mute/snooze setter for a chat key. 'permanent'
+   * adds it to the permanent mute set; '1h'/'tomorrow' start a time-boxed snooze;
+   * 'off' clears both (manual re-arm). The two are mutually exclusive per key, so
+   * the bell menu's options never let both apply at once. */
+  onSetAlertMute: (key: string, mode: AlertMuteMode) => void;
   /** WARDEN-482: the pane the human is currently focused on. The directed callout must
    * never PROMOTE the pane the human is already reading (the "trains the human to
    * ignore it" product-killer), so pickCalloutTop excludes it when choosing the
@@ -66,7 +77,8 @@ export function AttentionBadge({
   onOpenActivity,
   attentionDesktopAlerts,
   mutedAlertKeys,
-  onToggleMuteAlertKey,
+  snoozedAlertKeys,
+  onSetAlertMute,
   focusedPaneKey,
 }: Props) {
   const [open, setOpen] = useState(false);
@@ -77,6 +89,11 @@ export function AttentionBadge({
   const muteEnabled = attentionDesktopAlerts;
   // Fast membership check for the mute set on each render.
   const mutedSet = useMemo(() => new Set(mutedAlertKeys), [mutedAlertKeys]);
+  // WARDEN-551: the set of snoozes still ACTIVE (expiry in the future). Computed
+  // each render against a fresh clock so the row's muted visual + bell re-arm the
+  // instant a snooze expires (App's prune effect also clears the stale entry from
+  // state on cadence, so this never lingers past expiry).
+  const snoozedSet = activeSnoozedKeys(snoozedAlertKeys, Date.now());
 
   // Zero-state: render nothing intrusive. (A neutral ✓ was considered per the AC,
   // but an absent element is the least-noise zero state for an always-on header.)
@@ -168,8 +185,9 @@ export function AttentionBadge({
                       dot="bg-red-500"
                       onClick={() => openChat(key)}
                       muted={muteEnabled && mutedSet.has(key)}
+                      snoozedUntil={muteEnabled && snoozedSet.has(key) ? (snoozedAlertKeys[key] ?? null) : null}
                       muteEnabled={muteEnabled}
-                      onToggleMute={() => onToggleMuteAlertKey(key)}
+                      onSetAlertMute={onSetAlertMute}
                     />
                   );
                 })}
@@ -200,8 +218,9 @@ export function AttentionBadge({
                       dot="bg-yellow-500"
                       onClick={() => openChat(key)}
                       muted={muteEnabled && mutedSet.has(key)}
+                      snoozedUntil={muteEnabled && snoozedSet.has(key) ? (snoozedAlertKeys[key] ?? null) : null}
                       muteEnabled={muteEnabled}
-                      onToggleMute={() => onToggleMuteAlertKey(key)}
+                      onSetAlertMute={onSetAlertMute}
                     />
                   );
                 })}
@@ -260,8 +279,9 @@ function AgentRow({
   onClick,
   detail,
   muted = false,
+  snoozedUntil = null,
   muteEnabled = false,
-  onToggleMute,
+  onSetAlertMute,
 }: {
   agent: AttentionAgent;
   dot: string;
@@ -269,20 +289,34 @@ function AgentRow({
   /** The triggering signal (repeating line / matched prompt) for a pane-state row —
    * shown muted under the name so the human sees WHY it needs attention (WARDEN-344). */
   detail?: string | null;
-  /** WARDEN-364 per-agent mute. Only the health-bucket rows (critical/warning) pass
-   * these; pane-state rows pass none, so no bell renders there. */
+  /** WARDEN-364 permanent mute. Drives the BellOff icon specifically (the row's
+   * line-through/opacity styling keys off `suppressed` = muted OR snoozed below). */
   muted?: boolean;
+  /** WARDEN-551 — snooze expiry (ms) for this row, or null. A future timestamp
+   * means the row is snoozed (Clock icon + countdown + "End snooze now"); null
+   * means not snoozed. Only the health-bucket rows pass this (mirrors `muted`). */
+  snoozedUntil?: number | null;
   muteEnabled?: boolean;
-  onToggleMute?: () => void;
+  onSetAlertMute?: (key: string, mode: AlertMuteMode) => void;
 }) {
   const label = agent.name || agent.key || agent.id;
+  const muteKey = agent.key || agent.id;
+  const [muteMenuOpen, setMuteMenuOpen] = useState(false);
+  // Read the clock once per render; the badge re-renders on the rollup cadence
+  // and when App's prune effect clears an expired snooze, so this stays current.
+  const now = Date.now();
+  const isSnoozed = snoozedUntil != null && snoozedUntil > now;
+  const remaining = snoozedUntil != null ? formatSnoozeRemaining(snoozedUntil, now) : '';
+  // Either suppression state mutes the row visually (line-through + dim), matching
+  // the suppression the OS channel applies (WARDEN-551: a snoozed agent shows muted).
+  const suppressed = muted || isSnoozed;
   return (
     <div className="flex items-stretch gap-0.5 pr-1">
-      <Button variant="ghost" onClick={onClick} className={cn('flex-1 min-w-0 justify-start gap-2 h-auto px-2 py-1.5 font-normal text-xs text-foreground', muted && 'opacity-60')}>
+      <Button variant="ghost" onClick={onClick} className={cn('flex-1 min-w-0 justify-start gap-2 h-auto px-2 py-1.5 font-normal text-xs text-foreground', suppressed && 'opacity-60')}>
         <span className={cn('size-2 rounded-full shrink-0 mt-0.5', dot)} aria-hidden />
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-1">
-            <span className={cn('truncate', muted && 'line-through')}>{label}</span>
+            <span className={cn('truncate', suppressed && 'line-through')}>{label}</span>
             {agent.role && <span className="text-xs text-blue-400 shrink-0">{agent.role}</span>}
             {agent.host && agent.host !== '(local)' && <span className="text-xs text-muted-foreground shrink-0">{agent.host}</span>}
           </span>
@@ -292,31 +326,85 @@ function AgentRow({
         </span>
       </Button>
       {/*
-        WARDEN-364 — per-agent mute on the desktop-alert channel (health buckets
-        only). stopPropagation so tapping the bell never also opens the chat pane.
-        aria-pressed reflects the toggle state for screen readers; the icon swaps
-        Bell ↔ BellOff so the state is glanceable without color alone (WCAG 1.4.1).
-        Uses the library <Button> (variant=ghost size=icon-xs) — same component the
-        row itself uses right beside it (WARDEN-68 Rule 1: no raw <button>).
+        WARDEN-364 + WARDEN-551 — per-agent mute/snooze on the desktop-alert
+        channel (health buckets only). The bell now opens a small menu of
+        durations (permanent / 1 hour / until tomorrow) instead of toggling
+        permanent mute in one click, so the human can pick a time-boxed snooze
+        that auto-rearms. While suppressed it shows the state + a one-click resume.
+        stopPropagation on the trigger so tapping the bell never also opens the
+        chat pane. The icon swaps Bell (alerting) ↔ BellOff (permanent) ↔ Clock
+        (snoozed) so the state is glanceable without color alone (WCAG 1.4.1); the
+        menu is a nested Radix Popover layer with aria-haspopup/aria-expanded for
+        screen readers. Uses the library <Button> (variant=ghost size=icon-xs) —
+        WARDEN-68 Rule 1: no raw <button>.
       */}
-      {muteEnabled && onToggleMute && (
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggleMute();
-          }}
-          aria-pressed={muted}
-          aria-label={muted ? `Stop muting desktop alerts for ${label}` : `Mute desktop alerts for ${label}`}
-          title={muted ? 'Unmute desktop alerts for this agent' : 'Mute desktop alerts for this agent'}
-          className="shrink-0 self-center text-muted-foreground hover:text-foreground"
-        >
-          {muted ? <BellOff className="size-3.5" /> : <Bell className="size-3.5" />}
-        </Button>
+      {muteEnabled && onSetAlertMute && (
+        <Popover open={muteMenuOpen} onOpenChange={setMuteMenuOpen}>
+          <PopoverTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              onClick={(e) => e.stopPropagation()}
+              aria-haspopup="menu"
+              aria-expanded={muteMenuOpen}
+              aria-label={
+                isSnoozed
+                  ? `Snoozed desktop alerts for ${label}${remaining ? ` — resumes in ${remaining}` : ''}`
+                  : muted
+                    ? `Stop muting desktop alerts for ${label}`
+                    : `Mute desktop alerts for ${label}`
+              }
+              title={
+                isSnoozed
+                  ? (remaining ? `Snoozed — resumes in ${remaining}` : 'Snoozed')
+                  : muted
+                    ? 'Unmute desktop alerts for this agent'
+                    : 'Mute desktop alerts for this agent'
+              }
+              className="shrink-0 self-center text-muted-foreground hover:text-foreground"
+            >
+              {isSnoozed ? <Clock className="size-3.5" /> : muted ? <BellOff className="size-3.5" /> : <Bell className="size-3.5" />}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="end" className="w-48 p-1">
+            {isSnoozed && (
+              <div className="px-2 py-1 text-[10px] text-muted-foreground">
+                Snoozed{remaining ? ` — resumes in ${remaining}` : ''}
+              </div>
+            )}
+            {suppressed ? (
+              <MuteMenuRow
+                label={isSnoozed ? 'End snooze now' : 'Resume alerts'}
+                onClick={() => { onSetAlertMute(muteKey, 'off'); setMuteMenuOpen(false); }}
+              />
+            ) : (
+              <>
+                <MuteMenuRow label="Mute permanently" onClick={() => { onSetAlertMute(muteKey, 'permanent'); setMuteMenuOpen(false); }} />
+                <MuteMenuRow label="Mute for 1 hour" onClick={() => { onSetAlertMute(muteKey, '1h'); setMuteMenuOpen(false); }} />
+                <MuteMenuRow label="Mute until tomorrow" onClick={() => { onSetAlertMute(muteKey, 'tomorrow'); setMuteMenuOpen(false); }} />
+              </>
+            )}
+          </PopoverContent>
+        </Popover>
       )}
     </div>
+  );
+}
+
+// A single full-width option row inside the per-row mute/snooze menu. Mirrors the
+// row styling (ghost, left-aligned, compact) so the menu reads as part of the
+// same attention system. Reuses the library <Button> (WARDEN-68 Rule 1).
+function MuteMenuRow({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      onClick={onClick}
+      className="w-full justify-start h-auto px-2 py-1.5 font-normal text-xs text-foreground"
+    >
+      {label}
+    </Button>
   );
 }
 

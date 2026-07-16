@@ -14,6 +14,7 @@ import { indexByWatchKey } from '@/lib/chatWatch';
 import { requestAlertPermission, type AttentionSeverityPrefs } from '@/lib/desktopAlerts';
 import { useTokenBudget } from '@/lib/useTokenBudget';
 import { useAttentionRollup } from '@/lib/useAttentionRollup';
+import { snoozeExpiry, pruneExpired, withoutSnoozeKey, type AlertMuteMode } from '@/lib/snooze';
 import { rankAttention, hasReturnContent, attentionReason, type AttentionItem } from '@/lib/attentionRollup';
 import { cn } from '@/lib/utils';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray } from '@/lib/electron';
@@ -253,11 +254,45 @@ function App() {
   const [alertDirective, setAlertDirective] = useState(() => uiState.alertDirective ?? true);
   const [alertError, setAlertError] = useState(() => uiState.alertError ?? true);
   const [mutedAlertKeys, setMutedAlertKeys] = useState<string[]>(() => uiState.mutedAlertKeys ?? []);
-  // Toggle a chat key in the desktop-alert mute set. A muted agent driving a
-  // critical/warning increase fires no OS notification but still appears in the
-  // in-app AttentionBadge (which consumes the unfiltered rollup).
-  const toggleMuteAlertKey = useCallback((key: string) => {
-    setMutedAlertKeys((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  // WARDEN-551 — time-boxed snooze: chat key → expiry (ms). The auto-rearming
+  // twin of mutedAlertKeys above. Persisted by the saveUi effect below; the
+  // suppression DECISION runs in the lifted useAttentionRollup (unioned into the
+  // mute set there, reading the clock fresh each cadence tick so an expired snooze
+  // drops out → alerts resume with no manual un-mute). Never sent to the backend.
+  const [snoozedAlertKeys, setSnoozedAlertKeys] = useState<Record<string, number>>(() => uiState.snoozedAlertKeys ?? {});
+  // Unified mute/snooze setter (WARDEN-364 permanent mute + WARDEN-551 snooze).
+  // An agent is in exactly ONE state per key: un-muted, permanent-muted, or
+  // snoozed. Each mode clears the OTHER channel for the key so a permanent mute
+  // and a snooze never overlap (which would make "un-mute" ambiguous: would it
+  // also end the snooze?). 'off' clears both (manual re-arm); 'permanent' adds to
+  // the permanent set; '1h'/'tomorrow' start a time-boxed snooze via snoozeExpiry.
+  const setAlertMute = useCallback((key: string, mode: AlertMuteMode) => {
+    if (mode === 'permanent') {
+      setSnoozedAlertKeys((prev) => withoutSnoozeKey(prev, key));
+      setMutedAlertKeys((prev) => (prev.includes(key) ? prev : [...prev, key]));
+    } else if (mode === 'off') {
+      setMutedAlertKeys((prev) => prev.filter((k) => k !== key));
+      setSnoozedAlertKeys((prev) => withoutSnoozeKey(prev, key));
+    } else {
+      setMutedAlertKeys((prev) => prev.filter((k) => k !== key));
+      setSnoozedAlertKeys((prev) => ({ ...prev, [key]: snoozeExpiry(mode, Date.now()) }));
+    }
+  }, []);
+  // WARDEN-551 — prune expired snoozes on mount + a 60s cadence. This is the
+  // housekeeping layer for the BADGE visual + persistence: once a snooze's expiry
+  // passes, drop it from state so the bell stops showing muted/snoozed and the
+  // persisted map stays clean (an entry that expired while Warden was closed is
+  // already cleared on this mount — criterion #4). It NEVER gates whether an OS
+  // alert fires: the suppression decision in useAttentionRollup reads the clock
+  // fresh on its own faster cadence and drops an expired snooze within a poll, so
+  // auto-rearm (criterion #3) does not wait on this slower prune. pruneExpired
+  // returns the same reference when nothing expired, so a no-op tick causes no
+  // re-render or persist.
+  useEffect(() => {
+    const prune = () => setSnoozedAlertKeys((prev) => pruneExpired(prev, Date.now()));
+    prune();
+    const id = window.setInterval(prune, 60_000);
+    return () => window.clearInterval(id);
   }, []);
   // Per-chat "watch" opt-in (WARDEN-378): pane keys the human marked "watch this
   // chat" for a targeted, reason-specific desktop ping when that chat newly needs
@@ -547,8 +582,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy, fileViewerViewMode, healthCollapsedHosts, hostLabels }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy, fileViewerViewMode, healthCollapsedHosts, hostLabels, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, snoozedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy, fileViewerViewMode, healthCollapsedHosts, hostLabels }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, snoozedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy, fileViewerViewMode, healthCollapsedHosts, hostLabels, restoreOnStartup, startedEmpty]);
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
   // workspace, so switching clears it (WARDEN-256: maximized resets on switch).
@@ -758,6 +793,9 @@ function App() {
     setAlertDirective(true);
     setAlertError(true);
     setMutedAlertKeys([]);
+    // WARDEN-551: clear any active snoozes too, so a reset leaves no stale
+    // temporary suppression behind (mirrors clearing the permanent mute set).
+    setSnoozedAlertKeys({});
     setWatchedChats([]);
   }, []);
 
@@ -923,7 +961,7 @@ function App() {
   const focusedChat = chats.find((c) => (c.key || c.id) === focused) || null;
   const focusedPaneKey = focusedChat?.key || focusedChat?.id || null;
   const { rollup: attentionRollup, watchedStates: watchedAgentStates } = useAttentionRollup(
-    attentionDesktopAlerts, openPanes, attentionStates, attentionSeverityPrefs, mutedAlertKeys, watchedChats, openChat, focusedPaneKey,
+    attentionDesktopAlerts, openPanes, attentionStates, attentionSeverityPrefs, mutedAlertKeys, snoozedAlertKeys, watchedChats, openChat, focusedPaneKey,
   );
   // WARDEN-417: surface the per-chat watch catch-up (unacked away misses, deep-linking
   // to each watched pane via openChat). WARDEN-476: pass the rollup's watched-states
@@ -1757,7 +1795,7 @@ function App() {
             label={streamConn ? 'Connected' : 'Disconnected'}
             className="transition-colors duration-300 ease-in-out"
           />
-          <AttentionBadge rollup={attentionRollup} onOpenChat={openChat} onOpenActivity={openActivityTab} attentionDesktopAlerts={attentionDesktopAlerts} mutedAlertKeys={mutedAlertKeys} onToggleMuteAlertKey={toggleMuteAlertKey} focusedPaneKey={focusedPaneKey} />
+          <AttentionBadge rollup={attentionRollup} onOpenChat={openChat} onOpenActivity={openActivityTab} attentionDesktopAlerts={attentionDesktopAlerts} mutedAlertKeys={mutedAlertKeys} snoozedAlertKeys={snoozedAlertKeys} onSetAlertMute={setAlertMute} focusedPaneKey={focusedPaneKey} />
           <IconTooltip label="global search (Ctrl+Shift+F)" side="bottom"><button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⌕</button></IconTooltip>
           <IconTooltip label="toggle health panel" side="bottom"><button onClick={() => setHealthCollapsed(!healthCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{healthCollapsed ? '◂' : '▸'} Health</button></IconTooltip>
           <IconTooltip label="toggle observer" side="bottom"><button onClick={() => setObserverCollapsed(!observerCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>
