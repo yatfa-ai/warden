@@ -989,7 +989,6 @@ const TOOL_LABELS: Record<string, string> = {
   read_chats: 'read chats',
   send_directive: 'compose directive',
   summarize_chats: 'summarize chats',
-  alert_changes: 'alert changes',
 };
 
 function toolLabel(name: string): string {

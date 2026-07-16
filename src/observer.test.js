@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import {
   summarizeOpenChats, readChats, Observer, TOOLS,
-  alertChangedAgents, diffAlerts, detectCompleted, transcriptPhaseOf,
+  transcriptPhaseOf,
   filterRealTranscriptEntries, parseTranscriptTail, paneSignature,
   readTranscriptPhase, buildTranscriptTailScript, parsePhaseFromTailOutput,
 } from './observer.js';
@@ -1030,45 +1030,6 @@ describe('WARDEN-166 pure helpers', () => {
     });
   });
 
-  describe('detectCompleted', () => {
-    it('transcript path: fires on mid-turn → awaiting-input flip', () => {
-      assert.strictEqual(detectCompleted('active', 'mid-turn', 'active', 'awaiting-input'), true);
-    });
-
-    it('transcript path: does NOT fire when the phase did not flip', () => {
-      assert.strictEqual(detectCompleted('idle', 'awaiting-input', 'idle', 'awaiting-input'), false);
-      assert.strictEqual(detectCompleted('active', 'mid-turn', 'active', 'mid-turn'), false);
-    });
-
-    it('transcript path is authoritative even if the pane state stayed active', () => {
-      // The pane still reads "active" but the transcript flipped → completed. This
-      // is exactly the case pane-text alone cannot catch (the whole point of the
-      // transcript signal).
-      assert.strictEqual(detectCompleted('active', 'mid-turn', 'active', 'awaiting-input'), true);
-    });
-
-    it('fallback path: fires on a working-state → clean-idle transition (no transcript)', () => {
-      for (const prior of ['active', 'stuck', 'erroring', 'blocked', 'waiting']) {
-        assert.strictEqual(detectCompleted(prior, null, 'idle', null), true,
-          `${prior} → idle is a completed transition`);
-      }
-    });
-
-    it('fallback path: does NOT fire when prior was already idle', () => {
-      assert.strictEqual(detectCompleted('idle', null, 'idle', null), false);
-    });
-
-    it('fallback path: does NOT fire on working → working', () => {
-      assert.strictEqual(detectCompleted('active', null, 'erroring', null), false);
-    });
-
-    it('falls back to pane state when only one phase is known (mixed)', () => {
-      // prior phase known, current phase null (transcript read failed this round)
-      // → not "both known", so use the fallback: active → idle fires.
-      assert.strictEqual(detectCompleted('active', 'mid-turn', 'idle', null), true);
-    });
-  });
-
   describe('paneSignature', () => {
     it('is stable for identical content and changes when content changes', () => {
       assert.strictEqual(paneSignature('a\nb\nc'), paneSignature('a\nb\nc'));
@@ -1078,101 +1039,6 @@ describe('WARDEN-166 pure helpers', () => {
     it('ignores blank/whitespace-only lines in the count', () => {
       assert.strictEqual(paneSignature('a\n\nb'), '2:b');
     });
-  });
-});
-
-describe('WARDEN-166 diffAlerts (pure diff core)', () => {
-  // Helper: a curObserved entry with the metadata diffAlerts attaches alerts to.
-  function obs(key, state, phase = null, extra = {}) {
-    return [key, { id: key, key, host: 'h', role: 'worker', project: 'p', state, phase, ...extra }];
-  }
-  function prior(key, state, phase = null) { return { [key]: { state, phase } }; }
-
-  it('fires an alert only on change-into an alertable state', () => {
-    // active → idle (no transcript) is completed; idle → idle is nothing.
-    const cache = prior('w', 'idle');
-    const cur = Object.fromEntries([obs('w', 'idle')]);
-    assert.strictEqual(diffAlerts(cache, cur).alerts.length, 0, 'idle→idle is not a change');
-  });
-
-  it('fires idle when an agent newly goes idle (transcript present, no flip)', () => {
-    const cache = prior('w', 'active', 'awaiting-input');
-    const cur = Object.fromEntries([obs('w', 'idle', 'awaiting-input')]);
-    const { alerts } = diffAlerts(cache, cur);
-    assert.strictEqual(alerts.length, 1);
-    assert.strictEqual(alerts[0].alert, 'idle', 'awaiting-input→awaiting-input is not completed, so bare idle fires');
-    assert.strictEqual(alerts[0].fromState, 'active');
-    assert.strictEqual(alerts[0].toState, 'idle');
-  });
-
-  it('fires erroring only on change-into-erroring', () => {
-    assert.strictEqual(diffAlerts(prior('w', 'active'), Object.fromEntries([obs('w', 'erroring')])).alerts[0].alert, 'erroring');
-    assert.strictEqual(diffAlerts(prior('w', 'erroring'), Object.fromEntries([obs('w', 'erroring')])).alerts.length, 0, 'already erroring → no alert');
-  });
-
-  it('fires stuck only on change-into-stuck', () => {
-    assert.strictEqual(diffAlerts(prior('w', 'active'), Object.fromEntries([obs('w', 'stuck')])).alerts[0].alert, 'stuck');
-  });
-
-  it('fires completed on the mid-turn → awaiting-input flip', () => {
-    const cache = prior('w', 'active', 'mid-turn');
-    const cur = Object.fromEntries([obs('w', 'idle', 'awaiting-input')]);
-    const { alerts } = diffAlerts(cache, cur);
-    assert.strictEqual(alerts.length, 1);
-    assert.strictEqual(alerts[0].alert, 'completed', 'the flip is a completed event, not a bare idle');
-  });
-
-  it('a newly-erroring pane wins over a simultaneous completed flip (does not mask the error)', () => {
-    // The turn ended (mid-turn → awaiting-input) BUT the pane now shows an error.
-    // Erroring is more actionable than "it finished", so it must be reported — not
-    // masked behind completed.
-    const cache = prior('w', 'active', 'mid-turn');
-    const cur = Object.fromEntries([obs('w', 'erroring', 'awaiting-input')]);
-    const { alerts } = diffAlerts(cache, cur);
-    assert.strictEqual(alerts.length, 1);
-    assert.strictEqual(alerts[0].alert, 'erroring');
-  });
-
-  it('a newly-stuck pane wins over a simultaneous completed flip', () => {
-    const cache = prior('w', 'active', 'mid-turn');
-    const cur = Object.fromEntries([obs('w', 'stuck', 'awaiting-input')]);
-    const { alerts } = diffAlerts(cache, cur);
-    assert.strictEqual(alerts.length, 1);
-    assert.strictEqual(alerts[0].alert, 'stuck');
-  });
-
-  it('does NOT alert on the very first observation (no baseline)', () => {
-    // Cold cache: the agent is new, not "newly changed into" a state.
-    const { alerts } = diffAlerts({}, Object.fromEntries([obs('w', 'erroring')]));
-    assert.strictEqual(alerts.length, 0);
-  });
-
-  it('is a no-op when nothing changed', () => {
-    const cache = { w: { state: 'idle', phase: 'awaiting-input' }, x: { state: 'active', phase: 'mid-turn' } };
-    const cur = Object.fromEntries([obs('w', 'idle', 'awaiting-input'), obs('x', 'active', 'mid-turn', { id: 'x', key: 'x' })]);
-    assert.strictEqual(diffAlerts(cache, cur).alerts.length, 0);
-  });
-
-  it('sorts alerts by severity (erroring > stuck > completed > idle)', () => {
-    const cache = {
-      e: { state: 'active' }, s: { state: 'active' }, i: { state: 'active', phase: 'awaiting-input' },
-    };
-    const cur = Object.fromEntries([
-      obs('e', 'erroring'), obs('s', 'stuck'), obs('i', 'idle', 'awaiting-input'),
-    ]);
-    const { alerts } = diffAlerts(cache, cur);
-    assert.deepStrictEqual(alerts.map((a) => a.alert), ['erroring', 'stuck', 'idle']);
-  });
-
-  it('reports per-alert-type counts in the summary', () => {
-    const cache = { a: { state: 'active' }, b: { state: 'active' } };
-    const cur = Object.fromEntries([obs('a', 'erroring'), obs('b', 'stuck')]);
-    const { summary } = diffAlerts(cache, cur);
-    assert.strictEqual(summary.total, 2);
-    assert.strictEqual(summary.erroring, 1);
-    assert.strictEqual(summary.stuck, 1);
-    assert.strictEqual(summary.completed, 0);
-    assert.strictEqual(summary.idle, 0);
   });
 });
 
@@ -1240,135 +1106,6 @@ describe('WARDEN-166 readTranscriptPhase (local-filesystem branch)', () => {
     fs.rmSync(path.join(tmp, '.claude'), { recursive: true, force: true });
     const phase = await readTranscriptPhase({ container: null, host: '(local)', key: 'm', session: 'm' });
     assert.strictEqual(phase, null);
-  });
-});
-
-describe('WARDEN-166 alertChangedAgents (DI core)', () => {
-  // capturePanes mock that returns a pane string per chat key.
-  function captureFor(panes) {
-    return mock.fn(async (chats) => Object.fromEntries(
-      chats.filter((c) => panes[c.key] != null).map((c) => [c.key, panes[c.key]]),
-    ));
-  }
-  const openTabs = (chats) => chats.map((c) => c.container || c.session);
-
-  it('returns the empty-tabs guard error and does not capture', async () => {
-    const capturePanes = mock.fn(async () => ({}));
-    const res = await alertChangedAgents([], [yatfaChat()], capturePanes, async () => null, cfg, {});
-    assert.strictEqual(res.error, 'no tabs are open. open some agent panes first.');
-    assert.strictEqual(capturePanes.mock.callCount(), 0);
-  });
-
-  it('returns the stale-state guard error when open tabs match no chat', async () => {
-    const capturePanes = mock.fn(async () => ({}));
-    const res = await alertChangedAgents(['ghost'], [yatfaChat()], capturePanes, async () => null, cfg, {});
-    assert.strictEqual(res.error, 'open tabs do not match any discovered chats. try refreshing with list_chats.');
-  });
-
-  it('establishes a baseline on a cold cache (no alerts) and reports baseline:true', async () => {
-    const chat = yatfaChat();
-    const capturePanes = captureFor({ 'myproject-worker': 'Error: boom' });
-    const res = await alertChangedAgents(openTabs([chat]), [chat], capturePanes, async () => null, cfg, {});
-    assert.strictEqual(res.baseline, true);
-    assert.deepStrictEqual(res.alerts, [], 'cold cache → no alerts even for an erroring pane');
-    assert.ok(res.observedState['myproject-worker'], 'observedState captured for the next diff');
-    assert.strictEqual(res.observedState['myproject-worker'].state, 'erroring');
-  });
-
-  it('fires an erroring alert only on change-into-state (second read)', async () => {
-    const chat = yatfaChat();
-    let pane = 'Building the project'; // active
-    const capturePanes = mock.fn(async () => ({ 'myproject-worker': pane }));
-    const rtp = async () => null;
-    const r1 = await alertChangedAgents(openTabs([chat]), [chat], capturePanes, rtp, cfg, {});
-    assert.deepStrictEqual(r1.alerts, [], 'first read is baseline');
-
-    pane = 'Error: build failed'; // now erroring
-    const r2 = await alertChangedAgents(openTabs([chat]), [chat], capturePanes, rtp, cfg, r1.observedState);
-    assert.strictEqual(r2.alerts.length, 1);
-    assert.strictEqual(r2.alerts[0].alert, 'erroring');
-    assert.strictEqual(r2.alerts[0].id, 'myproject-worker');
-    assert.strictEqual(r2.alerts[0].fromState, 'active');
-    assert.strictEqual(r2.alerts[0].toState, 'erroring');
-  });
-
-  it('fires a stuck alert on change-into-stuck', async () => {
-    const chat = yatfaChat();
-    let pane = 'Building the project';
-    const capturePanes = mock.fn(async () => ({ 'myproject-worker': pane }));
-    const r1 = await alertChangedAgents(openTabs([chat]), [chat], capturePanes, async () => null, cfg, {});
-    pane = Array(6).fill('Retrying connection to host in 5 seconds...').join('\n'); // stuck
-    const r2 = await alertChangedAgents(openTabs([chat]), [chat], capturePanes, async () => null, cfg, r1.observedState);
-    assert.strictEqual(r2.alerts[0].alert, 'stuck');
-  });
-
-  it('fires completed on the mid-turn → awaiting-input transcript flip (pane unchanged)', async () => {
-    // The pane stays "active" both reads — only the transcript phase flips. This
-    // is the signal pane text alone cannot catch.
-    const chat = yatfaChat();
-    const capturePanes = mock.fn(async () => ({ 'myproject-worker': 'Building the project' }));
-    let phase = 'mid-turn';
-    const rtp = mock.fn(async () => phase);
-    const r1 = await alertChangedAgents(openTabs([chat]), [chat], capturePanes, rtp, cfg, {});
-    assert.deepStrictEqual(r1.alerts, [], 'baseline');
-    assert.strictEqual(r1.observedState['myproject-worker'].phase, 'mid-turn');
-
-    phase = 'awaiting-input'; // the agent finished its turn
-    const r2 = await alertChangedAgents(openTabs([chat]), [chat], capturePanes, rtp, cfg, r1.observedState);
-    assert.strictEqual(r2.alerts.length, 1);
-    assert.strictEqual(r2.alerts[0].alert, 'completed');
-  });
-
-  it('fires completed via the fallback path (transcript-less working → idle)', async () => {
-    const chat = yatfaChat({ active: false });
-    let pane = 'Building the project'; // active (needs c.active — set true for this read)
-    const chats = [chat];
-    // Use two chats instances to vary active across reads: simplest is to flip
-    // chat.active directly between calls since classifyPane reads c.active.
-    chat.active = true;
-    const capturePanes = mock.fn(async () => ({ 'myproject-worker': pane }));
-    const r1 = await alertChangedAgents(openTabs(chats), chats, capturePanes, async () => null, cfg, {});
-    assert.deepStrictEqual(r1.alerts, [], 'baseline');
-
-    chat.active = false;
-    pane = 'Ready.'; // clean idle
-    const r2 = await alertChangedAgents(openTabs(chats), chats, capturePanes, async () => null, cfg, r1.observedState);
-    assert.strictEqual(r2.alerts.length, 1);
-    assert.strictEqual(r2.alerts[0].alert, 'completed', 'working → clean idle with no transcript is completed');
-  });
-
-  it('is a no-op when nothing changed between reads', async () => {
-    const chat = yatfaChat({ active: false });
-    const chats = [chat];
-    const capturePanes = mock.fn(async () => ({ 'myproject-worker': 'Ready.' }));
-    const rtp = async () => 'awaiting-input';
-    const r1 = await alertChangedAgents(openTabs(chats), chats, capturePanes, rtp, cfg, {});
-    const r2 = await alertChangedAgents(openTabs(chats), chats, capturePanes, rtp, cfg, r1.observedState);
-    assert.deepStrictEqual(r2.alerts, [], 'same pane + same phase → no alerts');
-  });
-
-  it('surfaces capture failures per agent in the summary (not as alerts)', async () => {
-    const ok = yatfaChat();
-    const bad = yatfaChat({ id: 'host1:proj-bad', key: 'proj-bad', container: 'proj-bad' });
-    const chats = [ok, bad];
-    // bad's host capture "fails" → no key returned for it.
-    const capturePanes = mock.fn(async (cs) => Object.fromEntries(
-      cs.filter((c) => c.key === 'myproject-worker').map((c) => [c.key, 'Building the project']),
-    ));
-    // Baseline read: both active.
-    const r1 = await alertChangedAgents(openTabs(chats), chats, capturePanes, async () => null, cfg, {});
-    assert.strictEqual(r1.summary.captureFailed, 1, 'bad is flagged capture_failed on the baseline read too');
-    assert.strictEqual(r1.observedState['proj-bad'].state, 'capture_failed');
-  });
-
-  it('injects readTranscriptPhase (no SSH in the test) — per-agent failure → null phase', async () => {
-    const chat = yatfaChat();
-    const capturePanes = captureFor({ 'myproject-worker': 'Building the project' });
-    let calls = 0;
-    const rtp = async () => { calls++; throw new Error('ssh refused'); };
-    const res = await alertChangedAgents(openTabs([chat]), [chat], capturePanes, rtp, cfg, {});
-    assert.ok(calls > 0, 'readTranscriptPhase was invoked');
-    assert.strictEqual(res.observedState['myproject-worker'].phase, null, 'a throwing reader degrades to null, not a crash');
   });
 });
 
@@ -1491,39 +1228,13 @@ describe('WARDEN-166 Observer cache wiring', () => {
   });
 });
 
-describe('WARDEN-166 Observer _execTool alert_changes dispatch', () => {
-  // As with the read_chats/summarize_chats dispatch suites, _execTool wires the
-  // real module-level capturePanes + readTranscriptPhase, which can't be mocked
-  // on Node 20 and would hit live SSH. So these cover the GUARD paths that run
-  // before any capture; the alert logic itself is covered by the alertChangedAgents
-  // DI suite above with injected mocks.
-
-  it('returns the empty-tabs error when nothing is open', async () => {
-    const obs = new Observer(cfg, {});
-    obs.openTabs = [];
-    obs.lastChats = [yatfaChat()];
-    const res = await obs._execTool('alert_changes', {});
-    assert.strictEqual(res.error, 'no tabs are open. open some agent panes first.');
-  });
-
-  it('returns the stale-state error when open tabs match no chat', async () => {
-    const obs = new Observer(cfg, {});
-    obs.openTabs = ['ghost-tab'];
-    obs.lastChats = [yatfaChat()];
-    const res = await obs._execTool('alert_changes', {});
-    assert.strictEqual(res.error, 'open tabs do not match any discovered chats. try refreshing with list_chats.');
-  });
-});
-
-describe('WARDEN-166 alert_changes tool registration', () => {
-  it('is registered in the TOOLS array with an object input schema', () => {
+describe('WARDEN-509 alert_changes retirement', () => {
+  it('is absent from the TOOLS array (retired; "what needs attention" defers to the AttentionBadge)', () => {
     const tool = TOOLS.find((t) => t.name === 'alert_changes');
-    assert.ok(tool, 'alert_changes tool should be registered');
-    assert.strictEqual(tool.input_schema.type, 'object');
-    assert.deepStrictEqual(tool.input_schema.required, []);
+    assert.strictEqual(tool, undefined, 'alert_changes tool should be retired');
   });
 
-  it('summarize_chats and read_chats expose a changed_only flag', () => {
+  it('summarize_chats and read_chats still expose a changed_only flag', () => {
     const summ = TOOLS.find((t) => t.name === 'summarize_chats');
     const read = TOOLS.find((t) => t.name === 'read_chats');
     assert.ok(summ.input_schema.properties.changed_only, 'summarize_chats has changed_only');
