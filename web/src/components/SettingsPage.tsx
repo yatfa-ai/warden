@@ -104,6 +104,17 @@ interface ConfigData {
   // The transport (telemetry-send.js) no-ops while this is blank, independent of
   // the consent toggles. Persisted via /api/config so it survives a restart.
   telemetryEndpoint: string;
+  // Webhook "push" delivery channel (WARDEN-555). OFF by default; sends nothing
+  // until a URL is configured + the master switch is enabled. Routes critical
+  // agent alerts to the user's own webhook URL (ntfy/Discord/Slack/Telegram) so a
+  // human away from the machine still gets pinged. The shared secret is WRITE-
+  // ONLY (GET returns only webhookSecretSet + a tail), so — like the LLM auth
+  // token — the secret itself is NOT part of this state; it lives in a separate
+  // input state and is sent on save only when non-empty.
+  webhookUrl: string;
+  webhookEnabled: boolean;
+  webhookAlertAttention: boolean;
+  webhookAlertBudget: boolean;
   // User-authored output-pattern alerts (WARDEN-540). Persisted via /api/config
   // (SERVER-side — the matcher runs in pollAgentStates, not the renderer), NOT client
   // localStorage. Round-tripped through GET/PUT like the other config fields above.
@@ -685,6 +696,11 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
     telemetryExtendedEnabled: false,
     // Receiver endpoint (WARDEN-522) — empty by default = unconfigured = no-op.
     telemetryEndpoint: '',
+    // Webhook push channel (WARDEN-555) — off by default; both routing toggles on.
+    webhookUrl: '',
+    webhookEnabled: false,
+    webhookAlertAttention: true,
+    webhookAlertBudget: true,
     // WARDEN-540 — empty until the GET /api/config load populates it.
     watchPatterns: [],
   });
@@ -705,6 +721,16 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
   const [observerAuthTokenSet, setObserverAuthTokenSet] = useState(false);
   const [observerAuthTokenTail, setObserverAuthTokenTail] = useState<string | null>(null);
   const [observerAuthTokenInput, setObserverAuthTokenInput] = useState('');
+
+  // Webhook shared secret (WARDEN-555) — write-only, identical discipline to the
+  // observer auth token above: GET returns only a set + tail indicator, so the
+  // input stays empty until the human types a new secret; on save it is sent ONLY
+  // when non-empty, and an untouched field is omitted so the backend no-clobbers
+  // the stored secret.
+  const [webhookSecretSet, setWebhookSecretSet] = useState(false);
+  const [webhookSecretTail, setWebhookSecretTail] = useState<string | null>(null);
+  const [webhookSecretInput, setWebhookSecretInput] = useState('');
+  const [testingWebhook, setTestingWebhook] = useState(false);
 
   // Active section in the master-detail nav. The first section is selected by
   // default; switching shows only that section, so there's no cross-section
@@ -783,6 +809,12 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
           // Defensive ?? '' so an older backend that does not return the field
           // stays safely unconfigured (empty = sends nothing).
           telemetryEndpoint: configData.telemetryEndpoint ?? '',
+          // Webhook push channel (WARDEN-555). Defensive fallbacks so an older
+          // backend without these fields stays safely OFF / unconfigured.
+          webhookUrl: configData.webhookUrl ?? '',
+          webhookEnabled: configData.webhookEnabled ?? false,
+          webhookAlertAttention: configData.webhookAlertAttention ?? true,
+          webhookAlertBudget: configData.webhookAlertBudget ?? true,
           // WARDEN-540: patterns are sanitized on the PUT boundary, so the GET
           // response is already well-formed. Defensive ?? [] keeps an older backend
           // (no watchPatterns field) safely empty → no alerts.
@@ -791,6 +823,8 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
         setAvailableHosts(hostsData.hosts || []);
         setObserverAuthTokenSet(Boolean(configData.llm?.authTokenSet));
         setObserverAuthTokenTail(configData.llm?.authTokenTail ?? null);
+        setWebhookSecretSet(Boolean(configData.webhookSecretSet));
+        setWebhookSecretTail(configData.webhookSecretTail ?? null);
       })
       .catch((err) => {
         console.error('Failed to load config:', err);
@@ -824,7 +858,13 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
       const llm: { model: string; baseUrl: string; maxTokens: number | null; authToken?: string } = { ...config.llm };
       const token = observerAuthTokenInput.trim();
       if (token) llm.authToken = token;
-      const { ok, error } = await putJson('/api/config', { ...config, llm });
+      // Webhook secret is write-only too (WARDEN-555): send it only when the human
+      // typed a new one; omit it on an untouched field so the backend no-clobbers
+      // the stored secret.
+      const webhookSecret = webhookSecretInput.trim();
+      const webhookExtra: { webhookSecret?: string } = {};
+      if (webhookSecret) webhookExtra.webhookSecret = webhookSecret;
+      const { ok, error } = await putJson('/api/config', { ...config, llm, ...webhookExtra });
       if (!ok) {
         throw new Error(error || 'Failed to save configuration');
       }
@@ -835,6 +875,33 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
       toast.error(err instanceof Error ? err.message : 'Failed to save configuration');
     } finally {
       setSaving(false);
+    }
+  };
+
+  // "Send test alert" (WARDEN-555): POST a test payload so the user can verify
+  // their ntfy/Discord/Slack/Telegram topic end-to-end. The endpoint honors the
+  // on-the-wire gate (enabled + URL), so the button is disabled until both are
+  // set; the response tells us sent / dropped / not-configured. This MUST be
+  // called after a Save when the user just typed a new URL/secret/enable — the
+  // backend reads the PERSISTED config, not the in-memory draft.
+  const sendTestAlert = async () => {
+    setTestingWebhook(true);
+    try {
+      const res = await fetch('/api/webhook-test', { method: 'POST' });
+      const body = await res.json();
+      if (body.ok) {
+        toast.success('Test alert sent — check your webhook destination.');
+      } else if (body.attempts === 0) {
+        toast.error('Enable the webhook and set a URL first, then Save.');
+      } else if (body.dropped) {
+        toast.error(`Could not deliver (last status ${body.status ?? 'n/a'}). Check the URL and try again.`);
+      } else {
+        toast.error('Test alert did not succeed.');
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to send test alert');
+    } finally {
+      setTestingWebhook(false);
     }
   };
 
@@ -2757,6 +2824,109 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                     <p className="text-xs text-muted-foreground">
                       Choose which signals escalate to the desktop. To mute a specific agent, use the bell on its row in the attention menu (health signals only — directives and errors aren’t per-agent).
                     </p>
+                  </div>
+                </div>
+
+                {/* Webhook "push" delivery channel (WARDEN-555) — a THIRD channel
+                    alongside the in-app toast + OS desktop alert: it POSTs the
+                    alert to the user's OWN webhook URL (ntfy/Discord/Slack/
+                    Telegram/Home Assistant) so a human AWAY from the machine still
+                    gets pinged, even with the Warden window closed to tray. Off by
+                    default; sends nothing until a URL is set + enabled. Payload
+                    goes only to the user's URL (no yatfa SaaS) — same stance as
+                    the LLM API + telemetry endpoints. Persisted server-side via
+                    /api/config (NOT client localStorage) so it survives a restart. */}
+                <div className="flex flex-col gap-3 rounded-md border border-border/60 p-3 mt-2">
+                  <div className="flex flex-col gap-1">
+                    <span className="text-sm font-medium">Webhook push alerts</span>
+                    <span className="text-xs text-muted-foreground">
+                      Deliver critical alerts to your own webhook URL (ntfy, Discord, Slack, Telegram, Home Assistant) so you’re pinged on your phone even when Warden is closed to tray. Off by default.
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      id="webhookEnabled"
+                      checked={config.webhookEnabled}
+                      onCheckedChange={(v) => setConfig({ ...config, webhookEnabled: v })}
+                    />
+                    <Label htmlFor="webhookEnabled" className="cursor-pointer">
+                      Enable webhook push
+                    </Label>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <Label htmlFor="webhookUrl">Webhook URL</Label>
+                    <Input
+                      id="webhookUrl"
+                      value={config.webhookUrl}
+                      onChange={(e) => setConfig({ ...config, webhookUrl: e.target.value })}
+                      placeholder="https://ntfy.sh/your-topic"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Leave blank for unconfigured (sends nothing). Alerts go only to this URL — a destination you control, never a third-party service.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <Label htmlFor="webhookSecret">Shared secret (optional)</Label>
+                    <Input
+                      id="webhookSecret"
+                      type="password"
+                      value={webhookSecretInput}
+                      onChange={(e) => setWebhookSecretInput(e.target.value)}
+                      placeholder={webhookSecretSet ? `••••• set${webhookSecretTail ? ` (…${webhookSecretTail})` : ''}` : 'Not set'}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {webhookSecretSet
+                        ? `A secret is saved${webhookSecretTail ? ` (ends …${webhookSecretTail})` : ''}. It is sent as Authorization: Bearer and X-Webhook-Secret. Type a new one to replace it; leave blank to keep it.`
+                        : 'Optional. Sent as Authorization: Bearer and X-Webhook-Secret so your endpoint can verify the request. Leave blank if your topic needs no auth.'}
+                    </p>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <span className="text-sm font-medium">Which alerts to push</span>
+                    <div className="flex flex-wrap gap-x-4 gap-y-2">
+                      <div className="flex items-center gap-2">
+                        <Switch
+                          id="webhookAlertAttention"
+                          checked={config.webhookAlertAttention}
+                          onCheckedChange={(v) => setConfig({ ...config, webhookAlertAttention: v })}
+                        />
+                        <Label htmlFor="webhookAlertAttention" className="cursor-pointer leading-tight">
+                          Attention
+                          <span className="block text-[10px] text-muted-foreground font-normal">stuck / erroring / waiting / blocked</span>
+                        </Label>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Switch
+                          id="webhookAlertBudget"
+                          checked={config.webhookAlertBudget}
+                          onCheckedChange={(v) => setConfig({ ...config, webhookAlertBudget: v })}
+                        />
+                        <Label htmlFor="webhookAlertBudget" className="cursor-pointer leading-tight">
+                          Token budget
+                          <span className="block text-[10px] text-muted-foreground font-normal">fleet / per-session breach</span>
+                        </Label>
+                      </div>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Attention alerts fire once per new transition into a stuck/erroring/waiting/blocked pane state. Budget alerts fire once per crossing of your token-spend threshold.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={sendTestAlert}
+                      disabled={testingWebhook || !config.webhookEnabled || !config.webhookUrl.trim()}
+                    >
+                      {testingWebhook ? 'Sending…' : 'Send test alert'}
+                    </Button>
+                    <span className="text-xs text-muted-foreground">
+                      Save first, then verify your topic receives it. Fires only when enabled with a URL set.
+                    </span>
                   </div>
                 </div>
               </SettingsSection>
