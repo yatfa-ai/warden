@@ -3985,7 +3985,13 @@ let budgetRunning = false;
 // above any realistic 24h session count.
 const BUDGET_PER_HOST_LIMIT = 100;
 
-async function tickBudget() {
+// `deps` is a test seam (defaults to {} in production), identical in shape to
+// tickAttention's: `fetchImpl`/`sleepImpl` flow through to the webhook transport
+// so a test drives the full gate → computeBudgetState → shouldFireBudgetAlert →
+// dispatch path with ZERO real network. Production calls pass no args, so
+// deps.fetchImpl is undefined and dispatchWebhook falls through to globalThis.fetch
+// exactly as before.
+async function tickBudget(deps = {}) {
   // Self-gate: a disabled budget clears its own timer (and cache) so no sweep
   // runs while off. This makes startBudgetPoll safe to call unconditionally at
   // startup — it parks until the human opts in.
@@ -4037,6 +4043,8 @@ async function tickBudget() {
           : `Fleet token budget exceeded: ${budgetState.fleetSpent} tokens spent across active sessions in the last ${Math.round(windowMs / 3_600_000)}h window.`,
         cfg,
         now: Date.now(),
+        fetchImpl: deps.fetchImpl,
+        sleepImpl: deps.sleepImpl,
       }).catch(() => {});
     }
     prevBudgetState = budgetState;
