@@ -977,7 +977,7 @@ function DirectiveCard({
           <ContextMenuItem onSelect={() => copyText(card.directive, notifySuccess)}>
             <CopyIcon /> Copy directive
           </ContextMenuItem>
-          <ContextMenuItem onSelect={() => copyText(`${card.container}${card.role ? ` · ${card.role}` : ''}`, notifySuccess)}>
+          <ContextMenuItem onSelect={() => copyText(`${card.container ?? ''}${card.role ? ` · ${card.role}` : ''}`, notifySuccess)}>
             <CopyIcon /> Copy agent
           </ContextMenuItem>
         </ContextMenuContent>
