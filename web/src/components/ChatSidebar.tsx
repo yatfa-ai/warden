@@ -37,6 +37,7 @@ import {
   matchesAgentFilter, sortChats, findChat,
   type AgentFilter, type AgentSort,
 } from '@/lib/agentFilter';
+import { chatMatchesCriteria } from '@/lib/collections';
 import { getLastSeen, WHATS_NEW_FETCH_LIMIT } from '@/lib/whatsNew';
 import type { Chat, Collection, AgentStateRow } from '@/lib/types';
 import { StatusDot } from '@/components/StatusDot';
@@ -585,14 +586,17 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
   };
 
   // Collections management
-  const fetchCollections = async () => {
+  const fetchCollections = async (): Promise<Collection[]> => {
     try {
       const r = await fetch('/api/collections');
       const j = await r.json();
-      setCollections(j.collections || []);
+      const list = j.collections || [];
+      setCollections(list);
+      return list;
     } catch (error) {
       console.error('[collections] Failed:', error);
       if (prefs.notifyErrors) toast.error(`Failed to fetch collections: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      return [];
     }
   };
 
@@ -611,11 +615,21 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
   // own card list + refresh). On delete, leave the live view if the deleted
   // collection was the one open; always re-fetch so the CreateCollectionDialog
   // duplicate-name check stays accurate after a rename/delete.
-  const handleCollectionChange = (change: { type: 'rename' | 'delete'; id: string }) => {
+  // WARDEN-553: on edit, the open view also holds the edited collection as a
+  // SNAPSHOT in `view.collection` — fetchCollections refreshes the `collections`
+  // array but NOT that snapshot, so the membership list would render stale
+  // criteria while the card count updates. Refresh the snapshot from the
+  // freshly-fetched list when the edited id is the open view (or reset to root
+  // if the collection is gone — same sync-bug class as the delete case).
+  const handleCollectionChange = async (change: { type: 'rename' | 'delete' | 'edit'; id: string }) => {
     if (change.type === 'delete' && view.kind === 'collection' && view.collection.id === change.id) {
       setView({ kind: 'root' });
     }
-    fetchCollections();
+    const fresh = await fetchCollections();
+    if (change.type === 'edit' && view.kind === 'collection' && view.collection.id === change.id) {
+      const updated = fresh.find((c) => c.id === change.id);
+      setView(updated ? { kind: 'collection', collection: updated } : { kind: 'root' });
+    }
   };
 
   // Fetch collections on mount
@@ -748,19 +762,10 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
     let agents = collections.length > 0
       ? chats.filter((chat) => {
           // Apply the same filtering logic as getAgentsInCollection
+          // (web/src/lib/collections.ts — the single matcher shared with the card
+          // count + the backend). No criteria → include every agent.
           if (!C.criteria) return true;
-          const { criteria } = C;
-          let matches = true;
-          if (criteria.role && chat.role !== criteria.role) matches = false;
-          if (matches && criteria.project && chat.project !== criteria.project) matches = false;
-          if (matches && criteria.host && chat.host !== criteria.host) matches = false;
-          if (matches && criteria.custom && Array.isArray(criteria.custom) && criteria.custom.length > 0) {
-            const customMatch = criteria.custom.some((value) =>
-              chat.role === value || chat.project === value || chat.host === value || chat.name === value
-            );
-            if (!customMatch) matches = false;
-          }
-          return matches;
+          return chatMatchesCriteria(chat, C.criteria);
         })
       : [];
 
