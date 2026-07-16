@@ -88,6 +88,32 @@ const DEFAULTS = {
   // this URL. Consent is a SEPARATE gate (slice 1) — even with an endpoint set,
   // the transport no-ops unless consent is on.
   telemetryEndpoint: '',
+  // Webhook "push" delivery channel (WARDEN-555). OFF by default: sends nothing
+  // until the user configures a URL and enables it. Delivers critical agent
+  // alerts to the user's OWN webhook URL (ntfy/Discord/Slack/Telegram/Home
+  // Assistant) so a human away from the machine still gets pinged the moment an
+  // agent newly needs attention or a token budget breaches — even with the
+  // Warden window closed to tray (the backend stays alive on close-to-tray).
+  // Reuses the same fire-and-forget POST transport shape as telemetryEndpoint;
+  // the payload goes ONLY to the user's own URL (no yatfa SaaS), exactly like
+  // the LLM API + telemetry endpoints. Off-by-default is enforced on the wire:
+  // notify.js's sendWebhook is a strict no-op (fetch never called) unless
+  // webhookEnabled is true AND webhookUrl is non-empty.
+  //   webhookUrl            — destination URL. Empty = unconfigured = sends nothing.
+  //   webhookEnabled        — master switch (the on-the-wire gate).
+  //   webhookSecret         — shared secret (write-only on the wire: sent as
+  //                           Authorization: Bearer + X-Webhook-Secret). No-clobber
+  //                           on save, mirroring llm.authToken.
+  //   webhookAlertAttention — route newly stuck/erroring/waiting/blocked pane
+  //                           transitions (server-side attention sweep).
+  //   webhookAlertBudget    — route token-budget breach transitions (tickBudget).
+  // (Watch-pattern alerts are deferred to a follow-up: watch patterns live
+  // client-side, so there is no server-side transition to dispatch yet.)
+  webhookUrl: '',
+  webhookEnabled: false,
+  webhookSecret: '',
+  webhookAlertAttention: true,
+  webhookAlertBudget: true,
   // Safety
   confirmDestructiveActions: true, // boolean - confirm before destructive kills (force-kill tmux session, kill chat)
   notifyChatOps: true,           // chat operations (session kill, chat kill, resume, rename)

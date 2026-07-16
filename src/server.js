@@ -25,6 +25,7 @@ import { computeBudgetState, shouldFireBudgetAlert, resolveBudgetConfig, BUDGET_
 import { buildSnapshot, diffLifecycles } from './lifecycle.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { classifyPane, stripAnsi } from './agentState.js';
+import * as notify from './notify.js';
 import { checkHost } from './hostStatus.js';
 import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseReflog, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, parseGitRemotes, buildDockerGitArgv } from './gitStatus.js';
 import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep } from './companion.js';
@@ -550,6 +551,18 @@ app.get('/api/config', (_req, res) => res.json({
   // empty by default (unconfigured → transport sends nothing). This is a plain
   // string URL — no secret, no masking needed.
   telemetryEndpoint: cfg.telemetryEndpoint ?? '',
+  // Webhook push channel (WARDEN-555). Same write-only secret treatment as the
+  // LLM auth token (lines above) — NEVER return cleartext; the UI gets
+  // webhookSecretSet + a tail only, so the password field is write-only (no
+  // cleartext is seeded into it on load). The category toggles use `!== false`
+  // so a stale/missing field resolves to the DEFAULT (true), mirroring the
+  // desktop-alert severity defaults.
+  webhookUrl: cfg.webhookUrl ?? '',
+  webhookEnabled: cfg.webhookEnabled === true,
+  webhookSecretSet: Boolean(cfg.webhookSecret),
+  webhookSecretTail: cfg.webhookSecret ? String(cfg.webhookSecret).slice(-4) : null,
+  webhookAlertAttention: cfg.webhookAlertAttention !== false,
+  webhookAlertBudget: cfg.webhookAlertBudget !== false,
   confirmDestructiveActions: cfg.confirmDestructiveActions,
   notifyChatOps: cfg.notifyChatOps,
   notifyErrors: cfg.notifyErrors,
@@ -576,6 +589,8 @@ app.put('/api/config', (req, res) => {
           tokenBudgetWindowHours, tokenBudgetPerSessionThresholdTokens,
           companionTransportEnabled,
           telemetryEndpoint,
+          webhookUrl, webhookEnabled, webhookSecret,
+          webhookAlertAttention, webhookAlertBudget,
           confirmDestructiveActions,
           notifyChatOps, notifyErrors, notifySuccess, notifyObserver,
           showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges,
@@ -662,6 +677,16 @@ app.put('/api/config', (req, res) => {
   // malformed body can't corrupt the pref. An empty string is a valid value
   // (clears the endpoint → transport sends nothing), so accept any string.
   if (typeof telemetryEndpoint === 'string') cfg.telemetryEndpoint = telemetryEndpoint;
+  // Webhook push channel (WARDEN-555). URL accepts any string (empty clears it
+  // → sends nothing); enabled + category toggles are booleans; the secret is
+  // NO-CLOBBER (mirrors llm.authToken at lines 608-609) — only overwrite the
+  // stored secret when a non-empty string arrives, so an untouched password
+  // field survives a save (GET never seeds cleartext into it).
+  if (typeof webhookUrl === 'string') cfg.webhookUrl = webhookUrl;
+  if (typeof webhookEnabled === 'boolean') cfg.webhookEnabled = webhookEnabled;
+  if (typeof webhookSecret === 'string' && webhookSecret.length > 0) cfg.webhookSecret = webhookSecret;
+  if (typeof webhookAlertAttention === 'boolean') cfg.webhookAlertAttention = webhookAlertAttention;
+  if (typeof webhookAlertBudget === 'boolean') cfg.webhookAlertBudget = webhookAlertBudget;
   // Safety preference: confirm before destructive actions (force-kill, kill chat)
   if (typeof confirmDestructiveActions === 'boolean') cfg.confirmDestructiveActions = confirmDestructiveActions;
   // Notification preferences (toast categories). Only accept booleans so a
@@ -711,7 +736,37 @@ app.put('/api/config', (req, res) => {
   // enabling starts the poll (and seeds the cache); disabling stops it; a
   // threshold/window change re-computes now so the next /api/budget read is fresh.
   restartBudgetPoll();
+  // Pick up the webhook config immediately: enabling the channel (or routing
+  // attention alerts on) starts the server-side attention sweep; disabling stops
+  // it. Like restartBudgetPoll, this makes a Settings flip take effect on the
+  // next sweep, not after a restart. (WARDEN-555)
+  restartAttentionPoll();
   res.json({ ok: true });
+});
+
+// POST /api/webhook-test — send a test alert so the user can verify their
+// ntfy/Discord/Slack/Telegram topic end-to-end from Settings (WARDEN-555). This
+// is an EXPLICIT human action, but it still honors the on-the-wire gate: it
+// dispatches via dispatchWebhook, which no-ops (fetch never called) unless the
+// channel is enabled AND a URL is configured. So the off-by-default invariant
+// ("enabled off → zero outbound requests, from any path") holds absolutely.
+// Returns the transport result so the UI can report sent/failed/no-config.
+app.post('/api/webhook-test', async (_req, res) => {
+  try {
+    const result = await notify.dispatchWebhook({
+      event: 'test',
+      severity: 'info',
+      agent: 'Warden',
+      reason: 'Test alert from Warden — your webhook is configured correctly.',
+      cfg,
+      now: Date.now(),
+    });
+    res.json(result);
+  } catch (e) {
+    // dispatchWebhook never throws (best-effort), but guard anyway so a surprise
+    // never 500s the Settings page.
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // GET /api/pins — return the list of pinned chat ids
@@ -3915,6 +3970,11 @@ function startLifecyclePoll() {
 // unreachable host degrades to "no spend from it" via Promise.allSettled; it
 // never fails the whole sweep.
 let budgetState = null;
+// Previous-sweep snapshot for the budget-breach webhook debounce (WARDEN-555).
+// Kept SERVER-SIDE (the frontend has its OWN prev in useTokenBudget) so the
+// webhook fires on the !alerted → alerted transition even with the Warden
+// window closed to tray. Baseline-primed: null on the first tick → no fire.
+let prevBudgetState = null;
 let budgetTimer = null;
 // Re-entrancy guard, same rationale as lifecycleRunning: a sweep over slow hosts
 // can exceed the 120s beat, so an in-flight tick makes the next a no-op.
@@ -3958,6 +4018,28 @@ async function tickBudget() {
       threshold,
       perSessionThreshold,
     });
+    // Webhook push for a budget breach (WARDEN-555). Fires ONLY on the transition
+    // into an alerted state (the debounced one-shot), server-side, so it reaches
+    // the user's phone even with the window closed to tray. shouldFireBudgetAlert
+    // is the same pure debounce the frontend uses; this keeps its OWN prev. Fire-
+    // and-forget: dispatchWebhook already swallows terminal failure, and we never
+    // let a rejection escape the tick (the .catch is belt-and-suspenders). The
+    // dispatch is gated on cfg.webhookAlertBudget inside the helper chain; prev is
+    // advanced unconditionally so the debounce tracks reality regardless.
+    if (cfg.webhookAlertBudget && shouldFireBudgetAlert(prevBudgetState, budgetState)) {
+      const offender = budgetState.topOffender;
+      notify.dispatchWebhook({
+        event: 'budget-breached',
+        severity: 'critical',
+        agent: offender ? (offender.cwd || offender.id || 'fleet') : 'fleet',
+        reason: budgetState.perSessionBreached
+          ? `Per-session token budget exceeded: top session at ${offender?.total ?? 0} tokens (${offender?.cwd || offender?.id || 'unknown'}).`
+          : `Fleet token budget exceeded: ${budgetState.fleetSpent} tokens spent across active sessions in the last ${Math.round(windowMs / 3_600_000)}h window.`,
+        cfg,
+        now: Date.now(),
+      }).catch(() => {});
+    }
+    prevBudgetState = budgetState;
   } catch {
     // A transient failure leaves the previous cache in place (no blanking) so a
     // blip doesn't flap the progress surface / re-arm the one-shot spuriously.
@@ -3988,6 +4070,143 @@ function restartBudgetPoll() {
   }
 }
 
+// ---- Server-side attention sweep for webhook push (WARDEN-555) ---------------
+//
+// The desktop-alert channel detects a newly-needy agent by diffing /api/agent-
+// states client-side (desktopAlerts.ts). That only fires while the Warden window
+// is live. For a webhook to reach the user's phone with the window CLOSED TO
+// TRAY, transition detection must happen SERVER-SIDE. This is that server-side
+// sweep: on its own slow beat it discovers the fleet, classifies every pane
+// (capturePanes + classifyPane — the SAME classify /api/agent-states uses, but
+// WITHOUT the companion reconcile, which the dashboard owns for OPEN panes), and
+// diffs the per-pane state against the previous sweep, dispatching a webhook on
+// each NEW transition into an attention state (stuck/erroring/waiting/blocked).
+//
+// COST GATE: the sweep self-clears its timer unless the webhook channel is
+// enabled, a URL is configured, AND attention routing is on — so it adds ZERO
+// per-host pane-capture cost for users who never enable webhooks. The 60s beat
+// is between the 2s live monitor (per-WS, window-open only) and the 120s budget
+// accumulator, and well inside the ticket's "within one sweep (~120s)" bar.
+const ATTENTION_SWEEP_MS = 60_000;
+let prevAttentionStates = new Map(); // key → state (the diff baseline)
+let attentionTimer = null;
+// Re-entrancy guard, same rationale as lifecycleRunning/budgetRunning.
+let attentionRunning = false;
+
+// tickAttention — one server-side attention sweep. Exported so a test can drive
+// a single sweep deterministically (the running server drives it off a 60s
+// setInterval via startAttentionPoll, which is too slow for a test). Self-gates
+// to idle when the channel is off; baseline-primes on the first sweep (empty
+// prevAttentionStates → no fire). Transient capture failures leave the baseline
+// in place and retry next sweep (no spurious fire / no flap).
+//
+// `deps` is a test seam (defaults to {} in production): `chats` overrides the
+// pane source (otherwise discovered fresh via discoverAll so the sweep is
+// window-independent — NOT the client-refreshed `cache`), `pollAgentStates`
+// overrides the capture+classify path, and `fetchImpl`/`sleepImpl` flow through
+// to the webhook transport — so a test drives the full gate → diff → dispatch
+// path with ZERO real pane capture and ZERO real network.
+async function tickAttention(deps = {}) {
+  if (!cfg.webhookEnabled || !cfg.webhookUrl || !cfg.webhookAlertAttention) {
+    if (attentionTimer) { clearInterval(attentionTimer); attentionTimer = null; }
+    return;
+  }
+  if (attentionRunning) return;
+  attentionRunning = true;
+  try {
+    // Discover the fleet SERVER-SIDE so the sweep is self-sufficient: it does
+    // NOT rely on the `cache` (which is refreshed by client /api/chats +
+    // /api/discover calls and so can go stale with the window closed to tray).
+    // discoverAll over [LOCAL, ...cfg.hosts] covers local docker yatfa + local/
+    // remote manual tmux + remote docker — the same lean pass the lifecycle tick
+    // uses. Tests inject deps.chats to skip the SSH discovery entirely.
+    let chats = deps.chats;
+    if (chats === undefined) {
+      try {
+        ({ chats = [] } = await discoverAll([LOCAL, ...cfg.hosts], cfg, { activity: false }));
+      } catch {
+        return; // transient discovery failure; retry next sweep
+      }
+    }
+    if (!chats || chats.length === 0) return;
+    // Classify WITHOUT reconcilePaneSubscriptions: the dashboard's /api/agent-
+    // states reconciles the companion subscription to the OPEN panes, and this
+    // sweep classifies the WHOLE fleet — sharing the reconcile would make the two
+    // fight over the subscription set. capturePanes alone is fine (it falls back
+    // to the per-host SSH capture when a companion push subscription isn't live).
+    // Mirrors pollAgentStates' capture+classify, minus the reconcile. Tests inject
+    // deps.pollAgentStates to short-circuit the whole classify step.
+    const classify = deps.pollAgentStates || (async (chatList) => {
+      const panes = await capturePanes(chatList, cfg);
+      return chatList.map((c) => {
+        const base = {
+          id: c.container || c.session,
+          key: c.key,
+          host: c.host,
+          project: c.project,
+          role: c.role,
+          name: c.name || c.key || (c.container || c.session),
+        };
+        if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
+          return { ...base, state: 'capture_failed', signal: null };
+        }
+        const { state, signal } = classifyPane(stripAnsi(panes[c.key] || ''), c);
+        return { ...base, state, signal };
+      });
+    });
+    const agents = await classify(chats);
+    const transitions = notify.diffAttentionTransitions(prevAttentionStates, agents);
+    for (const t of transitions) {
+      // Fire-and-forget: dispatchWebhook swallows terminal failure; the .catch
+      // guarantees a slow/unreachable destination never escapes the sweep.
+      notify.dispatchWebhook({
+        event: `attention-${t.state}`,
+        severity: notify.attentionSeverity(t.state),
+        agent: t.name || t.key,
+        reason: notify.attentionReason(t.state, t.signal),
+        cfg,
+        now: Date.now(),
+        fetchImpl: deps.fetchImpl,
+        sleepImpl: deps.sleepImpl,
+      }).catch(() => {});
+    }
+    // Advance the baseline over EVERY classified row (including the non-attention
+    // ones) so recovery re-arms the one-shot and capture_failed rows don't get
+    // stuck firing on every sweep once capture recovers.
+    prevAttentionStates = new Map(
+      agents.filter((a) => a && typeof a.state === 'string').map((a) => [a.key, a.state]),
+    );
+  } catch {
+    // A transient capture failure leaves the previous baseline in place (no
+    // blanking) so a blip doesn't flap the sweep or re-prime spuriously.
+  } finally {
+    attentionRunning = false;
+  }
+}
+
+function startAttentionPoll() {
+  // Self-gates via tickAttention's first line, so a parked idle timer is harmless
+  // and a later enable (PUT /api/config → restartAttentionPoll) wakes it without a
+  // second start call.
+  if (!attentionTimer) attentionTimer = setInterval(tickAttention, ATTENTION_SWEEP_MS);
+  tickAttention();
+}
+
+// React to a config change: enable → ensure the timer runs + sweep now; disable
+// → stop + reset the baseline so the next enable gets a clean prime (no stale
+// state from a previous run). Mirrors restartBudgetPoll's shape.
+function restartAttentionPoll() {
+  if (cfg.webhookEnabled && cfg.webhookUrl && cfg.webhookAlertAttention) {
+    if (!attentionTimer) attentionTimer = setInterval(tickAttention, ATTENTION_SWEEP_MS);
+    prevAttentionStates = new Map(); // clean baseline prime on (re)enable
+    tickAttention();
+  } else if (attentionTimer) {
+    clearInterval(attentionTimer);
+    attentionTimer = null;
+    prevAttentionStates = new Map();
+  }
+}
+
 // Exported for HTTP-level integration tests (see src/server-hosts-status.test.js).
 // Not used by the running server — startServer() below drives the module-level
 // `server` directly.
@@ -4003,7 +4222,7 @@ function restartBudgetPoll() {
 // the integration glue the pure src/budget.test.js suite cannot reach:
 // localClaudeSessions → computeBudgetState → this cache → /api/budget, including
 // the '(local)' host tag and the window filter over a planted transcript.
-export { app, tickLifecycle, tickBudget, server };
+export { app, tickLifecycle, tickBudget, tickAttention, server };
 
 export function startServer(port = 7421, host = '127.0.0.1') {
   server.on('error', (e) => {
@@ -4026,6 +4245,11 @@ export function startServer(port = 7421, host = '127.0.0.1') {
     // until the human opts in via Settings; once enabled, reuses the existing
     // session-usage fetch on a 120s beat and caches the result for /api/budget.
     startBudgetPoll();
+    // Start the server-side attention sweep for webhook push (WARDEN-555).
+    // Self-gates: parks (zero pane-capture cost) until the user enables a
+    // webhook URL + attention routing; once enabled, classifies every known pane
+    // on a 60s beat and dispatches a webhook on each new attention transition.
+    startAttentionPoll();
     // Start the background pane-delta TTL sweep (WARDEN-413). When the last pane
     // closes the frontend stops polling, so the request-driven reconcile can't age
     // out subscriptions; this decoupled sweep releases them via unsubscribePanes.
