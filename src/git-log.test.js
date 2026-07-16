@@ -61,6 +61,33 @@ const GREP_SUBJECTS = [
   { subject: 'chore: bump deps', body: '' },
 ];
 
+// Commits used to build the pickaxe fixture (WARDEN-559): `git log -S`/`-G` finds the
+// commit that ADDED or REMOVED a code string. The whole point is distinguishing `-S`
+// (occurrence-COUNT change) from `-G` (diff-TEXT regex match), so this fixture is built
+// around the ONE commit that tells them apart: the middle "change value" commit rewrites
+// `billingTotal = 1` → `billingTotal = 2` — the term STAYS at one occurrence (so `-S`
+// skips it) but the diff text still contains `billingTotal` (so `-G` lists it). All
+// three touch the SAME file (billing.js) so add → modify-in-place → remove semantics are
+// real, and so a path+pickaxe composition can be exercised on it. Oldest-first here;
+// the expected endpoint order is newest-first (bottom→top).
+const PICKAXE_TERM = 'billingTotal';
+const PICKAXE_FILE = 'billing.js';
+const PICKAXE_STEPS = [
+  { subject: 'feat: add billingTotal', content: 'billingTotal = 1;\n' },     // count 0→1  (-S ✓, -G ✓)
+  { subject: 'fix: change billingTotal value', content: 'billingTotal = 2;\n' }, // count 1→1 (-S ✗, -G ✓)
+  { subject: 'refactor: remove billingTotal', content: 'total = 2;\n' },     // count 1→0  (-S ✓, -G ✓)
+];
+
+// Commits used to build the pickaxe AHEAD fixture (WARDEN-559): proves pickaxe composes
+// with range=outgoing (@{u}..HEAD). A base is pushed to a bare origin (→ @{u} at base),
+// then two MORE local commits add distinct terms — only the one matching the pickaxe AND
+// sitting in the outgoing set must surface. Oldest-first here.
+const PICKAXE_AHEAD_BASE = 'base: shared with upstream';
+const PICKAXE_AHEAD_STEPS = [
+  { subject: 'outgoing: add billingTotal', file: 'out.js', content: 'billingTotal = 7;\n' },
+  { subject: 'outgoing: add helperTotal', file: 'out2.js', content: 'helperTotal = 6;\n' },
+];
+
 let parseGitLogLine;
 let httpServer;
 let baseUrl;
@@ -74,6 +101,9 @@ let aheadRepo;
 let bareOriginAhead;
 let renameRepo;
 let grepRepo;
+let pickaxeRepo;
+let pickaxeAheadRepo;
+let bareOriginPickaxe;
 
 function git(args, cwd) {
   const r = spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'inherit'] });
@@ -185,6 +215,42 @@ before(async () => {
     git(args, grepRepo);
   });
 
+  // A repo built around ONE file rewritten across three commits (WARDEN-559): add the
+  // term, modify-in-place (count unchanged — the -S/-G wedge), then remove it. This is
+  // the fixture that lets a test PROVE `-S` (count change) and `-G` (diff-text match)
+  // behave differently on the very same history.
+  pickaxeRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitlog-pickaxe-'));
+  git(['init', '-q'], pickaxeRepo);
+  git(['config', 'user.email', 'test@example.com'], pickaxeRepo);
+  git(['config', 'user.name', 'Tester'], pickaxeRepo);
+  PICKAXE_STEPS.forEach((c) => {
+    fs.writeFileSync(path.join(pickaxeRepo, PICKAXE_FILE), c.content);
+    git(['add', PICKAXE_FILE], pickaxeRepo);
+    git(['commit', '-q', '-m', c.subject], pickaxeRepo);
+  });
+
+  // A repo whose HEAD is AHEAD of @{u} with two DISTINCT terms added in the outgoing
+  // commits (WARDEN-559): proves pickaxe composes with range=outgoing — only the
+  // outgoing commit that ALSO matches the pickaxe term must surface. Mirrors aheadRepo's
+  // base-then-push-then-commit-locally construction.
+  pickaxeAheadRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitlog-pickaxe-ahead-'));
+  git(['init', '-q'], pickaxeAheadRepo);
+  git(['config', 'user.email', 'test@example.com'], pickaxeAheadRepo);
+  git(['config', 'user.name', 'Tester'], pickaxeAheadRepo);
+  fs.writeFileSync(path.join(pickaxeAheadRepo, 'pkg.js'), 'const base = 0;\n');
+  git(['add', '.'], pickaxeAheadRepo);
+  git(['commit', '-q', '-m', PICKAXE_AHEAD_BASE], pickaxeAheadRepo);
+  bareOriginPickaxe = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitlog-bare-pickaxe-'));
+  git(['init', '--bare', '-q'], bareOriginPickaxe);
+  git(['remote', 'add', 'origin', bareOriginPickaxe], pickaxeAheadRepo);
+  git(['push', '-u', 'origin', 'HEAD'], pickaxeAheadRepo);
+  // Two more local commits, NOT pushed → HEAD is ahead of @{u} by exactly these two.
+  PICKAXE_AHEAD_STEPS.forEach((c) => {
+    fs.writeFileSync(path.join(pickaxeAheadRepo, c.file), c.content);
+    git(['add', c.file], pickaxeAheadRepo);
+    git(['commit', '-q', '-m', c.subject], pickaxeAheadRepo);
+  });
+
   // Catalog with LOCAL manual chats: the git repo, the non-git dir, the behind repo,
   // and the ahead repo. Resolved by bare session id (no ':' prefix) → no host/tmux
   // discovery runs.
@@ -197,6 +263,8 @@ before(async () => {
       { host: '(local)', session: 'warden-ahead', cwd: aheadRepo, cmd: 'bash', name: 'warden-ahead' },
       { host: '(local)', session: 'warden-rename', cwd: renameRepo, cmd: 'bash', name: 'warden-rename' },
       { host: '(local)', session: 'warden-grep', cwd: grepRepo, cmd: 'bash', name: 'warden-grep' },
+      { host: '(local)', session: 'warden-pickaxe', cwd: pickaxeRepo, cmd: 'bash', name: 'warden-pickaxe' },
+      { host: '(local)', session: 'warden-pickaxe-ahead', cwd: pickaxeAheadRepo, cmd: 'bash', name: 'warden-pickaxe-ahead' },
     ]),
   );
 
@@ -215,7 +283,7 @@ after(async () => {
   if (httpServer) await new Promise((r) => httpServer.close(r));
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  for (const d of [gitRepo, nonGitDir, behindRepo, bareOrigin, aheadRepo, bareOriginAhead, renameRepo, grepRepo, tempHome]) {
+  for (const d of [gitRepo, nonGitDir, behindRepo, bareOrigin, aheadRepo, bareOriginAhead, renameRepo, grepRepo, pickaxeRepo, pickaxeAheadRepo, bareOriginPickaxe, tempHome]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 });
@@ -596,5 +664,135 @@ describe('/api/git-log grep filter (commit-message search — WARDEN-498)', () =
     assert.strictEqual(body.commits.length, 4);
     assert.strictEqual(body.commits[0].subject, 'chore: bump deps');
     assert.strictEqual(body.commits[3].subject, 'feat: add login');
+  });
+});
+
+describe('/api/git-log pickaxe filter (content-history search — WARDEN-559)', () => {
+  // pickaxeRepo (newest-first): refactor: remove billingTotal · fix: change billingTotal
+  // value · feat: add billingTotal. The MIDDLE commit rewrites `billingTotal = 1` →
+  // `billingTotal = 2`: the term stays at one occurrence (so `-S` SKIPS it) but its diff
+  // text still contains the term (so `-G` LISTS it) — the one commit that distinguishes
+  // the two modes. Newest-first expected orders below.
+
+  it('pickaxe default uses -S: returns commits that added OR removed the term', async () => {
+    // `-S billingTotal` lists commits where the occurrence COUNT changed: feat (0→1)
+    // and refactor (1→0). The middle "change value" commit (1→1) is correctly SKIPPED —
+    // that is exactly the -S vs -G wedge. Newest-first: refactor, then feat.
+    const res = await fetch(`${baseUrl}/api/git-log?id=warden-pickaxe&pickaxe=${PICKAXE_TERM}`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.error, null);
+    assert.ok(Array.isArray(body.commits));
+    assert.strictEqual(body.commits.length, 2);
+    assert.strictEqual(body.commits[0].subject, 'refactor: remove billingTotal');
+    assert.strictEqual(body.commits[1].subject, 'feat: add billingTotal');
+    for (const c of body.commits) {
+      assert.match(c.hash, /^[0-9a-f]{4,}$/);
+      assert.strictEqual(c.author, 'Tester');
+      assert.ok(typeof c.epoch === 'number' && c.epoch > 0, 'epoch (%ct) must be a positive number');
+    }
+  });
+
+  it('pickaxeRegex=1 uses -G: also lists the modify-in-place commit (diff-text match)', async () => {
+    // `-G billingTotal` lists every commit whose diff ADDED/REMOVED a matching line —
+    // all three, INCLUDING the middle "change value" commit that `-S` skipped (its diff
+    // text contains `billingTotal` even though the count was unchanged). Newest-first.
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-pickaxe&pickaxe=${PICKAXE_TERM}&pickaxeRegex=1`)).json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.commits.length, 3);
+    assert.strictEqual(body.commits[0].subject, 'refactor: remove billingTotal');
+    assert.strictEqual(body.commits[1].subject, 'fix: change billingTotal value'); // the -S/-G wedge
+    assert.strictEqual(body.commits[2].subject, 'feat: add billingTotal');
+  });
+
+  it('-S is the default (omit pickaxeRegex → the count-change set, not the diff-text set)', async () => {
+    // No pickaxeRegex ⇒ -S ⇒ the middle commit is absent (count unchanged). This is the
+    // negative-control half of the -S/-G distinction: if a bug made pickaxeRegex absent
+    // accidentally select -G, this commit would appear and length would be 3.
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-pickaxe&pickaxe=${PICKAXE_TERM}`)).json();
+    assert.strictEqual(body.commits.length, 2);
+    assert.ok(!body.commits.some((c) => c.subject === 'fix: change billingTotal value'));
+  });
+
+  it('returns an empty list (200, not 500) when no diff ever contained the term', async () => {
+    const res = await fetch(`${baseUrl}/api/git-log?id=warden-pickaxe&pickaxe=this-string-never-existed`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.deepStrictEqual(body.commits, []);
+    assert.strictEqual(body.error, null);
+  });
+
+  it('uses the pickaxe ceiling, not the browse cap (limit=1 is ignored while searching)', async () => {
+    // Mirrors the WARDEN-498 grep assertion: search widens beyond the 50-commit browse
+    // cap so an old add/remove is findable. limit=1 must NOT clip the 2 `-S` matches —
+    // when pickaxe is present, searchLimit = GIT_LOG_GREP_MAX. (A buggy impl that reused
+    // `limit` would return 1 commit here.)
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-pickaxe&pickaxe=${PICKAXE_TERM}&limit=1`)).json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.commits.length, 2);
+  });
+
+  it('caps an over-long pickaxe term at 128 chars and stays safe (200, not 500)', async () => {
+    // The argv-bounding safety net (mirrors grep's .slice(0,128)): a 200-char term is
+    // truncated before reaching git, so the handler stays 200 with a well-formed body —
+    // never a 500 and never an unbounded argv. pickaxeRepo has no 128-char run, so the
+    // truncated term matches nothing.
+    const longTerm = 'X'.repeat(200);
+    const res = await fetch(`${baseUrl}/api/git-log?id=warden-pickaxe&pickaxe=${encodeURIComponent(longTerm)}`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.ok(Array.isArray(body.commits));
+    assert.strictEqual(body.commits.length, 0);
+    assert.strictEqual(body.error, null);
+  });
+
+  it('combines pickaxe with range=outgoing (intersect the unpushed set)', async () => {
+    // pickaxeAheadRepo's two outgoing commits add DISTINCT terms; only the one that
+    // matches the pickaxe AND sits in the outgoing (@{u}..HEAD) set must surface.
+    // Proves the -S flag and the rangeRev splice together without error.
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-pickaxe-ahead&range=outgoing&pickaxe=${PICKAXE_TERM}`)).json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.commits.length, 1);
+    assert.strictEqual(body.commits[0].subject, 'outgoing: add billingTotal');
+  });
+
+  it('combines pickaxe with path (git log -S --follow -- <file>)', async () => {
+    // The term only ever lives in billing.js, so pickaxe+path=billing.js yields the same
+    // `-S` set as pickaxe alone (the refactor + feat). Proves the -S flag splices before
+    // the --follow/-- pathspec branch and git accepts the combination.
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-pickaxe&pickaxe=${PICKAXE_TERM}&path=${PICKAXE_FILE}`)).json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.commits.length, 2);
+    assert.strictEqual(body.commits[0].subject, 'refactor: remove billingTotal');
+    assert.strictEqual(body.commits[1].subject, 'feat: add billingTotal');
+  });
+
+  it('returns { commits: [], error: null } (200, not 500) for a non-git cwd', async () => {
+    const res = await fetch(`${baseUrl}/api/git-log?id=warden-nongit&pickaxe=${PICKAXE_TERM}`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.deepStrictEqual(body.commits, []);
+    assert.strictEqual(body.error, null);
+  });
+
+  it('absent pickaxe stays byte-for-byte today\'s behavior (all commits, unchanged)', async () => {
+    // No pickaxe → the existing HEAD-reachable behavior (the whole 3-commit history),
+    // proving the browse path was not perturbed by the new param. Identical to the
+    // headline "returns parsed commits" case minus the param.
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-pickaxe`)).json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.commits.length, 3);
+    assert.strictEqual(body.commits[0].subject, 'refactor: remove billingTotal');
+    assert.strictEqual(body.commits[2].subject, 'feat: add billingTotal');
+  });
+
+  it('pickaxe and grep compose (both filters splice as first log options)', async () => {
+    // A user may pass both: `-S billingTotal --grep=add -i`. Only 'feat: add billingTotal'
+    // both added the term (pickaxe) AND has 'add' in its message (grep) — refactor
+    // removed the term but its message lacks 'add'. Proves the two splice independently.
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-pickaxe&pickaxe=${PICKAXE_TERM}&grep=add`)).json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.commits.length, 1);
+    assert.strictEqual(body.commits[0].subject, 'feat: add billingTotal');
   });
 });

@@ -28,7 +28,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-fleet-search-test-'));
 const tmpFile = join(tmpDir, 'gitStateSummary.mjs');
 writeFileSync(tmpFile, code);
-const { fleetCommitSearchEligible, buildFleetCommitGroups } = await import(tmpFile);
+const { fleetCommitSearchEligible, buildFleetCommitGroups, buildFleetSearchBaseUrl } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -194,6 +194,52 @@ test('matches across multiple agents + projects group by agent with per-group un
   // The popover's "↑N" per-group header = commits.filter(unpushed).length.
   assert.equal(r.groups[0].commits.filter((c) => c.unpushed).length, 1);
   assert.equal(r.groups[1].commits.filter((c) => c.unpushed).length, 1);
+});
+
+console.log('\nbuildFleetSearchBaseUrl — the message⇄content fetch-URL swap (WARDEN-559)');
+// The aggregation layer is mode-agnostic, so the ONLY mode-dependent line in the whole
+// fan-out is the fetch URL: message mode → grep= (WARDEN-498/534), content mode →
+// pickaxe= (WARDEN-559, git log -S/-G). buildFleetSearchBaseUrl owns that swap, extracted
+// into the pure layer so it is unit-testable without a React runner (this repo has none).
+test('MESSAGE mode builds a grep= URL (the WARDEN-498/534 message axis)', () => {
+  const url = buildFleetSearchBaseUrl('a1', 'login', 'message');
+  assert.equal(url, '/api/git-log?id=a1&grep=login');
+  assert.ok(!url.includes('pickaxe='), 'message mode must NOT splice pickaxe');
+});
+test('CONTENT mode builds a pickaxe= URL (the WARDEN-559 content/pickaxe axis)', () => {
+  const url = buildFleetSearchBaseUrl('a1', 'billingTotal', 'content');
+  assert.equal(url, '/api/git-log?id=a1&pickaxe=billingTotal');
+  assert.ok(!url.includes('grep='), 'content mode must NOT splice grep');
+});
+test('CONTENT mode without the regex toggle omits pickaxeRegex (default -S count-change)', () => {
+  const url = buildFleetSearchBaseUrl('a1', 'billingTotal', 'content', false);
+  assert.ok(!url.includes('pickaxeRegex'), 'default content mode is -S (no pickaxeRegex)');
+});
+test('CONTENT mode with pickaxeRegex appends pickaxeRegex=1 (selects -G diff-text match)', () => {
+  const url = buildFleetSearchBaseUrl('a1', 'billingTotal', 'content', true);
+  assert.equal(url, '/api/git-log?id=a1&pickaxe=billingTotal&pickaxeRegex=1');
+});
+test('the regex toggle has no effect in MESSAGE mode (grep ignores pickaxeRegex)', () => {
+  // pickaxeRegex is a content-mode-only concern; passing it in message mode must not
+  // leak a stray pickaxeRegex=1 onto a grep URL (the component gates the toggle to
+  // content mode, but the pure helper must be robust to it regardless).
+  const url = buildFleetSearchBaseUrl('a1', 'login', 'message', true);
+  assert.equal(url, '/api/git-log?id=a1&grep=login');
+  assert.ok(!url.includes('pickaxeRegex'));
+});
+test('id and query are URL-encoded (a key/term with special chars stays one param value)', () => {
+  // Mirrors the WARDEN-122 argv discipline on the backend: the term reaches git as ONE
+  // argument. Here the term 'a b&c=d' must be encoded so it can't split into extra params.
+  const url = buildFleetSearchBaseUrl('host:container', 'a b&c=d', 'content');
+  assert.equal(url, '/api/git-log?id=host%3Acontainer&pickaxe=a%20b%26c%3Dd');
+});
+test('the returned base has no range= so the component can append &range=outgoing for the join', () => {
+  // The ↑unpushed join fires a SECOND fetch with &range=outgoing appended to this base.
+  // Asserting range= is absent here proves the component's `${base}&range=outgoing`
+  // concatenation yields a clean two-param-by-mode URL (+range=outgoing), not a double.
+  const base = buildFleetSearchBaseUrl('a1', 'x', 'content', true);
+  assert.ok(!base.includes('range='), 'base must leave room for the outgoing-range append');
+  assert.equal(`${base}&range=outgoing`, '/api/git-log?id=a1&pickaxe=x&pickaxeRegex=1&range=outgoing');
 });
 
 console.log(`\n✓ FLEET COMMIT SEARCH TESTS PASS (${passed})`);
