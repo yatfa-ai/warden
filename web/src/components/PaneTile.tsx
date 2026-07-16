@@ -119,6 +119,12 @@ interface Props {
   // against THIS pane's cwd. Pure pass-through; PaneGrid binds it to this tile's
   // id (openFilePromptFor(t.id)).
   onOpenFileFromDir: () => void;
+  // WARDEN-573: per-pane read-only directory browse (📂) — the structural twin
+  // of onSearchWorkspace. Opens FileBrowserDialog scoped to THIS pane's repo so a
+  // human can discover a file by position (browse dirs) without prior knowledge
+  // of its name. Pure pass-through; PaneGrid binds it to this tile's id
+  // (openBrowseFor(t.id)).
+  onBrowseFiles: () => void;
   chat?: Chat | null;     // chat metadata for export
   host?: string;          // host hint for restore (which host to discover)
   externalSearchQuery?: string;  // external search trigger from global search
@@ -179,7 +185,7 @@ interface Props {
   onFileViewerViewModeChange: (mode: 'rendered' | 'source') => void;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, onSpawned, snippets, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, onBrowseFiles, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, onSpawned, snippets, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const hostLabels = useHostLabels();
@@ -939,7 +945,11 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
             toolbar (🔍 search / 📄 file) so they operate on THIS pane's repo,
             not the focused pane's. Grouped with Split (the other per-pane
             workspace action from WARDEN-543). Guarded like Split — disabled
-            when this pane has no resolvable chat (no cwd to search / open in). */}
+            when this pane has no resolvable chat (no cwd to search / open in).
+            WARDEN-573 adds 📂 browse as a third sibling — discover a file by
+            position (browse dirs) rather than by content (search) or known path
+            (file). Order mirrors the discovery matrix: browse → search → file. */}
+        <ContextMenuItem disabled={!chat} onSelect={() => onBrowseFiles()}>Browse files in directory</ContextMenuItem>
         <ContextMenuItem disabled={!chat} onSelect={() => onSearchWorkspace()}>Search workspace files</ContextMenuItem>
         <ContextMenuItem disabled={!chat} onSelect={() => onOpenFileFromDir()}>Open file from directory</ContextMenuItem>
         {/* WARDEN-543: per-pane split — spawn a shell on THIS pane's host/cwd

@@ -2619,8 +2619,9 @@ app.get('/api/git-range-diff', async (req, res) => {
 // Distinct from isPathWithinCwd (WARDEN-151): that one guards a working-tree FILE
 // (realpath-hardened against symlink escapes), whereas this validates a git pathspec
 // against an arbitrary commit — a path the current tree may not even contain — so a
-// purely lexical rule is the right containment model here.
-function isSafeRelativePath(p) {
+// purely lexical rule is the right containment model here. Exported so the
+// /api/git-ls browse route (WARDEN-573) and its tests can rely on the same rule.
+export function isSafeRelativePath(p) {
   if (!p || typeof p !== 'string') return false;
   if (p.includes('\0')) return false;
   if (p.startsWith('/') || p.startsWith('~') || /^[A-Za-z]:[\\/]/.test(p)) return false;
@@ -3688,6 +3689,103 @@ app.post('/api/search-files', async (req, res) => {
     // Generic message — don't leak internals (e.g. a HostConnectionError embedding
     // the remote hostname) to the browser. Mirrors read-file's 'read failed'.
     res.json({ results: [], query, error: 'search failed' });
+  }
+});
+
+// Derive ONE directory's immediate children (files + subdirs) from the flat,
+// recursive `git ls-files` output (WARDEN-573). Each path is collapsed to its
+// first segment relative to `dir`: a lone segment is a FILE, a segment followed
+// by `/…` is a DIR. A subdir holding many files yields a SINGLE dir entry
+// (deduped via the Set). This is the lazy per-directory expansion that keeps the
+// payload bounded — we never return a recursive tree, just one dir's children.
+// Sorted dirs-first then alphabetical (the standard file-browser order) so a
+// human scanning for a folder isn't buried under files. Exported for tests.
+export function parseGitLsEntries(raw, dir) {
+  const prefix = dir ? dir.replace(/\/+$/, '') + '/' : '';
+  const dirs = new Set();
+  const files = new Set();
+  for (const rawLine of String(raw || '').split('\n')) {
+    const line = rawLine.replace(/\r$/, '').trim();
+    if (!line) continue;
+    // Strip the requested dir's prefix → path relative to it. A line not under
+    // the prefix (can't happen with a pathspec, but defensive) is skipped.
+    let rel = line;
+    if (prefix) {
+      if (!line.startsWith(prefix)) continue;
+      rel = line.slice(prefix.length);
+    }
+    if (!rel) continue;
+    const slash = rel.indexOf('/');
+    if (slash === -1) files.add(rel);
+    else dirs.add(rel.slice(0, slash));
+  }
+  // Sort case-insensitively (so README.md sits next to readme.md, the natural
+  // file-browser order) but deterministically via codePoint — NOT localeCompare,
+  // whose ordering shifts with the server's ICU/locale build. A case-sensitive
+  // tiebreaker keeps it stable for names differing only in case.
+  const cmp = (a, b) => {
+    const al = a.toLowerCase();
+    const bl = b.toLowerCase();
+    if (al < bl) return -1;
+    if (al > bl) return 1;
+    return a < b ? -1 : a > b ? 1 : 0;
+  };
+  const toEntries = (names, type) => [...names].sort(cmp).map((name) => ({ name, type }));
+  return [...toEntries(dirs, 'dir'), ...toEntries(files, 'file')];
+}
+
+// GET /api/git-ls — read-only directory listing of a chat's working directory
+// (WARDEN-573). The STRUCTURAL discovery twin of /api/search-files: where grep
+// finds a file by CONTENT, this finds it by POSITION (browse dirs → filenames)
+// with no prior knowledge of either. Backed by `git ls-files --cached --others
+// --exclude-standard` via runGit (WARDEN-235) so it lights up identically for
+// local, SSH-remote, and yatfa-container chats (docker-exec into the container);
+// raw fs.readdirSync is deliberately avoided — it would silently break the
+// remote/container transports AND would not honor .gitignore. --exclude-standard
+// naturally hides node_modules/.git/build artifacts. Mirrors /api/git-status's
+// resolve → gitCwd → runGit shape and its graceful `error:'no cwd'` contract.
+//
+// Query: id=<chatId>, dir=<cwd-relative path, default '' (repo root)>
+// Response: { entries: [{ name, type: 'file'|'dir' }], cwd, dir, error?: string }
+//
+// Strictly read-only (WARDEN-199 line): `git ls-files` mutates nothing.
+app.get('/api/git-ls', async (req, res) => {
+  const chatId = String(req.query.id || '');
+  const { chat, error } = await resolve(chatId);
+  if (error) return res.status(404).json({ error });
+
+  // `dir` is relative to cwd (default '' = repo root). Containment guard: a
+  // pathspec reaching `..` would let git list outside cwd, so it is validated
+  // server-side here (not just client-side in the dialog). Reuses the SAME
+  // isSafeRelativePath the git-show/blame routes trust (lexical pathspec rule —
+  // works across all transports, no host-fs realpath needed). The `dir &&` gate
+  // lets the empty root default through (isSafeRelativePath treats '' as invalid
+  // because a git-show path is required, but root is the legitimate list-all).
+  const dir = String(req.query.dir || '');
+  if (dir && !isSafeRelativePath(dir)) {
+    return res.status(400).json({ error: 'dir must be within working directory' });
+  }
+
+  try {
+    const cwd = gitCwd(chat);
+    if (!cwd) return res.json({ entries: [], cwd: '', dir, error: 'no cwd' });
+
+    // Pathspec the listing to `dir` so git reads only that subtree; with dir=''
+    // (root) no pathspec is passed → lists from cwd. --cached (--staged) gives
+    // tracked files, --others adds untracked work-in-progress, and
+    // --exclude-standard drops .gitignored entries (node_modules, build, .git).
+    const args = ['ls-files', '--cached', '--others', '--exclude-standard'];
+    if (dir) args.push('--', dir);
+    const r = await runGit(chat, args, cwd);
+    // Non-zero exit (not a git repo, or an unborn repo whose index is empty
+    // under a non-root dir) → empty list with an explicit error so the dialog
+    // can tell "empty directory" from "not a repo" (mirrors search-files's
+    // honest-error discipline rather than masking as "no results").
+    if (!r.ok) return res.json({ entries: [], cwd, dir, error: 'not a git repository' });
+    res.json({ entries: parseGitLsEntries(r.stdout, dir), cwd, dir, error: null });
+  } catch (e) {
+    // Generic — don't leak internals (a HostConnectionError embeds the hostname).
+    res.json({ entries: [], cwd: chat.cwd || '', dir, error: 'ls failed' });
   }
 });
 
