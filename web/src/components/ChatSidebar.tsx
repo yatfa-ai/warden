@@ -44,6 +44,11 @@ import type { GitCommit, GitFile, ClaudeSession, DiffStat } from './sidebar/type
 import { ChatRow, OpenPaneRow, ChatRowSkeleton, SessionRowSkeleton } from './sidebar/ChatRows';
 import { AgentFilterSortControls } from './sidebar/AgentFilterSortControls';
 import { FleetCommitSearch } from './sidebar/FleetCommitSearch';
+// WARDEN-565: re-homes the orphaned WARDEN-288 cross-agent file-collision ⚠ badge
+// into the fleet view headers (the surfaces that replaced the abolished project-
+// chip row, WARDEN-372). The badge is fully built; it was simply never rendered.
+import { GitCollisionBadge } from './sidebar/GitBadges';
+import { detectProjectFileCollisions } from '@/lib/gitStateSummary';
 import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/SidebarBits';
 import { SessionTagChips, SessionTagFilterRow } from './sidebar/SessionTags';
 import { computeTagsInUse, filterSessionsByTags, addTag, removeTag } from '@/lib/sessionTags';
@@ -441,6 +446,28 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
     if (view.kind !== 'host') return [];
     return filterSessionsByTags(hostSessions[view.host]?.sessions || [], sessionTags, activeTagFilters);
   }, [view, hostSessions, sessionTags, activeTagFilters]);
+
+  // WARDEN-565: cross-agent file-edit collision ⚠ badge for the fleet view headers.
+  // Re-homes the orphaned WARDEN-288 detection (detectProjectFileCollisions) into the
+  // surfaces that replaced the abolished project-chip row (WARDEN-372). The helper
+  // reads the cached gitStatus map (no new fetch, no backend change) and keys by
+  // project internally, so a per-view computation over that view's chats emits a
+  // cross-project total.paths union that maps to a single ⚠N badge — and the badge's
+  // showProject flag disambiguates the same path colliding in two projects.
+  //
+  // This memo MUST live at the top level (hooks can't be called conditionally — the
+  // host/collection branches are early returns), so it guards on view.kind and
+  // resolves the in-view population the same way each branch does: the host view's
+  // hostChats (a single host can run several projects, so it can span them), and the
+  // whole chats fleet for the root view (mirroring FleetCommitSearch, which reads the
+  // full chats fleet from that same header). The colliding paths are empty when no two
+  // active project agents share a dirty file, in which case the badge renders nothing.
+  const fleetCollisionPaths = useMemo(() => {
+    const viewChats = view.kind === 'host'
+      ? chats.filter((c) => c.host === view.host)
+      : chats;
+    return detectProjectFileCollisions(viewChats, gitStatus).total.paths;
+  }, [view, chats, gitStatus]);
 
   // Fan the message out to every selected agent via the existing per-target
   // /api/send path (server.js:182 → sendPane → tmux send-keys), then summarize.
@@ -899,6 +926,19 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
             onSortChange={onSortChange}
             hideHostSort
           />
+          {/* WARDEN-565: cross-agent file-collision ⚠ badge, re-homed into the fleet
+              header that replaced the abolished project-chip row (WARDEN-372). Computed
+              over this host's chats (hostChats) — a host can run several projects, so
+              showProject tags each colliding path with its project. Renders nothing when
+              no two active project agents share a dirty file (silent-when-clean). The
+              popover's jump rows + per-path "Compare edits" (WARDEN-321) live in the badge. */}
+          <GitCollisionBadge
+            collisions={fleetCollisionPaths}
+            chats={hostChats}
+            gitStatus={gitStatus}
+            onOpenChat={onOpenChat}
+            showProject
+          />
           <IconTooltip label="rescan" disabled={loadingHost === H}><button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => fetchHostSessions(H)} disabled={loadingHost === H}>
             {loadingHost === H ? <Skeleton className="h-3 w-3" /> : '↻'}
           </button></IconTooltip>
@@ -1068,6 +1108,21 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
             placement (alongside the filter/sort controls) per the ticket's
             placement note; the popover owns its own input + debounce + fan-out. */}
         <FleetCommitSearch chats={chats} onOpenChat={onOpenChat} />
+        {/* WARDEN-565: cross-agent file-collision ⚠ badge, re-homed into the root
+            fleet header alongside FleetCommitSearch (the surface that replaced the
+            abolished project-chip row, WARDEN-372). Computed over the whole chats
+            fleet — mirroring FleetCommitSearch, which also fans across the full fleet
+            from this header — so the ⚠ surfaces a fleet-wide divergence risk. The
+            fleet spans projects, so showProject tags each colliding path with its
+            project. Renders nothing when no two active project agents share a dirty
+            file (silent-when-clean). */}
+        <GitCollisionBadge
+          collisions={fleetCollisionPaths}
+          chats={chats}
+          gitStatus={gitStatus}
+          onOpenChat={onOpenChat}
+          showProject
+        />
         <Badge variant="secondary" className="text-xs @max-[18rem]:hidden">{filteredPanes.length}</Badge>
         <span className="@max-[20rem]:hidden"><UpdatedAgo at={lastRefreshAt} timestampFormat={timestampFormat} /></span>
         <button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={onRefresh} disabled={loading} title="refresh">
