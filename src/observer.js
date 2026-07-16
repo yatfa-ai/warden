@@ -12,7 +12,7 @@ import { complete } from './llm.js';
 import { getSession, saveMessages, appendTranscript } from './sessions.js';
 // The pane-state classifier was extracted into agentState.js (WARDEN-344) so the
 // proactive attention surfaces can reach it without this Observer's LLM. Re-imported
-// here unchanged — summarize_chats / read_chats / alert_changes still classify panes
+// here unchanged — summarize_chats / read_chats still classify panes
 // with the exact same logic. stripAnsi + inferGoal are also used directly below.
 import { classifyPane, stripAnsi, inferGoal } from './agentState.js';
 // WARDEN-359: log a directive_sent activity event at the moment a directive actually
@@ -38,12 +38,11 @@ You operate ONLY through these tools:
 - read_chats({ids, open_only?, lines?, changed_only?}): read several panes in ONE batched call — much cheaper than several read_chat round trips when you must read multiple agents in full. Pass ids (array of substrings) OR open_only: true to read all open panes at once. Returns each pane's raw content per pane; capture failures are reported per pane, never dropped. Set changed_only: true on a follow-up to get back only panes whose content changed since the last read.
 - send_directive({id, directive}): propose a message to an agent. The user MUST approve every send; you propose and wait for the gate.
 - summarize_chats({per_agent_lines?, changed_only?}): structured, size-bounded summary of every open chat — one entry per pane with role, state (active/idle/stuck/erroring/blocked/waiting), last action, errors, current step, and goal. Failed captures are flagged per-entry, never omitted. Use this when the user asks "what's happening", "what are they working on", or you need a complete picture to advise well. Set changed_only: true to get back only agents whose state or content changed since the last read.
-- alert_changes(): on-demand check that reports ONLY open agents newly entering a state worth alerting on since the last read — idle, erroring, stuck (repeating output), or completed-a-task. It diffs against the last-read cache, so only CHANGES surface (no re-reading everything). Use this when the user asks "what needs attention", "who finished", or "what changed". NOTE: the first call on a cold cache establishes a baseline and returns no alerts — call summarize_chats first, then alert_changes later to see what changed.
 - write_file({path, content, append?}): save TEXT to a file under the warden data dir (~/.yatfa-warden/), e.g. reports/summary.md or snapshots/agent-X.md. Use this to persist observations, findings, snapshots, or reports worth keeping between turns — it is your only durable output channel besides send_directive (which only talks to agents). path is relative to the data dir; set append: true to add to a file instead of overwriting. Writes are confined to the data dir.
 
 Your job:
 1. Watch — read the chats the user cares about; keep an accurate, current picture of each agent's work.
-2. Advise — tell the user what's going on: who is progressing, who is stuck, who is idle, what needs a human decision right now. Be concrete and brief; cite what you read.
+2. Advise — explain what's going on: who is progressing, who is stuck, who is idle, and what each is working on. Be concrete and brief; cite what you read. You do NOT own "what needs attention right now": the always-visible header Attention badge already ranks that deterministically — when the user asks "where am I needed" or "what needs attention", point them at its "You're needed in {name} {reason}" callout (and the per-chat watch ping) instead of synthesizing your own urgency ranking.
 3. Direct — when the user wants action, compose a PROPER directive and send it to the right agent via send_directive.
 
 A "proper" directive is a self-contained message addressed to the receiving agent, including: the goal, any context it may lack (paths, ticket ids, decisions), any constraints, and a "done when" condition. Write it as clear natural instructions to that agent — not a rigid template. One focused directive per send.
@@ -63,7 +62,7 @@ When using summarize_chats, the tool returns STRUCTURED per-agent state (not raw
 - captureError: true means that pane could not be captured (host unreachable). The entry is still present — flag it to the user; do NOT assume the agent is idle.
 - Be concrete: name the agents, cite the errors/currentStep you read, and recommend the next action.
 
-Be concise. Highlight what needs attention NOW.`;
+Be concise. For "what needs attention" or "where am I needed", defer to the header Attention badge (its "You're needed in {name} {reason}" callout, plus the per-chat watch ping) — it is the authoritative, deterministic signal; your job is to read chats and explain the why, not to rebuild the ranking.`;
 
 export const TOOLS = [
   {
@@ -114,11 +113,6 @@ export const TOOLS = [
       },
       required: [],
     },
-  },
-  {
-    name: 'alert_changes',
-    description: "On-demand: check the open agents and report ONLY those that newly entered a state worth alerting on since the last read — idle, erroring, stuck (repeating output), or completed-a-task. No background watcher; call this when the user asks 'what needs attention' or 'who finished'. It reads each open pane and (for Claude Code agents) the transcript to detect a task completing, then diffs against the last-read cache so only CHANGES surface. The FIRST call on a cold cache establishes a baseline and returns no alerts — call it once after a summarize, then again later to see what changed. No extra LLM calls.",
-    input_schema: { type: 'object', properties: {}, required: [] },
   },
   {
     name: 'write_file',
@@ -323,12 +317,12 @@ export function writeReportFile(dataDir, relPath, content, opts = {}) {
 //
 // The conservative core of change-awareness: a per-agent last-read snapshot
 // (pane state + content signature + transcript phase + timestamp) kept as a
-// side-effect of normal opt-in reads, a "what changed since last read" diff,
-// and an on-demand alert trigger. NO background polling, NO autonomous token
-// spend (WARDEN-75) — every read is caller-driven. The pure helpers below are
-// fully unit-testable with no SSH/tmux; the async DI core (alertChangedAgents)
-// takes capturePanes + readTranscriptPhase as injected dependencies for the same
-// reason (mock.module is unavailable on the project's Node — WARDEN-130).
+// side-effect of normal opt-in reads, surfaced as a "what changed since last
+// read" diff via changed_only on summarize_chats / read_chats. NO background
+// polling, NO autonomous token spend (WARDEN-75) — every read is caller-driven.
+// The pure helpers below are fully unit-testable with no SSH/tmux.
+// (WARDEN-509 retired the on-demand alert_changes tool that consumed this cache;
+// "where am I needed" is now owned by the deterministic AttentionBadge.)
 
 // Content signature for change detection: stable across reads unless the pane's
 // line count or its last line actually changed. Two captures with the same sig
@@ -339,14 +333,17 @@ export function paneSignature(cleanPane) {
   return `${lines.length}:${last.slice(0, 120)}`;
 }
 
-// ---- completed-a-task detection (the one genuinely new signal) ----
+// ---- transcript phase detection (mid-turn vs awaiting-input) ----
 //
-// Idle / erroring / Stuck / Blocked / Waiting / Active are already returned by
-// classifyPane — reused as-is, no new patterns. "Completed" is new and its
-// PRIMARY signal is the Claude Code transcript (not pane text): a turn flips
-// mid-turn → awaiting-input when an agent finishes and is waiting for the next
-// prompt. Bare-tmux tabs without a transcript fall back to a pane-state
-// transition (working → clean idle).
+// classifyPane already returns idle / erroring / stuck / blocked / waiting /
+// active — reused as-is, no new patterns. The extra signal here is the Claude
+// Code transcript phase: a turn is 'mid-turn' until it ends, then
+// 'awaiting-input' (the agent finished and is waiting for the next prompt). It
+// is recorded in the change-aware cache so summarize_chats / read_chats
+// changed_only can detect progress. (WARDEN-509 removed the on-demand
+// alert_changes derivation that turned a mid-turn → awaiting-input flip into a
+// "completed" alert; "who finished" / "where am I needed" is now surfaced by the
+// deterministic AttentionBadge + per-chat watch, which read pane state directly.)
 
 // Transcript entry types that carry no conversational signal — skipped when
 // locating the "last real" entry (per WARDEN-166 spec).
@@ -393,68 +390,6 @@ export function transcriptPhaseOf(entries) {
     return null;
   }
   return 'mid-turn'; // last real entry is a user message → turn in progress
-}
-
-// Did this agent just complete a task? Transcript path is authoritative when both
-// phases are known (fires on the mid-turn → awaiting-input flip); otherwise the
-// transcript-less fallback fires on a working-state → clean-idle transition.
-const WORKING_STATES = new Set(['active', 'stuck', 'erroring', 'blocked', 'waiting']);
-export function detectCompleted(priorState, priorPhase, curState, curPhase) {
-  if (priorPhase && curPhase) {
-    return priorPhase === 'mid-turn' && curPhase === 'awaiting-input';
-  }
-  return WORKING_STATES.has(priorState) && curState === 'idle';
-}
-
-// States that warrant an alert when newly entered. ('completed' is a transient
-// event derived in diffAlerts, not a persistent classifyPane state.)
-const ALERTABLE_STATES = new Set(['idle', 'erroring', 'stuck']);
-const ALERT_PRIORITY = { erroring: 0, stuck: 1, completed: 2, idle: 3 };
-
-// Diff a prior cache snapshot against a freshly observed one and surface ONLY
-// agents that newly entered an alertable state (idle / erroring / stuck /
-// completed) since the last read. Fires on change-into-state only: an agent
-// already in the state produces no alert, and an agent with no prior baseline
-// (first observation) produces none either. At most ONE alert per agent per
-// diff, chosen by urgency: a newly-erroring/stuck pane beats "completed" (an
-// error is more actionable than "it finished"), and "completed" beats a bare
-// newly-idle (idle is the expected post-completion pane, so reporting both is
-// redundant). Pure — the heart of AC #3.
-export function diffAlerts(priorReadState, curObserved) {
-  const prior = priorReadState || {};
-  const cur = curObserved || {};
-  const alerts = [];
-  for (const [key, c] of Object.entries(cur)) {
-    const p = prior[key];
-    if (!p) continue; // no last read → no diff
-    const completed = detectCompleted(p.state, p.phase, c.state, c.phase);
-    const newlyEntered = ALERTABLE_STATES.has(c.state) && p.state !== c.state;
-    // Urgency precedence: erroring > stuck > completed > idle. Newly-erroring or
-    // newly-stuck wins over a simultaneous completed flip (don't mask an error
-    // behind "it finished"). Completed wins over bare idle (post-finish idle is
-    // expected, not a separate alert).
-    let alert = null;
-    if (c.state === 'erroring' && newlyEntered) alert = 'erroring';
-    else if (c.state === 'stuck' && newlyEntered) alert = 'stuck';
-    else if (completed) alert = 'completed';
-    else if (c.state === 'idle' && newlyEntered) alert = 'idle';
-    if (alert) {
-      alerts.push({ id: c.id, key, host: c.host, role: c.role, project: c.project,
-        alert, fromState: p.state || null, toState: c.state });
-    }
-  }
-  alerts.sort((a, b) => (ALERT_PRIORITY[a.alert] ?? 9) - (ALERT_PRIORITY[b.alert] ?? 9));
-  const count = (a) => alerts.filter((x) => x.alert === a).length;
-  return {
-    alerts,
-    summary: {
-      total: alerts.length,
-      erroring: count('erroring'),
-      stuck: count('stuck'),
-      completed: count('completed'),
-      idle: count('idle'),
-    },
-  };
 }
 
 // ---- reading a live agent's transcript tail (the impure part) ----
@@ -833,88 +768,6 @@ export async function readChats(ids, openOnly, openTabs, lastChats, capturePanes
   }
 }
 
-// Pure, dependency-injected core of the alert_changes tool (WARDEN-166 AC #3).
-// An ON-DEMAND trigger — never called by a background loop (WARDEN-75). It
-// captures every open pane (concurrent via capturePanes — WARDEN-88), classifies
-// each with the EXISTING classifyPane (no new patterns, no extra LLM calls),
-// reads each agent's transcript phase (readTranscriptPhase injected so this is
-// unit-testable with no SSH/tmux), and diffs against the last-read cache to
-// surface ONLY agents newly entering an alertable state (idle / erroring /
-// stuck / completed). Returns the alerts plus an observedState side-channel the
-// Observer merges into its cache so the NEXT diff has a fresh baseline.
-export async function alertChangedAgents(openTabs, lastChats, capturePanes, readTranscriptPhase, cfg, lastReadState) {
-  const open = new Set(openTabs || []);
-  if (open.size === 0) return { error: 'no tabs are open. open some agent panes first.' };
-
-  const openChats = (lastChats || []).filter(c =>
-    open.has(c.container || c.session) || open.has(c.key)
-  );
-
-  if (openChats.length === 0) {
-    return { error: 'open tabs do not match any discovered chats. try refreshing with list_chats.' };
-  }
-
-  try {
-    const panes = await capturePanes(openChats, cfg);
-
-    // Per-agent observe (concurrent): classify the pane + read the transcript
-    // phase. Capture failures and transcript failures are surfaced/degraded per
-    // agent, never dropped — a missing pane key is a capture_failed state, and a
-    // transcript error resolves to phase null (the pane-state fallback path).
-    const observedState = {};
-    let captureFailed = 0;
-    await Promise.all(openChats.map(async (c) => {
-      if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
-        observedState[c.key] = { state: 'capture_failed', phase: null, sig: null };
-        captureFailed += 1;
-        return;
-      }
-      const clean = stripAnsi(panes[c.key] || '');
-      const state = classifyPane(clean, c).state;
-      let phase = null;
-      if (typeof readTranscriptPhase === 'function') {
-        try { phase = await readTranscriptPhase(c, cfg); } catch { phase = null; }
-      }
-      observedState[c.key] = { state, phase, sig: paneSignature(clean) };
-    }));
-
-    // Attach chat metadata to the observed snapshot so diffAlerts can build
-    // self-describing alert objects (id/host/role/project).
-    const curObserved = {};
-    for (const c of openChats) {
-      const ob = observedState[c.key];
-      if (!ob) continue;
-      curObserved[c.key] = {
-        ...ob,
-        id: c.container || c.session,
-        key: c.key,
-        host: c.host,
-        role: c.role,
-        project: c.project,
-      };
-    }
-
-    const { alerts, summary: diffSummary } = diffAlerts(lastReadState || {}, curObserved);
-
-    return {
-      alerts,
-      observedState,
-      // Guidance for the model: if there is no baseline yet, the first call only
-      // establishes one (no alerts) — say so explicitly so it doesn't conclude
-      // "nothing needs attention" from a cold cache.
-      baseline: Object.keys(lastReadState || {}).length === 0,
-      summary: {
-        total: openChats.length,
-        alertCount: alerts.length,
-        captureFailed,
-        ...diffSummary,
-      },
-    };
-  } catch (e) {
-    return { error: e.message };
-  }
-}
-
 export class Observer {
   constructor(cfg, { sid, gate, onTool, onToolResult, onText, chatContext } = {}) {
     this.cfg = cfg;
@@ -931,7 +784,7 @@ export class Observer {
     // Per-agent last-read state cache (WARDEN-166): key → { state, phase, sig, ts }.
     // Updated as a SIDE-EFFECT of summarize_chats / read_chats / read_chat — never
     // by a background loop (WARDEN-75). In-memory, matching lastChats. Drives the
-    // changed_only diff and the alert_changes trigger.
+    // changed_only diff on summarize_chats / read_chats.
     this.lastReadState = {};
     // resume an existing persisted conversation (if any)
     const existing = sid ? getSession(sid) : null;
@@ -1057,8 +910,8 @@ export class Observer {
         const pane = await readPane(chat, this.cfg, input.lines || 120);
         // WARDEN-166: cache the last-read pane state + content signature as a
         // side-effect of the read. Phase is left to the opt-in change-awareness
-        // tools (summarize/read_chats with changed_only, or alert_changes) so a
-        // plain read_chat stays a single round-trip. Best-effort, never blocks.
+        // tools (summarize/read_chats with changed_only) so a plain read_chat
+        // stays a single round-trip. Best-effort, never blocks.
         try {
           const clean = stripAnsi(pane);
           this._mergeReadState({
@@ -1104,17 +957,6 @@ export class Observer {
       // the cache); a plain summarize stays phase-free and single-round-trip.
       const rtp = input.changed_only ? readTranscriptPhase : undefined;
       const res = await summarizeOpenChats(this.effectiveOpenTabs(), this.lastChats, capturePanes, this.cfg, input, rtp, this.lastReadState);
-      this._mergeReadState(res.observedState);
-      const out = { ...res };
-      delete out.observedState;
-      return out;
-    }
-    if (name === 'alert_changes') {
-      // On-demand change-awareness trigger (WARDEN-166). Always reads transcript
-      // phase so a completed-task flip can fire. Never invoked by a background
-      // loop (WARDEN-75). The first call on a cold cache only establishes a
-      // baseline (no alerts) — surfaced via res.baseline.
-      const res = await alertChangedAgents(this.effectiveOpenTabs(), this.lastChats, capturePanes, readTranscriptPhase, this.cfg, this.lastReadState);
       this._mergeReadState(res.observedState);
       const out = { ...res };
       delete out.observedState;
