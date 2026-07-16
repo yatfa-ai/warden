@@ -13,10 +13,10 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
-import { IconTooltip } from '@/components/ui/icon-tooltip';
 import type { Chat } from '@/lib/types';
 import type { PaneLayout, TerminalCursorStyle, OnExitBehavior, Snippet } from '@/lib/storage';
 import { resolveVisibleTiles } from '@/lib/paneGrid';
+import { resolveActingChat } from '@/lib/actingChat';
 import type { ThemeId } from '@/lib/theme';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
 
@@ -104,13 +104,27 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
   const [fileInputError, setFileInputError] = useState('');
   const [filePromptOpen, setFilePromptOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  // WARDEN-563: the pane whose context menu last opened a workspace dialog
+  // (search / file). The dialogs resolve `actingChat` from this — NOT
+  // `focusedChat` — so right-clicking a NON-focused pane searches/opens in THAT
+  // pane's repo. Seeded by openSearchFor / openFilePromptFor (bound per-tile),
+  // mirroring how onSplitShell threads a pane id. Stays set after a dialog
+  // closes (harmless: the next menu action re-seeds it); resolves to focusedChat
+  // when unset, and falls back to focusedChat if the acting pane's chat has
+  // since vanished (keeps an open dialog mounted rather than blanking it).
+  const [actingPaneId, setActingPaneId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const nameOf = (id: string) => chats.find((c) => (c.key || c.id) === id)?.name || id;
 
   const focusedChat = focused ? chats.find((c) => (c.key || c.id) === focused) : null;
 
+  // WARDEN-563: the chat the workspace dialogs (search / file-prompt /
+  // FileViewer) act on — the right-clicked pane's chat, not the focused one.
+  // Pure resolution lives in resolveActingChat (src/lib) so it's unit-tested.
+  const actingChat = resolveActingChat(actingPaneId, focusedChat, chats);
+
   const handleOpenFile = () => {
-    if (!focusedChat) return;
+    if (!actingChat) return;
 
     const trimmedInput = fileInput.trim();
     if (!trimmedInput) {
@@ -133,14 +147,29 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
     setFileInput(''); // Clear file input to prevent both dialogs from showing
   };
 
-  const handleFilePrompt = () => {
-    if (!focusedChat) return;
+  // WARDEN-563: per-pane "open file from directory" trigger — seeds the acting
+  // pane (so the path-entry dialog + FileViewer resolve THIS pane's cwd, not the
+  // focused pane's), prefills the input with the pane's cwd, and opens the
+  // path-entry Dialog. Replaces the old handleFilePrompt, which keyed off
+  // focusedChat and is what made the grid-toolbar 📄 button act on the wrong pane.
+  const openFilePromptFor = (id: string) => {
+    const chat = chats.find((c) => (c.key || c.id) === id);
+    if (!chat) return;
+    setActingPaneId(id);
     // Auto-fill with the chat's working directory if known
-    const cwd = focusedChat.cwd || '.';
+    const cwd = chat.cwd || '.';
     setFileInput(`${cwd}/`);
     setFileInputError(''); // Clear any previous error
     setFileOpen(false);
     setFilePromptOpen(true); // Open the path-entry Dialog
+  };
+
+  // WARDEN-563: per-pane workspace content-search trigger — seeds the acting pane
+  // so WorkspaceSearchDialog scopes its query to THIS pane's repo. Mirrors
+  // openFilePromptFor's id-seeding shape.
+  const openSearchFor = (id: string) => {
+    setActingPaneId(id);
+    setSearchOpen(true);
   };
 
   // keyboard shortcuts: pane navigation, actions, and panel toggles
@@ -250,12 +279,10 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
       <div className="flex items-center px-3 py-2 compact:py-1.5 border-b text-xs text-muted-foreground gap-2 shrink-0 relative">
         <span className="truncate">{focused ? nameOf(focused) : 'open a chat →'}</span>
         <span className="flex-1" />
-        {focusedChat && (
-          <>
-            <IconTooltip label="search workspace files by content"><Button variant="ghost" size="xs" onClick={() => setSearchOpen(true)}>🔍 search</Button></IconTooltip>
-            <IconTooltip label="open file from chat directory"><Button variant="ghost" size="xs" onClick={handleFilePrompt}>📄 file</Button></IconTooltip>
-          </>
-        )}
+        {/* WARDEN-563: the grid-toolbar 🔍 search / 📄 file buttons lived here,
+            operating on the focused pane. Retired — both affordances now live
+            on each pane's own context menu (right-click → Search workspace
+            files / Open file from directory) and act on the right-clicked pane. */}
       </div>
       <div className="flex-1 min-h-0 p-1">
         {n === 0 ? (
@@ -270,7 +297,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                   <PaneTile id={t.id} label={nameOf(t.id)} focused={focused === t.id} maximized={effectiveMax === t.id}
                     hasNew={newActivity.has(t.id)} onClearNew={() => onClearNew(t.id)}
                     onFocus={() => onFocus(t.id)} onClose={() => onClose(t.id)} onToggleMax={() => onToggleMax(t.id)}
-                    onKill={() => onForceKill(t.id)} onSplitShell={() => onSplitShell?.(t.id)} chat={chat} host={paneHost[t.id]}
+                    onKill={() => onForceKill(t.id)} onSplitShell={() => onSplitShell?.(t.id)} onSearchWorkspace={() => openSearchFor(t.id)} onOpenFileFromDir={() => openFilePromptFor(t.id)} chat={chat} host={paneHost[t.id]}
                     externalSearchQuery={externalSearchQuery?.paneId === t.id ? externalSearchQuery.query : undefined}
                     fontSize={fontSize} onFontSizeChange={onFontSizeChange}
                     scrollback={scrollback}
@@ -294,9 +321,9 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
       </div>
 
       {/* File Viewer Dialog */}
-      {focusedChat && filePath && (
+      {actingChat && filePath && (
         <FileViewer
-          chatId={focusedChat.id}
+          chatId={actingChat.id}
           filePath={filePath}
           line={fileLine}
           open={fileOpen}
@@ -314,11 +341,12 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
       )}
 
       {/* Workspace content-search Dialog (WARDEN-145): locate a file by content,
-          then hand its path to the FileViewer above to open. */}
-      {focusedChat && (
+          then hand its path to the FileViewer above to open. WARDEN-563: scoped
+          to the right-clicked pane's chat (actingChat), not the focused pane. */}
+      {actingChat && (
         <WorkspaceSearchDialog
-          chatId={focusedChat.id}
-          cwd={focusedChat.cwd}
+          chatId={actingChat.id}
+          cwd={actingChat.cwd}
           open={searchOpen}
           onOpenChange={setSearchOpen}
           onSelectFile={(file, line) => { setFilePath(file); setFileLine(line); setFileOpen(true); }}
@@ -339,7 +367,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
         <DialogContent className="sm:max-w-md" onOpenAutoFocus={(e) => e.preventDefault()}>
           <DialogHeader>
             <DialogTitle>Open file from chat directory</DialogTitle>
-            <DialogDescription>Working directory: {focusedChat?.cwd || '.'}</DialogDescription>
+            <DialogDescription>Working directory: {actingChat?.cwd || '.'}</DialogDescription>
           </DialogHeader>
           <Input
             ref={fileInputRef}
