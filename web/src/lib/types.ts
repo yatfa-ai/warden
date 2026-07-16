@@ -191,6 +191,14 @@ export interface ActivitySeries {
  * triggered it. `capture_failed` is NOT folded into the attention rollup — an
  * unreachable host is already surfaced as CRITICAL/CLOSED by /api/health, so counting
  * it here would double-count the same condition.
+ *
+ * WARDEN-571: the fleet-sweep endpoint (`GET /api/agent-states/fleet`) returns the SAME
+ * row shape for the REST of the fleet (agents that are NEITHER open NOR watched), plus a
+ * `sweep_skipped` state for hosts the cost gate never probes (non-companion / LOCAL — no
+ * SSH sweep). `sweep_skipped` matches none of the attention buckets, so it is NEVER a
+ * needs-attention row and never inflates the count — the honest "didn't look here"
+ * signal, distinct from `capture_failed` (tried + failed). A classified sweep row is
+ * byte-for-byte what the open-pane poll would have produced.
  */
 export interface AgentStateRow {
   id: string;
@@ -204,6 +212,9 @@ export interface AgentStateRow {
   signal?: string | null;
   /** True when the pane's host could not be captured (flagged, not dropped). */
   captureError?: boolean;
+  /** WARDEN-571: true when the sweep intentionally skipped this host (non-companion /
+   *  LOCAL — never SSH-probed). `state` is then `sweep_skipped`; never needs-attention. */
+  sweepSkipped?: boolean;
   /**
    * WARDEN-540: a user-authored watch pattern that matched this pane's output —
    * `{ pattern, line }` where `pattern` is the human-authored pattern NAME and

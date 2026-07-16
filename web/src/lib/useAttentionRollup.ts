@@ -58,6 +58,13 @@ export const ATTENTION_RECENT_WINDOW_MS = 15 * 60 * 1000;
 // runs capturePanes (a batched SSH round-trip), so it gets a DEDICATED slower cadence.
 const HEALTH_POLL_MS = 10_000;
 const AGENT_STATE_POLL_MS = 30_000;
+// WARDEN-571: the fleet sweep runs on its OWN slower cadence (distinct from the 30s
+// open∪watched poll). It classifies the REST of the fleet — the hidden / un-watched
+// agents the 30s poll never reaches — via the companion-delta-backed sweep endpoint
+// (zero SSH sweep), so a hidden agent needing attention surfaces within one sweep cycle
+// instead of reading HEALTHY forever. 90s sits in the ticket's 60–120s band and off the
+// :00/:30 marks so it never lands on the same tick as another poll.
+const FLEET_SWEEP_POLL_MS = 90_000;
 
 // A stable empty array default for `mutedAlertKeys` so the memoized Set and the
 // effect dep list stay reference-stable when no caller passes a mute set.
@@ -234,6 +241,18 @@ export function useAttentionRollup(
   const [watchedStates, setWatchedStates] = useState<AgentStateRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [agentStatesLoaded, setAgentStatesLoaded] = useState(false);
+  // WARDEN-571: the hidden-fleet sweep rows (stuck/erroring/waiting/blocked agents that
+  // are NEITHER open NOR watched). Folded into the SAME rollup below so a hidden agent
+  // needing attention surfaces in the badge + fires the opt-in alert. `sweep_skipped`
+  // rows (non-companion / LOCAL hosts the cost gate never probes) are present here too
+  // but match no rollup bucket, so they never count. Preserved (not blanked) on a
+  // transient fetch failure, mirroring agentStates.
+  const [fleetSweepStates, setFleetSweepStates] = useState<AgentStateRow[]>([]);
+  // WARDEN-571: the baseline-priming gate also waits for the FIRST sweep to land, so a
+  // hidden agent that was ALREADY stuck at launch/reload does not fire a "new" alert —
+  // the same "pre-existing attention does not fire (the return banner covers it)"
+  // principle the open-pane poll's priming already enforces.
+  const [fleetSweepLoaded, setFleetSweepLoaded] = useState(false);
   // The previous ROUTABLE sub-rollup (severity + per-agent-mute filtered), for the
   // desktop-alert increase detector below. Tracked in a ref (not state) so updating
   // it never triggers a re-render. We compare the FILTERED view — not the raw rollup
@@ -441,6 +460,42 @@ export function useAttentionRollup(
     setAgentStatesLoaded(true);
   }, []);
 
+  // WARDEN-571: the hidden-fleet sweep fetch. Classifies every active chat that is
+  // NEITHER open NOR watched, so a hidden agent stuck-looping / waiting for input /
+  // error-spamming surfaces in the badge instead of reading HEALTHY forever. The sweep
+  // is companion-delta-backed (no SSH sweep); non-companion / LOCAL hosts come back
+  // `sweep_skipped` and never inflate the count. The result folds into the SAME rollup
+  // (see the useMemo below), so the existing badge + opt-in alert fire for a hidden
+  // agent that newly needs attention — Snooze (WARDEN-551), mute, and the
+  // excludeFocusedPane (WARDEN-482) exclusion all apply unchanged because the rows are
+  // ordinary AgentStateRow's bucketed by the same buildAttentionRollup.
+  const fetchFleetStates = useCallback(async () => {
+    const open = openPanesRef.current;
+    const watched = watchedChatsRef.current;
+    // The sweep set = the whole fleet MINUS what the 30s open∪watched poll already
+    // covers. Pass the union as ?exclude= so the sweep never re-classifies (or double-
+    // counts) a pane the faster poll owns.
+    const exclude = Array.from(new Set([...open, ...watched]));
+    try {
+      const res = await fetch(`/api/agent-states/fleet?exclude=${encodeURIComponent(exclude.join(','))}`);
+      if (res.ok) {
+        const data = (await res.json()) as AgentStatesData;
+        const rows = Array.isArray(data?.agents) ? data.agents : [];
+        // Defensive: a pane that just became open/watched between this sweep and the
+        // last must NOT contribute a sweep row — it is now owned by the 30s poll, and a
+        // stale sweep copy would double-count it for up to one sweep cycle. The server
+        // already excludes these via ?exclude=; this is the belt-and-suspenders guard.
+        const owned = new Set([...open, ...watched]);
+        setFleetSweepStates(rows.filter((r) => !owned.has(r.key ?? r.id)));
+      }
+      // A failed sweep must not blank the rollup (mirrors fetchAgentStates) — leave the
+      // prior sweep rows in place.
+    } catch {
+      // best-effort: keep the last good sweep rows.
+    }
+    setFleetSweepLoaded(true);
+  }, []);
+
   // Health + stats on the 10s cadence (unchanged from WARDEN-228).
   useEffect(() => {
     void fetchHealthStats();
@@ -490,13 +545,52 @@ export function useAttentionRollup(
     };
   }, [fetchAgentStates, attentionDesktopAlerts, openPanes, watchedChats]);
 
+  // Fleet sweep on a DEDICATED slow cadence (~90s — distinct from the 30s open∪watched
+  // poll above) so a HIDDEN agent needing attention surfaces within one sweep cycle
+  // (WARDEN-571). The sweep is companion-delta-backed (zero SSH sweep). It runs whenever
+  // its results would be ACTED on — Warden visible (the badge shows them) OR the fleet
+  // alert opted in (an away alert fires) — mirroring the 30s poll's visibility
+  // relaxation. The exclude set is read LIVE via refs (openPanesRef/watchedChatsRef), so
+  // opening/watching a pane (which SHRINKS the sweep set) never rebuilds this slow
+  // cadence — responsiveness for those panes is the 30s poll's job; this is the
+  // background sweep for everything else.
+  useEffect(() => {
+    void fetchFleetStates();
+    const tick = () => {
+      if (attentionDesktopAlerts || document.visibilityState === 'visible') void fetchFleetStates();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void fetchFleetStates();
+    };
+    const intervalId = window.setInterval(tick, FLEET_SWEEP_POLL_MS);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [fetchFleetStates, attentionDesktopAlerts]);
+
   // Derive the rollup from the three signals + the per-state toggle. useMemo so a
   // toggle change re-aggregates without a refetch, and so the badge only re-renders
   // when something that affects the count actually changed.
-  const rollup = useMemo(
-    () => buildAttentionRollup(health, stats, agentStates, { enabledStates }),
-    [health, stats, agentStates, enabledStates],
-  );
+  // WARDEN-571: the hidden-fleet sweep rows are folded in HERE — alongside the open-
+  // pane agentStates — so a hidden agent needing attention (stuck/erroring/waiting/
+  // blocked/custom) appears as a needs-attention row. sweep_skipped rows match no
+  // bucket and never count. buildAttentionRollup is unchanged (it buckets by state);
+  // the fold is purely the concatenation here.
+  //
+  // WARDEN-344 invariant preserved: the rollup stays OPEN-only — a WATCHED-but-closed
+  // pane surfaces via the targeted watch ping, not the lumped badge. The sweep's purpose
+  // is precisely the HIDDEN / un-watched fleet, so a sweep row whose pane is currently
+  // OPEN or WATCHED is dropped before the merge. This also closes the ≤1-sweep-cycle
+  // stale window (a pane swept, then newly opened/watched) so the invariant never
+  // transiently breaks and an open pane is never double-counted (its open row in
+  // agentStates is always the current one). agentStates is already open-only.
+  const rollup = useMemo(() => {
+    const covered = new Set([...openPanes, ...watchedChats]);
+    const sweepRows = fleetSweepStates.filter((r) => !covered.has(r.key ?? r.id));
+    return buildAttentionRollup(health, stats, [...agentStates, ...sweepRows], { enabledStates });
+  }, [health, stats, agentStates, fleetSweepStates, openPanes, watchedChats, enabledStates]);
 
   // Fire an attention notification on a genuine rollup INCREASE (WARDEN-259). The
   // increase-only shouldFireAlert returns true ONLY on a total increase, so a
@@ -521,13 +615,15 @@ export function useAttentionRollup(
   // toast's transience (sonner auto-dismiss) is what keeps the relaxed gate from
   // reintroducing the noise the visible-return originally existed to suppress.
   //
-  // Baseline priming: the FIRST rollup observed after both initial fetches land
+  // Baseline priming: the FIRST rollup observed after all initial fetches land
   // becomes the baseline (no fire) — so pre-existing attention at launch/reload does
   // not fire (the "While you were away" banner covers that), matching shouldFireAlert's
   // "either input missing → false". A pane that flips stuck/erroring/waiting AFTER
-  // that raises total → fires.
+  // that raises total → fires. WARDEN-571: the gate also waits for the first sweep to
+  // land, so a hidden agent that was ALREADY stuck at launch does not fire a "new"
+  // alert once the slow sweep discovers it (the banner covers launch state too).
   useEffect(() => {
-    if (loading || !agentStatesLoaded) return;
+    if (loading || !agentStatesLoaded || !fleetSweepLoaded) return;
     // WARDEN-551: union the ACTIVE snoozes into the mute set, reading Date.now()
     // FRESH here (not from a memoized value) so an expired snooze drops out on
     // the very next cadence tick — the auto-rearm. The merged set is what
@@ -558,7 +654,7 @@ export function useAttentionRollup(
         fireAttentionNotification(routable);
       }
     }
-  }, [rollup, attentionDesktopAlerts, loading, agentStatesLoaded, severityPrefs, mutedSet, snoozedAlertKeys]);
+  }, [rollup, attentionDesktopAlerts, loading, agentStatesLoaded, fleetSweepLoaded, severityPrefs, mutedSet, snoozedAlertKeys]);
 
   return { rollup, loading, watchedStates };
 }

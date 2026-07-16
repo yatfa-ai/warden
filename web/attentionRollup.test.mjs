@@ -188,6 +188,19 @@ test('capture_failed rows are NOT counted (already surfaced as CRITICAL/CLOSED b
   assert.equal(r.total, 0, 'capture_failed is not an attention bucket');
   assert.deepEqual(r.stuck, []);
 });
+test('sweep_skipped rows are NOT counted (WARDEN-571: hidden host the cost gate never probed)', () => {
+  // The fleet sweep returns sweep_skipped for non-companion / LOCAL hosts it must not
+  // SSH-probe. It must NEVER surface as needs-attention (the honest "didn't look here"
+  // signal), even alongside a real stuck agent — only the real attention row counts.
+  const r = roll(health(), stats(), [
+    stateRow('skip1', 'sweep_skipped', { sweepSkipped: true }),
+    stateRow('stuck1', 'stuck'),
+  ]);
+  assert.equal(r.total, 1, 'only the stuck agent counts; sweep_skipped is not a bucket');
+  assert.deepEqual(r.stuck.map((a) => a.id), ['stuck1']);
+  // A sweep_skipped row folded in by itself contributes nothing.
+  assert.equal(roll(health(), stats(), [stateRow('skip1', 'sweep_skipped')]).total, 0);
+});
 test('active/idle rows are NOT counted (no attention needed)', () => {
   const r = roll(health(), stats(), [stateRow('a1', 'active'), stateRow('i1', 'idle')]);
   assert.equal(r.total, 0);

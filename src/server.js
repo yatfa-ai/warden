@@ -277,6 +277,33 @@ app.get('/api/agent-states', async (req, res) => {
   }
 });
 
+// Fleet sweep — the slow companion of /api/agent-states above (WARDEN-571). Where that
+// endpoint classifies ONLY the open ∪ watched panes, this one classifies the REST of the
+// fleet: every active chat NOT in the caller's open ∪ watched set, so a HIDDEN agent
+// that is stuck-looping / waiting for a keypress / error-spamming surfaces in the
+// Attention badge instead of reading HEALTHY forever. The frontend polls this on a
+// dedicated ~90s cadence (distinct from the 30s open∪watched poll) and folds the rows
+// into the same rollup.
+//
+// `?exclude=k1,k2` is the caller's CURRENTLY open ∪ watched pane keys, so the sweep does
+// not re-classify (or double-count) what the faster poll already owns; the sweep set =
+// active chats (the catalog cache) − (open ∪ watched). Hard cost gate: the sweep
+// classifies ONLY via the companion delta path — companion hosts render from the delta
+// cache (zero RPCs steady-state), and non-companion / LOCAL hosts come back
+// `sweep_skipped` and are never SSH-probed (no full SSH sweep). See pollFleetStates.
+app.get('/api/agent-states/fleet', async (req, res) => {
+  try {
+    const excludeKeys = String(req.query.exclude || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const agents = await pollFleetStates(cache, cfg, {}, { excludeKeys });
+    res.json({ agents, total: agents.length, timestamp: Date.now() });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // pollAgentStates is the /api/agent-states poll core: it reconciles the companion
 // pane-push subscriptions for the polled hosts, captures their pane content, and
 // classifies each. Exported (and deps-injected) so the WARDEN-413 success gate is
@@ -322,6 +349,77 @@ export async function pollAgentStates(chats, cfg = {}, deps = {}) {
     const customMatch = matchWatchPatterns(clean, cfg.watchPatterns);
     return { ...base, state, signal, captureError: false, ...(customMatch ? { customMatch } : {}) };
   });
+}
+
+// pollFleetStates is the slow "fleet sweep" classification mode (WARDEN-571). The 30s
+// /api/agent-states poll above classifies ONLY the open ∪ watched panes, so an agent the
+// human has HIDDEN — or simply never opened/watched on a busy fleet — is NEVER
+// classified. Because a stuck-looping, error-spamming, or "press enter"-prompting agent
+// is still PRODUCING output, /api/health's inactivity classifier reads it HEALTHY and
+// Warden stays silently green. This fills that gap by classifying the REST of the fleet
+// — every active chat NOT already in the caller's open ∪ watched set — on a dedicated
+// slow cadence (the frontend's ~90s beat), folded into the SAME Attention rollup so a
+// hidden agent needing attention surfaces in the badge + fires the opt-in alert.
+//
+// Hard cost gate — the sweep NEVER opens an SSH connection to the fleet. It classifies
+// ONLY via the companion delta path (the shipped WARDEN-413 read/delta path — NOT the
+// rejected WARDEN-279/283 companion write/send-keys paths; those rejections do not bear
+// on this). Companion-connected REMOTE hosts reuse pollAgentStates' reconcile → capture
+// → classify: steady-state sweeps render from the in-memory delta cache (ZERO RPCs); the
+// first sweep after a host's panes enter the sweep set bootstraps the subscription and
+// captures once over the persistent channel (the graceful bootstrap documented above at
+// the pollAgentStates header). Hosts WITHOUT the companion transport (flag off, or LOCAL)
+// are returned `state: 'sweep_skipped'` and NEVER probed — preserving the "no full SSH
+// sweep" invariant at the /api/agent-states header. `sweep_skipped` is a NEW state,
+// distinct from `capture_failed` (tried + failed): it is the honest "intentionally not
+// probed (cost gate)" signal, the opposite of the silence this fixes.
+//
+// `chats` is the full active fleet (the endpoint passes the catalog `cache`).
+// `opts.excludeKeys` is the caller's open ∪ watched pane keys, so the sweep does NOT
+// re-classify what the 30s poll already covers (the sweep set = active chats − open ∪
+// watched). `deps` is the same test seam pollAgentStates takes, so the WARDEN-413
+// cost-gate test is drivable end-to-end. The sweep uses the SAME classifyPane +
+// stripAnsi path so classification semantics are identical to the open-pane poll — no
+// divergent heuristics. Exported (and deps-injected) for the cost-gate test. (WARDEN-571)
+export async function pollFleetStates(chats, cfg = {}, deps = {}, opts = {}) {
+  const exclude = new Set((opts.excludeKeys || []));
+  const fleet = (Array.isArray(chats) ? chats : []).filter((c) => c && c.key && !exclude.has(c.key));
+  // Partition the fleet: companion-eligible (REMOTE + companion transport on) vs the
+  // rest. The companion path is the ONLY capture path the sweep is allowed to use, so
+  // anything that would require a raw SSH capture (LOCAL tmux, or the companion flag
+  // off) is intentionally NOT classified and surfaced as sweep_skipped — never probed.
+  const companionEligible = [];
+  const skipped = [];
+  for (const c of fleet) {
+    if (isCompanionTransportEnabled() && c.host !== LOCAL) companionEligible.push(c);
+    else skipped.push(c);
+  }
+  // Reconcile establishes the pane-push subscription → the companion pushes paneDelta
+  // events → capturePanes renders from hasFreshPaneDelta cache and SKIPS the RPC. The
+  // companion-eligible subset is classified by the EXACT pollAgentStates path, so a
+  // hidden agent's classification (stuck / erroring / waiting / blocked / custom) is
+  // byte-for-byte what the open-pane poll would have produced.
+  const classified = companionEligible.length
+    ? await pollAgentStates(companionEligible, cfg, deps)
+    : [];
+  // sweep_skipped rows are NAMED (so the badge can list "not swept" if it ever wants
+  // to) but carry state 'sweep_skipped', which matches none of buildAttentionRollup's
+  // four attention buckets — so a sweep_skipped row is NEVER a needs-attention row and
+  // never inflates the count or fires an alert. Honors WARDEN-89's "flagged, not
+  // dropped" spirit: it is the explicit "didn't look here" state, kept distinct from
+  // capture_failed (tried + failed via the companion path).
+  const skippedRows = skipped.map((c) => ({
+    id: c.container || c.session,
+    key: c.key,
+    host: c.host,
+    project: c.project,
+    role: c.role,
+    name: c.name || c.key || (c.container || c.session),
+    state: 'sweep_skipped',
+    sweepSkipped: true,
+    signal: null,
+  }));
+  return [...classified, ...skippedRows];
 }
 app.get('/api/pane', async (req, res) => {
   const r = await resolve(String(req.query.id || ''));
