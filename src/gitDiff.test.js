@@ -86,8 +86,8 @@ after(() => {
 
 // --- Local diff (getLocalGitDiff) --------------------------------------------
 describe('getLocalGitDiff', () => {
-  it('returns a non-empty diff for a worktree-modified tracked file', () => {
-    const r = getLocalGitDiff(repo, 'tracked.txt');
+  it('returns a non-empty diff for a worktree-modified tracked file', async () => {
+    const r = await getLocalGitDiff(repo, 'tracked.txt');
     assert.equal(r.error, undefined);
     assert.equal(r.untracked, false);
     assert.ok(r.diff.length > 0, 'diff should be non-empty');
@@ -95,54 +95,54 @@ describe('getLocalGitDiff', () => {
     assert.match(r.diff, /diff --git a\/tracked\.txt b\/tracked\.txt/);
   });
 
-  it('returns an empty diff (not untracked) for a clean tracked file', () => {
-    const r = getLocalGitDiff(repo, 'clean.txt');
+  it('returns an empty diff (not untracked) for a clean tracked file', async () => {
+    const r = await getLocalGitDiff(repo, 'clean.txt');
     assert.equal(r.error, undefined);
     assert.equal(r.untracked, false);
     assert.equal(r.diff, '');
   });
 
-  it('returns { untracked: true, diff: null } for an untracked file', () => {
-    const r = getLocalGitDiff(repo, 'untracked.txt');
+  it('returns { untracked: true, diff: null } for an untracked file', async () => {
+    const r = await getLocalGitDiff(repo, 'untracked.txt');
     assert.equal(r.error, undefined);
     assert.equal(r.untracked, true);
     assert.equal(r.diff, null);
   });
 
-  it('still diffs a DELETED file (missing-path realpath tolerance)', () => {
+  it('still diffs a DELETED file (missing-path realpath tolerance)', async () => {
     // toDelete.txt no longer exists on disk → realpathSync throws. The guard must
     // fall back to lexical containment so the deletion diff is reachable.
-    const r = getLocalGitDiff(repo, 'toDelete.txt');
+    const r = await getLocalGitDiff(repo, 'toDelete.txt');
     assert.equal(r.error, undefined, `deleted file must not error: ${JSON.stringify(r)}`);
     assert.equal(r.untracked, false);
     assert.ok(r.diff.length > 0, 'deletion diff should be non-empty');
     assert.match(r.diff, /-gone/);
   });
 
-  it('diffs a nested path under cwd (subdir containment)', () => {
-    const r = getLocalGitDiff(repo, 'sub/deep.txt');
+  it('diffs a nested path under cwd (subdir containment)', async () => {
+    const r = await getLocalGitDiff(repo, 'sub/deep.txt');
     assert.equal(r.error, undefined);
     assert.equal(r.untracked, false);
     assert.ok(r.diff.length > 0);
     assert.match(r.diff, /\+b/);
   });
 
-  it('returns 403 on a "../" path escape', () => {
-    const r = getLocalGitDiff(repo, '../escape.txt');
+  it('returns 403 on a "../" path escape', async () => {
+    const r = await getLocalGitDiff(repo, '../escape.txt');
     assert.equal(r.status, 403);
     assert.equal(r.error, 'path must be within working directory');
   });
 
-  it('returns 403 on a deeper "../" escape that resolves outside cwd', () => {
-    const r = getLocalGitDiff(repo, 'sub/../../escape.txt');
+  it('returns 403 on a deeper "../" escape that resolves outside cwd', async () => {
+    const r = await getLocalGitDiff(repo, 'sub/../../escape.txt');
     assert.equal(r.status, 403);
   });
 
   // ---- WARDEN-369: staged=true isolates the index-vs-HEAD diff ----------------
-  it('staged=true isolates the STAGED portion of a partially-staged file', () => {
+  it('staged=true isolates the STAGED portion of a partially-staged file', async () => {
     // partial.txt: committed v0, staged v1, worktree v2. `git diff --cached` shows
     // the staged hunk (v0→v1) and NOT the further worktree change (v2).
-    const r = getLocalGitDiff(repo, 'partial.txt', true);
+    const r = await getLocalGitDiff(repo, 'partial.txt', true);
     assert.equal(r.error, undefined, `staged diff must not error: ${JSON.stringify(r)}`);
     assert.equal(r.untracked, false);
     assert.ok(r.diff.length > 0, 'staged diff should be non-empty');
@@ -150,25 +150,25 @@ describe('getLocalGitDiff', () => {
     assert.doesNotMatch(r.diff, /v2/, 'staged diff must NOT include the worktree-only change (v2)');
   });
 
-  it('staged=false (default) returns the COMBINED worktree-vs-HEAD diff', () => {
+  it('staged=false (default) returns the COMBINED worktree-vs-HEAD diff', async () => {
     // Same file: `git diff HEAD` spans HEAD (v0) all the way to the worktree (v2),
     // so it includes the worktree-only change the staged diff omits.
-    const combined = getLocalGitDiff(repo, 'partial.txt');
+    const combined = await getLocalGitDiff(repo, 'partial.txt');
     assert.equal(combined.error, undefined);
     assert.ok(combined.diff.length > 0);
     assert.match(combined.diff, /\+v2/, 'combined diff ends at the worktree version (v2)');
   });
 
-  it('omitting staged defaults to the combined HEAD diff (backward compat)', () => {
-    const def = getLocalGitDiff(repo, 'partial.txt');
-    const explicit = getLocalGitDiff(repo, 'partial.txt', false);
+  it('omitting staged defaults to the combined HEAD diff (backward compat)', async () => {
+    const def = await getLocalGitDiff(repo, 'partial.txt');
+    const explicit = await getLocalGitDiff(repo, 'partial.txt', false);
     assert.equal(def.diff, explicit.diff);
   });
 
-  it('staged=true returns an empty diff (not untracked) for a purely-unstaged file', () => {
+  it('staged=true returns an empty diff (not untracked) for a purely-unstaged file', async () => {
     // tracked.txt is worktree-modified but NOT staged → `git diff --cached` is empty,
     // and the file is tracked, so untracked stays false (nothing staged to show).
-    const r = getLocalGitDiff(repo, 'tracked.txt', true);
+    const r = await getLocalGitDiff(repo, 'tracked.txt', true);
     assert.equal(r.error, undefined);
     assert.equal(r.untracked, false);
     assert.equal(r.diff, '');

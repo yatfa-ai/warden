@@ -95,18 +95,38 @@ const controlMasterPath = () => {
   return `${tmpDir}/ssh-ctrl-${process.pid}`;
 };
 
+// Async `ssh -O <sub> -S <socketPath> <host>` (sub = 'check' | 'exit') for the
+// ControlMaster lifecycle — the non-blocking replacement for the spawnSync probes
+// that previously froze the whole event loop on every pooled request (`-O check`)
+// and on the pool's idle-cleanup timer (`-O exit`) (WARDEN-441). Mirrors the
+// spawn + Promise pattern run() already uses, so a control-socket probe or
+// teardown never blocks the server while it runs. Resolves the child's exit code
+// (0 = success, e.g. master-alive for `check`; non-zero/-1 otherwise) and NEVER
+// rejects — a dead/absent socket just resolves non-zero, exactly the signal the
+// callers already branch on. Bounded by `timeout` (ms) via SIGTERM so a wedged
+// `ssh -O` can never hang. stdio is drained (captured, not inherited) so ssh's
+// control diagnostics never spam the console.
+function sshControl(host, socketPath, sub, timeout = 5000) {
+  return new Promise((resolve) => {
+    const child = spawn(SSH_BIN, ['-O', sub, '-S', socketPath, host], {
+      windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch { /* noop */ } }, timeout);
+    let settled = false;
+    const finish = (code) => { if (!settled) { settled = true; clearTimeout(timer); resolve(code); } };
+    child.stdout.on('data', () => {});
+    child.stderr.on('data', () => {});
+    child.on('error', () => finish(-1)); // binary absent / spawn failure → like a non-zero exit
+    child.on('exit', (code) => finish(code ?? -1));
+  });
+}
+
 async function ensureControlMaster(host, cfg) {
   const socketPath = `${controlMasterPath()}-${host.replace(/[^a-zA-Z0-9]/g, '_')}`;
   const timeout = (cfg?.connectTimeout ?? 10);
 
-  // Check if master is already running
-  const checkResult = spawnSync(SSH_BIN, ['-O', 'check', '-S', socketPath, host], {
-    windowsHide: true,
-    timeout: 2000,
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
-
-  if (checkResult.status === 0) {
+  // Check if master is already running (async — never blocks the event loop).
+  if ((await sshControl(host, socketPath, 'check', 2000)) === 0) {
     return { socketPath, existing: true };
   }
 
@@ -164,28 +184,23 @@ async function getConnection(host, cfg) {
 
   // Return existing healthy connection
   if (cached && cached.healthy && cached.socketPath) {
-    // Verify the control socket is still valid
-    const checkResult = spawnSync(SSH_BIN, ['-O', 'check', '-S', cached.socketPath, host], {
-      windowsHide: true,
-      timeout: 2000,
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-
-    if (checkResult.status === 0) {
+    // Verify the control socket is still valid (async — never blocks the event loop).
+    if ((await sshControl(host, cached.socketPath, 'check', 2000)) === 0) {
       cached.refs++;
       cached.lastUsed = Date.now();
       return { socketPath: cached.socketPath, existing: true };
-    } else {
-      // Control master died, remove from pool
-      connectionPool.delete(host);
     }
+    // Control master died, remove from pool
+    connectionPool.delete(host);
   }
 
   // Establish new connection
   try {
     const { socketPath, existing, process } = await ensureControlMaster(host, { connectTimeout: timeout });
 
-    // Monitor process exit to mark connection unhealthy
+    // Monitor the ControlMaster CHILD's exit (the master died) → evict its pool
+    // entry. Fire-and-forget: markConnectionUnhealthy is async but never rejects,
+    // and this exit callback can't (and needn't) await it.
     if (process) {
       process.on('exit', () => {
         markConnectionUnhealthy(host);
@@ -219,41 +234,36 @@ function releaseConnection(host) {
   }
 }
 
-function markConnectionUnhealthy(host) {
+// Tear down a suspect/dead control master and evict it from the pool. Async: the
+// `ssh -O exit` (spawn-based, non-blocking) is AWAITED so that by the time a
+// caller (notably runWithPool's self-healing retry) asks for a fresh connection,
+// the dead master has actually exited and ensureControlMaster rebuilds a brand-new
+// socket instead of reusing the wedged one — preserving the pre-WARDEN-441
+// behavior where the sync spawnSync completed before the retry. Never rejects
+// (sshControl resolves on both success and failure), so fire-and-forget callers
+// (the child-exit monitor below) can invoke it without awaiting.
+async function markConnectionUnhealthy(host) {
   const cached = connectionPool.get(host);
   if (cached) {
     cached.healthy = false;
-    // Terminate the control master
-    try {
-      spawnSync(SSH_BIN, ['-O', 'exit', '-S', cached.socketPath, host], {
-        windowsHide: true,
-        timeout: 5000,
-        stdio: ['ignore', 'pipe', 'pipe']
-      });
-    } catch (e) {
-      // Ignore errors during cleanup
-    }
+    const socketPath = cached.socketPath;
     connectionPool.delete(host);
+    await sshControl(host, socketPath, 'exit', 5000); // best-effort teardown; never rejects
   }
 }
 
-// Background cleanup for idle connections
+// Background cleanup for idle connections. Runs on a setInterval (a timer path):
+// the per-idle-host teardown is a non-blocking `ssh -O exit` (WARDEN-441) so the
+// timer never freezes the event loop the way the old sync spawnSync did.
 export function startConnectionPoolCleanup() {
   setInterval(() => {
     const now = Date.now();
     for (const [host, state] of connectionPool.entries()) {
       if (state.refs === 0 && (now - state.lastUsed) > POOL_IDLE_TIMEOUT) {
-        // Close idle connection
-        try {
-          spawnSync(SSH_BIN, ['-O', 'exit', '-S', state.socketPath, host], {
-            windowsHide: true,
-            timeout: 5000,
-            stdio: ['ignore', 'pipe', 'pipe']
-          });
-        } catch (e) {
-          // Ignore errors during cleanup
-        }
+        const socketPath = state.socketPath;
         connectionPool.delete(host);
+        // Fire-and-forget: best-effort teardown, never blocks the timer, never rejects.
+        sshControl(host, socketPath, 'exit', 5000);
         console.log(`[SSH pool] Closed idle connection to ${host}`);
       }
     }
@@ -461,8 +471,9 @@ export async function runWithPool(host, cmd, opts = {}, cfg = {}, deps = {}) {
     releaseConnection(host);
 
     if (!result.ok && isTransportFailure(result)) {
-      // Evict the wedged socket, then retry once on a freshly built connection.
-      markUnhealthy(host);
+      // Evict the wedged socket (awaiting its `-O exit` teardown so the dead master
+      // is really gone), then retry once on a freshly built connection.
+      await markUnhealthy(host);
       try {
         const freshConn = await getConn(host, cfg);
         const retry = await doRun(host, cmd, { ...opts, socketPath: freshConn.socketPath }, cfg);
