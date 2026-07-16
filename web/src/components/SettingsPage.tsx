@@ -18,7 +18,8 @@ import {
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { TelemetryTransparency } from '@/components/TelemetryTransparency';
-import { ArrowLeft, Trash2 } from 'lucide-react';
+import { deriveTelemetrySendingStatus } from '@/lib/telemetry/destination';
+import { ArrowLeft, Trash2, AlertTriangle, Send } from 'lucide-react';
 import { type Theme, type TerminalColorScheme, THEMES } from '@/lib/theme';
 import { type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
@@ -328,6 +329,56 @@ function SettingsSection({ title, children, className }: { title: string; childr
       <h2 className="text-sm font-medium text-foreground">{title}</h2>
       {children}
     </section>
+  );
+}
+
+/**
+ * WARDEN-557 — the honest "is signal actually flowing?" status for the
+ * Telemetry section. A pure, live-derived view of the two already-bound prefs
+ * `telemetryBaseEnabled` × `telemetryEndpoint` (no new consent flag, no
+ * transport change, no delivery feedback). It reads the same values the
+ * consent toggles and endpoint field use, so it re-renders the instant either
+ * changes — there is no shadow state.
+ *
+ * Three states (see deriveTelemetrySendingStatus):
+ *  - base OFF → renders nothing (off is off).
+ *  - base ON + blank endpoint → amber notice: enabled but no receiver is
+ *    configured, so nothing is being sent (the silently-inert opt-in).
+ *  - base ON + endpoint set → positive destination confirmation (host only,
+ *    derived from the configured URL; NOT a reachability claim).
+ */
+function TelemetrySendingStatus({
+  baseEnabled,
+  endpoint,
+}: {
+  baseEnabled: boolean;
+  endpoint: string;
+}) {
+  const status = deriveTelemetrySendingStatus({ baseEnabled, endpoint });
+  if (status.kind === 'off') return null;
+  if (status.kind === 'unconfigured') {
+    return (
+      <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs">
+        <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+        <p className="text-amber-800 dark:text-amber-200">
+          <span className="font-medium">Enabled, but nothing is being sent.</span>{' '}
+          No receiver endpoint is configured, so events buffer in memory and are
+          dropped. Add a receiver URL below for signal to flow.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="flex items-start gap-2 rounded-md border border-green-500/30 bg-green-500/5 px-3 py-2 text-xs">
+      <Send className="mt-0.5 size-3.5 shrink-0 text-green-600 dark:text-green-400" aria-hidden />
+      <p className="text-muted-foreground">
+        <span className="font-medium text-foreground">
+          Configured — events will go to {status.destination}.
+        </span>{' '}
+        That is the receiver host above; warden does not verify whether the
+        receiver is reachable or accepts events.
+      </p>
+    </div>
   );
 }
 
@@ -1815,6 +1866,18 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                     Chat <em>content</em> is never sent — names only.
                   </p>
                 </div>
+
+                {/* WARDEN-557 — honest sending status. A pure derived view of
+                    config.telemetryBaseEnabled × config.telemetryEndpoint
+                    (see TelemetrySendingStatus above). Placed here, directly
+                    above the endpoint field, so the cause (blank endpoint)
+                    and the consequence (nothing sent) read together. Reads the
+                    same `config` the toggles/field mutate via setConfig, so it
+                    updates live with no stale-closure / shadow state. */}
+                <TelemetrySendingStatus
+                  baseEnabled={config.telemetryBaseEnabled}
+                  endpoint={config.telemetryEndpoint}
+                />
 
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="telemetryEndpoint">Receiver endpoint</Label>
