@@ -122,8 +122,13 @@ export interface ActivityEvent {
     // `active` reflects the `agent` tmux session being alive, not output recency.
     | 'agent_started' | 'agent_ended'           // container appeared / disappeared
     | 'agent_session_up' | 'agent_session_down' // tmux session came alive / stopped
-    | 'host_error' | 'host_ok';                 // host discovery failed / recovered
+    | 'host_error' | 'host_ok'                 // host discovery failed / recovered
+    // Human-initiated lifecycle actions from the control endpoints (WARDEN-484):
+    // lets a returning human tell an agent THEY stopped (killed) from one that
+    // crashed (ended). `name` is the agent's display label where available.
+    | 'killed' | 'spawned' | 'resumed';
   id?: string;
+  name?: string;
   container?: string;
   host?: string;
   role?: string;
