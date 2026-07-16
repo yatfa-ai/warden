@@ -109,6 +109,16 @@ interface Props {
   // through; App owns the spawn. Bound to this tile's id in PaneGrid, so the
   // split always targets the right-clicked pane, not the focused one.
   onSplitShell: () => void;
+  // WARDEN-563: per-pane workspace content-search (🔍) — relocated off the grid-
+  // toolbar "search" button so the search scopes to THIS pane's repo, not the
+  // focused pane's. Pure pass-through; PaneGrid binds it to this tile's id
+  // (openSearchFor(t.id)), seeding the "acting pane" the dialog resolves.
+  onSearchWorkspace: () => void;
+  // WARDEN-563: per-pane "open file from directory" (📄) — relocated off the
+  // grid-toolbar "file" button so the path-entry dialog prefills + opens a file
+  // against THIS pane's cwd. Pure pass-through; PaneGrid binds it to this tile's
+  // id (openFilePromptFor(t.id)).
+  onOpenFileFromDir: () => void;
   chat?: Chat | null;     // chat metadata for export
   host?: string;          // host hint for restore (which host to discover)
   externalSearchQuery?: string;  // external search trigger from global search
@@ -169,7 +179,7 @@ interface Props {
   onFileViewerViewModeChange: (mode: 'rendered' | 'source') => void;
 }
 
-export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, onSpawned, snippets, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange }: Props) {
+export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, onFocus, onClose, onToggleMax, onKill, onSplitShell, onSearchWorkspace, onOpenFileFromDir, chat, host, externalSearchQuery, fontSize, onFontSizeChange, scrollback, fontFamily, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, onSpawned, snippets, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const hostLabels = useHostLabels();
@@ -925,6 +935,13 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
         <ContextMenuItem onSelect={() => onFontSizeChange(Math.max(8, safeFontSize - 1))}>Smaller font</ContextMenuItem>
         <ContextMenuItem onSelect={() => onFontSizeChange(Math.min(24, safeFontSize + 1))}>Bigger font</ContextMenuItem>
         <ContextMenuSeparator />
+        {/* WARDEN-563: per-pane workspace actions, relocated off the grid
+            toolbar (🔍 search / 📄 file) so they operate on THIS pane's repo,
+            not the focused pane's. Grouped with Split (the other per-pane
+            workspace action from WARDEN-543). Guarded like Split — disabled
+            when this pane has no resolvable chat (no cwd to search / open in). */}
+        <ContextMenuItem disabled={!chat} onSelect={() => onSearchWorkspace()}>Search workspace files</ContextMenuItem>
+        <ContextMenuItem disabled={!chat} onSelect={() => onOpenFileFromDir()}>Open file from directory</ContextMenuItem>
         {/* WARDEN-543: per-pane split — spawn a shell on THIS pane's host/cwd
             (not the focused pane's). Grouped with the pane-lifecycle actions
             (Maximize / Close). Guarded like Download (disabled when this pane
