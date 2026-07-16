@@ -167,4 +167,44 @@ describe('GET /api/agent-states — pane-state classification over open panes (W
     assert.equal(byKey[WAIT_SESSION], 'waiting');
     assert.equal(byKey[DEAD_SESSION], 'capture_failed');
   });
+
+  // WARDEN-540: the matcher runs in pollAgentStates over the SAME capture
+  // classifyPane read (zero new SSH cost) and attaches customMatch to a row whose
+  // output matches a user pattern. This proves the end-to-end wiring — the pure
+  // matcher is covered by agentState.test.js; this is the pipeline integration.
+  it('a watched pattern match attaches customMatch (matcher rides the existing capture)', async () => {
+    // 1. With no patterns, no row carries customMatch (identical to today).
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ watchPatterns: [] }),
+    });
+    let r = await states(STUCK_SESSION);
+    assert.equal(r.agents[0].customMatch ?? null, null, 'no pattern → no customMatch');
+
+    // 2. PUT a pattern matching the stuck pane's repeating line.
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ watchPatterns: [{ id: 's', name: 'Stuck loop', expression: 'stuck loop', mode: 'string', enabled: true }] }),
+    });
+    r = await states(STUCK_SESSION);
+    const stuck = r.agents[0];
+    assert.deepEqual(stuck.customMatch, { pattern: 'Stuck loop', line: STUCK_LINE }, 'customMatch carries pattern name + matching line');
+    // The match is ADDITIVE — the classifyPane state is unaffected (still stuck).
+    assert.equal(stuck.state, 'stuck');
+
+    // 3. A pane whose output does NOT contain the expression gets no customMatch.
+    r = await states(WAIT_SESSION);
+    assert.equal(r.agents[0].customMatch ?? null, null, 'no match on the wait pane');
+
+    // 4. Restore: clearing patterns removes customMatch (back to identical-to-today).
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ watchPatterns: [] }),
+    });
+    r = await states(STUCK_SESSION);
+    assert.equal(r.agents[0].customMatch ?? null, null, 'cleared pattern → no customMatch');
+  });
 });

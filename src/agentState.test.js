@@ -19,7 +19,7 @@
 // Run: node --test src/agentState.test.js   (or auto-discovered by `npm test`)
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyPane, stripAnsi, SUMM_ERROR_RE, SUMM_WAITING_RE, SUMM_BLOCKED_RE } from './agentState.js';
+import { classifyPane, stripAnsi, SUMM_ERROR_RE, SUMM_WAITING_RE, SUMM_BLOCKED_RE, matchWatchPatterns, sanitizeWatchPatterns } from './agentState.js';
 
 // A chat with active:true so the 'active' state guard can fire.
 const chat = { active: true, role: 'worker', project: 'acme' };
@@ -197,5 +197,168 @@ describe('classifyPane — goal inference still works (unchanged from observer.j
   });
   it('falls back to role on project when no ticket/action phrase is present', () => {
     assert.equal(classify('just output', { active: true, role: 'reviewer', project: 'acme' }).goal, 'reviewer on acme');
+  });
+});
+
+// ─── matchWatchPatterns (WARDEN-540) ─────────────────────────────────────────
+//
+// The user-authored output-pattern matcher — sibling of classifyPane. Pure +
+// dependency-free, so it imports cleanly under `node --test`. The contracts locked
+// here are the ticket's matcher success criteria: string = case-insensitive
+// substring (mirrors /api/search-pane), regex = a case-insensitive RegExp, an
+// INVALID regex never throws (skipped), disabled patterns are skipped, the FIRST
+// enabled match wins, and the LAST (most recent) matching line is returned.
+describe('matchWatchPatterns — string mode: case-insensitive substring', () => {
+  const stringPat = (name, expression, enabled = true) => ({ id: name, name, expression, mode: 'string', enabled });
+
+  it('matches a substring anywhere in any line, case-insensitively', () => {
+    const m = matchWatchPatterns('building step 2\nDEPLOY FAILED: exit code 1', [stringPat('Deploy', 'deploy failed')]);
+    assert.equal(m.pattern, 'Deploy');
+    assert.equal(m.line, 'DEPLOY FAILED: exit code 1');
+  });
+  it('matches /api/search-pane semantics: substring, not whole-line equality', () => {
+    // The expression is a fragment, not the full line — must still match.
+    const m = matchWatchPatterns('remote: error: merge conflict in src/index.ts', [stringPat('Conflict', 'merge conflict')]);
+    assert.equal(m.pattern, 'Conflict');
+    assert.equal(m.line, 'remote: error: merge conflict in src/index.ts');
+  });
+  it('returns null when no line contains the substring', () => {
+    assert.equal(matchWatchPatterns('all good here\nstill building', [stringPat('X', 'deploy failed')]), null);
+  });
+});
+
+describe('matchWatchPatterns — regex mode: case-insensitive RegExp', () => {
+  const rePat = (name, expression, enabled = true) => ({ id: name, name, expression, mode: 'regex', enabled });
+
+  it('matches a regex and returns the matching line', () => {
+    const m = matchWatchPatterns('processing\nPayment Required (HTTP 402)', [rePat('Paywall', 'payment (required|due)')]);
+    assert.equal(m.pattern, 'Paywall');
+    assert.equal(m.line, 'Payment Required (HTTP 402)');
+  });
+  it('a regex with anchors respects them', () => {
+    // Anchored to start-of-line: matches the line that BEGINS with FAIL.
+    const m = matchWatchPatterns('step: FAIL\nFAIL: the deploy (anchored match)', [rePat('Fail', '^FAIL:')]);
+    assert.equal(m.line, 'FAIL: the deploy (anchored match)');
+  });
+  it('an INVALID regex never throws — it is skipped, returning null when it is the only pattern', () => {
+    // The load-bearing "never throw" contract: a user-authored bad regex must not
+    // crash /api/agent-states. `(unclosed` is an unterminated group.
+    assert.doesNotThrow(() => matchWatchPatterns('anything', [rePat('Bad', '(unclosed')]));
+    assert.equal(matchWatchPatterns('anything', [rePat('Bad', '(unclosed')]), null);
+  });
+  it('an invalid regex is skipped but a LATER valid pattern still matches', () => {
+    const m = matchWatchPatterns('deploy failed', [rePat('Bad', '(unclosed'), rePat('Good', 'deploy failed')]);
+    assert.equal(m.pattern, 'Good');
+  });
+});
+
+describe('matchWatchPatterns — selection + edge contracts', () => {
+  const pat = (id, name, expression, mode = 'string', enabled = true) => ({ id, name, expression, mode, enabled });
+
+  it('the FIRST enabled matching pattern wins (array order is the precedence)', () => {
+    const text = 'both should match this line';
+    const m = matchWatchPatterns(text, [pat('a', 'First', 'match'), pat('b', 'Second', 'should')]);
+    assert.equal(m.pattern, 'First');
+  });
+  it('returns the LAST (most recent) matching line for the winning pattern', () => {
+    // Two lines match; the pane's live bottom is the actionable one (mirrors
+    // classifyPane's recency-bound signal). The matcher walks from the end.
+    const m = matchWatchPatterns('deploy failed earlier\ncleanup ok\ndeploy failed just now', [pat('a', 'Deploy', 'deploy failed')]);
+    assert.equal(m.line, 'deploy failed just now');
+  });
+  it('a disabled pattern is skipped (enabled === false)', () => {
+    const m = matchWatchPatterns('deploy failed', [pat('a', 'Off', 'deploy failed', 'string', false), pat('b', 'On', 'nomatch')]);
+    assert.equal(m, null, 'disabled pattern did not match, and the enabled one found nothing');
+  });
+  it('an enabled: false pattern does NOT block a later enabled pattern from matching', () => {
+    const m = matchWatchPatterns('merge conflict', [pat('a', 'Off', 'deploy failed', 'string', false), pat('b', 'On', 'merge conflict')]);
+    assert.equal(m.pattern, 'On');
+  });
+  it('returns null for an empty pattern list (no patterns = no alerts = identical to today)', () => {
+    assert.equal(matchWatchPatterns('deploy failed', []), null);
+  });
+  it('returns null for null/undefined patterns', () => {
+    assert.equal(matchWatchPatterns('deploy failed', null), null);
+    assert.equal(matchWatchPatterns('deploy failed', undefined), null);
+  });
+  it('returns null when cleanText is not a string', () => {
+    assert.equal(matchWatchPatterns(null, [pat('a', 'A', 'x')]), null);
+    assert.equal(matchWatchPatterns(undefined, [pat('a', 'A', 'x')]), null);
+  });
+  it('skips patterns missing a name or expression (defensive — never trusts input)', () => {
+    const m = matchWatchPatterns('deploy failed', [
+      { id: 'a', name: '', expression: 'deploy failed', mode: 'string', enabled: true },
+      { id: 'b', name: 'BlankExpr', expression: '   ', mode: 'string', enabled: true },
+      pat('c', 'Good', 'deploy failed'),
+    ]);
+    assert.equal(m.pattern, 'Good');
+  });
+  it('trims + slices the matching line to 200 chars (mirrors classifyPane signal bound)', () => {
+    // The matching token at the START survives the leading slice; the trailing
+    // padding is what gets clipped, proving the 200-char bound holds.
+    const longLine = 'deploy failed ' + 'x'.repeat(300);
+    const m = matchWatchPatterns(longLine, [pat('a', 'Deploy', 'deploy failed')]);
+    assert.ok(m.line.length <= 200, `line was not sliced (${m.line.length} chars)`);
+    assert.equal(m.line.slice(0, 'deploy failed'.length), 'deploy failed');
+  });
+});
+
+describe('sanitizeWatchPatterns — PUT /api/config type-guard (WARDEN-540)', () => {
+  it('returns null for a non-array so the PUT handler treats the field as absent', () => {
+    // null/undefined/string/object → null (no mutation), mirroring the per-key guards.
+    assert.equal(sanitizeWatchPatterns(null), null);
+    assert.equal(sanitizeWatchPatterns(undefined), null);
+    assert.equal(sanitizeWatchPatterns('nope'), null);
+    assert.equal(sanitizeWatchPatterns({ id: 'x' }), null);
+  });
+  it('drops entries missing id/name/expression, keeping the valid ones', () => {
+    const out = sanitizeWatchPatterns([
+      { id: '1', name: 'A', expression: 'a', mode: 'string' },
+      { id: '', name: 'noid', expression: 'x' },       // missing id → drop
+      { id: '2', name: '', expression: 'x' },          // missing name → drop
+      { id: '3', name: 'noexpr', expression: '' },     // missing expression → drop
+      'not-an-object',                                  // not an object → drop
+      null,
+    ]);
+    assert.deepEqual(out, [{ id: '1', name: 'A', expression: 'a', mode: 'string', enabled: true }]);
+  });
+  it('coerces mode to "string" for anything but the literal "regex"', () => {
+    const out = sanitizeWatchPatterns([
+      { id: '1', name: 'A', expression: 'a', mode: 'STRING' },
+      { id: '2', name: 'B', expression: 'b', mode: 'regex' },
+      { id: '3', name: 'C', expression: 'c' }, // missing mode → string
+    ]);
+    assert.equal(out[0].mode, 'string');
+    assert.equal(out[1].mode, 'regex');
+    assert.equal(out[2].mode, 'string');
+  });
+  it('enabled defaults to true and is preserved (enabled !== false)', () => {
+    const out = sanitizeWatchPatterns([
+      { id: '1', name: 'A', expression: 'a' },            // absent → true
+      { id: '2', name: 'B', expression: 'b', enabled: false },
+      { id: '3', name: 'C', expression: 'c', enabled: true },
+    ]);
+    assert.equal(out[0].enabled, true);
+    assert.equal(out[1].enabled, false);
+    assert.equal(out[2].enabled, true);
+  });
+  it('dedups by id (first occurrence wins)', () => {
+    const out = sanitizeWatchPatterns([
+      { id: 'dup', name: 'First', expression: 'a' },
+      { id: 'dup', name: 'Second', expression: 'b' },
+    ]);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].name, 'First');
+  });
+  it('caps the count at the max (overflow dropped)', () => {
+    const big = Array.from({ length: 60 }, (_, i) => ({ id: String(i), name: `n${i}`, expression: 'x' }));
+    const out = sanitizeWatchPatterns(big);
+    assert.equal(out.length, 50);
+  });
+  it('an empty array is a valid value (clears all patterns) — not null', () => {
+    // null means "field absent"; [] means "the human cleared the list". The
+    // distinction is what lets a PUT with [] wipe patterns while a PUT omitting the
+    // field leaves them intact.
+    assert.deepEqual(sanitizeWatchPatterns([]), []);
   });
 });

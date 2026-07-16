@@ -30,6 +30,9 @@ export interface AttentionRollup {
   waiting: AgentStateRow[];
   /** Agents blocked on another agent / dependency — amber tone (deep-link to the agent pane). */
   blocked: AgentStateRow[];
+  /** Agents whose output matched a user-authored watch pattern (WARDEN-540) — amber tone
+   *  (deep-link to the agent pane). The row carries `customMatch` { pattern, line }. */
+  custom: AgentStateRow[];
   /** Directive-proposal events in the recent window (links to the Activity tab). */
   directives: number;
   /** Error events in the recent window (links to the Activity tab). */
@@ -61,6 +64,7 @@ export const EMPTY_ATTENTION_ROLLUP: AttentionRollup = {
   erroring: [],
   waiting: [],
   blocked: [],
+  custom: [],
   directives: 0,
   errors: 0,
   total: 0,
@@ -107,16 +111,27 @@ export function buildAttentionRollup(
   const on = (k: 'stuck' | 'erroring' | 'waiting' | 'blocked') => en[k] !== false;
 
   const rows = Array.isArray(agentStates) ? agentStates : [];
-  const bucket = (state: string) => rows.filter((a) => a && a.state === state);
+  // WARDEN-540: a row whose output matched a user-authored pattern is its own
+  // attention item. To keep `total` and `ranked` correct (each pane counted + listed
+  // ONCE — no duplicate deep-links), a custom-matched row is EXCLUDED from the state
+  // buckets below: the custom signal (the specific pattern the human asked about)
+  // supersedes the generic pane state for DISPLAY. The pane state is unaffected on
+  // the row (`a.state` is unchanged) and the watch PING still fires independently on
+  // the state transition — this only chooses which label the badge shows. When no
+  // patterns match, customRows is empty and the buckets behave identically to today.
+  const customRows = rows.filter((a) => a && a.customMatch);
+  const customKeys = new Set(customRows.map((a) => a.key ?? a.id));
+  const bucket = (state: string) => rows.filter((a) => a && a.state === state && !customKeys.has(a.key ?? a.id));
   const stuck = on('stuck') ? bucket('stuck') : [];
   const erroring = on('erroring') ? bucket('erroring') : [];
   const waiting = on('waiting') ? bucket('waiting') : [];
   const blocked = on('blocked') ? bucket('blocked') : [];
+  const custom = customRows;
 
   const total =
     critical.length + warning.length + directives + errors +
-    stuck.length + erroring.length + waiting.length + blocked.length;
-  return { critical, warning, stuck, erroring, waiting, blocked, directives, errors, total };
+    stuck.length + erroring.length + waiting.length + blocked.length + custom.length;
+  return { critical, warning, stuck, erroring, waiting, blocked, custom, directives, errors, total };
 }
 
 // ─── Directed ranking (Observer Intelligence roadmap WARDEN-8, Job #2) ────────
@@ -159,11 +174,14 @@ export interface AttentionItem {
  * needed HERE" signal (a `waiting`-on-you pane ranks above a merely `stuck` one).
  * `blocked` sinks: the agent depends on OTHER agents, so the human is not the sole
  * unblocker. `critical`/`warning` health sit alongside, severe-but-less-actionable
- * than a live failure with a visible signal.
+ * than a live failure with a visible signal. `custom` (WARDEN-540) sits just below a
+ * live error: the human EXPLICITLY opted into "tell me when X prints", a strong
+ * actionable signal — but a live error/loop is at least as pressing.
  */
 const ATTENTION_RANK: Record<string, number> = {
   waiting: 100,
   erroring: 90,
+  custom: 88,
   stuck: 80,
   critical: 70,
   blocked: 60,
@@ -208,6 +226,16 @@ export function rankAttention(rollup: AttentionRollup): {
     state: a.state,
     signal: a.signal ?? null,
   });
+  // WARDEN-540: a custom-pattern match is its own AttentionItem — state 'custom'
+  // (NOT the pane's underlying state, which is irrelevant to this signal) with the
+  // matching line + pattern name as the "because X" signal so the callout reads
+  // "you're needed HERE, because '<matching line>' (pattern: <name>)".
+  const fromCustom = (a: AgentStateRow): AttentionItem => ({
+    id: a.key || a.id,
+    name: a.name || a.key || a.id,
+    state: 'custom',
+    signal: a.customMatch ? `'${a.customMatch.line}' (pattern: ${a.customMatch.pattern})` : null,
+  });
 
   // `directives`/`errors` are raw event counts with no single pane to deep-link, so
   // they are excluded from the directed answer — they stay in the sectioned rundown.
@@ -216,6 +244,7 @@ export function rankAttention(rollup: AttentionRollup): {
   const items: AttentionItem[] = [
     ...rollup.waiting.map(fromRow),
     ...rollup.erroring.map(fromRow),
+    ...rollup.custom.map(fromCustom),
     ...rollup.stuck.map(fromRow),
     ...rollup.critical.map(fromChat('critical')),
     ...rollup.blocked.map(fromRow),
@@ -277,6 +306,7 @@ const ATTENTION_REASON_FALLBACK: Record<string, string> = {
   waiting: 'waiting for your input',
   erroring: 'emitting errors',
   stuck: 'stuck in a loop',
+  custom: 'matched a watch pattern',
   critical: 'critical health',
   blocked: 'blocked on another agent',
   warning: 'needs attention',

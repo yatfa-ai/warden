@@ -16,6 +16,15 @@ const DEFAULTS = {
   pins: [],             // chat ids to surface first in listings / UI
   agentNotes: {},       // id → short human note (mirrors pins; works for un-renameable yatfa agents)
   sessionTags: {},      // claude-session id → string[] of short reusable labels (WARDEN-342); local sidecar, never written to transcripts
+  // User-authored output-pattern alerts (WARDEN-540). The deterministic, zero-LLM,
+  // user-authored complement to the fixed Watch categories: a human teaches Warden
+  // "ping me when a watched agent prints X." Each entry:
+  //   { id, name, expression, mode: 'string'|'regex', enabled }
+  // Evaluated ONLY over pane text already captured for the watched set (the matcher
+  // rides pollAgentStates's existing capturePanes — ZERO new SSH cost). Empty by
+  // default → behavior is identical to today (no patterns = no custom alerts).
+  // Sanitized on PUT /api/config (src/server.js) via sanitizeWatchPatterns.
+  watchPatterns: [],
   // Observer settings
   observerConfirmMode: 'always',  // 'always' | 'auto-safe' - whether to auto-approve read-only directives
   observerAutoStart: false,       // boolean - whether to auto-start observer on first connection

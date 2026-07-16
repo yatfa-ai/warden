@@ -336,3 +336,84 @@ describe('/api/config telemetry consent — off by default, extended gated behin
     assert.strictEqual(after.telemetryExtendedEnabled, false, 'left unchanged, not overwritten by a number');
   });
 });
+
+describe('/api/config watchPatterns — user-authored output-pattern alerts (WARDEN-540)', () => {
+  // The three-site persistence boundary (DEFAULTS + GET + PUT type-guard). A field
+  // set at the producer but stripped at the PUT boundary is the failure mode to
+  // avoid (WARDEN-131): these prove each link carries watchPatterns through.
+
+  it('GET /api/config exposes watchPatterns defaulting to an empty array', async () => {
+    // Seed a clean empty list first so the block is self-contained.
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ watchPatterns: [] }),
+    });
+    const body = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.ok('watchPatterns' in body, 'field must be present in the GET response');
+    assert.ok(Array.isArray(body.watchPatterns), 'must be an array');
+    assert.strictEqual(body.watchPatterns.length, 0, 'safe default is empty (no patterns = no custom alerts)');
+  });
+
+  it('PUT round-trips watchPatterns through GET and persists to disk (survives a restart)', async () => {
+    const patterns = [
+      { id: 'p1', name: 'Deploy failed', expression: 'deploy failed', mode: 'string', enabled: true },
+      { id: 'p2', name: 'Paywall', expression: 'payment (required|due)', mode: 'regex', enabled: false },
+    ];
+    const res = await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ watchPatterns: patterns }),
+    });
+    assert.strictEqual(res.status, 200);
+    // GET round-trips the whitelisted value.
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.deepStrictEqual(after.watchPatterns, patterns);
+    // It persisted to disk (survives a restart).
+    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    assert.deepStrictEqual(onDisk.watchPatterns, patterns);
+  });
+
+  it('PUT drops malformed entries via the type-guard (never 500, valid ones kept)', async () => {
+    // A mix of valid + invalid: missing id/name/expression, wrong mode, non-objects,
+    // a duplicate id, and an over-cap flood. The sanitizer must drop the bad ones
+    // and keep the good ones — never throw, never blank the list.
+    const res = await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        watchPatterns: [
+          { id: 'good', name: 'Merge conflict', expression: 'merge conflict', mode: 'string' },
+          { id: '', name: 'noid', expression: 'x' },                  // missing id → drop
+          { id: 'noname', name: '', expression: 'x' },                // missing name → drop
+          { id: 'noexpr', name: 'noexpr', expression: '' },           // missing expression → drop
+          'string-not-object',                                         // not an object → drop
+          { id: 'good', name: 'dup-id', expression: 'y' },            // duplicate id → drop
+        ],
+      }),
+    });
+    assert.strictEqual(res.status, 200);
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.deepStrictEqual(after.watchPatterns, [
+      { id: 'good', name: 'Merge conflict', expression: 'merge conflict', mode: 'string', enabled: true },
+    ]);
+  });
+
+  it('PUT with a non-array watchPatterns is ignored (no mutation — field treated as absent)', async () => {
+    // Seed a known list, then PUT a malformed (non-array) value — it must NOT blank
+    // the stored list. null means "field absent"; only a real array mutates.
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ watchPatterns: [{ id: 'keep', name: 'Keep', expression: 'k', mode: 'string', enabled: true }] }),
+    });
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ watchPatterns: 'not-an-array' }),
+    });
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.watchPatterns.length, 1, 'left unchanged, not blanked by a non-array');
+    assert.strictEqual(after.watchPatterns[0].id, 'keep');
+  });
+});

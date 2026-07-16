@@ -24,7 +24,7 @@ import { appendEvent, rotateEvents, readEvents, getStatsSince, getSeriesSince } 
 import { computeBudgetState, shouldFireBudgetAlert, resolveBudgetConfig, BUDGET_INTERVAL_MS } from './budget.js';
 import { buildSnapshot, diffLifecycles } from './lifecycle.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
-import { classifyPane, stripAnsi } from './agentState.js';
+import { classifyPane, stripAnsi, matchWatchPatterns, sanitizeWatchPatterns } from './agentState.js';
 import * as notify from './notify.js';
 import { checkHost } from './hostStatus.js';
 import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseReflog, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, parseGitRemotes, buildDockerGitArgv } from './gitStatus.js';
@@ -311,7 +311,16 @@ export async function pollAgentStates(chats, cfg = {}, deps = {}) {
     }
     const clean = stripAnsi(panes[c.key] || '');
     const { state, signal } = classifyPane(clean, c);
-    return { ...base, state, signal, captureError: false };
+    // WARDEN-540: user-authored output-pattern alerts. Run the matcher over the SAME
+    // already-cleaned text classifyPane read (a sibling pure function — zero new SSH
+    // capture; rides this poll's existing capturePanes). When a watched chat's output
+    // matches an enabled pattern, attach customMatch { pattern, line } — an ADDITIVE
+    // signal independent of `state` (an agent can be both erroring AND match a custom
+    // pattern). The frontend's watch diff fires a 'custom' ping on the new-match
+    // transition; the attention rollup surfaces it as its own row. Null/absent when no
+    // pattern matches → identical to today.
+    const customMatch = matchWatchPatterns(clean, cfg.watchPatterns);
+    return { ...base, state, signal, captureError: false, ...(customMatch ? { customMatch } : {}) };
   });
 }
 app.get('/api/pane', async (req, res) => {
@@ -574,6 +583,10 @@ app.get('/api/config', (_req, res) => res.json({
   showStatusIndicators: cfg.showStatusIndicators,
   showProjectBadges: cfg.showProjectBadges,
   hideOfflineHosts: cfg.hideOfflineHosts,
+  // User-authored output-pattern alerts (WARDEN-540). Surfaced so Settings can edit
+  // the persisted list; the matcher reads cfg.watchPatterns live in pollAgentStates.
+  // Always an array (DEFAULTS supplies []); sanitizeWatchPatterns guards the PUT.
+  watchPatterns: Array.isArray(cfg.watchPatterns) ? cfg.watchPatterns : [],
   // Telemetry consent (WARDEN-457). Both off by default; persisted here (not
   // client localStorage) so consent survives a restart. See config.js DEFAULTS.
   telemetryBaseEnabled: cfg.telemetryBaseEnabled,
@@ -594,7 +607,8 @@ app.put('/api/config', (req, res) => {
           confirmDestructiveActions,
           notifyChatOps, notifyErrors, notifySuccess, notifyObserver,
           showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges,
-          hideOfflineHosts, telemetryBaseEnabled, telemetryExtendedEnabled, llm } = req.body;
+          hideOfflineHosts, telemetryBaseEnabled, telemetryExtendedEnabled,
+          watchPatterns, llm } = req.body;
   if (hosts && Array.isArray(hosts)) cfg.hosts = hosts;
   if (typeof pollIntervalMs === 'number') cfg.pollIntervalMs = pollIntervalMs;
   if (typeof tmuxSession === 'string') cfg.tmuxSession = tmuxSession;
@@ -701,6 +715,17 @@ app.put('/api/config', (req, res) => {
   if (typeof showStatusIndicators === 'boolean') cfg.showStatusIndicators = showStatusIndicators;
   if (typeof showProjectBadges === 'boolean') cfg.showProjectBadges = showProjectBadges;
   if (typeof hideOfflineHosts === 'boolean') cfg.hideOfflineHosts = hideOfflineHosts;
+  // User-authored output-pattern alerts (WARDEN-540). Type-guard the array via
+  // sanitizeWatchPatterns (sibling of parseSnippets's drop-bad-entries discipline):
+  // it returns null for a non-array (→ field treated as absent, no mutation — a PUT
+  // that omits watchPatterns leaves the stored list intact) and a sanitized array
+  // (capped, deduped by id, bad entries dropped) otherwise. A malformed entry can
+  // never blank the list or crash the matcher; an empty array is a valid value
+  // (clears all patterns). Mirrors the per-key type-guards above.
+  {
+    const cleanedPatterns = sanitizeWatchPatterns(watchPatterns);
+    if (cleanedPatterns) cfg.watchPatterns = cleanedPatterns;
+  }
   // Telemetry consent (WARDEN-457). Both are booleans. The SERVER enforces
   // extended-requires-base (not just the UI) so a hand-crafted PUT cannot enable
   // extended without base. The unconditional clamp at the end — mirroring the
