@@ -74,7 +74,7 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
   // WARDEN-198: per-host reachability from the 30s /api/hosts/status poll.
   // 'offline' → the row renders a distinct "unreachable" state.
   hostStatus?: 'online' | 'offline' | 'unknown';
-  gitInfo?: { branch: string | null; detached?: boolean; headSha?: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; upstream?: string | null; inProgress?: { operation: string | null }; stashCount?: number | null; diffstat?: DiffStat | null };
+  gitInfo?: { branch: string | null; detached?: boolean; headSha?: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; upstream?: string | null; inProgress?: { operation: string | null; detail?: string | null }; stashCount?: number | null; diffstat?: DiffStat | null };
   gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
   // WARDEN-225: incoming (behind) commits + their own fetch/loader, threaded to
   // GitBranchBadge the same way the local gitLog trio is.
@@ -341,7 +341,7 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
   onClose: () => void;
   onRename: (session: string, kind: string, name: string, host?: string) => void;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
-  gitInfo?: { branch: string | null; detached?: boolean; headSha?: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; upstream?: string | null; inProgress?: { operation: string | null }; stashCount?: number | null; diffstat?: DiffStat | null };
+  gitInfo?: { branch: string | null; detached?: boolean; headSha?: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; upstream?: string | null; inProgress?: { operation: string | null; detail?: string | null }; stashCount?: number | null; diffstat?: DiffStat | null };
   gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
   // WARDEN-225: incoming (behind) commits + their own fetch/loader.
   incomingCommits?: GitCommit[]; incomingLoading?: boolean; onFetchIncoming?: () => void;

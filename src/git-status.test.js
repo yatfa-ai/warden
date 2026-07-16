@@ -42,6 +42,13 @@ let noUpstreamRepo;
 let trackingRepo;
 let bareRemote;
 let buildInProgressScript;
+let parseInProgressDetail;
+let rebaseRepo;
+let rebaseMsgnum;
+let rebaseEnd;
+let rebaseOntoShort;
+let rebaseStoppedShort;
+let mergeHeadShort;
 
 function git(args, cwd) {
   const r = spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'inherit'] });
@@ -95,6 +102,62 @@ before(async () => {
   });
   assert.notStrictEqual(m.status, 0, 'expected the merge to conflict (non-zero exit)');
   assert.ok(fs.existsSync(path.join(mergeRepo, '.git', 'MERGE_HEAD')), 'MERGE_HEAD must exist mid-merge');
+  // WARDEN-511: capture the MERGE_HEAD short SHA so the merge-detail assertion
+  // locks the exact value the badge must surface (not just "some sha").
+  mergeHeadShort = fs.readFileSync(path.join(mergeRepo, '.git', 'MERGE_HEAD'), 'utf8').trim().slice(0, 7);
+
+  // ---- rebaseRepo: left mid-conflicting INTERACTIVE rebase (rebase-merge dir
+  // present, halted at step 1/3) so the badge can surface step N/M + onto +
+  // stopped-sha (WARDEN-511). Only the merge backend (rebase-merge) carries the
+  // step files, so we force it with `git rebase -i` + a no-op sequence editor;
+  // the first replayed commit conflicts and halts the rebase. Built on explicit
+  // branch names ('onto'/'topic') so it never depends on git's default initial
+  // branch name (master/main) — mirroring mergeRepo's 'base' pin.
+  rebaseRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitstatus-rebase-'));
+  git(['init', '-q'], rebaseRepo);
+  git(['config', 'user.email', 'test@example.com'], rebaseRepo);
+  git(['config', 'user.name', 'Tester'], rebaseRepo);
+  git(['checkout', '-q', '-b', 'onto'], rebaseRepo);
+  fs.writeFileSync(path.join(rebaseRepo, 'f.txt'), 'root\n');
+  git(['add', '.'], rebaseRepo);
+  git(['commit', '-q', '-m', 'root'], rebaseRepo);
+  // topic: 3 commits each rewriting f.txt (so end === 3); capture the FIRST as
+  // the commit that will fail to apply (= stopped-sha at the halt).
+  git(['checkout', '-q', '-b', 'topic'], rebaseRepo);
+  fs.writeFileSync(path.join(rebaseRepo, 'f.txt'), 'topic-A\n');
+  git(['add', '.'], rebaseRepo);
+  git(['commit', '-q', '-m', 'topic-A'], rebaseRepo);
+  const rebaseStoppedFull = git(['rev-parse', 'HEAD'], rebaseRepo).stdout.toString().trim();
+  fs.writeFileSync(path.join(rebaseRepo, 'f.txt'), 'topic-B\n');
+  git(['add', '.'], rebaseRepo);
+  git(['commit', '-q', '-m', 'topic-B'], rebaseRepo);
+  fs.writeFileSync(path.join(rebaseRepo, 'f.txt'), 'topic-C\n');
+  git(['add', '.'], rebaseRepo);
+  git(['commit', '-q', '-m', 'topic-C'], rebaseRepo);
+  // onto branch diverges with a conflicting f.txt change.
+  git(['checkout', '-q', 'onto'], rebaseRepo);
+  fs.writeFileSync(path.join(rebaseRepo, 'f.txt'), 'onto-change\n');
+  git(['add', '.'], rebaseRepo);
+  git(['commit', '-q', '-m', 'onto-change'], rebaseRepo);
+  git(['checkout', '-q', 'topic'], rebaseRepo);
+  // Conflicting interactive rebase of topic onto 'onto'. GIT_SEQUENCE_EDITOR=true
+  // accepts the todo as-is; topic-A (rewrite root→topic-A) conflicts with onto's
+  // onto-change → the rebase halts at step 1/3. Exits non-zero by design; run
+  // raw — our git() helper throws on non-zero, but the halt IS the success case
+  // here (same discipline as the merge conflict above).
+  const rb = spawnSync('git', ['rebase', '-i', 'onto'], {
+    cwd: rebaseRepo, stdio: ['ignore', 'pipe', 'inherit'],
+    env: { ...process.env, GIT_SEQUENCE_EDITOR: 'true', GIT_EDITOR: 'true' },
+  });
+  assert.notStrictEqual(rb.status, 0, 'expected the rebase to conflict (non-zero exit)');
+  assert.ok(fs.existsSync(path.join(rebaseRepo, '.git', 'rebase-merge')), 'rebase-merge dir must exist mid-rebase');
+  // Read the actual marker state git wrote so the integration assertions lock the
+  // endpoint's echo of it (not a hardcoded guess at git's internal values).
+  rebaseMsgnum = fs.readFileSync(path.join(rebaseRepo, '.git', 'rebase-merge', 'msgnum'), 'utf8').trim();
+  rebaseEnd = fs.readFileSync(path.join(rebaseRepo, '.git', 'rebase-merge', 'end'), 'utf8').trim();
+  rebaseOntoShort = fs.readFileSync(path.join(rebaseRepo, '.git', 'rebase-merge', 'onto'), 'utf8').trim().slice(0, 7);
+  const stoppedFile = path.join(rebaseRepo, '.git', 'rebase-merge', 'stopped-sha');
+  rebaseStoppedShort = (fs.existsSync(stoppedFile) ? fs.readFileSync(stoppedFile, 'utf8') : rebaseStoppedFull).trim().slice(0, 7);
 
   // ---- nonGitDir: a plain directory with no .git ----
   nonGitDir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitstatus-nongit-'));
@@ -172,6 +235,7 @@ before(async () => {
     JSON.stringify([
       { host: '(local)', session: 'warden-clean', cwd: cleanRepo, cmd: 'bash', name: 'warden-clean' },
       { host: '(local)', session: 'warden-merge', cwd: mergeRepo, cmd: 'bash', name: 'warden-merge' },
+      { host: '(local)', session: 'warden-rebase', cwd: rebaseRepo, cmd: 'bash', name: 'warden-rebase' },
       { host: '(local)', session: 'warden-nongit', cwd: nonGitDir, cmd: 'bash', name: 'warden-nongit' },
       { host: '(local)', session: 'warden-detached', cwd: detachedRepo, cmd: 'bash', name: 'warden-detached' },
       { host: '(local)', session: 'warden-noupstream', cwd: noUpstreamRepo, cmd: 'bash', name: 'warden-noupstream' },
@@ -182,6 +246,7 @@ before(async () => {
   // Import server.js ONCE — after HOME/config/catalog/repos are in place.
   const server = await import('./server.js');
   buildInProgressScript = server.buildInProgressScript;
+  parseInProgressDetail = server.parseInProgressDetail;
   httpServer = server.app.listen(0, '127.0.0.1');
   await new Promise((resolve, reject) => {
     httpServer.once('listening', resolve);
@@ -194,7 +259,7 @@ after(async () => {
   if (httpServer) await new Promise((r) => httpServer.close(r));
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  for (const d of [cleanRepo, mergeRepo, nonGitDir, detachedRepo, noUpstreamRepo, trackingRepo, bareRemote, tempHome]) {
+  for (const d of [cleanRepo, mergeRepo, rebaseRepo, nonGitDir, detachedRepo, noUpstreamRepo, trackingRepo, bareRemote, tempHome]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 });
@@ -209,6 +274,7 @@ describe('/api/git-status in-progress + conflict detection (real Express app)', 
     assert.strictEqual(body.clean, true);
     assert.ok(body.inProgress, 'response must include inProgress');
     assert.strictEqual(body.inProgress.operation, null);
+    assert.strictEqual(body.inProgress.detail, null);
     // No regression: a normal branch is NOT detached and reports no short SHA.
     assert.strictEqual(body.detached, false);
     assert.strictEqual(body.headSha, null);
@@ -221,6 +287,9 @@ describe('/api/git-status in-progress + conflict detection (real Express app)', 
     assert.strictEqual(body.error, null);
     // The headline assertion: a blocked agent is visible without opening the chat.
     assert.strictEqual(body.inProgress.operation, 'merge');
+    // WARDEN-511: the MERGE_HEAD short SHA must surface in the detail so a human
+    // can see WHICH commit is being merged without opening the chat.
+    assert.strictEqual(body.inProgress.detail, mergeHeadShort, 'detail must be the short MERGE_HEAD sha');
     assert.strictEqual(body.clean, false);
     // The conflicted path (UU) must be tagged conflict:true — not the gray fallback.
     const conflicted = (body.files || []).filter((f) => f.conflict);
@@ -228,11 +297,29 @@ describe('/api/git-status in-progress + conflict detection (real Express app)', 
     assert.ok(conflicted.some((f) => f.path === 'f.txt'), 'f.txt should be the conflicted path');
   });
 
+  it('surfaces rebase step N/M + onto + stopped-sha for a repo halted mid-rebase', async () => {
+    const res = await fetch(`${baseUrl}/api/git-status?id=warden-rebase`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.error, null);
+    // WARDEN-511 headline: WHERE the rebase halted, not just that one is in
+    // progress. step, onto, and the stopped commit must all surface in detail.
+    assert.strictEqual(body.inProgress.operation, 'rebase');
+    assert.ok(body.inProgress.detail, 'a halted rebase must carry progress detail');
+    assert.ok(body.inProgress.detail.includes(`${rebaseMsgnum}/${rebaseEnd}`),
+      `detail "${body.inProgress.detail}" must include step ${rebaseMsgnum}/${rebaseEnd}`);
+    assert.ok(body.inProgress.detail.includes(`onto ${rebaseOntoShort}`),
+      `detail "${body.inProgress.detail}" must include the onto short sha`);
+    assert.ok(body.inProgress.detail.includes(`stopped at ${rebaseStoppedShort}`),
+      `detail "${body.inProgress.detail}" must include the stopped-at short sha`);
+  });
+
   it('clears the operation after `git merge --abort`', async () => {
     // Abort the merge (mutates mergeRepo) then re-query — must read clean/null.
     git(['merge', '--abort'], mergeRepo);
     const body = await (await fetch(`${baseUrl}/api/git-status?id=warden-merge`)).json();
     assert.strictEqual(body.inProgress.operation, null);
+    assert.strictEqual(body.inProgress.detail, null);
   });
 
   it('returns inProgress.operation null (200, not 500) for a non-git cwd', async () => {
@@ -241,6 +328,7 @@ describe('/api/git-status in-progress + conflict detection (real Express app)', 
     const body = await res.json();
     assert.strictEqual(body.branch, null);
     assert.strictEqual(body.inProgress.operation, null);
+    assert.strictEqual(body.inProgress.detail, null);
     // A non-git cwd must NOT be misread as detached (symbolic-ref fails here too,
     // but the inGitRepo guard — branch truthy — keeps it false).
     assert.strictEqual(body.detached, false);
@@ -281,6 +369,7 @@ describe('/api/git-status detached-HEAD detection (real Express app)', () => {
     assert.strictEqual(body.detached, true);
     assert.strictEqual(body.clean, true);          // gate passes (truthy branch)
     assert.strictEqual(body.inProgress.operation, null);
+    assert.strictEqual(body.inProgress.detail, null);
     assert.ok(body.files !== null, 'files must still surface (not nulled) on detached');
     // ahead/behind are null on detached (no @{u}) — by design.
     assert.strictEqual(body.ahead, null);
@@ -388,11 +477,22 @@ describe('buildInProgressScript', () => {
     assert.ok(rebase < bisect, 'rebase before bisect');
   });
 
-  it('echoes the canonical operation names', () => {
+  it('echoes each op as a pipe-delimited op|detail record (rebase-apply + bisect stay bare)', () => {
     const s = buildInProgressScript('/w');
-    for (const op of ['merge', 'cherry-pick', 'revert', 'rebase', 'bisect']) {
-      assert.ok(s.includes(`echo ${op}`), `must echo "${op}"`);
+    // WARDEN-511: the SHA ops carry their marker-file contents after the op,
+    // pipe-delimited, so detectInProgress parses operation + detail in one pass.
+    assert.ok(s.includes('echo "merge|$(cat "$gd/MERGE_HEAD"'), 'merge must emit a merge|<sha> record');
+    assert.ok(s.includes('echo "cherry-pick|$(cat "$gd/CHERRY_PICK_HEAD"'), 'cherry-pick must emit a delimited record');
+    assert.ok(s.includes('echo "revert|$(cat "$gd/REVERT_HEAD"'), 'revert must emit a delimited record');
+    // rebase-merge carries step N/M + onto + stopped-sha (all four step files).
+    assert.ok(s.includes('echo "rebase|$(cat "$gd/rebase-merge/msgnum"'), 'rebase-merge must open with msgnum');
+    for (const f of ['msgnum', 'end', 'onto', 'stopped-sha']) {
+      assert.ok(s.includes(`rebase-merge/${f}`), `rebase-merge step file ${f} must be read`);
     }
+    // rebase-apply (no step files) and bisect (no detail) emit a BARE operation
+    // name — no pipe — so they degrade to detail: null, not a misleading "0/0".
+    assert.ok(s.includes('] && echo rebase;'), 'rebase-apply must emit bare rebase (no detail)');
+    assert.ok(s.includes('] && echo bisect;'), 'bisect must emit a bare operation (no detail)');
   });
 
   it('shellQuotes a cwd containing spaces/quotes (no shell injection)', () => {
@@ -402,5 +502,72 @@ describe('buildInProgressScript', () => {
     assert.ok(s.includes("'cd'") === false, 'raw unquoted tokens must not appear');
     // shellQuote wraps in single quotes and escapes embedded quotes via '\''.
     assert.ok(s.includes("'/path with space and a '\\''quote'"), 'cwd must be POSIX single-quoted: ' + s);
+  });
+});
+
+// parseInProgressDetail parses ONE in-progress-operation record (the line
+// buildInProgressScript echoes, or the identical record detectInProgress's
+// host-fs path builds from readMarker) into { operation, detail } (WARDEN-511).
+// It is the shared, unit-testable seam both detection paths feed, so its output
+// for a given on-disk state is transport-independent. Each operation's detail
+// shape, the null/absent → null degradation, the short-SHA normalization, the
+// rebase-apply (step-less) graceful-null, and the subset rendering (only the
+// marker files git actually wrote) are all locked here.
+describe('parseInProgressDetail', () => {
+  it('returns { operation: null, detail: null } for a blank record', () => {
+    assert.deepEqual(parseInProgressDetail(''), { operation: null, detail: null });
+    assert.deepEqual(parseInProgressDetail('   '), { operation: null, detail: null });
+    assert.deepEqual(parseInProgressDetail(null), { operation: null, detail: null });
+    assert.deepEqual(parseInProgressDetail(undefined), { operation: null, detail: null });
+  });
+
+  it('shortens the *_HEAD SHA for merge / cherry-pick / revert', () => {
+    // Full 40-char SHA → 7-char display form (mirrors rev-parse --short).
+    assert.deepEqual(parseInProgressDetail('merge|abc1234deadbeef0000000000000000000000000'), { operation: 'merge', detail: 'abc1234' });
+    assert.deepEqual(parseInProgressDetail('cherry-pick|abcdef1234567890abcdef1234567890abcdef12'), { operation: 'cherry-pick', detail: 'abcdef1' });
+    assert.deepEqual(parseInProgressDetail('revert|9876543210fedcba000000000000000000000000'), { operation: 'revert', detail: '9876543' });
+  });
+
+  it('nulls the detail when the *_HEAD SHA is empty', () => {
+    // MERGE_HEAD present but empty/unreadable → operation still reported, no sha.
+    assert.deepEqual(parseInProgressDetail('merge|'), { operation: 'merge', detail: null });
+    assert.deepEqual(parseInProgressDetail('cherry-pick|'), { operation: 'cherry-pick', detail: null });
+  });
+
+  it('renders rebase step N/M + onto + stopped-sha from a full record', () => {
+    assert.deepEqual(
+      parseInProgressDetail('rebase|3|7|2b755b9e4ffa005ec9053c0c3d2b79cee3c8952a|c5766c442b36017b177359ad639752ab079f0fe4'),
+      { operation: 'rebase', detail: '3/7 · onto 2b755b9 · stopped at c5766c4' },
+    );
+  });
+
+  it('renders only the subset of step files git actually wrote', () => {
+    // step present, onto/stopped absent.
+    assert.deepEqual(parseInProgressDetail('rebase|1|3||'), { operation: 'rebase', detail: '1/3' });
+    // only stopped-sha present (step nums + onto absent).
+    assert.deepEqual(
+      parseInProgressDetail('rebase||||c5766c442b36017b177359ad639752ab079f0fe4'),
+      { operation: 'rebase', detail: 'stopped at c5766c4' },
+    );
+  });
+
+  it('shows onto verbatim when it is NOT a hex object name (defensive)', () => {
+    // git's onto marker always holds a SHA in practice; if it ever held a ref
+    // name it must be shown as-is, never mis-truncated to 7 chars.
+    assert.deepEqual(
+      parseInProgressDetail('rebase|1|3|origin/main|c5766c442b36017b177359ad639752ab079f0fe4'),
+      { operation: 'rebase', detail: '1/3 · onto origin/main · stopped at c5766c4' },
+    );
+  });
+
+  it('nulls the detail for a bare rebase (rebase-apply: no step files)', () => {
+    // The older rebase backend carries no step files → graceful null, NOT a
+    // misleading "step 0/0". operation is still reported.
+    assert.deepEqual(parseInProgressDetail('rebase'), { operation: 'rebase', detail: null });
+    assert.deepEqual(parseInProgressDetail('rebase||||'), { operation: 'rebase', detail: null });
+  });
+
+  it('nulls the detail for bisect (no progress info to surface)', () => {
+    assert.deepEqual(parseInProgressDetail('bisect'), { operation: 'bisect', detail: null });
   });
 });

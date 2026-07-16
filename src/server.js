@@ -1625,37 +1625,136 @@ async function runInContext(chat, script, { timeout = 8000 } = {}) {
 // ssh for manual-remote); manual-LOCAL uses the host-fs path in detectInProgress
 // instead. The `2>/dev/null` on rev-parse swallows non-git/detached → empty →
 // operation null (graceful, never a 500). See WARDEN-235.
+//
+// Each matching marker echoes ONE record line carrying the operation PLUS its
+// raw progress detail, pipe-delimited so detectInProgress can parse it in one
+// pass (WARDEN-511): `merge|<MERGE_HEAD-sha>`, `rebase|<msgnum>|<end>|<onto>|
+// <stopped-sha>`, etc. rebase-apply (no step files) and bisect (no detail) echo
+// a bare operation name → detail null. Callers take the FIRST non-empty line
+// (priority order), so only the highest-priority in-progress op is reported.
 export function buildInProgressScript(cwd) {
   return `cd ${shellQuote(cwd)} && gd=$(git rev-parse --git-dir 2>/dev/null) && ` +
-    `{ [ -f "$gd/MERGE_HEAD" ] && echo merge; ` +
-    `[ -f "$gd/CHERRY_PICK_HEAD" ] && echo cherry-pick; ` +
-    `[ -f "$gd/REVERT_HEAD" ] && echo revert; ` +
-    `[ -d "$gd/rebase-merge" ] && echo rebase; ` +
+    `{ [ -f "$gd/MERGE_HEAD" ] && echo "merge|$(cat "$gd/MERGE_HEAD" 2>/dev/null)"; ` +
+    `[ -f "$gd/CHERRY_PICK_HEAD" ] && echo "cherry-pick|$(cat "$gd/CHERRY_PICK_HEAD" 2>/dev/null)"; ` +
+    `[ -f "$gd/REVERT_HEAD" ] && echo "revert|$(cat "$gd/REVERT_HEAD" 2>/dev/null)"; ` +
+    `[ -d "$gd/rebase-merge" ] && echo "rebase|$(cat "$gd/rebase-merge/msgnum" 2>/dev/null)|$(cat "$gd/rebase-merge/end" 2>/dev/null)|$(cat "$gd/rebase-merge/onto" 2>/dev/null)|$(cat "$gd/rebase-merge/stopped-sha" 2>/dev/null)"; ` +
     `[ -d "$gd/rebase-apply" ] && echo rebase; ` +
     `[ -f "$gd/BISECT_LOG" ] && echo bisect; }`;
 }
 
-// Detect an in-progress git operation (merge/cherry-pick/revert/rebase/bisect).
-// manual-LOCAL stats the marker files on the host fs (fast, no shell); every
-// other transport (yatfa local+remote, manual-remote) runs buildInProgressScript
-// in-context — the marker files live beyond the host fs (in-container or on the
-// remote host), so only a shell `test` delivered there can reach them. Returns
-// the operation name or null (graceful, never throws). Display only (WARDEN-28).
+// Read+trim a git marker file under git-dir `gd`. Returns '' on any error (the
+// file is absent or unreadable) so a partial marker state never throws — only
+// used by detectInProgress's manual-LOCAL host-fs path, which (unlike the script
+// path) reaches the marker files on this machine's fs directly.
+function readMarker(gd, name) {
+  try {
+    return fs.readFileSync(path.join(gd, name), 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
+// Shorten a hex object name (40-char SHA from a marker file) to the ~7-char
+// display form git's own `rev-parse --short` produces, mirroring the headSha
+// discipline at the /api/git-status route. A non-hex value (a ref name, should a
+// marker ever hold one) is returned verbatim — never mis-truncated. null when
+// empty so the caller can omit the segment entirely.
+function shortObjName(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (!s) return null;
+  return /^[0-9a-f]{7,40}$/i.test(s) ? s.slice(0, 7) : s;
+}
+
+// Parse a non-negative integer marker value (msgnum/end), or null when it is
+// absent/non-numeric — so a missing step file degrades to a skipped segment
+// rather than a misleading "0".
+function parseStepNum(v) {
+  const s = String(v == null ? '' : v).trim();
+  return /^\d+$/.test(s) ? Number(s) : null;
+}
+
+// Parse ONE in-progress-operation record into { operation, detail } (WARDEN-511).
+// The record is the line buildInProgressScript echoes — a bare operation
+// (`bisect`, or `rebase` for the step-less rebase-apply backend) or
+// `op|<raw marker values>`:
+//   merge|<MERGE_HEAD-sha>   cherry-pick|<sha>   revert|<sha>
+//   rebase|<msgnum>|<end>|<onto>|<stopped-sha>
+// Pure + exported so BOTH detectInProgress code paths share it: the in-context
+// script path feeds the first stdout line; the manual-LOCAL host-fs path builds
+// the identical record from readMarker and feeds it — guaranteeing the same
+// detail for the same on-disk state regardless of transport, and giving the
+// detail logic one unit-testable seam (mirrors buildInProgressScript). Returns
+// { operation: null, detail: null } for a blank line (graceful, never throws).
+// detail is null when no progress info is available: bisect, rebase-apply, a
+// rebase-merge state with no step files yet, or an empty *_HEAD. The detail is a
+// display-ready fragment the badge appends after "<op> in progress · ".
+export function parseInProgressDetail(line) {
+  const trimmed = String(line == null ? '' : line).trim();
+  if (!trimmed) return { operation: null, detail: null };
+  const sep = trimmed.indexOf('|');
+  const operation = sep === -1 ? trimmed : trimmed.slice(0, sep);
+  const tail = sep === -1 ? '' : trimmed.slice(sep + 1);
+  let detail = null;
+  if (operation === 'merge' || operation === 'cherry-pick' || operation === 'revert') {
+    // tail is the full SHA from the *_HEAD file — the commit being applied.
+    detail = shortObjName(tail);
+  } else if (operation === 'rebase') {
+    // rebase-merge step files: msgnum/end (step N/M), onto (the new base SHA),
+    // stopped-sha (the commit that failed to apply). onto/stopped-sha are hex
+    // object names → shortened; each present piece joins the detail, so a
+    // partial state (e.g. stopped-sha absent early in a rebase) still renders
+    // whatever subset exists. All absent → null (rebase-apply degrades here too,
+    // since its backend never carries these files).
+    const [msgnum, end, onto, stopped] = tail.split('|');
+    const mn = parseStepNum(msgnum);
+    const en = parseStepNum(end);
+    const ontoShort = shortObjName(onto);
+    const stoppedShort = shortObjName(stopped);
+    const parts = [];
+    if (mn && en) parts.push(`${mn}/${en}`);
+    if (ontoShort) parts.push(`onto ${ontoShort}`);
+    if (stoppedShort) parts.push(`stopped at ${stoppedShort}`);
+    detail = parts.length ? parts.join(' · ') : null;
+  }
+  // bisect (and any unknown operation) carry no progress detail — operation
+  // name alone, exactly as before WARDEN-511.
+  return { operation, detail };
+}
+
+// Detect an in-progress git operation (merge/cherry-pick/revert/rebase/bisect)
+// and, where git records it, the progress detail (rebase step N/M · onto ·
+// stopped-sha; the SHA being applied for merge/cherry-pick/revert). manual-LOCAL
+// stats the marker files on the host fs and feeds the shared parseInProgressDetail
+// seam a record built from readMarker; every other transport (yatfa local+remote,
+// manual-remote) runs buildInProgressScript in-context and feeds its first stdout
+// line to the same parser — the marker files live beyond the host fs (in-container
+// or on the remote host), so only a shell `test`+`cat` delivered there can reach
+// them. Returns { operation, detail } (both null when nothing is in progress).
+// Display only, read-only — never mutates the repo (WARDEN-28, WARDEN-511).
 async function detectInProgress(chat, cwd) {
   if (!chat.container && chat.host === LOCAL) {
     const gitDirResult = await runLocalGit(['rev-parse', '--git-dir'], cwd);
     const gitDir = gitDirResult.stdout.trim() || '';
-    if (!gitDir) return null;
+    if (!gitDir) return { operation: null, detail: null };
     const gd = path.resolve(cwd, gitDir);
-    if (fs.existsSync(path.join(gd, 'MERGE_HEAD'))) return 'merge';
-    if (fs.existsSync(path.join(gd, 'CHERRY_PICK_HEAD'))) return 'cherry-pick';
-    if (fs.existsSync(path.join(gd, 'REVERT_HEAD'))) return 'revert';
-    if (fs.existsSync(path.join(gd, 'rebase-merge')) || fs.existsSync(path.join(gd, 'rebase-apply'))) return 'rebase';
-    if (fs.existsSync(path.join(gd, 'BISECT_LOG'))) return 'bisect';
-    return null;
+    if (fs.existsSync(path.join(gd, 'MERGE_HEAD')))
+      return parseInProgressDetail(`merge|${readMarker(gd, 'MERGE_HEAD')}`);
+    if (fs.existsSync(path.join(gd, 'CHERRY_PICK_HEAD')))
+      return parseInProgressDetail(`cherry-pick|${readMarker(gd, 'CHERRY_PICK_HEAD')}`);
+    if (fs.existsSync(path.join(gd, 'REVERT_HEAD')))
+      return parseInProgressDetail(`revert|${readMarker(gd, 'REVERT_HEAD')}`);
+    if (fs.existsSync(path.join(gd, 'rebase-merge')))
+      return parseInProgressDetail(`rebase|${readMarker(gd, 'rebase-merge/msgnum')}|${readMarker(gd, 'rebase-merge/end')}|${readMarker(gd, 'rebase-merge/onto')}|${readMarker(gd, 'rebase-merge/stopped-sha')}`);
+    // rebase-apply (the older git rebase / git pull --rebase backend) has NO
+    // step files — surface the operation with a null detail rather than a
+    // misleading "step 0/0".
+    if (fs.existsSync(path.join(gd, 'rebase-apply'))) return { operation: 'rebase', detail: null };
+    if (fs.existsSync(path.join(gd, 'BISECT_LOG'))) return { operation: 'bisect', detail: null };
+    return { operation: null, detail: null };
   }
   const r = await runInContext(chat, buildInProgressScript(cwd));
-  return (r.stdout || '').split('\n').map((l) => l.trim()).find(Boolean) || null;
+  const firstLine = (r.stdout || '').split('\n').map((l) => l.trim()).find(Boolean) || '';
+  return parseInProgressDetail(firstLine);
 }
 
 app.get('/api/git-status', async (req, res) => {
@@ -1665,7 +1764,7 @@ app.get('/api/git-status', async (req, res) => {
 
   try {
     const cwd = gitCwd(chat);
-    if (!cwd) return res.json({ branch: null, detached: false, headSha: null, clean: null, cwd: '', ahead: null, behind: null, upstream: null, inProgress: { operation: null }, stashCount: null, diffstat: null, files: null, error: 'no cwd' });
+    if (!cwd) return res.json({ branch: null, detached: false, headSha: null, clean: null, cwd: '', ahead: null, behind: null, upstream: null, inProgress: { operation: null, detail: null }, stashCount: null, diffstat: null, files: null, error: 'no cwd' });
 
     // branch / status / ahead-behind / detached / stash all run via runGit: argv
     // (no shell) for the LOCAL transports, ssh for the remote ones — and for yatfa
@@ -1721,7 +1820,7 @@ app.get('/api/git-status', async (req, res) => {
       headSha = normalizeHeadSha(shaResult.stdout, shaResult.code);
     }
 
-    const inProgressOp = await detectInProgress(chat, cwd);
+    const inProgressState = await detectInProgress(chat, cwd);
 
     // Shelved WIP: `git stash list` emits one line per stash, empty when none.
     // --porcelain status never surfaces stashes, so a clean tree with parked work
@@ -1765,7 +1864,7 @@ app.get('/api/git-status', async (req, res) => {
       // already null there, so this is what lets the badge tell a never-pushed
       // branch from a synced 0/0 one.
       upstream: branch ? upstream : null,
-      inProgress: { operation: branch ? inProgressOp : null },
+      inProgress: { operation: branch ? inProgressState.operation : null, detail: branch ? inProgressState.detail : null },
       stashCount: branch ? stashCount : null,
       // diffstat: net insertions/deletions of the working-tree edits vs HEAD
       // (WARDEN-411), or null for a clean / non-git / detached repo. Gated on
@@ -1775,7 +1874,7 @@ app.get('/api/git-status', async (req, res) => {
       error: null,
     });
   } catch (e) {
-    res.json({ branch: null, detached: false, headSha: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, upstream: null, inProgress: { operation: null }, stashCount: null, diffstat: null, files: null, error: e.message });
+    res.json({ branch: null, detached: false, headSha: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, upstream: null, inProgress: { operation: null, detail: null }, stashCount: null, diffstat: null, files: null, error: e.message });
   }
 });
 
