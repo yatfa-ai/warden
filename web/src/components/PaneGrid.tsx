@@ -16,6 +16,7 @@ import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import type { Chat } from '@/lib/types';
 import type { PaneLayout, TerminalCursorStyle, OnExitBehavior, Snippet } from '@/lib/storage';
+import { resolveVisibleTiles } from '@/lib/paneGrid';
 import type { ThemeId } from '@/lib/theme';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
 
@@ -214,7 +215,12 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
     if (filePromptOpen) fileInputRef.current?.focus();
   }, [filePromptOpen]);
 
-  const visible = maximized ? tiles.filter((t) => t.id === maximized) : tiles;
+  // Resolve the visible tiles through the stale-maximized guard (WARDEN-521): a
+  // maximized id whose tile is no longer in the grid (closed/killed/moved away)
+  // behaves as "not maximized" so the grid falls back to every open tile instead
+  // of blanking. effectiveMax also drives the grid template and per-tile flag, so
+  // a stale id can never pin the layout to a single column either.
+  const { effectiveMax, visible } = resolveVisibleTiles(maximized, tiles);
   const n = visible.length;
   // Pane layout preference controls cols/rows. 'auto' reproduces today's exact
   // grid (cols = colsFor(n), rows = ceil(n/cols)); 'stacked' forces a single
@@ -264,12 +270,12 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
           <div className="text-xs text-muted-foreground p-8 text-center">click a chat to open a live pane</div>
         ) : (
           <div data-pane-grid className="grid gap-2 compact:gap-1 h-full min-h-0 overflow-x-auto transition-all duration-200 ease-in-out"
-            style={{ gridTemplateColumns: `repeat(${maximized ? 1 : cols}, minmax(9rem, 1fr))`, gridTemplateRows: `repeat(${maximized ? 1 : rows}, minmax(0, 1fr))` }}>
+            style={{ gridTemplateColumns: `repeat(${effectiveMax ? 1 : cols}, minmax(9rem, 1fr))`, gridTemplateRows: `repeat(${effectiveMax ? 1 : rows}, minmax(0, 1fr))` }}>
             {visible.map((t) => {
               const chat = chats.find((c) => (c.key || c.id) === t.id);
               return (
                 <div key={t.id} data-pane-id={t.id} className="min-h-0 min-w-0">
-                  <PaneTile id={t.id} label={nameOf(t.id)} focused={focused === t.id} maximized={maximized === t.id}
+                  <PaneTile id={t.id} label={nameOf(t.id)} focused={focused === t.id} maximized={effectiveMax === t.id}
                     hasNew={newActivity.has(t.id)} onClearNew={() => onClearNew(t.id)}
                     onFocus={() => onFocus(t.id)} onClose={() => onClose(t.id)} onToggleMax={() => onToggleMax(t.id)}
                     onKill={() => onForceKill(t.id)} chat={chat} host={paneHost[t.id]}

@@ -1064,12 +1064,19 @@ function App() {
     pushRecentlyClosed(id);
     setOpenPanes((p) => p.filter((x) => x !== id));
     setFocused((f) => (f === id ? null : f));
+    // WARDEN-521: drop the maximized id when the maximized pane itself leaves the
+    // grid, else it goes stale and the grid blanks until a workspace switch. A
+    // NON-maximized pane closing while another is maximized leaves the id intact.
+    setMaximized((m) => (m === id ? null : m));
   }, [setOpenPanes, setFocused, pushRecentlyClosed]);
   // remove the pane only (no recently-closed entry) — used by the KILL flow, since
   // a killed chat's tmux session is destroyed and is not safely reopenable.
   const removeActive = useCallback((id: string) => {
     setOpenPanes((p) => p.filter((x) => x !== id));
     setFocused((f) => (f === id ? null : f));
+    // WARDEN-521: same stale-maximized guard as closePane — killing the maximized
+    // pane must restore the grid, not blank it.
+    setMaximized((m) => (m === id ? null : m));
   }, [setOpenPanes, setFocused]);
   // reopen a recently-closed pane: drop it from the recovery list (it is no longer
   // closed), then open it. openChat re-primes paneHost from the live catalog entry,
