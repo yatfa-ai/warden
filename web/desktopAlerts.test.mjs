@@ -52,11 +52,12 @@ const roll = (b = {}) => {
   const erroring = b.erroring ?? [];
   const waiting = b.waiting ?? [];
   const blocked = b.blocked ?? [];
+  const custom = b.custom ?? [];
   const directives = b.directives ?? 0;
   const errors = b.errors ?? 0;
   const total = critical.length + warning.length + stuck.length + erroring.length +
-    waiting.length + blocked.length + directives + errors;
-  return { critical, warning, stuck, erroring, waiting, blocked, directives, errors, total };
+    waiting.length + blocked.length + custom.length + directives + errors;
+  return { critical, warning, stuck, erroring, waiting, blocked, custom, directives, errors, total };
 };
 
 // Severity-prefs builder mirroring ATTENTION_SEVERITY_DEFAULTS (all true) so a
@@ -151,6 +152,12 @@ test('a waiting agent appears in the body as "waiting"', () => {
 });
 test('a blocked agent appears in the body as "blocked"', () => {
   assert.equal(formatAlertMessage(roll({ blocked: [agent('b1')] })).body, '1 blocked');
+});
+test('a watch-pattern match appears in the body as "watch pattern(s)" (WARDEN-540)', () => {
+  // custom counts toward total, so the body must enumerate it (else title/body disagree).
+  const customRow = { id: 'd1', key: 'd1', name: 'd1', state: 'idle', customMatch: { pattern: 'X', line: 'l' } };
+  assert.equal(formatAlertMessage(roll({ custom: [customRow] })).body, '1 watch pattern');
+  assert.equal(formatAlertMessage(roll({ custom: [customRow, { ...customRow, id: 'd2', key: 'd2' }] })).body, '2 watch patterns');
 });
 test('red pane states sort before amber in the body (critical, stuck, erroring, warning, waiting, blocked)', () => {
   const r = roll({
@@ -349,6 +356,17 @@ test('falls back to id when name is absent', () => {
   const r = { id: 'container-1', state: 'stuck', signal: 'loop line' };
   const { body } = formatWatchMessage(r, 'stuck');
   assert.ok(body.includes('container-1'), 'falls back to id for the name');
+});
+test('custom reason (WARDEN-540) names the pattern + quotes the matching line', () => {
+  // row.signal is the classifyPane signal; the match lives in row.customMatch. The
+  // custom body must surface BOTH the pattern name and the matching line so the
+  // human knows which of their rules tripped and what printed.
+  const r = { id: 'w', key: 'w', name: 'deploy-agent', state: 'idle', customMatch: { pattern: 'Deploy failed', line: 'DEPLOY FAILED: exit 1' } };
+  const { title, body } = formatWatchMessage(r, 'custom');
+  assert.ok(title.includes('watch pattern'), 'title carries the generic custom label');
+  assert.ok(body.includes('deploy-agent'), 'body names the agent');
+  assert.ok(body.includes("'Deploy failed'"), 'body names the pattern');
+  assert.ok(body.includes("'DEPLOY FAILED: exit 1'"), 'body quotes the matching line (not the classifyPane signal)');
 });
 
 console.log('\nwatchStateLabel (WARDEN-514): row tooltip = reason vocabulary + quoted signal');
@@ -689,6 +707,21 @@ test('an agent known by key in prev suppresses the same key in a different next 
 test('a row with neither key nor id is skipped (un-actionable, un-trackable)', () => {
   const out = diffNewAttention(roll(), roll({ stuck: [{ state: 'stuck', signal: 'x' }] }));
   assert.equal(out.length, 0);
+});
+test('a newly-matching watch pattern is a named entrant carrying the matching line (WARDEN-540)', () => {
+  // The entrant's signal is the MATCHING line (customMatch.line), not classifyPane's
+  // signal — the match is what the human asked to be told about.
+  const customRow = { id: 'd1', key: 'd1', name: 'deploy-agent', state: 'idle', customMatch: { pattern: 'Deploy failed', line: 'DEPLOY FAILED: exit 1' } };
+  const out = diffNewAttention(roll(), roll({ custom: [customRow] }));
+  assert.equal(out.length, 1);
+  assert.equal(out[0].key, 'd1');
+  assert.equal(out[0].reason, 'Matched a watch pattern');
+  assert.equal(out[0].signal, 'DEPLOY FAILED: exit 1', 'signal is the matching line, not classifyPane signal');
+  assert.equal(out[0].tone, 'warning');
+});
+test('a persistent custom match (already in prev) is not a new entrant', () => {
+  const customRow = { id: 'd1', key: 'd1', name: 'd1', state: 'idle', customMatch: { pattern: 'X', line: 'l' } };
+  assert.equal(diffNewAttention(roll({ custom: [customRow] }), roll({ custom: [customRow] })).length, 0);
 });
 
 console.log('\ndiffNewAttention: missing input is defensive (returns [])');

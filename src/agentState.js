@@ -138,3 +138,150 @@ export function inferGoal(clean, c) {
   if (c && c.role) return c.role;
   return null;
 }
+
+// ─── User-authored output-pattern alerts (WARDEN-540) ─────────────────────────
+//
+// The deterministic, zero-LLM, user-authored complement to the fixed Watch
+// categories above. A human teaches Warden "ping me when a watched agent prints X"
+// (a deploy returning non-200, `pytest` printing `1 failed`, a billing/paywall
+// page, "merge conflict", a custom CI marker) — signals the hard-coded SUMM_*_RE
+// regexes are blind to. This is categorically DISTINCT from the Observer LLM
+// (WARDEN-8): it is a pure substring/regex match over already-captured pane text,
+// evaluated on the SAME /api/agent-states capture cadence Watch already uses for
+// watched chats → zero new SSH cost (the codebase's hard SSH-cost discipline).
+//
+// Sibling of classifyPane: a pure function over already-cleaned (stripAnsi'd) pane
+// text, intentionally dependency-free so it is unit-testable in isolation
+// (agentState.test.js) and importable from server.js's pollAgentStates WITHOUT
+// pulling fs / ssh / llm / node-pty. classifyPane decides the pane's STATE from a
+// fixed developer-chosen vocabulary; this decides whether a USER-chosen string just
+// appeared — an additive signal that never overrides the state (an agent can be
+// both `erroring` AND match a custom pattern; both are independent dimensions).
+//
+// Shape of one pattern (the persisted cfg.watchPatterns entry): { id, name,
+// expression, mode: 'string'|'regex', enabled }. The matcher only reads
+// { name, expression, mode, enabled } (duck-typed — `id` is for UI keys + dedup,
+// not matching), so a JSDoc typedef suffices; no runtime type is needed.
+
+/**
+ * @typedef {Object} WatchPattern
+ * @property {string} id        Stable unique id (UI React key + PUT dedup).
+ * @property {string} name      Human label, shown in the alert ("pattern: <name>").
+ * @property {string} expression The text to match (substring or regex source).
+ * @property {'string'|'regex'} mode Match semantics.
+ * @property {boolean} enabled  false → the matcher skips it (no alert).
+ */
+
+/**
+ * @typedef {Object} WatchPatternMatch
+ * @property {string} pattern The matching pattern's `name` (for the alert body).
+ * @property {string} line    The matching pane line (the actionable "where to look").
+ */
+
+// Caps mirrored verbatim in web/src/lib/storage.ts (WATCH_PATTERN_*_MAX) so the UI's
+// maxLength + validatePatternName agree with this load/PUT sanitizer on one bound —
+// a name/expression the UI accepts can never be silently dropped on save/reload.
+// Mirrors the SNIPPET_*_MAX discipline (storage.ts) + parseSnippets (server side).
+const WATCH_PATTERN_NAME_MAX = 64;
+const WATCH_PATTERN_EXPRESSION_MAX = 500;
+const WATCH_PATTERN_MAX_COUNT = 50;
+
+/**
+ * Pure: does any ENABLED user pattern match the cleaned pane text? Sibling of
+ * classifyPane (WARDEN-540). Returns the FIRST enabled pattern that matches (in
+ * array order — the user's defined order is the precedence), as
+ * { pattern, line }, or null when no enabled pattern matches.
+ *
+ *  - `mode:'string'` = case-insensitive SUBSTRING, mirroring /api/search-pane's
+ *    semantics exactly (line.toLowerCase().includes(expr.toLowerCase())). No RegExp
+ *    is built, so a metacharacter-laden literal ("$ ? ( )") matches as plain text.
+ *  - `mode:'regex'` = a case-insensitive RegExp built from the user's expression.
+ *    An INVALID regex NEVER throws — it is skipped (the UI surfaces the validity
+ *    error at authoring time; the matcher is the defense-in-depth backstop so a
+ *    stale/invalid pattern can never crash /api/agent-states).
+ *  - `enabled === false` patterns are skipped (the human silenced it).
+ *  - Entries missing a name/expression are skipped (defensive — the PUT sanitizer
+ *    already drops these, but the matcher never trusts its input).
+ *  - The FIRST matching pattern wins (array order); for that pattern, the LAST
+ *    (most recent) matching line is returned, trimmed + sliced to 200 chars —
+ *    mirroring classifyPane's signal slicing so the alert body fits a toast.
+ *
+ * Pure + dependency-free (no RegExp.parse / no throws on bad input) so
+ * agentState.test.js exercises string / regex / invalid-regex-doesn't-throw /
+ * disabled / first-match-wins / last-line directly.
+ *
+ * @param {string} cleanText Already stripAnsi'd pane text (the same `clean` classifyPane reads).
+ * @param {WatchPattern[]|null|undefined} patterns The user's cfg.watchPatterns.
+ * @returns {WatchPatternMatch|null}
+ */
+export function matchWatchPatterns(cleanText, patterns) {
+  if (typeof cleanText !== 'string' || !Array.isArray(patterns) || patterns.length === 0) return null;
+  const lines = cleanText.split('\n');
+  for (const p of patterns) {
+    if (!p || p.enabled === false) continue;
+    const name = typeof p.name === 'string' ? p.name.trim() : '';
+    const expression = typeof p.expression === 'string' ? p.expression : '';
+    if (!name || !expression.trim()) continue;
+    const isRegex = p.mode === 'regex';
+    let re = null;
+    if (isRegex) {
+      try { re = new RegExp(expression, 'i'); } catch { continue; } // invalid → skip, NEVER throw
+    }
+    // Walk from the END so the LAST (most recent) matching line wins — the pane's
+    // live bottom is what the human needs to act on, mirroring classifyPane's
+    // recency-bound signal. First matching pattern wins, so we return immediately.
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i];
+      const hit = isRegex ? re.test(line) : line.toLowerCase().includes(expression.toLowerCase());
+      if (hit) {
+        return { pattern: name, line: line.trim().slice(0, 200) };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Pure: sanitize a raw watchPatterns payload (from PUT /api/config's req.body) into
+ * a valid WatchPattern[] — the persistence-boundary type-guard (WARDEN-540). Mirrors
+ * the parseSnippets drop-bad-entries discipline (web/src/lib/storage.ts): never
+ * throws on malformed input (WARDEN-89), drops bad entries instead so one corrupt
+ * entry can never blank the list or crash /api/config.
+ *
+ * Returns a SANITIZED ARRAY when `raw` is an array (possibly empty — all entries
+ * dropped), or `null` when `raw` is not an array. The PUT handler treats `null` as
+ * "field absent → no mutation" (mirroring `if (typeof X === 'string')` guards), so a
+ * PUT that omits watchPatterns leaves the stored list intact while a PUT with a
+ * malformed (non-array) value is ignored rather than blanking it.
+ *
+ * Drops entries that: aren't objects; lack a non-empty id/name/expression; have a
+ * name/expression over the caps; dedups by id (first occurrence wins). Coerces `mode`
+ * to 'string' for anything but the literal 'regex'. `enabled` defaults to true
+ * (enabled !== false) so a legacy/partial entry without the flag still alerts.
+ *
+ * @param {unknown} raw
+ * @returns {WatchPattern[]|null}
+ */
+export function sanitizeWatchPatterns(raw) {
+  if (!Array.isArray(raw)) return null;
+  const seen = new Set();
+  const out = [];
+  for (const entry of raw) {
+    if (out.length >= WATCH_PATTERN_MAX_COUNT) break; // cap payload size
+    if (!entry || typeof entry !== 'object') continue;
+    const id = typeof entry.id === 'string' ? entry.id.trim() : '';
+    const name = typeof entry.name === 'string' ? entry.name.trim() : '';
+    const expression = typeof entry.expression === 'string' ? entry.expression.trim() : '';
+    if (!id || !name || !expression) continue;
+    if (name.length > WATCH_PATTERN_NAME_MAX) continue;
+    if (expression.length > WATCH_PATTERN_EXPRESSION_MAX) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const mode = entry.mode === 'regex' ? 'regex' : 'string';
+    const enabled = entry.enabled !== false;
+    out.push({ id, name, expression, mode, enabled });
+  }
+  return out;
+}
+
+export { WATCH_PATTERN_NAME_MAX, WATCH_PATTERN_EXPRESSION_MAX, WATCH_PATTERN_MAX_COUNT };

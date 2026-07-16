@@ -98,7 +98,12 @@ function WatchToggle({ isWatched, watchState, onToggle }: {
   const need = isWatched && watchState ? currentWatchNeed(watchState) : null;
   if (need) {
     const broken = need === 'erroring' || need === 'stuck';
-    const label = watchStateLabel(need, watchState?.signal);
+    // WARDEN-540: for a custom-pattern match, the actionable "signal" is the matching
+    // line + pattern name (row.signal is the classifyPane signal, not the match).
+    const customSignal = need === 'custom' && watchState?.customMatch
+      ? `'${watchState.customMatch.line}' (pattern: ${watchState.customMatch.pattern})`
+      : watchState?.signal;
+    const label = watchStateLabel(need, customSignal);
     return (
       <IconTooltip label={label}>
         <Button

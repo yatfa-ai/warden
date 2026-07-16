@@ -429,4 +429,55 @@ test('the broadened gate is what unblocks the stuck-with-zero-events case', () =
   assert.equal(hasReturnContent(0, top), true, 'zero activity events, but ranked top → still surface');
 });
 
+// ─── user-authored output-pattern alerts (WARDEN-540) ─────────────────────────
+const cm = (pattern, line) => ({ pattern, line });
+
+console.log('\nbuildAttentionRollup: a customMatch row is its own bucket, excluded from state buckets (no double-count)');
+test('a row with customMatch lands in the custom bucket', () => {
+  const r = roll(health(), stats(), [stateRow('d1', 'idle', { customMatch: cm('Deploy', 'deploy failed') })]);
+  assert.equal(r.custom.length, 1);
+  assert.equal(r.custom[0].id, 'd1');
+});
+test('a customMatch row is EXCLUDED from the state buckets (each pane counted once)', () => {
+  // This pane is BOTH erroring AND matches a custom pattern. It must appear in the
+  // custom bucket ONLY — not also in erroring — so total and ranked stay correct.
+  const r = roll(health(), stats(), [stateRow('d1', 'erroring', { signal: 'err', customMatch: cm('Deploy', 'deploy failed') })]);
+  assert.equal(r.custom.length, 1);
+  assert.equal(r.erroring.length, 0, 'the custom-matched pane is not also counted as erroring');
+  assert.equal(r.total, 1, 'total counts the pane exactly once');
+});
+test('a non-custom erroring pane is unaffected (still in erroring)', () => {
+  // Regression guard: the custom exclusion must not bleed into ordinary state rows.
+  const r = roll(health(), stats(), [stateRow('e1', 'erroring', { signal: 'boom' })]);
+  assert.equal(r.erroring.length, 1);
+  assert.equal(r.custom.length, 0);
+});
+test('no customMatch anywhere → custom bucket empty (identical to today)', () => {
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck'), stateRow('e1', 'erroring')]);
+  assert.equal(r.custom.length, 0);
+  assert.equal(r.total, 2);
+});
+
+console.log('\nrankAttention: a custom row is a directed "because X" item carrying the matching line + pattern');
+test('a custom row → AttentionItem state "custom" with line + pattern in the signal', () => {
+  const r = roll(health(), stats(), [stateRow('d1', 'idle', { customMatch: cm('Deploy', 'deploy failed') })]);
+  const { ranked } = rankAttention(r);
+  assert.equal(ranked.length, 1);
+  assert.equal(ranked[0].state, 'custom', 'state is "custom", NOT the pane\'s underlying "idle"');
+  assert.match(ranked[0].signal, /deploy failed/);
+  assert.match(ranked[0].signal, /Deploy/);
+});
+test('a custom match (88) outranks a stuck pane (80) in the directed callout', () => {
+  const r = roll(health(), stats(), [
+    stateRow('s1', 'stuck', { signal: 'looping' }),
+    stateRow('d1', 'idle', { customMatch: cm('Deploy', 'deploy failed') }),
+  ]);
+  const { top } = rankAttention(r);
+  assert.equal(top.state, 'custom', 'the user-authored signal is the directed answer over a generic stuck pane');
+});
+test('attentionReason phrases a custom item (fallback when no signal)', () => {
+  // A custom item with a null signal (defensive) still reads as a complete reason.
+  assert.equal(attentionReason({ id: 'd1', name: 'd1', state: 'custom', signal: null }), 'matched a watch pattern');
+});
+
 console.log(`\n✓ ATTENTION ROLLUP TESTS PASS (${passed})`);

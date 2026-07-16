@@ -40,7 +40,7 @@ const tmpDir = mkdtempSync(join(tmpdir(), 'warden-storage-test-'));
 writeFileSync(join(tmpDir, 'themes.mjs'), themesCode);
 const tmpFile = join(tmpDir, 'storage.mjs');
 writeFileSync(tmpFile, storageCode.replaceAll('@/lib/themes', './themes.mjs'));
-const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, mergeRecentlyClosed, RECENTLY_CLOSED_CAP, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, validateSnippetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, SNIPPET_MAX_COUNT, STARTER_SNIPPETS, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, SIDEBAR_MIN, SIDEBAR_MAX, OBSERVER_MIN, OBSERVER_MAX, PANE_MIN, HEALTH_WIDTH, resetUiPrefsPreservingWorkspace } = await import(tmpFile);
+const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, mergeRecentlyClosed, RECENTLY_CLOSED_CAP, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, validateSnippetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, SNIPPET_MAX_COUNT, STARTER_SNIPPETS, validatePatternName, isValidRegex, WATCH_PATTERN_NAME_MAX, clampSidebarWidth, clampObserverWidth, clampLayoutWidths, SIDEBAR_MIN, SIDEBAR_MAX, OBSERVER_MIN, OBSERVER_MAX, PANE_MIN, HEALTH_WIDTH, resetUiPrefsPreservingWorkspace } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -1627,6 +1627,48 @@ test('excludes `except` so a case-only rename is allowed', () => {
 test('trims before validating (matches load-time normalization)', () => {
   assert.equal(validateSnippetName('  Run tests  ', []), null);
   assert.equal(validateSnippetName('  Run tests  ', [{ name: 'Run tests', text: 'r' }]), 'duplicate');
+});
+
+console.log('\nvalidatePatternName — the watch-pattern write-site contract (WARDEN-540)');
+test('returns null for an acceptable pattern name', () => {
+  assert.equal(validatePatternName('Deploy failed', [{ id: 'a', name: 'Merge', expression: 'x', mode: 'string', enabled: true }]), null);
+});
+test('flags empty (after trim)', () => {
+  assert.equal(validatePatternName('', []), 'empty');
+  assert.equal(validatePatternName('   ', []), 'empty');
+});
+test('flags names longer than WATCH_PATTERN_NAME_MAX', () => {
+  assert.equal(validatePatternName('x'.repeat(WATCH_PATTERN_NAME_MAX), []), null);
+  assert.equal(validatePatternName('x'.repeat(WATCH_PATTERN_NAME_MAX + 1), []), 'too-long');
+});
+test('flags duplicate names case-insensitively', () => {
+  const existing = [{ id: 'p1', name: 'Deploy failed', expression: 'x', mode: 'string', enabled: true }];
+  assert.equal(validatePatternName('Deploy failed', existing), 'duplicate');
+  assert.equal(validatePatternName('DEPLOY FAILED', existing), 'duplicate');
+  assert.equal(validatePatternName('Merge', existing), null);
+});
+test('excludes `except` (a pattern id) so a case-only rename is allowed', () => {
+  // Unlike snippets (except = name), patterns key on a stable id, so `except` is the id.
+  const existing = [{ id: 'p1', name: 'Deploy failed', expression: 'x', mode: 'string', enabled: true }];
+  assert.equal(validatePatternName('DEPLOY FAILED', existing, 'p1'), null);
+  const two = [
+    { id: 'p1', name: 'Deploy failed', expression: 'x', mode: 'string', enabled: true },
+    { id: 'p2', name: 'Merge', expression: 'y', mode: 'string', enabled: true },
+  ];
+  assert.equal(validatePatternName('Merge', two, 'p1'), 'duplicate');
+});
+
+console.log('\nisValidRegex — authoring-time feedback for mode:regex (WARDEN-540)');
+test('true for a compilable regex', () => {
+  assert.equal(isValidRegex('payment (required|due)'), true);
+  assert.equal(isValidRegex('^FAIL:'), true);
+});
+test('false for an uncompilable regex (the matcher would skip it)', () => {
+  assert.equal(isValidRegex('(unclosed'), false);
+  assert.equal(isValidRegex('*leading-star'), false);
+});
+test('false for an empty expression', () => {
+  assert.equal(isValidRegex(''), false);
 });
 
 console.log('\ndefaultNewChatPresetByHost (per-host preset overrides) round-trips through loadUi/saveUi — WARDEN-352');

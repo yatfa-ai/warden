@@ -204,6 +204,16 @@ export interface AgentStateRow {
   signal?: string | null;
   /** True when the pane's host could not be captured (flagged, not dropped). */
   captureError?: boolean;
+  /**
+   * WARDEN-540: a user-authored watch pattern that matched this pane's output —
+   * `{ pattern, line }` where `pattern` is the human-authored pattern NAME and
+   * `line` is the matching pane line. ADDITIVE: independent of `state` (an agent
+   * can be both `erroring` AND match a custom pattern — both are real signals).
+   * Absent/null when no enabled pattern matches → behavior identical to today.
+   * Computed server-side in pollAgentStates over the SAME capture classifyPane
+   * reads (zero new SSH cost).
+   */
+  customMatch?: { pattern: string; line: string } | null;
 }
 
 /** Response shape of `GET /api/agent-states` (WARDEN-344). */
