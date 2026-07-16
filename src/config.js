@@ -63,6 +63,23 @@ const DEFAULTS = {
   // the env var remains an explicit operator override (force on/off regardless
   // of the UI). Remote-only by design — local hosts never route through it.
   companionTransportEnabled: false,
+  // Optional telemetry — OFF BY DEFAULT, two tiers, both revocable anytime
+  // (roadmap WARDEN-446 / design WARDEN-443). Nothing leaves the machine until
+  // the user explicitly turns the base tier on in Settings; this is warden's
+  // "off by default" trust foundation, persisted server-side (NOT client
+  // localStorage) so it survives behind the backend config and a restart. The
+  // receiver lives in a SEPARATE repo (warden-telemetry); this repo ships only
+  // the client + the schema version it speaks.
+  //   telemetryBaseEnabled     — anonymous error / crash / performance-stall
+  //                              events only. No content, no paths, no identifiers
+  //                              (the base-tier schema carries none by design).
+  //   telemetryExtendedEnabled — gated behind base: additionally retains chat +
+  //                              session NAMES (content is never sent). The server
+  //                              PUT handler CLAMPS this to false unless base is
+  //                              also on (extended-requires-base, enforced in
+  //                              code — server.js WARDEN-457).
+  telemetryBaseEnabled: false,
+  telemetryExtendedEnabled: false,
   // Safety
   confirmDestructiveActions: true, // boolean - confirm before destructive kills (force-kill tmux session, kill chat)
   notifyChatOps: true,           // chat operations (session kill, chat kill, resume, rename)

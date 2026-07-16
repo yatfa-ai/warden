@@ -130,3 +130,31 @@ describe('config llm (Observer model — WARDEN-350)', () => {
     assert.strictEqual(cfg.llm.authToken, 'sk-tok');
   });
 });
+
+describe('config telemetry consent (WARDEN-457)', () => {
+  afterEach(() => {
+    mock.restoreAll();
+  });
+
+  it('defaults BOTH telemetry tiers to false at fresh state (off by default)', () => {
+    // first run — no config file on disk. Off-by-default is a non-negotiable
+    // invariant: nothing leaves the machine until the user opts in via Settings.
+    mock.method(fs, 'readFileSync', () => {
+      throw new Error('ENOENT: config.json does not exist');
+    });
+    const cfg = load();
+    assert.strictEqual(cfg.telemetryBaseEnabled, false, 'base tier OFF by default');
+    assert.strictEqual(cfg.telemetryExtendedEnabled, false, 'extended tier OFF by default');
+  });
+
+  it('preserves user-enabled consent through load()', () => {
+    mock.method(fs, 'readFileSync', () => JSON.stringify({
+      telemetryBaseEnabled: true,
+      telemetryExtendedEnabled: true,
+    }));
+    const cfg = load();
+    assert.strictEqual(cfg.telemetryBaseEnabled, true);
+    assert.strictEqual(cfg.telemetryExtendedEnabled, true);
+  });
+});
+
