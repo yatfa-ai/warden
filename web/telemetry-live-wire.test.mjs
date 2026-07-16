@@ -1,0 +1,258 @@
+// Constructed live-wire integration tests (WARDEN-524). These prove the capstone
+// wiring in electron/main.cjs actually moves a real base-tier signal to the wire:
+// a source-built event flows source → record() → pipeline (resolveTier → redact →
+// validate) → the REAL transport, which POSTs it via the injected fetchImpl seam.
+//
+// The construction mirrors main.cjs EXACTLY: the source's record sink is bound to
+// a pipeline built with the CJS redact mirror + validateBaseEvent + SCHEMA_VERSION
+// + the REAL src/telemetry-send.js transport, a consent resolver fed by the same
+// prefs holder, and the endpoint pushed via setEndpoint. Only fetchImpl / sleepImpl
+// are faked (the transport's injectable seam) so the assertions are wire-level —
+// no real network, no standing up a receiver. This is the test shape the ticket's
+// testing notes prescribe.
+//
+// Success criteria covered:
+//   #1 — sends when opted in (base on + endpoint set): one POST, x-telemetry-schema=1.
+//   #2 — no-ops when off OR unconfigured: zero fetchImpl calls.
+//   #3 — runtime toggle starts/stops capture immediately (no restart).
+//
+// Auto-discovered by `npm test` in web/ (`node --test`).
+//
+// Run: node telemetry-live-wire.test.mjs   (from web/)
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import assert from 'node:assert/strict';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
+
+// --- Load the REAL transport (ESM — dynamic import) --------------------------
+const { send: realSend } = await import(resolve(__dirname, '..', 'src', 'telemetry-send.js'));
+
+// --- Load the CJS modules main.cjs wires together ----------------------------
+const { createTelemetrySource, SCHEMA_VERSION, validateBaseEvent } = require('../electron/telemetry-source.cjs');
+const { createTelemetryPipeline } = require('../electron/telemetry-pipeline.cjs');
+const { redact: redactCjs } = require('../electron/telemetry-redact.cjs');
+const { resolveTelemetryTier } = require('../electron/telemetry-config.cjs');
+
+let passed = 0;
+const test = async (name, fn) => {
+  await fn();
+  passed += 1;
+  console.log('  ok -', name);
+};
+const tick = () => new Promise((r) => setTimeout(r, 10));
+
+const TS = 1719500000123;
+const ENDPOINT = 'https://telemetry.example.selfhosted.net/v1/events';
+const GH_TOKEN = 'ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789';
+
+// --- fakes -------------------------------------------------------------------
+
+// A minimal process-like emitter: the source attaches .on('uncaughtExceptionMonitor')
+// and .on('unhandledRejection'); emit() drives the recorded handler synchronously.
+function fakeEmitter() {
+  const handlers = Object.create(null);
+  return {
+    on(evt, fn) { handlers[evt] = fn; },
+    off(evt) { delete handlers[evt]; },
+    emit(evt, ...args) { if (handlers[evt]) handlers[evt](...args); },
+  };
+}
+
+// fetch recorder — every call captured as { url, opts }; returns a 2xx so the
+// transport treats the batch as delivered.
+function fetchRecorder() {
+  const calls = [];
+  const fn = async (url, opts) => { calls.push({ url, opts }); return { ok: true, status: 200 }; };
+  fn.calls = calls;
+  return fn;
+}
+// fetch that FAILS the test if called — for the no-op gates (zero calls expected).
+function fetchMustNotBeCalled() {
+  let count = 0;
+  const fn = async () => { count += 1; throw new Error('fetchImpl must NOT be called from a gated no-op'); };
+  fn.count = () => count;
+  fn.calls = [];
+  return fn;
+}
+
+// Build the EXACT wiring shape main.cjs constructs. Returns a handle exposing the
+// source's main emitter + an apply() that mirrors main.cjs's applyTelemetryConfig
+// (update the prefs holder, arm/disarm the source, push the endpoint to the
+// pipeline — the transport's last gate).
+function buildWire({ fetchImpl }) {
+  const prefs = { telemetryBaseEnabled: false, telemetryExtendedEnabled: false, telemetryEndpoint: '' };
+  const pipeline = createTelemetryPipeline({
+    consent: () => resolveTelemetryTier(prefs),
+    redact: redactCjs,
+    validate: validateBaseEvent,
+    schemaVersion: SCHEMA_VERSION,
+    send: realSend,
+    fetchImpl,
+    sleepImpl: () => Promise.resolve(),
+  });
+  const source = createTelemetrySource({
+    record: pipeline.record,
+    now: () => TS,
+    setInterval: () => null, // no real heartbeat timer in tests
+    clearInterval: () => {},
+  });
+  const main = fakeEmitter();
+  source.attachMain(main);
+  const apply = (next) => {
+    if (next && typeof next === 'object') {
+      if (typeof next.telemetryBaseEnabled === 'boolean') prefs.telemetryBaseEnabled = next.telemetryBaseEnabled;
+      if (typeof next.telemetryExtendedEnabled === 'boolean') prefs.telemetryExtendedEnabled = next.telemetryExtendedEnabled;
+      if (typeof next.telemetryEndpoint === 'string') prefs.telemetryEndpoint = next.telemetryEndpoint;
+    }
+    source.setBaseConsent(prefs.telemetryBaseEnabled === true);
+    pipeline.setEndpoint(prefs.telemetryEndpoint || '');
+  };
+  return { prefs, pipeline, source, main, apply };
+}
+
+// ==========================================================================
+// Criterion #1 — sends when opted in (base on + endpoint set)
+// ==========================================================================
+
+await test('a real source error signal POSTs once with x-telemetry-schema=1 + a redacted JSON body', async () => {
+  const fetch = fetchRecorder();
+  const w = buildWire({ fetchImpl: fetch });
+  w.apply({ telemetryBaseEnabled: true, telemetryExtendedEnabled: false, telemetryEndpoint: ENDPOINT });
+
+  // Drive the source the way the live main process would: an uncaught error.
+  w.main.emit('uncaughtExceptionMonitor', new Error(`auth token ${GH_TOKEN} leaked on /home/alice/secret`));
+  await tick();
+
+  assert.equal(fetch.calls.length, 1, 'exactly one POST for one source signal');
+  const { url, opts } = fetch.calls[0];
+  assert.equal(url, ENDPOINT, 'destination is exactly the configured endpoint');
+  assert.equal(opts.method, 'POST');
+  assert.equal(opts.headers['content-type'], 'application/json');
+  assert.equal(opts.headers['x-telemetry-schema'], '1', 'schema-version handshake header present and = 1');
+  const body = JSON.parse(opts.body);
+  assert.equal(body.schemaVersion, 1, 'schema version echoed in the body');
+  assert.ok(Array.isArray(body.events) && body.events.length === 1);
+  assert.equal(body.events[0].type, 'error');
+  assert.equal(body.events[0].runtime, 'main');
+  assert.equal(body.events[0].timestamp, TS, 'the source-supplied timestamp survives');
+  // The credential planted in the raw error is [REDACTED:…] at the wire; neither
+  // the token nor the file path survives anywhere in the POSTed body.
+  assert.ok(body.events[0].message.includes('[REDACTED:github-token]'), 'credential redacted at the transport boundary');
+  assert.doesNotMatch(JSON.stringify(body), /ghp_/, 'raw token never reaches the wire');
+  assert.doesNotMatch(JSON.stringify(body), /\/home\/alice/, 'file path never reaches the wire');
+});
+
+await test('an unhandledRejection signal flows the same path (source → pipeline → transport)', async () => {
+  const fetch = fetchRecorder();
+  const w = buildWire({ fetchImpl: fetch });
+  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.main.emit('unhandledRejection', new Error('rejected boom'));
+  await tick();
+  assert.equal(fetch.calls.length, 1);
+  assert.equal(JSON.parse(fetch.calls[0].opts.body).events[0].type, 'error');
+});
+
+// ==========================================================================
+// Criterion #2 — no-ops when off OR unconfigured (zero fetchImpl calls)
+// ==========================================================================
+
+await test('consent OFF ⇒ ZERO fetchImpl calls (source not armed; nothing emitted)', async () => {
+  const fetch = fetchMustNotBeCalled();
+  const w = buildWire({ fetchImpl: fetch });
+  w.apply({ telemetryBaseEnabled: false, telemetryEndpoint: ENDPOINT }); // consent off
+  w.main.emit('uncaughtExceptionMonitor', new Error(`token ${GH_TOKEN}`));
+  await tick();
+  assert.equal(fetch.count(), 0, 'the source subscribes to nothing with consent off');
+});
+
+await test('endpoint empty ⇒ ZERO fetchImpl calls (transport last gate, now actually reached)', async () => {
+  const fetch = fetchMustNotBeCalled();
+  const w = buildWire({ fetchImpl: fetch });
+  // Base consent ON but no endpoint configured — the source IS armed and the
+  // pipeline DOES process the event, but the transport's own final gate
+  // (consent + endpoint) returns { attempts: 0 } without opening a connection.
+  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: '' });
+  w.main.emit('uncaughtExceptionMonitor', new Error('boom'));
+  await tick();
+  assert.equal(fetch.count(), 0, 'no-endpoint ⇒ transport no-ops (fetchImpl never called)');
+});
+
+await test('off-by-default: with no apply() at all, a signal sends nothing', async () => {
+  const fetch = fetchMustNotBeCalled();
+  const w = buildWire({ fetchImpl: fetch }); // prefs all-off / empty — the boot default
+  w.main.emit('uncaughtExceptionMonitor', new Error('boom'));
+  await tick();
+  assert.equal(fetch.count(), 0);
+});
+
+// ==========================================================================
+// Criterion #3 — runtime toggle starts/stops capture IMMEDIATELY (no restart)
+// ==========================================================================
+
+await test('flipping consent on at runtime starts capture on the next signal', async () => {
+  const fetch = fetchRecorder();
+  const w = buildWire({ fetchImpl: fetch });
+  // Boot default: off + no endpoint. A signal sends nothing.
+  w.apply({ telemetryBaseEnabled: false, telemetryExtendedEnabled: false, telemetryEndpoint: '' });
+  w.main.emit('uncaughtExceptionMonitor', new Error('first'));
+  await tick();
+  assert.equal(fetch.calls.length, 0, 'no send while consent is off');
+
+  // A live Settings flip (PUT /api/config forwarded over the fork's IPC channel)
+  // turns base on + sets the endpoint — capture begins on the NEXT signal.
+  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.main.emit('uncaughtExceptionMonitor', new Error('second'));
+  await tick();
+  assert.equal(fetch.calls.length, 1, 'capture starts immediately after the toggle');
+  assert.equal(JSON.parse(fetch.calls[0].opts.body).events[0].type, 'error');
+});
+
+await test('revoking consent at runtime stops capture on the next signal', async () => {
+  const fetch = fetchRecorder();
+  const w = buildWire({ fetchImpl: fetch });
+  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.main.emit('uncaughtExceptionMonitor', new Error('on'));
+  await tick();
+  assert.equal(fetch.calls.length, 1);
+
+  // Flip base OFF — the source detaches its subscriptions; the next signal no-ops.
+  w.apply({ telemetryBaseEnabled: false });
+  w.main.emit('uncaughtExceptionMonitor', new Error('off'));
+  await tick();
+  assert.equal(fetch.calls.length, 1, 'capture stops immediately when consent is revoked');
+});
+
+await test('clearing the endpoint at runtime stops sends (consent still on)', async () => {
+  const fetch = fetchRecorder();
+  const w = buildWire({ fetchImpl: fetch });
+  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.main.emit('uncaughtExceptionMonitor', new Error('one'));
+  await tick();
+  assert.equal(fetch.calls.length, 1);
+  // Endpoint cleared to '' — the transport gate closes again (consent on, but no
+  // destination), so the next signal sends nothing even though consent stayed on.
+  w.apply({ telemetryEndpoint: '' });
+  w.main.emit('uncaughtExceptionMonitor', new Error('two'));
+  await tick();
+  assert.equal(fetch.calls.length, 1, 'clearing the endpoint halts sends immediately');
+});
+
+// ==========================================================================
+// Robustness — the live path never throws the host into a worse state
+// ==========================================================================
+
+await test('a source signal with consent on never rejects out of the pipeline', async () => {
+  const fetch = fetchRecorder();
+  const w = buildWire({ fetchImpl: fetch });
+  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  // The pipeline swallows transport rejections; this just confirms the path
+  // resolves cleanly (no unhandled rejection) on the happy path.
+  assert.doesNotThrow(() => w.main.emit('uncaughtExceptionMonitor', new Error('ok')));
+  await tick();
+  assert.equal(fetch.calls.length, 1);
+});
+
+console.log(`\n✓ TELEMETRY LIVE-WIRE INTEGRATION TESTS PASS (${passed})`);
