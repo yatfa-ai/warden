@@ -328,6 +328,14 @@ function App() {
   // the saveUi effect below, never sent to the backend / /api/config. An empty
   // map (or a host with no entry) = today's behavior.
   const [hostLabels, setHostLabels] = useState<HostLabels>(() => uiState.hostLabels ?? {});
+  // WARDEN-500: the per-host expand/collapse state INSIDE Health's Host grouping.
+  // Was a HealthDashboard-local useState that reset to {} on every restart — so
+  // the durable grouping choice (WARDEN-468) survived reload but the collapsed
+  // hosts beneath it did not. Now App-owned + persisted by the saveUi effect (the
+  // single writer), exactly like healthGroupBy above — so a cross-host human's
+  // collapsed hosts survive reload. Forwarded read-only to HealthDashboard except
+  // for the change handler. Pure client-side pref; default {} = every host expanded.
+  const [healthCollapsedHosts, setHealthCollapsedHosts] = useState<Record<string, boolean>>(() => uiState.healthCollapsedHosts ?? {});
   // Default agent type + host pre-filled in the ＋ new chat form, plus the
   // user-defined custom presets (named quick-fill commands beyond claude/shell).
   // All pure client-side prefs (like density/terminalFontSize): persisted by the
@@ -538,8 +546,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy, fileViewerViewMode, hostLabels }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy, fileViewerViewMode, hostLabels, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy, fileViewerViewMode, healthCollapsedHosts, hostLabels }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy, fileViewerViewMode, healthCollapsedHosts, hostLabels, restoreOnStartup, startedEmpty]);
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
   // workspace, so switching clears it (WARDEN-256: maximized resets on switch).
@@ -719,6 +727,9 @@ function App() {
     setAgentSort('manual');
     // Health group-by (WARDEN-468): reset to the DEFAULT_UI value ('health').
     setHealthGroupBy('health');
+    // Health per-host collapse state (WARDEN-500): reset to the DEFAULT_UI value
+    // ({} = every host expanded), clearing any collapsed hosts.
+    setHealthCollapsedHosts({});
     // Per-host display labels (WARDEN-490): reset to the empty map (no labels =
     // raw hosts everywhere, today's behavior).
     setHostLabels({});
@@ -1833,6 +1844,8 @@ function App() {
             timestampFormat={timestampFormat}
             groupBy={healthGroupBy}
             onGroupByChange={setHealthGroupBy}
+            collapsedHosts={healthCollapsedHosts}
+            onCollapsedHostsChange={setHealthCollapsedHosts}
           />
         </section>
       </main>
