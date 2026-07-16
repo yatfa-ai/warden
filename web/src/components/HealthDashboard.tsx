@@ -16,6 +16,7 @@ import {
 } from '@/lib/healthUtils';
 import { StatusDot, type StatusTone } from '@/components/StatusDot';
 import { Sparkline } from '@/components/Sparkline';
+import { FleetActivityHeatmap } from '@/components/FleetActivityHeatmap';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -629,6 +630,19 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
       {healthData && (
         <ScrollArea className="flex-1 min-h-0 health-fleet-scroll">
           <div className="p-2 flex flex-col gap-3 min-w-0">
+            {/*
+              Fleet-wide 24h activity heatmap (WARDEN-532). A collapsible overview
+              above the agent sections, consuming the SAME in-scope activitySeries
+              the per-row sparklines use (the 60s useActivitySeries hook) + the
+              full fleet agents list. Sits as the first item so a returning human
+              scans the fleet's behavior pattern before drilling into rows; it
+              scrolls with the list (not pinned) so expanding it never eats the
+              viewport. Pure additive — no new fetch/hook/state lifted here. */}
+            <FleetActivityHeatmap
+              series={activitySeries}
+              agents={healthData.agents}
+              timestampFormat={timestampFormat}
+            />
             {groupBy === 'health' ? (
               HEALTH_SECTION_ORDER.filter(section => {
                 const agents = healthData.groups[section];
