@@ -123,6 +123,15 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
       return;
     }
 
+    // Guard every post-await setState with a `cancelled` flag, exactly like the
+    // sibling blame/history/blob effects in this file (and DiffViewer's content
+    // fetch). On rapid open/close/open — or a fast chat/file switch — the stale
+    // in-flight fetch would otherwise setContent/setError/setLoading AFTER the
+    // dialog closed (or the component unmounted), flashing a just-closed file's
+    // content/error and tripping a React "set state on unmounted component"
+    // warning. The early-return close branch above needs no guard: it has no
+    // fetch to cancel (WARDEN-561).
+    let cancelled = false;
     const fetchFile = async () => {
       setLoading(true);
       setError(null);
@@ -135,20 +144,22 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
 
         if (!response.ok) {
           const data = await response.json();
-          setError(data.error || `Failed to read file: ${response.statusText}`);
+          if (!cancelled) setError(data.error || `Failed to read file: ${response.statusText}`);
           return;
         }
 
         const data = await response.json();
+        if (cancelled) return;
         setContent(data.content);
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Failed to read file');
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to read file');
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
 
     fetchFile();
+    return () => { cancelled = true; };
   }, [chatId, filePath, open]);
 
   // Fetch blame only while annotating. Gates the success path on response.ok so a
