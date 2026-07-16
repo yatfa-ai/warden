@@ -3,12 +3,13 @@
 // Groups: the changed-file row, the project-chip WIP/collision badges,
 // and the per-row branch badge (+ its expanded-commit file rows).
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Popover as RadixPopover } from 'radix-ui';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
-import { GitCompare, FileIcon } from 'lucide-react';
+import { GitCompare, FileIcon, Search, X } from 'lucide-react';
 import { DiffBlock } from '@/components/DiffBlock';
 import { DiffViewer } from '@/components/DiffViewer';
 import { CollisionCompareDialog } from '../CollisionCompareDialog';
@@ -692,6 +693,97 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   // GitCollisionBadge's setOpen(false) + open-dialog discipline).
   const [popoverOpen, setPopoverOpen] = useState(false);
 
+  // WARDEN-498: commit-message search across the per-agent lists. A small debounced
+  // input above the lists fetches /api/git-log?grep= for each VISIBLE range (recent
+  // always; outgoing when ahead; incoming when behind) so one term filters every list
+  // at once. Results are held LOCALLY (mirrors the stash/reflog lazy-fetch pattern:
+  // expanded-view-only, transient, lives in the badge that owns the interaction) so the
+  // cached browse lists stay intact — clearing the box simply drops these and each
+  // section reverts to its cached list (no refetch). The list RENDERING is unchanged —
+  // only each section's data source swaps (see listFor below), so matches drill down via
+  // the existing expand→changed-files→DiffBlock path with no new row type.
+  const [grepInput, setGrepInput] = useState('');
+  // searchResults is keyed by range: '' (recent), 'outgoing', 'incoming'. A key's value
+  // is `undefined` while that range's fetch is pending (or not yet started for this
+  // term); `{ status: 'ok', commits }` once it resolved (possibly empty); or
+  // `{ status: 'error' }` if the fetch failed (non-ok HTTP, network, or bad JSON). The
+  // three states keep "loading", "fetched, no matches", and "fetch failed" distinct so
+  // the empty/error states are honest (WARDEN-89 — never let a failure masquerade as a
+  // barren history).
+  type GrepResult = { status: 'ok'; commits: GitCommit[] } | { status: 'error' };
+  const [searchResults, setSearchResults] = useState<Record<string, GrepResult | undefined>>({});
+  const [searchLoading, setSearchLoading] = useState(false);
+  const searching = grepInput.trim().length > 0;
+
+  useEffect(() => {
+    const q = grepInput.trim();
+    if (!q) {
+      // Cleared → drop search results so every section reverts to its cached browse list.
+      setSearchResults({});
+      setSearchLoading(false);
+      return;
+    }
+    setSearchLoading(true);
+    // Clear the previous term's results immediately so stale matches are never rendered
+    // under the new query while the debounce + fetch are in flight (mirrors the
+    // WARDEN-161 session-search discipline in OpenChatBrowserPage).
+    setSearchResults({});
+    let cancelled = false;
+    // Only the ranges currently shown by the popover are worth searching — a hidden list
+    // (e.g. outgoing when not ahead) has no rows to match, so skip it rather than issuing
+    // a harmless-but-wasteful fetch. `range` is '' for the recent (HEAD-reachable) list.
+    const ranges: string[] = [''];
+    if (aheadCount > 0) ranges.push('outgoing');
+    if (behindCount > 0) ranges.push('incoming');
+    const t = setTimeout(async () => {
+      const settled = await Promise.all(
+        ranges.map(async (range): Promise<[string, GrepResult]> => {
+          try {
+            const url = `/api/git-log?id=${encodeURIComponent(chatId)}&grep=${encodeURIComponent(q)}` + (range ? `&range=${range}` : '');
+            const r = await fetch(url);
+            // WARDEN-89: fetch() resolves (does not reject) on a 4xx/5xx — gate on r.ok
+            // so a server error surfaces as { status: 'error' } instead of reading
+            // undefined `j.commits` as an empty list (false-empty disease).
+            if (!r.ok) throw new Error(`git-log grep HTTP ${r.status}`);
+            const j = await r.json();
+            return [range, { status: 'ok', commits: Array.isArray(j.commits) ? j.commits : [] }];
+          } catch (error) {
+            // WARDEN-89: never swallow silently — log with the range + term so a network
+            // failure or bad JSON leaves a trace instead of looking like "no matches".
+            console.warn('[WARDEN-498 git-log grep] failed:', error, { range, q });
+            return [range, { status: 'error' }];
+          }
+        }),
+      );
+      if (cancelled) return;
+      const next: Record<string, GrepResult | undefined> = {};
+      for (const [range, result] of settled) next[range] = result;
+      setSearchResults(next);
+      setSearchLoading(false);
+    }, 300);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [grepInput, chatId, aheadCount, behindCount]);
+
+  // Resolve what a given section should render right now: its grep-filtered results when
+  // a search is active, else its cached browse list. Returns the items (possibly
+  // undefined while pending) and whether the section is in a loading state. Used below
+  // to swap each list's data source without touching its row markup.
+  const listFor = (range: '' | 'outgoing' | 'incoming', browse: GitCommit[] | undefined, browseLoading: boolean) => {
+    if (searching) {
+      const hit = searchResults[range];
+      if (hit === undefined) return { items: undefined, loading: true, error: false };
+      if (hit.status === 'error') return { items: undefined, loading: false, error: true };
+      return { items: hit.commits, loading: false, error: false };
+    }
+    return { items: browse, loading: !!browseLoading, error: false };
+  };
+
+  // Resolve each section's render source once (browse cache vs grep results) so the JSX
+  // below reads the same whether or not a search is active.
+  const recent = listFor('', commits, !!loading);
+  const outList = listFor('outgoing', outgoingCommits, !!outgoingLoading);
+  const incList = listFor('incoming', incomingCommits, !!incomingLoading);
+
   const fetchShow = async (hash: string) => {
     if (showCache[hash] || showLoading[hash]) return;
     setShowLoading((p) => ({ ...p, [hash]: true }));
@@ -750,7 +842,13 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
     <>
     <RadixPopover.Root open={popoverOpen} onOpenChange={(open) => {
       setPopoverOpen(open);
-      if (!open) return;
+      if (!open) {
+        // WARDEN-498: drop any active commit-message search on close so a reopen starts
+        // from the unfiltered browse list (a stale term persisting across opens would be
+        // confusing — and the search effect's clear-on-empty path drops its results).
+        setGrepInput('');
+        return;
+      }
       // Lazy-fetch ALL signals on first open: the local recent commits, the incoming
       // list (only when behind upstream), and shelved stashes (only when some are
       // parked). Each fetch is guarded so a repeat open reuses the cache instead of
@@ -809,13 +907,53 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
               >↻</button>
             </IconTooltip>
           </div>
-          {loading && (!commits || commits.length === 0) ? (
+          {/* WARDEN-498: commit-message search across every visible list. Debounced
+              (the effect at the top of the component fetches on a 300ms settle). A
+              non-empty term swaps each section's data source to its grep results via
+              listFor; the ✕ clears it so the unfiltered browse lists return. shadcn
+              <Input>/<Button> — never raw form elements (WARDEN-68); the leading Search
+              icon + trailing clear use the shadcn icon-input convention (relative
+              wrapper, absolutely-positioned affordances, padded input). Sizes are on the
+              Tailwind scale (text-xs), not arbitrary literals (WARDEN-68 Rule 2).
+              stopPropagation keeps typing/clearing from toggling the row/pane beneath.
+              Searches the FULL message (subject + body), case-insensitive, over a wider
+              window than the browse cap. */}
+          <div className="relative mb-1">
+            <Search className="pointer-events-none absolute left-1.5 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              type="text"
+              value={grepInput}
+              onChange={(e) => setGrepInput(e.target.value)}
+              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => e.stopPropagation()}
+              placeholder="search commit messages…"
+              aria-label="search commit messages"
+              className="h-6 text-xs md:text-xs pl-6 pr-6"
+            />
+            {(searching || searchLoading) && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                onClick={(e) => { e.stopPropagation(); setGrepInput(''); }}
+                onKeyDown={(e) => e.stopPropagation()}
+                aria-label="clear commit search"
+                title="clear search"
+                className="absolute right-0.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              >
+                <X className="size-3" />
+              </Button>
+            )}
+          </div>
+          {recent.error ? (
+            <div className="px-1 py-1 text-[10px] text-destructive">search failed — try again</div>
+          ) : recent.loading && (!recent.items || recent.items.length === 0) ? (
             <div className="flex items-center gap-1.5 px-1 py-1">
-              <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">loading…</span>
+              <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">{searching ? 'searching…' : 'loading…'}</span>
             </div>
-          ) : commits && commits.length > 0 ? (
+          ) : recent.items && recent.items.length > 0 ? (
             <ul className="max-h-72 overflow-auto">
-              {commits.map((cm) => (
+              {recent.items.map((cm) => (
                 <li key={cm.hash} className="rounded">
                   <div
                     role="button"
@@ -854,7 +992,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
               ))}
             </ul>
           ) : (
-            <div className="px-1 py-1 text-[10px] text-muted-foreground">no commits</div>
+            <div className="px-1 py-1 text-[10px] text-muted-foreground">{searching ? 'no matching commits' : 'no commits'}</div>
           )}
           {clean === false && (
             <div className="mt-1.5 border-t border-border pt-1.5">
@@ -911,13 +1049,15 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
                   full diff
                 </Button>
               </div>
-              {outgoingLoading && (!outgoingCommits || outgoingCommits.length === 0) ? (
+              {outList.error ? (
+                <div className="px-1 py-1 text-[10px] text-destructive">search failed — try again</div>
+              ) : outList.loading && (!outList.items || outList.items.length === 0) ? (
                 <div className="flex items-center gap-1.5 px-1 py-1">
-                  <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">loading…</span>
+                  <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">{searching ? 'searching…' : 'loading…'}</span>
                 </div>
-              ) : outgoingCommits && outgoingCommits.length > 0 ? (
+              ) : outList.items && outList.items.length > 0 ? (
                 <ul className="max-h-72 overflow-auto">
-                  {outgoingCommits.map((cm) => (
+                  {outList.items.map((cm) => (
                     // Explorable (WARDEN-303): each row expands to its changed files +
                     // per-file diff via /api/git-show — these commits are local objects
                     // reachable from HEAD. The incoming list below is explorable too
@@ -963,7 +1103,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
                   ))}
                 </ul>
               ) : (
-                <div className="px-1 py-1 text-[10px] text-muted-foreground">no unpushed commits</div>
+                <div className="px-1 py-1 text-[10px] text-muted-foreground">{searching ? 'no matching commits' : 'no unpushed commits'}</div>
               )}
             </div>
           )}
@@ -987,13 +1127,15 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
                   full diff
                 </Button>
               </div>
-              {incomingLoading && (!incomingCommits || incomingCommits.length === 0) ? (
+              {incList.error ? (
+                <div className="px-1 py-1 text-[10px] text-destructive">search failed — try again</div>
+              ) : incList.loading && (!incList.items || incList.items.length === 0) ? (
                 <div className="flex items-center gap-1.5 px-1 py-1">
-                  <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">loading…</span>
+                  <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">{searching ? 'searching…' : 'loading…'}</span>
                 </div>
-              ) : incomingCommits && incomingCommits.length > 0 ? (
+              ) : incList.items && incList.items.length > 0 ? (
                 <ul className="max-h-72 overflow-auto">
-                  {incomingCommits.map((cm) => (
+                  {incList.items.map((cm) => (
                     // Explorable (WARDEN-348): an incoming commit is reachable from
                     // the branch's upstream remote-tracking ref (@{u}, a LOCAL object
                     // updated by the last git fetch), so a per-commit /api/git-show is
@@ -1038,7 +1180,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
                   ))}
                 </ul>
               ) : (
-                <div className="px-1 py-1 text-[10px] text-muted-foreground">no incoming commits</div>
+                <div className="px-1 py-1 text-[10px] text-muted-foreground">{searching ? 'no matching commits' : 'no incoming commits'}</div>
               )}
             </div>
           )}

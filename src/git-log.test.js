@@ -48,6 +48,19 @@ const BEHIND_SUBJECTS = ['base one', 'base two', 'incoming: add feature X', 'inc
 const AHEAD_BASE_SUBJECT = 'base: shared with upstream';
 const AHEAD_SUBJECTS = ['outgoing: add feature Z', 'outgoing: fix bug W'];
 
+// Commits used to build the grep fixture (WARDEN-498): each carries an optional BODY
+// so commit-MESSAGE search can be exercised on subject AND body — the only way to
+// prove `git log --grep` matches the full message (the headline behavior). Oldest-first
+// here; the expected endpoint order is newest-first (bottom→top). 'login' appears in a
+// subject (feat) AND only in a body (fix) — that split is what distinguishes a real
+// full-message match from a subject-only match.
+const GREP_SUBJECTS = [
+  { subject: 'feat: add login', body: 'implements the auth flow\nneeds review' },
+  { subject: 'docs: readme', body: '' },
+  { subject: 'fix: flaky test', body: 'the timer race in login was the cause' },
+  { subject: 'chore: bump deps', body: '' },
+];
+
 let parseGitLogLine;
 let httpServer;
 let baseUrl;
@@ -60,6 +73,7 @@ let bareOrigin;
 let aheadRepo;
 let bareOriginAhead;
 let renameRepo;
+let grepRepo;
 
 function git(args, cwd) {
   const r = spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'inherit'] });
@@ -154,6 +168,23 @@ before(async () => {
   git(['mv', 'a.txt', 'b.txt'], renameRepo);
   git(['commit', '-q', '-m', 'rename a.txt to b.txt'], renameRepo);
 
+  // A repo whose commits carry BODIES (WARDEN-498): commit-message search must match
+  // the full message (subject + body), so this fixture is what lets a test PROVE a body-
+  // only match. Newest-first when listed (bottom→top) == the GREP_SUBJECTS array reversed.
+  grepRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitlog-grep-'));
+  git(['init', '-q'], grepRepo);
+  git(['config', 'user.email', 'test@example.com'], grepRepo);
+  git(['config', 'user.name', 'Tester'], grepRepo);
+  GREP_SUBJECTS.forEach((c, i) => {
+    fs.writeFileSync(path.join(grepRepo, `g${i}.txt`), `${i}\n`);
+    git(['add', '.'], grepRepo);
+    // -m subject -m body → git composes a multi-paragraph message (subject + blank +
+    // body); the body paragraph is what --grep must reach into.
+    const args = ['commit', '-q', '-m', c.subject];
+    if (c.body) args.push('-m', c.body);
+    git(args, grepRepo);
+  });
+
   // Catalog with LOCAL manual chats: the git repo, the non-git dir, the behind repo,
   // and the ahead repo. Resolved by bare session id (no ':' prefix) → no host/tmux
   // discovery runs.
@@ -165,6 +196,7 @@ before(async () => {
       { host: '(local)', session: 'warden-behind', cwd: behindRepo, cmd: 'bash', name: 'warden-behind' },
       { host: '(local)', session: 'warden-ahead', cwd: aheadRepo, cmd: 'bash', name: 'warden-ahead' },
       { host: '(local)', session: 'warden-rename', cwd: renameRepo, cmd: 'bash', name: 'warden-rename' },
+      { host: '(local)', session: 'warden-grep', cwd: grepRepo, cmd: 'bash', name: 'warden-grep' },
     ]),
   );
 
@@ -183,7 +215,7 @@ after(async () => {
   if (httpServer) await new Promise((r) => httpServer.close(r));
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  for (const d of [gitRepo, nonGitDir, behindRepo, bareOrigin, aheadRepo, bareOriginAhead, renameRepo, tempHome]) {
+  for (const d of [gitRepo, nonGitDir, behindRepo, bareOrigin, aheadRepo, bareOriginAhead, renameRepo, grepRepo, tempHome]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 });
@@ -484,5 +516,85 @@ describe('/api/git-log path filter (file history — WARDEN-319)', () => {
     const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-gitlog`)).json();
     assert.strictEqual(body.commits.length, 3);
     assert.strictEqual(body.commits[0].subject, 'third commit');
+  });
+});
+
+describe('/api/git-log grep filter (commit-message search — WARDEN-498)', () => {
+  // grepRepo (newest-first): chore: bump deps · fix: flaky test · docs: readme · feat: add login.
+  // 'login' appears in feat's SUBJECT and ONLY in fix's BODY — that split is the crux.
+
+  it('returns only commits whose message contains the term (case-insensitive, subject)', async () => {
+    const res = await fetch(`${baseUrl}/api/git-log?id=warden-grep&grep=deps`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.error, null);
+    assert.ok(Array.isArray(body.commits));
+    assert.strictEqual(body.commits.length, 1);
+    assert.strictEqual(body.commits[0].subject, 'chore: bump deps');
+  });
+
+  it('matches the BODY too, not just the subject (the headline WARDEN-498 behavior)', async () => {
+    // 'login' is in feat's subject AND in fix's body ('the timer race in login …').
+    // fix's SUBJECT ('fix: flaky test') contains no 'login', so fix surfacing here is
+    // ONLY possible if --grep reached the body — a subject-only match would miss it.
+    // Newest-first: fix (newer) then feat (older).
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-grep&grep=login`)).json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.commits.length, 2);
+    assert.strictEqual(body.commits[0].subject, 'fix: flaky test');
+    assert.strictEqual(body.commits[1].subject, 'feat: add login');
+  });
+
+  it('is case-insensitive (LOGIN matches the same two commits as login)', async () => {
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-grep&grep=LOGIN`)).json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.commits.length, 2);
+    assert.strictEqual(body.commits[0].subject, 'fix: flaky test');
+    assert.strictEqual(body.commits[1].subject, 'feat: add login');
+  });
+
+  it('returns an empty list (200, not 500) when no message matches', async () => {
+    const res = await fetch(`${baseUrl}/api/git-log?id=warden-grep&grep=this-match-nothing`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.deepStrictEqual(body.commits, []);
+    assert.strictEqual(body.error, null);
+  });
+
+  it('uses the grep ceiling, not the browse cap (limit=1 is ignored while searching)', async () => {
+    // The design point of WARDEN-498: search widens beyond the 50-commit browse cap so
+    // an old commit is findable. Symptom here: limit=1 must NOT clip the 2 'login'
+    // matches — when grep is present, searchLimit = GIT_LOG_GREP_MAX, not the browse
+    // limit. (A buggy impl that reused `limit` would return 1 commit here.)
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-grep&grep=login&limit=1`)).json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.commits.length, 2);
+  });
+
+  it('combines grep with range=outgoing (search the unpushed set)', async () => {
+    // aheadRepo's two outgoing commits both start with 'outgoing:', but only one
+    // contains 'feature'. grep+range must intersect BOTH filters.
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-ahead&range=outgoing&grep=feature`)).json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.commits.length, 1);
+    assert.strictEqual(body.commits[0].subject, 'outgoing: add feature Z');
+  });
+
+  it('returns { commits: [], error: null } (200, not 500) for a non-git cwd', async () => {
+    const res = await fetch(`${baseUrl}/api/git-log?id=warden-nongit&grep=anything`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.deepStrictEqual(body.commits, []);
+    assert.strictEqual(body.error, null);
+  });
+
+  it('absent grep stays byte-for-byte today\'s behavior (all commits, unchanged)', async () => {
+    // No grep → the existing HEAD-reachable behavior (the whole 4-commit history),
+    // proving the browse path was not perturbed by the new param.
+    const body = await (await fetch(`${baseUrl}/api/git-log?id=warden-grep`)).json();
+    assert.strictEqual(body.error, null);
+    assert.strictEqual(body.commits.length, 4);
+    assert.strictEqual(body.commits[0].subject, 'chore: bump deps');
+    assert.strictEqual(body.commits[3].subject, 'feat: add login');
   });
 });
