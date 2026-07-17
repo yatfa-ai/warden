@@ -90,6 +90,47 @@ describe('tmux send() — bracketed paste for multiline (WARDEN-254)', () => {
     assert.strictEqual(calls[0].args[0], 'set-buffer');
     assert.strictEqual(calls[0].args[4], 'hello\n');
   });
+
+  // WARDEN-613: paste-buffer -d reclaims the named buffer ONLY on a successful
+  // paste. If paste-buffer itself fails (e.g. the target session is dead —
+  // "can't find session", the WARDEN-231 case), the buffer would leak on the
+  // durable tmux server until the server is killed, once per retry. The failure
+  // path now reclaims it best-effort via delete-buffer. These tests drive the
+  // dangerous input (a failing tmux call) and assert the reclaim happens — they
+  // FAIL without the fix (no delete-buffer call is recorded).
+
+  it('multiline send reclaims the named buffer when paste-buffer fails (no leak)', async () => {
+    const calls = [];
+    const fn = mock.fn(async (chat, args) => {
+      calls.push({ chat, args });
+      // set-buffer succeeds; paste-buffer fails (e.g. target session dead)
+      if (args[0] === 'paste-buffer') return { ok: false, code: 1, stdout: '', stderr: "can't find session: agent\n" };
+      return { ok: true, code: 0, stdout: '', stderr: '' };
+    });
+    await assert.rejects(send(chat, cfg, 'line1\nline2', { runTmux: fn }), /can't find session/);
+    const bufName = calls[0].args[2]; // from set-buffer -b <name>
+    const del = calls.find((c) => c.args[0] === 'delete-buffer');
+    assert.ok(del, 'failure path issues delete-buffer to reclaim the leaked buffer');
+    assert.strictEqual(del.args[del.args.indexOf('-b') + 1], bufName, 'deletes the SAME buffer set-buffer created');
+  });
+
+  it('multiline send reclaims the named buffer when send-keys fails after a successful paste', async () => {
+    // The other entry into the failure branch: paste-buffer succeeded (so -d
+    // already deleted the buffer), then the trailing send-keys Enter failed.
+    // The reclaim is still issued best-effort; delete-buffer errors on the
+    // already-gone buffer and the .catch swallows it. send() must still throw.
+    const calls = [];
+    const fn = mock.fn(async (chat, args) => {
+      calls.push({ chat, args });
+      if (args[0] === 'send-keys') return { ok: false, code: 1, stdout: '', stderr: 'send-keys failed\n' };
+      return { ok: true, code: 0, stdout: '', stderr: '' };
+    });
+    await assert.rejects(send(chat, cfg, 'a\nb', { runTmux: fn }), /send-keys failed/);
+    const bufName = calls[0].args[2]; // from set-buffer -b <name>
+    const del = calls.find((c) => c.args[0] === 'delete-buffer');
+    assert.ok(del, 'failure path issues delete-buffer even when the buffer was already -d-reclaimed');
+    assert.strictEqual(del.args[del.args.indexOf('-b') + 1], bufName, 'targets the SAME buffer set-buffer created');
+  });
 });
 
 // WARDEN-386: spawn/kill argv + companion routing. The deps seam this slice
