@@ -156,9 +156,12 @@ describe('updateCollection — identity preservation + uniqueness', () => {
     assert.throws(() => updateCollection('coll-missing', { name: 'beta' }), /Collection not found/);
   });
 
-  it('allows a case-only rename (codex → Codex) without self-collision', () => {
-    // The uniqueness check must let a row pass when only the casing of its own name
-    // changes — it must not collide with itself.
+  it('persists a new casing on rename (codex → Codex)', () => {
+    // A rename that only changes the casing of the row's own name must persist the new
+    // casing. NOTE: this does NOT exercise the `c.id !== id` self-exclusion guard —
+    // case-sensitive compare means 'codex' !== 'Codex' regardless of that guard. The
+    // guard is driven by the same-trim self-rename test below (the only input that can
+    // reach it).
     mock.method(fs, 'readFileSync', () =>
       JSON.stringify([{ id: 'coll-1', name: 'codex', createdAt: 1000, updatedAt: 1000 }])
     );
@@ -166,6 +169,21 @@ describe('updateCollection — identity preservation + uniqueness', () => {
 
     const updated = updateCollection('coll-1', { name: 'Codex' });
     assert.strictEqual(updated.name, 'Codex');
+  });
+
+  it('excludes the row itself from the uniqueness check on a self-rename that trims to the same name', () => {
+    // 'alpha' -> '  alpha  ' trims back to 'alpha'. With the `c.id !== id` term in the
+    // uniqueness check this succeeds; WITHOUT it, `c.name === trimmedName` ('alpha' ===
+    // 'alpha') would wrongly throw "Collection "alpha" already exists" — the exact
+    // false-positive the guard exists to prevent. This is the only input that actually
+    // drives that guard (a case-only rename can't reach it under case-sensitive compare).
+    mock.method(fs, 'readFileSync', () =>
+      JSON.stringify([{ id: 'coll-1', name: 'alpha', createdAt: 1000, updatedAt: 1000 }])
+    );
+    mockWrites();
+
+    const updated = updateCollection('coll-1', { name: '  alpha  ' });
+    assert.strictEqual(updated.id, 'coll-1', 'rename succeeded (no self-collision)');
   });
 
   it('throws when renaming to a name already used by a DIFFERENT collection', () => {
