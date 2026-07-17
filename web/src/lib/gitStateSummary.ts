@@ -311,23 +311,34 @@ export function fleetCommitSearchEligible(chats: FleetSearchChat[]): FleetSearch
   return out;
 }
 
-// The two fleet commit-search axes (WARDEN-534 = message, WARDEN-559 = content). The
-// AGGREGATION is mode-agnostic — a hit is just another FleetCommitLike and
-// buildFleetCommitGroups groups it identically — so the mode lives with the FETCH (which
-// param to splice), not with the grouping. Kept as a string union (not a const enum) so
-// it survives the TS→ESM test transform without runtime support.
-export type FleetCommitSearchMode = 'message' | 'content';
+// The fleet commit-search axes (WARDEN-534 = message, WARDEN-559 = content) PLUS the
+// WARDEN-589 working-tree CODE axis. The AGGREGATION for message/content is
+// mode-agnostic — a hit is just another FleetCommitLike and buildFleetCommitGroups
+// groups it identically — so those two modes live with the FETCH (which param to
+// splice), not with the grouping. The Code axis is grouped by its OWN fn
+// (buildFleetCodeGroups) because its result shape is fundamentally different
+// (file:line:text hits, not commits) — see the Code-search section below. Kept as a
+// string union (not a const enum) so it survives the TS→ESM test transform without
+// runtime support. The name says "Commit" but it now also covers the Code axis;
+// renaming is out of scope (the population gate it selects is shared).
+export type FleetCommitSearchMode = 'message' | 'content' | 'code';
 
 /**
- * Build the per-agent fetch base URL for the fleet commit search. `mode` selects the
- * param: 'message' → `grep=` (`git log --grep`, WARDEN-498 — searches commit messages);
- * 'content' → `pickaxe=` (`git log -S`/`-G`, WARDEN-559 — searches commit-history diffs
- * to find the commit that ADDED or REMOVED a code string). When `pickaxeRegex` is set in
- * content mode, appends `pickaxeRegex=1` (the broader `-G` diff-text match over the
- * default `-S` count-change match). The component appends `&range=outgoing` to this base
- * for the second (↑unpushed join) fetch. Extracted into the pure layer — not inlined in
- * the React component — so the message⇄content URL swap is unit-testable without a
- * React runner (this repo has none).
+ * Build the per-agent fetch base URL for the fleet commit search (message/content axes).
+ * `mode` selects the param: 'message' → `grep=` (`git log --grep`, WARDEN-498 — searches
+ * commit messages); 'content' → `pickaxe=` (`git log -S`/`-G`, WARDEN-559 — searches
+ * commit-history diffs to find the commit that ADDED or REMOVED a code string). When
+ * `pickaxeRegex` is set in content mode, appends `pickaxeRegex=1` (the broader `-G`
+ * diff-text match over the default `-S` count-change match). The component appends
+ * `&range=outgoing` to this base for the second (↑unpushed join) fetch. Extracted into
+ * the pure layer — not inlined in the React component — so the message⇄content URL swap
+ * is unit-testable without a React runner (this repo has none).
+ *
+ * NOT used by the Code axis: /api/search-files is a POST with a JSON body (not a GET URL),
+ * so WARDEN-589's Code mode has its own seam — fleetCodeFetchRequest — rather than
+ * overloading this GET-URL helper. The component's fan-out branches to Code before ever
+ * reaching this call, so 'code' is never passed here in practice; if it were, it would
+ * fall through to the grep= branch (harmless, but unreachable).
  */
 export function buildFleetSearchBaseUrl(
   key: string,
@@ -416,4 +427,138 @@ export function buildFleetCommitGroups(outcomes: FleetCommitOutcome[]): FleetCom
     });
   }
   return { groups, errorCount };
+}
+
+// ---- Fleet-wide working-tree CODE search aggregation (WARDEN-589) ------------
+//
+// The cross-agent WORKING-TREE layer — the fleet-wide counterpart to the per-agent
+// workspace grep shipped in WARDEN-145 (POST /api/search-files, read-only `git grep`
+// over tracked files). Where the commit search above (WARDEN-534 message / WARDEN-559
+// content) finds WHERE a change LANDED in HISTORY, this finds WHERE a string lives
+// RIGHT NOW across the fleet's CURRENT tracked code — answering "which agent is
+// editing auth.js?", "who already has a cancelToken helper?", "which repos still
+// reference the old API name?". One query greps every active project agent's working
+// tree, grouped by agent (file:line:text snippets, not commits).
+//
+// Three load-bearing divergences from the commit axes (message/content), each called
+// out in WARDEN-589, which is why this gets its OWN grouping fn + types rather than a
+// third branch on buildFleetCommitGroups:
+//
+//  1. RESULT SHAPE is fundamentally different — file:line:text hits, NOT commits.
+//     /api/search-files → { results: [{ file, line, text }] }, grouped as
+//     FleetCodeGroup { hits: FleetCodeHit[] } and rendered as file:line:text rows
+//     (mirroring WorkspaceSearchDialog's SearchResultRow), NOT commit rows.
+//
+//  2. ONE FETCH PER AGENT (N, not 2N) — a working-tree grep match has no hash and no
+//     concept of "unpushed"; there is no outgoing join. The group header shows only
+//     the match count (no · ↑N).
+//
+//  3. HTTP-200 ERRORS — /api/search-files returns transport/runtime failures
+//     ('search failed', 'no cwd') at HTTP 200 with an `error` field (mirroring
+//     /api/git-status), so the fan-out must check `data.error` (NOT just r.ok) and
+//     treat an error response as that agent's FAILURE outcome (counted into
+//     errorCount), NEVER as a false-empty match list — the WARDEN-89 false-empty
+//     contract the rest of this codebase fights. That gate lives in the component
+//     (the fetch); this pure layer just counts whatever the component hands it.
+//
+// Pure (no React import, no fetch) so it is unit-testable directly via node, mirroring
+// the commit-search seam. The population gate is REUSED (fleetCommitSearchEligible —
+// mode-agnostic: active + project, keyed, deduped); this layer then groups + counts
+// the per-agent outcomes in chats iteration order (deterministic, so tests assert
+// deep equality).
+
+// One matched working-tree line, exactly as /api/search-files returns it: file path,
+// line number, and the matched text. Deliberately carries NO `unpushed` field — a
+// working-tree grep match has no hash and no concept of "unpushed" (the commit axes'
+// ↑unpushed join does not apply here). buildFleetCodeGroups emits EXACTLY these three
+// fields; asserting `unpushed`'s absence in tests catches an accidental copy-paste
+// from the commit path.
+export interface FleetCodeHit {
+  file: string;
+  line: number;
+  text: string;
+}
+
+// One agent's fan-out outcome for the code axis. `ok: false` = that agent's
+// /api/search-files fetch failed OR returned an HTTP-200 `error` body (the component
+// maps both to this before calling buildFleetCodeGroups) — counted as an error but
+// never dropped silently, and never blanking the other agents' results (the
+// Promise.allSettled contract). `ok: true` carries the agent's grep hits
+// (file:line:text), in git-grep order.
+export type FleetCodeOutcome =
+  | { ok: true; key: string; project: string; hits: FleetCodeHit[] }
+  | { ok: false; key: string; project: string };
+
+// One agent's matched working-tree lines (the rows under its group header). key +
+// project ride along so the React layer can join key → displayName / project without
+// a second lookup, mirroring FleetCommitGroup.
+export interface FleetCodeGroup {
+  key: string;
+  project: string;
+  hits: FleetCodeHit[];
+}
+
+export interface FleetCodeSearchResult {
+  // Matched agents in chats iteration order (empties dropped). Each group's hits stay
+  // in the order /api/search-files returned them (git grep order).
+  groups: FleetCodeGroup[];
+  // # of agents whose fetch failed (transport error, non-ok HTTP, OR an HTTP-200
+  // `error` body) — surfaced as a "(N unreachable)" note so a partial failure is
+  // honest, never a silent false-empty (WARDEN-89).
+  errorCount: number;
+}
+
+/**
+ * Turn N per-agent working-tree grep outcomes into the grouped-by-agent fleet view
+ * for the Code axis. Drops `ok` agents with no hits (no group for a clean repo);
+ * counts `ok: false` agents into `errorCount` without dropping the successful groups;
+ * and emits each hit as EXACTLY { file, line, text } — stripping any stray fields so
+ * a working-tree match never carries the commit axes' `unpushed` marker (the Code
+ * axis has no such concept). No outgoing join, no ↑unpushed.
+ *
+ * Outcomes are processed in caller (chats) order, so the returned groups are
+ * deterministic and tests assert deep equality — the convention the rest of this
+ * module follows.
+ */
+export function buildFleetCodeGroups(outcomes: FleetCodeOutcome[]): FleetCodeSearchResult {
+  const groups: FleetCodeGroup[] = [];
+  let errorCount = 0;
+  for (const o of outcomes) {
+    if (!o.ok) {
+      errorCount += 1;
+      continue;
+    }
+    if (o.hits.length === 0) continue;  // drop empties — no group for a clean repo
+    groups.push({
+      key: o.key,
+      project: o.project,
+      // Emit EXACTLY { file, line, text } so the Code axis never inherits the commit
+      // path's `unpushed` field (and any stray field the raw API row carried is
+      // dropped). The contract tests assert this exact shape.
+      hits: o.hits.map((h) => ({ file: h.file, line: h.line, text: h.text })),
+    });
+  }
+  return { groups, errorCount };
+}
+
+/**
+ * Build the per-agent POST request for the fleet Code search (WARDEN-589).
+ * /api/search-files is a POST with a JSON body `{ id, query }` — UNLIKE the commit
+ * axes' GET + URL params — so it gets its OWN seam rather than overloading
+ * buildFleetSearchBaseUrl (whose GET URL-string contract is exhaustively tested).
+ * The query rides in a JSON body, so special chars are safe WITHOUT the URL-encoding
+ * the GET commit path needs: `id`/`query` are passed through verbatim via
+ * JSON.stringify. Returns the fetch() args (`url` + `init`) so the component's Code
+ * fan-out stays a thin Promise.allSettled over ONE fetch per agent (N, not the 2N
+ * the commit axes pay for the ↑unpushed join).
+ */
+export function fleetCodeFetchRequest(key: string, query: string): { url: string; init: RequestInit } {
+  return {
+    url: '/api/search-files',
+    init: {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: key, query }),
+    },
+  };
 }
