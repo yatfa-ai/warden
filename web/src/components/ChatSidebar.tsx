@@ -144,6 +144,40 @@ interface Props {
 
 const LABEL: Record<string, string> = { '(local)': 'this machine' };
 
+// Query-string builders (module-level so the fetchers' useCallback deps stay stable).
+// incoming/outgoing ignore the limit arg — their limit is hardcoded at 50.
+const buildGitLogParams = (limit: number) => `limit=${limit}`;
+const buildIncomingParams = () => `limit=50&range=incoming`;
+const buildOutgoingParams = () => `limit=50&range=outgoing`;
+
+// Shared skeleton for fetchGitLog / fetchGitLogIncoming / fetchGitLogOutgoing: GET
+// /api/git-log?id=…&<buildParams(limit)>, cache commits per chatId (re-expand is
+// instant), toggle a per-chatId loading flag, and cache [] on transient failure so
+// a re-expand won't loop. Zero behavior change vs. the inline copies (WARDEN-620).
+// Deps are all stable (useState setters, a string literal, module consts) so the
+// callback keeps a stable identity, matching the original useCallback(fn, []).
+function useGitLogFetcher({ setCommits, setLoading, errorLabel, buildParams }: {
+  setCommits: (updater: (prev: Record<string, GitCommit[]>) => Record<string, GitCommit[]>) => void;
+  setLoading: (updater: (prev: Record<string, boolean>) => Record<string, boolean>) => void;
+  errorLabel: string;
+  buildParams: (limit: number) => string;
+}) {
+  return useCallback(async (chatId: string, limit: number = WHATS_NEW_FETCH_LIMIT) => {
+    setLoading((p) => ({ ...p, [chatId]: true }));
+    try {
+      const r = await fetch(`/api/git-log?id=${encodeURIComponent(chatId)}&${buildParams(limit)}`);
+      const j = await r.json();
+      setCommits((p) => ({ ...p, [chatId]: Array.isArray(j.commits) ? j.commits : [] }));
+    } catch (error) {
+      // Non-critical: cache an empty list so a transient failure doesn't loop on re-expand.
+      console.error(errorLabel, error);
+      setCommits((p) => ({ ...p, [chatId]: [] }));
+    } finally {
+      setLoading((p) => ({ ...p, [chatId]: false }));
+    }
+  }, [setCommits, setLoading, errorLabel, buildParams]);
+}
+
 export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, snippets, watchedChats, watchedStates, onToggleWatch, onSnoozeMany, onToggleWatchMany, agentFilter, agentSort, onFilterChange, onSortChange }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [offlineExpanded, setOfflineExpanded] = useState(false);
@@ -246,62 +280,15 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
     }
   }, []);
 
-  // Fetch recent commits for a chat. Results (even an empty list) are cached per chatId
-  // so re-expanding the badge doesn't refetch; the badge's refresh affordance re-runs this.
-  // `limit` defaults to WHATS_NEW_FETCH_LIMIT (50) so the cached window is wide enough for
-  // the per-agent "What's new since" marker to count every commit that landed since the
-  // last visit (a rare visitor can have dozens) — matching the incoming/outgoing fetches.
-  // The GitBranchBadge popover renders this same cache in a scrollable list, so showing
-  // up to 50 recent commits (vs the old 5) is a benign superset, not a regression, and the
-  // marker's count + truncation signal stay honest (WARDEN-356 review: "count capped at 5").
-  const fetchGitLog = useCallback(async (chatId: string, limit: number = WHATS_NEW_FETCH_LIMIT) => {
-    setGitLogLoading((p) => ({ ...p, [chatId]: true }));
-    try {
-      const r = await fetch(`/api/git-log?id=${encodeURIComponent(chatId)}&limit=${limit}`);
-      const j = await r.json();
-      setGitLog((p) => ({ ...p, [chatId]: Array.isArray(j.commits) ? j.commits : [] }));
-    } catch (error) {
-      // Non-critical: cache an empty list so a transient failure doesn't loop on re-expand.
-      console.error('Failed to fetch git log:', error);
-      setGitLog((p) => ({ ...p, [chatId]: [] }));
-    } finally {
-      setGitLogLoading((p) => ({ ...p, [chatId]: false }));
-    }
-  }, []);
-
-  // Fetch the incoming (behind) commits — git log HEAD..@{u} — for a chat. Mirrors
-  // fetchGitLog but hits the range=incoming flag (WARDEN-225). Cached per chatId so a
-  // re-expand is instant; a transient failure caches [] so it won't loop.
-  const fetchGitLogIncoming = useCallback(async (chatId: string) => {
-    setGitLogIncomingLoading((p) => ({ ...p, [chatId]: true }));
-    try {
-      const r = await fetch(`/api/git-log?id=${encodeURIComponent(chatId)}&limit=50&range=incoming`);
-      const j = await r.json();
-      setGitLogIncoming((p) => ({ ...p, [chatId]: Array.isArray(j.commits) ? j.commits : [] }));
-    } catch (error) {
-      console.error('Failed to fetch incoming git log:', error);
-      setGitLogIncoming((p) => ({ ...p, [chatId]: [] }));
-    } finally {
-      setGitLogIncomingLoading((p) => ({ ...p, [chatId]: false }));
-    }
-  }, []);
-
-  // Fetch the outgoing (ahead/unpushed) commits — git log @{u}..HEAD — for a chat.
-  // Mirrors fetchGitLogIncoming but hits range=outgoing (WARDEN-252). Cached per
-  // chatId so a re-expand is instant; a transient failure caches [] so it won't loop.
-  const fetchGitLogOutgoing = useCallback(async (chatId: string) => {
-    setGitLogOutgoingLoading((p) => ({ ...p, [chatId]: true }));
-    try {
-      const r = await fetch(`/api/git-log?id=${encodeURIComponent(chatId)}&limit=50&range=outgoing`);
-      const j = await r.json();
-      setGitLogOutgoing((p) => ({ ...p, [chatId]: Array.isArray(j.commits) ? j.commits : [] }));
-    } catch (error) {
-      console.error('Failed to fetch outgoing git log:', error);
-      setGitLogOutgoing((p) => ({ ...p, [chatId]: [] }));
-    } finally {
-      setGitLogOutgoingLoading((p) => ({ ...p, [chatId]: false }));
-    }
-  }, []);
+  // Recent commits. `limit` defaults to WHATS_NEW_FETCH_LIMIT (50) so the per-agent
+  // "What's new since your last visit" marker counts every commit since the last
+  // visit (a rare visitor can have dozens); showing up to 50 (vs the old 5) is a
+  // benign superset, not a regression (WARDEN-356 review: "count capped at 5").
+  const fetchGitLog = useGitLogFetcher({ setCommits: setGitLog, setLoading: setGitLogLoading, errorLabel: 'Failed to fetch git log:', buildParams: buildGitLogParams });
+  // Incoming (behind, HEAD..@{u}) via range=incoming (WARDEN-225); limit hardcoded at 50.
+  const fetchGitLogIncoming = useGitLogFetcher({ setCommits: setGitLogIncoming, setLoading: setGitLogIncomingLoading, errorLabel: 'Failed to fetch incoming git log:', buildParams: buildIncomingParams });
+  // Outgoing (ahead/unpushed, @{u}..HEAD) via range=outgoing (WARDEN-252); limit hardcoded at 50.
+  const fetchGitLogOutgoing = useGitLogFetcher({ setCommits: setGitLogOutgoing, setLoading: setGitLogOutgoingLoading, errorLabel: 'Failed to fetch outgoing git log:', buildParams: buildOutgoingParams });
 
   // Load pinned chat ids + per-agent notes from the backend on mount
   useEffect(() => {
