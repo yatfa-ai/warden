@@ -135,3 +135,88 @@ export async function setCloseToTray(on: boolean): Promise<boolean> {
     return on;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Telemetry runtime-status bridge (WARDEN-631). The schema-drift flag lives in
+// MAIN (the pipeline); this is the renderer's read-only window onto it. Same
+// three-context feature-detection story as the window bridge above: present only
+// inside the Electron desktop app (preload exposes `window.wardenTelemetry`),
+// absent in `npm run dev` and `node web/smoke.cjs`. When absent the accessors
+// degrade to "not drifted" and the subscription is a no-op unsubscribe, so the
+// Settings telemetry section renders cleanly in every host without branching.
+
+/** The runtime drift status pushed/pulled over the bridge. Metadata only. */
+export interface TelemetryRuntimeStatus {
+  drifted: boolean;
+}
+
+interface WardenTelemetryBridge {
+  getRuntimeStatus: () => Promise<TelemetryRuntimeStatus>;
+  clearRuntimeDrift: () => Promise<TelemetryRuntimeStatus>;
+  onRuntimeStatus: (cb: (status: TelemetryRuntimeStatus) => void) => () => void;
+}
+
+interface WindowWithWardenTelemetry extends Window {
+  wardenTelemetry?: WardenTelemetryBridge;
+}
+
+function telemetryBridge(): WardenTelemetryBridge | undefined {
+  return (window as WindowWithWardenTelemetry).wardenTelemetry;
+}
+
+// Pull the current runtime drift status from main. Called when the Settings
+// telemetry section mounts so a window opened AFTER drift armed shows the correct
+// state (the push below handles live updates while Settings is open). Resolves to
+// `{ drifted: false }` when the bridge is absent (browser/dev/smoke) — a
+// non-Electron host has no main-process drift to report. Never rejects.
+export async function getTelemetryRuntimeStatus(): Promise<TelemetryRuntimeStatus> {
+  const b = telemetryBridge();
+  if (!b) return { drifted: false };
+  try {
+    const status = await b.getRuntimeStatus();
+    if (status && typeof status === 'object' && typeof status.drifted === 'boolean') {
+      return { drifted: status.drifted };
+    }
+    return { drifted: false };
+  } catch (e) {
+    console.warn('[warden:electron] getTelemetryRuntimeStatus failed', e);
+    return { drifted: false };
+  }
+}
+
+// Subscribe to LIVE runtime drift transitions (main pushes only when drift arms
+// or clears). Returns an unsubscribe. A clean no-op when the bridge is absent:
+// returns an unsubscribe that does nothing, so the caller's useEffect cleanup is
+// safe in a browser/dev/smoke host. Never throws into the caller.
+export function onTelemetryRuntimeStatus(
+  cb: (status: TelemetryRuntimeStatus) => void,
+): () => void {
+  const b = telemetryBridge();
+  if (!b) return () => {};
+  try {
+    return b.onRuntimeStatus(cb) ?? (() => {});
+  } catch (e) {
+    console.warn('[warden:electron] onTelemetryRuntimeStatus failed', e);
+    return () => {};
+  }
+}
+
+// Tell main to clear the runtime drift breaker — called when a "Test connection"
+// probe confirms the receiver is schema-matched again (WARDEN-631). A receiver
+// fixed at the SAME url cannot otherwise clear the breaker in-session, so this is
+// the user-driven recovery path. Resolves to the post-clear status; a clean
+// no-op ({ drifted: false }) when the bridge is absent. Never rejects.
+export async function clearTelemetryRuntimeDrift(): Promise<TelemetryRuntimeStatus> {
+  const b = telemetryBridge();
+  if (!b) return { drifted: false };
+  try {
+    const status = await b.clearRuntimeDrift();
+    if (status && typeof status === 'object' && typeof status.drifted === 'boolean') {
+      return { drifted: status.drifted };
+    }
+    return { drifted: false };
+  } catch (e) {
+    console.warn('[warden:electron] clearTelemetryRuntimeDrift failed', e);
+    return { drifted: false };
+  }
+}

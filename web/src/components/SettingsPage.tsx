@@ -18,15 +18,16 @@ import {
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { TelemetryTransparency } from '@/components/TelemetryTransparency';
-import { deriveTelemetrySendingStatus } from '@/lib/telemetry/destination';
+import { deriveTelemetrySendingStatus, telemetryDestinationLabel } from '@/lib/telemetry/destination';
 import { describeTelemetryTestVerdict, type TelemetryTestVerdict } from '@/lib/telemetry/testConnection';
+import { deriveTelemetryRuntimeStatus } from '@/lib/telemetry/runtimeStatus';
 import { ArrowLeft, Trash2, AlertTriangle, Send } from 'lucide-react';
 import { type Theme, type TerminalColorScheme, THEMES } from '@/lib/theme';
 import { type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
 import { type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type PresetNameIssue, type Snippet, type SnippetNameIssue, type WatchPattern, type PatternNameIssue, PRESET_NAME_MAX, validatePresetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, validateSnippetName, WATCH_PATTERN_NAME_MAX, WATCH_PATTERN_EXPRESSION_MAX, WATCH_PATTERN_MAX_COUNT, validatePatternName, isValidRegex, DEFAULT_TERMINAL_FONT_FAMILY } from '@/lib/storage';
 import { THIS_MACHINE, type HostLabels } from '@/lib/chatDisplay';
-import { hasWindowBridge } from '@/lib/electron';
+import { hasWindowBridge, getTelemetryRuntimeStatus, onTelemetryRuntimeStatus, clearTelemetryRuntimeDrift, type TelemetryRuntimeStatus } from '@/lib/electron';
 import { requestAlertPermission } from '@/lib/desktopAlerts';
 import { putJson } from '@/lib/api';
 import { resolvePollIntervalMs } from '@/lib/pollInterval';
@@ -392,6 +393,45 @@ function TelemetrySendingStatus({
         </span>{' '}
         That is the receiver host above; warden does not verify whether the
         receiver is reachable or accepts events.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * WARDEN-631 — the RUNTIME schema-drift warning. Unlike TelemetrySendingStatus
+ * (a pure view of CONFIG prefs — "is telemetry configured to send?"), this is a
+ * view of the pipeline's runtime DELIVERY outcome: the receiver has rejected the
+ * current schema (415), the per-endpoint circuit-breaker is armed, and events are
+ * NOT being delivered — even though the config-time status says "configured".
+ *
+ * Renders ONLY when main reports `drifted === true` (see
+ * deriveTelemetryRuntimeStatus). When active it takes the place of the green
+ * "configured" status below, because "events will go to X" is false while the
+ * receiver rejects the schema. The status updates LIVE (the bridge pushes on
+ * arm/clear), so the warning appears the moment a 415 lands without reopening
+ * Settings — turning a silent permanent loss into a visible, actionable state.
+ */
+function TelemetryRuntimeDriftStatus({ destination }: { destination: string }) {
+  return (
+    // role="status" (an aria-live=polite region), mirroring TelemetrySendingStatus:
+    // the status appears the moment a 415 arms (the bridge pushes on arm/clear),
+    // without reopening Settings — turning a silent permanent loss into a visible,
+    // announced state. Polite (not alert) because the warning persists until the
+    // mismatch resolves; an assertive alert would re-announce on every re-render.
+    <div
+      role="status"
+      data-telemetry-runtime-status="schema-drift"
+      className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs"
+    >
+      <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+      <p className="text-amber-800 dark:text-amber-200">
+        <span className="font-medium">Schema mismatch — events are not being delivered.</span>{' '}
+        Telemetry is on, but{destination ? <> your receiver at{' '}
+        <span className="font-medium">{destination}</span></> : ' your receiver'} rejected it as a
+        schema-version mismatch. Further sends to this endpoint are paused to avoid
+        losing every event. Update the client or the receiver so the schema versions
+        agree, then click Test connection below to confirm and resume delivery.
       </p>
     </div>
   );
@@ -818,6 +858,34 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
   const [telemetryTestLoading, setTelemetryTestLoading] = useState(false);
   const [telemetryTestVerdict, setTelemetryTestVerdict] = useState<TelemetryTestVerdict | null>(null);
 
+  // WARDEN-631 — the RUNTIME telemetry drift status, pushed from main (the pipeline
+  // arms a per-endpoint breaker on a 415 schema mismatch) and pulled on mount. null
+  // before the first pull resolves; deriveTelemetryRuntimeStatus maps null → ok, so
+  // nothing renders until main has unambiguously reported drift. Like the test
+  // verdict this is live-only — never persisted (drift re-arms on the next send).
+  const [telemetryRuntimeStatus, setTelemetryRuntimeStatus] = useState<TelemetryRuntimeStatus | null>(null);
+  useEffect(() => {
+    // Pull the current value on mount (a window opened AFTER drift armed must show
+    // it immediately), then subscribe to live PUSH updates (the bridge fires only on
+    // an arm/clear, so the warning appears the moment a 415 lands). Both accessors
+    // no-op cleanly when the Electron bridge is absent (browser/dev/smoke). `pushed`
+    // guards the merge race: if a fresher push lands before the pull resolves, the
+    // pull's (now-stale) snapshot is discarded rather than clobbering the live value.
+    let cancelled = false;
+    let pushed = false;
+    getTelemetryRuntimeStatus().then((status) => {
+      if (!cancelled && !pushed) setTelemetryRuntimeStatus(status);
+    });
+    const unsubscribe = onTelemetryRuntimeStatus((status) => {
+      pushed = true;
+      setTelemetryRuntimeStatus(status);
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
+
   // Active section in the master-detail nav. The first section is selected by
   // default; switching shows only that section, so there's no cross-section
   // page-level scroll. Persisting across visits is intentionally not done.
@@ -1027,6 +1095,18 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
       const body = await res.json();
       if (body && typeof body.kind === 'string' && typeof body.message === 'string') {
         setTelemetryTestVerdict(body as TelemetryTestVerdict);
+        // WARDEN-631 — a 'connected' probe means the receiver is schema-matched, so
+        // any stale runtime drift breaker is resolved: clear it so sends resume
+        // (and so the drift warning does not contradict a green 'Connected'). This
+        // is the in-session recovery path for a receiver fixed at the same url,
+        // which setEndpoint's change-guard would otherwise leave wedged. Harmless
+        // when the probe tested a still-unsaved draft endpoint: a save re-points
+        // the endpoint (clearing drift via setEndpoint) and a lingering drift on
+        // the old endpoint would just re-arm on the next 415. The returned status
+        // updates the warning immediately; the push is authoritative on changes.
+        if ((body as TelemetryTestVerdict).kind === 'connected') {
+          clearTelemetryRuntimeDrift().then((status) => setTelemetryRuntimeStatus(status));
+        }
       } else if (body && typeof body.error === 'string') {
         setTelemetryTestVerdict({ kind: 'no-receiver', ok: false, message: body.error });
       } else {
@@ -1964,11 +2044,23 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                     above the endpoint field, so the cause (blank endpoint)
                     and the consequence (nothing sent) read together. Reads the
                     same `config` the toggles/field mutate via setConfig, so it
-                    updates live with no stale-closure / shadow state. */}
-                <TelemetrySendingStatus
-                  baseEnabled={config.telemetryBaseEnabled}
-                  endpoint={config.telemetryEndpoint}
-                />
+                    updates live with no stale-closure / shadow state.
+                    WARDEN-631 — when telemetry is ON and the RUNTIME breaker is
+                    armed (the receiver rejected the schema), the drift warning
+                    takes this slot instead: "events will go to X" is false while
+                    X rejects them. Gated on baseEnabled so a stale drift flag
+                    never shows when telemetry is off (drift is moot then). */}
+                {config.telemetryBaseEnabled
+                && deriveTelemetryRuntimeStatus(telemetryRuntimeStatus).kind === 'schema-drift' ? (
+                  <TelemetryRuntimeDriftStatus
+                    destination={telemetryDestinationLabel(config.telemetryEndpoint)}
+                  />
+                ) : (
+                  <TelemetrySendingStatus
+                    baseEnabled={config.telemetryBaseEnabled}
+                    endpoint={config.telemetryEndpoint}
+                  />
+                )}
 
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="telemetryEndpoint">Receiver endpoint</Label>

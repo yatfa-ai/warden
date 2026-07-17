@@ -118,6 +118,12 @@ const telemetryPipeline = createTelemetryPipeline({
   validate: validateBaseEvent,
   schemaVersion: SCHEMA_VERSION,
   transmissionLog: telemetryTransmissionLog,
+  // WARDEN-631 — the runtime drift bridge tap. When the per-endpoint breaker arms
+  // (a 415 schema mismatch) or clears (endpoint/schema change or a later success),
+  // the pipeline invokes this so main can PUSH the live status to the renderer's
+  // Settings telemetry section (see broadcastTelemetryRuntimeStatus below). The
+  // pipeline fires ONLY on a real transition, so this never spams the renderer.
+  onRuntimeStatus: (status) => broadcastTelemetryRuntimeStatus(status),
 });
 
 // Bind the source's record sink to the pipeline entry point — the wiring that was
@@ -161,6 +167,31 @@ function applyTelemetryConfig(prefs) {
   telemetry.setBaseConsent(telemetryPrefs.telemetryBaseEnabled === true);
   telemetryPipeline.setEndpoint(telemetryPrefs.telemetryEndpoint || '');
   telemetryPipeline.setAuthToken(telemetryPrefs.telemetryAuthToken || '');
+}
+
+// WARDEN-631 — PUSH the runtime telemetry drift status to the renderer. The drift
+// flag lives in MAIN (the pipeline constructed above); the status renders in the
+// RENDERER's Settings telemetry section. There was previously NO main→renderer
+// channel for runtime DELIVERY state (the renderer derived status purely from
+// CONFIG prefs). This is that bridge: when the breaker arms/clears, the pipeline's
+// onRuntimeStatus tap calls this, which sends 'telemetry:runtime-status' to the
+// focused window's webContents. The renderer ALSO pulls the current value on
+// Settings mount (telemetry:get-runtime-status below) so a window opened AFTER
+// drift armed shows the correct state immediately — the push handles liveness
+// (the status appears the moment drift arms, without reopening Settings).
+//
+// Metadata only: { drifted: boolean }. Never the payload, the endpoint URL, or any
+// identifier — consistent with the transmission log's discipline. Defensive: a
+// missing/destroyed window or a throwing webContents is swallowed (telemetry
+// status must never crash the host); before any window exists this is a no-op.
+function broadcastTelemetryRuntimeStatus(status) {
+  try {
+    if (win && !win.isDestroyed() && win.webContents && !win.webContents.isDestroyed()) {
+      win.webContents.send('telemetry:runtime-status', { drifted: status ? status.drifted === true : false });
+    }
+  } catch {
+    /* a status broadcast must never break the host */
+  }
 }
 
 // Kill anything occupying the port (stale server from a previous run)
@@ -478,6 +509,35 @@ ipcMain.handle('window:set-close-to-tray', (_event, on) => {
   closeToTray = on === true;
   saveWindowState(withCloseToTray(loadWindowState(), closeToTray));
   return closeToTray;
+});
+
+// WARDEN-631 — PULL the current runtime telemetry drift status. The renderer queries
+// this when the Settings telemetry section mounts so a window opened AFTER drift
+// armed shows the correct state immediately (the push channel 'telemetry:runtime-
+// status' handles live updates while Settings is open). Read-only; metadata only.
+// Defensive: a pipeline failure degrades to { drifted: false } (no false alarm).
+ipcMain.handle('telemetry:get-runtime-status', () => {
+  try {
+    return telemetryPipeline.getRuntimeStatus();
+  } catch {
+    return { drifted: false };
+  }
+});
+
+// WARDEN-631 — clear the runtime drift breaker. The renderer invokes this when a
+// "Test connection" probe returns 'connected' (the receiver is schema-matched
+// again). A receiver fixed at the SAME url cannot otherwise clear the breaker
+// in-session (setEndpoint no-ops on an unchanged url), so this is the recovery
+// path that unwedges the user without an endpoint change or restart. clearRuntime-
+// Drift is a no-op when drift is not armed, and emits the clear over the push
+// channel so the renderer's warning dismisses itself. Returns the new status.
+ipcMain.handle('telemetry:clear-runtime-drift', () => {
+  try {
+    telemetryPipeline.clearRuntimeDrift();
+    return telemetryPipeline.getRuntimeStatus();
+  } catch {
+    return { drifted: false };
+  }
 });
 
 app.whenReady().then(async () => {

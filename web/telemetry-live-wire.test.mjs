@@ -102,7 +102,7 @@ function fetchSeq(responses) {
 // pipeline — the transport's last gate). The handle also exposes `log` — the
 // transmission log main.cjs injects (WARDEN-583) — so the actual-outcome criteria
 // assert on what the REAL transport produced.
-function buildWire({ fetchImpl, transmissionLog, logCap } = {}) {
+function buildWire({ fetchImpl, transmissionLog, logCap, onRuntimeStatus } = {}) {
   const prefs = { telemetryBaseEnabled: false, telemetryExtendedEnabled: false, telemetryEndpoint: '' };
   const log = transmissionLog || createTransmissionLog({ clock: () => TS, cap: logCap });
   const pipeline = createTelemetryPipeline({
@@ -114,6 +114,7 @@ function buildWire({ fetchImpl, transmissionLog, logCap } = {}) {
     fetchImpl,
     sleepImpl: () => Promise.resolve(),
     transmissionLog: log,
+    onRuntimeStatus,
   });
   const source = createTelemetrySource({
     record: pipeline.record,
@@ -381,6 +382,73 @@ await test('(e) the live log is bounded — many sends never grow it past the ca
   }
   assert.equal(w.log.size(), 3, 'cap held at 3 across 6 sends (oldest dropped)');
   assert.ok(w.log.entries().every((e) => e.outcome === 'ok'), 'remaining entries are all ok');
+});
+
+// ==========================================================================
+// WARDEN-631 — runtime schema-drift circuit-breaker (END-TO-END with the REAL transport)
+// ==========================================================================
+// The receiver returns 415 on an x-telemetry-schema mismatch (ingest.mjs). With the
+// real transport wired (the exact main.cjs shape), prove the success criterion from
+// the ticket's Observation point: a 415 → drifted → the pipeline's dispatch short-
+// circuits so NO further network attempt fires for the rest of the session (verifiable
+// via the injected fetchImpl recorder), and the runtime-status bridge tap surfaces it.
+
+await test('a runtime 415 (schema drift) arms the breaker → a SECOND signal makes ZERO further fetch calls', async () => {
+  const fetch = fetchSeq([{ ok: false, status: 415 }]); // always 415
+  const w = buildWire({ fetchImpl: fetch });
+  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.main.emit('uncaughtExceptionMonitor', new Error('first'));
+  await tick();
+  assert.equal(fetch.calls.length, 1, 'the first signal POSTed and hit the 415');
+  assert.equal(w.pipeline.getRuntimeStatus().drifted, true, 'the 415 armed the runtime drift breaker');
+
+  // A SECOND signal — the receiver already rejected the current schema, so the
+  // pipeline short-circuits BEFORE redact/validate/transport. No further fetch.
+  w.main.emit('uncaughtExceptionMonitor', new Error('second'));
+  w.main.emit('uncaughtExceptionMonitor', new Error('third'));
+  await tick();
+  assert.equal(fetch.calls.length, 1, 'NO further fetch after the first 415 — futile sends skipped');
+  assert.equal(w.pipeline.getRuntimeStatus().drifted, true, 'breaker stays armed for the session');
+});
+
+await test('a schema-MATCHED receiver (200) never arms the breaker — legitimate traffic is unaffected', async () => {
+  const fetch = fetchRecorder(); // always 200
+  const w = buildWire({ fetchImpl: fetch });
+  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  for (let i = 0; i < 3; i++) {
+    w.main.emit('uncaughtExceptionMonitor', new Error(`evt ${i}`));
+    await tick();
+  }
+  assert.equal(fetch.calls.length, 3, 'every signal POSTs — the breaker adds a stop condition, relaxes nothing');
+  assert.equal(w.pipeline.getRuntimeStatus().drifted, false, 'a schema-matched receiver never 415s');
+});
+
+await test('re-pointing the receiver at runtime clears the breaker → sends resume to the new endpoint', async () => {
+  const fetch = fetchSeq([{ ok: false, status: 415 }, { ok: true, status: 200 }]);
+  const w = buildWire({ fetchImpl: fetch });
+  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.main.emit('uncaughtExceptionMonitor', new Error('drift'));
+  await tick();
+  assert.equal(w.pipeline.getRuntimeStatus().drifted, true, 'drifted on the first endpoint');
+  // Change to a different receiver that accepts the current schema.
+  w.apply({ telemetryEndpoint: 'https://telemetry-fixed.example/ingest' });
+  assert.equal(w.pipeline.getRuntimeStatus().drifted, false, 'the endpoint change cleared the breaker');
+  w.main.emit('uncaughtExceptionMonitor', new Error('ok'));
+  await tick();
+  assert.equal(fetch.calls.length, 2, 'the new receiver was attempted after the clear');
+  assert.equal(fetch.calls[1].url, 'https://telemetry-fixed.example/ingest', 'aimed at the new endpoint');
+});
+
+await test('the runtime-status bridge tap fires on a live 415 arm and on its clear', async () => {
+  const statuses = [];
+  const fetch = fetchSeq([{ ok: false, status: 415 }, { ok: true, status: 200 }]);
+  const w = buildWire({ fetchImpl: fetch, onRuntimeStatus: (s) => statuses.push(s) });
+  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.main.emit('uncaughtExceptionMonitor', new Error('drift'));
+  await tick();
+  assert.deepEqual(statuses, [{ drifted: true }], 'the 415 pushed a drift-arm status to the bridge');
+  w.apply({ telemetryEndpoint: 'https://telemetry-fixed.example/ingest' });
+  assert.deepEqual(statuses, [{ drifted: true }, { drifted: false }], 'the endpoint change pushed a clear');
 });
 
 console.log(`\n✓ TELEMETRY LIVE-WIRE INTEGRATION TESTS PASS (${passed})`);
