@@ -54,6 +54,25 @@ function fetchMustNotBeCalled() {
   return fn;
 }
 
+// isConsentActive sequence — returns one boolean per call (re-using the last when
+// the sequence is exhausted), so a test can flip consent OFF mid-loop — e.g.
+// consentSeq([true, false]) is "active for attempt 1, revoked before attempt 2" —
+// the exact "user hits Off while telemetry struggles during backoff" case. Records
+// every value it returned.
+function consentSeq(values) {
+  let i = 0;
+  const calls = [];
+  const fn = () => {
+    const v = values[Math.min(i, values.length - 1)];
+    calls.push(v);
+    i++;
+    return v;
+  };
+  fn.calls = calls;
+  fn.count = () => i;
+  return fn;
+}
+
 describe('makePayload — the pure wire-payload seam', () => {
   it('sets Content-Type and X-Telemetry-Schema headers', () => {
     const { headers } = makePayload({ schemaVersion: SCHEMA, events: EVENTS });
@@ -275,6 +294,91 @@ describe('(d) transient failure → retried ≤ cap with backoff then dropped; n
     const r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl, sleepImpl: sleepRec().fn });
     assert.strictEqual(fetchImpl.count(), _INTERNALS.MAX_ATTEMPTS, 'hard-stopped at the cap');
     assert.strictEqual(r.dropped, true);
+  });
+});
+
+// (WARDEN-585) LIVE consent re-check INSIDE the retry loop. The entry gate checks
+// consent ONCE with a snapshot; once past it, the bounded-retry loop used to call
+// fetchImpl up to 3× with backoff sleeps and NO consent re-check — so a user who
+// revoked telemetry during the backoff window could watch the in-flight batch POST
+// anyway. send() now takes an optional isConsentActive() resolver, re-checked
+// before every attempt (the first included, as defense-in-depth); a mid-loop revoke
+// halts the batch cleanly — no further fetch, no further sleep — and returns a
+// result DISTINGUISHABLE from a transient-exhaustion drop.
+describe('(WARDEN-585) live consent re-check inside the retry loop', () => {
+  it('revoking during a backoff sleep halts the batch: ZERO further fetchImpl AND zero further sleep', async () => {
+    const fetchImpl = fetchSeq([{ ok: false, status: 503 }]); // always transient
+    const sleep = sleepRec();
+    // Active for attempt 1, then flipped OFF during the backoff before attempt 2.
+    const isConsentActive = consentSeq([true, false]);
+    const r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl, sleepImpl: sleep.fn, isConsentActive });
+
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.revoked, true, 'halted by revocation, not by exhaustion');
+    assert.strictEqual(r.dropped, false, 'a revoked batch is NOT a drop');
+    assert.strictEqual(r.attempts, 1, 'exactly one attempt happened before the revoke');
+    assert.strictEqual(fetchImpl.count(), 1, 'no further fetchImpl call after the revoke');
+    assert.strictEqual(sleep.count(), 1, 'only the backoff that was in flight; no further sleep after the revoke');
+  });
+
+  it('revoking before the FIRST attempt → zero fetchImpl (defense-in-depth: snapshot said yes, live says no)', async () => {
+    const fetchImpl = fetchMustNotBeCalled();
+    const sleep = sleepRec();
+    // consent snapshot is true (passes the entry gate), but LIVE consent is OFF.
+    const isConsentActive = consentSeq([false]);
+    const r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl, sleepImpl: sleep.fn, isConsentActive });
+
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.revoked, true);
+    assert.strictEqual(r.dropped, false);
+    assert.strictEqual(r.attempts, 0, 'never attempted — revoked before the first fetchImpl');
+    assert.strictEqual(fetchImpl.count(), 0);
+    assert.strictEqual(sleep.count(), 0);
+  });
+
+  it('a revoked result is DISTINGUISHABLE from a transient-exhaustion drop', async () => {
+    const sleep = () => Promise.resolve();
+    // Same failing receiver (always 503). Left: consent holds → exhausted → dropped.
+    // Right: consent flips off after attempt 1 → halted → revoked.
+    const dropped = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl: fetchSeq([{ ok: false, status: 503 }]), sleepImpl: sleep });
+    const revoked = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl: fetchSeq([{ ok: false, status: 503 }]), sleepImpl: sleep, isConsentActive: consentSeq([true, false]) });
+
+    // Both are non-ok, but MUST differ: a drop discards a batch we gave up on; a
+    // revoke halts a batch the user stopped. The flag keeps them distinct so a
+    // revoked send is never mislabeled a drop (the WARDEN-583 transmission log can
+    // eventually record "revoked before send" honestly).
+    assert.strictEqual(dropped.ok, false);
+    assert.strictEqual(revoked.ok, false);
+    assert.strictEqual(dropped.dropped, true);
+    assert.strictEqual(dropped.revoked, undefined, 'exhaustion carries no revoked flag');
+    assert.strictEqual(revoked.revoked, true);
+    assert.strictEqual(revoked.dropped, false, 'revoked is NOT mislabeled a drop');
+    assert.notStrictEqual(dropped.dropped, revoked.dropped);
+  });
+
+  it('omitting isConsentActive (default → always active) leaves the retry loop unchanged', async () => {
+    // Backward-compat: with no live resolver injected, the loop behaves exactly as
+    // before — runs to exhaustion, drops, never revokes. Existing callers/tests
+    // that do not pass isConsentActive are unaffected.
+    const fetchImpl = fetchSeq([{ ok: false, status: 503 }]);
+    const sleep = sleepRec();
+    const r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl, sleepImpl: sleep.fn });
+    assert.strictEqual(r.revoked, undefined, 'default (no live resolver) never revokes');
+    assert.strictEqual(r.dropped, true);
+    assert.strictEqual(r.attempts, _INTERNALS.MAX_ATTEMPTS);
+    assert.strictEqual(fetchImpl.count(), _INTERNALS.MAX_ATTEMPTS);
+    assert.strictEqual(sleep.count(), _INTERNALS.MAX_ATTEMPTS - 1);
+  });
+
+  it('a successful send is unaffected when consent stays active throughout', async () => {
+    const fetchImpl = fetchSeq([{ ok: true, status: 200 }]);
+    const sleep = sleepRec();
+    const isConsentActive = consentSeq([true]);
+    const r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl, sleepImpl: sleep.fn, isConsentActive });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.attempts, 1);
+    assert.strictEqual(r.revoked, undefined);
+    assert.strictEqual(fetchImpl.count(), 1);
   });
 });
 

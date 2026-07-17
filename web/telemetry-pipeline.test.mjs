@@ -589,6 +589,59 @@ test('fetchImpl / sleepImpl are threaded through to the transport (slice-3 retry
   assert.equal(send.calls[0].sleepImpl, sleepImpl);
 });
 
+// ==========================================================================
+// WARDEN-585 — LIVE consent threaded to the transport's in-loop re-check
+// ==========================================================================
+// The pipeline hands the transport a SNAPSHOT tier (call.consent) for its entry
+// gate, but ALSO a LIVE isConsentActive() resolver that re-reads the SAME source
+// the layer-2 guard uses (effectiveTier). So a revoke that lands during the
+// transport's bounded-retry backoff halts the in-flight batch before its next
+// attempt — "halts all traffic immediately" holds end-to-end, not just to dispatch.
+
+test('the transport receives a LIVE isConsentActive callback alongside the snapshot tier', () => {
+  let live = TIERS.BASE;
+  const send = fakeSend();
+  const pipeline = createTelemetryPipeline({ consent: () => live, redact, send });
+  pipeline.record(validEventWithCredential());
+
+  const call = send.calls[0];
+  assert.equal(typeof call.isConsentActive, 'function', 'transport gets an isConsentActive resolver');
+  assert.equal(call.consent, TIERS.BASE, 'snapshot tier still passed for the entry gate');
+  assert.equal(call.isConsentActive(), true, 'active while consent resolves to BASE');
+  live = TIERS.OFF;
+  assert.equal(call.isConsentActive(), false, 'flips to inactive once consent re-resolves to OFF');
+});
+
+test('isConsentActive re-resolves LIVE: a revoke AFTER dispatch halts the in-flight batch', () => {
+  // The callback captured at send-time must STILL reflect a LATER revoke — proving
+  // it holds a live resolver, not a snapshot of the tier at dispatch time.
+  let live = TIERS.BASE;
+  const send = fakeSend();
+  const pipeline = createTelemetryPipeline({ consent: () => live, redact, send });
+  pipeline.record(validEventWithCredential());
+  const { isConsentActive } = send.calls[0];
+  assert.equal(isConsentActive(), true);
+  live = TIERS.OFF; // user revokes AFTER dispatch handed the batch to transport
+  assert.equal(isConsentActive(), false, 'the in-flight batch is halted by the later revoke');
+});
+
+test('isConsentActive degrades to inactive when the consent resolver throws (effectiveTier safety)', () => {
+  // Proves the resolver uses effectiveTier() (which try/catches → OFF), not a raw
+  // resolveTier(consent()) that would THROW into the transport's retry loop.
+  const send = fakeSend();
+  let throwNext = false;
+  const pipeline = createTelemetryPipeline({
+    consent: () => { if (throwNext) throw new Error('pref store down'); return TIERS.BASE; },
+    redact,
+    send,
+  });
+  pipeline.record(validEventWithCredential());
+  const { isConsentActive } = send.calls[0];
+  assert.equal(isConsentActive(), true);
+  throwNext = true;
+  assert.equal(isConsentActive(), false, 'a throwing resolver degrades to inactive, not a throw');
+});
+
 test('setValidate overrides the default source-contract validator (slice-1 canonical seam)', () => {
   const send = fakeSend();
   const pipeline = createTelemetryPipeline({

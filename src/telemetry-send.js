@@ -93,7 +93,14 @@ export function makePayload({ schemaVersion, events, authToken }) {
 //            failures exhausted MAX_ATTEMPTS). A dropped batch is gone — there is
 //            no retry queue. false for the consent/endpoint no-op (the gate was
 //            simply closed; nothing was attempted or discarded).
-//   attempts number of fetchImpl calls actually made (0 when gated off).
+//   revoked  true iff the batch was HALTED mid-loop because LIVE consent flipped
+//            off between attempts (or before the first, as defense-in-depth).
+//            Distinct from dropped: nothing was discarded — the user revoked, so
+//            the transport stopped cleanly with no further fetch or backoff. Only
+//            present on this outcome; absent (undefined) elsewhere, so existing
+//            deepStrictEqual result assertions are unaffected (WARDEN-585).
+//   attempts number of fetchImpl calls actually made (0 when gated off or revoked
+//            before the first attempt).
 //   status   last HTTP status observed (null when gated off or a network error
 //            that never produced a response).
 //
@@ -116,6 +123,16 @@ export function makePayload({ schemaVersion, events, authToken }) {
 //                 backoff waits zero real time.
 //   log           optional (level, message) sink for drop/retry warnings. Defaults
 //                 to a no-op; the pipeline-assembly layer injects the app logger.
+//   isConsentActive optional LIVE consent resolver checked INSIDE the retry loop.
+//                 Defaults to () => true (always active) so existing callers and
+//                 tests are unchanged. The pipeline (slice 5) injects a resolver
+//                 that re-reads the SAME live consent source its own layer-2 guard
+//                 uses, so a revoke that lands between retry attempts — during a
+//                 backoff sleep — halts the in-flight batch BEFORE the next
+//                 fetchImpl. This closes the last window where a send could POST
+//                 after the user turned telemetry off (WARDEN-585). A live
+//                 resolver (not a snapshot) is what makes "revocable / halts all
+//                 traffic immediately" true even mid-retry.
 export async function send({
   events,
   consent,
@@ -125,6 +142,7 @@ export async function send({
   fetchImpl = globalThis.fetch,
   sleepImpl = realSleep,
   log = noopLog,
+  isConsentActive = () => true,
 } = {}) {
   // GATE — the last line of defense for the roadmap's core invariant. If consent
   // is off/revoked (falsy) OR no endpoint is configured (empty), send NOTHING: do
@@ -139,6 +157,17 @@ export async function send({
 
   let status = null;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    // LIVE consent re-check (WARDEN-585). The entry gate checked consent ONCE
+    // with a snapshot; between then and now — or between retry attempts during a
+    // backoff sleep — the user may have revoked telemetry. Re-resolve LIVE
+    // consent before EVERY fetchImpl (including the first, as defense-in-depth).
+    // If it has flipped off, abort cleanly: no further fetch, no further backoff
+    // sleep. A revoked send is DISTINCT from a drop (the user chose to stop;
+    // nothing was discarded), so it returns revoked:true / dropped:false.
+    if (!isConsentActive()) {
+      log('info', `telemetry: consent revoked before attempt ${attempt + 1}; halting batch (last status ${status})`);
+      return { ok: false, revoked: true, dropped: false, attempts: attempt, status };
+    }
     let res;
     try {
       // Destination is EXACTLY endpointUrl — never rewritten, never a hardcoded
