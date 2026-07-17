@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { PaneTile } from './PaneTile';
 import { FileViewer } from './FileViewer';
 import { WorkspaceSearchDialog } from './WorkspaceSearchDialog';
+import { FileBrowserDialog } from './FileBrowserDialog';
 import {
   Dialog,
   DialogContent,
@@ -105,14 +106,19 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
   const [filePromptOpen, setFilePromptOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   // WARDEN-563: the pane whose context menu last opened a workspace dialog
-  // (search / file). The dialogs resolve `actingChat` from this — NOT
-  // `focusedChat` — so right-clicking a NON-focused pane searches/opens in THAT
-  // pane's repo. Seeded by openSearchFor / openFilePromptFor (bound per-tile),
-  // mirroring how onSplitShell threads a pane id. Stays set after a dialog
-  // closes (harmless: the next menu action re-seeds it); resolves to focusedChat
-  // when unset, and falls back to focusedChat if the acting pane's chat has
-  // since vanished (keeps an open dialog mounted rather than blanking it).
+  // (search / file / browse). The dialogs resolve `actingChat` from this — NOT
+  // `focusedChat` — so right-clicking a NON-focused pane searches/opens/browses
+  // in THAT pane's repo. Seeded by openSearchFor / openFilePromptFor /
+  // openBrowseFor (bound per-tile), mirroring how onSplitShell threads a pane
+  // id. Stays set after a dialog closes (harmless: the next menu action re-seeds
+  // it); resolves to focusedChat when unset, and falls back to focusedChat if
+  // the acting pane's chat has since vanished (keeps an open dialog mounted
+  // rather than blanking it).
   const [actingPaneId, setActingPaneId] = useState<string | null>(null);
+  // WARDEN-573: read-only directory browser (📂) — the structural twin of the
+  // grep dialog (WARDEN-145). Opened from a pane's context menu (openBrowseFor),
+  // not the retired grid toolbar.
+  const [browseOpen, setBrowseOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const nameOf = (id: string) => chats.find((c) => (c.key || c.id) === id)?.name || id;
 
@@ -170,6 +176,14 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
   const openSearchFor = (id: string) => {
     setActingPaneId(id);
     setSearchOpen(true);
+  };
+
+  // WARDEN-573: per-pane read-only directory-browse trigger (📂) — the structural
+  // twin of openSearchFor. Seeds the acting pane so FileBrowserDialog lists THIS
+  // pane's repo (not the focused pane's). Same id-seeding shape.
+  const openBrowseFor = (id: string) => {
+    setActingPaneId(id);
+    setBrowseOpen(true);
   };
 
   // keyboard shortcuts: pane navigation, actions, and panel toggles
@@ -282,7 +296,9 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
         {/* WARDEN-563: the grid-toolbar 🔍 search / 📄 file buttons lived here,
             operating on the focused pane. Retired — both affordances now live
             on each pane's own context menu (right-click → Search workspace
-            files / Open file from directory) and act on the right-clicked pane. */}
+            files / Open file from directory / Browse files in directory) and
+            act on the right-clicked pane. The 📂 browse entry (WARDEN-573) is a
+            third sibling there, not a re-added toolbar button. */}
       </div>
       <div className="flex-1 min-h-0 p-1">
         {n === 0 ? (
@@ -297,7 +313,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                   <PaneTile id={t.id} label={nameOf(t.id)} focused={focused === t.id} maximized={effectiveMax === t.id}
                     hasNew={newActivity.has(t.id)} onClearNew={() => onClearNew(t.id)}
                     onFocus={() => onFocus(t.id)} onClose={() => onClose(t.id)} onToggleMax={() => onToggleMax(t.id)}
-                    onKill={() => onForceKill(t.id)} onSplitShell={() => onSplitShell?.(t.id)} onSearchWorkspace={() => openSearchFor(t.id)} onOpenFileFromDir={() => openFilePromptFor(t.id)} chat={chat} host={paneHost[t.id]}
+                    onKill={() => onForceKill(t.id)} onSplitShell={() => onSplitShell?.(t.id)} onSearchWorkspace={() => openSearchFor(t.id)} onOpenFileFromDir={() => openFilePromptFor(t.id)} onBrowseFiles={() => openBrowseFor(t.id)} chat={chat} host={paneHost[t.id]}
                     externalSearchQuery={externalSearchQuery?.paneId === t.id ? externalSearchQuery.query : undefined}
                     fontSize={fontSize} onFontSizeChange={onFontSizeChange}
                     scrollback={scrollback}
@@ -350,6 +366,21 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
           open={searchOpen}
           onOpenChange={setSearchOpen}
           onSelectFile={(file, line) => { setFilePath(file); setFileLine(line); setFileOpen(true); }}
+        />
+      )}
+
+      {/* Read-only directory browser (WARDEN-573): the structural twin of the
+          grep dialog — browse dirs → filenames, then hand the chosen path to the
+          same FileViewer above. onSelectFile mirrors the grep callback minus the
+          line (a browse has no line to scroll to). WARDEN-563: scoped to the
+          right-clicked pane's chat (actingChat), not the focused pane. */}
+      {actingChat && (
+        <FileBrowserDialog
+          chatId={actingChat.id}
+          cwd={actingChat.cwd}
+          open={browseOpen}
+          onOpenChange={setBrowseOpen}
+          onSelectFile={(file) => { setFilePath(file); setFileLine(undefined); setFileOpen(true); }}
         />
       )}
 
