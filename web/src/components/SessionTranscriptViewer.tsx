@@ -11,6 +11,7 @@ import {
 } from '@/components/ui/dialog';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { EyeIcon, AlertCircleIcon, Loader2Icon, SearchIcon, ChevronUpIcon, ChevronDownIcon, XIcon } from 'lucide-react';
@@ -317,8 +318,13 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
             Shift+Enter→prev, Escape→close — identical keyboard to PaneTile's search. */}
         {showSearch && (
           <div className="flex flex-wrap items-center gap-1.5 rounded-md border bg-muted/40 px-2 py-1.5">
-            <input
+            {/* shadcn <Input> — never a raw form element (WARDEN-68); <Input> already
+                ships focus-visible:ring-3 / min-w-0 / bg + dark variants, so the raw
+                className reinvents nothing here. autoFocus/onKeyDown/value/onChange
+                pass straight through {...props}. */}
+            <Input
               autoFocus
+              aria-label="Find in transcript"
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
               onKeyDown={(e) => {
@@ -331,11 +337,11 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
                 }
               }}
               placeholder="find in transcript…"
-              className="min-w-0 flex-1 rounded border bg-background px-2 py-1 text-xs outline-none focus:border-ring"
+              className="h-7 flex-1 text-xs"
             />
             <span
               aria-live="polite"
-              className="shrink-0 text-[11px] tabular-nums text-muted-foreground"
+              className="shrink-0 text-xs tabular-nums text-muted-foreground"
             >
               {debouncedQuery
                 ? matches.length > 0
