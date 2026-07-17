@@ -19,6 +19,20 @@
 //     ↑unpushed outgoing join is KEPT (valuable + the fleet convention is honest about
 //     unpushed state); its doubled cost is now paid once per submit. (WARDEN-559 cost
 //     nuance.)
+//  • CODE mode (WARDEN-589) — the working-tree grep, NOT history: fans the per-agent
+//     POST /api/search-files (`git grep` over CURRENT tracked files, WARDEN-145) across
+//     the whole fleet, grouped by agent as file:line:text snippets — answering "where
+//     does this string live RIGHT NOW?" ("which agent is editing auth.js?", "who already
+//     has a cancelToken helper?"). Three load-bearing divergences from the commit axes:
+//     (1) the result is file:line:text hits, NOT commits, so it has its OWN grouping
+//     (buildFleetCodeGroups) + its OWN result state + a NEW file:line:text renderer;
+//     (2) a working-tree match has no hash, so there is NO ↑unpushed join — ONE fetch
+//     per agent (N, not 2N) and the group header shows only the match count;
+//     (3) /api/search-files returns transport/runtime errors at HTTP 200 with an `error`
+//     field, so the Code fan-out gates on `data.error` too (not just r.ok) and treats
+//     an error response as that agent's FAILURE (counted into errorCount), never a
+//     false-empty. As-you-type with the 300ms debounce (git grep is cheap + bounded at
+//     the source, ≤30 results), like MESSAGE mode.
 //
 // The fan-out follows the fleet convention — Promise.allSettled, like the batch
 // kill/broadcast fan-outs in ChatSidebar.tsx — so one unreachable / non-git agent
@@ -48,7 +62,10 @@ import {
   fleetCommitSearchEligible,
   buildFleetCommitGroups,
   buildFleetSearchBaseUrl,
+  buildFleetCodeGroups,
+  fleetCodeFetchRequest,
   type FleetCommitSearchResult,
+  type FleetCodeSearchResult,
   type FleetCommitSearchMode,
 } from '@/lib/gitStateSummary';
 import type { Chat } from '@/lib/types';
@@ -73,6 +90,12 @@ export function FleetCommitSearch({ chats, onOpenChat }: {
   const [committed, setCommitted] = useState(''); // CONTENT mode: the submitted query (Enter)
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<FleetCommitSearchResult | null>(null);
+  // CODE mode's own result state (WARDEN-589). The Code axis' result shape (groups of
+  // file:line:text hits) is fundamentally different from the commit axes' (commit rows),
+  // so it does NOT share `result` — the render layer branches on mode. Cleared on every
+  // mode switch / close alongside `result` so a stale code view never shows under a
+  // commit axis (and vice versa).
+  const [codeResult, setCodeResult] = useState<FleetCodeSearchResult | null>(null);
 
   // The searchable fleet: active project agents, keyed & deduped by key, in
   // chats iteration order. Memoized so a stable array reference feeds the search
@@ -81,45 +104,92 @@ export function FleetCommitSearch({ chats, onOpenChat }: {
   const eligible = useMemo(() => fleetCommitSearchEligible(chats), [chats]);
   const fleetN = eligible.length;
 
-  // The single reactive search term. Message mode drives off the typed `query`
+  // The single reactive search term. Message + Code modes drive off the typed `query`
   // (as-you-type); content mode drives off the `committed` (submitted) query — so
   // TYPING in content mode does NOT change this value and therefore does NOT refire
   // the effect (the WARDEN-559 cost gate: no 2N full-history-diff walks per keystroke).
+  // Code mode is as-you-type like message (git grep is cheap + bounded at the source).
   // Computed OUTSIDE the effect so only `searchTerm` (not `query`/`committed`) is a dep.
   const searchTerm = mode === 'content' ? committed : query;
 
-  // Debounced (300ms, MESSAGE mode) / immediate-on-submit (CONTENT mode) fleet fan-out.
-  // Message mode: each keystroke over N agents is N runGit invocations (×2 — recent +
-  // outgoing), so the debounce matters more here than in the single-agent WARDEN-498
-  // box. Content mode: pickaxe is far costlier (per-commit diff), so it is gated to
-  // submit only — `searchTerm` changes solely on Enter (or a regex-toggle re-run) — and
-  // the 0ms timer just defers the fire to the next tick so the cleanup can still cancel
-  // a rapid resubmit. Mirrors the WARDEN-498 effect's discipline: clear the old results
-  // immediately so stale matches never render under the new query while the fetch is in
-  // flight; a `cancelled` flag drops a late-resolving fetch.
+  // Debounced (300ms, MESSAGE + CODE modes) / immediate-on-submit (CONTENT mode) fleet
+  // fan-out. Message mode: each keystroke over N agents is N runGit invocations (×2 —
+  // recent + outgoing), so the debounce matters more here than in the single-agent
+  // WARDEN-498 box. Content mode: pickaxe is far costlier (per-commit diff), so it is
+  // gated to submit only — `searchTerm` changes solely on Enter (or a regex-toggle
+  // re-run) — and the 0ms timer just defers the fire to the next tick so the cleanup
+  // can still cancel a rapid resubmit. Code mode: working-tree `git grep` is cheap +
+  // bounded at the source (≤30 results), so it is as-you-type with the 300ms debounce,
+  // exactly like message mode. Mirrors the WARDEN-498 effect's discipline: clear the
+  // old results immediately so stale matches never render under the new query while the
+  // fetch is in flight; a `cancelled` flag drops a late-resolving fetch.
   useEffect(() => {
     const q = searchTerm.trim();
     if (!q) {
       setResult(null);
+      setCodeResult(null);
       setLoading(false);
       return;
     }
     // No searchable agents → resolve immediately to an empty result rather than
     // spinning the loading state forever (e.g. a fresh install with no chats).
     if (eligible.length === 0) {
-      setResult({ groups: [], errorCount: 0 });
+      if (mode === 'code') setCodeResult({ groups: [], errorCount: 0 });
+      else setResult({ groups: [], errorCount: 0 });
       setLoading(false);
       return;
     }
     setLoading(true);
     setResult(null);
+    setCodeResult(null);
     let cancelled = false;
     const timer = setTimeout(async () => {
       // Promise.allSettled (the fleet convention, ChatSidebar.tsx handleBroadcast
       // / handleKillSelected): one unreachable / non-git agent never rejects the
-      // whole. Each agent fires its recent search + its outgoing search concurrently;
-      // a hash in both is ↑unpushed. buildFleetSearchBaseUrl swaps grep= ↔ pickaxe=
-      // (and adds pickaxeRegex=1) by mode — the only mode-dependent line.
+      // whole; a per-agent failure is counted and surfaced as an honest
+      // "(N unreachable)" note (WARDEN-89 — never let a failure masquerade as a
+      // barren history / clean tree).
+      if (mode === 'code') {
+        // CODE fan-out (WARDEN-589): ONE fetch per agent (N, not 2N — a working-tree
+        // grep match has no hash, so there is NO ↑unpushed outgoing join). The POST
+        // /api/search-files seam (fleetCodeFetchRequest) carries { id, query } in a
+        // JSON body. /api/search-files returns transport/runtime errors at HTTP 200
+        // with an `error` field (mirroring /api/git-status), so gate on `data.error`
+        // too — a remote failure / missing cwd becomes that agent's FAILURE outcome
+        // (counted into errorCount), NOT a false-empty match list (the WARDEN-89
+        // contract WorkspaceSearchDialog.tsx:127 upholds for the per-agent case).
+        const settled = await Promise.allSettled(
+          eligible.map(async ({ key, project }) => {
+            const { url, init } = fleetCodeFetchRequest(key, q);
+            const r = await fetch(url, init);
+            if (!r.ok) throw new Error(`search-files HTTP ${r.status}`);
+            const data = await r.json();
+            if (data.error) throw new Error(`search-files: ${data.error}`);
+            const hits = Array.isArray(data.results) ? data.results : [];
+            return { ok: true as const, key, project, hits };
+          }),
+        );
+        if (cancelled) return;
+        // Unwrap allSettled → outcomes in input (chats) order; a rejected promise
+        // (a thrown !r.ok / data.error, or a bad-JSON throw) becomes that agent's
+        // error outcome, keyed from the same `eligible` entry so it still carries
+        // key/project.
+        const outcomes = settled.map((s, i) =>
+          s.status === 'fulfilled'
+            ? s.value
+            : { ok: false as const, key: eligible[i].key, project: eligible[i].project },
+        );
+        for (const s of settled) {
+          if (s.status === 'rejected') console.warn('[fleet code search] agent search failed:', s.reason, { q });
+        }
+        setCodeResult(buildFleetCodeGroups(outcomes));
+        setLoading(false);
+        return;
+      }
+      // COMMIT fan-out (message/content): each agent fires its recent search + its
+      // outgoing search concurrently; a hash in both is ↑unpushed.
+      // buildFleetSearchBaseUrl swaps grep= ↔ pickaxe= (and adds pickaxeRegex=1) by
+      // mode — the only mode-dependent line.
       const settled = await Promise.allSettled(
         eligible.map(async ({ key, project }) => {
           const base = buildFleetSearchBaseUrl(key, q, mode, pickaxeRegex);
@@ -171,6 +241,7 @@ export function FleetCommitSearch({ chats, onOpenChat }: {
     setMode(m);
     setCommitted('');
     setResult(null);
+    setCodeResult(null);
     setLoading(false);
   };
 
@@ -191,12 +262,41 @@ export function FleetCommitSearch({ chats, onOpenChat }: {
   };
 
   const q = query.trim();
-  const groups = result?.groups ?? [];
-  const errorCount = result?.errorCount ?? 0;
-  const totalHits = groups.reduce((n, g) => n + g.commits.length, 0);
+  const isCode = mode === 'code';
+  // The commit axes (message/content) read `result`; the Code axis reads its own
+  // `codeResult` — the two result shapes are kept separate because they group
+  // different things (commit rows vs file:line:text hits). The render layer branches
+  // on `isCode`; these select whichever result the active axis actually produced.
+  const commitGroups = result?.groups ?? [];
+  const codeGroups = codeResult?.groups ?? [];
+  const errorCount = (isCode ? codeResult?.errorCount : result?.errorCount) ?? 0;
+  const hasGroups = isCode ? codeGroups.length > 0 : commitGroups.length > 0;
+  // totalHits drives the trigger icon's text-primary tint (totalHits > 0) for ALL
+  // modes — for code it sums each group's file:line:text hit count (no ↑unpushed,
+  // which the commit axes add per row but never here).
+  const totalHits = isCode
+    ? codeGroups.reduce((n, g) => n + g.hits.length, 0)
+    : commitGroups.reduce((n, g) => n + g.commits.length, 0);
   // CONTENT mode: true when there is typed text that has not been submitted yet — the
   // cue to show the "press Enter" hint (the search will not run until submitted).
   const contentPending = mode === 'content' && q.length > 0 && q !== committed.trim();
+  // Per-mode strings (placeholder/aria/trigger flip per axis — WARDEN-589). The Code
+  // axis is as-you-type (no "press Enter" hint — that stays content-only).
+  const triggerLabel = isCode
+    ? 'search current code across all agents'
+    : mode === 'content'
+      ? 'search commit content across all agents'
+      : 'search commit messages across all agents';
+  const inputPlaceholder = isCode
+    ? 'search current code across the fleet…'
+    : mode === 'content'
+      ? 'search added/removed code across the fleet — press Enter'
+      : 'search commit messages across the fleet…';
+  const inputAriaLabel = isCode
+    ? 'search current code across the fleet'
+    : mode === 'content'
+      ? 'search commit content across the fleet'
+      : 'search commit messages across the fleet';
 
   // The jump-to-agent handler shared by every group header + commit row: open the
   // agent's pane and dismiss the popover so the pane takes focus.
@@ -211,8 +311,8 @@ export function FleetCommitSearch({ chats, onOpenChat }: {
         <Button
           variant="ghost"
           size="icon-xs"
-          title="search commits across all agents"
-          aria-label="search commits across all agents"
+          title={triggerLabel}
+          aria-label={triggerLabel}
           className={cn('text-muted-foreground', totalHits > 0 && 'text-primary')}
         >
           <GitCommitHorizontal />
@@ -220,15 +320,17 @@ export function FleetCommitSearch({ chats, onOpenChat }: {
       </PopoverTrigger>
       <PopoverContent align="end" className="w-80 p-2">
         <div className="mb-1 flex items-center justify-between gap-2 px-0.5">
-          <span className="text-[10px] font-medium text-muted-foreground">fleet commit search</span>
+          <span className="text-[10px] font-medium text-muted-foreground">{isCode ? 'fleet code search' : 'fleet commit search'}</span>
           <span className="text-[10px] text-muted-foreground" title="searchable active project agents">
             {fleetN} agent{fleetN === 1 ? '' : 's'}
           </span>
         </div>
-        {/* Mode toggle (WARDEN-559): message (commit messages, WARDEN-534) ⇄ content
-            (added/removed code via pickaxe, WARDEN-559). A two-button segment of shadcn
-            <Button>s (never raw form elements — WARDEN-68); the active axis is `secondary`,
-            the other `ghost`. In content mode a regex sub-toggle (-S ⇄ -G) appears. */}
+        {/* Mode toggle: message (commit messages, WARDEN-534) / content (added/removed
+            code via pickaxe, WARDEN-559) / code (current working-tree grep, WARDEN-589).
+            A three-button segment of shadcn <Button>s (never raw form elements —
+            WARDEN-68); the active axis is `secondary`, the others `ghost`. In content
+            mode a regex sub-toggle (-S ⇄ -G) appears; code mode has no sub-toggle (it is
+            a fixed-string `git grep -F` at the source). */}
         <div className="mb-1.5 flex items-center gap-1 px-0.5">
           <div className="flex gap-0.5 rounded bg-muted p-0.5">
             <Button
@@ -252,6 +354,17 @@ export function FleetCommitSearch({ chats, onOpenChat }: {
               title="search commit content — added/removed code (pickaxe)"
             >
               Content
+            </Button>
+            <Button
+              type="button"
+              variant={mode === 'code' ? 'secondary' : 'ghost'}
+              size="xs"
+              onClick={() => switchMode('code')}
+              aria-pressed={mode === 'code'}
+              className="h-5 px-1.5 text-[10px]"
+              title="search current tracked code (working-tree git grep)"
+            >
+              Code
             </Button>
           </div>
           {mode === 'content' && (
@@ -284,12 +397,8 @@ export function FleetCommitSearch({ chats, onOpenChat }: {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submitContent(); } }}
-            placeholder={mode === 'content'
-              ? 'search added/removed code across the fleet — press Enter'
-              : 'search commit messages across the fleet…'}
-            aria-label={mode === 'content'
-              ? 'search commit content across the fleet'
-              : 'search commit messages across the fleet'}
+            placeholder={inputPlaceholder}
+            aria-label={inputAriaLabel}
             className="h-7 text-xs pl-6 pr-6"
             autoFocus
           />
@@ -314,24 +423,26 @@ export function FleetCommitSearch({ chats, onOpenChat }: {
         )}
         {!q ? (
           <div className="px-1 py-2 text-[10px] text-muted-foreground">
-            {mode === 'content'
-              ? 'Find where a string was added or removed across the fleet — searches every active project agent\'s commit-history diffs (git log -S' + (pickaxeRegex ? ' / -G regex' : '') + ').'
-              : 'Find where a change landed across the fleet — searches every active project agent\'s commit messages (subject + body), case-insensitive.'}
+            {isCode
+              ? 'Find where a string lives right now across the fleet — greps every active project agent\'s current tracked code (git grep), grouped by agent.'
+              : mode === 'content'
+                ? 'Find where a string was added or removed across the fleet — searches every active project agent\'s commit-history diffs (git log -S' + (pickaxeRegex ? ' / -G regex' : '') + ').'
+                : 'Find where a change landed across the fleet — searches every active project agent\'s commit messages (subject + body), case-insensitive.'}
           </div>
         ) : contentPending ? (
           // CONTENT mode with typed-but-unsubmitted text: the "press Enter" hint above is
           // the whole cue — render nothing else (no false "no matching commits", since the
-          // search has not run yet). Message mode is never pending (as-you-type), so this
-          // branch is content-only.
+          // search has not run yet). Message + Code modes are never pending (as-you-type),
+          // so this branch is content-only.
           null
         ) : loading ? (
           <div className="flex items-center gap-1.5 px-1 py-2">
             <Skeleton className="size-2 rounded-full" />
             <span className="text-[10px] text-muted-foreground">searching {fleetN} agent{fleetN === 1 ? '' : 's'}…</span>
           </div>
-        ) : groups.length === 0 ? (
+        ) : !hasGroups ? (
           <div className="px-1 py-2 text-[10px] text-muted-foreground">
-            no matching commits
+            {isCode ? 'no matching code' : 'no matching commits'}
             {errorCount > 0 && (
               <span className="mt-0.5 block text-yellow-500/80">{errorCount} agent{errorCount === 1 ? '' : 's'} unreachable</span>
             )}
@@ -341,7 +452,59 @@ export function FleetCommitSearch({ chats, onOpenChat }: {
             {errorCount > 0 && (
               <div className="px-0.5 text-[10px] text-yellow-500/80">{errorCount} agent{errorCount === 1 ? '' : 's'} unreachable — showing the rest</div>
             )}
-            {groups.map((g) => {
+            {isCode ? codeGroups.map((g) => {
+              const c = findChat(chats, g.key);
+              const name = displayName(c);
+              return (
+                <div key={g.key} className="rounded">
+                  {/* Code group header: agent name · project · match count. NO ↑unpushed —
+                      a working-tree grep match has no hash (the commit axes' outgoing join
+                      does not apply). Same jump-to-agent affordance as the commit groups. */}
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`open ${name}`}
+                    onClick={() => jump(g.key)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); jump(g.key); } }}
+                    title={`open ${name}`}
+                    className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+                  >
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[10px] font-medium text-foreground" title={name}>{name}</span>
+                      <span className="block truncate text-[10px] text-muted-foreground" title={g.project}>{g.project}</span>
+                    </span>
+                    <span className="shrink-0 text-[10px] text-muted-foreground">
+                      {g.hits.length} match{g.hits.length === 1 ? '' : 'es'}
+                    </span>
+                  </div>
+                  <ul>
+                    {g.hits.map((h, i) => (
+                      // A file:line:text row — mirrors WorkspaceSearchDialog's
+                      // SearchResultRow (WARDEN-145) but in the fleet group-card layout:
+                      // file:line (muted) over the matched text (foreground). click → open
+                      // the agent's pane so the human can drill in via its workspace search
+                      // / file viewer. role="button" div (sibling of the header, NOT nested).
+                      <li key={`${g.key}:${h.file}:${h.line}:${i}`}>
+                        <div
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`open ${name} (${h.file}:${h.line})`}
+                          onClick={() => jump(g.key)}
+                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); jump(g.key); } }}
+                          title={`open ${name} — inspect in its workspace`}
+                          className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+                        >
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate font-mono text-[10px] text-muted-foreground" title={`${h.file}:${h.line}`}>{h.file}:{h.line}</span>
+                            <span className="block truncate font-mono text-[10px] text-foreground" title={h.text}>{h.text}</span>
+                          </span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            }) : commitGroups.map((g) => {
               const c = findChat(chats, g.key);
               const name = displayName(c);
               const unpushedN = g.commits.filter((cm) => cm.unpushed).length;
