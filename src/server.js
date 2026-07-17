@@ -30,7 +30,7 @@ import { checkHost } from './hostStatus.js';
 import {
   probeReceiverCapabilities,
 } from './telemetry-capabilities.js';
-import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseReflog, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, parseGitRemotes, parseGitBranches, buildDockerGitArgv } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseOutgoingFiles, parseStashCount, parseStashList, parseReflog, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, parseGitRemotes, parseGitBranches, buildDockerGitArgv } from './gitStatus.js';
 import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep } from './companion.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -2157,7 +2157,7 @@ app.get('/api/git-status', async (req, res) => {
 
   try {
     const cwd = gitCwd(chat);
-    if (!cwd) return res.json({ branch: null, detached: false, headSha: null, headDate: null, clean: null, cwd: '', ahead: null, behind: null, upstream: null, inProgress: { operation: null, detail: null }, stashCount: null, diffstat: null, files: null, error: 'no cwd' });
+    if (!cwd) return res.json({ branch: null, detached: false, headSha: null, headDate: null, clean: null, cwd: '', ahead: null, behind: null, upstream: null, inProgress: { operation: null, detail: null }, stashCount: null, diffstat: null, files: null, outgoingFiles: null, error: 'no cwd' });
 
     // branch / status / ahead-behind / detached / stash all run via runGit: argv
     // (no shell) for the LOCAL transports, ssh for the remote ones — and for yatfa
@@ -2252,6 +2252,27 @@ app.get('/api/git-status', async (req, res) => {
     const diffstatR = await runGit(chat, ['diff', 'HEAD', '--shortstat'], cwd);
     const diffstat = parseDiffStat(diffstatR.ok ? diffstatR.stdout : '');
 
+    // Outgoing (unpushed-commit) changed-file set (WARDEN-601): `git diff --name-only
+    // @{u}..HEAD` lists the files touched by the agent's local commits that @{u}
+    // (upstream) doesn't have yet — the join key for the IMPENDING cross-agent file-
+    // conflict detector. Where `files` (porcelain) surfaces working-tree WIP and
+    // ahead/behind surface the COUNT of unpushed/incoming commits, this surfaces
+    // WHICH paths are in the unpushed set, so the detector can flag the case the
+    // working-tree×working-tree join is blind to: agent A committed F (clean tree →
+    // contributes nothing to the WIP join) while agent B has F dirty — B's next pull
+    // (after A pushes) collides on F. Read-only (the WARDEN-199 line: a `git diff
+    // --name-only` over a range is a pure read). One more git call in a route that
+    // already runs @{u} rev-lists, gated on `branch && ahead > 0` so a non-git /
+    // detached / in-sync agent pays nothing and reads null (mirroring the ahead/files
+    // gating). Same runGit transport as the probes above, so it runs inside yatfa
+    // containers via `docker exec … git -C <cwd>` too (WARDEN-235). parseOutgoingFiles
+    // returns [] for empty; the `branch && ahead > 0` gate below nulls it otherwise.
+    let outgoingFiles = null;
+    if (branch && typeof ahead === 'number' && ahead > 0) {
+      const outR = await runGit(chat, ['diff', '--name-only', '@{u}..HEAD'], cwd);
+      outgoingFiles = parseOutgoingFiles(outR.ok ? outR.stdout : '');
+    }
+
     res.json({
       branch: branch || null,
       // detached: true only inside a real repo whose HEAD is not on a branch.
@@ -2285,10 +2306,16 @@ app.get('/api/git-status', async (req, res) => {
       // (WARDEN-545); fetched unconditionally above (not detached-only).
       headDate: branch ? headDate : null,
       files: branch ? files : null,
+      // outgoingFiles: the unpushed-commit changed-file set (WARDEN-601), or null for
+      // a non-git / detached / in-sync (ahead 0) repo. Gated on `branch && ahead > 0`
+      // like the other derived fields so a clean agent reads null (zero noise for the
+      // impending-conflict detector); a repo with unpushed commits reads its outgoing
+      // path list (possibly empty if the range touches nothing).
+      outgoingFiles: branch && typeof ahead === 'number' && ahead > 0 ? outgoingFiles : null,
       error: null,
     });
   } catch (e) {
-    res.json({ branch: null, detached: false, headSha: null, headDate: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, upstream: null, inProgress: { operation: null, detail: null }, stashCount: null, diffstat: null, files: null, error: e.message });
+    res.json({ branch: null, detached: false, headSha: null, headDate: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, upstream: null, inProgress: { operation: null, detail: null }, stashCount: null, diffstat: null, files: null, outgoingFiles: null, error: e.message });
   }
 });
 
@@ -2613,8 +2640,22 @@ export async function diffNoIndex(contentA, contentB, filePath) {
 // than the combined worktree-vs-HEAD diff. `git diff --cached` is strictly read-only
 // (NOT in the forbidden mutating-ops set — see the read-only contract comment above
 // /api/git-diff), so this stays within Warden's by-design read-only contract.
-export function buildGitDiffScript(cwd, filePath, staged) {
-  const diffCmd = staged ? 'git diff --cached' : 'git diff HEAD';
+//
+// `rangeRev` (WARDEN-601) — a fixed, server-validated literal commit range (only
+// '@{u}..HEAD' today, for the impending-conflict committer's per-agent panel) — swaps
+// `git diff HEAD`/`--cached` for `git diff <rangeRev>`, so the diff shows the file's
+// change across that range instead of vs the working tree. It is shellQuote'd before
+// splicing (its `{u}` braces never reach the shell unquoted — belt-and-suspenders on
+// the WARDEN-122 discipline, even though single-element `{u}` is brace-expansion-safe
+// in bash) and is ALWAYS a server-chosen constant (the route validates the query param
+// to this literal), so it can never carry user input. CRUCIALLY the `-- "$FILE"`
+// pathspec and the realpath containment `case` below run UNCHANGED — supplying a range
+// does NOT relax path containment one bit (a range + a pathspec compose exactly as git
+// always composes them). Read-only: a `git diff <range> -- <path>` is a pure read.
+export function buildGitDiffScript(cwd, filePath, staged, rangeRev) {
+  const diffCmd = rangeRev
+    ? `git diff ${shellQuote(rangeRev)}`
+    : (staged ? 'git diff --cached' : 'git diff HEAD');
   return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; RESOLVED_CWD="$(cd "$CWD" && pwd -P)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -m -- "$FILE" 2>/dev/null)" || RESOLVED="$RESOLVED_CWD/$FILE"; case "$RESOLVED" in "$RESOLVED_CWD"/*|"$RESOLVED_CWD") ;; *) echo "ERROR path must be within working directory"; exit 1 ;; esac; ${diffCmd} -- "$FILE" 2>/dev/null`;
 }
 
@@ -2646,12 +2687,24 @@ export function isPathWithinCwd(cwd, filePath) {
 //
 // `staged` (WARDEN-369) runs `git diff --cached` (index-vs-HEAD, exactly what will
 // be committed) instead of `git diff HEAD` (combined staged+unstaged). Read-only.
-export async function getLocalGitDiff(cwd, filePath, staged) {
+//
+// `rangeRev` (WARDEN-601) — a fixed server-validated literal range ('@{u}..HEAD') —
+// runs `git diff <rangeRev> -- <path>` (the file's change across the range) instead of
+// the working-tree diff, so the impending-conflict committer's panel can show its
+// OUTGOING change to the path (its working tree is clean, so the default `git diff
+// HEAD` would be empty and misclassify as 'already resolved'). rangeRev is passed as a
+// single argv element (no shell on the LOCAL transport) so @{u}..HEAD stays brace-
+// expansion-safe. Read-only. Containment (isPathWithinCwd) is unchanged — the pathspec
+// `-- <path>` still applies identically regardless of the rev.
+export async function getLocalGitDiff(cwd, filePath, staged, rangeRev) {
   if (!isPathWithinCwd(cwd, filePath)) {
     return { error: 'path must be within working directory', status: 403 };
   }
 
-  const result = await runLocalGit(staged ? ['diff', '--cached', '--', filePath] : ['diff', 'HEAD', '--', filePath], cwd);
+  const args = rangeRev
+    ? ['diff', rangeRev, '--', filePath]
+    : (staged ? ['diff', '--cached', '--', filePath] : ['diff', 'HEAD', '--', filePath]);
+  const result = await runLocalGit(args, cwd);
   let diff = capDiff(result.stdout || '');
 
   if (diff.length === 0) {
@@ -2676,8 +2729,8 @@ export async function getLocalGitDiff(cwd, filePath, staged) {
 // so the `cd <cwd>` + `realpath` resolve where the repo actually is. The remote
 // untracked check is a second runInContext (only when the diff is empty) so the
 // common case stays a single round-trip. See WARDEN-235.
-async function getDeliveredGitDiff(chat, cwd, filePath, staged) {
-  const script = buildGitDiffScript(cwd, filePath, staged);
+async function getDeliveredGitDiff(chat, cwd, filePath, staged, rangeRev) {
+  const script = buildGitDiffScript(cwd, filePath, staged, rangeRev);
   const r = await runInContext(chat, script);
   if (!r.ok) {
     const out = `${r.stdout || ''}${r.stderr || ''}`;
@@ -2713,6 +2766,15 @@ app.get('/api/git-diff', async (req, res) => {
   const filePath = String(req.query.path || '').trim();
   if (!filePath) return res.status(400).json({ diff: null, untracked: false, path: '', error: 'path is required' });
   const staged = String(req.query.staged || '') === '1';
+  // range=outgoing (WARDEN-601): diff the file across the unpushed (@{u}..HEAD) range
+  // instead of the working tree, so the impending-conflict committer's per-agent panel
+  // shows its OUTGOING change (its clean working tree would otherwise yield an empty
+  // diff and misclassify as 'already resolved'). Validated to the fixed literal rev
+  // '@{u}..HEAD' — anything else (including an unknown/garbage range) falls back to the
+  // default working-tree diff (rangeRev null), so a stray param can never inject a rev
+  // (mirroring /api/git-range-diff's rangeRev map discipline, WARDEN-398).
+  const rangeParam = String(req.query.range || '').trim();
+  const rangeRev = rangeParam === 'outgoing' ? '@{u}..HEAD' : null;
 
   const { chat, error } = await resolve(String(req.query.id || ''));
   if (error) return res.status(404).json({ diff: null, untracked: false, path: filePath, error });
@@ -2726,8 +2788,8 @@ app.get('/api/git-diff', async (req, res) => {
     // — runs the diff in-context via docker-exec/ssh (getDeliveredGitDiff), so the
     // realpath containment + git diff resolve where the repo actually lives.
     const result = (!chat.container && chat.host === LOCAL)
-      ? await getLocalGitDiff(cwd, filePath, staged)
-      : await getDeliveredGitDiff(chat, cwd, filePath, staged);
+      ? await getLocalGitDiff(cwd, filePath, staged, rangeRev)
+      : await getDeliveredGitDiff(chat, cwd, filePath, staged, rangeRev);
 
     if (result.status) return res.status(result.status).json({ diff: null, untracked: false, path: filePath, error: result.error });
     if (result.error) return res.json({ diff: null, untracked: false, path: filePath, error: result.error });

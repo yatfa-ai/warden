@@ -32,11 +32,21 @@ export interface GitStateChat {
 // /api/git-status already returns per chat (parsed from `git status --porcelain`)
 // — the join key detectProjectFileCollisions compares across agents. null for a
 // detached/no-branch chat (contributes nothing).
+//
+// outgoingFiles (WARDEN-601) is the UNPUSHED-COMMIT changed-file list (parsed from
+// `git diff --name-only @{u}..HEAD`) — the join key for the IMPENDING cross-agent
+// collision detector. Where `files` is the working-tree WIP set, this is the
+// committed-but-not-pushed set: agent A can have F here with a CLEAN tree (F ∉
+// files), which is exactly the case the working-tree×working-tree detector is blind
+// to (A contributes nothing to the `files` join) yet B's next pull collides on F.
+// null for a detached/no-branch/in-sync (ahead 0) chat. A bare `string[]` (no status
+// codes — `--name-only` carries none), unlike `files`' porcelain objects.
 export interface GitStateStatus {
   clean?: boolean | null;
   ahead?: number | null;
   behind?: number | null;
   files?: { path: string }[] | null;
+  outgoingFiles?: string[] | null;
 }
 
 // One contributing agent for a project's WIP breakdown (WARDEN-268). The project
@@ -148,9 +158,30 @@ export function summarizeProjectGitState(
 // status/conflict fields are intentionally NOT part of it (two agents creating
 // the same new file path collide on `git add`/commit, so untracked `??` paths
 // count too).
+//
+// `kind` (WARDEN-601) discriminates the two collision classes the rollup surfaces:
+//   - omitted (≡ 'live') — WARDEN-288's working-tree×working-tree collision (both
+//     agents have the path dirty right now). Existing live collisions omit it so
+//     this shape stays deep-equal to pre-601 tests.
+//   - 'impending' — WARDEN-601's committed-outgoing × working-tree-WIP collision:
+//     one agent committed the path (clean tree) and another has it dirty; the
+//     collision lands on the next push/pull. Visually distinct in the rollup.
+export interface FileCollisionAgent {
+  key: string;  // c.key || c.id — the same lookup the per-row GitBranchBadge uses
+  // source (WARDEN-601) marks WHICH side an agent brings to an 'impending' collision:
+  //   'outgoing' — this agent's change to the path lives in an unpushed COMMIT (its
+  //     working tree is clean for this path), so the compare dialog must fetch the
+  //     path's diff from the outgoing range (@{u}..HEAD), NOT the (empty) working tree.
+  //   'wip'      — this agent has the path dirty in its working tree (the live side).
+  // Omitted for the working-tree×working-tree 'live' collision — those always fetch
+  // the working-tree diff, so the compare dialog treats a missing source as 'wip'.
+  source?: 'outgoing' | 'wip';
+}
+
 export interface FileCollision {
   path: string;
-  agents: { key: string }[];  // ≥2 distinct agent keys, in chats iteration order
+  agents: FileCollisionAgent[];  // ≥2 distinct agent keys, in chats iteration order
+  kind?: 'live' | 'impending';
 }
 
 export interface FileCollisions {
@@ -245,6 +276,111 @@ export function detectProjectFileCollisions(
     }
     // Sparse: only projects with at least one colliding path get an entry, so a
     // clean chip shows no ⚠.
+    if (colliding.length > 0) {
+      perProject[project] = { paths: colliding };
+      total.paths.push(...colliding);
+    }
+  }
+
+  return { perProject, total };
+}
+
+/**
+ * Detect cross-agent IMPENDING file collisions (WARDEN-601): a changed-file path that
+ * one active agent has in its UNPUSHED commits (outgoingFiles) while ANOTHER active
+ * agent in the SAME project has dirty in its working tree (files). The collision
+ * class the working-tree×working-tree detector (`detectProjectFileCollisions`,
+ * WARDEN-288) is structurally blind to: agent A committed F (A's tree is clean → F
+ * ∉ A.files → A contributes nothing to the WIP join) while agent B has F dirty — so
+ * today NO collision is flagged, yet B's next pull (after A pushes) collides on F.
+ * It only becomes visible at pull/push time, too late to coordinate; this surfaces it
+ * now, as a forward-looking sibling of the live ⚠.
+ *
+ * Population mirrors detectProjectFileCollisions exactly (active chats with a
+ * project, status by `key || id`). For each project, per path, it cross-joins:
+ *   committers (source 'outgoing') — agents with the path in outgoingFiles; AND
+ *   editors    (source 'wip')      — agents with the path in files (working tree).
+ * A path with ≥1 committer AND ≥1 editor (distinct agents — which they are by
+ * construction) is an impending collision. The committer-clean rule keeps this
+ * orthogonal and noise-free with the live detector: an agent that has the path BOTH
+ * outgoing AND dirty is NOT counted as a committer (its dirty copy already makes it a
+ * live-collision contributor alongside any other dirty agent), so a path already
+ * surfaced by the live ⚠ is NOT re-surfaced here as impending. `outgoingFiles` null
+ * (detached/no-branch/in-sync) or missing contributes no committer; `files` null/
+ * empty contributes no editor — both exactly like a not-yet-fetched chat.
+ *
+ * Returns the SAME sparse `{ perProject, total }` shape as detectProjectFileCollisions
+ * so the rollup renders both through one badge, each entry tagged `kind: 'impending'`
+ * with agents tagged `source: 'outgoing' | 'wip'` (committers first, then editors) so
+ * the compare dialog can source the committer's panel from its outgoing change.
+ * Paths/agents emit in `chats` iteration order so tests assert deep equality — the
+ * convention the rest of this module follows.
+ */
+export function detectProjectImpendingCollisions(
+  chats: GitStateChat[],
+  gitStatus: Record<string, GitStateStatus>,
+): FileCollisionSummary {
+  // project -> (path -> { committers, editors }) where each list holds distinct agent
+  // keys in chats iteration order. Maps preserve insertion order, so iterating yields
+  // projects, paths, and agents all in first-seen (= chats iteration) order.
+  const byProject = new Map<string, Map<string, { committers: string[]; editors: string[] }>>();
+
+  for (const c of chats) {
+    if (!c.active || !c.project) continue;
+    const status = gitStatus[c.key || c.id];
+    if (!status) continue;
+    const key = c.key || c.id;
+
+    // The working-tree WIP path set (the editor side) — distinct paths only.
+    const wipPaths = new Set<string>();
+    for (const f of status.files ?? []) {
+      const p = f?.path;
+      if (p) wipPaths.add(p);
+    }
+    const outgoing = status.outgoingFiles ?? [];
+
+    let paths = byProject.get(c.project);
+    if (!paths) { paths = new Map(); byProject.set(c.project, paths); }
+
+    // Committers: path in outgoing AND NOT in wip (clean tree for that path — the
+    // exact case the live WIP join is blind to). An agent with the path BOTH
+    // outgoing and dirty is skipped here (it stays an editor below) so the live
+    // detector owns that overlap and this one adds no noise on top of it.
+    for (const p of outgoing) {
+      if (!p || wipPaths.has(p)) continue;
+      let entry = paths.get(p);
+      if (!entry) { entry = { committers: [], editors: [] }; paths.set(p, entry); }
+      if (!entry.committers.includes(key)) entry.committers.push(key);
+    }
+    // Editors: path in wip (dirty tree). Distinct keys only.
+    for (const p of wipPaths) {
+      let entry = paths.get(p);
+      if (!entry) { entry = { committers: [], editors: [] }; paths.set(p, entry); }
+      if (!entry.editors.includes(key)) entry.editors.push(key);
+    }
+  }
+
+  const perProject: Record<string, FileCollisions> = {};
+  const total: FileCollisions = { paths: [] };
+
+  for (const [project, paths] of byProject) {
+    const colliding: FileCollision[] = [];
+    for (const [path, entry] of paths) {
+      // An impending collision needs ≥1 committer AND ≥1 editor (distinct agents —
+      // guaranteed, since a committer is clean for the path and an editor is dirty).
+      // Committers first (the impending-conflict source), then editors, in chats order.
+      if (entry.committers.length > 0 && entry.editors.length > 0) {
+        colliding.push({
+          path,
+          kind: 'impending',
+          agents: [
+            ...entry.committers.map((k) => ({ key: k, source: 'outgoing' as const })),
+            ...entry.editors.map((k) => ({ key: k, source: 'wip' as const })),
+          ],
+        });
+      }
+    }
+    // Sparse: only projects with at least one impending path get an entry.
     if (colliding.length > 0) {
       perProject[project] = { paths: colliding };
       total.paths.push(...colliding);

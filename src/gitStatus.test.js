@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseReflog, parseDiffStat, isConflictStatus, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, parseGitBranches, buildDockerGitArgv } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseOutgoingFiles, parseStashCount, parseStashList, parseReflog, parseDiffStat, isConflictStatus, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, parseGitBranches, buildDockerGitArgv } from './gitStatus.js';
 
 describe('parseGitStatusPorcelain', () => {
   it('parses the most common case: unstaged modification as the FIRST file', () => {
@@ -371,6 +371,52 @@ describe('parseAheadBehind', () => {
 
   it('tolerates leading/trailing whitespace', () => {
     assert.deepEqual(parseAheadBehind('  2\t5  '), { ahead: 5, behind: 2 });
+  });
+});
+
+describe('parseOutgoingFiles', () => {
+  // `git diff --name-only @{u}..HEAD` prints one cwd-relative path per line for the
+  // files changed in an agent's UNPUSHED commits — the join key for the impending
+  // cross-agent file-conflict detector (WARDEN-601). Unlike porcelain there are no
+  // status codes, so this is the simple split/trim/drop-empties shape. Empty input
+  // → [] (the route additionally nulls it unless branch && ahead > 0).
+
+  it('parses a normal multi-file outgoing set', () => {
+    assert.deepEqual(parseOutgoingFiles('src/auth.js\nsrc/config.js\n'), ['src/auth.js', 'src/config.js']);
+  });
+
+  it('parses a single file', () => {
+    assert.deepEqual(parseOutgoingFiles('README.md\n'), ['README.md']);
+  });
+
+  it('returns [] for empty output (no unpushed commits / no upstream)', () => {
+    // git exits non-zero with empty stdout when ahead is 0 or there's no @{u}.
+    assert.deepEqual(parseOutgoingFiles(''), []);
+  });
+
+  it('handles undefined / null input without throwing', () => {
+    assert.deepEqual(parseOutgoingFiles(undefined), []);
+    assert.deepEqual(parseOutgoingFiles(null), []);
+  });
+
+  it('accepts a Buffer input', () => {
+    assert.deepEqual(parseOutgoingFiles(Buffer.from('a.js\nb.js\n')), ['a.js', 'b.js']);
+  });
+
+  it('drops blank lines (e.g. the trailing newline) rather than emitting ""', () => {
+    assert.deepEqual(parseOutgoingFiles('a.js\n\nb.js\n'), ['a.js', 'b.js']);
+  });
+
+  it('trims per-line whitespace (never a leading-space path corruption)', () => {
+    assert.deepEqual(parseOutgoingFiles('  a.js  \n b.js\n'), ['a.js', 'b.js']);
+  });
+
+  it('tolerates CRLF line endings (e.g. over SSH)', () => {
+    assert.deepEqual(parseOutgoingFiles('a.js\r\nb.js\r\n'), ['a.js', 'b.js']);
+  });
+
+  it('preserves paths with spaces (the join key, not split on spaces)', () => {
+    assert.deepEqual(parseOutgoingFiles('src/my file.js\n'), ['src/my file.js']);
   });
 });
 

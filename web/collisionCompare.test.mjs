@@ -31,7 +31,7 @@ const { code } = await transformWithOxc(src, libPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-collision-compare-test-'));
 const tmpFile = join(tmpDir, 'collisionCompare.mjs');
 writeFileSync(tmpFile, code);
-const { reduceCollisionDiffs, reduceCrossAgentDiff } = await import(tmpFile);
+const { reduceCollisionDiffs, reduceCrossAgentDiff, buildCollisionDiffUrl } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -262,6 +262,54 @@ test('error takes precedence over an empty diff (an errored identical read is st
   const panel = reduceCrossAgentDiff(...PAIR, fulfilled(crossDiff('', 'B: binary file')));
   assert.equal(panel.status, 'error');
   assert.equal(panel.error, 'B: binary file');
+});
+
+// --- buildCollisionDiffUrl (WARDEN-601) --------------------------------------
+// The per-agent /api/git-diff URL the compare dialog fans out, chosen by the
+// agent's collision `source`. The load-bearing swap: an OUTGOING contributor (an
+// impending collision's committer, clean working tree) MUST get &range=outgoing or
+// its panel would fetch an empty working-tree diff and misclassify as 'already
+// resolved'. A WIP contributor (and a live collision's source-less agents) MUST
+// get the plain working-tree URL. Extracted into the pure layer so this is tested.
+console.log('\nbuildCollisionDiffUrl (WARDEN-601): source selects the diff range');
+test('a WIP contributor (no source) → plain working-tree /api/git-diff URL', () => {
+  assert.equal(
+    buildCollisionDiffUrl('agent-1', 'src/auth.js'),
+    '/api/git-diff?id=agent-1&path=src%2Fauth.js',
+  );
+});
+
+test('source:"wip" → plain working-tree URL (same as no source)', () => {
+  assert.equal(
+    buildCollisionDiffUrl('agent-1', 'src/auth.js', 'wip'),
+    '/api/git-diff?id=agent-1&path=src%2Fauth.js',
+  );
+});
+
+test('source:"outgoing" → appends &range=outgoing (the committer fetches its committed change)', () => {
+  assert.equal(
+    buildCollisionDiffUrl('agent-1', 'src/auth.js', 'outgoing'),
+    '/api/git-diff?id=agent-1&path=src%2Fauth.js&range=outgoing',
+  );
+});
+
+test('null/undefined source → plain working-tree URL (live-collision backward compat)', () => {
+  assert.equal(buildCollisionDiffUrl('a', 'f.js', null), '/api/git-diff?id=a&path=f.js');
+  assert.equal(buildCollisionDiffUrl('a', 'f.js', undefined), '/api/git-diff?id=a&path=f.js');
+});
+
+test('id and path are URL-encoded (spaces and query chars are safe)', () => {
+  assert.equal(
+    buildCollisionDiffUrl('agent 1', 'src/my file.js', 'outgoing'),
+    '/api/git-diff?id=agent%201&path=src%2Fmy%20file.js&range=outgoing',
+  );
+});
+
+test('the range swap is the ONLY difference between outgoing and wip for the same agent+path', () => {
+  // Precisely the WARDEN-601 contract: same agent, same path, one fetch difference.
+  const wip = buildCollisionDiffUrl('a1', 'F', 'wip');
+  const out = buildCollisionDiffUrl('a1', 'F', 'outgoing');
+  assert.equal(out, `${wip}&range=outgoing`);
 });
 
 console.log(`\n✓ COLLISION COMPARE TESTS PASS (${passed})`);
