@@ -563,7 +563,13 @@ export function GitCollisionBadge({ collisions, impending, chats, gitStatus, onO
 /** One touched-file row inside an expanded commit. Click to fetch and reveal the
  *  committed diff for that file (`git show --format= <hash> -- <path>`). Owns its
  *  diff fetch state so a re-collapse/re-expand is instant. */
-function CommitFile({ chatId, hash, file, onOpenFile }: { chatId: string; hash: string; file: GitFile; onOpenFile?: (path: string) => void }) {
+// Exported (WARDEN-597) so the FleetRecentCommits feed can render the SAME expanded
+// commit → changed-files → per-file /api/git-show diff path the per-agent popover
+// uses, without duplicating the diff machinery. Each row in that cross-fleet feed
+// passes its OWN agent key as `chatId` (git-show's `id` param), so the per-file diff
+// resolves against the right repo — the component is multi-agent where this badge is
+// single-agent, but `chatId` is just the git-show `id`, so it composes cleanly.
+export function CommitFile({ chatId, hash, file, onOpenFile }: { chatId: string; hash: string; file: GitFile; onOpenFile?: (path: string) => void }) {
   const [open, setOpen] = useState(false);
   const [diff, setDiff] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -624,7 +630,9 @@ function CommitFile({ chatId, hash, file, onOpenFile }: { chatId: string; hash: 
  *  subject-only commit stays compact (the collapsed row already shows the subject).
  *  whitespace-pre-wrap preserves the message's own line breaks; break-words +
  *  muted text-[10px] match DiffBlock's density. (WARDEN-388) */
-function CommitMessage({ message }: { message?: string }) {
+// Exported (WARDEN-597) — see CommitFile's export note. Shared by the FleetRecentCommits
+// feed so a cross-fleet commit row expands to the SAME commit body this badge shows.
+export function CommitMessage({ message }: { message?: string }) {
   if (!message) return null;
   return (
     <div className="whitespace-pre-wrap break-words px-1 pb-0.5 text-[10px] text-muted-foreground">{message}</div>
