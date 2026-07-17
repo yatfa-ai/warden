@@ -51,7 +51,7 @@ import { FleetCommitSearch } from './sidebar/FleetCommitSearch';
 // into the fleet view headers (the surfaces that replaced the abolished project-
 // chip row, WARDEN-372). The badge is fully built; it was simply never rendered.
 import { GitCollisionBadge } from './sidebar/GitBadges';
-import { detectProjectFileCollisions } from '@/lib/gitStateSummary';
+import { detectProjectFileCollisions, detectProjectImpendingCollisions } from '@/lib/gitStateSummary';
 import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/SidebarBits';
 import { SessionTagChips, SessionTagFilterRow } from './sidebar/SessionTags';
 import { computeTagsInUse, filterSessionsByTags, addTag, removeTag } from '@/lib/sessionTags';
@@ -165,7 +165,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
   const [activeTagFilters, setActiveTagFilters] = useState<Set<string>>(new Set());
   const [hostSessions, setHostSessions] = useState<Record<string, { sessions: ClaudeSession[]; claudeAvailable?: boolean }>>({});
   const [loadingHost, setLoadingHost] = useState<string | null>(null);
-  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; detached?: boolean; headSha?: string | null; headDate?: string | null; clean: boolean | null; cwd: string; files?: GitFile[]; ahead?: number | null; behind?: number | null; upstream?: string | null; inProgress?: { operation: string | null; detail?: string | null }; stashCount?: number | null; diffstat?: DiffStat | null }>>({});
+  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; detached?: boolean; headSha?: string | null; headDate?: string | null; clean: boolean | null; cwd: string; files?: GitFile[]; ahead?: number | null; behind?: number | null; upstream?: string | null; inProgress?: { operation: string | null; detail?: string | null }; stashCount?: number | null; diffstat?: DiffStat | null; outgoingFiles?: string[] | null }>>({});
   // recent commit history (git log) per chatId — cached so re-expanding the badge is instant
   const [gitLog, setGitLog] = useState<Record<string, GitCommit[]>>({});
   const [gitLogLoading, setGitLogLoading] = useState<Record<string, boolean>>({});
@@ -238,7 +238,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
       const r = await fetch(`/api/git-status?id=${encodeURIComponent(chatId)}`);
       const j = await r.json();
       if (j.branch) {
-        setGitStatus((p) => ({ ...p, [chatId]: { branch: j.branch, detached: j.detached, headSha: j.headSha, headDate: j.headDate, clean: j.clean, cwd: j.cwd, files: j.files, ahead: j.ahead, behind: j.behind, upstream: j.upstream, inProgress: j.inProgress, stashCount: j.stashCount, diffstat: j.diffstat } }));
+        setGitStatus((p) => ({ ...p, [chatId]: { branch: j.branch, detached: j.detached, headSha: j.headSha, headDate: j.headDate, clean: j.clean, cwd: j.cwd, files: j.files, ahead: j.ahead, behind: j.behind, upstream: j.upstream, inProgress: j.inProgress, stashCount: j.stashCount, diffstat: j.diffstat, outgoingFiles: j.outgoingFiles } }));
       }
     } catch (error) {
       // Git status is non-critical, so just log it without showing a toast
@@ -491,6 +491,21 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
       ? chats.filter((c) => c.host === view.host)
       : chats;
     return detectProjectFileCollisions(viewChats, gitStatus).total.paths;
+  }, [view, chats, gitStatus]);
+
+  // WARDEN-601: the IMPENDING counterpart to fleetCollisionPaths — cross-joins each
+  // agent's unpushed-commit file-set (outgoingFiles, now on /api/git-status) against
+  // the OTHER agents' working-tree WIP, so the rollup can surface a collision the
+  // working-tree×working-tree detector is blind to (one agent committed the file,
+  // clean tree, while another has it dirty). Same view population + cached gitStatus
+  // map as the live memo (no new fetch — outgoingFiles rides the existing per-tab
+  // /api/git-status poll). Empty when no committed-outgoing × working-tree overlap
+  // exists, in which case the ⏱ renders nothing (zero noise).
+  const fleetImpendingPaths = useMemo(() => {
+    const viewChats = view.kind === 'host'
+      ? chats.filter((c) => c.host === view.host)
+      : chats;
+    return detectProjectImpendingCollisions(viewChats, gitStatus).total.paths;
   }, [view, chats, gitStatus]);
 
   // Fan the message out to every selected agent via the existing per-target
@@ -1001,6 +1016,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
               popover's jump rows + per-path "Compare edits" (WARDEN-321) live in the badge. */}
           <GitCollisionBadge
             collisions={fleetCollisionPaths}
+            impending={fleetImpendingPaths}
             chats={hostChats}
             gitStatus={gitStatus}
             onOpenChat={onOpenChat}
@@ -1194,6 +1210,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
             file (silent-when-clean). */}
         <GitCollisionBadge
           collisions={fleetCollisionPaths}
+          impending={fleetImpendingPaths}
           chats={chats}
           gitStatus={gitStatus}
           onOpenChat={onOpenChat}

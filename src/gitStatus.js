@@ -251,6 +251,31 @@ export function parseAheadBehind(output) {
 }
 
 /**
+ * Parse `git diff --name-only @{u}..HEAD` output into a list of the file paths an
+ * agent has changed in its UNPUSHED commits (the outgoing set) — the join key for
+ * the impending cross-agent file-conflict detector (WARDEN-601).
+ *
+ * `--name-only` prints one cwd-relative path per line (no status codes, unlike
+ * porcelain), so this is the simple split-on-newline / trim / drop-empties shape —
+ * no X/Y column parsing. Empty output (no unpushed commits, or unpushed commits
+ * that touch nothing — impossible in practice) → `[]`, mirroring how
+ * `parseGitStatusPorcelain` returns `[]` for an empty porcelain blob; the route
+ * additionally nulls it unless `branch && ahead > 0`. CRLF (over SSH) is tolerated
+ * per line, the same as every other line-splitting parser here.
+ *
+ * @param {string|Buffer|undefined} output - Raw stdout from `git diff --name-only @{u}..HEAD`.
+ * @returns {string[]} the outgoing changed-file paths (empty for empty input, never null).
+ */
+export function parseOutgoingFiles(output) {
+  const raw = (output ?? '').toString();
+  return raw
+    .split('\n')
+    .map((line) => line.replace(/\r$/, '')) // tolerate CRLF (e.g. over SSH)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+/**
  * Count the number of `git stash list` entries.
  *
  * Delegates to `parseStashList` (same line-splitting/CRLF/empty-filter pipeline)

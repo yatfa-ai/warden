@@ -51,6 +51,7 @@ import { DiffBlock } from './DiffBlock';
 import {
   reduceCollisionDiffs,
   reduceCrossAgentDiff,
+  buildCollisionDiffUrl,
   type CollisionDiffPanel,
   type CrossAgentDiffPanel,
   type CrossAgentDiffResult,
@@ -91,8 +92,15 @@ export function CollisionCompareDialog({ open, onOpenChange, path, agents, chats
 
   // Stable identity for the effect dep so a new `agents` array reference each
   // parent render does NOT re-trigger the fan-out. The actual fetch keys are this
-  // joined string; same keys → same value → effect skips.
-  const agentKeys = useMemo(() => agents.map((a) => a.key).join('\n'), [agents]);
+  // joined string; same keys → same value → effect skips. The signature includes
+  // each agent's collision `source` (WARDEN-601) because source selects the diff
+  // RANGE (outgoing vs working tree) — two collisions with the same keys+path but a
+  // swapped committer/editor assignment would fetch different diffs, so the source
+  // must be part of the identity or a stale panel could survive a swap.
+  const agentKeys = useMemo(
+    () => agents.map((a) => `${a.key}:${a.source ?? 'wip'}`).join('\n'),
+    [agents],
+  );
 
   useEffect(() => {
     if (!open || !path || agents.length === 0) {
@@ -113,16 +121,27 @@ export function CollisionCompareDialog({ open, onOpenChange, path, agents, chats
     // broadcast.ts's fan-out mapping of 404/500 → { ok:false, error }) so the
     // reducer sees only settled data, never a Response object.
     //
+    // The URL is built per agent by buildCollisionDiffUrl, which appends
+    // `&range=outgoing` for an OUTGOING contributor (an impending collision's
+    // committer, whose clean working tree would otherwise yield an empty diff and
+    // misclassify as 'already resolved') and the plain working-tree URL otherwise
+    // (WARDEN-601). `results[i]` stays aligned with `agents[i]` since the map is
+    // over `agents` in order.
+    //
     // Concurrently, for the common ≥2-agent case, fetch the SINGLE A↔B diff
     // (/api/cross-agent-diff) for the first two agents and reduce it through
     // reduceCrossAgentDiff — the same settled-result → status discipline as the
     // per-agent reducer, so the rejected→error mapping stays in the tested pure
     // seam. The two fetches run in parallel via Promise.all so the A↔B panel
     // doesn't add a sequential round-trip on top of the per-agent fan-out.
+    // NOTE for impending collisions: the committer (agents[0]) has a CLEAN working
+    // tree for the path, so its working-tree bytes == its HEAD bytes == the version
+    // it is about to push — the A↔B working-tree-content diff is therefore ALREADY
+    // the "committed vs WIP" comparison, no special-casing needed (WARDEN-601).
     (async () => {
       const perAgentPromise = Promise.allSettled(
-        keys.map((id) =>
-          fetch(`/api/git-diff?id=${encodeURIComponent(id)}&path=${encodeURIComponent(path)}`)
+        agents.map((a) =>
+          fetch(buildCollisionDiffUrl(a.key, path, a.source))
             .then(async (r): Promise<GitDiffResult> => {
               const j = await r.json().catch(() => ({}));
               if (!r.ok) return { diff: null, untracked: false, error: j.error || `HTTP ${r.status}` };

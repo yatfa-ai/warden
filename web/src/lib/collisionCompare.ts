@@ -25,6 +25,41 @@ export interface GitDiffResult {
   error?: string | null;
 }
 
+/** The side an agent brings to a collision — decides which diff the compare dialog
+ *  fetches for that agent's panel (WARDEN-601). 'outgoing' = the agent's change to
+ *  the path lives in an unpushed COMMIT (clean working tree) → the panel MUST fetch
+ *  the outgoing (@{u}..HEAD) diff, or it would be empty and misclassify as 'already
+ *  resolved' (the load-bearing nuance for an IMPENDING collision's committer).
+ *  Undefined / 'wip' = the agent has the path dirty in its working tree → fetch the
+ *  ordinary working-tree diff (the original WARDEN-321 behavior). */
+export type CollisionAgentSource = 'outgoing' | 'wip';
+
+/**
+ * Build the per-agent `/api/git-diff` URL the compare dialog fans out, choosing the
+ * diff RANGE by the agent's collision `source` (WARDEN-601).
+ *
+ * For a working-tree contributor (source omitted / 'wip') this is the original
+ * `/api/git-diff?id=&path=` (the file's uncommitted change vs HEAD) — unchanged
+ * behavior for the live WARDEN-288 collision. For an OUTGOING contributor
+ * (source 'outgoing' — an impending collision's committer, whose working tree is
+ * clean for this path) it appends `&range=outgoing` so the panel shows the file's
+ * UNPUSHED-COMMIT change instead of an empty working-tree diff that would wrongly
+ * read "file matches HEAD — already resolved." Extracted into the pure layer (not
+ * inlined in the React component) so the outgoing⇄working-tree URL swap is unit-
+ * testable without a React runner (this repo has none), mirroring
+ * buildFleetSearchBaseUrl's extraction.
+ *
+ * `path` and `key` are URL-encoded so special chars (spaces, query chars) are safe.
+ */
+export function buildCollisionDiffUrl(
+  key: string,
+  path: string,
+  source?: CollisionAgentSource | null,
+): string {
+  const base = `/api/git-diff?id=${encodeURIComponent(key)}&path=${encodeURIComponent(path)}`;
+  return source === 'outgoing' ? `${base}&range=outgoing` : base;
+}
+
 /** The per-panel render classification the dialog branches on. Ordered from most
  *  to least useful so a switch/lookup falls through sensibly. */
 export type CollisionDiffStatus = 'ok' | 'untracked' | 'empty' | 'error';

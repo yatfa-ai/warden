@@ -341,9 +341,19 @@ export function GitStateBadges({ dirty, unpushed, behind, agents, chats, gitStat
 // with its contributing agents beneath — a human can jump to either agent.
 // No new fetch: the collisions come from the cached gitStatus map via
 // detectProjectFileCollisions (which reads the per-chat `files` already cached).
-export function GitCollisionBadge({ collisions, chats, gitStatus, onOpenChat, showProject }: {
+// One trigger + popover + compare-dialog for a SINGLE collision class — `live`
+// (the working-tree×working-tree ⚠, WARDEN-288) or `impending` (the committed-
+// outgoing×working-tree ⏱, WARDEN-601). Extracted from GitCollisionBadge so the
+// badge renders the two classes as visually-distinct siblings (⚠ red vs ⏱ amber)
+// without duplicating the popover/dialog JSX. Each class has its own popover
+// `open` state and its own `compareTarget` so opening one never interferes with
+// the other. The agent rows tag each contributor's side for an impending collision
+// (committed vs editing) so a human sees who is the source of the impending
+// conflict; a live collision's rows carry no tag (both sides are "editing").
+function CollisionPopoverGroup({ kind, collisions, chats, gitStatus, onOpenChat, showProject }: {
+  kind: 'live' | 'impending';
   // Already scoped to this chip (a project's paths, or `total.paths` for the
-  // "All Projects" chip). Empty ⇒ renders nothing (no ⚠ on a clean chip).
+  // "All Projects" chip). Empty ⇒ the group is not rendered at all.
   collisions: FileCollision[];
   chats: Chat[];
   // Minimal slice the popover rows read (just the branch label) — the full
@@ -358,14 +368,30 @@ export function GitCollisionBadge({ collisions, chats, gitStatus, onOpenChat, sh
 }) {
   const [open, setOpen] = useState(false);
   // The path + contributors scoped to the "Compare edits" dialog (WARDEN-321): set
-  // by the per-path Compare action below, null while the dialog is closed. Lives
-  // in the badge (not its parent) so the change stays minimal — the badge already
-  // owns its popover `open` state and has collisions/chats/gitStatus/onOpenChat in
-  // hand, which is everything the dialog needs.
+  // by the per-path Compare action below, null while the dialog is closed. Lives in
+  // the group (not its parent) so the badge stays minimal — the group already owns
+  // its popover `open` state and has collisions/chats/gitStatus/onOpenChat in hand,
+  // which is everything the dialog needs.
   const [compareTarget, setCompareTarget] = useState<{ path: string; agents: FileCollision['agents'] } | null>(null);
   const count = collisions.length;
   if (count <= 0) return null;
-  const title = `${count} file${count === 1 ? '' : 's'} edited by 2+ agents — click to list`;
+
+  // Per-class visual identity. Live ⚠ (red) = two agents editing the same file
+  // RIGHT NOW. Impending ⏱ (amber) = one agent already committed (unpushed) while
+  // another is editing — the collision lands on the next push/pull, hence the
+  // forward-looking stopwatch glyph (text-presented via the VS15 selector so it
+  // reads as text, matching the ⚠/±/↑ vocabulary, not an emoji).
+  const isImpending = kind === 'impending';
+  const glyph = isImpending ? '⏱︎' : '⚠';
+  const accentText = isImpending ? 'text-amber-400 hover:text-amber-300' : 'text-red-400 hover:text-red-300';
+  const accentHeader = isImpending ? 'text-amber-400' : 'text-red-400';
+  const title = isImpending
+    ? `${count} file${count === 1 ? '' : 's'} about to collide — one agent committed (unpushed), another is editing — click to list`
+    : `${count} file${count === 1 ? '' : 's'} edited by 2+ agents — click to list`;
+  const headerLabel = isImpending
+    ? `impending · committed × editing · ${count} path${count === 1 ? '' : 's'}`
+    : `same file · 2+ agents · ${count} path${count === 1 ? '' : 's'}`;
+
   return (
     <>
     <RadixPopover.Root open={open} onOpenChange={setOpen}>
@@ -388,9 +414,9 @@ export function GitCollisionBadge({ collisions, chats, gitStatus, onOpenChat, sh
             }
           }}
           title={title}
-          className="ml-0.5 inline-flex items-center text-[10px] cursor-pointer rounded-sm text-red-400 hover:text-red-300 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+          className={`ml-0.5 inline-flex items-center text-[10px] cursor-pointer rounded-sm ${accentText} focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary`}
         >
-          ⚠{count}
+          {glyph}{count}
         </span>
       </RadixPopover.Trigger>
       <RadixPopover.Portal>
@@ -401,8 +427,8 @@ export function GitCollisionBadge({ collisions, chats, gitStatus, onOpenChat, sh
           className="z-50 min-w-56 max-w-80 rounded-md border border-border bg-popover p-1.5 text-popover-foreground shadow-lg outline-none data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0"
         >
           <div className="mb-1 px-0.5">
-            <span className="text-[10px] font-medium text-red-400">
-              same file · 2+ agents · {count} path{count === 1 ? '' : 's'}
+            <span className={`text-[10px] font-medium ${accentHeader}`}>
+              {headerLabel}
             </span>
           </div>
           <div className="max-h-72 overflow-auto flex flex-col gap-1">
@@ -410,6 +436,9 @@ export function GitCollisionBadge({ collisions, chats, gitStatus, onOpenChat, sh
               // The project the first contributor belongs to — disambiguates the
               // same path colliding in two different projects on the "All Projects" chip.
               const project = showProject ? findChat(chats, col.agents[0]?.key)?.project : undefined;
+              const compareLabel = isImpending
+                ? `compare the committed vs in-progress edits to ${col.path}`
+                : `compare each agent's uncommitted edits to ${col.path}`;
               return (
                 <div key={`${col.path}·${col.agents.map((a) => a.key).join(',')}`} className="rounded">
                   <div className="flex items-center gap-1 px-1 py-0.5" title={col.path}>
@@ -419,10 +448,12 @@ export function GitCollisionBadge({ collisions, chats, gitStatus, onOpenChat, sh
                     )}
                   </div>
                   {/* The resolution layer (WARDEN-321): open the per-path compare
-                      dialog showing each agent's uncommitted diff stacked. A real
-                      shadcn <Button> — the header row above is plain, so there's no
-                      nested-interactive issue (the chip and the popover trigger are
-                      the only buttons/role=button in play) — per WARDEN-68.
+                      dialog showing each agent's diff stacked. For an impending
+                      collision the committer's panel is sourced from its OUTGOING
+                      change (WARDEN-601, via the agent `source` tag the dialog
+                      reads). A real shadcn <Button> — the header row above is plain,
+                      so there's no nested-interactive issue (the chip and the popover
+                      trigger are the only buttons/role=button in play) — per WARDEN-68.
                       stopPropagation + close the popover so the dialog takes focus,
                       mirroring the per-agent rows' setOpen(false) + jump discipline. */}
                   <Button
@@ -430,8 +461,8 @@ export function GitCollisionBadge({ collisions, chats, gitStatus, onOpenChat, sh
                     size="xs"
                     onClick={(e) => { e.stopPropagation(); setOpen(false); setCompareTarget({ path: col.path, agents: col.agents }); }}
                     className="ml-1 mb-0.5 text-muted-foreground hover:text-foreground"
-                    aria-label={`compare each agent's uncommitted edits to ${col.path}`}
-                    title={`compare each agent's uncommitted edits to ${col.path}`}
+                    aria-label={compareLabel}
+                    title={compareLabel}
                   >
                     <GitCompare />
                     Compare edits
@@ -441,6 +472,11 @@ export function GitCollisionBadge({ collisions, chats, gitStatus, onOpenChat, sh
                       const c = findChat(chats, a.key);
                       const name = displayName(c);
                       const branch = gitStatus[a.key]?.branch ?? null;
+                      // Impending-collision side tag (WARDEN-601): 'committed' = this
+                      // agent's change is in an unpushed commit (clean tree, the
+                      // conflict source); 'editing' = working-tree WIP. Omitted for a
+                      // live collision (both sides are "editing").
+                      const sideTag = a.source === 'outgoing' ? 'committed' : a.source === 'wip' ? 'editing' : null;
                       return (
                         <li key={a.key} className="rounded">
                           {/* role="button" div (not a <button>) so the row is keyboard-
@@ -464,6 +500,9 @@ export function GitCollisionBadge({ collisions, chats, gitStatus, onOpenChat, sh
                                 </span>
                               )}
                             </span>
+                            {sideTag && (
+                              <span className={`shrink-0 text-[9px] uppercase tracking-wide ${a.source === 'outgoing' ? 'text-amber-400/80' : 'text-muted-foreground'}`} title={sideTag}>{sideTag}</span>
+                            )}
                           </div>
                         </li>
                       );
@@ -488,6 +527,35 @@ export function GitCollisionBadge({ collisions, chats, gitStatus, onOpenChat, sh
         gitStatus={gitStatus}
         onOpenChat={onOpenChat}
       />
+    </>
+  );
+}
+
+export function GitCollisionBadge({ collisions, impending, chats, gitStatus, onOpenChat, showProject }: {
+  // Live working-tree×working-tree collisions (WARDEN-288). Empty ⇒ no ⚠.
+  collisions: FileCollision[];
+  // Impending committed-outgoing×working-tree collisions (WARDEN-601). Optional —
+  // a caller with no impending signal omits it and the ⏱ never renders. Empty ⇒ no ⏱.
+  impending?: FileCollision[];
+  chats: Chat[];
+  // Minimal slice the popover rows read (just the branch label) — the full
+  // gitStatus map ChatSidebar holds is structurally compatible.
+  gitStatus: Record<string, { branch: string | null }>;
+  onOpenChat: (id: string) => void;
+  // Show a project tag on each path header (the "All Projects" chip, where the
+  // same path can collide in two different projects and needs disambiguation).
+  // Looked up from the first contributor's chat in the React layer — the helper
+  // stays display-field-free, exactly like ProjectGitAgent.
+  showProject?: boolean;
+}) {
+  // Render the live ⚠ and the impending ⏱ as siblings in the same rollup. Each
+  // renders nothing when its list is empty (silent-when-clean), so a chip with no
+  // collisions of either class shows neither glyph. The live group stays exactly
+  // the pre-WARDEN-601 ⚠ behavior when `impending` is absent or empty.
+  return (
+    <>
+      <CollisionPopoverGroup kind="live" collisions={collisions} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} showProject={showProject} />
+      <CollisionPopoverGroup kind="impending" collisions={impending ?? []} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} showProject={showProject} />
     </>
   );
 }
