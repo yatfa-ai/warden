@@ -14,6 +14,7 @@ import { indexByWatchKey, toggleWatchManyKeys } from '@/lib/chatWatch';
 import { requestAlertPermission, type AttentionSeverityPrefs } from '@/lib/desktopAlerts';
 import { useTokenBudget } from '@/lib/useTokenBudget';
 import { useAttentionRollup } from '@/lib/useAttentionRollup';
+import { useHostStatuses } from '@/lib/useHostStatuses';
 import { snoozeExpiry, pruneExpired, withoutSnoozeKey, snoozeManyKeys, type AlertMuteMode, type SnoozeDuration } from '@/lib/snooze';
 import { rankAttention, hasReturnContent, attentionReason, type AttentionItem } from '@/lib/attentionRollup';
 import { cn } from '@/lib/utils';
@@ -857,31 +858,6 @@ function App() {
     void discoverHost(THIS_MACHINE);
   }, [discoverHost]);
 
-  // Poll host connectivity statuses every 30s. Lifted here from ChatSidebar so the
-  // dots stay live while the full-page Open Chat browser (which replaces the
-  // sidebar) is open. Graceful degradation: on failure every host reads 'unknown'.
-  useEffect(() => {
-    const fetchHostStatuses = async () => {
-      try {
-        const r = await fetch('/api/hosts/status');
-        const j = await r.json();
-        const statuses: Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }> = {};
-        j.hosts.forEach((h: { host: string; status: string; latency_ms: number | null }) => {
-          statuses[h.host] = {
-            status: h.status as 'online' | 'offline' | 'unknown',
-            latency_ms: h.latency_ms,
-          };
-        });
-        setHostStatuses(statuses);
-      } catch {
-        // Graceful degradation — leave prior statuses (or unknown) in place.
-      }
-    };
-    fetchHostStatuses();
-    const interval = window.setInterval(fetchHostStatuses, pollIntervalMs);
-    return () => window.clearInterval(interval);
-  }, [pollIntervalMs]);
-
   // open chat: open pane + focus. The dedup point for the multi-workspace model
   // (WARDEN-256): a pane lives in at most one workspace, so if `id` is already a
   // pane in some workspace we switch there + focus it instead of duplicating it
@@ -1511,10 +1487,14 @@ function App() {
   // alerts respect.
   const openSessionsView = useCallback(() => { setChatBrowserSortUsage(true); setChatBrowserOpen(true); }, []);
   const { budget: tokenBudget } = useTokenBudget({ attentionDesktopAlerts, onOpenSessions: openSessionsView, hostLabels });
-  // Host connectivity statuses. Polled at the App level (formerly inside
-  // ChatSidebar) so they stay live while the full-page browser view — which
-  // replaces ChatSidebar — is open. Fed to both ChatSidebar and the browser page.
-  const [hostStatuses, setHostStatuses] = useState<Record<string, { status: 'online' | 'offline' | 'unknown'; latency_ms: number | null }>>({});
+  // Host connectivity statuses, sourced from the shared /api/hosts/status
+  // singleton (useHostStatuses, WARDEN-237). One ref-counted, visibility-gated
+  // poll backs every consumer — this App-level feed (host dots in the sidebar
+  // and the full-page Open Chat browser, which replaces ChatSidebar) plus the
+  // Fleet Health dashboard — so there is no second SSH-probing poll. The poll
+  // runs at a fixed 30s and is gated on Page Visibility (WARDEN-609); it does
+  // not track the "Poll Interval" pref (the catalog poll above still does).
+  const hostStatuses = useHostStatuses();
   // Display customization settings
   const [displaySettings, setDisplaySettings] = useState({
     showHostTags: true,
