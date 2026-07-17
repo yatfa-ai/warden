@@ -899,6 +899,169 @@ describe('pollAgentStates: idle companion host receives ZERO capturePanes RPCs (
   });
 });
 
+// ----------------------- pollFleetStates (WARDEN-571) --------------------------
+// The slow "fleet sweep": classify the REST of the fleet (agents NEITHER open NOR
+// watched) so a hidden stuck/erroring/waiting agent surfaces in the badge instead of
+// reading HEALTHY forever. Hard cost gate — the sweep captures ONLY via the companion
+// delta path: a steady-state sweep issues ONE batched capturePanesViaCompanion per
+// hidden companion HOST per ~90s sweep (the subscription's 30s TTL — tuned for the 30s
+// open-pane poll — evicts a hidden pane between sweeps, so each sweep re-subscribes and
+// re-captures once). That is a companion RPC over the PERSISTENT channel, NOT an SSH
+// sweep. Non-companion / LOCAL hosts come back `sweep_skipped` and are NEVER probed.
+// Contrast with pollAgentStates above: the 30s poll keeps its own subscriptions alive
+// (cadence == TTL), so it earns ZERO capturePanes RPCs steady-state; the 90s sweep does
+// not, and the test below asserts the REAL steady state (1/host/sweep), driving the
+// production background TTL eviction between iterations so it cannot fool itself.
+
+describe('pollFleetStates: hidden-fleet sweep (WARDEN-571)', () => {
+  let server, savedEnv, savedHome, tempHome;
+  before(async () => {
+    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+    savedHome = process.env.HOME;
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-fleet-'));
+    process.env.HOME = tempHome;
+    process.env.WARDEN_COMPANION_TRANSPORT = '1';
+    // Dynamic import so this suite stays out of server.js's module-scope side effects
+    // unless this describe runs. HOME is an isolated temp dir so server.js's own load()
+    // reads no real config (pollFleetStates takes cfg/chats as params anyway).
+    server = await import('./server.js');
+  });
+  after(async () => {
+    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+  beforeEach(() => { _resetChannelCacheForTests(); _resetPaneDeltaStateForTests(); });
+  afterEach(() => { _resetChannelCacheForTests(); _resetPaneDeltaStateForTests(); });
+
+  it('steady-state sweep re-captures each hidden companion host ONCE per sweep after the background TTL evicts between sweeps; LOCAL host is sweep_skipped + never probed', async () => {
+    let captureRpc = 0;
+    const t = healthySubTransport({ panes: { 'hidden-a': 'POLLED A', 'hidden-b': 'POLLED B' } });
+    const origWrite = t.write.bind(t);
+    t.write = (line) => { try { if (JSON.parse(line).method === 'capturePanes') captureRpc++; } catch { /* non-JSON noise */ } origWrite(line); };
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    // Two HIDDEN panes on the SAME companion host (proves the per-sweep capture is
+    // batched into ONE capturePanes RPC per host, not one per pane) + a LOCAL host.
+    const chats = [
+      { host: 'prod', key: 'hidden-a', container: 'hidden-a', session: 'agent', project: 'p', role: 'worker' },
+      { host: 'prod', key: 'hidden-b', container: 'hidden-b', session: 'agent', project: 'p', role: 'worker' },
+      { host: '(local)', key: 'local1', session: 'local1', project: 'p', role: 'worker' },
+    ];
+
+    // --- Sweep 1 (bootstrap, ~t=0): prod has no delta yet, so capturePanes issues ONE
+    // batched RPC for the host (both panes) — the graceful bootstrap, exactly as
+    // pollAgentStates does on the first poll after a host enters the watched set. The
+    // LOCAL host is sweep_skipped and never probed. ---
+    let agents = await server.pollFleetStates(chats, {}, deps, {});
+    assert.strictEqual(captureRpc, 1, 'bootstrap sweep captured the companion host ONCE (batched, both panes)');
+    const localRow = agents.find((a) => a.key === 'local1');
+    assert.strictEqual(localRow.state, 'sweep_skipped', 'LOCAL host is sweep_skipped (cost gate)');
+    assert.strictEqual(localRow.sweepSkipped, true, 'flagged sweep_skipped');
+    assert.strictEqual(agents.filter((a) => a.host === 'prod' && !a.sweepSkipped).length, 2, 'both hidden panes classified in the one batched RPC');
+    const t0 = Date.now();
+
+    // --- The companion pushes deltas for the now-subscribed hidden panes (cache fresh). ---
+    const ch = await getChannel('prod', {}, deps);
+    ch._onLine(JSON.stringify({ event: 'paneDelta', panes: { 'hidden-a': 'IDLE A', 'hidden-b': 'IDLE B' } }));
+    assert.ok(hasFreshPaneDelta('prod'), 'precondition: the pushed delta made prod fresh');
+
+    // --- Model the ~90s sweep gap's interior. The hidden panes are owned ONLY by the
+    // 90s sweep — the 30s open-pane /api/agent-states poll never requests them (they are
+    // HIDDEN), so nothing refreshes their subscription TTL between sweeps. The production
+    // background sweep (startPaneDeltaSweep) ticks every AGENT_STATE_TTL_MS (30s) and
+    // evicts any watched key whose lastSeen is >30s stale, so the hidden panes are
+    // unsubscribed ~30s into every 90s gap. Drive THAT eviction with an injected `now`
+    // past the TTL — the exact production path the previous test skipped (the
+    // false-confidence gap: it never ran the background sweep, so the subscription never
+    // aged out and the steady-state read came from a cache the production runtime does
+    // not keep fresh). ---
+    await reconcilePaneSubscriptions([], {}, { now: t0 + 60_000 }, deps);
+    assert.deepStrictEqual(_getAgentStateWatchedForTests(), {}, 'the background TTL tick evicted the hidden panes (no 30s poll refreshed them)');
+
+    // After unsubscribe the companion stops pushing; the cache's lastEventAt ages past
+    // PANE_DELTA_FRESH_MS (6s). Model the last push landing ~10s before this sweep (right
+    // before eviction stopped it) so hasFreshPaneDelta is false and capturePanes re-captures.
+    applyPaneDelta('prod', { event: 'paneDelta', panes: { 'hidden-a': 'STALE A', 'hidden-b': 'STALE B' } }, t0 - 10_000);
+    assert.ok(!hasFreshPaneDelta('prod'), 'precondition: the delta aged out after the subscription was dropped');
+
+    // --- Sweep 2 (~t=90): the subscription was evicted, so reconcile RE-subscribes and
+    // capturePanes issues ONE batched capturePanesViaCompanion for prod. This is the
+    // HONEST steady state — ONE companion RPC per hidden host per sweep (NOT zero, and
+    // NOT an SSH sweep: it is a single batched RPC over the persistent channel). The
+    // LOCAL host stays sweep_skipped and is still never probed. ---
+    agents = await server.pollFleetStates(chats, {}, deps, {});
+    assert.strictEqual(captureRpc, 2, 'steady-state sweep re-captured the hidden host ONCE (1 batched companion RPC per host per sweep after TTL eviction)');
+    assert.strictEqual(agents.find((a) => a.key === 'local1').state, 'sweep_skipped', 'LOCAL host still sweep_skipped on steady-state');
+    const t1 = Date.now();
+
+    // --- Sweep 3: repeat the gap to prove this is the STEADY state, not a one-off. The
+    // count increments by exactly 1 again — every sweep re-captures each hidden host once. ---
+    await reconcilePaneSubscriptions([], {}, { now: t1 + 60_000 }, deps);
+    applyPaneDelta('prod', { event: 'paneDelta', panes: { 'hidden-a': 'STALE A2', 'hidden-b': 'STALE B2' } }, t1 - 10_000);
+    agents = await server.pollFleetStates(chats, {}, deps, {});
+    assert.strictEqual(captureRpc, 3, 'third sweep re-captured once more — 1 batched companion RPC per hidden host per sweep is the steady state');
+    const prodRow = agents.find((a) => a.key === 'hidden-a');
+    assert.ok(prodRow, 'companion hidden agent present');
+    assert.ok(!prodRow.sweepSkipped, 'a classified companion row is not sweep_skipped');
+  });
+
+  it('companion flag OFF -> every host is sweep_skipped and NONE are probed (no SSH sweep)', async () => {
+    const saved = process.env.WARDEN_COMPANION_TRANSPORT;
+    delete process.env.WARDEN_COMPANION_TRANSPORT;
+    let captureRpc = 0;
+    const t = healthySubTransport({ panes: { hidden: 'POLLED' } });
+    const origWrite = t.write.bind(t);
+    t.write = (line) => { try { if (JSON.parse(line).method === 'capturePanes') captureRpc++; } catch { /* non-JSON noise */ } origWrite(line); };
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    try {
+      const chats = [{ host: 'prod', key: 'hidden', container: 'hidden', session: 'agent', project: 'p', role: 'worker' }];
+      const agents = await server.pollFleetStates(chats, {}, deps, {});
+      assert.strictEqual(captureRpc, 0, 'no capturePanes RPC issued with the companion flag off');
+      assert.strictEqual(agents.length, 1);
+      assert.strictEqual(agents[0].state, 'sweep_skipped', 'flag-off host is sweep_skipped, never probed');
+      assert.strictEqual(agents[0].sweepSkipped, true);
+    } finally {
+      process.env.WARDEN_COMPANION_TRANSPORT = saved; // restore ('1') for the next test
+    }
+  });
+
+  it('a hidden stuck-looping agent on a companion host is classified as stuck by the sweep', async () => {
+    // The stuck-loop pane content arrives via the companion capturePanes RPC — the
+    // production path for a hidden pane (captured once per sweep; the per-sweep cost is
+    // pinned by the cost-gate test above). The sweep classifies it via the SAME
+    // classifyPane + stripAnsi path the open-pane poll uses, so a hidden agent is now
+    // surfaced as 'stuck' where /api/health reads it HEALTHY forever. The last 3
+    // non-blank lines repeat the previous 3, the joined last-3 block clears the 50-char
+    // stuck threshold, and the line matches NO error/waiting/blocked regex so precedence
+    // lands on 'stuck'.
+    const line = 'Retrying the upload step because the network is slow today';
+    const loop = [line, line, line, line, line, line].join('\n');
+    const t = healthySubTransport({ panes: { hidden: loop } });
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const chats = [{ host: 'prod', key: 'hidden', container: 'hidden', session: 'agent', project: 'p', role: 'worker' }];
+    const agents = await server.pollFleetStates(chats, {}, deps, {});
+    const row = agents.find((a) => a.key === 'hidden');
+    assert.ok(row, 'hidden agent classified by the sweep');
+    assert.strictEqual(row.state, 'stuck', 'the hidden looping agent is stuck');
+    assert.ok(row.signal, 'the stuck row carries a triggering signal');
+    assert.ok(!row.sweepSkipped, 'a classified row is not sweep_skipped');
+  });
+
+  it('excludeKeys drops open ∪ watched panes (sweep set = fleet − open ∪ watched)', async () => {
+    const t = healthySubTransport({ panes: { opened: 'A', hidden: 'B' } });
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const chats = [
+      { host: 'prod', key: 'opened', container: 'opened', session: 'agent' },
+      { host: 'prod', key: 'hidden', container: 'hidden', session: 'agent' },
+    ];
+    // 'opened' is the caller's open pane -> excluded; only 'hidden' is swept.
+    const agents = await server.pollFleetStates(chats, {}, deps, { excludeKeys: ['opened'] });
+    assert.deepStrictEqual(agents.map((a) => a.key).sort(), ['hidden'], 'the open pane is excluded; only the hidden pane is swept');
+  });
+});
+
 // --------------------------- bootstrap orchestration ------------------------
 
 // Manifest + ping handler that agree on a hex version. binaries point at the
