@@ -148,14 +148,36 @@ function parseStackFrames(stack) {
 // ---------------------------------------------------------------------------
 // Pure event builders. Each returns a schema-valid base-tier event. `now` is an
 // epoch-ms timestamp (caller-injected so tests are deterministic).
+//
+// EXTENDED-TIER NAMES (WARDEN-538). The builders stay PURE: each attaches the
+// `chatName` / `sessionName` identifier fields ONLY when the caller threaded them
+// via `opts` — the consent GATE (extended on AND a context value held) lives in
+// the source closure's `extendedNameFields()` helper, which is spread into these
+// builders' `opts` from every emit path. So a builder called directly (e.g. from
+// a test) with no names emits today's anonymous event; a builder called from a
+// live signal with extended consent on + a focused chat emits a name-bearing
+// event. Field names match the sink's IDENTIFIER_FIELDS (schema.ts / redact.ts),
+// which retain them only at the `extended` tier (dropped at base/off) — two
+// independent layers of defense in depth.
 // ---------------------------------------------------------------------------
+
+// Attach the extended-tier identifier fields when the caller (the source closure,
+// already gated by extended consent) threaded non-empty string names via opts.
+// Pure: attaches exactly what it is given; never invents or redacts a name (the
+// name is the deliberate identifier the user opted into; the sink's redactor is
+// what retains/drops it by tier).
+function attachExtendedNames(event, o) {
+  if (!event || !o) return;
+  if (typeof o.chatName === 'string' && o.chatName) event.chatName = o.chatName;
+  if (typeof o.sessionName === 'string' && o.sessionName) event.sessionName = o.sessionName;
+}
 
 function buildErrorEvent(err, opts) {
   const o = opts || {};
   const e = err instanceof Error ? err : new Error(err == null ? '' : String(err));
   const name = typeof e.name === 'string' && e.name ? e.name : 'Error';
   const rawMessage = typeof e.message === 'string' ? e.message : '';
-  return {
+  const event = {
     schemaVersion: SCHEMA_VERSION,
     type: 'error',
     runtime: o.runtime === RUNTIME.RENDERER ? RUNTIME.RENDERER : RUNTIME.MAIN,
@@ -164,6 +186,8 @@ function buildErrorEvent(err, opts) {
     message: redactIdentifiers(rawMessage),
     frames: parseStackFrames(typeof e.stack === 'string' ? e.stack : ''),
   };
+  attachExtendedNames(event, o);
+  return event;
 }
 
 function buildCrashEvent(details, opts) {
@@ -180,13 +204,14 @@ function buildCrashEvent(details, opts) {
     reason,
   };
   if (typeof d.exitCode === 'number') event.exitCode = d.exitCode;
+  attachExtendedNames(event, o);
   return event;
 }
 
 function buildStallEvent(lagMs, opts) {
   const o = opts || {};
   const lag = typeof lagMs === 'number' && lagMs > 0 ? Math.round(lagMs) : 0;
-  return {
+  const event = {
     schemaVersion: SCHEMA_VERSION,
     type: 'performance-stall',
     runtime: o.runtime === RUNTIME.MAIN ? RUNTIME.MAIN : RUNTIME.RENDERER,
@@ -194,6 +219,8 @@ function buildStallEvent(lagMs, opts) {
     lagMs: lag,
     source: o.source === 'unresponsive' ? 'unresponsive' : 'event-loop',
   };
+  attachExtendedNames(event, o);
+  return event;
 }
 
 // Heartbeat decision: a tick is a stall iff its overdue gap (actual elapsed
@@ -272,12 +299,18 @@ function containsPath(text) {
 //   .attachMain(processLike)        — store the main-process emitter (process)
 //   .attachRenderer(webContentsLike) — store the renderer emitter (win.webContents)
 //   .setBaseConsent(boolean)        — toggle subscriptions on consent change
+//   .setExtendedConsent(boolean)    — toggle name attachment (clamped to base; WARDEN-538)
+//   .setContext({chatName?, sessionName?}) — latest focused names (WARDEN-538)
 //   .setRecord(fn)                  — hot-swap the record sink (slice 1 wiring)
 //   .dispose()                      — detach everything + stop the heartbeat
 //
 // Signals subscribe ONLY when base consent is on; turning it off detaches every
 // tap and stops the heartbeat. record() is additionally gated by consent, so
-// there are two independent layers of "off = nothing".
+// there are two independent layers of "off = nothing". Name attachment is a THIRD
+// independent gate: even with base + extended on, no name attaches unless a
+// focused-chat context was pushed; and the sink's tier redactor strips names at
+// base/off regardless — so an extended opt-in is the only path to a name-bearing
+// event, through three independent layers.
 // ---------------------------------------------------------------------------
 
 function createTelemetrySource(opts) {
@@ -290,6 +323,15 @@ function createTelemetrySource(opts) {
   const thresholdMs = typeof o.thresholdMs === 'number' ? o.thresholdMs : DEFAULT_STALL_THRESHOLD_MS;
 
   let baseConsent = false;
+  // EXTENDED-tier producer state (WARDEN-538). `extendedConsent` mirrors the sink
+  // client's extended-requires-base invariant (client.ts: clamped to false unless
+  // base is on); `context` holds the latest focused chat/session name the renderer
+  // pushed over IPC. Together they gate name attachment: a built event carries the
+  // focused name ONLY when extended consent is on (which requires base) AND a
+  // non-empty name is held — otherwise today's anonymous event (zero change for
+  // base/off). The builders themselves stay pure; the gate is `extendedNameFields`.
+  let extendedConsent = false;
+  let context = { chatName: null, sessionName: null };
   let mainEmitter = null;
   let rendererEmitter = null;
   let mainAttached = false;
@@ -309,22 +351,37 @@ function createTelemetrySource(opts) {
     }
   }
 
+  // The extended-tier identifier fields to thread into a builder's opts. Returns
+  // `{}` (anonymous event) UNLESS extended consent is on AND a non-empty name is
+  // held — so base/off users get byte-identical payloads to today. Spread into
+  // every builder call below so the gate lives in ONE place (not 5). The builders
+  // attach exactly these fields; the sink's redactor then retains them only at
+  // the live `extended` tier (defense in depth: if consent drops between build and
+  // dispatch, the redactor strips the names).
+  function extendedNameFields() {
+    if (!extendedConsent) return {};
+    const f = {};
+    if (context.chatName) f.chatName = context.chatName;
+    if (context.sessionName) f.sessionName = context.sessionName;
+    return f;
+  }
+
   // --- signal handlers (gated by consent at emit time) ---
   const onUncaught = (err) => {
     if (!baseConsent) return;
-    emit(buildErrorEvent(err, { now: nowFn(), runtime: RUNTIME.MAIN }));
+    emit(buildErrorEvent(err, { now: nowFn(), runtime: RUNTIME.MAIN, ...extendedNameFields() }));
   };
   const onRejection = (reason) => {
     if (!baseConsent) return;
-    emit(buildErrorEvent(reason, { now: nowFn(), runtime: RUNTIME.MAIN }));
+    emit(buildErrorEvent(reason, { now: nowFn(), runtime: RUNTIME.MAIN, ...extendedNameFields() }));
   };
   const onRenderGone = (_event, details) => {
     if (!baseConsent) return;
-    emit(buildCrashEvent(details, { now: nowFn() }));
+    emit(buildCrashEvent(details, { now: nowFn(), ...extendedNameFields() }));
   };
   const onUnresponsive = () => {
     if (!baseConsent) return;
-    emit(buildStallEvent(0, { now: nowFn(), runtime: RUNTIME.RENDERER, source: 'unresponsive' }));
+    emit(buildStallEvent(0, { now: nowFn(), runtime: RUNTIME.RENDERER, source: 'unresponsive', ...extendedNameFields() }));
   };
 
   // --- heartbeat: measures real wall-clock lag between timer callbacks ---
@@ -336,7 +393,7 @@ function createTelemetrySource(opts) {
       const overdue = t - lastTick - heartbeatMs; // how late this tick arrived
       lastTick = t;
       if (isStall(overdue, thresholdMs)) {
-        emit(buildStallEvent(overdue, { now: t, runtime: RUNTIME.MAIN, source: 'event-loop' }));
+        emit(buildStallEvent(overdue, { now: t, runtime: RUNTIME.MAIN, source: 'event-loop', ...extendedNameFields() }));
       }
     }, heartbeatMs);
     // The telemetry heartbeat must never keep the process alive on its own —
@@ -404,6 +461,11 @@ function createTelemetrySource(opts) {
       const next = enabled === true;
       if (next === baseConsent) return;
       baseConsent = next;
+      // extended requires base: turning base off also drops extended consent, so
+      // no name-bearing event can be built once base is off (mirrors the sink
+      // client's setBaseConsent clamp in client.ts). Context is retained — it is
+      // inert while extended is off and reactivates if extended is re-enabled.
+      if (!next) extendedConsent = false;
       if (next) {
         attachMainListeners();
         attachRendererListeners();
@@ -413,6 +475,25 @@ function createTelemetrySource(opts) {
         detachRendererListeners();
         stopHeartbeat();
       }
+    },
+    setExtendedConsent(enabled) {
+      // extended requires base: clamped to false unless base is on (mirrors the
+      // sink client's setExtendedConsent in client.ts). Names are never attached
+      // without base consent — defense in depth alongside the sink's tier gate.
+      extendedConsent = enabled === true && baseConsent;
+    },
+    setContext(ctx) {
+      // Store the latest focused chat/session names pushed by the renderer. Strings
+      // only; garbage (non-strings, non-objects, empty) is normalized to null so a
+      // buggy/late payload can never inject a non-string or empty identifier into a
+      // built event. Storing is ALWAYS safe: names attach only when extendedConsent
+      // is on (which requires base), so this holds nothing-identifying-useful until
+      // the user has opted into the extended tier.
+      const c = ctx && typeof ctx === 'object' ? ctx : {};
+      context = {
+        chatName: typeof c.chatName === 'string' && c.chatName ? c.chatName : null,
+        sessionName: typeof c.sessionName === 'string' && c.sessionName ? c.sessionName : null,
+      };
     },
     setRecord(fn) {
       record = typeof fn === 'function' ? fn : null;
@@ -427,6 +508,8 @@ function createTelemetrySource(opts) {
       mainEmitter = null;
       rendererEmitter = null;
       baseConsent = false;
+      extendedConsent = false;
+      context = { chatName: null, sessionName: null };
     },
   };
 }
