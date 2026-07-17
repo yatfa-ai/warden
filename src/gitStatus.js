@@ -548,3 +548,105 @@ export function parseGitRemotes(output) {
       return acc;
     }, []);
 }
+
+/**
+ * Parse git's `%(upstream:track)` token into `{ ahead, behind, gone }`.
+ *
+ * The track token (the LAST for-each-ref field) is exactly one of `[ahead N]`,
+ * `[behind N]`, `[ahead N, behind M]`, `[gone]`, or empty. Empty means in-sync
+ * when the branch HAS an upstream (the separate `upstream` field distinguishes
+ * "in sync" from "tracks nothing"). `[gone]` means the remote tracking branch was
+ * deleted — the local branch is now stranded with no upstream to compare against,
+ * so ahead/behind no longer apply (both read 0) and `gone` is surfaced as its own
+ * boolean so a UI can mark the branch distinctly. Counts default to 0 when their
+ * clause is absent. Pure + local so `parseGitBranches` stays readable and is
+ * exercised through it (mirrors `toEpoch`'s role for `parseGitLogLine`). See
+ * WARDEN-577.
+ *
+ * @param {string|Buffer|undefined} track - The raw %(upstream:track) token.
+ * @returns {{ ahead: number, behind: number, gone: boolean }}
+ */
+function parseUpstreamTrack(track) {
+  const t = (track ?? '').toString().trim();
+  if (/\bgone\b/.test(t)) return { ahead: 0, behind: 0, gone: true };
+  const aheadM = t.match(/ahead\s+(\d+)/);
+  const behindM = t.match(/behind\s+(\d+)/);
+  return {
+    ahead: aheadM ? parseInt(aheadM[1], 10) : 0,
+    behind: behindM ? parseInt(behindM[1], 10) : 0,
+    gone: false,
+  };
+}
+
+/**
+ * Parse `git for-each-ref --format='%(refname:short)|%(objectname:short)|
+ * %(committerdate:iso-strict)|%(upstream:short)|%(upstream:track)' refs/heads/`
+ * output into `[{ name, headSha, headDate, upstream, ahead, behind, gone }]`.
+ *
+ * The FIVE pipe-separated fields per line, in order: the short branch name
+ * (`refname:short`), the short tip SHA (`objectname:short`), the strict-ISO
+ * committer date (`committerdate:iso-strict` — `2026-07-17T01:23:59Z`, matching
+ * the `%cI` headDate discipline so the frontend's `Date.parse` is reliable), the
+ * short upstream name (`upstream:short` — `origin/main`, or empty when the branch
+ * tracks nothing), and the upstream tracking summary (`upstream:track` — parsed by
+ * `parseUpstreamTrack` into ahead/behind/gone).
+ *
+ * ROBUSTNESS: git ALLOWS a `|` inside a refname (verified:
+ * `git check-ref-format --branch 'a|b'` accepts it), so BOTH the branch name AND
+ * its upstream (`origin/<branch>`) can carry a `|` — a naive split misaligns
+ * fields whenever a pipe-bearing branch is pushed. sha (hex) and the date (strict
+ * ISO, carries a `T`) are adjacent, pipe-FREE, and format-recognizable, so we
+ * anchor on the `|<sha>|<date>|` span: everything before it is the name,
+ * everything after is `upstream|track`. The track is the LAST field (always a
+ * `[...]` bracket token or empty); the upstream is the remainder (and may itself
+ * contain `|`). A line with no recognizable `sha|date` span (short/garbage) degrades
+ * to a name-only record so a partial line never throws.
+ *
+ * `current` and `merged` are NOT set here — they require git state beyond the one
+ * for-each-ref call (HEAD + the `--merged HEAD` set) and are stamped by the route.
+ *
+ * Empty / undefined input → `[]` (no branches), never throws — same discipline as
+ * `parseStashList` / `parseGitRemotes`. Exported for unit tests. See WARDEN-577.
+ *
+ * @param {string|Buffer|undefined} output - Raw stdout from `git for-each-ref --format`.
+ * @returns {Array<{ name: string, headSha: string, headDate: string, upstream: string, ahead: number, behind: number, gone: boolean }>}
+ */
+export function parseGitBranches(output) {
+  const raw = (output ?? '').toString();
+  return raw
+    .split('\n')
+    .map((line) => line.replace(/\r$/, '')) // tolerate CRLF (e.g. over SSH)
+    .filter((line) => line.trim())           // drop the trailing empty line + blanks
+    .map(parseGitBranchLine);
+}
+
+// Parse ONE `name|sha|date|upstream|track` for-each-ref line. Extracted so the
+// per-line alignment logic is readable + unit-testable in isolation. See the
+// parseGitBranches header for the pipe-in-refname robustness rationale.
+function parseGitBranchLine(line) {
+  // Anchor on `|<sha>|<date>|`: sha is `[0-9a-f]{4,40}`, date is strict ISO
+  // (`\d{4}-\d{2}-\d{2}T…`, pipe-free). The name (`(.*?)`, lazy) is everything
+  // before the FIRST such span; the tail (`upstream|track`) is everything after.
+  const m = line.match(/^(.*?)\|([0-9a-f]{4,40})\|(\d{4}-\d{2}-\d{2}T[^|]*)\|(.*)$/);
+  if (!m) {
+    return { name: line, headSha: '', headDate: '', upstream: '', ahead: 0, behind: 0, gone: false };
+  }
+  const [, name, headSha, headDate, tail] = m;
+  // tail is `upstream|track` (≥1 pipe in well-formed input). track is the LAST
+  // field (always `[...]` or empty); upstream is the rest (may contain '|'). A
+  // pipe-less tail is malformed — a lone `[...]` token reads as the track, else
+  // the whole tail reads as the upstream.
+  const lastPipe = tail.lastIndexOf('|');
+  let track;
+  let upstream;
+  if (lastPipe === -1) {
+    const isBracket = /^\[.*\]$/.test(tail);
+    track = isBracket ? tail : '';
+    upstream = isBracket ? '' : tail;
+  } else {
+    track = tail.slice(lastPipe + 1);
+    upstream = tail.slice(0, lastPipe);
+  }
+  const { ahead, behind, gone } = parseUpstreamTrack(track);
+  return { name, headSha, headDate, upstream, ahead, behind, gone };
+}
