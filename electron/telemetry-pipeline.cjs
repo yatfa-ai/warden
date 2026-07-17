@@ -180,6 +180,15 @@ function createTelemetryPipeline(opts) {
         authToken,
         fetchImpl,
         sleepImpl,
+        // LIVE consent for the transport's in-loop re-check (WARDEN-585). Re-resolves
+        // the SAME source this layer-2 guard uses — effectiveTier(), which re-reads
+        // consent() and degrades to OFF on a throwing resolver — so a revoke that
+        // lands during the transport's bounded-retry backoff halts the in-flight
+        // batch before its next attempt. "Halts all traffic immediately" now holds
+        // end-to-end (toggle → dispatch → WIRE), not just up to this boundary. The
+        // snapshot `tier` above stays as the transport's entry gate; this callback
+        // is the mid-loop re-check between attempts.
+        isConsentActive: () => effectiveTier() !== TIERS.OFF,
       });
       if (result && typeof result.then === 'function') {
         result.then(() => {}, () => {}); // swallow async transport rejections
