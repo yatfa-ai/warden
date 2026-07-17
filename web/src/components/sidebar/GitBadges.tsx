@@ -625,6 +625,63 @@ export function CommitFile({ chatId, hash, file, onOpenFile }: { chatId: string;
   );
 }
 
+/** One touched-file row inside an expanded stash. Click to fetch and reveal the
+ *  stashed diff for that file (`git diff stash@{n}^ stash@{n} -- <path>` via
+ *  /api/git-stash-show). Owns its diff fetch state so a re-collapse/re-expand is
+ *  instant. Mirrors CommitFile exactly; the only divergence is `ref=` instead of
+ *  `hash=` (a stash is addressed by its reflog selector `stash@{n}`, not a commit
+ *  hash). (WARDEN-340) */
+function StashFile({ chatId, stashRef, file }: { chatId: string; stashRef: string; file: GitFile }) {
+  const [open, setOpen] = useState(false);
+  const [diff, setDiff] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [fetched, setFetched] = useState(false);
+
+  const toggle = async () => {
+    if (!open && !fetched) {
+      setLoading(true);
+      try {
+        const r = await fetch(`/api/git-stash-show?id=${encodeURIComponent(chatId)}&ref=${encodeURIComponent(stashRef)}&path=${encodeURIComponent(file.path)}`);
+        const j = await r.json();
+        setDiff(typeof j.diff === 'string' ? j.diff : null);
+      } catch {
+        setDiff(null);
+      } finally {
+        setLoading(false);
+        setFetched(true);
+      }
+    }
+    setOpen((o) => !o);
+  };
+
+  return (
+    <div className="pl-2">
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        aria-label={`inspect stashed diff for ${file.path}`}
+        onClick={(e) => { e.stopPropagation(); toggle(); }}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggle(); } }}
+        title="click to inspect this file's stashed diff"
+        className="flex w-full items-center gap-1 rounded px-0.5 py-px text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+      >
+        <div className="min-w-0 flex-1"><GitChangedFile file={file} /></div>
+        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{loading ? '…' : open ? '▾' : '▸'}</span>
+      </div>
+      {open && (
+        loading ? (
+          <div className="px-1 text-[10px] text-muted-foreground">loading diff…</div>
+        ) : diff ? (
+          <DiffBlock diff={diff} />
+        ) : (
+          <div className="px-1 text-[10px] text-muted-foreground">no diff</div>
+        )
+      )}
+    </div>
+  );
+}
+
 /** The commit's body — the "why" behind the change — rendered above the changed-
  *  files list inside an expanded commit. Undefined/empty → renders nothing, so a
  *  subject-only commit stays compact (the collapsed row already shows the subject).
@@ -814,6 +871,15 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   const [branchList, setBranchList] = useState<GitBranch[] | undefined>(undefined);
   const [branchLoading, setBranchLoading] = useState(false);
 
+  // Per-stash expand state + the /api/git-stash-show files cache (keyed by ref), a
+  // parallel of expandedHash/showCache/showLoading for commits — so expanding a
+  // stash is INDEPENDENT of expanding a commit (and vice versa). Mirrors the
+  // commit-inspect pattern exactly; the only divergence is `ref=` instead of
+  // `hash=` (a stash is addressed by its reflog selector stash@{n}). (WARDEN-340)
+  const [expandedStashRef, setExpandedStashRef] = useState<string | null>(null);
+  const [stashShowCache, setStashShowCache] = useState<Record<string, { files?: GitFile[]; error?: string | null }>>({});
+  const [stashShowLoading, setStashShowLoading] = useState<Record<string, boolean>>({});
+
   // WARDEN-398: the aggregated range-diff modal target. Set by the "View full diff"
   // affordance in the outgoing (↑N) or incoming (↓N) section; null while closed.
   // WARDEN-449: extended to the ± (worktree) axis — `git diff HEAD`, no count (the
@@ -934,6 +1000,17 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   // guards on stashList === undefined, and the refresh button is disabled while loading).
   const fetchStash = async () => {
     setStashLoading(true);
+    // A refresh is an explicit request for FRESH data, so drop the per-stash caches
+    // and collapse any expanded stash row. Stash refs (`stash@{n}`) are reflog
+    // selectors, NOT immutable keys like commit hashes — `stash@{0}` shifts to a
+    // DIFFERENT stash whenever one is popped or created above it. Without this reset,
+    // after the agent adds/pops a stash the refreshed subject (e.g. "WIP: B") would
+    // render under a stale file list cached for the PREVIOUS stash@{0} (e.g. "WIP: A")
+    // — subject and files would disagree, and toggleStash's dedup guard would keep
+    // serving the stale entry on re-collapse. CommitFile's cache-by-hash pattern
+    // doesn't have this problem because a hash always names the same commit (WARDEN-340).
+    setStashShowCache({});
+    setExpandedStashRef(null);
     try {
       const r = await fetch(`/api/git-stash?id=${encodeURIComponent(chatId)}`);
       const j = await r.json();
@@ -1032,6 +1109,36 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
     } else {
       setExpandedHash(hash);
       if (!showCache[hash]) fetchShow(hash);
+    }
+  };
+
+  // Fetch the changed files for ONE stash (the stash's tree diff vs its base) via
+  // /api/git-stash-show. A parallel of fetchShow for commits — `ref` is the stash
+  // reflog selector (stash@{n}) from parseStashList / /api/git-stash. Dedup'd so a
+  // repeat expand reuses the cache instead of re-hitting the endpoint. (WARDEN-340)
+  const fetchStashShow = async (ref: string) => {
+    if (stashShowCache[ref] || stashShowLoading[ref]) return;
+    setStashShowLoading((p) => ({ ...p, [ref]: true }));
+    try {
+      const r = await fetch(`/api/git-stash-show?id=${encodeURIComponent(chatId)}&ref=${encodeURIComponent(ref)}`);
+      const j = await r.json();
+      setStashShowCache((p) => ({ ...p, [ref]: { files: Array.isArray(j.files) ? j.files : [], error: j.error } }));
+    } catch {
+      setStashShowCache((p) => ({ ...p, [ref]: { files: [], error: 'fetch failed' } }));
+    } finally {
+      setStashShowLoading((p) => ({ ...p, [ref]: false }));
+    }
+  };
+
+  // Toggle a stash's expand, mirroring toggleCommit. Expanded state keys off a
+  // separate expandedStashRef (not expandedHash) so a stash and a commit can be
+  // open at the same time. (WARDEN-340)
+  const toggleStash = (ref: string) => {
+    if (expandedStashRef === ref) {
+      setExpandedStashRef(null);
+    } else {
+      setExpandedStashRef(ref);
+      if (!stashShowCache[ref]) fetchStashShow(ref);
     }
   };
 
@@ -1476,9 +1583,44 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
               ) : stashList && stashList.length > 0 ? (
                 <ul className="max-h-40 overflow-auto">
                   {stashList.map((s, i) => (
-                    <li key={s.ref || i} className="rounded px-1 py-0.5 text-left">
-                      <span className="block truncate text-[10px] text-foreground" title={s.subject}>{s.subject}</span>
-                      {s.date && <span className="block text-[10px] text-muted-foreground">{s.date}</span>}
+                    // Explorable (WARDEN-340): each stash row expands to its changed
+                    // files + per-file diff via /api/git-stash-show, mirroring the
+                    // recent/outgoing commit rows above. A role="button" div (not a
+                    // <button>) so it's keyboard-operable without nesting interactive
+                    // rows (each StashFile is itself a role="button" div) inside this
+                    // portaled popover — the same pattern CommitFile/the commit rows use.
+                    <li key={s.ref || i} className="rounded">
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        aria-expanded={expandedStashRef === s.ref}
+                        aria-label={`inspect files in stash ${s.ref}`}
+                        onClick={(e) => { e.stopPropagation(); toggleStash(s.ref); }}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleStash(s.ref); } }}
+                        title="click to inspect the files this stash changed"
+                        className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+                      >
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-[10px] text-foreground" title={s.subject}>{s.subject}</span>
+                          {s.date && <span className="block text-[10px] text-muted-foreground">{s.date}</span>}
+                        </span>
+                        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{expandedStashRef === s.ref ? '▾' : '▸'}</span>
+                      </div>
+                      {expandedStashRef === s.ref && (
+                        <div className="pb-1 pl-1">
+                          {stashShowLoading[s.ref] && !stashShowCache[s.ref] ? (
+                            <div className="px-1 text-[10px] text-muted-foreground">loading files…</div>
+                          ) : (stashShowCache[s.ref]?.files?.length ?? 0) > 0 ? (
+                            <div className="flex flex-col gap-0.5">
+                              {stashShowCache[s.ref]!.files!.map((f) => (
+                                <StashFile key={f.path} chatId={chatId} stashRef={s.ref} file={f} />
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="px-1 text-[10px] text-muted-foreground">{stashShowCache[s.ref]?.error ? 'failed to load' : 'no files'}</div>
+                          )}
+                        </div>
+                      )}
                     </li>
                   ))}
                 </ul>

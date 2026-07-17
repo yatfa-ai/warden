@@ -185,3 +185,86 @@ describe('/api/git-stash detail endpoint (real Express app from server.js)', () 
     assert.strictEqual(res.status, 404);
   });
 });
+
+describe('/api/git-stash-show detail endpoint (real Express app from server.js)', () => {
+  /**
+   * The depth layer under /api/git-stash (WARDEN-340): a stash expands to its
+   * changed files + per-file diff, mirroring /api/git-show + CommitFile for commits.
+   * stashRepo (seeded above) stashed a NEW wip.txt (added, then stashed) at
+   * stash@{0}, so the files-list + per-file-diff cases have real content to assert.
+   * Mirrors src/git-show.test.js's resolve → validate → guard → never-500 shape.
+   */
+
+  it("returns the stash's touched files for a known ref", async () => {
+    const res = await fetch(`${baseUrl}/api/git-stash-show?id=warden-stashed&ref=${encodeURIComponent('stash@{0}')}`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.error, null);
+    assert.ok(Array.isArray(body.files));
+    // stashRepo stashed a NEW wip.txt (added then stashed) → status 'A' vs base.
+    assert.deepStrictEqual(body.files, [{ status: 'A', path: 'wip.txt' }]);
+    assert.strictEqual(body.diff, null); // no path requested → no diff
+  });
+
+  it('returns a per-file diff when path= is given', async () => {
+    const res = await fetch(`${baseUrl}/api/git-stash-show?id=warden-stashed&ref=${encodeURIComponent('stash@{0}')}&path=${encodeURIComponent('wip.txt')}`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.error, null);
+    assert.ok(typeof body.diff === 'string' && body.diff.length > 0, 'diff must be a non-empty string');
+    assert.ok(body.diff.includes('+uncommitted wip to stash'), 'diff should show the stashed line(s)');
+  });
+
+  it('rejects a malformed ref with 200 + invalid ref (injection guard, WARDEN-122)', async () => {
+    // The ref clamp: only ^stash@{\d+}$ is accepted. Each of these must be rejected
+    // BEFORE it reaches git or the remote shell — 200 + { files: [], error }.
+    for (const bad of ['stash@{a}', '--version', '; rm -rf /', 'stash@{0', 'main', 'stash@{0} refs/stash']) {
+      const res = await fetch(`${baseUrl}/api/git-stash-show?id=warden-stashed&ref=${encodeURIComponent(bad)}`);
+      assert.strictEqual(res.status, 200);
+      const body = await res.json();
+      assert.deepStrictEqual(body.files, [], `${JSON.stringify(bad)} should yield empty files`);
+      assert.strictEqual(body.diff, null);
+      assert.strictEqual(body.error, 'invalid ref');
+    }
+  });
+
+  it('rejects a path-traversal path= param (200, never 500)', async () => {
+    const res = await fetch(`${baseUrl}/api/git-stash-show?id=warden-stashed&ref=${encodeURIComponent('stash@{0}')}&path=${encodeURIComponent('../../etc/passwd')}`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.deepStrictEqual(body.files, []);
+    assert.strictEqual(body.diff, null);
+    assert.strictEqual(body.error, 'invalid path');
+  });
+
+  it('rejects an absolute path= param (200, never 500)', async () => {
+    const res = await fetch(`${baseUrl}/api/git-stash-show?id=warden-stashed&ref=${encodeURIComponent('stash@{0}')}&path=${encodeURIComponent('/etc/passwd')}`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.error, 'invalid path');
+  });
+
+  it('returns { files: [], diff: null, error: null } (200, not 500) for a non-git cwd', async () => {
+    const res = await fetch(`${baseUrl}/api/git-stash-show?id=warden-nongit&ref=${encodeURIComponent('stash@{0}')}`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.deepStrictEqual(body.files, []);
+    assert.strictEqual(body.diff, null);
+    assert.strictEqual(body.error, null);
+  });
+
+  it('returns empty files (200) for a valid-shape but unknown stash ref', async () => {
+    // stash@{999} matches ^stash@{\d+}$ but doesn't exist → git exits non-zero →
+    // empty stdout → parseGitShowNameStatus([]) → graceful-empty, never a 500.
+    const res = await fetch(`${baseUrl}/api/git-stash-show?id=warden-stashed&ref=${encodeURIComponent('stash@{999}')}`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.deepStrictEqual(body.files, []);
+    assert.strictEqual(body.error, null);
+  });
+
+  it('returns 404 for an unknown chat id', async () => {
+    const res = await fetch(`${baseUrl}/api/git-stash-show?id=does-not-exist&ref=${encodeURIComponent('stash@{0}')}`);
+    assert.strictEqual(res.status, 404);
+  });
+});

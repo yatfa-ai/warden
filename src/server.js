@@ -3174,6 +3174,76 @@ app.get('/api/git-branch', async (req, res) => {
   }
 });
 
+// Inspect a single stash's changes (the depth layer under /api/git-stash).
+// Completes the explorable-badge symmetry with recent/outgoing commits — a stash
+// row expands to its changed files (path + M/A/D token) and each file expands to a
+// per-file diff, exactly like the commit rows expand via /api/git-show + CommitFile.
+// Read-only — no apply/pop/drop (stays on the WARDEN-199 read-only side of the
+// roadmap, like git-show/blame). No persistence (read live from git via runGit).
+//
+//   GET /api/git-stash-show?id=<chatId>&ref=<ref>           → { files: [{path,status}] }
+//   GET /api/git-stash-show?id=<chatId>&ref=<ref>&path=<p>  → { diff: "<patch text>" }
+//
+// `ref` is the stash reflog selector from parseStashList (`%gd` = stash@{0}, stash@{1},
+// …), clamped here to that exact shape `^stash@{\d+}$` and rejected otherwise BEFORE it
+// reaches git or the remote shell — the stash equivalent of git-show's hex clamp
+// ([0-9a-f]{4,40}). `path`, when present, is a git pathspec with isSafeRelativePath
+// containment. On malformed ref / bad path / non-git cwd / empty → empty result, never
+// a 500. See WARDEN-340.
+app.get('/api/git-stash-show', async (req, res) => {
+  const chatId = String(req.query.id || '');
+  const ref = String(req.query.ref || '');
+  const filePath = String(req.query.path || '').trim();
+  const { chat, error } = await resolve(chatId);
+  if (error) return res.status(404).json({ error });
+
+  // ref clamp (WARDEN-122 injection discipline): parseStashList's `ref` is the %gd
+  // reflog selector = `stash@{0}`. Validate against that exact shape and reject
+  // anything else (e.g. "--version", "stash@{a}", "; rm -rf") BEFORE it reaches git
+  // or the remote shell — the stash equivalent of git-show's /([0-9a-f]{4,40})/i
+  // hex clamp. On malformed ref → empty, never a 500.
+  if (!/^stash@\{\d+\}$/.test(ref)) {
+    return res.json({ files: [], diff: null, error: 'invalid ref' });
+  }
+  // Reject unsafe per-file paths (absolute / traversal). Bad path → empty, never 500.
+  if (filePath && !isSafeRelativePath(filePath)) {
+    return res.json({ files: [], diff: null, error: 'invalid path' });
+  }
+
+  try {
+    const cwd = gitCwd(chat);
+    if (!cwd) return res.json({ files: [], diff: null, error: 'no cwd' });
+
+    // `git stash show` accepts the same --name-status/--pretty shape as `git show`,
+    // so parseGitShowNameStatus reuses cleanly for the files list. `ref` is already
+    // ^stash@{\d+}$-validated above and `path` is isSafeRelativePath-checked, so both
+    // are safe as argv after `git -C <cwd>` / the shellQuoted remote form (the
+    // WARDEN-122 discipline). `--` before the path stops option injection.
+    //
+    // NOTE on the per-file diff: `git stash show -p <ref> -- <path>` FAILS with
+    // "Too many revisions specified" (verified on git 2.47) — `git stash show` does
+    // not accept a pathspec. Instead `git diff <ref>^ <ref> -- <path>` is used: it is
+    // byte-identical to `git stash show -p <ref>` (the stash commit's tree diff vs its
+    // first parent, the commit the stash was created on) and stays consistent with the
+    // files list — both surface the tracked working-tree changes only (verified they
+    // agree for a `-u` stash too). `git diff` emits pure patch output with no commit
+    // header, so no --format= is needed. capDiff guards the 1MB ceiling (capDiff).
+    let files = [];
+    let diff = null;
+    if (filePath) {
+      const r = await runGit(chat, ['diff', `${ref}^`, ref, '--', filePath], cwd);
+      diff = capDiff(r.ok ? r.stdout : '');
+    } else {
+      const r = await runGit(chat, ['stash', 'show', '--name-status', '--pretty=format:', ref], cwd);
+      files = parseGitShowNameStatus(r.ok ? r.stdout : '');
+    }
+
+    res.json({ files, diff, error: null });
+  } catch (e) {
+    res.json({ files: [], diff: null, error: e.message });
+  }
+});
+
 // ---- Per-line git blame / annotate (WARDEN-206) -----------------------------
 // Read-only provenance for the file a human is viewing in FileViewer: which
 // commit / author / date last touched each line. Strictly observational — `git
