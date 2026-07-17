@@ -457,9 +457,16 @@ describe('diffDoneTransitions — the pure positive "finished" diff (WARDEN-575)
     assert.strictEqual(out[0].host, 'h1');
   });
 
-  it('fires on a working→idle flip for every working state, not just active', () => {
-    // Mirrors chatWatch's WORKING_STATES: any of active/stuck/erroring/blocked/
-    // waiting → idle is a "finished after needing attention" completion.
+  it('fires ONLY on active→idle — a crash/stall/wait → idle is NOT a finish', () => {
+    // WARDEN-575 review: narrowed to genuine completion. erroring→idle most likely
+    // means the agent ERRORED OUT and returned to its prompt (a failure, not a
+    // finish); stuck→idle is an ambiguous-to-failure recovery; waiting→idle is
+    // usually human-driven. None of those should read as "Finished a task" — a crash
+    // that reads as success is the worst-case false positive (the human skips
+    // reviewing the failure). Only active→idle (the clean "was working → finished")
+    // fires. (The opt-in per-chat watch subsystem KEEPS the broader working set via
+    // chatWatch.detectWatchCompleted; the fleet done ping is not per-chat opt-in, so
+    // it does not propagate it.)
     const prev = new Map([
       ['a', 'active'], ['s', 'stuck'], ['e', 'erroring'], ['w', 'waiting'], ['b', 'blocked'],
     ]);
@@ -468,8 +475,8 @@ describe('diffDoneTransitions — the pure positive "finished" diff (WARDEN-575)
       { key: 'w', state: 'idle' }, { key: 'b', state: 'idle' },
     ];
     const out = diffDoneTransitions(prev, agents);
-    assert.deepStrictEqual(out.map((t) => t.key).sort(), ['a', 'b', 'e', 's', 'w']);
-    for (const t of out) assert.strictEqual(t.state, 'done');
+    assert.deepStrictEqual(out.map((t) => t.key), ['a'], 'only the active→idle flip fires');
+    assert.strictEqual(out[0].state, 'done');
   });
 
   it('does NOT fire on idle→idle (dormant) or a newly-seen idle pane (no prior activity)', () => {
@@ -545,10 +552,14 @@ describe('doneSeverity / doneReason / doneEndedIdentity — positive formatting 
     assert.strictEqual(doneEndedIdentity({ id: 'only-id' }).agent, 'only-id');
   });
 
-  it('DONE_WORKING_STATES is exactly the working set shared with the frontend watch subsystem', () => {
+  it('DONE_WORKING_STATES is exactly the narrowed genuine-completion set (active only)', () => {
+    // WARDEN-575 review: narrowed from the broader working set the first pass mirrored
+    // from chatWatch.WORKING_STATES. Only `active` — the genuine "was working →
+    // finished" prior — fires a done ping; erroring/stuck/waiting/blocked → idle do
+    // NOT (see the "fires ONLY on active→idle" case above for the rationale).
     assert.deepStrictEqual(
       [..._INTERNALS.DONE_WORKING_STATES].sort(),
-      ['active', 'blocked', 'erroring', 'stuck', 'waiting'],
+      ['active'],
     );
   });
 });

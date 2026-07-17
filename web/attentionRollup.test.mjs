@@ -30,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-attention-test-'));
 const tmpFile = join(tmpDir, 'attentionRollup.mjs');
 writeFileSync(tmpFile, code);
-const { buildAttentionRollup, EMPTY_ATTENTION_ROLLUP, rankAttention, pickCalloutTop, attentionReason, hasReturnContent } = await import(tmpFile);
+const { buildAttentionRollup, EMPTY_ATTENTION_ROLLUP, rankAttention, pickCalloutTop, attentionReason, hasReturnContent, isDoneTransition } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -531,6 +531,38 @@ test('a done row that ALSO matched a custom pattern stays in custom (custom supe
   });
   assert.equal(r.done.length, 0, 'the custom signal supersedes the generic finished label for display');
   assert.equal(r.custom.length, 1);
+});
+
+console.log('\nisDoneTransition: the narrowed fleet done-detection rule (active→idle ONLY) (WARDEN-575)');
+test('active → idle IS a finish (the genuine completion signal)', () => {
+  assert.equal(isDoneTransition('active', 'idle'), true);
+});
+test('erroring → idle is NOT a finish (an error-out is a failure, not success)', () => {
+  // The worst-case false positive the narrowing prevents: a crash that reads as
+  // "Finished a task" would make the human skip reviewing the failure.
+  assert.equal(isDoneTransition('erroring', 'idle'), false);
+});
+test('stuck → idle is NOT a finish (a stall recovery is ambiguous-to-failure)', () => {
+  assert.equal(isDoneTransition('stuck', 'idle'), false);
+});
+test('waiting → idle is NOT a finish (usually human-driven, no ping needed)', () => {
+  assert.equal(isDoneTransition('waiting', 'idle'), false);
+});
+test('blocked → idle is NOT a finish', () => {
+  assert.equal(isDoneTransition('blocked', 'idle'), false);
+});
+test('idle → idle is NOT a finish (dormant)', () => {
+  assert.equal(isDoneTransition('idle', 'idle'), false);
+});
+test('capture_failed → idle is NOT a finish (never genuinely active)', () => {
+  assert.equal(isDoneTransition('capture_failed', 'idle'), false);
+});
+test('null prior → idle is NOT a finish (newly-seen, no prior activity)', () => {
+  assert.equal(isDoneTransition(null, 'idle'), false);
+});
+test('active → active / active → waiting are NOT finishes (still working, not idle)', () => {
+  assert.equal(isDoneTransition('active', 'active'), false);
+  assert.equal(isDoneTransition('active', 'waiting'), false);
 });
 
 console.log(`\n✓ ATTENTION ROLLUP TESTS PASS (${passed})`);

@@ -4123,9 +4123,22 @@ async function tickLifecycle(deps = {}) {
 // ZERO webhook cost when the positive routing is off; the channel gate inside
 // dispatchWebhook is the second line of defense. Fire-and-forget + .catch so a slow
 // receiver never blocks the lifecycle sweep. Sibling of tickAttention's done
-// dispatch — same event id ('done'), non-alarming 'info' severity, and shared
-// doneEndedIdentity wording — so working→idle and container-ended read identically
-// on the phone.
+// dispatch — same event id ('done') and non-alarming 'info' severity, so the
+// active→idle ("Finished a task", doneReason) and container-ended ("Agent finished
+// (container ended)", doneEndedIdentity) pings share a positive tone on the phone.
+//
+// Intentional TWO-signal design (WARDEN-575 review): the active→idle ping (tickAttention)
+// means "the agent stopped working — finished a task"; THIS agent_ended ping means "the
+// container was genuinely recycled." They fire at DIFFERENT times with DIFFERENT wording
+// and convey distinct events. The common yatfa sequence — agent finishes (active→idle),
+// then its container is torn down (agent_ended) — can therefore produce two positive
+// pings for one task. That is intentional, not a bug to dedup away: the two pings are
+// separable in time (active→idle when work stops; agent_ended later, on recycle) and the
+// container-ended ping is a distinct, SSH-cleaned confirmation worth surfacing on its
+// own. Suppressing one would lose that signal; the per-event wording lets the human tell
+// them apart. (The two sweeps also key agents differently — t.name||t.key here vs
+// container||id — so a cross-sweep dedup would add shared state + key normalization for
+// a marginal noise win; documented-intentional is the lower-risk call.)
 //
 // `deps` (test seam, defaults to {} in production) threads fetchImpl/sleepImpl to
 // the webhook transport — mirroring tickBudget/tickAttention so the bridge is

@@ -90,6 +90,32 @@ export const EMPTY_ATTENTION_ROLLUP: AttentionRollup = {
 };
 
 /**
+ * Did an open pane JUST finish a task? The fleet "done" DETECTION rule (WARDEN-575):
+ * fire ONLY on `active → idle` — the clean "was genuinely working → finished"
+ * transition. Pure + dependency-free (only the `import type` above, erased at
+ * transpile) so attentionRollup.test.mjs exercises it standalone.
+ *
+ * DELIBERATELY narrower than `chatWatch.detectWatchCompleted` (which treats
+ * active/stuck/erroring/blocked/waiting → idle ALL as "completed"). The watch
+ * subsystem is per-chat OPT-IN, so its broader rule is precise enough to keep; the
+ * fleet done ping is NOT per-chat opt-in, so propagating that broader rule would
+ * surface a "Finished a task" ping for an agent that ERRORED OUT and returned to its
+ * prompt (erroring→idle) or was repeating output (stuck→idle) — a crash that reads
+ * as success is the worst-case false positive (the human skips reviewing the
+ * failure). `waiting→idle` is usually human-driven (no ping needed). Mirrors the
+ * backend `DONE_WORKING_STATES` (src/notify.js) so the frontend badge + desktop ping
+ * and the backend webhook agree on ONE genuine-completion rule. The
+ * container-genuinely-ended case (the OTHER genuine signal) is the lifecycle
+ * `agent_ended` bridge on the backend; the frontend open-pane path does not see it.
+ *
+ * Used by useAttentionRollup to (a) seed the rollup's green `done` bucket and
+ * (b) gate the positive desktop ping — both on the SAME `active→idle` transition.
+ */
+export function isDoneTransition(prevState: string | null, curState: string): boolean {
+  return prevState === 'active' && curState === 'idle';
+}
+
+/**
  * Roll up already-fetched health + activity-stats + pane states into the header
  * attention count.
  *

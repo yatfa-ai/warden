@@ -24,6 +24,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { toast } from 'sonner';
 import {
   buildAttentionRollup,
+  isDoneTransition,
   type AttentionRollup,
   type AttentionRollupOptions,
 } from '@/lib/attentionRollup';
@@ -41,7 +42,7 @@ import {
   ATTENTION_SEVERITY_DEFAULTS,
   type AttentionSeverityPrefs,
 } from '@/lib/desktopAlerts';
-import { diffWatchAlerts, indexByWatchKey, applyWatchCooldown, detectWatchCompleted, type WatchLastFiredMap, type WatchReason } from '@/lib/chatWatch';
+import { diffWatchAlerts, indexByWatchKey, applyWatchCooldown, type WatchLastFiredMap, type WatchReason } from '@/lib/chatWatch';
 import { recordWatchMiss, shouldRecordMiss } from '@/lib/watchCatchup';
 import { activeSnoozedKeys, type SnoozeMap } from '@/lib/snooze';
 import type { HealthData, ActivityStats, AgentStateRow, AgentStatesData } from '@/lib/types';
@@ -327,11 +328,13 @@ export function useAttentionRollup(
   const watchLastFiredRef = useRef<WatchLastFiredMap>({});
 
   // WARDEN-575: the done-detection baseline + window for OPEN panes. `openPrevRef`
-  // holds each open pane's last observed state (key → state) so a working→idle flip
-  // is detected via the SAME detectWatchCompleted the watch subsystem uses. The
-  // ping for a finished OPEN pane reuses the watch-completed delivery (success tone
-  // + "finished a task" wording), so the fleet done ping and the per-watch
-  // completed ping stay in sync — no duplicate wording/tone to drift.
+  // holds each open pane's last observed state (key → state) so a genuine
+  // active→idle completion is detected via isDoneTransition (the narrowed
+  // fleet-done rule — active→idle ONLY, deliberately narrower than the watch
+  // subsystem's detectWatchCompleted). The ping for a finished OPEN pane reuses the
+  // watch-completed delivery (success tone + "finished a task" wording), so the
+  // fleet done ping and the per-watch completed ping stay in sync — no duplicate
+  // wording/tone to drift.
   const openPrevRef = useRef<Record<string, string>>({});
   // key → epoch-ms the agent finished; entries older than DONE_RECENT_WINDOW_MS are
   // pruned each poll so the "Finished" section is transient.
@@ -489,13 +492,15 @@ export function useAttentionRollup(
         const openSet = new Set(open);
         const openRows = rows.filter((r) => openSet.has(r.key ?? r.id));
         setAgentStates(openRows);
-        // WARDEN-575: detect working→idle COMPLETIONS on OPEN panes and (a) keep a
-        // time-boxed "recently finished" set that feeds the badge's green `done`
-        // bucket, and (b) fire a positive "agent X finished" ping on the NEW
+        // WARDEN-575: detect genuine active→idle COMPLETIONS on OPEN panes and (a)
+        // keep a time-boxed "recently finished" set that feeds the badge's green
+        // `done` bucket, and (b) fire a positive "agent X finished" ping on the NEW
         // transition. Watched chats are EXCLUDED here — the watch subsystem above
         // already pings their `completed` transition, so this covers the open-but-
-        // NOT-watched panes (the fleet). Reuses detectWatchCompleted (the shared
-        // working→idle rule) + the watch-completed delivery, so wording/tone match.
+        // NOT-watched panes (the fleet). Uses isDoneTransition (active→idle ONLY —
+        // narrower than detectWatchCompleted, which the opt-in watch subsystem keeps
+        // broad) + the watch-completed delivery, so wording/tone match. A crash/stall
+        // → idle does NOT read as a finish here (only a genuine active→idle does).
         const watchedSetForDone = new Set(watched);
         const prevOpen = openPrevRef.current;
         const doneRecent = doneRecentRef.current;
@@ -507,7 +512,7 @@ export function useAttentionRollup(
           nextOpenPrev[key] = r.state;
           if (watchedSetForDone.has(key)) continue; // watched → the watch ping handles it
           const prev = prevOpen[key];
-          if (detectWatchCompleted(prev ?? null, r.state)) {
+          if (isDoneTransition(prev ?? null, r.state)) {
             doneRecent.set(key, now);
             // Fire the positive done ping, gated exactly like the watch ping: master
             // toggle + the done per-state toggle + the per-key flap-cooldown + focus +
