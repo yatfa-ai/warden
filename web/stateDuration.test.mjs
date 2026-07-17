@@ -87,6 +87,21 @@ test('sub-minute (1–59s) → "" (suppressed to avoid false precision)', () => 
 test('a future enteredAt (clock skew) → "" (never a negative/nonsense duration)', () => {
   assert.equal(formatStateDuration(NOW + 5_000, NOW), '');
 });
+test('opts.subMinute overrides the sub-minute "" — the "Finished" ago tense ("<1m")', () => {
+  // The done tense stamps a real completion event, so recency IS the signal in its
+  // transient 3-min window: a just-finished pane reads "<1m" (→ "<1m ago" at the call
+  // site), not nothing. The ongoing tense passes no label → still '' (false-precision
+  // guard). A finite/missing/future enteredAt ignores the option (the guard wins).
+  assert.equal(formatStateDuration(NOW - 30_000, NOW, { subMinute: '<1m' }), '<1m');
+  assert.equal(formatStateDuration(NOW, NOW, { subMinute: '<1m' }), '<1m');
+  assert.equal(formatStateDuration(NOW - 59_999, NOW, { subMinute: '<1m' }), '<1m');
+  // past a minute the label is unused (the real label takes over)
+  assert.equal(formatStateDuration(NOW - MIN, NOW, { subMinute: '<1m' }), '1m');
+  // the option never rescues a missing / non-finite / future stamp
+  assert.equal(formatStateDuration(undefined, NOW, { subMinute: '<1m' }), '');
+  assert.equal(formatStateDuration(NaN, NOW, { subMinute: '<1m' }), '');
+  assert.equal(formatStateDuration(NOW + 5_000, NOW, { subMinute: '<1m' }), '');
+});
 
 console.log('\nformatStateDuration: minute granularity under an hour');
 test('exactly 1m → "1m" (the first label to appear)', () => {
@@ -220,9 +235,21 @@ test('a row with NO enteredAt sorts LAST (never leapfrogs a languishing row)', (
   ]);
   assert.deepEqual(sorted.map((r) => r.id), ['stale', 'unstamped']);
 });
-test('two unstamped rows keep input order (NaN-safe: Infinity === Infinity → 0, stable)', () => {
-  // The regression guard: the old `(a ?? Infinity) - (b ?? Infinity)` returned NaN here,
-  // giving Array#sort undefined ordering. The fixed comparator returns 0 on a tie.
+test('equal rows keep input order (stability contract: both-unstamped → input order)', () => {
+  // Contract pin: rows that compare EQUAL — here both unstamped (both coerce to Infinity)
+  // — preserve their input order, because Array#sort is stable (ES2019+) and the
+  // comparator returns 0 on a tie. This is the user-visible behavior when two agents are
+  // freshly observed with no stamp yet (e.g. two hidden agents first-swept in one batch).
+  //
+  // Honest scope (verified by mutation — WARDEN-111 "a test must be able to fail"): this
+  // is NOT a NaN-reproducible regression guard. Deleting the comparator's `ai === bi → 0`
+  // short-circuit makes two unstamped rows return `Infinity - Infinity` = NaN, but V8's
+  // TimSort treats a NaN comparator result as 0, so this assertion stays green either way
+  // (confirmed: 38/38 pass with the guard removed). The short-circuit is kept in
+  // production anyway so the comparator stays spec-clean (never EMITS NaN) rather than
+  // leaning on V8's NaN-as-0 tolerance; this test pins the contract that results from it,
+  // and the "mix" test below is the one that actually exercises ordering under the
+  // Infinity coercion (and DOES fail on a sign-flip / unstamped-first regression).
   const sorted = sortOldestEnteredAtFirst([row('a'), row('b'), row('c')]);
   assert.deepEqual(sorted.map((r) => r.id), ['a', 'b', 'c']);
 });

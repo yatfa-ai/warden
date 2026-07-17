@@ -69,11 +69,22 @@ export type StateDurationTone = 'fresh' | 'amber' | 'red';
  * health-bucket Chat that has no pane state, or a row observed before any transition)
  * and for a future `enteredAt` (clock skew), so the caller renders no suffix at all
  * rather than a nonsensical value. Pure: takes `enteredAt` + `now`.
+ *
+ * `opts.subMinute` overrides the sub-minute '' return — used ONLY by the "Finished" (ago)
+ * tense, where the stamp is a real completion event and recency IS the signal (the
+ * section is a transient 3-min window, so the first minute is the MOST relevant readout,
+ * not noise). The ongoing tense passes nothing, preserving the "first poll → no suffix,
+ * never 0s" false-precision guard.
  */
-export function formatStateDuration(enteredAt: number | null | undefined, now: number): string {
+export function formatStateDuration(
+  enteredAt: number | null | undefined,
+  now: number,
+  opts?: { subMinute?: string },
+): string {
   if (typeof enteredAt !== 'number' || !Number.isFinite(enteredAt)) return '';
   const ms = now - enteredAt;
-  if (ms < 60_000) return ''; // sub-minute suppressed (first-poll / just-flipped < 1m)
+  if (ms < 0) return ''; // future enteredAt (clock skew) — never a suffix, even with opts.subMinute
+  if (ms < 60_000) return opts?.subMinute ?? ''; // sub-minute: suppressed (first-poll / just-flipped < 1m) unless a label is provided
   const totalMin = Math.floor(ms / 60000);
   if (totalMin < 60) return `${totalMin}m`;
   const totalHours = Math.floor(totalMin / 60);

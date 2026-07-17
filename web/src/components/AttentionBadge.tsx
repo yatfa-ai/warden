@@ -17,11 +17,14 @@ import { cn } from '@/lib/utils';
 // WARDEN-587: the duration suffix's supplementary color escalates the longer an agent
 // has been in its state — muted (fresh) → amber → red — so a glance picks out the
 // LANGUISHING rows. The duration TEXT always carries the primary signal (WCAG 1.4.1);
-// color is supplementary only.
+// color is supplementary only. The -600 shades (not -500) keep the count readable on the
+// light popover background at text-[10px] — escalation must not make a languishing row's
+// duration HARDER to read than a fresh one (the opposite of the intent). The dot (not the
+// text) already carries the section's red/amber severity, so the text need only tick up.
 const DURATION_TONE_CLASS: Record<StateDurationTone, string> = {
   fresh: 'text-muted-foreground',
-  amber: 'text-yellow-500',
-  red: 'text-red-500',
+  amber: 'text-amber-600',
+  red: 'text-red-600',
 };
 
 interface Props {
@@ -399,8 +402,14 @@ function AgentRow({
   // WARDEN-587: the live duration suffix + its supplementary tone + verbose tooltip.
   // formatStateDuration returns '' under a minute (and for an unstamped row), so a
   // freshly-observed row renders no suffix — never a false "0s". The visible text is
-  // the primary signal (WCAG 1.4.1); color + tooltip are supplementary.
-  const durationCompact = enteredAt != null ? formatStateDuration(enteredAt, now) : '';
+  // the primary signal (WCAG 1.4.1); color + tooltip are supplementary. The 'ago' (done)
+  // tense passes a sub-minute label so a JUST-finished pane reads "<1m ago" instead of
+  // nothing — recency is the signal in the transient 3-min Finished window, so hiding the
+  // first minute would bury the most relevant readout. The ongoing tense stays suppressed
+  // under a minute (its false-precision guard).
+  const durationCompact = enteredAt != null
+    ? formatStateDuration(enteredAt, now, durationTense === 'ago' ? { subMinute: '<1m' } : undefined)
+    : '';
   const durationVerbose = enteredAt != null ? formatStateDurationVerbose(enteredAt, now) : '';
   const durationTone = languishingTone(enteredAt, now);
   const durationAgo = durationTense === 'ago';

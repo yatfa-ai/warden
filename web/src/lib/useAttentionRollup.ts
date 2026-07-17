@@ -658,6 +658,38 @@ export function useAttentionRollup(
           const key = r.key ?? r.id;
           if (!enteredAt.has(key)) { enteredAt.set(key, sweepNow); enteredAtDirtyRef.current = true; }
         }
+        // WARDEN-587: prune the stamp map to currently-live keys — the bounded-growth
+        // counterpart to doneLastFiredRef's prune in fetchAgentStates (:600). Relocated
+        // here from the rollup useMemo: mutating a persistence-feeding ref inside a memo
+        // is a side-effect anti-pattern React may double-invoke under StrictMode (the
+        // doneLastFiredRef sibling prunes in a fetch callback for the same reason). This
+        // callback is the natural home for the SHARED map's prune because it alone has
+        // the freshest data from BOTH sources natively — `open`/`watched` via the refs
+        // above and `sweptRows` from the fetch just above — so one prune is correct with
+        // no per-source split, AND it runs even when no pane is open (the sweep covers the
+        // hidden fleet regardless, so open-pane-only fetchAgentStates can't own this).
+        //
+        // BLIP SAFETY (success criterion #2 — a transient catalog miss must not wipe
+        // persisted durations): liveness is tested against the open∪watched KEY SET
+        // (human intent — the panes the human currently has open/watched), NOT the
+        // resolved rows. A catalog blip empties /api/agent-states (openRows → []) but
+        // leaves the open∪watched key set unchanged, so an open pane that didn't resolve
+        // this poll is still "live" and its persisted stamp is KEPT. The prior useMemo
+        // prune tested the RESOLVED rows, so a blip (empty openRows + a non-empty
+        // concurrent sweep) deleted EVERY open-pane stamp and the persist effect wrote the
+        // emptied map to localStorage — wiping restart continuity for all open panes.
+        //
+        // A key is pruned only when it left open∪watched (the human closed/un-watched it)
+        // AND is not currently swept (the hidden-fleet sweep still owns it — preserves
+        // duration continuity across a close→sweep transition). A recovered hidden agent
+        // (no longer swept, not open) is pruned — its duration is moot.
+        const liveKeys = new Set<string>([...open, ...watched]);
+        for (const r of sweptRows) liveKeys.add(r.key ?? r.id);
+        let prunedStamps = false;
+        for (const k of Array.from(enteredAt.keys())) {
+          if (!liveKeys.has(k)) { enteredAt.delete(k); prunedStamps = true; }
+        }
+        if (prunedStamps) enteredAtDirtyRef.current = true;
         setFleetSweepStates(sweptRows);
       }
       // A failed sweep must not blank the rollup (mirrors fetchAgentStates) — leave the
@@ -770,34 +802,28 @@ export function useAttentionRollup(
     const sweepRows = fleetSweepStates.filter((r) => !covered.has(r.key ?? r.id));
     // WARDEN-587: attach each row's enteredAt stamp (the epoch-ms it entered its current
     // state) so the badge rows + directed callout can render a live duration suffix.
-    // Also PRUNE the stamp map to currently-relevant keys (open ∪ swept) so a closed /
-    // un-swept pane's stale stamp doesn't linger forever (mirrors doneLastFired's prune-
-    // to-open-keys discipline), keeping the persisted map bounded across a long session.
-    // The prune is guarded on a non-empty row set: before the first poll lands (empty
-    // agentStates + sweep) we must NOT prune, or we'd wipe the just-hydrated persisted
-    // stamps and lose restart continuity (success criterion #2). Idempotent ref
-    // maintenance — the localStorage write fires in the persist effect below.
-    const stamps = enteredAtRef.current as Map<string, number>;
+    // PURE READ of the stamp map only — the map is mutated (stamped on transition in
+    // fetchAgentStates / fetchFleetStates, pruned to live keys in fetchFleetStates) in the
+    // FETCH CALLBACKS, never here. Mutating a persistence-feeding ref inside useMemo is a
+    // side-effect anti-pattern: React may double-invoke a memo under StrictMode / concurrent
+    // rendering, and a discarded recompute can desync the dirty flag + map. The map is also
+    // pruned there (not here) so a transient catalog blip can't wipe persisted durations —
+    // see fetchFleetStates for the blip-safe liveness test (success criterion #2).
+    const stamps = enteredAtRef.current;
     const allRows = [...agentStates, ...sweepRows];
-    if (allRows.length > 0) {
-      const liveKeys = new Set(allRows.map((r) => r.key ?? r.id));
-      let pruned = false;
-      for (const k of stamps.keys()) {
-        if (!liveKeys.has(k)) { stamps.delete(k); pruned = true; }
-      }
-      if (pruned) enteredAtDirtyRef.current = true;
-    }
-    const stamped = allRows.map((r) => {
-      const enteredAt = stamps.get(r.key ?? r.id);
-      return typeof enteredAt === 'number' ? { ...r, enteredAt } : r;
-    });
+    const stamped = stamps
+      ? allRows.map((r) => {
+          const enteredAt = stamps.get(r.key ?? r.id);
+          return typeof enteredAt === 'number' ? { ...r, enteredAt } : r;
+        })
+      : allRows;
     return buildAttentionRollup(health, stats, stamped, { enabledStates, doneKeys });
   }, [health, stats, agentStates, fleetSweepStates, openPanes, watchedChats, enabledStates, doneKeys]);
 
   // WARDEN-587: persist the enteredAt stamp map to localStorage whenever a poll changed
   // it (a transition/first-observation stamp in fetchAgentStates/fetchFleetStates, or a
-  // prune in the useMemo above). Runs after each poll updates the row state (the deps),
-  // so a restart hydrates the same durations and a returning human reads "stuck 3h", not
+  // prune in fetchFleetStates). Runs after each poll updates the row state (the deps), so
+  // a restart hydrates the same durations and a returning human reads "stuck 3h", not
   // "stuck 0s". Bound to one write per poll cycle via the dirty flag. Reads the ref
   // directly (no helper) so there is no extra dependency.
   useEffect(() => {
