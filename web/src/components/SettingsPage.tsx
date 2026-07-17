@@ -19,6 +19,7 @@ import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { TelemetryTransparency } from '@/components/TelemetryTransparency';
 import { deriveTelemetrySendingStatus } from '@/lib/telemetry/destination';
+import { describeTelemetryTestVerdict, type TelemetryTestVerdict } from '@/lib/telemetry/testConnection';
 import { ArrowLeft, Trash2, AlertTriangle, Send } from 'lucide-react';
 import { type Theme, type TerminalColorScheme, THEMES } from '@/lib/theme';
 import { type Density } from '@/lib/density';
@@ -807,6 +808,16 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
   const [telemetryAuthTokenTail, setTelemetryAuthTokenTail] = useState<string | null>(null);
   const [telemetryAuthTokenInput, setTelemetryAuthTokenInput] = useState('');
 
+  // "Test connection" probe state (WARDEN-595). The verdict is NOT the destination
+  // label's "configured" non-claim — it is a LIVE probe of the receiver's
+  // /capabilities (reachable + schema-matched + authed), driven through the backend
+  // (renderer→receiver is cross-origin → CORS-blocked). It stays in component state
+  // only — never persisted (a cached "connected" goes stale: receiver down, token
+  // rotated). `telemetryTestVerdict` is one of the four kinds the backend returns, or
+  // null before the first probe / after the endpoint it was derived from changes.
+  const [telemetryTestLoading, setTelemetryTestLoading] = useState(false);
+  const [telemetryTestVerdict, setTelemetryTestVerdict] = useState<TelemetryTestVerdict | null>(null);
+
   // Active section in the master-detail nav. The first section is selected by
   // default; switching shows only that section, so there's no cross-section
   // page-level scroll. Persisting across visits is intentionally not done.
@@ -986,6 +997,53 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
       toast.error(err instanceof Error ? err.message : 'Failed to send test alert');
     } finally {
       setTestingWebhook(false);
+    }
+  };
+
+  // "Test connection" (WARDEN-595): probe the configured receiver's /capabilities
+  // through the backend (the renderer→receiver fetch is cross-origin → CORS-blocked,
+  // so it MUST go via /api/telemetry-test, exactly like sendTestAlert). Unlike
+  // webhook-test, the endpoint/token are sent in the BODY so the user can test a
+  // typo'd URL BEFORE saving — and the backend falls back to the persisted token when
+  // no draft is supplied (the token is write-only, so this component never holds its
+  // cleartext). The verdict is rendered as a precise multi-line result below the
+  // button, not just a toast, because the four states carry distinct, actionable copy.
+  // Never persisted — a cached "connected" would go stale (receiver down, token
+  // rotated) and become a false trust signal.
+  const sendTestConnection = async () => {
+    const endpoint = config.telemetryEndpoint.trim();
+    if (!endpoint) return; // button is disabled when blank, but guard anyway
+    setTelemetryTestLoading(true);
+    setTelemetryTestVerdict(null);
+    try {
+      // Send the draft token only when the human typed a new one; omit it on an
+      // untouched field so the backend uses the persisted token (no-clobber parity).
+      const draftToken = telemetryAuthTokenInput.trim();
+      const res = await fetch('/api/telemetry-test', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ endpoint, ...(draftToken ? { token: draftToken } : {}) }),
+      });
+      const body = await res.json();
+      if (body && typeof body.kind === 'string' && typeof body.message === 'string') {
+        setTelemetryTestVerdict(body as TelemetryTestVerdict);
+      } else if (body && typeof body.error === 'string') {
+        setTelemetryTestVerdict({ kind: 'no-receiver', ok: false, message: body.error });
+      } else {
+        setTelemetryTestVerdict({
+          kind: 'no-receiver',
+          ok: false,
+          message: 'Could not interpret the receiver response.',
+        });
+      }
+    } catch (err) {
+      setTelemetryTestVerdict({
+        kind: 'no-receiver',
+        ok: false,
+        message: err instanceof Error ? err.message : 'Failed to test the connection.',
+      });
+    } finally {
+      setTelemetryTestLoading(false);
     }
   };
 
@@ -1917,7 +1975,11 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                   <Input
                     id="telemetryEndpoint"
                     value={config.telemetryEndpoint}
-                    onChange={(e) => setConfig({ ...config, telemetryEndpoint: e.target.value })}
+                    onChange={(e) => {
+                      setConfig({ ...config, telemetryEndpoint: e.target.value });
+                      // An edited endpoint invalidates any prior probe result.
+                      setTelemetryTestVerdict(null);
+                    }}
                     placeholder="https://your-receiver.example/ingest"
                   />
                   <p className="text-xs text-muted-foreground">
@@ -1931,7 +1993,11 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                     id="telemetryAuthToken"
                     type="password"
                     value={telemetryAuthTokenInput}
-                    onChange={(e) => setTelemetryAuthTokenInput(e.target.value)}
+                    onChange={(e) => {
+                      setTelemetryAuthTokenInput(e.target.value);
+                      // An edited token invalidates any prior probe result.
+                      setTelemetryTestVerdict(null);
+                    }}
                     placeholder={telemetryAuthTokenSet ? `••••• set${telemetryAuthTokenTail ? ` (…${telemetryAuthTokenTail})` : ''}` : 'Not set'}
                   />
                   <p className="text-xs text-muted-foreground">
@@ -1939,6 +2005,46 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                       ? `A token is saved${telemetryAuthTokenTail ? ` (ends …${telemetryAuthTokenTail})` : ''}. It is sent as Authorization: Bearer so a receiver that requires auth (AUTH_TOKEN) accepts your events. Type a new one to replace it; leave blank to keep it.`
                       : 'Optional. Sent as Authorization: Bearer when your receiver is gated by a shared secret (AUTH_TOKEN). Leave blank if your receiver runs open.'}
                   </p>
+                </div>
+
+                {/* WARDEN-595 — config-time "Test connection" probe. The destination
+                    label above ("configured") is deliberately NOT a reachability
+                    claim; this turns it into a verified one on demand. The probe goes
+                    through the backend (renderer→receiver is cross-origin), tests the
+                    endpoint/token from the in-memory draft (before Save), and renders a
+                    precise multi-line verdict. The result is never persisted (a cached
+                    "connected" goes stale) — it recomputes on every click. */}
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={sendTestConnection}
+                      disabled={telemetryTestLoading || !config.telemetryEndpoint.trim()}
+                    >
+                      {telemetryTestLoading ? 'Testing…' : 'Test connection'}
+                    </Button>
+                    <span className="text-xs text-muted-foreground">
+                      Verifies the receiver is reachable, schema-matched, and authed. Uses the endpoint above — no Save required.
+                    </span>
+                  </div>
+                  {telemetryTestVerdict && (() => {
+                    const { tone, label } = describeTelemetryTestVerdict(telemetryTestVerdict);
+                    return (
+                      <div
+                        className={
+                          tone === 'positive'
+                            ? 'rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-400'
+                            : 'rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400'
+                        }
+                        data-telemetry-test-verdict={telemetryTestVerdict.kind}
+                        role={tone === 'positive' ? 'status' : 'alert'}
+                      >
+                        <p className="font-medium">{label}</p>
+                        <p>{telemetryTestVerdict.message}</p>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* WARDEN-526 — read-only "What telemetry sends" verifiability

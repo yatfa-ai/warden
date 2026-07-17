@@ -27,6 +27,9 @@ import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { classifyPane, stripAnsi, matchWatchPatterns, sanitizeWatchPatterns } from './agentState.js';
 import * as notify from './notify.js';
 import { checkHost } from './hostStatus.js';
+import {
+  probeReceiverCapabilities,
+} from './telemetry-capabilities.js';
 import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseReflog, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, parseGitRemotes, parseGitBranches, buildDockerGitArgv } from './gitStatus.js';
 import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep } from './companion.js';
 
@@ -933,6 +936,49 @@ app.post('/api/webhook-test', async (_req, res) => {
   } catch (e) {
     // dispatchWebhook never throws (best-effort), but guard anyway so a surprise
     // never 500s the Settings page.
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/telemetry-test — probe a configured telemetry receiver so the user
+// can confirm it is reachable + schema-matched + authed BEFORE relying on it
+// (WARDEN-595). The renderer cannot fetch the receiver directly: the telemetry
+// transport runs in the Node main process (no CORS), but the probe button lives
+// in the renderer, and a cross-origin renderer fetch would be CORS-blocked (the
+// receiver sends no CORS headers). So — exactly like /api/webhook-test above —
+// the renderer POSTs { endpoint, token? } and THIS backend does the outbound
+// GET /capabilities in Node (no CORS), returning a structured verdict the UI
+// renders (connected / schema-drift / auth-required / no-receiver).
+//
+// The endpoint comes from the BODY (not persisted config) so the user can test a
+// typo'd URL before saving — an improvement over /api/webhook-test. The optional
+// token likewise comes from the body when the user typed a new one; when it is
+// absent, the route falls back to the persisted cfg.telemetryAuthToken so a
+// previously-saved token is used for the probe without the user retyping it (the
+// token is write-only on GET /api/config, so the renderer never holds its
+// cleartext). The verdict is NEVER persisted: a cached "connected" would go stale
+// (receiver down, token rotated) and become a false trust signal, so it stays a
+// live, on-demand probe. Only the configured origin is ever contacted — no
+// third-party SaaS, no hardcoded host.
+app.post('/api/telemetry-test', async (req, res) => {
+  try {
+    const endpoint = typeof req.body?.endpoint === 'string' ? req.body.endpoint.trim() : '';
+    if (!endpoint) {
+      return res.status(400).json({ error: 'endpoint is required' });
+    }
+    // A draft token from the body takes precedence; otherwise probeReceiverCapabilities
+    // falls back to the persisted cfg.telemetryAuthToken so a saved secret works
+    // without retyping (the token is write-only on GET /api/config).
+    const verdict = await probeReceiverCapabilities({
+      endpoint,
+      token: typeof req.body?.token === 'string' ? req.body.token : '',
+      fallbackToken: typeof cfg.telemetryAuthToken === 'string' ? cfg.telemetryAuthToken : '',
+      fetchImpl: fetch,
+    });
+    return res.json(verdict);
+  } catch (e) {
+    // The probe itself never throws (errors map to verdicts), but guard anyway so
+    // a surprise never 500s the Settings page.
     res.status(500).json({ error: e.message });
   }
 });
