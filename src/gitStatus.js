@@ -41,8 +41,18 @@
  * renderer tell a STAGED-for-commit file apart from unstaged WIP (WARDEN-369).
  * Both fields are additive alongside `status`, which is kept for backward compat.
  *
+ * Renames and copies are the one porcelain form that carries TWO names. Git writes
+ * a renamed/copied path as `XY <old> -> <new>` where the status code is `R` (rename)
+ * or `C` (copy) — the only two codes that ever carry the arrow — e.g. `R  old.ts ->
+ * new.ts` (a staged rename) or `RM old.js -> new.js` (a staged rename plus a further
+ * worktree edit). The `path` is set to the DESTINATION (the file that actually exists
+ * now) so collision detection (WARDEN-288), the sidebar file list, and file-open on
+ * the changed-file row all target a real path; the SOURCE is carried as an optional,
+ * additive `renamedFrom` (absent on ordinary M/A/D/??/conflict rows). The split is on
+ * the LAST ` -> ` so a source path that itself contains the arrow literal is preserved.
+ *
  * @param {string|Buffer|undefined} output - Raw stdout from `git status --porcelain`.
- * @returns {Array<{path: string, status: string, staged: string, worktree: string, conflict: boolean}>} Changed files, or `[]` when clean.
+ * @returns {Array<{path: string, status: string, staged: string, worktree: string, conflict: boolean, renamedFrom?: string}>} Changed files, or `[]` when clean.
  */
 // The unmerged (conflict) XY codes from `git status --porcelain` v1. For an
 // unmerged path git sets BOTH columns — at least one 'U' (unmerged), or the
@@ -193,7 +203,30 @@ export function parseGitStatusPorcelain(output) {
     .filter((line) => line.trim())           // drop the trailing empty line + blanks
     .map((line) => {
       const statusCode = line.substring(0, 2).trim();
-      const filePath = line.substring(3).trim();
+      const rawPath = line.substring(3).trim();
+      // A rename (`R`) or copy (`C`) is the ONLY porcelain v1 form that carries
+      // TWO names: git writes it as `XY <old> -> <new>` (e.g. `R  old.ts -> new.ts`
+      // for a staged rename, `RM old.js -> new.js` for a rename + further worktree
+      // edit). The status code for these ALWAYS starts with `R` or `C` — the only
+      // two letters that ever carry the arrow. A naive `substring(3)` captures the
+      // whole `old.ts -> new.ts` blob as the path: a non-existent path that breaks
+      // the sidebar file list, file-open on the changed-file row, and — critically
+      // — cross-agent collision detection (WARDEN-288), which joins on `.path` and
+      // so never matches a real destination. We split on the LAST ` -> ` so a SOURCE
+      // path that itself contains ` -> ` is preserved (the same last-separator
+      // discipline parseStashList/parseReflog use for their middle field), set
+      // `path` to the DESTINATION (the file that exists now), and carry the source
+      // as an additive optional `renamedFrom`. Absent on ordinary M/A/D/??/conflict
+      // rows so existing deepEqual tests stay green (WARDEN-608).
+      let filePath = rawPath;
+      let renamedFrom;
+      if (/^[RC]/.test(statusCode)) {
+        const arrow = rawPath.lastIndexOf(' -> ');
+        if (arrow !== -1) {
+          renamedFrom = rawPath.slice(0, arrow).trim();
+          filePath = rawPath.slice(arrow + ' -> '.length).trim();
+        }
+      }
       // Preserve the porcelain X/Y position so a STAGED-for-commit file is no longer
       // indistinguishable from an unstaged WIP file (WARDEN-369). `status` is the
       // collapsed/trimmed code existing consumers already read (kept verbatim for
@@ -210,6 +243,7 @@ export function parseGitStatusPorcelain(output) {
         staged: line.charAt(0),
         worktree: line.charAt(1),
         conflict: isConflictStatus(statusCode),
+        ...(renamedFrom !== undefined && { renamedFrom }),
       };
     })
     .filter((f) => f.path.length > 0);

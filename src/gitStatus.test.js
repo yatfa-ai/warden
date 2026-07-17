@@ -179,6 +179,76 @@ describe('parseGitStatusPorcelain', () => {
       assert.notEqual(files[0].worktree, files[1].worktree); // ' ' vs 'M'
     });
   });
+
+  // ---- WARDEN-608: a rename (`R`) or copy (`C`) is the only porcelain v1 form
+  // that carries TWO names — git writes `XY <old> -> <new>`. The parser must set
+  // `path` to the DESTINATION (the file that exists now) and carry the source as
+  // an optional `renamedFrom`, or the raw `old -> new` blob leaks into the sidebar
+  // file list, file-open on the row, and cross-agent collision detection
+  // (WARDEN-288), which joins on `.path` and so never matches a real destination.
+  describe('rename/copy ` -> ` porcelain lines', () => {
+    it('parses a staged rename to the DESTINATION path with renamedFrom = source', () => {
+      assert.deepEqual(parseGitStatusPorcelain('R  lib/old.ts -> lib/new.ts\n'), [
+        { path: 'lib/new.ts', status: 'R', staged: 'R', worktree: ' ', conflict: false, renamedFrom: 'lib/old.ts' },
+      ]);
+    });
+
+    it('parses a copy (C) to the destination with renamedFrom = source', () => {
+      // Copies use the identical ` -> ` form. Rare under default config
+      // (status.renames=true detects renames only), but the parser must handle them.
+      assert.deepEqual(parseGitStatusPorcelain('C  a.go -> b.go\n'), [
+        { path: 'b.go', status: 'C', staged: 'C', worktree: ' ', conflict: false, renamedFrom: 'a.go' },
+      ]);
+    });
+
+    it('parses a two-char RM code (staged rename + further worktree edit)', () => {
+      // `git mv` then a further edit → `RM` (X=R staged rename, Y=M worktree mod).
+      // Proves the R/C keying works on the FULL two-char code, not just bare `R`.
+      assert.deepEqual(parseGitStatusPorcelain('RM old.js -> new.js\n'), [
+        { path: 'new.js', status: 'RM', staged: 'R', worktree: 'M', conflict: false, renamedFrom: 'old.js' },
+      ]);
+    });
+
+    it('does NOT leave " -> " in any path of a mixed batch, and non-rename rows have no renamedFrom', () => {
+      const out = ' M src/foo.js\nR  lib/old.ts -> lib/new.ts\n?? newfile.go\n';
+      assert.deepEqual(parseGitStatusPorcelain(out), [
+        { path: 'src/foo.js', status: 'M', staged: ' ', worktree: 'M', conflict: false },
+        { path: 'lib/new.ts', status: 'R', staged: 'R', worktree: ' ', conflict: false, renamedFrom: 'lib/old.ts' },
+        { path: 'newfile.go', status: '??', staged: '?', worktree: '?', conflict: false },
+      ]);
+    });
+
+    it('splits on the LAST " -> " so a source path containing the arrow literal is preserved', () => {
+      // A source literally named `weird -> name.ts` renamed to `final.ts`. Splitting
+      // on the FIRST arrow would corrupt the source; the last-arrow split keeps it.
+      assert.deepEqual(parseGitStatusPorcelain('R  weird -> name.ts -> final.ts\n'), [
+        { path: 'final.ts', status: 'R', staged: 'R', worktree: ' ', conflict: false, renamedFrom: 'weird -> name.ts' },
+      ]);
+    });
+
+    it('ordinary modified/untracked/conflict rows do NOT carry a renamedFrom field', () => {
+      // renamedFrom is additive — present on rename/copy only, absent everywhere
+      // else, so existing consumers (and deepEqual assertions) are unaffected.
+      const files = parseGitStatusPorcelain(' M src/foo.js\n?? newfile.go\nA  brand-new.js\nUU both.js\n');
+      for (const f of files) {
+        assert.equal('renamedFrom' in f, false, `${f.path} must not carry renamedFrom`);
+      }
+    });
+
+    it('does not split a non-rename path that merely contains " -> "', () => {
+      // The R/C status-code guard is what scopes the split: an ordinary modified
+      // file whose name happens to contain ` -> ` must NOT be treated as a rename.
+      assert.deepEqual(parseGitStatusPorcelain(' M a -> b.js\n'), [
+        { path: 'a -> b.js', status: 'M', staged: ' ', worktree: 'M', conflict: false },
+      ]);
+    });
+
+    it('tolerates CRLF line endings on a rename line (e.g. over SSH)', () => {
+      assert.deepEqual(parseGitStatusPorcelain('R  old.ts -> new.ts\r\n'), [
+        { path: 'new.ts', status: 'R', staged: 'R', worktree: ' ', conflict: false, renamedFrom: 'old.ts' },
+      ]);
+    });
+  });
 });
 
 describe('isConflictStatus', () => {
