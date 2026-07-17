@@ -218,6 +218,14 @@ export interface AttentionItem {
   name?: string;
   state: string;
   signal?: string | null;
+  /**
+   * WARDEN-587: the epoch-ms this item entered its current attention state (copied from
+   * the source `AgentStateRow.enteredAt`), so the directed Callout can show the same
+   * live "stuck 2h 14m" duration suffix the section rows do. Absent for health-group
+   * agents (Chat rows carry no enteredAt — duration is a pane-state concept) and for any
+   * pane row that was never stamped.
+   */
+  enteredAt?: number;
 }
 
 /**
@@ -283,6 +291,9 @@ export function rankAttention(rollup: AttentionRollup): {
     name: a.name || a.key || a.id,
     state: a.state,
     signal: a.signal ?? null,
+    // WARDEN-587: carry the enteredAt stamp through so the directed Callout can render
+    // the same live duration suffix the section rows do.
+    ...(typeof a.enteredAt === 'number' ? { enteredAt: a.enteredAt } : {}),
   });
   // WARDEN-540: a custom-pattern match is its own AttentionItem — state 'custom'
   // (NOT the pane's underlying state, which is irrelevant to this signal) with the
@@ -293,6 +304,7 @@ export function rankAttention(rollup: AttentionRollup): {
     name: a.name || a.key || a.id,
     state: 'custom',
     signal: a.customMatch ? `'${a.customMatch.line}' (pattern: ${a.customMatch.pattern})` : null,
+    ...(typeof a.enteredAt === 'number' ? { enteredAt: a.enteredAt } : {}),
   });
 
   // `directives`/`errors` are raw event counts with no single pane to deep-link, so

@@ -565,4 +565,51 @@ test('active → active / active → waiting are NOT finishes (still working, no
   assert.equal(isDoneTransition('active', 'waiting'), false);
 });
 
+console.log('\nenteredAt threading (WARDEN-587): the duration stamp rides the row into every surface');
+// The stamp is attached to each AgentStateRow as it enters the rollup (useAttentionRollup),
+// so buildAttentionRollup must PRESERVE it on the bucketed rows (the badge sections read it
+// there) and rankAttention's mappers must COPY it onto AttentionItem (the directed callout).
+test('buildAttentionRollup preserves enteredAt on the bucketed rows (sections read it there)', () => {
+  const r = roll(health(), stats(), [
+    stateRow('s1', 'stuck', { enteredAt: 100 }),
+    stateRow('e1', 'erroring', { enteredAt: 200 }),
+    stateRow('w1', 'waiting', { enteredAt: 300 }),
+  ]);
+  assert.equal(r.stuck[0].enteredAt, 100);
+  assert.equal(r.erroring[0].enteredAt, 200);
+  assert.equal(r.waiting[0].enteredAt, 300);
+});
+test('a done row carries its enteredAt (the finish time, for "finished Nm ago")', () => {
+  const r = roll(health(), stats(), [stateRow('w1', 'idle', { enteredAt: 500 })], { doneKeys: new Set(['w1']) });
+  assert.equal(r.done[0].enteredAt, 500);
+});
+test('rankAttention copies enteredAt onto the ranked AttentionItem (the callout shows duration)', () => {
+  const r = roll(health(), stats(), [
+    stateRow('s1', 'stuck', { enteredAt: 100, signal: 'loop' }),
+    stateRow('w1', 'waiting', { enteredAt: 300, signal: 'hi' }),
+  ]);
+  const { ranked } = rankAttention(r);
+  const byId = Object.fromEntries(ranked.map((x) => [x.id, x]));
+  assert.equal(byId.s1.enteredAt, 100);
+  assert.equal(byId.w1.enteredAt, 300);
+});
+test('a custom (WARDEN-540) ranked item carries enteredAt too', () => {
+  const r = roll(health(), stats(), [stateRow('d1', 'idle', { enteredAt: 250, customMatch: cm('Deploy', 'deploy failed') })]);
+  const { ranked } = rankAttention(r);
+  assert.equal(ranked.length, 1);
+  assert.equal(ranked[0].state, 'custom');
+  assert.equal(ranked[0].enteredAt, 250);
+});
+test('a row with NO enteredAt yields an AttentionItem with no enteredAt (no duration renders)', () => {
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck', { signal: 'loop' })]);
+  const { ranked } = rankAttention(r);
+  assert.equal('enteredAt' in ranked[0], false);
+});
+test('a health-group top (Chat, no pane state) has no enteredAt (duration is pane-state only)', () => {
+  const r = roll(health({ critical: [agent('c1')] }), stats());
+  const { ranked } = rankAttention(r);
+  assert.equal(ranked.length, 1);
+  assert.equal('enteredAt' in ranked[0], false);
+});
+
 console.log(`\n✓ ATTENTION ROLLUP TESTS PASS (${passed})`);

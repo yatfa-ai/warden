@@ -45,6 +45,7 @@ import {
 import { diffWatchAlerts, indexByWatchKey, applyWatchCooldown, type WatchLastFiredMap, type WatchReason } from '@/lib/chatWatch';
 import { recordWatchMiss, shouldRecordMiss } from '@/lib/watchCatchup';
 import { activeSnoozedKeys, type SnoozeMap } from '@/lib/snooze';
+import { loadStateEnteredAt, saveStateEnteredAt, computeEnteredAt } from '@/lib/stateDuration';
 import type { HealthData, ActivityStats, AgentStateRow, AgentStatesData } from '@/lib/types';
 
 // Recent-error / recent-directive window. ActivityStats counts raw events in the
@@ -346,6 +347,31 @@ export function useAttentionRollup(
   // does not re-ping. Pruned to open keys each poll so it stays bounded.
   const doneLastFiredRef = useRef<Map<string, number>>(new Map());
 
+  // WARDEN-587: key → epoch-ms the agent ENTERED its current attention state — the
+  // timestamp behind the live "stuck 2h 14m" duration suffix on the badge rows. A
+  // returning rare-visitor human cannot otherwise tell an agent stuck 90s from one
+  // stuck 4h (they render identically today); this adds the missing time dimension so
+  // the languishing rows can be triaged from the just-flipped ones. Sibling of
+  // doneRecentRef above (also a key→epoch-ms Map stamped on a transition), but broader:
+  // doneRecentRef tracks ONLY the active→idle finish (a transient 3-min window), while
+  // enteredAtRef tracks EVERY pane's entry into its current state for the whole session.
+  //
+  // LAZY-HYDRATED from localStorage on the first render (the null-check below) so a
+  // human who restarts Warden after lunch still reads "stuck 3h", not "stuck 0s" — the
+  // persisted stamps survive across restart (success criterion #2). The null-check is
+  // idempotent (a no-op after the first render) and only READS storage, so it is safe
+  // in the render pass; it guarantees `.current` is non-null for every fetch/memo/effect
+  // that follows. Accessed directly (not via a helper) so the `[]`-deps fetch callbacks
+  // need no new dependency.
+  const enteredAtRef = useRef<Map<string, number> | null>(null);
+  if (enteredAtRef.current === null) {
+    enteredAtRef.current = new Map(Object.entries(loadStateEnteredAt()));
+  }
+  // Whether the stamp map has changed since the last persist. Set on every stamp/prune,
+  // cleared by the persist effect below so we only write localStorage when something
+  // actually moved (bounded writes on the 30s/90s cadences).
+  const enteredAtDirtyRef = useRef(false);
+
   const fetchHealthStats = useCallback(async () => {
     const after = new Date(Date.now() - ATTENTION_RECENT_WINDOW_MS).toISOString();
     // allSettled: a health OR stats failure must not blank the other half of the
@@ -505,13 +531,36 @@ export function useAttentionRollup(
         const prevOpen = openPrevRef.current;
         const doneRecent = doneRecentRef.current;
         const doneLastFired = doneLastFiredRef.current;
+        // WARDEN-587: the enteredAt stamp map (lazy-hydrated from localStorage; non-null
+        // after the first render). Read once here so every row stamps the same live Map.
+        const enteredAt = enteredAtRef.current as Map<string, number>;
         const now = Date.now();
         const nextOpenPrev: Record<string, string> = {};
         for (const r of openRows) {
           const key = r.key ?? r.id;
           nextOpenPrev[key] = r.state;
-          if (watchedSetForDone.has(key)) continue; // watched → the watch ping handles it
+          // WARDEN-587: stamp when this key ENTERED its current state, so the badge row
+          // can show a live "stuck 2h 14m" duration. Covers EVERY open row (watched
+          // panes that are also open appear in the badge and need durations too), so it
+          // runs BEFORE the watched done-ping `continue`. prevOpen holds each key's prior
+          // state from the last poll; computeEnteredAt is the pure stamp/reset/keep rule
+          // (null → keep the existing stamp):
+          //   - first observation (no prev)            → stamp `now` as a baseline;
+          //   - genuine transition (prev !== state)    → reset the stamp to `now`;
+          //   - unchanged                              → keep the stamp (keeps growing).
+          // The formatter (formatStateDuration) suppresses the sub-minute window, so a
+          // first-observation baseline never reads as a false "0s"/"<1m" — the suffix
+          // appears only once the state has held ≥1m (the languishing-vs-just-flipped
+          // signal a returning human needs). An agent that finished (active→idle) is a
+          // transition like any other, so its done row gets the finish time as its
+          // enteredAt for free — the same stamp doneRecentRef records.
           const prev = prevOpen[key];
+          const nextEnteredAt = computeEnteredAt(prev ?? null, r.state, enteredAt.has(key), now);
+          if (nextEnteredAt !== null && enteredAt.get(key) !== nextEnteredAt) {
+            enteredAt.set(key, nextEnteredAt);
+            enteredAtDirtyRef.current = true;
+          }
+          if (watchedSetForDone.has(key)) continue; // watched → the watch ping handles it
           if (isDoneTransition(prev ?? null, r.state)) {
             doneRecent.set(key, now);
             // Fire the positive done ping, gated exactly like the watch ping: master
@@ -595,7 +644,21 @@ export function useAttentionRollup(
         // stale sweep copy would double-count it for up to one sweep cycle. The server
         // already excludes these via ?exclude=; this is the belt-and-suspenders guard.
         const owned = new Set([...open, ...watched]);
-        setFleetSweepStates(rows.filter((r) => !owned.has(r.key ?? r.id)));
+        const sweptRows = rows.filter((r) => !owned.has(r.key ?? r.id));
+        // WARDEN-587: stamp an enteredAt baseline for a hidden-fleet row the FIRST sweep
+        // it appears. The sweep has no per-key prior-state baseline (unlike the open-pane
+        // loop), so a swept agent's duration starts when first swept — the documented
+        // approximation (same as its classification today). A swept key that was already
+        // stamped (prior sweep, or persisted across restart) keeps its stamp. sweep_skipped
+        // rows match no attention bucket and never render, but stamping them is harmless
+        // (they carry no row into the rollup) and keeps the map bounded to real keys.
+        const enteredAt = enteredAtRef.current as Map<string, number>;
+        const sweepNow = Date.now();
+        for (const r of sweptRows) {
+          const key = r.key ?? r.id;
+          if (!enteredAt.has(key)) { enteredAt.set(key, sweepNow); enteredAtDirtyRef.current = true; }
+        }
+        setFleetSweepStates(sweptRows);
       }
       // A failed sweep must not blank the rollup (mirrors fetchAgentStates) — leave the
       // prior sweep rows in place.
@@ -705,8 +768,44 @@ export function useAttentionRollup(
   const rollup = useMemo(() => {
     const covered = new Set([...openPanes, ...watchedChats]);
     const sweepRows = fleetSweepStates.filter((r) => !covered.has(r.key ?? r.id));
-    return buildAttentionRollup(health, stats, [...agentStates, ...sweepRows], { enabledStates, doneKeys });
+    // WARDEN-587: attach each row's enteredAt stamp (the epoch-ms it entered its current
+    // state) so the badge rows + directed callout can render a live duration suffix.
+    // Also PRUNE the stamp map to currently-relevant keys (open ∪ swept) so a closed /
+    // un-swept pane's stale stamp doesn't linger forever (mirrors doneLastFired's prune-
+    // to-open-keys discipline), keeping the persisted map bounded across a long session.
+    // The prune is guarded on a non-empty row set: before the first poll lands (empty
+    // agentStates + sweep) we must NOT prune, or we'd wipe the just-hydrated persisted
+    // stamps and lose restart continuity (success criterion #2). Idempotent ref
+    // maintenance — the localStorage write fires in the persist effect below.
+    const stamps = enteredAtRef.current as Map<string, number>;
+    const allRows = [...agentStates, ...sweepRows];
+    if (allRows.length > 0) {
+      const liveKeys = new Set(allRows.map((r) => r.key ?? r.id));
+      let pruned = false;
+      for (const k of stamps.keys()) {
+        if (!liveKeys.has(k)) { stamps.delete(k); pruned = true; }
+      }
+      if (pruned) enteredAtDirtyRef.current = true;
+    }
+    const stamped = allRows.map((r) => {
+      const enteredAt = stamps.get(r.key ?? r.id);
+      return typeof enteredAt === 'number' ? { ...r, enteredAt } : r;
+    });
+    return buildAttentionRollup(health, stats, stamped, { enabledStates, doneKeys });
   }, [health, stats, agentStates, fleetSweepStates, openPanes, watchedChats, enabledStates, doneKeys]);
+
+  // WARDEN-587: persist the enteredAt stamp map to localStorage whenever a poll changed
+  // it (a transition/first-observation stamp in fetchAgentStates/fetchFleetStates, or a
+  // prune in the useMemo above). Runs after each poll updates the row state (the deps),
+  // so a restart hydrates the same durations and a returning human reads "stuck 3h", not
+  // "stuck 0s". Bound to one write per poll cycle via the dirty flag. Reads the ref
+  // directly (no helper) so there is no extra dependency.
+  useEffect(() => {
+    if (!enteredAtDirtyRef.current) return;
+    enteredAtDirtyRef.current = false;
+    const map = enteredAtRef.current;
+    if (map) saveStateEnteredAt(Object.fromEntries(map));
+  }, [agentStates, fleetSweepStates]);
 
   // Fire an attention notification on a genuine rollup INCREASE (WARDEN-259). The
   // increase-only shouldFireAlert returns true ONLY on a total increase, so a
