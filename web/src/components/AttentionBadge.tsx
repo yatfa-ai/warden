@@ -10,8 +10,22 @@ import {
   type AttentionItem,
 } from '@/lib/attentionRollup';
 import { activeSnoozedKeys, formatSnoozeRemaining, SNOOZE_DURATION_OPTIONS, type AlertMuteMode, type SnoozeMap } from '@/lib/snooze';
+import { formatStateDuration, formatStateDurationVerbose, languishingTone, sortOldestEnteredAtFirst, type StateDurationTone } from '@/lib/stateDuration';
 import type { AttentionAgent } from '@/lib/types';
 import { cn } from '@/lib/utils';
+
+// WARDEN-587: the duration suffix's supplementary color escalates the longer an agent
+// has been in its state — muted (fresh) → amber → red — so a glance picks out the
+// LANGUISHING rows. The duration TEXT always carries the primary signal (WCAG 1.4.1);
+// color is supplementary only. The -600 shades (not -500) keep the count readable on the
+// light popover background at text-[10px] — escalation must not make a languishing row's
+// duration HARDER to read than a fresh one (the opposite of the intent). The dot (not the
+// text) already carries the section's red/amber severity, so the text need only tick up.
+const DURATION_TONE_CLASS: Record<StateDurationTone, string> = {
+  fresh: 'text-muted-foreground',
+  amber: 'text-amber-600',
+  red: 'text-red-600',
+};
 
 interface Props {
   /**
@@ -216,15 +230,15 @@ export function AttentionBadge({
             )}
             {stuck.length > 0 && (
               <Section title="Stuck" count={stuck.length} tone="text-red-500">
-                {stuck.map((a) => (
-                  <AgentRow key={a.key || a.id} agent={a} dot="bg-red-500" detail={a.signal} onClick={() => openChat(a.key || a.id)} />
+                {sortOldestEnteredAtFirst(stuck).map((a) => (
+                  <AgentRow key={a.key || a.id} agent={a} dot="bg-red-500" detail={a.signal} enteredAt={a.enteredAt} durationStateLabel="stuck" onClick={() => openChat(a.key || a.id)} />
                 ))}
               </Section>
             )}
             {erroring.length > 0 && (
               <Section title="Erroring" count={erroring.length} tone="text-red-500">
-                {erroring.map((a) => (
-                  <AgentRow key={a.key || a.id} agent={a} dot="bg-red-500" detail={a.signal} onClick={() => openChat(a.key || a.id)} />
+                {sortOldestEnteredAtFirst(erroring).map((a) => (
+                  <AgentRow key={a.key || a.id} agent={a} dot="bg-red-500" detail={a.signal} enteredAt={a.enteredAt} durationStateLabel="erroring" onClick={() => openChat(a.key || a.id)} />
                 ))}
               </Section>
             )}
@@ -249,21 +263,21 @@ export function AttentionBadge({
             )}
             {waiting.length > 0 && (
               <Section title="Waiting on you" count={waiting.length} tone="text-yellow-500">
-                {waiting.map((a) => (
-                  <AgentRow key={a.key || a.id} agent={a} dot="bg-yellow-500" detail={a.signal} onClick={() => openChat(a.key || a.id)} />
+                {sortOldestEnteredAtFirst(waiting).map((a) => (
+                  <AgentRow key={a.key || a.id} agent={a} dot="bg-yellow-500" detail={a.signal} enteredAt={a.enteredAt} durationStateLabel="waiting" onClick={() => openChat(a.key || a.id)} />
                 ))}
               </Section>
             )}
             {blocked.length > 0 && (
               <Section title="Blocked" count={blocked.length} tone="text-yellow-500">
-                {blocked.map((a) => (
-                  <AgentRow key={a.key || a.id} agent={a} dot="bg-yellow-500" detail={a.signal} onClick={() => openChat(a.key || a.id)} />
+                {sortOldestEnteredAtFirst(blocked).map((a) => (
+                  <AgentRow key={a.key || a.id} agent={a} dot="bg-yellow-500" detail={a.signal} enteredAt={a.enteredAt} durationStateLabel="blocked" onClick={() => openChat(a.key || a.id)} />
                 ))}
               </Section>
             )}
             {custom.length > 0 && (
               <Section title="Watch patterns" count={custom.length} tone="text-yellow-500">
-                {custom.map((a) => (
+                {sortOldestEnteredAtFirst(custom).map((a) => (
                   <AgentRow
                     key={a.key || a.id}
                     agent={a}
@@ -271,6 +285,8 @@ export function AttentionBadge({
                     // detail = the matching line + the pattern name that matched it, so
                     // the human sees both WHAT printed and WHICH of their rules tripped.
                     detail={a.customMatch ? `'${a.customMatch.line}' (${a.customMatch.pattern})` : undefined}
+                    enteredAt={a.enteredAt}
+                    durationStateLabel="matching a watch pattern"
                     onClick={() => openChat(a.key || a.id)}
                   />
                 ))}
@@ -286,12 +302,18 @@ export function AttentionBadge({
             */}
             {done.length > 0 && (
               <Section title="Finished" count={done.length} tone="text-emerald-500">
-                {done.map((a) => (
+                {sortOldestEnteredAtFirst(done).map((a) => (
                   <AgentRow
                     key={a.key || a.id}
                     agent={a}
                     dot="bg-emerald-500"
                     detail="Finished a task"
+                    enteredAt={a.enteredAt}
+                    durationStateLabel="finished"
+                    // done reads as elapsed SINCE the finish ("3m ago"), not an ongoing
+                    // hold — the active→idle transition that populated `done` IS the
+                    // enteredAt stamp, so the duration is the age of the completion.
+                    durationTense="ago"
                     onClick={() => openChat(a.key || a.id)}
                   />
                 ))}
@@ -339,6 +361,9 @@ function AgentRow({
   snoozedUntil = null,
   muteEnabled = false,
   onSetAlertMute,
+  enteredAt,
+  durationStateLabel,
+  durationTense = 'ongoing',
 }: {
   agent: AttentionAgent;
   dot: string;
@@ -355,6 +380,16 @@ function AgentRow({
   snoozedUntil?: number | null;
   muteEnabled?: boolean;
   onSetAlertMute?: (key: string, mode: AlertMuteMode) => void;
+  /** WARDEN-587: the epoch-ms this agent entered its current state — drives the live
+   * "stuck 2h 14m" duration suffix. Absent on health-bucket rows (Chat carries no
+   * stamp) and on a row observed before any stamp landed → no suffix renders. */
+  enteredAt?: number;
+  /** WARDEN-587: a short verb for the verbose tooltip/aria ("stuck for 2 hours 14
+   * minutes"). Omit → "in this state for …". */
+  durationStateLabel?: string;
+  /** WARDEN-587: 'ago' reads the duration as elapsed SINCE a completion (the green
+   * "Finished" section: "3m ago"); 'ongoing' (default) reads it as a held state. */
+  durationTense?: 'ongoing' | 'ago';
 }) {
   const label = agent.name || agent.key || agent.id;
   const muteKey = agent.key || agent.id;
@@ -364,6 +399,28 @@ function AgentRow({
   const now = Date.now();
   const isSnoozed = snoozedUntil != null && snoozedUntil > now;
   const remaining = snoozedUntil != null ? formatSnoozeRemaining(snoozedUntil, now) : '';
+  // WARDEN-587: the live duration suffix + its supplementary tone + verbose tooltip.
+  // formatStateDuration returns '' under a minute (and for an unstamped row), so a
+  // freshly-observed row renders no suffix — never a false "0s". The visible text is
+  // the primary signal (WCAG 1.4.1); color + tooltip are supplementary. The 'ago' (done)
+  // tense passes a sub-minute label so a JUST-finished pane reads "<1m ago" instead of
+  // nothing — recency is the signal in the transient 3-min Finished window, so hiding the
+  // first minute would bury the most relevant readout. The ongoing tense stays suppressed
+  // under a minute (its false-precision guard).
+  const durationCompact = enteredAt != null
+    ? formatStateDuration(enteredAt, now, durationTense === 'ago' ? { subMinute: '<1m' } : undefined)
+    : '';
+  const durationVerbose = enteredAt != null ? formatStateDurationVerbose(enteredAt, now) : '';
+  const durationTone = languishingTone(enteredAt, now);
+  const durationAgo = durationTense === 'ago';
+  const durationShown = durationCompact
+    ? durationAgo ? `${durationCompact} ago` : durationCompact
+    : '';
+  const durationLabel = durationVerbose
+    ? durationAgo
+      ? `finished ${durationVerbose} ago`
+      : `${durationStateLabel ?? 'in this state'} for ${durationVerbose}`
+    : '';
   // Either suppression state mutes the row visually (line-through + dim), matching
   // the suppression the OS channel applies (WARDEN-551: a snoozed agent shows muted).
   const suppressed = muted || isSnoozed;
@@ -381,6 +438,22 @@ function AgentRow({
               muted under the agent name so the human can see WHY it needs attention. */}
           {detail ? <span className="block truncate text-[10px] text-muted-foreground">{detail}</span> : null}
         </span>
+        {/*
+          WARDEN-587: the live duration suffix — how long this agent has been in its
+          current state. Right-aligned, supplementary tone (muted → amber → red the
+          longer it languishes), with a verbose tooltip ("stuck for 2 hours 14
+          minutes"). Rendered only when there is a stamp AND it has aged past a minute
+          (formatStateDuration returns '' otherwise). tabular-nums so the count doesn't
+          shift width as it ticks.
+        */}
+        {durationShown ? (
+          <span
+            className={cn('shrink-0 self-center text-[10px] tabular-nums', DURATION_TONE_CLASS[durationTone])}
+            title={durationLabel}
+          >
+            {durationShown}
+          </span>
+        ) : null}
       </Button>
       {/*
         WARDEN-364 + WARDEN-551 — per-agent mute/snooze on the desktop-alert
@@ -496,6 +569,14 @@ function Callout({ top, onClick }: { top: AttentionItem; onClick: () => void }) 
   // agents carry no signal of their own). Shared with the return-banner callout so
   // the phrasing is identical across both surfaces.
   const reason = attentionReason(top);
+  // WARDEN-587: show the same live duration the section rows do, so the promoted
+  // "you're needed HERE" answer carries the languishing-vs-just-flipped signal too
+  // ("stuck 2h 14m"). Absent for health-group tops (no enteredAt) → no suffix.
+  const now = Date.now();
+  const duration = top.enteredAt != null ? formatStateDuration(top.enteredAt, now) : '';
+  const durationVerbose = top.enteredAt != null ? formatStateDurationVerbose(top.enteredAt, now) : '';
+  const durationTone = languishingTone(top.enteredAt, now);
+  const durationLabel = durationVerbose ? `for ${durationVerbose}` : '';
   return (
     <Button variant="ghost" onClick={onClick} className={cn(rowClass(), 'rounded-md border border-border bg-muted/40 py-2')}>
       <span className={cn('size-2 rounded-full shrink-0 mt-0.5', dotForState(top.state))} aria-hidden />
@@ -505,6 +586,20 @@ function Callout({ top, onClick }: { top: AttentionItem; onClick: () => void }) 
         </span>
         <span className="block truncate text-xs text-muted-foreground">{reason}</span>
       </span>
+      {/*
+        WARDEN-587: the duration suffix on the directed answer. Rendered only when a
+        stamp aged past a minute is present, with the same supplementary tone + verbose
+        tooltip as the section rows. Sits beside "open →" so the callout reads as one
+        composed answer: where, why, and for how long.
+      */}
+      {duration ? (
+        <span
+          className={cn('shrink-0 self-center text-[10px] tabular-nums', DURATION_TONE_CLASS[durationTone])}
+          title={durationLabel}
+        >
+          {duration}
+        </span>
+      ) : null}
       <span className="text-xs text-muted-foreground shrink-0">open →</span>
     </Button>
   );

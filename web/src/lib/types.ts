@@ -225,6 +225,18 @@ export interface AgentStateRow {
    * reads (zero new SSH cost).
    */
   customMatch?: { pattern: string; line: string } | null;
+  /**
+   * WARDEN-587: the epoch-ms this agent ENTERED its current attention state — the
+   * timestamp behind the live "stuck 2h 14m" duration suffix on the badge rows, so a
+   * returning human can triage LANGUISHING agents from just-flipped ones. Stamped
+   * client-side in useAttentionRollup's fetchAgentStates loop (on a genuine state
+   * transition, or `now` as a baseline on first observation), persisted to localStorage
+   * across restart, and attached to each row as it enters the rollup. Absent on rows
+   * that were never stamped (a fresh first observation, or a health-bucket Chat) → the
+   * badge renders no duration suffix for that row. Pure display data; never sent to the
+   * backend.
+   */
+  enteredAt?: number;
 }
 
 /** Response shape of `GET /api/agent-states` (WARDEN-344). */
