@@ -157,6 +157,16 @@ interface WardenTelemetryBridge {
   // events can attach it. Fire-and-forget context; resolves once main has stored it.
   setContext: (ctx: TelemetryContext) => Promise<void>;
   onRuntimeStatus: (cb: (status: TelemetryRuntimeStatus) => void) => () => void;
+  // WARDEN-637 — forward a serialized renderer JS error { name, message, stack }
+  // to main's consent-gated source. Fire-and-forget (send); resolves to void.
+  reportError: (serialized: RendererErrorPayload) => void;
+}
+
+/** A renderer-process error serialized for the telemetry forward (WARDEN-637). */
+export interface RendererErrorPayload {
+  name: string;
+  message: string;
+  stack: string;
 }
 
 interface WindowWithWardenTelemetry extends Window {
@@ -225,6 +235,7 @@ export async function clearTelemetryRuntimeDrift(): Promise<TelemetryRuntimeStat
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // WARDEN-538 — push the FOCUSED chat/session name to main so the telemetry
 // source can attach it to extended-tier events. App.tsx calls this on focus /
 // active-pane change with `{ chatName: focusedChat?.name }` (sessionName is left
@@ -249,4 +260,108 @@ export async function setTelemetryContext(ctx: TelemetryContext): Promise<void> 
   } catch (e) {
     console.warn('[warden:electron] setTelemetryContext failed', e);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Renderer-process JS error forward (WARDEN-637). The warden UI is a React app,
+// so most "warden broke" moments are renderer-side. The main-process telemetry
+// source sees only process-level signals (render-process-gone, unresponsive), so
+// a non-fatal renderer error would be invisible without this forward. The React
+// ErrorBoundary's `onError` (and any future direct caller) hands the error here;
+// this serializes it to { name, message, stack } and forwards it to main's
+// consent-gated `recordRendererError` over the `wardenTelemetry` bridge.
+//
+// Error instances do NOT survive the contextBridge clone with their prototype, so
+// the serialization happens HERE (in the renderer's main world) before the call —
+// main's buildErrorEvent then reads the fields directly (it recognizes this
+// serialized shape). Both the React `onError` path and the global window
+// `error`/`unhandledrejection` listeners (installed by installRendererErrorCapture
+// below) forward through this same bridge. Those listeners MUST run in the web
+// bundle (the renderer's main world), NOT in preload — under contextIsolation a
+// listener attached in the preload's isolated world does not fire for main-world
+// errors (sentry-electron#316).
+//
+// Same three-context feature-detection story: a clean no-op when the bridge is
+// absent (`npm run dev` browser, `node web/smoke.cjs`), so callers never branch.
+
+// Coerce an error-like value into the serializable { name, message, stack } shape
+// the forward channel expects. Handles Error instances, plain objects, and
+// strings. `componentStack` (React's errorInfo.componentStack, when available) is
+// appended to the stack: its `at Component (file:line:col)` frames then parse
+// into the event's frames array (basename-only — no identifier leak). The schema
+// carries no separate componentStack field, so the stack is the one slot the
+// component tree can reach without a schema change.
+function serializeErrorForTelemetry(
+  error: unknown,
+  componentStack?: string | null,
+): RendererErrorPayload {
+  let name = 'Error';
+  let message = '';
+  let stack = '';
+  if (error instanceof Error) {
+    name = error.name || 'Error';
+    message = error.message || '';
+    stack = error.stack || '';
+  } else if (error !== null && typeof error === 'object') {
+    const e = error as { name?: unknown; message?: unknown; stack?: unknown };
+    if (typeof e.name === 'string' && e.name) name = e.name;
+    if (typeof e.message === 'string') message = e.message;
+    if (typeof e.stack === 'string') stack = e.stack;
+  } else if (typeof error === 'string') {
+    message = error;
+  }
+  if (typeof componentStack === 'string' && componentStack.length > 0) {
+    stack = stack ? `${stack}\n${componentStack}` : componentStack;
+  }
+  return { name, message, stack };
+}
+
+// Forward a renderer-process error (React render throw from ErrorBoundary, or any
+// direct caller) to main's consent-gated telemetry source. A clean no-op when the
+// bridge is absent (browser/dev/smoke) — never throws into the caller. Main drops
+// the forward while base consent is off, so this captures nothing until the user
+// opts in. Never rejects (fire-and-forget over `send`).
+export function forwardRendererError(error: unknown, componentStack?: string | null): void {
+  const b = telemetryBridge();
+  if (!b || typeof b.reportError !== 'function') return;
+  try {
+    b.reportError(serializeErrorForTelemetry(error, componentStack));
+  } catch (e) {
+    console.warn('[warden:electron] forwardRendererError failed', e);
+  }
+}
+
+// Install the renderer's global `error` + `unhandledrejection` listeners — the
+// NON-React half of WARDEN-637 (an unhandled promise rejection or a window error
+// NOT caught by an ErrorBoundary). These MUST live in the web bundle (the
+// renderer's MAIN world): under contextIsolation the preload's isolated-world
+// `window` is a different object, so a listener installed there does NOT fire for
+// main-world errors (sentry-electron#316). Each listener serializes via the same
+// path as the React `onError` forward and no-ops when the bridge is absent
+// (`npm run dev` browser / `node web/smoke.cjs`), satisfying the three-context
+// feature-detection requirement (refinement C). Idempotent — a guard prevents
+// stacking duplicate listeners on repeat calls (e.g. Vite HMR module re-eval in
+// dev, where the forward no-ops anyway). Installed once at App module load.
+let rendererErrorCaptureInstalled = false;
+export function installRendererErrorCapture(): void {
+  if (rendererErrorCaptureInstalled) return;
+  if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+  rendererErrorCaptureInstalled = true;
+
+  window.addEventListener('error', (event) => {
+    // ErrorEvent.error is the thrown value (preferred); for resource-load errors
+    // where .error is absent, fall back to the event's message string.
+    const err =
+      event && event.error != null
+        ? event.error
+        : event && typeof event.message === 'string'
+          ? { message: event.message }
+          : null;
+    if (err != null) forwardRendererError(err);
+  });
+
+  window.addEventListener('unhandledrejection', (event) => {
+    // PromiseRejectionEvent.reason is whatever the promise rejected with.
+    if (event && event.reason != null) forwardRendererError(event.reason);
+  });
 }

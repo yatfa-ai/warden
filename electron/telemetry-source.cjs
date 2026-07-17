@@ -172,19 +172,57 @@ function attachExtendedNames(event, o) {
   if (typeof o.sessionName === 'string' && o.sessionName) event.sessionName = o.sessionName;
 }
 
+// Coerce an error-like value into a { name, message, stack } triple for
+// buildErrorEvent. Three shapes are handled:
+//   1. A real Error instance (the MAIN-process uncaught/rejection path).
+//   2. A plain serializable { name, message, stack } object forwarded across the
+//      contextBridge from the RENDERER (WARDEN-637). Error instances do NOT
+//      survive the IPC structured clone with their prototype, so the renderer
+//      forwards the fields; recognizing that shape here reads the renderer's
+//      real name/message/stack instead of the old fallback, which ran
+//      `new Error(String(obj))` and collapsed it to message:"[object Object]"
+//      with frames parsed from a MAIN-process stack (where `new Error` ran) —
+//      silently losing the renderer's error entirely (refinement B).
+//   3. Anything else (string/null/undefined/a non-error object WITHOUT a
+//      `message` field) is wrapped into a fresh main-process Error — UNCHANGED
+//      from pre-WARDEN-637 behavior, so existing callers that reject with e.g.
+//      { code, msg } are unaffected.
+function coerceErrorFields(err) {
+  if (err instanceof Error) {
+    return {
+      name: typeof err.name === 'string' && err.name ? err.name : 'Error',
+      message: typeof err.message === 'string' ? err.message : '',
+      stack: typeof err.stack === 'string' ? err.stack : '',
+    };
+  }
+  // Serialized renderer error: a plain object carrying a string `message`. Read
+  // its fields directly so the renderer's name/message/stack survive.
+  if (err !== null && typeof err === 'object' && typeof err.message === 'string') {
+    return {
+      name: typeof err.name === 'string' && err.name ? err.name : 'Error',
+      message: err.message,
+      stack: typeof err.stack === 'string' ? err.stack : '',
+    };
+  }
+  const wrapped = new Error(err == null ? '' : String(err));
+  return {
+    name: 'Error',
+    message: typeof wrapped.message === 'string' ? wrapped.message : '',
+    stack: typeof wrapped.stack === 'string' ? wrapped.stack : '',
+  };
+}
+
 function buildErrorEvent(err, opts) {
   const o = opts || {};
-  const e = err instanceof Error ? err : new Error(err == null ? '' : String(err));
-  const name = typeof e.name === 'string' && e.name ? e.name : 'Error';
-  const rawMessage = typeof e.message === 'string' ? e.message : '';
+  const e = coerceErrorFields(err);
   const event = {
     schemaVersion: SCHEMA_VERSION,
     type: 'error',
     runtime: o.runtime === RUNTIME.RENDERER ? RUNTIME.RENDERER : RUNTIME.MAIN,
     timestamp: typeof o.now === 'number' ? o.now : Date.now(),
-    name,
-    message: redactIdentifiers(rawMessage),
-    frames: parseStackFrames(typeof e.stack === 'string' ? e.stack : ''),
+    name: e.name,
+    message: redactIdentifiers(e.message),
+    frames: parseStackFrames(e.stack),
   };
   attachExtendedNames(event, o);
   return event;
@@ -302,6 +340,8 @@ function containsPath(text) {
 //   .setExtendedConsent(boolean)    — toggle name attachment (clamped to base; WARDEN-538)
 //   .setContext({chatName?, sessionName?}) — latest focused names (WARDEN-538)
 //   .setRecord(fn)                  — hot-swap the record sink (slice 1 wiring)
+//   .recordRendererError(serialized) — consent-gated renderer JS-error entry point
+//                                       (forwarded over IPC from preload; WARDEN-637)
 //   .dispose()                      — detach everything + stop the heartbeat
 //
 // Signals subscribe ONLY when base consent is on; turning it off detaches every
@@ -497,6 +537,20 @@ function createTelemetrySource(opts) {
     },
     setRecord(fn) {
       record = typeof fn === 'function' ? fn : null;
+    },
+    // WARDEN-637 — consent-gated entry point for a RENDERER-process JS error (a
+    // React render throw caught by ErrorBoundary, a global `error` event, or an
+    // unhandled promise rejection) forwarded over IPC from preload. The renderer
+    // cannot keep an Error instance alive across the contextBridge, so it forwards
+    // a serializable { name, message, stack }; buildErrorEvent reads that shape
+    // directly (coerceErrorFields) and produces a renderer-runtime event through
+    // the SAME consent-gated record() pipeline as main-process errors. Mirrors
+    // onUncaught/onRejection: gated at the top (the FIRST "off = nothing" layer)
+    // so nothing is built or recorded while base consent is off — the preload
+    // listener forwards unconditionally and main drops it here (refinement D).
+    recordRendererError(serialized) {
+      if (!baseConsent) return;
+      emit(buildErrorEvent(serialized, { now: nowFn(), runtime: RUNTIME.RENDERER, ...extendedNameFields() }));
     },
     isConsentOn() {
       return baseConsent;

@@ -61,4 +61,27 @@ contextBridge.exposeInMainWorld('wardenTelemetry', {
     ipcRenderer.on('telemetry:runtime-status', listener);
     return () => ipcRenderer.removeListener('telemetry:runtime-status', listener);
   },
+  // WARDEN-637 — forward a renderer-process JS error (a React render throw caught
+  // by ErrorBoundary, a global `error` event, or an unhandled promise rejection)
+  // to main's consent-gated telemetry source. The web bundle serializes the error
+  // to { name, message, stack } BEFORE calling this — Error instances do not
+  // survive the contextBridge clone (their stack/type are lost crossing the
+  // boundary), so the renderer serializes in its own main world. Fire-and-forget
+  // via `send` (not `invoke`): no response is needed, and avoiding a returned
+  // promise keeps the forward safe to fire from inside a global
+  // `unhandledrejection` listener (a rejecting invoke promise there could
+  // re-trigger the listener and loop). Main gates this on base consent and drops
+  // it when off (refinement D).
+  //
+  // WHY THE LISTENERS LIVE IN THE WEB BUNDLE, NOT HERE: under contextIsolation
+  // (enabled in main.cjs) this preload runs in an ISOLATED world whose `window`
+  // is a different object than the renderer's main-world `window` (Electron
+  // context-isolation docs). A `window.addEventListener('error')` installed HERE
+  // does NOT fire for errors thrown in the main world (the React app) — see
+  // sentry-electron#316, which hit exactly this. So the global `error` /
+  // `unhandledrejection` listeners are installed by the web bundle
+  // (installRendererErrorCapture in web/src/lib/electron.ts), which runs in the
+  // main world and CAN hear them; it feature-detects this bridge and no-ops in
+  // dev/smoke. This method is the IPC seam the web bundle forwards through.
+  reportError: (serialized) => ipcRenderer.send('telemetry:renderer-error', serialized),
 });
