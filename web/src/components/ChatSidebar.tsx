@@ -50,8 +50,11 @@ import { FleetCommitSearch } from './sidebar/FleetCommitSearch';
 // WARDEN-565: re-homes the orphaned WARDEN-288 cross-agent file-collision ⚠ badge
 // into the fleet view headers (the surfaces that replaced the abolished project-
 // chip row, WARDEN-372). The badge is fully built; it was simply never rendered.
-import { GitCollisionBadge } from './sidebar/GitBadges';
-import { detectProjectFileCollisions, detectProjectImpendingCollisions } from '@/lib/gitStateSummary';
+// WARDEN-635: GitStateBadges (the ±N/↑N/↓N fleet WIP badges, orphaned by the same
+// WARDEN-372 abolition) is re-homed alongside it here, now extended with a 4th ⚑N
+// at-risk-repo-state axis — mounting it lights up all four axes at once.
+import { GitCollisionBadge, GitStateBadges } from './sidebar/GitBadges';
+import { detectProjectFileCollisions, detectProjectImpendingCollisions, summarizeProjectGitState } from '@/lib/gitStateSummary';
 import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/SidebarBits';
 import { SessionTagChips, SessionTagFilterRow } from './sidebar/SessionTags';
 import { computeTagsInUse, filterSessionsByTags, addTag, removeTag } from '@/lib/sessionTags';
@@ -493,6 +496,24 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
       ? chats.filter((c) => c.host === view.host)
       : chats;
     return detectProjectImpendingCollisions(viewChats, gitStatus).total.paths;
+  }, [view, chats, gitStatus]);
+
+  // WARDEN-635 (per WARDEN-565): the ±N/↑N/↓N/⚑N project git-state badges were
+  // orphaned dead code — GitStateBadges was never imported (WARDEN-372 abolished the
+  // project-chip row that hosted it; WARDEN-565 re-wired the sibling GitCollisionBadge
+  // and explicitly deferred this one). This memo re-homes summarizeProjectGitState
+  // (the cached-map aggregator — no new fetch, no backend change) the same way, so
+  // mounting <GitStateBadges> below lights up all four axes at once: the existing ±N
+  // (dirty) / ↑N (unpushed) / ↓N (behind) fleet WIP totals AND the new ⚑N at-risk-
+  // repo-state chip rolling up detached HEAD / no-upstream / mid-merge agents — a
+  // non-routine state that needs a human's eye but was previously invisible at the
+  // fleet level. Same view population + cached gitStatus map as the collision memos
+  // above; .total carries the four counts + the contributing agents (in chats order).
+  const fleetGitState = useMemo(() => {
+    const viewChats = view.kind === 'host'
+      ? chats.filter((c) => c.host === view.host)
+      : chats;
+    return summarizeProjectGitState(viewChats, gitStatus).total;
   }, [view, chats, gitStatus]);
 
   // Fan the message out to every selected agent via the existing per-target
@@ -1009,6 +1030,24 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
             onOpenChat={onOpenChat}
             showProject
           />
+          {/* WARDEN-635 (per WARDEN-565): the ±N/↑N/↓N/⚑N project git-state fleet
+              badges, re-homed into this host header the same way GitCollisionBadge
+              was. Computed over hostChats (== the memo's viewChats for this host — a
+              host can run several projects). The 4th ⚑N axis rolls up detached-HEAD /
+              no-upstream / mid-merge agents — a non-routine repo state that needs a
+              human's eye but was previously invisible at the fleet level. Renders
+              nothing when every axis is 0 (silent-when-clean); each popover lists the
+              contributing agents and deep-links to them. */}
+          <GitStateBadges
+            dirty={fleetGitState.dirty}
+            unpushed={fleetGitState.unpushed}
+            behind={fleetGitState.behind}
+            atRisk={fleetGitState.atRisk}
+            agents={fleetGitState.agents}
+            chats={hostChats}
+            gitStatus={gitStatus}
+            onOpenChat={onOpenChat}
+          />
           <IconTooltip label="rescan" disabled={loadingHost === H}><button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => fetchHostSessions(H)} disabled={loadingHost === H}>
             {loadingHost === H ? <Skeleton className="h-3 w-3" /> : '↻'}
           </button></IconTooltip>
@@ -1202,6 +1241,22 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
           gitStatus={gitStatus}
           onOpenChat={onOpenChat}
           showProject
+        />
+        {/* WARDEN-635 (per WARDEN-565): the ±N/↑N/↓N/⚑N project git-state fleet
+            badges, re-homed into the root fleet header alongside GitCollisionBadge
+            and FleetCommitSearch. Computed over the whole chats fleet (== the memo's
+            viewChats), mirroring those siblings which also fan across the full fleet
+            from this header. The ⚑N axis rolls up detached-HEAD / no-upstream /
+            mid-merge agents across the fleet; renders nothing when every axis is 0. */}
+        <GitStateBadges
+          dirty={fleetGitState.dirty}
+          unpushed={fleetGitState.unpushed}
+          behind={fleetGitState.behind}
+          atRisk={fleetGitState.atRisk}
+          agents={fleetGitState.agents}
+          chats={chats}
+          gitStatus={gitStatus}
+          onOpenChat={onOpenChat}
         />
         <Badge variant="secondary" className="text-xs @max-[18rem]:hidden">{filteredPanes.length}</Badge>
         <span className="@max-[20rem]:hidden"><UpdatedAgo at={lastRefreshAt} timestampFormat={timestampFormat} /></span>
