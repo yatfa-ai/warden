@@ -31,7 +31,7 @@ const { code } = await transformWithOxc(src, libPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-collision-compare-test-'));
 const tmpFile = join(tmpDir, 'collisionCompare.mjs');
 writeFileSync(tmpFile, code);
-const { reduceCollisionDiffs } = await import(tmpFile);
+const { reduceCollisionDiffs, reduceCrossAgentDiff } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -43,10 +43,12 @@ const test = (name, fn) => {
 
 // Promise.allSettled result builders + /api/git-diff response builders — keep the
 // test bodies honest about shape. `gitDiff` mirrors the server.js:1377-1402
-// response: { diff, untracked, error }.
+// response: { diff, untracked, error }. `crossDiff` mirrors /api/cross-agent-diff:
+// { diff, error }.
 const fulfilled = (value) => ({ status: 'fulfilled', value });
 const rejected = (reason) => ({ status: 'rejected', reason });
 const gitDiff = (diff, untracked = false, error = null) => ({ diff, untracked, error });
+const crossDiff = (diff, error = null) => ({ diff, error });
 // A single-agent fixture for the per-branch classification tests (one result in,
 // one panel out). AGENTS (3) is reserved for the order/partial-failure cases.
 const ONE = [{ key: 'a' }];
@@ -187,6 +189,79 @@ test('two-agent collision (the minimum) → two panels, each independently class
   // the two stacked panels — exactly the disjoint-vs-overlap legibility goal.
   assert.match(panels[0].diff, /-10 \+10/);
   assert.match(panels[1].diff, /-80 \+80/);
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nreduceCrossAgentDiff — A↔B overlap classification (WARDEN-593)');
+// ---------------------------------------------------------------------------
+// The A↔B reducer classifies the SINGLE cross-agent-diff outcome (two agents'
+// working trees diffed directly) — a sibling of reduceCollisionDiffs, sharing its
+// settled-result → status discipline so the rejected/error/empty mapping lives in
+// the tested pure seam, not the component. PAIR holds the two agent keys; ONEAB is
+// the canonical 2-agent collision.
+const PAIR = ['worker-1', 'worker-2'];
+test('a real A↔B diff → status differ, diff carried through', () => {
+  const panel = reduceCrossAgentDiff(PAIR[0], PAIR[1], fulfilled(crossDiff('@@ -1 +1 @@\n-old\n+new\n')));
+  assert.equal(panel.keyA, 'worker-1');
+  assert.equal(panel.keyB, 'worker-2');
+  assert.equal(panel.status, 'differ');
+  assert.equal(panel.diff, '@@ -1 +1 @@\n-old\n+new\n');
+  assert.equal(panel.error, null);
+});
+test('empty diff, no error → status identical (both made the same change — no conflict)', () => {
+  // The load-bearing A↔B signal: two working trees byte-identical → the collision
+  // is a false alarm. Distinct from per-agent 'empty' (one agent vs its OWN HEAD).
+  const panel = reduceCrossAgentDiff(...PAIR, fulfilled(crossDiff('')));
+  assert.equal(panel.status, 'identical');
+  assert.equal(panel.diff, '');
+  assert.equal(panel.error, null);
+});
+test('null diff, no error → status identical (null and "" both read as identical)', () => {
+  const panel = reduceCrossAgentDiff(PAIR[0], PAIR[1], fulfilled(crossDiff(null)));
+  assert.equal(panel.status, 'identical');
+});
+test('fulfilled with .error → status error carrying the server-prefixed side', () => {
+  // The server prefixes the failing side; the reducer passes it straight through.
+  const panel = reduceCrossAgentDiff(PAIR[0], PAIR[1], fulfilled(crossDiff(null, 'A: file not found')));
+  assert.equal(panel.status, 'error');
+  assert.equal(panel.diff, '');
+  assert.equal(panel.error, 'A: file not found');
+});
+test('a rejected promise → status error reading reason.message (a network throw)', () => {
+  const panel = reduceCrossAgentDiff(PAIR[0], PAIR[1], rejected(new Error('ssh: connect to host port 22')));
+  assert.equal(panel.status, 'error');
+  assert.match(panel.error, /connect to host port 22/);
+});
+test('a rejected non-Error reason stringifies (does not print [object Object])', () => {
+  const panel = reduceCrossAgentDiff(PAIR[0], PAIR[1], rejected('timeout'));
+  assert.equal(panel.error, 'timeout');
+});
+test('a rejected null/undefined reason falls back to "unreachable" (not "null")', () => {
+  assert.equal(reduceCrossAgentDiff(...PAIR, rejected(null)).error, 'unreachable');
+  assert.equal(reduceCrossAgentDiff(...PAIR, rejected(undefined)).error, 'unreachable');
+});
+test('a missing outcome (undefined) → status error (does not crash or render a broken panel)', () => {
+  // <2 agents, or a buggy call site that did not produce an outcome — surface it
+  // rather than throwing. Keys are still carried so the panel could label it.
+  const panel = reduceCrossAgentDiff(PAIR[0], PAIR[1], undefined);
+  assert.equal(panel.status, 'error');
+  assert.equal(panel.error, 'unreachable');
+  assert.equal(panel.keyA, 'worker-1');
+  assert.equal(panel.keyB, 'worker-2');
+});
+test('whitespace-only A↔B diff is NOT identical (a real, if tiny, divergence)', () => {
+  // A diff of just a newline is still a non-empty string — the two trees diverge —
+  // so it reads as differ, not identical. length===0 is the only identical.
+  const panel = reduceCrossAgentDiff(...PAIR, fulfilled(crossDiff('\n')));
+  assert.equal(panel.status, 'differ');
+  assert.equal(panel.diff, '\n');
+});
+test('error takes precedence over an empty diff (an errored identical read is still an error)', () => {
+  // If the transport set BOTH error and an empty diff, the error is the actionable
+  // signal — surface it rather than masking it behind the identical branch.
+  const panel = reduceCrossAgentDiff(...PAIR, fulfilled(crossDiff('', 'B: binary file')));
+  assert.equal(panel.status, 'error');
+  assert.equal(panel.error, 'B: binary file');
 });
 
 console.log(`\n✓ COLLISION COMPARE TESTS PASS (${passed})`);
