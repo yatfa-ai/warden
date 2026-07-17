@@ -493,4 +493,44 @@ test('attentionReason phrases a custom item (fallback when no signal)', () => {
   assert.equal(attentionReason({ id: 'd1', name: 'd1', state: 'custom', signal: null }), 'matched a watch pattern');
 });
 
+console.log('\nbuildAttentionRollup: the positive "finished" (done) bucket (WARDEN-575)');
+test('a doneKey row lands in the done bucket', () => {
+  const r = roll(health(), stats(), [stateRow('w1', 'idle')], { doneKeys: new Set(['w1']) });
+  assert.equal(r.done.length, 1);
+  assert.equal(r.done[0].key, 'w1');
+});
+test('the done bucket is EXCLUDED from the problem total (a finish is not an alarm)', () => {
+  // A finished agent alone → done populated, but total stays 0 (no problem).
+  const r = roll(health(), stats(), [stateRow('w1', 'idle')], { doneKeys: new Set(['w1']) });
+  assert.equal(r.total, 0, 'done does not inflate the problem count');
+  assert.equal(r.done.length, 1);
+  // A problem + a finish: total counts only the problem.
+  const r2 = roll(health({ critical: [agent('c1')] }), stats(), [stateRow('w1', 'idle')], { doneKeys: new Set(['w1']) });
+  assert.equal(r2.total, 1, 'total is the problem count only, done still separate');
+  assert.equal(r2.done.length, 1);
+});
+test('enabledStates.done === false empties the done bucket (silenced)', () => {
+  const r = roll(health(), stats(), [stateRow('w1', 'idle')], {
+    doneKeys: new Set(['w1']),
+    enabledStates: { done: false },
+  });
+  assert.equal(r.done.length, 0, 'silenced → no done bucket');
+});
+test('omitting doneKeys → done bucket empty (identical to pre-WARDEN-575)', () => {
+  const r = roll(health(), stats(), [stateRow('w1', 'idle')]);
+  assert.equal(r.done.length, 0);
+  assert.equal(r.total, 0);
+});
+test('enabledStates.done defaults ON (omitting it surfaces done)', () => {
+  const r = roll(health(), stats(), [stateRow('w1', 'idle')], { doneKeys: new Set(['w1']) });
+  assert.equal(r.done.length, 1, 'done defaults ON like the problem states');
+});
+test('a done row that ALSO matched a custom pattern stays in custom (custom supersedes done)', () => {
+  const r = roll(health(), stats(), [stateRow('d1', 'idle', { customMatch: cm('Deploy', 'deploy ok') })], {
+    doneKeys: new Set(['d1']),
+  });
+  assert.equal(r.done.length, 0, 'the custom signal supersedes the generic finished label for display');
+  assert.equal(r.custom.length, 1);
+});
+
 console.log(`\n✓ ATTENTION ROLLUP TESTS PASS (${passed})`);

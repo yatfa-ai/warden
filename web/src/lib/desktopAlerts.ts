@@ -145,12 +145,17 @@ export function applySeverityPrefs(
   // states — they are silenced via the per-pattern `enabled` flag (which prevents the
   // match at the source), not via a severity toggle here.
   const custom = rollup.custom;
+  // WARDEN-575: the positive "finished" bucket passes through UNCHANGED — it never
+  // participated in the problem `total` and is silenced via enabledStates.done (at
+  // rollup-build), not a severity toggle here. Carried through (defaulting to [] for
+  // a partial rollup) so the routable sub-rollup satisfies the AttentionRollup shape.
+  const done = rollup.done ?? [];
   const directives = prefs.alertDirective ? rollup.directives : 0;
   const errors = prefs.alertError ? rollup.errors : 0;
   const total =
     critical.length + warning.length + directives + errors +
     stuck.length + erroring.length + waiting.length + blocked.length + custom.length;
-  return { critical, warning, stuck, erroring, waiting, blocked, custom, directives, errors, total };
+  return { critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors, total };
 }
 
 /**

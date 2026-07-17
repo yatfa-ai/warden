@@ -33,11 +33,20 @@ export interface AttentionRollup {
   /** Agents whose output matched a user-authored watch pattern (WARDEN-540) — amber tone
    *  (deep-link to the agent pane). The row carries `customMatch` { pattern, line }. */
   custom: AgentStateRow[];
+  /** Agents that recently FINISHED a task (WARDEN-575) — a POSITIVE green tone, the
+   *  mirror of the problem buckets above. Populated from open panes that transitioned
+   *  working→idle within a short recent window (the caller tracks which keys). These
+   *  are "go review their work," not alarms, so they do NOT count toward the problem
+   *  `total` (the red/amber count + the desktop-alert increase gate stay problem-only). */
+  done: AgentStateRow[];
   /** Directive-proposal events in the recent window (links to the Activity tab). */
   directives: number;
   /** Error events in the recent window (links to the Activity tab). */
   errors: number;
-  /** Total attention items == sum of all eight buckets (the number the badge shows). */
+  /** Total attention items == sum of the PROBLEM buckets only (the number the badge
+   *  shows when something is wrong). `done` is intentionally excluded — a finished
+   *  agent is a positive review cue, not an alarm, so it must not inflate the
+   *  problem count nor trip the increase-only desktop-alert gate. */
   total: number;
 }
 
@@ -54,7 +63,16 @@ export interface AttentionRollupOptions {
     erroring?: boolean;
     waiting?: boolean;
     blocked?: boolean;
+    /** WARDEN-575: surface the positive "finished" bucket. Defaults ON (enabled !==
+     *  false), like the problem states, so a finished agent surfaces by default; a
+     *  human can silence it without losing the problem states. */
+    done?: boolean;
   };
+  /** WARDEN-575: the open-pane keys that transitioned working→idle within the recent
+   *  window (the caller — useAttentionRollup — tracks these). A row whose key is in
+   *  this set is bucketed as `done` (positive). Omitted/empty → no done bucket, the
+   *  rollup behaves identically to pre-WARDEN-575. */
+  doneKeys?: Set<string> | null;
 }
 
 export const EMPTY_ATTENTION_ROLLUP: AttentionRollup = {
@@ -65,6 +83,7 @@ export const EMPTY_ATTENTION_ROLLUP: AttentionRollup = {
   waiting: [],
   blocked: [],
   custom: [],
+  done: [],
   directives: 0,
   errors: 0,
   total: 0,
@@ -128,10 +147,23 @@ export function buildAttentionRollup(
   const blocked = on('blocked') ? bucket('blocked') : [];
   const custom = customRows;
 
+  // WARDEN-575: the positive "finished" bucket — open panes that transitioned
+  // working→idle within the recent window (membership decided by the caller via
+  // doneKeys). Gated by enabledStates.done (default ON) like the problem states, and
+  // deliberately EXCLUDED from `total`: a finished agent is a review cue, not an
+  // alarm, so it must not inflate the red/amber count nor trip the increase-only
+  // desktop-alert gate. A done row whose output also matched a custom pattern still
+  // shows under custom (the specific pattern the human asked about supersedes the
+  // generic "finished" label for display), mirroring the state/custom precedence.
+  const doneKeys = opts.doneKeys instanceof Set && opts.doneKeys.size > 0 ? opts.doneKeys : null;
+  const done = en.done !== false && doneKeys
+    ? rows.filter((a) => a && !customKeys.has(a.key ?? a.id) && doneKeys.has(a.key ?? a.id))
+    : [];
+
   const total =
     critical.length + warning.length + directives + errors +
     stuck.length + erroring.length + waiting.length + blocked.length + custom.length;
-  return { critical, warning, stuck, erroring, waiting, blocked, custom, directives, errors, total };
+  return { critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors, total };
 }
 
 // ─── Directed ranking (Observer Intelligence roadmap WARDEN-8, Job #2) ────────

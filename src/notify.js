@@ -281,6 +281,121 @@ export function attentionSeverity(state) {
   return 'info';
 }
 
+// ─── Positive "agent finished" transition (WARDEN-575) ───────────────────────
+//
+// The mirror of the problem-side diff above. The whole attention pipeline pings a
+// human the instant an agent is stuck/erroring/waiting/blocked — but never when an
+// agent FINISHES. A human who delegates a task and walks away must eyeball each
+// pane to learn it's done. This adds the missing positive half: a transition-level
+// "was recently working → now idle" signal dispatched with a NON-ALARMING severity
+// through the SAME proven webhook transport (and surfaced frontend-side in the
+// AttentionBadge + desktop alert — see attentionRollup.ts / desktopAlerts.ts).
+//
+// Anti-noise crux — gate on PRIOR WORKING ACTIVITY, not on idle. A dormant agent
+// reading `idle` sweep after sweep never fires; only an agent that WAS recently
+// working (active/stuck/erroring/blocked/waiting) and just went idle does. This is
+// the verbatim "working → idle" definition the frontend watch subsystem already
+// ships (chatWatch.detectWatchCompleted / WORKING_STATES) — a recently-active agent
+// returning to its prompt is "finished a task," distinct from a pane that was always
+// quiet. Mirrored here so backend + frontend agree on one positive-transition rule.
+
+// "Working" states — a transition from one of these to `idle` means the agent just
+// finished. Verbatim of chatWatch's WORKING_STATES (web/src/lib/chatWatch.ts) and
+// observer.js's detectCompleted, so backend, frontend-watch, and the Observer all
+// share one definition of "was working → now idle = done." `idle` and
+// `capture_failed` are NOT working; an agent that was never working going idle is a
+// no-op (the anti-noise gate).
+const DONE_WORKING_STATES = Object.freeze(new Set(['active', 'stuck', 'erroring', 'blocked', 'waiting']));
+
+// Pure: the NEWLY-finished transitions to ping about (WARDEN-575). Given the
+// server's previous per-pane state map and the current /api/agent-states sweep
+// result, returns the agents that transitioned from a WORKING state to `idle`
+// since the last sweep — i.e. "was recently working, just stopped = finished."
+//
+// Sibling of diffAttentionTransitions, sharing its discipline so the positive
+// signal is as trustworthy as the problem signal:
+//  - Baseline-primed: an empty/null prevStates (first sweep, or first sweep after
+//    the channel is enabled) returns [] — a pre-existing idle agent at launch does
+//    NOT fire. The first sweep just seeds the baseline.
+//  - One ping per NEW working→idle transition. An agent that stays idle (idle→idle)
+//    never fires; an agent that goes idle then active again re-arms (the next
+//    working→idle fires again). Recovery / no-change never fires.
+//  - Does NOT fire on ABSENCE: an agent missing from the current sweep (host blip,
+//    pane detach, capture_failed) is intentionally NOT treated as "finished" here —
+//    the attention sweep is not carry-forward-protected the way the lifecycle sweep
+//    is, so absence is SSH-noise-unsafe. A container GENUINELY ending is the
+//    lifecycle sweep's already-SSH-cleaned `agent_ended` event, which tickLifecycle
+//    bridges to this same done dispatch (see server.js) — that is the
+//    "container-genuinely-ended" signal, deliberately kept out of this diff.
+//
+// `prevStates` — Map<key, state> (or null/empty for the priming case). SAME baseline
+//                 diffAttentionTransitions advances, so the two diffs share one sweep
+//                 at zero extra capture cost.
+// `agents`     — the pollAgentStates() result rows ({ key, state, signal, name,
+//                 host, ... }).
+export function diffDoneTransitions(prevStates, agents) {
+  if (!prevStates || prevStates.size === 0) return [];
+  if (!Array.isArray(agents)) return [];
+  const out = [];
+  for (const a of agents) {
+    if (!a || a.state !== 'idle') continue; // fires ONLY on a present, idle row
+    const prev = prevStates.get(a.key);
+    // Fire only when the agent WAS working last sweep and is idle now. An agent
+    // already idle (idle→idle), newly-seen (prev undefined → not working), or in a
+    // non-working state never fires.
+    if (DONE_WORKING_STATES.has(prev)) {
+      out.push({
+        key: a.key,
+        state: 'done',
+        signal: a.signal ?? null,
+        name: a.name,
+        host: a.host,
+      });
+    }
+  }
+  return out;
+}
+
+// The NON-ALARMING severity for a "finished" transition (WARDEN-575). Positive
+// signal — deliberately NOT critical/warning (the red/amber problem tones). 'info'
+// so a receiver that maps severity→tone (ntfy priority) reads it as low-key, and
+// the phone ping reads as crafted signal, not an alarm. Exported so the test pins
+// it (and so a future severity-aware receiver stays consistent).
+export function doneSeverity() {
+  return 'info';
+}
+
+// The one-line human-readable "why" for a finished transition — the SAME wording
+// the frontend watch ping uses for its `completed` reason
+// (WATCH_REASON_LABEL.completed = 'finished a task', web/src/lib/desktopAlerts.ts)
+// so the phone ping, the OS toast, and the in-app badge all speak with one voice on
+// the positive signal. Appends the triggering signal line when present (an idle row
+// usually carries none, but a real `signal` is surfaced when classifyPane attached
+// one). Sibling of attentionReason for the positive case.
+export function doneReason(signal) {
+  const label = 'Finished a task';
+  const sig = typeof signal === 'string' && signal.trim() ? signal.trim() : '';
+  return sig ? `${label}: ${sig}` : label;
+}
+
+// Build the agent identity + reason for a lifecycle `agent_ended` event dispatched
+// as a "finished" webhook (WARDEN-575). A lifecycle event carries no display `name`
+// (it has { id, host, container, role, project }), so the agent field is derived —
+// preferring the container name (a yatfa container is "{project}-{role}", the most
+// pane-specific handle), then the unique id (host:session for a tmux chat). `role`
+// and `project` are intentionally skipped: alone they are ambiguous (a bare
+// "worker"/"local" identifies nothing on a phone ping), and a yatfa container
+// already encodes both. The reason conveys that the container genuinely ended (the
+// SSH-cleaned signal), distinct from a working→idle "finished a task." Used by
+// tickLifecycle so the container-genuinely-ended case reaches the phone with the
+// same positive severity + delivery contract as the working→idle case.
+export function doneEndedIdentity(event) {
+  const e = event || {};
+  const agent = e.container || e.id || null;
+  const reason = 'Agent finished (container ended)';
+  return { agent, reason };
+}
+
 // The one-line human-readable "why" for an attention state — the SAME wording
 // desktopAlerts.INAPP_REASON uses (WARDEN-402) so the phone ping, the in-app
 // toast, and the desktop alert all speak with one voice. Appends the triggering
@@ -299,4 +414,4 @@ export function attentionReason(state, signal) {
 }
 
 // Exported for tests / introspection. Not part of the public dispatch contract.
-export const _INTERNALS = { MAX_ATTEMPTS, isTransientStatus, backoffMs, ATTENTION_STATES };
+export const _INTERNALS = { MAX_ATTEMPTS, isTransientStatus, backoffMs, ATTENTION_STATES, DONE_WORKING_STATES };

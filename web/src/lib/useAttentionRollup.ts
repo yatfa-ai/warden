@@ -41,7 +41,7 @@ import {
   ATTENTION_SEVERITY_DEFAULTS,
   type AttentionSeverityPrefs,
 } from '@/lib/desktopAlerts';
-import { diffWatchAlerts, indexByWatchKey, applyWatchCooldown, type WatchLastFiredMap, type WatchReason } from '@/lib/chatWatch';
+import { diffWatchAlerts, indexByWatchKey, applyWatchCooldown, detectWatchCompleted, type WatchLastFiredMap, type WatchReason } from '@/lib/chatWatch';
 import { recordWatchMiss, shouldRecordMiss } from '@/lib/watchCatchup';
 import { activeSnoozedKeys, type SnoozeMap } from '@/lib/snooze';
 import type { HealthData, ActivityStats, AgentStateRow, AgentStatesData } from '@/lib/types';
@@ -53,6 +53,21 @@ import type { HealthData, ActivityStats, AgentStateRow, AgentStatesData } from '
 // (The "While you were away" startup banner keeps its own since-last-close window;
 // this is the live, always-on rollup, so it uses a fixed rolling window instead.)
 export const ATTENTION_RECENT_WINDOW_MS = 15 * 60 * 1000;
+
+// WARDEN-575: how long a finished agent stays in the badge's green "Finished"
+// section. A completion is a transient "just stopped" cue — long enough to notice
+// when the human glances at Warden (~3 min), short enough that the section clears
+// once the work is no longer news. The DURABLE signal is the desktop/webhook ping
+// (fired once on the transition); this window only governs the in-badge visibility.
+const DONE_RECENT_WINDOW_MS = 3 * 60 * 1000;
+// WARDEN-575: per-key cooldown for the fleet done PING (the badge section is
+// separately windowed above). A flapping open pane (active→idle→active→idle on
+// successive polls) would otherwise fire a "Finished a task" toast on every
+// active→idle — exactly the flap-spam WARDEN-452 collapsed for the watch ping with
+// applyWatchCooldown. This is the fleet-done equivalent: one done ping per key per
+// window. Mirrors WATCH_PING_COOLDOWN_MS (5 min) so a flap reads identically whether
+// the pane is watched (watch ping) or merely open (fleet done ping).
+const DONE_PING_COOLDOWN_MS = 5 * 60 * 1000;
 
 // Health + activity stay on HealthDashboard's 10s cadence. Pane-state classification
 // runs capturePanes (a batched SSH round-trip), so it gets a DEDICATED slower cadence.
@@ -237,6 +252,10 @@ export function useAttentionRollup(
   const [health, setHealth] = useState<HealthData | null>(null);
   const [stats, setStats] = useState<ActivityStats | null>(null);
   const [agentStates, setAgentStates] = useState<AgentStateRow[]>([]);
+  // WARDEN-575: the open-pane keys that finished within DONE_RECENT_WINDOW_MS — the
+  // membership set the rollup's `done` bucket reads. Kept in STATE (not a ref) so a
+  // completion/refesh re-aggregates the rollup and the badge's green section updates.
+  const [doneKeys, setDoneKeys] = useState<Set<string>>(() => new Set());
   // WARDEN-476: the watched chats' current states (watched subset of the fetched rows),
   // exposed for the catch-up's return-time reconciliation. See AttentionRollupState.
   const [watchedStates, setWatchedStates] = useState<AgentStateRow[]>([]);
@@ -287,6 +306,13 @@ export function useAttentionRollup(
   // focus shifts WHAT fires, not WHAT's classified, so it must not reset cadence).
   const focusedPaneRef = useRef(focusedPaneKey);
   focusedPaneRef.current = focusedPaneKey;
+  // WARDEN-575: live refs for the done-ping gates, read inside the fetchAgentStates
+  // closure (a [] useCallback) so the master toggle + the done per-state toggle take
+  // effect without rebuilding the ~30s poll.
+  const attentionDesktopAlertsRef = useRef(attentionDesktopAlerts);
+  attentionDesktopAlertsRef.current = attentionDesktopAlerts;
+  const enabledStatesDoneRef = useRef<boolean>(enabledStates?.done !== false);
+  enabledStatesDoneRef.current = enabledStates?.done !== false;
   const watchPrevRef = useRef<Record<string, AgentStateRow>>({});
   // The set of keys that were watched when the last watch diff ran. A key NEWLY
   // added to the watch set must start fresh (its first observation is a baseline,
@@ -299,6 +325,23 @@ export function useAttentionRollup(
   // prior toast is gone (escalations override + reset). Pruned to watched keys below
   // so an un-watched key's stale anchor can't suppress a fresh re-watch's first ping.
   const watchLastFiredRef = useRef<WatchLastFiredMap>({});
+
+  // WARDEN-575: the done-detection baseline + window for OPEN panes. `openPrevRef`
+  // holds each open pane's last observed state (key → state) so a working→idle flip
+  // is detected via the SAME detectWatchCompleted the watch subsystem uses. The
+  // ping for a finished OPEN pane reuses the watch-completed delivery (success tone
+  // + "finished a task" wording), so the fleet done ping and the per-watch
+  // completed ping stay in sync — no duplicate wording/tone to drift.
+  const openPrevRef = useRef<Record<string, string>>({});
+  // key → epoch-ms the agent finished; entries older than DONE_RECENT_WINDOW_MS are
+  // pruned each poll so the "Finished" section is transient.
+  const doneRecentRef = useRef<Map<string, number>>(new Map());
+  // WARDEN-575: key → epoch-ms the done PING last fired for that key — the flap
+  // cooldown (see DONE_PING_COOLDOWN_MS). Distinct from doneRecentRef: the badge
+  // section must drop a pane the instant it goes active again (pruned below), but
+  // the ping cooldown must PERSIST across that flap so a re-finish within the window
+  // does not re-ping. Pruned to open keys each poll so it stays bounded.
+  const doneLastFiredRef = useRef<Map<string, number>>(new Map());
 
   const fetchHealthStats = useCallback(async () => {
     const after = new Date(Date.now() - ATTENTION_RECENT_WINDOW_MS).toISOString();
@@ -444,7 +487,66 @@ export function useAttentionRollup(
         // closed pane does NOT inflate the fleet attention count — its signal reaches
         // the human through the targeted watch ping, not the lumped badge.
         const openSet = new Set(open);
-        setAgentStates(rows.filter((r) => openSet.has(r.key ?? r.id)));
+        const openRows = rows.filter((r) => openSet.has(r.key ?? r.id));
+        setAgentStates(openRows);
+        // WARDEN-575: detect working→idle COMPLETIONS on OPEN panes and (a) keep a
+        // time-boxed "recently finished" set that feeds the badge's green `done`
+        // bucket, and (b) fire a positive "agent X finished" ping on the NEW
+        // transition. Watched chats are EXCLUDED here — the watch subsystem above
+        // already pings their `completed` transition, so this covers the open-but-
+        // NOT-watched panes (the fleet). Reuses detectWatchCompleted (the shared
+        // working→idle rule) + the watch-completed delivery, so wording/tone match.
+        const watchedSetForDone = new Set(watched);
+        const prevOpen = openPrevRef.current;
+        const doneRecent = doneRecentRef.current;
+        const doneLastFired = doneLastFiredRef.current;
+        const now = Date.now();
+        const nextOpenPrev: Record<string, string> = {};
+        for (const r of openRows) {
+          const key = r.key ?? r.id;
+          nextOpenPrev[key] = r.state;
+          if (watchedSetForDone.has(key)) continue; // watched → the watch ping handles it
+          const prev = prevOpen[key];
+          if (detectWatchCompleted(prev ?? null, r.state)) {
+            doneRecent.set(key, now);
+            // Fire the positive done ping, gated exactly like the watch ping: master
+            // toggle + the done per-state toggle + the per-key flap-cooldown + focus +
+            // visibility (visible → the crafted in-app toast; hidden → the OS away
+            // toast). A focused-on-this-pane + present human skips it (they can already
+            // see it idle). The cooldown collapses a flapping pane (active→idle→active
+            // →idle) to one ping per window — the fleet-done analog of the watch ping's
+            // WARDEN-452 cooldown.
+            const lastFired = doneLastFired.get(key) ?? 0;
+            if (now - lastFired > DONE_PING_COOLDOWN_MS
+              && attentionDesktopAlertsRef.current && enabledStatesDoneRef.current
+              && shouldFireWatch(focusedPaneRef.current, r, document.visibilityState)) {
+              doneLastFired.set(key, now);
+              if (document.visibilityState === 'visible') {
+                fireWatchInApp(r, 'completed', onOpenChatRef.current);
+              } else {
+                fireWatchNotification(r, 'completed', onOpenChatRef.current);
+              }
+            }
+          }
+        }
+        openPrevRef.current = nextOpenPrev;
+        // Prune the recently-finished window: drop entries older than the horizon, and
+        // drop a key whose pane is no longer idle (it went active again → no longer
+        // "just finished"). A pane ABSENT this poll keeps its entry (host blip).
+        const currentlyIdleKeys = new Set(openRows.filter((r) => r.state === 'idle').map((r) => r.key ?? r.id));
+        for (const [k, t] of doneRecent) {
+          if (now - t > DONE_RECENT_WINDOW_MS || (nextOpenPrev[k] !== undefined && !currentlyIdleKeys.has(k))) {
+            doneRecent.delete(k);
+          }
+        }
+        setDoneKeys(new Set(doneRecent.keys()));
+        // Prune the cooldown map to currently-open keys (bounded across a long
+        // session; a closed pane's stale anchor can't suppress a fresh re-open's
+        // first finish). Entries older than the cooldown also drop.
+        const openKeySet = new Set(Object.keys(nextOpenPrev));
+        for (const [k, t] of doneLastFired) {
+          if (!openKeySet.has(k) || now - t > DONE_PING_COOLDOWN_MS) doneLastFired.delete(k);
+        }
         // WARDEN-476: expose the watched chats' CURRENT states — the WATCHED subset of
         // the pre-open-filter `rows` (which include watched-but-closed panes the open
         // filter above just discarded). This is the data the per-chat watch catch-up
@@ -589,11 +691,17 @@ export function useAttentionRollup(
   // stale window (a pane swept, then newly opened/watched) so the invariant never
   // transiently breaks and an open pane is never double-counted (its open row in
   // agentStates is always the current one). agentStates is already open-only.
+  //
+  // WARDEN-575: doneKeys — the open-pane keys that finished within
+  // DONE_RECENT_WINDOW_MS — seeds the rollup's green `done` bucket (a passive, transient
+  // "just finished" cue in the badge). It does NOT affect the increase-only alert gate
+  // (done is excluded from `total` in buildAttentionRollup), so the sweep fold above and
+  // the done bucket compose without either perturbing the other.
   const rollup = useMemo(() => {
     const covered = new Set([...openPanes, ...watchedChats]);
     const sweepRows = fleetSweepStates.filter((r) => !covered.has(r.key ?? r.id));
-    return buildAttentionRollup(health, stats, [...agentStates, ...sweepRows], { enabledStates });
-  }, [health, stats, agentStates, fleetSweepStates, openPanes, watchedChats, enabledStates]);
+    return buildAttentionRollup(health, stats, [...agentStates, ...sweepRows], { enabledStates, doneKeys });
+  }, [health, stats, agentStates, fleetSweepStates, openPanes, watchedChats, enabledStates, doneKeys]);
 
   // Fire an attention notification on a genuine rollup INCREASE (WARDEN-259). The
   // increase-only shouldFireAlert returns true ONLY on a total increase, so a

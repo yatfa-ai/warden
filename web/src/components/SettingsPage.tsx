@@ -116,6 +116,7 @@ interface ConfigData {
   webhookEnabled: boolean;
   webhookAlertAttention: boolean;
   webhookAlertBudget: boolean;
+  webhookAlertDone: boolean;
   // User-authored output-pattern alerts (WARDEN-540). Persisted via /api/config
   // (SERVER-side — the matcher runs in pollAgentStates, not the renderer), NOT client
   // localStorage. Round-tripped through GET/PUT like the other config fields above.
@@ -310,9 +311,10 @@ interface Props {
   setAlertError: (v: boolean) => void;
   // Per-state Attention toggle (WARDEN-344): which pane states raise the badge +
   // desktop alert. Pure client-side localStorage pref (same channel/persistence as
-  // attentionDesktopAlerts); never added to the backend `config`.
-  attentionStates: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean };
-  setAttentionStates: (v: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean }) => void;
+  // attentionDesktopAlerts); never added to the backend `config`. WARDEN-575 adds
+  // `done` (the positive "finished" bucket + done desktop ping).
+  attentionStates: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean; done?: boolean };
+  setAttentionStates: (v: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean; done?: boolean }) => void;
   // Reset every client-side UI PREF (appearance, terminal, new-chat, behavior)
   // to its DEFAULT_UI value while preserving the open workspace (tabs/panes/
   // focus/host map) and panel layout (collapse state + widths). Confirm-gated
@@ -764,6 +766,7 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
     webhookEnabled: false,
     webhookAlertAttention: true,
     webhookAlertBudget: true,
+    webhookAlertDone: true,
     // WARDEN-540 — empty until the GET /api/config load populates it.
     watchPatterns: [],
   });
@@ -887,6 +890,7 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
           webhookEnabled: configData.webhookEnabled ?? false,
           webhookAlertAttention: configData.webhookAlertAttention ?? true,
           webhookAlertBudget: configData.webhookAlertBudget ?? true,
+          webhookAlertDone: configData.webhookAlertDone ?? true,
           // WARDEN-540: patterns are sanitized on the PUT boundary, so the GET
           // response is already well-formed. Defensive ?? [] keeps an older backend
           // (no watchPatterns field) safely empty → no alerts.
@@ -2890,6 +2894,11 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                       { k: 'stuck', label: 'Stuck', hint: 'repeating-output loops' },
                       { k: 'waiting', label: 'Waiting on you', hint: 'human-input prompts' },
                       { k: 'blocked', label: 'Blocked', hint: 'coordination / dependency' },
+                      // WARDEN-575: the POSITIVE "finished" state — a recently-working
+                      // agent going idle. Surfaces the green Finished section + a done
+                      // desktop ping. Distinct from the problem states (it is a review
+                      // cue, not an alarm) but gated the same way.
+                      { k: 'done', label: 'Finished', hint: 'agent completed a task' },
                     ] as const).map(({ k, label, hint }) => (
                       <div key={k} className="flex items-center gap-2">
                         <Switch
@@ -3017,9 +3026,23 @@ export function SettingsPage({ onClose, onConfigChange, theme, setTheme, density
                           <span className="block text-[10px] text-muted-foreground font-normal">fleet / per-session breach</span>
                         </Label>
                       </div>
+                      {/* WARDEN-575: the POSITIVE "finished" push — a recently-working
+                          agent going idle, or a container genuinely ending. Non-
+                          alarming; the missing positive half of the alert loop. */}
+                      <div className="flex items-center gap-2">
+                        <Switch
+                          id="webhookAlertDone"
+                          checked={config.webhookAlertDone}
+                          onCheckedChange={(v) => setConfig({ ...config, webhookAlertDone: v })}
+                        />
+                        <Label htmlFor="webhookAlertDone" className="cursor-pointer leading-tight">
+                          Finished
+                          <span className="block text-[10px] text-muted-foreground font-normal">agent completed a task</span>
+                        </Label>
+                      </div>
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      Attention alerts fire once per new transition into a stuck/erroring/waiting/blocked pane state. Budget alerts fire once per crossing of your token-spend threshold.
+                      Attention alerts fire once per new transition into a stuck/erroring/waiting/blocked pane state. Budget alerts fire once per crossing of your token-spend threshold. Finished alerts fire once when a recently-working agent goes idle (or its container ends).
                     </p>
                   </div>
 
