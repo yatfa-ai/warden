@@ -288,9 +288,16 @@ app.get('/api/agent-states', async (req, res) => {
 // `?exclude=k1,k2` is the caller's CURRENTLY open ∪ watched pane keys, so the sweep does
 // not re-classify (or double-count) what the faster poll already owns; the sweep set =
 // active chats (the catalog cache) − (open ∪ watched). Hard cost gate: the sweep
-// classifies ONLY via the companion delta path — companion hosts render from the delta
-// cache (zero RPCs steady-state), and non-companion / LOCAL hosts come back
-// `sweep_skipped` and are never SSH-probed (no full SSH sweep). See pollFleetStates.
+// classifies ONLY via the companion path and NEVER opens an SSH connection to the fleet.
+// A steady-state sweep issues ONE batched capturePanesViaCompanion per hidden companion
+// HOST per ~90s sweep (the subscription's 30s TTL — tuned for the 30s open-pane poll —
+// evicts a hidden pane between sweeps, because the hidden pane is owned only by this 90s
+// sweep and no 30s poll refreshes its TTL, so each sweep re-subscribes and re-captures
+// once over the persistent channel). That is a single batched companion RPC per host —
+// NOT an SSH sweep. Non-companion / LOCAL hosts come back `sweep_skipped` and are never
+// probed. Contrast: the 30s /api/agent-states poll keeps its own subscriptions alive
+// (cadence == TTL), so it earns zero capturePanes RPCs steady-state; the 90s sweep does
+// not, and the cost-gate test pins the real 1/host/sweep steady state. See pollFleetStates.
 app.get('/api/agent-states/fleet', async (req, res) => {
   try {
     const excludeKeys = String(req.query.exclude || '')
@@ -362,17 +369,24 @@ export async function pollAgentStates(chats, cfg = {}, deps = {}) {
 // hidden agent needing attention surfaces in the badge + fires the opt-in alert.
 //
 // Hard cost gate — the sweep NEVER opens an SSH connection to the fleet. It classifies
-// ONLY via the companion delta path (the shipped WARDEN-413 read/delta path — NOT the
+// ONLY via the companion path (the shipped WARDEN-413 read/delta path — NOT the
 // rejected WARDEN-279/283 companion write/send-keys paths; those rejections do not bear
 // on this). Companion-connected REMOTE hosts reuse pollAgentStates' reconcile → capture
-// → classify: steady-state sweeps render from the in-memory delta cache (ZERO RPCs); the
-// first sweep after a host's panes enter the sweep set bootstraps the subscription and
-// captures once over the persistent channel (the graceful bootstrap documented above at
-// the pollAgentStates header). Hosts WITHOUT the companion transport (flag off, or LOCAL)
-// are returned `state: 'sweep_skipped'` and NEVER probed — preserving the "no full SSH
-// sweep" invariant at the /api/agent-states header. `sweep_skipped` is a NEW state,
-// distinct from `capture_failed` (tried + failed): it is the honest "intentionally not
-// probed (cost gate)" signal, the opposite of the silence this fixes.
+// → classify: a steady-state sweep issues ONE batched capturePanesViaCompanion per hidden
+// HOST per ~90s sweep. The subscription's 30s TTL (tuned for the 30s open-pane poll — see
+// AGENT_STATE_TTL_MS) evicts a hidden pane between sweeps, because the hidden pane is
+// owned ONLY by this 90s sweep and the 30s poll never requests it, so nothing refreshes
+// its TTL; each sweep therefore re-subscribes and captures once over the persistent
+// channel. That single batched RPC per host is NOT an SSH sweep. (Contrast pollAgentStates
+// above: the 30s poll's cadence equals its TTL, so its subscriptions stay live and it
+// earns ZERO capturePanes RPCs steady-state; the 90s sweep's cadence is 3× its TTL, so it
+// does not — the cost-gate test asserts the real 1/host/sweep steady state, driving the
+// production background TTL eviction between iterations.) Hosts WITHOUT the companion
+// transport (flag off, or LOCAL) are returned `state: 'sweep_skipped'` and NEVER probed —
+// preserving the "no full SSH sweep" invariant at the /api/agent-states header.
+// `sweep_skipped` is a NEW state, distinct from `capture_failed` (tried + failed): it is
+// the honest "intentionally not probed (cost gate)" signal, the opposite of the silence
+// this fixes.
 //
 // `chats` is the full active fleet (the endpoint passes the catalog `cache`).
 // `opts.excludeKeys` is the caller's open ∪ watched pane keys, so the sweep does NOT

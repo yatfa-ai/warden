@@ -60,10 +60,11 @@ const HEALTH_POLL_MS = 10_000;
 const AGENT_STATE_POLL_MS = 30_000;
 // WARDEN-571: the fleet sweep runs on its OWN slower cadence (distinct from the 30s
 // open∪watched poll). It classifies the REST of the fleet — the hidden / un-watched
-// agents the 30s poll never reaches — via the companion-delta-backed sweep endpoint
-// (zero SSH sweep), so a hidden agent needing attention surfaces within one sweep cycle
-// instead of reading HEALTHY forever. 90s sits in the ticket's 60–120s band and off the
-// :00/:30 marks so it never lands on the same tick as another poll.
+// agents the 30s poll never reaches — via the companion-backed sweep endpoint (no SSH
+// sweep: one batched companion RPC per hidden host per sweep, never an SSH probe), so a
+// hidden agent needing attention surfaces within one sweep cycle instead of reading
+// HEALTHY forever. 90s sits in the ticket's 60–120s band and off the :00/:30 marks so it
+// never lands on the same tick as another poll.
 const FLEET_SWEEP_POLL_MS = 90_000;
 
 // A stable empty array default for `mutedAlertKeys` so the memoized Set and the
@@ -463,10 +464,11 @@ export function useAttentionRollup(
   // WARDEN-571: the hidden-fleet sweep fetch. Classifies every active chat that is
   // NEITHER open NOR watched, so a hidden agent stuck-looping / waiting for input /
   // error-spamming surfaces in the badge instead of reading HEALTHY forever. The sweep
-  // is companion-delta-backed (no SSH sweep); non-companion / LOCAL hosts come back
-  // `sweep_skipped` and never inflate the count. The result folds into the SAME rollup
-  // (see the useMemo below), so the existing badge + opt-in alert fire for a hidden
-  // agent that newly needs attention — Snooze (WARDEN-551), mute, and the
+  // is companion-backed (no SSH sweep — one batched companion RPC per hidden host per
+  // sweep); non-companion / LOCAL hosts come back `sweep_skipped` and never inflate the
+  // count. The result folds into the SAME rollup (see the useMemo below), so the existing
+  // badge + opt-in alert fire for a hidden agent that newly needs attention — Snooze
+  // (WARDEN-551), mute, and the
   // excludeFocusedPane (WARDEN-482) exclusion all apply unchanged because the rows are
   // ordinary AgentStateRow's bucketed by the same buildAttentionRollup.
   const fetchFleetStates = useCallback(async () => {
@@ -547,9 +549,10 @@ export function useAttentionRollup(
 
   // Fleet sweep on a DEDICATED slow cadence (~90s — distinct from the 30s open∪watched
   // poll above) so a HIDDEN agent needing attention surfaces within one sweep cycle
-  // (WARDEN-571). The sweep is companion-delta-backed (zero SSH sweep). It runs whenever
-  // its results would be ACTED on — Warden visible (the badge shows them) OR the fleet
-  // alert opted in (an away alert fires) — mirroring the 30s poll's visibility
+  // (WARDEN-571). The sweep is companion-backed (no SSH sweep — one batched companion RPC
+  // per hidden host per sweep; the 30s subscription TTL evicts between sweeps). It runs
+  // whenever its results would be ACTED on — Warden visible (the badge shows them) OR the
+  // fleet alert opted in (an away alert fires) — mirroring the 30s poll's visibility
   // relaxation. The exclude set is read LIVE via refs (openPanesRef/watchedChatsRef), so
   // opening/watching a pane (which SHRINKS the sweep set) never rebuilds this slow
   // cadence — responsiveness for those panes is the 30s poll's job; this is the
