@@ -205,6 +205,11 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(uiState.sidebarCollapsed);
   const [observerCollapsed, setObserverCollapsed] = useState(uiState.observerCollapsed);
   const [healthCollapsed, setHealthCollapsed] = useState(uiState.healthCollapsed ?? true);
+  // WARDEN-431: Source Control section collapse (the single place a focused
+  // pane's repo changes now show). A sidebar-internal section collapse, persisted
+  // by the saveUi effect below like the panel collapses above. Pure client-side
+  // pref; never sent to the backend.
+  const [sourceControlCollapsed, setSourceControlCollapsed] = useState(uiState.sourceControlCollapsed ?? false);
   const [theme, setTheme] = useState<Theme>(() => uiState.theme ?? 'system');
   // The OS-resolved concrete theme id (e.g. 'github-dark', 'dracula'). The
   // `theme` state variable stays 'system' on an OS flip, so chrome re-paints via
@@ -583,8 +588,8 @@ function App() {
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, snoozedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy, fileViewerViewMode, healthCollapsedHosts, hostLabels }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, snoozedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy, fileViewerViewMode, healthCollapsedHosts, hostLabels, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sourceControlCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, snoozedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy, fileViewerViewMode, healthCollapsedHosts, hostLabels }, restoreOnStartup, loadUi(), startedEmpty));
+  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sourceControlCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, snoozedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy, fileViewerViewMode, healthCollapsedHosts, hostLabels, restoreOnStartup, startedEmpty]);
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
   // workspace, so switching clears it (WARDEN-256: maximized resets on switch).
@@ -1829,6 +1834,7 @@ function App() {
               sshHosts={sshHosts}
               openPanes={openPaneSet}
               recentlyClosed={activeWorkspace?.recentlyClosed ?? []}
+              focused={focused}
               onOpenChat={openChat}
               onClosePane={closePane}
               onReopenClosed={reopenClosed}
@@ -1859,6 +1865,8 @@ function App() {
               agentSort={agentSort}
               onFilterChange={setAgentFilter}
               onSortChange={setAgentSort}
+              sourceControlCollapsed={sourceControlCollapsed}
+              onSourceControlCollapsedChange={setSourceControlCollapsed}
             />
           </ErrorBoundary>
         </section>

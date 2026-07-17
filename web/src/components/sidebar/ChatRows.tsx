@@ -18,7 +18,7 @@ import { useHostLabels } from '@/lib/hostLabels';
 import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
 import type { Chat, AgentStateRow } from '@/lib/types';
 import type { GitCommit, GitFile, DiffStat } from './types';
-import { GitBranchBadge, GitChangedFile, WhatsNewMarker } from './GitBadges';
+import { GitBranchBadge, WhatsNewMarker } from './GitBadges';
 import { DiffStatChip } from './DiffStatChip';
 import { getLastSeen, summarizeWhatsNew, hasUnreviewedProgress } from '@/lib/whatsNew';
 import { currentWatchNeed } from '@/lib/chatWatch';
@@ -314,20 +314,21 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
           )}
           {gitInfo?.clean === false && gitInfo.files && gitInfo.files.length > 0 && (
             <div className="ml-1 mt-0.5 flex flex-col gap-0.5">
-              {/* WARDEN-411: magnitude chip — how much WIP, not just which files.
-                  Tracked-edits only (insertions+deletions > 0); an all-untracked
-                  WIP renders no misleading +0−0 and speaks through the file list. */}
+              {/* WARDEN-411: magnitude chip — how much WIP, not just whether there is any.
+                  WARDEN-431: the per-file changed-file rows that rendered here moved to the
+                  Source Control panel; the +N −M chip stays inline as a fleet-wide glanceable
+                  signal (the panel shows only the focused pane). Tracked-edits only
+                  (insertions+deletions > 0); an all-untracked WIP renders no misleading +0−0
+                  and speaks through the Source Control panel's file list. */}
               {gitInfo.diffstat && gitInfo.diffstat.insertions + gitInfo.diffstat.deletions > 0 && (
                 <div className="px-0.5"><DiffStatChip diffstat={gitInfo.diffstat} /></div>
               )}
-              {gitInfo.files.map((file, i) => (
-                <GitChangedFile key={file.path + '-' + i} file={file} onOpen={onOpenDiff} onOpenConflict={onOpenConflict} onOpenFile={onOpenFile} />
-              ))}
             </div>
           )}
           {/* WARDEN-305: per-agent note — muted one-line subtext under the name,
-              or an inline editor when noteEditing. Mirrors the files block above
-              (a block child of the truncate span → renders on its own line). */}
+              or an inline editor when noteEditing. A block child of the truncate
+              span → renders on its own line. (WARDEN-431: the per-chat working-tree
+              file rows that used to render here moved to the Source Control panel.) */}
           {noteEditing ? (
             <Input autoFocus value={noteVal} onClick={(e) => e.stopPropagation()} onChange={(e) => setNoteVal(e.target.value)} onBlur={commitNote} onKeyDown={(e) => { if (e.key === 'Enter') commitNote(); if (e.key === 'Escape') setNoteEditing(false); }} placeholder="add a note…" maxLength={200} className="block mt-0.5 h-5 w-full text-[10px] px-1 text-muted-foreground" />
           ) : note ? (
@@ -507,11 +508,13 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
       </div>
       {hasFiles && gitInfo?.files && (
         <div className="ml-6 flex flex-col gap-0.5">
-          {/* WARDEN-411: magnitude chip — how much WIP, not just which files. */}
+          {/* WARDEN-411: magnitude chip — how much WIP, not just which files.
+              WARDEN-431: the per-file changed-file rows moved to the Source Control panel;
+              the +N −M chip stays inline as a fleet-wide glanceable signal (the panel shows
+              only the focused pane). */}
           {gitInfo.diffstat && gitInfo.diffstat.insertions + gitInfo.diffstat.deletions > 0 && (
             <div className="px-0.5"><DiffStatChip diffstat={gitInfo.diffstat} /></div>
           )}
-          {gitInfo.files.map((file, i) => (<GitChangedFile key={file.path + '-' + i} file={file} onOpen={onOpenDiff} onOpenConflict={onOpenConflict} onOpenFile={onOpenFile} />))}
         </div>
       )}
       {/* WARDEN-305: per-agent note — muted one-line subtext under the name, or an
