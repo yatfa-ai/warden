@@ -60,7 +60,18 @@ export async function send(chat, cfg, text, deps = {}) {
   let r = await run(chat, ['set-buffer', '-b', buf, '--', str]);
   if (r.ok) r = await run(chat, ['paste-buffer', '-p', '-d', '-b', buf, '-t', s]);
   if (r.ok) r = await run(chat, ['send-keys', '-t', s, 'Enter']);
-  if (!r.ok) throw new Error((r.stderr || '').trim() || `send failed (exit ${r.code})`);
+  if (!r.ok) {
+    // paste-buffer -d reclaims the buffer only on success. If paste failed
+    // (e.g. the target session is dead: "can't find session"), the named
+    // buffer would leak on the durable tmux server until the server is
+    // killed — and a retry loop against a dead session leaks one copy of the
+    // full payload every attempt. Reclaim it best-effort. delete-buffer
+    // errors if the buffer is already gone (set-buffer failed, or -d already
+    // deleted it on a paste that succeeded before send-keys failed) — so the
+    // .catch swallows that; the happy path is unchanged (still a single -d).
+    await run(chat, ['delete-buffer', '-b', buf]).catch(() => {});
+    throw new Error((r.stderr || '').trim() || `send failed (exit ${r.code})`);
+  }
   return true;
 }
 
