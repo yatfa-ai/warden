@@ -1073,40 +1073,62 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
               const isLoading = resumingSessionId === s.id;
               const sTags = sessionTags[s.id] || [];
               return (
-                <IconTooltip
-                  key={s.id}
-                  disabled={isLoading}
-                  label={
-                    <span className="flex flex-col text-left gap-0.5">
-                      <span>resume <span className="font-mono">{s.id}</span></span>
-                      <span className="opacity-70">{s.cwd}</span>
-                    </span>
-                  }
-                >
-                  {/* Row container (group) holds the resume <button> + tag chips as
-                      SIBLINGS, not nested — nested interactive elements are invalid
-                      HTML. `group` reveals the "+ tag" affordance on hover. */}
-                  <div className={`group flex flex-col gap-0.5 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs transition-all duration-150 ease-out hover:bg-accent ${isLoading ? 'opacity-50' : ''}`}>
-                    <button
-                      onClick={() => { handleResume(s.id, s.summary, s.cwd, H); setView({ kind: 'root' }); }}
-                      disabled={isLoading}
-                      className="flex flex-col gap-0.5 text-left active:bg-accent/80 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded-md"
-                    >
-                      <span className="truncate">
-                        {isLoading ? (
-                          <Skeleton className="h-3 w-3/4 inline-block" />
-                        ) : (
-                          s.summary || <span className="text-muted-foreground">(no summary)</span>
-                        )}
-                        {running && <span className="ml-1 text-green-400">● live</span>}
-                      </span>
-                      <span className="text-[10px] text-muted-foreground truncate">
-                        {isLoading ? <Skeleton className="h-2.5 w-1/2 inline-block" /> : `${formatTimestamp(s.mtime, timestampFormat)} · ${basename(s.cwd)}${s.tokenUsage?.total ? ` · ${formatTokens(s.tokenUsage.total)}` : ''}`}
-                      </span>
-                    </button>
-                    <SessionTagChips tags={sTags} onAdd={(tag) => addSessionTag(s.id, tag)} onRemove={(tag) => removeSessionTag(s.id, tag)} />
-                  </div>
-                </IconTooltip>
+                <ContextMenu key={s.id}>
+                  <ContextMenuTrigger asChild>
+                    {/* Row container (group) holds the resume <button> + tag chips as
+                        SIBLINGS, not nested — nested interactive elements are invalid
+                        HTML. `group` reveals the "+ tag" affordance on hover. The row
+                        itself is the ContextMenuTrigger, so right-clicking anywhere on
+                        it opens the themed menu (Resume · Copy session ID/cwd/summary). */}
+                    <div className={`group flex flex-col gap-0.5 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs transition-all duration-150 ease-out hover:bg-accent ${isLoading ? 'opacity-50' : ''}`}>
+                      {/* The themed hover tooltip sits on the resume <button>, not the row
+                          div: a Radix Tooltip (asChild) and a Radix ContextMenu (asChild)
+                          cannot share one DOM node — each needs its provider in scope, and
+                          Slot only merges props one level deep, so nesting ContextMenu
+                          inside IconTooltip would clone the tooltip's pointer handlers onto
+                          the <ContextMenu> provider (which drops them) and silently kill the
+                          tooltip. Putting the tooltip on the inner button gives it a real DOM
+                          anchor; the non-loading path adds no wrapper element (asChild). */}
+                      <IconTooltip
+                        disabled={isLoading}
+                        label={
+                          <span className="flex flex-col text-left gap-0.5">
+                            <span>resume <span className="font-mono">{s.id}</span></span>
+                            <span className="opacity-70">{s.cwd}</span>
+                          </span>
+                        }
+                      >
+                        <button
+                          onClick={() => { handleResume(s.id, s.summary, s.cwd, H); setView({ kind: 'root' }); }}
+                          disabled={isLoading}
+                          className="flex flex-col gap-0.5 text-left active:bg-accent/80 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded-md"
+                        >
+                          <span className="truncate">
+                            {isLoading ? (
+                              <Skeleton className="h-3 w-3/4 inline-block" />
+                            ) : (
+                              s.summary || <span className="text-muted-foreground">(no summary)</span>
+                            )}
+                            {running && <span className="ml-1 text-green-400">● live</span>}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground truncate">
+                            {isLoading ? <Skeleton className="h-2.5 w-1/2 inline-block" /> : `${formatTimestamp(s.mtime, timestampFormat)} · ${basename(s.cwd)}${s.tokenUsage?.total ? ` · ${formatTokens(s.tokenUsage.total)}` : ''}`}
+                          </span>
+                        </button>
+                      </IconTooltip>
+                      <SessionTagChips tags={sTags} onAdd={(tag) => addSessionTag(s.id, tag)} onRemove={(tag) => removeSessionTag(s.id, tag)} />
+                    </div>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent>
+                    <ContextMenuItem onSelect={() => { handleResume(s.id, s.summary, s.cwd, H); setView({ kind: 'root' }); }}>
+                      Resume
+                    </ContextMenuItem>
+                    <ContextMenuSeparator />
+                    <ContextMenuItem onSelect={() => handleCopy(s.id)}>Copy session ID</ContextMenuItem>
+                    <ContextMenuItem onSelect={() => handleCopy(s.cwd)}>Copy working directory</ContextMenuItem>
+                    <ContextMenuItem onSelect={() => handleCopy(s.summary)}>Copy summary</ContextMenuItem>
+                  </ContextMenuContent>
+                </ContextMenu>
               );
             })}
             {visibleSessions.length === 0 && activeTagFilters.size > 0 && (
