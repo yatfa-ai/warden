@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseReflog, parseDiffStat, isConflictStatus, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, buildDockerGitArgv } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseReflog, parseDiffStat, isConflictStatus, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, parseGitBranches, buildDockerGitArgv } from './gitStatus.js';
 
 describe('parseGitStatusPorcelain', () => {
   it('parses the most common case: unstaged modification as the FIRST file', () => {
@@ -739,6 +739,104 @@ describe('parseDiffStat', () => {
     assert.deepEqual(parseDiffStat(Buffer.from(' 3 files changed, 847 insertions(+), 203 deletions(-)\n')), {
       files: 3, insertions: 847, deletions: 203,
     });
+  });
+});
+
+describe('parseGitBranches', () => {
+  // `git for-each-ref --format='%(refname:short)|%(objectname:short)|
+  // %(committerdate:iso-strict)|%(upstream:short)|%(upstream:track)' refs/heads/`
+  // emits `<name>|<sha>|<date>|<upstream>|<track>` per branch. The track field is
+  // the native ahead/behind/gone source. See WARDEN-577.
+
+  it('parses a branch with an upstream that is in sync (track empty)', () => {
+    const out = 'main|a4e8679|2026-07-17T01:24:17Z|origin/main|\n';
+    assert.deepEqual(parseGitBranches(out), [
+      { name: 'main', headSha: 'a4e8679', headDate: '2026-07-17T01:24:17Z', upstream: 'origin/main', ahead: 0, behind: 0, gone: false },
+    ]);
+  });
+
+  it('parses a branch with no upstream at all (upstream + track empty)', () => {
+    // A never-pushed branch: upstream:short and upstream:track both blank → the
+    // line ends with `||`. ahead/behind read 0; the empty upstream is what tells
+    // the caller this is local-only (distinct from an in-sync 0/0 branch).
+    const out = 'experiment|57e4d8b|2026-07-17T01:23:59Z||\n';
+    assert.deepEqual(parseGitBranches(out), [
+      { name: 'experiment', headSha: '57e4d8b', headDate: '2026-07-17T01:23:59Z', upstream: '', ahead: 0, behind: 0, gone: false },
+    ]);
+  });
+
+  it('parses [ahead N] / [behind N] / [ahead N, behind M] track tokens', () => {
+    const out = [
+      'ahead-only|aaa1111|2026-07-17T01:00:00Z|origin/ahead-only|[ahead 3]',
+      'behind-only|bbb2222|2026-07-17T01:00:00Z|origin/behind-only|[behind 2]',
+      'diverged|ccc3333|2026-07-17T01:00:00Z|origin/diverged|[ahead 5, behind 1]',
+    ].join('\n') + '\n';
+    assert.deepEqual(parseGitBranches(out), [
+      { name: 'ahead-only', headSha: 'aaa1111', headDate: '2026-07-17T01:00:00Z', upstream: 'origin/ahead-only', ahead: 3, behind: 0, gone: false },
+      { name: 'behind-only', headSha: 'bbb2222', headDate: '2026-07-17T01:00:00Z', upstream: 'origin/behind-only', ahead: 0, behind: 2, gone: false },
+      { name: 'diverged', headSha: 'ccc3333', headDate: '2026-07-17T01:00:00Z', upstream: 'origin/diverged', ahead: 5, behind: 1, gone: false },
+    ]);
+  });
+
+  it('flags [gone] (upstream deleted) with gone:true and 0/0 ahead/behind', () => {
+    // The upstream name is retained (it WAS tracking origin/old) but the track is
+    // [gone] — the remote branch no longer exists, so ahead/behind don't apply.
+    const out = 'old-feature|a7a09c4|2026-06-01T01:00:00Z|origin/old-feature|[gone]\n';
+    assert.deepEqual(parseGitBranches(out), [
+      { name: 'old-feature', headSha: 'a7a09c4', headDate: '2026-06-01T01:00:00Z', upstream: 'origin/old-feature', ahead: 0, behind: 0, gone: true },
+    ]);
+  });
+
+  it('parses multiple branches (git emits them in sorted order)', () => {
+    const out = [
+      'feature/x|1111111|2026-07-17T01:00:00Z|origin/feature/x|[ahead 1]',
+      'main|2222222|2026-07-17T01:00:00Z|origin/main|',
+      'wip|3333333|2026-07-17T01:00:00Z||',
+    ].join('\n') + '\n';
+    assert.deepEqual(parseGitBranches(out), [
+      { name: 'feature/x', headSha: '1111111', headDate: '2026-07-17T01:00:00Z', upstream: 'origin/feature/x', ahead: 1, behind: 0, gone: false },
+      { name: 'main', headSha: '2222222', headDate: '2026-07-17T01:00:00Z', upstream: 'origin/main', ahead: 0, behind: 0, gone: false },
+      { name: 'wip', headSha: '3333333', headDate: '2026-07-17T01:00:00Z', upstream: '', ahead: 0, behind: 0, gone: false },
+    ]);
+  });
+
+  it('reassembles a branch name that contains a literal "|" (git allows pipes)', () => {
+    // git check-ref-format accepts `|` in a branch name, so a naive 5-way split
+    // would truncate `feat|ure` to `feat`. Peeling the 4 trailing fields off the
+    // back and rejoining the rest preserves the full name.
+    const out = 'feat|ure|abc1234|2026-07-17T01:00:00Z|origin/feat|ure|[ahead 2]\n';
+    assert.deepEqual(parseGitBranches(out), [
+      { name: 'feat|ure', headSha: 'abc1234', headDate: '2026-07-17T01:00:00Z', upstream: 'origin/feat|ure', ahead: 2, behind: 0, gone: false },
+    ]);
+  });
+
+  it('returns [] for empty / whitespace-only output', () => {
+    assert.deepEqual(parseGitBranches(''), []);
+    assert.deepEqual(parseGitBranches('   \n  \n'), []);
+  });
+
+  it('handles undefined / null input without throwing', () => {
+    assert.deepEqual(parseGitBranches(undefined), []);
+    assert.deepEqual(parseGitBranches(null), []);
+  });
+
+  it('accepts a Buffer input', () => {
+    assert.deepEqual(parseGitBranches(Buffer.from('main|abc1234|2026-07-17T01:00:00Z|origin/main|\n')), [
+      { name: 'main', headSha: 'abc1234', headDate: '2026-07-17T01:00:00Z', upstream: 'origin/main', ahead: 0, behind: 0, gone: false },
+    ]);
+  });
+
+  it('tolerates CRLF line endings (e.g. over SSH)', () => {
+    assert.deepEqual(parseGitBranches('main|abc1234|2026-07-17T01:00:00Z|origin/main|\r\n'), [
+      { name: 'main', headSha: 'abc1234', headDate: '2026-07-17T01:00:00Z', upstream: 'origin/main', ahead: 0, behind: 0, gone: false },
+    ]);
+  });
+
+  it('degrades a short/garbage line to a name-only record (never throws)', () => {
+    // Fewer than 5 pipe-fields → the whole line becomes the name, fields blank.
+    assert.deepEqual(parseGitBranches('not-a-valid-line\n'), [
+      { name: 'not-a-valid-line', headSha: '', headDate: '', upstream: '', ahead: 0, behind: 0, gone: false },
+    ]);
   });
 });
 

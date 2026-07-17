@@ -20,7 +20,7 @@ import { type ProjectGitAgent, type FileCollision } from '@/lib/gitStateSummary'
 import { formatWhatsNewLine, type WhatsNewSummary } from '@/lib/whatsNew';
 import { formatRelative, formatAbsoluteFull } from '@/lib/formatTimestamp';
 import type { Chat } from '@/lib/types';
-import type { GitCommit, GitFile, GitStash, GitReflogEntry, GitRemote, DiffStat } from './types';
+import type { GitCommit, GitFile, GitStash, GitReflogEntry, GitRemote, GitBranch, DiffStat } from './types';
 import { DiffStatChip } from './DiffStatChip';
 
 /**
@@ -727,6 +727,17 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   const [remoteList, setRemoteList] = useState<GitRemote[] | undefined>(undefined);
   const [remoteLoading, setRemoteLoading] = useState(false);
 
+  // WARDEN-577: the agent's local branches — the topology the badge's single
+  // current-branch name only gestures at (which OTHER branches exist, whether
+  // work is scattered, whether a branch is stranded/unmerged or its upstream
+  // gone). Lazily fetched on first open (mirrors reflog/remote: undefined = not
+  // yet fetched, [] = fetched-but-empty so a repeat open reuses the cache).
+  // Read-only (/api/git-branch runs `git for-each-ref refs/heads/`, which never
+  // mutates); never gated on a count because every repo with a commit has at
+  // least one branch.
+  const [branchList, setBranchList] = useState<GitBranch[] | undefined>(undefined);
+  const [branchLoading, setBranchLoading] = useState(false);
+
   // WARDEN-398: the aggregated range-diff modal target. Set by the "View full diff"
   // affordance in the outgoing (↑N) or incoming (↓N) section; null while closed.
   // WARDEN-449: extended to the ± (worktree) axis — `git diff HEAD`, no count (the
@@ -890,6 +901,22 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
     }
   };
 
+  // Always fetch (mirrors fetchReflog/fetchRemote); dedup is at the call site
+  // (onOpenChange guards on branchList === undefined). Read-only — /api/git-branch
+  // runs `git for-each-ref`, which never mutates the repo.
+  const fetchBranches = async () => {
+    setBranchLoading(true);
+    try {
+      const r = await fetch(`/api/git-branch?id=${encodeURIComponent(chatId)}`);
+      const j = await r.json();
+      setBranchList(Array.isArray(j.branches) ? j.branches : []);
+    } catch {
+      setBranchList([]);
+    } finally {
+      setBranchLoading(false);
+    }
+  };
+
   // WARDEN-528: resolve the ONE remote this badge speaks for + the deep-link URLs.
   // A repo can have several remotes (origin, upstream, fork); the branch HEAD is on
   // tracks a specific one (`origin/feature` → the `origin` remote), so prefer that —
@@ -958,6 +985,10 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
       // WARDEN-528: the remote identity (which repo host this maps to) is relevant
       // for every repo — not just a dirty one — so it has no count gate either.
       if (remoteList === undefined && !remoteLoading) fetchRemote();
+      // WARDEN-577: the local branch topology is relevant for every repo too (not
+      // just a dirty one), so it has no count gate — fetch on every first open
+      // (guarded so repeat opens reuse the cache), alongside reflog/remote.
+      if (branchList === undefined && !branchLoading) fetchBranches();
     }}>
       <RadixPopover.Trigger asChild>
         <button
@@ -1422,6 +1453,97 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
                 </ul>
               ) : (
                 <div className="px-1 py-1 text-[10px] text-muted-foreground">no operations</div>
+              )}
+            </div>
+          )}
+          {/* WARDEN-577: the agent's local branches — the topology the badge's single
+              current-branch name only gestures at. Each row: current-marker, name
+              (bold + ● when HEAD is on it), `· Nd` freshness (reuses formatRelative,
+              amber when stale like the badge append), `↑N`/`↓N` (ahead/behind, the
+              same glyphs/colors the badge uses), an amber `gone` when the upstream
+              tracking ref was deleted, and a green `✓` when merged into HEAD (shown
+              only on non-current branches — current is trivially merged, so the ✓
+              would be noise there; its ABSENCE on another branch is the "stranded
+              work" signal). The name deep-links to {web}/tree/<branch> via the same
+              primaryRemote web base + encodeTreeRef the HEAD/upstream links use
+              (WARDEN-528); a repo with no web remote renders the name plain. Read-
+              only throughout — list+render only, no checkout/merge/delete affordance
+              (the WARDEN-199 line). stopPropagation on the link keeps a click from
+              toggling the popover; target=_blank opens the system browser. */}
+          {(branchList !== undefined || branchLoading) && (
+            <div className="mt-1.5 border-t border-border pt-1.5">
+              <div className="mb-0.5 flex items-center justify-between gap-2 px-0.5">
+                <span className="truncate text-[10px] font-medium text-muted-foreground">⎇ branches · {branchList?.length ?? 0}</span>
+                <IconTooltip label="refresh branches" disabled={branchLoading}>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); fetchBranches(); }}
+                    className="shrink-0 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+                    disabled={branchLoading}
+                  >↻</button>
+                </IconTooltip>
+              </div>
+              {branchLoading && branchList === undefined ? (
+                <div className="flex items-center gap-1.5 px-1 py-1">
+                  <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">loading…</span>
+                </div>
+              ) : branchList && branchList.length > 0 ? (
+                <ul className="max-h-40 overflow-auto">
+                  {branchList.map((b, i) => {
+                    const ms = b.headDate ? Date.parse(b.headDate) : NaN;
+                    const fresh = Number.isFinite(ms);
+                    const stale = fresh && Date.now() - ms > STALE_HEAD_AGE_MS;
+                    const href = originWeb ? `${originWeb}/tree/${encodeTreeRef(b.name)}` : null;
+                    const titleParts = [b.name];
+                    if (b.current) titleParts.push('current');
+                    if (b.gone) titleParts.push('upstream gone — remote tracking branch deleted, work is local-only');
+                    else if (b.upstream) titleParts.push(`tracking ${b.upstream}`);
+                    else titleParts.push('no remote tracking — local-only, not backed up');
+                    if (fresh) titleParts.push(`last commit ${formatAbsoluteFull(ms)}`);
+                    if (b.ahead > 0) titleParts.push(`${b.ahead} unpushed`);
+                    if (b.behind > 0) titleParts.push(`${b.behind} behind remote`);
+                    if (!b.merged) titleParts.push('not merged into HEAD — may carry unlanded commits');
+                    return (
+                      <li
+                        /* key by name when stable; a duplicate/empty name (a
+                           pathological repo) falls back to the positional index so
+                           the list never crashes. */
+                        key={b.name || i}
+                        className="flex items-center gap-1 rounded px-1 py-0.5 text-left text-[10px]"
+                      >
+                        <span className={b.current ? 'text-cyan-400' : 'text-muted-foreground/40'}>{b.current ? '●' : '○'}</span>
+                        {href ? (
+                          <a
+                            href={href}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            onClick={(e) => e.stopPropagation()}
+                            title={titleParts.join(' · ')}
+                            className={cn('min-w-0 flex-1 truncate underline underline-offset-2 hover:opacity-80', b.current ? 'font-medium text-primary' : 'text-primary/80')}
+                          >
+                            {b.name}
+                          </a>
+                        ) : (
+                          <span
+                            title={titleParts.join(' · ')}
+                            className={cn('min-w-0 flex-1 truncate', b.current ? 'font-medium text-foreground' : 'text-foreground/80')}
+                          >
+                            {b.name}
+                          </span>
+                        )}
+                        {fresh && (
+                          <span className={stale ? 'text-amber-400' : 'text-muted-foreground'}>· {formatRelative(ms)}</span>
+                        )}
+                        {b.ahead > 0 && <span className="text-amber-400">↑{b.ahead}</span>}
+                        {b.behind > 0 && <span className="text-blue-400">↓{b.behind}</span>}
+                        {b.gone && <span className="text-amber-400">gone</span>}
+                        {b.merged && !b.current && <span className="text-green-400" title="merged into HEAD">✓</span>}
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <div className="px-1 py-1 text-[10px] text-muted-foreground">no branches</div>
               )}
             </div>
           )}

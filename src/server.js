@@ -27,7 +27,7 @@ import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { classifyPane, stripAnsi, matchWatchPatterns, sanitizeWatchPatterns } from './agentState.js';
 import * as notify from './notify.js';
 import { checkHost } from './hostStatus.js';
-import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseReflog, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, parseGitRemotes, buildDockerGitArgv } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseStashCount, parseStashList, parseReflog, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, parseGitRemotes, parseGitBranches, buildDockerGitArgv } from './gitStatus.js';
 import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep } from './companion.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -3089,6 +3089,70 @@ app.get('/api/git-reflog', async (req, res) => {
     res.json({ entries, error: null });
   } catch (e) {
     res.json({ entries: [], error: e.message });
+  }
+});
+
+// Local branches — an agent's branch topology (WARDEN-577). The last read-only
+// "axis" on the WARDEN-199 line: a human can already see WHICH branch the agent
+// sits on (the badge), but not what OTHER branches exist — whether work is
+// focused on one branch or scattered across many, whether a branch is stranded
+// (unmerged into HEAD, or its upstream `[gone]`), or whether a remembered older
+// branch still exists. Surfaces that without dropping into a terminal. Mirrors
+// /api/git-stash's transport/shape exactly (resolve → 404 guard → gitCwd →
+// graceful [] on no-cwd/non-git, never 500). Read-only by construction:
+// `git for-each-ref` (and `--merged HEAD`) only — never branch/checkout/merge/
+// delete/rename (the WARDEN-199 read-only line the whole git-status/log/diff/
+// show/blame/stash/reflog set holds; the withdrawn branch-switch slice is the
+// cautionary tale the git-status comment at /api/git-status cites).
+//
+//   GET /api/git-branch?id=<chatId>
+//     → { branches: [{ name, current, headSha, headDate, upstream, ahead, behind, gone, merged }], error }
+app.get('/api/git-branch', async (req, res) => {
+  const chatId = String(req.query.id || '');
+  const { chat, error } = await resolve(chatId);
+  if (error) return res.status(404).json({ error });
+
+  try {
+    const cwd = gitCwd(chat);
+    if (!cwd) return res.json({ branches: [], error: 'no cwd' });
+
+    // name|sha|date|upstream|track. %(upstream:track) yields [ahead N]/[behind N]/
+    // [ahead N, behind M]/[gone] natively, so ahead/behind (+ gone) come for free
+    // (no separate rev-list). %(committerdate:iso-strict) gives strict ISO (the
+    // %cI headDate discipline — `2026-07-17T01:23:59Z`, reliably Date.parse-able).
+    // --format is one argv element (no shell on LOCAL); the remote branch
+    // shellQuotes it (WARDEN-122). yatfa chats run this inside the container
+    // (WARDEN-235).
+    const fmt = '%(refname:short)|%(objectname:short)|%(committerdate:iso-strict)|%(upstream:short)|%(upstream:track)';
+    const r = await runGit(chat, ['for-each-ref', `--format=${fmt}`, 'refs/heads/'], cwd);
+    const raw = r.ok ? r.stdout.trim() : '';
+    const branches = raw ? parseGitBranches(raw) : [];
+
+    // Current branch: re-resolve HEAD so the matching branch is flagged current
+    // (the badge already names it; the list marks it). One cheap runGit; on a
+    // detached HEAD / non-git cwd symbolic-ref exits non-zero → '' → no branch
+    // flagged current (a detached repo still lists its branches).
+    const headR = await runGit(chat, ['symbolic-ref', '--short', 'HEAD'], cwd);
+    const currentName = headR.ok ? headR.stdout.trim() : '';
+
+    // Merged-into-HEAD set: a second read-only `for-each-ref --merged HEAD` so a
+    // NON-merged branch (a tip not reachable from HEAD — potentially stranded
+    // work that never landed) is flaggable. A failure degrades to all-false
+    // (never 500). Same CRLF tolerance as the main parse; one name per line.
+    const mergedR = await runGit(chat, ['for-each-ref', '--merged', 'HEAD', '--format=%(refname:short)', 'refs/heads/'], cwd);
+    const mergedNames = mergedR.ok
+      ? mergedR.stdout.split('\n').map((l) => l.replace(/\r$/, '')).filter((l) => l.trim())
+      : [];
+    const mergedSet = new Set(mergedNames);
+
+    const out = branches.map((b) => ({
+      ...b,
+      current: currentName !== '' && b.name === currentName,
+      merged: mergedSet.has(b.name),
+    }));
+    res.json({ branches: out, error: null });
+  } catch (e) {
+    res.json({ branches: [], error: e.message });
   }
 });
 

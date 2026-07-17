@@ -36,6 +36,30 @@ export type GitRemote = {
   web: string | null;
 };
 
+// One row from /api/git-branch (a parsed `git for-each-ref refs/heads/` line) — the
+// agent's LOCAL branch topology: every branch that exists in this checkout, each
+// with its tip SHA, last-commit date, upstream tracking + ahead/behind, and three
+// flags. `current` marks the branch HEAD sits on; `merged` marks branches whose tip
+// is reachable from HEAD (so a NON-merged branch surfaces as potentially stranded
+// work — commits not yet landed); `gone` marks a branch whose upstream tracking ref
+// was deleted on the remote (the branch is now local-only). `upstream` is the short
+// tracking name (`origin/main`) or `''` when the branch tracks nothing (local-only,
+// never pushed — the same durability risk GitBranchBadge's 🔒 surfaces for HEAD).
+// `headDate` is strict ISO-8601 (git's committerdate:iso-strict) so `Date.parse` is
+// reliable. The last read-only axis alongside commit history / working-tree / stash
+// / reflog / remote identity. Read-only throughout. (WARDEN-577.)
+export type GitBranch = {
+  name: string;
+  current: boolean;
+  headSha: string;
+  headDate: string;
+  upstream: string;
+  ahead: number;
+  behind: number;
+  gone: boolean;
+  merged: boolean;
+};
+
 // One per-session token-usage ledger, summed from every assistant turn's
 // `message.usage` across the transcript (model-agnostic raw token counts, NOT
 // dollar cost). `total = input+output+cacheCreation+cacheRead`. Optional +
