@@ -15,24 +15,10 @@ import {
   FolderOpenIcon,
   FileIcon,
 } from 'lucide-react';
-
-interface Entry {
-  name: string;
-  type: 'file' | 'dir';
-}
-
-// One loaded directory in the tree, keyed by its cwd-relative path ('' = root).
-// Owns its lazy listing + expand state, so expanding a dir never reloads its
-// siblings and each dir is fetched at most once per dialog-open.
-interface DirState {
-  loaded: boolean;
-  loading: boolean;
-  error: string | null;
-  entries: Entry[];
-  expanded: boolean;
-}
-
-const EMPTY_DIR: DirState = { loaded: false, loading: false, error: null, entries: [], expanded: false };
+// Pure tree logic (DirState/Entry/EMPTY_DIR/joinPath/applyToggle) lives in
+// src/lib so it is unit-testable without a DOM — the WARDEN-573 subdir-expansion
+// decision is asserted against the real function (see web/fileBrowser.test.mjs).
+import { type DirState, EMPTY_DIR, joinPath, applyToggle } from '@/lib/fileBrowserTree';
 
 interface Props {
   chatId: string;
@@ -43,13 +29,6 @@ interface Props {
   // can open the EXISTING FileViewer — same contract as WorkspaceSearchDialog's
   // onSelectFile, minus the line (a browse has no line to scroll to).
   onSelectFile: (file: string) => void;
-}
-
-// Join a cwd-relative dir + entry name into the path both the API (dir=) and the
-// FileViewer (filePath=) expect. A leading/trailing slash would break the
-// containment rule / double up, so it is normalized here in one place.
-function joinPath(dir: string, name: string) {
-  return dir ? `${dir}/${name}` : name;
 }
 
 // Read-only directory browser (WARDEN-573) — the STRUCTURAL twin of
@@ -102,16 +81,11 @@ export function FileBrowserDialog({ chatId, cwd, open, onOpenChange, onSelectFil
   }, [open, fetchDir]);
 
   const toggleDir = (dir: string) => {
-    const node = tree[dir];
-    if (!node) return;
-    if (node.expanded) {
-      // Collapse keeps the loaded entries cached (re-expand is instant, no refetch).
-      setTree((t) => ({ ...t, [dir]: { ...t[dir], expanded: false } }));
-      return;
-    }
-    // Expand: lazy-load on first expand, otherwise just flip the cached node open.
-    setTree((t) => ({ ...t, [dir]: { ...t[dir], expanded: true } }));
-    if (!node.loaded) fetchDir(dir);
+    // Delegate to the pure applyToggle (exported + unit-tested) so the
+    // seed-on-demand expansion decision — the WARDEN-573 fix — cannot regress.
+    const { tree: nextTree, needsFetch } = applyToggle(tree, dir);
+    setTree(nextTree);
+    if (needsFetch) fetchDir(dir);
   };
 
   const handleSelect = (file: string) => {
