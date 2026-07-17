@@ -270,7 +270,7 @@ before(async () => {
 
   // Import server.js ONCE — after HOME/config/catalog are in place.
   const server = await import('./server.js');
-  parseGitLogLine = server.parseGitLogLine;
+  ({ parseGitLogLine } = await import('./git.js'));
   httpServer = server.app.listen(0, '127.0.0.1');
   await new Promise((resolve, reject) => {
     httpServer.once('listening', resolve);
