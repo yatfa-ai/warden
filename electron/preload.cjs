@@ -34,3 +34,26 @@ contextBridge.exposeInMainWorld('wardenWindow', {
   getCloseToTray: () => ipcRenderer.invoke('window:get-close-to-tray'),
   setCloseToTray: (on) => ipcRenderer.invoke('window:set-close-to-tray', on),
 });
+
+// Telemetry runtime-status bridge (WARDEN-631). The drift flag lives in MAIN (the
+// pipeline); this is the renderer's read-only window onto it — distinct from
+// `wardenWindow` (OS window state) because runtime DELIVERY state is a different
+// domain. getRuntimeStatus pulls the current value (called on Settings mount);
+// onRuntimeStatus subscribes to live PUSH updates (fired only when drift arms or
+// clears) and returns an unsubscribe. Same three-context feature-detection story
+// as wardenWindow: absent in `npm run dev` + `node web/smoke.cjs`, present only in
+// the Electron app, and the web layer no-ops cleanly when it is missing.
+contextBridge.exposeInMainWorld('wardenTelemetry', {
+  getRuntimeStatus: () => ipcRenderer.invoke('telemetry:get-runtime-status'),
+  // WARDEN-631 — clear the drift breaker when a Test-connection probe confirms the
+  // receiver is schema-matched again (the in-session recovery path for a receiver
+  // fixed at the same url). No-op when drift is not armed.
+  clearRuntimeDrift: () => ipcRenderer.invoke('telemetry:clear-runtime-drift'),
+  onRuntimeStatus: (cb) => {
+    const listener = (_event, status) => {
+      try { cb(status); } catch { /* a renderer callback must never crash main */ }
+    };
+    ipcRenderer.on('telemetry:runtime-status', listener);
+    return () => ipcRenderer.removeListener('telemetry:runtime-status', listener);
+  },
+});

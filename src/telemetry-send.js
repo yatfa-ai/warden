@@ -99,6 +99,16 @@ export function makePayload({ schemaVersion, events, authToken }) {
 //            the transport stopped cleanly with no further fetch or backoff. Only
 //            present on this outcome; absent (undefined) elsewhere, so existing
 //            deepStrictEqual result assertions are unaffected (WARDEN-585).
+//   drifted  true iff the receiver returned 415 (x-telemetry-schema mismatch —
+//            the client and receiver disagree on the event-schema version). The
+//            batch is STILL dropped (a schema mismatch is permanent for this
+//            payload — the identical body + header would be rejected again, so it
+//            is not retried), but the distinct flag lets the pipeline circuit-break
+//            further sends to this drifted endpoint instead of silently losing
+//            every subsequent event to the same version mismatch. Only present on
+//            this outcome; absent (undefined) elsewhere (the other non-retryable
+//            4xx — 400/401/403/404/422 — stay generic drops), so existing result
+//            assertions are unaffected (WARDEN-631).
 //   attempts number of fetchImpl calls actually made (0 when gated off or revoked
 //            before the first attempt).
 //   status   last HTTP status observed (null when gated off or a network error
@@ -198,6 +208,15 @@ export async function send({
     // Retrying the identical body cannot help, so drop the batch now without
     // spending the remaining attempts.
     log('warn', `telemetry: non-retryable ${res.status}; dropping batch`);
+    // A 415 is a schema-version mismatch: the receiver rejected X-Telemetry-Schema,
+    // so it can NEVER accept this payload as-is. Flag it distinctly (ALONGSIDE the
+    // drop — the bad batch is still not re-sent) so the pipeline can circuit-break
+    // further sends to this drifted endpoint. Collecting + POSTing events the
+    // receiver is guaranteed to reject is pure waste; surfacing the signal turns a
+    // silent permanent loss into a stoppable, visible one (WARDEN-631).
+    if (res.status === 415) {
+      return { ok: false, dropped: true, drifted: true, attempts: attempt + 1, status };
+    }
     return { ok: false, dropped: true, attempts: attempt + 1, status };
   }
 

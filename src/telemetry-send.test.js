@@ -422,6 +422,59 @@ describe('(e) non-retryable 4xx (≠429) → no retry, batch dropped', () => {
   }
 });
 
+// (WARDEN-631) A 415 is a schema-version mismatch — a permanent rejection DISTINCT
+// from a generic 4xx drop. The transport still DROPS the batch (the identical body
+// + schema header would be rejected again, so it is not retried — same one attempt,
+// no backoff as any other non-retryable 4xx), but it ALSO sets `drifted:true` so the
+// pipeline can circuit-break further sends to this endpoint instead of silently
+// losing every subsequent event to the same version mismatch. `drifted` is present
+// ONLY on the 415 outcome; the other non-retryable 4xx (asserted above) leave it
+// undefined, so the result shapes stay distinguishable end-to-end.
+describe('(WARDEN-631) 415 schema-drift → dropped AND drifted:true (distinct signal)', () => {
+  it('a 415 drops the batch AND sets drifted:true (one attempt, no backoff)', async () => {
+    const fetchImpl = fetchSeq([{ ok: false, status: 415 }]);
+    const sleep = sleepRec();
+    const r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl, sleepImpl: sleep.fn });
+
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.dropped, true, 'a 415 still drops the bad batch');
+    assert.strictEqual(r.drifted, true, 'a 415 sets the distinct drift flag');
+    assert.strictEqual(r.status, 415);
+    assert.strictEqual(r.attempts, 1, 'schema drift is non-retryable — one attempt only');
+    assert.strictEqual(fetchImpl.count(), 1);
+    assert.strictEqual(sleep.count(), 0, 'no backoff — 415 fails immediately like any non-retryable 4xx');
+  });
+
+  it('other non-retryable 4xx do NOT set drifted (the flag is 415-specific)', async () => {
+    // 400/401/403/404/422 are generic drops — `drifted` is absent (undefined), so a
+    // generic auth/route/validation failure is never misread as a schema mismatch.
+    for (const status of [400, 401, 403, 404, 422]) {
+      const fetchImpl = fetchSeq([{ ok: false, status }]);
+      const r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl });
+      assert.strictEqual(r.drifted, undefined, `${status} carries no drift flag`);
+      assert.strictEqual(r.dropped, true);
+    }
+  });
+
+  it('a successful send, a transient, a revoke, and the gate no-op all leave drifted undefined', async () => {
+    // success
+    let r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl: fetchSeq([{ ok: true, status: 200 }]) });
+    assert.strictEqual(r.drifted, undefined, 'success is never drifted');
+    // transient (will exhaust + drop)
+    r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl: fetchSeq([{ ok: false, status: 503 }]), sleepImpl: sleepRec().fn });
+    assert.strictEqual(r.drifted, undefined, 'an exhausted-transient drop is not drift');
+    assert.strictEqual(r.dropped, true);
+    // revoke mid-loop
+    r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl: fetchSeq([{ ok: false, status: 503 }]), sleepImpl: sleepRec().fn, isConsentActive: consentSeq([true, false]) });
+    assert.strictEqual(r.drifted, undefined, 'a revoke is not drift');
+    assert.strictEqual(r.revoked, true);
+    // gate no-op
+    r = await send({ events: EVENTS, consent: false, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl: fetchMustNotBeCalled() });
+    assert.strictEqual(r.drifted, undefined, 'the gate no-op is not drift');
+    assert.deepStrictEqual(r, { ok: false, dropped: false, attempts: 0, status: null }, 'the gate no-op shape is unchanged');
+  });
+});
+
 describe('best-effort: a failed send NEVER throws to the caller', () => {
   it('resolves (not rejects) on exhausted transient retries', async () => {
     const fetchImpl = fetchSeq([{ ok: false, status: 503 }]);

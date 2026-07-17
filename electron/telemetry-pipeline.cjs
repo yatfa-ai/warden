@@ -146,6 +146,33 @@ function createTelemetryPipeline(opts) {
       ? o.transmissionLog
       : noopTransmissionLog;
 
+  // WARDEN-631 — per-endpoint schema-drift circuit-breaker. Session-scoped,
+  // in-memory, NEVER persisted (mirrors the transmission log's discipline): once
+  // the current endpoint has returned a 415 (x-telemetry-schema mismatch) the
+  // receiver CANNOT accept the current schema, so redact → validate → POST is
+  // pure waste. `drifted` describes the CURRENT endpoint; it arms on a drifted
+  // transport outcome and clears on anything that could resolve the mismatch —
+  // an endpoint change (a different receiver may match), a schema-version change
+  // (the client re-versioned), or a subsequent successful send (the endpoint is
+  // confirmed matched again). See settle() + setEndpoint / setSchemaVersion.
+  // `onRuntimeStatus` is the optional main→renderer bridge tap (Part 3): invoked
+  // ONLY when drift arms or clears, so the renderer can surface the live state.
+  // Default no-op — an unconfigured pipeline never reaches out.
+  let drifted = false;
+  const onRuntimeStatus = typeof o.onRuntimeStatus === 'function' ? o.onRuntimeStatus : () => {};
+
+  // Push the current drift state to the runtime-status tap. Called ONLY on a real
+  // state change (every call site guards `if (drifted !== prev)`), so the bridge
+  // never sees a no-op transition and never spams the renderer. Wrapped so a
+  // throwing tap (a main-process wiring bug) can never crash a send path.
+  function emitRuntimeStatus() {
+    try {
+      onRuntimeStatus({ drifted });
+    } catch {
+      /* a status tap must never break telemetry */
+    }
+  }
+
   // Resolve the current effective tier. A throwing consent resolver (slice 1 bug,
   // missing pref, etc.) degrades to OFF — telemetry must never crash the host.
   function effectiveTier() {
@@ -207,6 +234,16 @@ function createTelemetryPipeline(opts) {
     const tier = effectiveTier();
     if (tier === TIERS.OFF) return; // layer 2 consent guard (defense in depth)
 
+    // WARDEN-631 — circuit-breaker. If the current endpoint already rejected the
+    // current schema (415), do NOT redact/validate/POST: the receiver cannot
+    // accept this schema, so collecting + sending is pure waste. Like the
+    // consent-off guard above this records nothing and sends nothing — the
+    // endpoint is "drifted", which is a stop condition consistent with "off halts
+    // all traffic", relaxing nothing (a schema-MATCHED receiver never 415s, so
+    // legitimate traffic is unaffected). The flag clears on endpoint/schema
+    // change or a later successful send (see settle + setEndpoint/setSchemaVersion).
+    if (drifted) return;
+
     let redacted;
     try {
       redacted = redact(payload, { tier });
@@ -223,6 +260,11 @@ function createTelemetryPipeline(opts) {
 
     try {
       const events = [redacted];
+      // Capture the endpoint this send targets at DISPATCH time. The result may
+      // resolve AFTER the user changed endpointUrl (a slow receiver that 415s, or
+      // an in-flight send when the endpoint is re-pointed); settle must not then
+      // arm/clear drift for the NEW endpoint based on the OLD one's outcome.
+      const targetEndpoint = endpointUrl;
       const result = transportSend({
         events,
         consent: tier,
@@ -242,17 +284,42 @@ function createTelemetryPipeline(opts) {
         isConsentActive: () => effectiveTier() !== TIERS.OFF,
       });
       // Route the transport outcome into the transmission log instead of
-      // swallowing it (WARDEN-583 — verifiability's third leg). The transport
+      // swallowing it (WARDEN-583 — verifiability's third leg), AND arm/clear the
+      // drift circuit-breaker from the SAME outcome (WARDEN-631). The transport
       // never throws here (this try wraps a synchronous call site) and the REAL
       // transport never rejects (it resolves with dropped:true on failure), so
-      // every real attempt reaches recordOutcome. A rejection records nothing:
+      // every real attempt reaches settle. A rejection records/breaks nothing:
       // the real transport does not produce one, and the absence of an entry for
       // a contract-violating failure is acceptable (the absence is itself a
       // signal, never a crash).
+      const settle = (res) => {
+        recordOutcome(res, events.length);
+        // WARDEN-631 — a 415 arms the per-endpoint breaker (stop futile sends); a
+        // 2xx success clears it (the endpoint is confirmed schema-matched again).
+        // Only a real, recognized outcome flips the flag — the gate no-op, an
+        // ambiguous/absent result, and a non-drift drop all leave it untouched, so
+        // a transient/validator drop never wedges a reachable receiver.
+        if (!res || typeof res !== 'object') return;
+        // Stale-result guard: skip the drift update if the endpoint changed since
+        // dispatch — a late outcome for the OLD endpoint must not arm/clear drift
+        // for the NEW one (which would wedge a schema-matched receiver).
+        if (endpointUrl !== targetEndpoint) return;
+        if (res.drifted === true) {
+          if (!drifted) {
+            drifted = true;
+            emitRuntimeStatus();
+          }
+        } else if (res.ok === true) {
+          if (drifted) {
+            drifted = false;
+            emitRuntimeStatus();
+          }
+        }
+      };
       if (result && typeof result.then === 'function') {
-        result.then((res) => recordOutcome(res, events.length), () => {});
+        result.then(settle, () => {});
       } else if (result && typeof result === 'object') {
-        recordOutcome(result, events.length); // a synchronous result-bearing transport
+        settle(result); // a synchronous result-bearing transport
       }
     } catch {
       /* telemetry must never crash the host */
@@ -286,13 +353,50 @@ function createTelemetryPipeline(opts) {
       if (typeof fn === 'function') transportSend = fn;
     },
     setEndpoint(url) {
-      endpointUrl = typeof url === 'string' && url ? url : null;
+      const next = typeof url === 'string' && url ? url : null;
+      if (next === endpointUrl) return;
+      endpointUrl = next;
+      // WARDEN-631 — a real endpoint change may resolve drift: the new destination
+      // is a different receiver that may accept the current schema. applyTelemetry-
+      // Config calls this on EVERY pref update (incl. a tier toggle), so the
+      // change-guard above is what prevents a same-endpoint toggle from clearing
+      // the breaker and re-arming a futile send.
+      if (drifted) {
+        drifted = false;
+        emitRuntimeStatus();
+      }
     },
     setAuthToken(token) {
       authToken = typeof token === 'string' && token ? token : null;
     },
     setSchemaVersion(v) {
-      if (typeof v === 'number') schemaVersion = v;
+      if (typeof v !== 'number' || v === schemaVersion) return;
+      schemaVersion = v;
+      // WARDEN-631 — a schema-version change may resolve drift: the client re-
+      // versioned, so the next send re-probes rather than staying broken against
+      // the version that mismatched. Change-guarded so a redundant set is a no-op.
+      if (drifted) {
+        drifted = false;
+        emitRuntimeStatus();
+      }
+    },
+    // WARDEN-631 — the runtime drift state, for the main→renderer bridge (Part 3)
+    // to pull on Settings mount (a push fires on every change, but the renderer
+    // that opens AFTER drift armed needs the current value too). Read-only.
+    getRuntimeStatus() {
+      return { drifted };
+    },
+    // WARDEN-631 — user-driven drift clear. Invoked when a "Test connection" probe
+    // confirms the receiver is schema-matched again (the optional reset from the
+    // ticket). A receiver fixed at the SAME url cannot otherwise clear the change-
+    // guarded breaker in-session (setEndpoint no-ops on an unchanged url), so
+    // without this the user is wedged until an endpoint/schema change or a restart.
+    // Emits the transition so the renderer's warning clears. No-op if not armed.
+    clearRuntimeDrift() {
+      if (drifted) {
+        drifted = false;
+        emitRuntimeStatus();
+      }
     },
   };
 }

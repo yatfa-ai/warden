@@ -848,4 +848,272 @@ test('entries respect the injected log cap (bounded — oldest dropped)', () => 
   assert.equal(log.size(), 2, 'the pipeline-driven log respects its cap');
 });
 
+// ==========================================================================
+// WARDEN-631 — per-endpoint schema-drift circuit-breaker
+// ==========================================================================
+// The receiver returns 415 on an x-telemetry-schema mismatch (ingest.mjs). The
+// transport (slice 3) now sets drifted:true on that outcome; the pipeline arms a
+// session-scoped, in-memory breaker that short-circuits dispatch BEFORE redact/
+// validate/transportSend — the endpoint cannot accept the current schema, so
+// collecting + POSTing is pure waste. The breaker clears on endpoint change,
+// schema-version change, or a later successful send, and surfaces each transition
+// through the onRuntimeStatus tap (the main→renderer bridge, Part 3).
+
+// Captures every runtime-status push so a test can assert the exact transition
+// sequence (and that a no-op transition never fires).
+function statusSpy() {
+  const calls = [];
+  const fn = (status) => { calls.push(status); };
+  fn.calls = calls;
+  return fn;
+}
+
+// A deferred-thenable transport: each send returns a thenable whose .then queues
+// the settle callback WITHOUT calling it, so a test can dispatch several events
+// past the drift check (drift still false), then resolve their outcomes IN ORDER
+// to exercise the interleaved-result path (e.g. a later success clearing an
+// already-armed breaker). settle runs synchronously inside resolveAt (no timers).
+function sendDeferredSeq(results) {
+  const handlers = [];
+  const calls = [];
+  const send = (args) => {
+    calls.push(args);
+    const thenable = {
+      then(onFulfilled) { handlers.push(onFulfilled); return thenable; },
+    };
+    return thenable;
+  };
+  send.calls = calls;
+  send.resolveAt = (i) => {
+    const h = handlers[i];
+    if (h) h(results[Math.min(i, results.length - 1)]);
+  };
+  return send;
+}
+
+const DRIFT_EVENT = validEventWithCredential;
+
+test('getRuntimeStatus defaults to { drifted: false } (no drift out of the box)', () => {
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send: fakeSend() });
+  assert.deepEqual(pipeline.getRuntimeStatus(), { drifted: false });
+});
+
+test('a drifted (415) transport outcome arms the breaker → further dispatches send NOTHING', () => {
+  const send = sendReturning({ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  pipeline.record(DRIFT_EVENT()); // first send → 415 → arms the breaker
+  assert.equal(send.calls.length, 1, 'the first (drifted) send went through');
+  assert.equal(pipeline.getRuntimeStatus().drifted, true, 'breaker is armed');
+
+  pipeline.record(DRIFT_EVENT()); // short-circuited
+  pipeline.record(DRIFT_EVENT()); // short-circuited
+  assert.equal(send.calls.length, 1, 'no further transport call after the breaker armed — futile sends skipped');
+});
+
+test('a short-circuited (drifted) dispatch records NO transmission-log entry (a stop, like consent-off)', () => {
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendReturning({ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 });
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(DRIFT_EVENT()); // the drifted send itself → recorded as outcome:dropped + arms breaker
+  assert.equal(log.size(), 1, 'the drifted send is recorded as a dropped outcome');
+  pipeline.record(DRIFT_EVENT()); // short-circuited
+  pipeline.record(DRIFT_EVENT());
+  assert.equal(log.size(), 1, 'short-circuited sends record nothing — like a gated no-op');
+});
+
+test('a NON-drift drop (e.g. a 503) does NOT arm the breaker — a reachable receiver is never wedged', () => {
+  // dropped:true WITHOUT drifted:true (a transient-exhaustion drop, not a 415).
+  const send = sendReturning({ ok: false, dropped: true, attempts: 3, status: 503 });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  pipeline.record(DRIFT_EVENT());
+  assert.equal(pipeline.getRuntimeStatus().drifted, false, 'a generic drop never arms the breaker');
+  pipeline.record(DRIFT_EVENT());
+  assert.equal(send.calls.length, 2, 'sends keep flowing — only a 415 drift breaks the circuit');
+});
+
+test('the gate no-op and a revoked result do NOT arm the breaker', () => {
+  // gate no-op {ok:false,dropped:false} — not a real send.
+  let send = sendReturning({ ok: false, dropped: false, attempts: 0, status: null });
+  let pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  pipeline.record(DRIFT_EVENT());
+  assert.equal(pipeline.getRuntimeStatus().drifted, false, 'the gate no-op does not arm');
+  // revoked {ok:false,dropped:false,revoked:true} — a consent halt, not a drift.
+  send = sendReturning({ ok: false, dropped: false, revoked: true, attempts: 1, status: null });
+  pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  pipeline.record(DRIFT_EVENT());
+  assert.equal(pipeline.getRuntimeStatus().drifted, false, 'a revoke does not arm');
+});
+
+test('setEndpoint with a NEW url clears an armed breaker → sends resume', () => {
+  const send = sendReturning({ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 });
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    endpointUrl: 'https://telemetry.example.invalid/v1/events',
+  });
+  pipeline.record(DRIFT_EVENT()); // arm
+  assert.equal(pipeline.getRuntimeStatus().drifted, true);
+  // A different endpoint (the user re-pointed the receiver) clears the breaker.
+  pipeline.setEndpoint('https://telemetry-other.example/ingest');
+  assert.equal(pipeline.getRuntimeStatus().drifted, false, 'endpoint change cleared the breaker');
+  pipeline.record(DRIFT_EVENT());
+  assert.equal(send.calls.length, 2, 'a send now goes through after the endpoint change');
+});
+
+test('setEndpoint with the SAME url does NOT clear the breaker (change-guard against pref re-applies)', () => {
+  // applyTelemetryConfig calls setEndpoint on EVERY pref update (incl. a tier
+  // toggle). A blind reset would let a same-endpoint re-apply re-arm a futile send,
+  // so the breaker only clears on a GENUINE endpoint change.
+  const spy = statusSpy();
+  const ENDPOINT = 'https://telemetry.example.invalid/ingest';
+  const send = sendReturning({ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 });
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    endpointUrl: ENDPOINT,
+    onRuntimeStatus: spy,
+  });
+  pipeline.record(DRIFT_EVENT()); // arm
+  assert.deepEqual(spy.calls, [{ drifted: true }]);
+  pipeline.setEndpoint(ENDPOINT); // same url → no-op
+  assert.deepEqual(spy.calls, [{ drifted: true }], 'same endpoint fires no clear');
+  assert.equal(pipeline.getRuntimeStatus().drifted, true, 'breaker stays armed on a same-url re-apply');
+  pipeline.setEndpoint('https://other.example/ingest'); // different → clears
+  assert.deepEqual(spy.calls, [{ drifted: true }, { drifted: false }]);
+});
+
+test('setSchemaVersion change clears an armed breaker (the client re-versioned)', () => {
+  const send = sendReturning({ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  pipeline.record(DRIFT_EVENT()); // arm
+  assert.equal(pipeline.getRuntimeStatus().drifted, true);
+  pipeline.setSchemaVersion(SCHEMA_VERSION); // same → no-op
+  assert.equal(pipeline.getRuntimeStatus().drifted, true, 'same schema version does not clear');
+  pipeline.setSchemaVersion(2); // different → clears
+  assert.equal(pipeline.getRuntimeStatus().drifted, false, 'a schema-version change cleared the breaker');
+  pipeline.record(DRIFT_EVENT());
+  assert.equal(send.calls.length, 2, 'a send now goes through after the schema change');
+});
+
+test('a later SUCCESSFUL send clears an armed breaker (interleaved async outcomes)', () => {
+  // Two dispatches pass the drift check (drift=false) before either outcome
+  // resolves. Outcome #1 → 415 (arms); outcome #2 → 200 (clears). The breaker
+  // must reflect the most recent real outcome, not stay wedged on the 415.
+  const send = sendDeferredSeq([
+    { ok: false, dropped: true, drifted: true, attempts: 1, status: 415 },
+    { ok: true, dropped: false, attempts: 1, status: 200 },
+  ]);
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  assert.equal(pipeline.getRuntimeStatus().drifted, false);
+  pipeline.record(DRIFT_EVENT()); // dispatch #1 — check passes, outcome pending
+  pipeline.record(DRIFT_EVENT()); // dispatch #2 — check passes (drift still false), outcome pending
+  send.resolveAt(0); // 415 → arms
+  assert.equal(pipeline.getRuntimeStatus().drifted, true, 'the 415 armed the breaker');
+  send.resolveAt(1); // 200 → clears
+  assert.equal(pipeline.getRuntimeStatus().drifted, false, 'the later success cleared the breaker');
+});
+
+test('onRuntimeStatus fires ONLY on a real arm/clear transition — never on a no-op', () => {
+  const spy = statusSpy();
+  const send = sendReturning({ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send, onRuntimeStatus: spy });
+  assert.deepEqual(spy.calls, [], 'no status pushed at construction');
+  pipeline.record(DRIFT_EVENT()); // arm → fire
+  assert.deepEqual(spy.calls, [{ drifted: true }]);
+  pipeline.record(DRIFT_EVENT()); // short-circuit → NO outcome → NO fire
+  assert.deepEqual(spy.calls, [{ drifted: true }], 'a short-circuit does not re-fire');
+  pipeline.setEndpoint('https://other.example/ingest'); // clear → fire
+  assert.deepEqual(spy.calls, [{ drifted: true }, { drifted: false }]);
+  // A successful send while NOT drifted fires nothing (no transition).
+  const ok = sendReturning({ ok: true, dropped: false, attempts: 1, status: 200 });
+  const spy2 = statusSpy();
+  const p2 = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send: ok, onRuntimeStatus: spy2 });
+  p2.record(DRIFT_EVENT());
+  assert.deepEqual(spy2.calls, [], 'a success from a non-drifted state fires nothing');
+});
+
+test('a throwing onRuntimeStatus tap is swallowed (a status bridge never breaks a send)', () => {
+  const send = sendReturning({ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 });
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    onRuntimeStatus: () => { throw new Error('bridge blew up'); },
+  });
+  assert.doesNotThrow(() => pipeline.record(DRIFT_EVENT()), 'a throwing tap never propagates');
+  assert.equal(pipeline.getRuntimeStatus().drifted, true, 'the breaker still armed despite the throw');
+});
+
+test('a late 415 for the OLD endpoint does NOT arm drift for a NEW endpoint (stale-result guard)', () => {
+  // A send targets endpoint X; while it is in-flight the user re-points to Y. The
+  // send then resolves 415 — drift must NOT arm for Y (X's outcome is stale relative
+  // to the current endpoint). Without the guard this would wedge a schema-matched Y.
+  const send = sendDeferredSeq([{ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 }]);
+  const spy = statusSpy();
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    endpointUrl: 'https://x.example/ingest',
+    onRuntimeStatus: spy,
+  });
+  pipeline.record(DRIFT_EVENT()); // dispatch to X — outcome pending
+  pipeline.setEndpoint('https://y.example/ingest'); // re-point to Y mid-flight
+  assert.equal(pipeline.getRuntimeStatus().drifted, false, 'drift not armed yet');
+  send.resolveAt(0); // X's late 415 resolves AFTER the endpoint became Y
+  assert.equal(pipeline.getRuntimeStatus().drifted, false, 'the stale X 415 did NOT arm drift for Y');
+  assert.deepEqual(spy.calls, [], 'no status transition fired for the stale result');
+  // Y is not wedged: a send to Y now flows.
+  const ok = sendReturning({ ok: true, dropped: false, attempts: 1, status: 200 });
+  pipeline.setSend(ok);
+  pipeline.record(DRIFT_EVENT());
+  assert.equal(ok.calls.length, 1, 'Y receives the send — not wedged by X’s old 415');
+});
+
+test('a fresh (non-stale) 415 still arms drift — the guard only skips changed-endpoint results', () => {
+  // Same deferred shape, but the endpoint does NOT change before the result resolves
+  // → the 415 is fresh → drift arms normally. Proves the guard is about staleness,
+  // not a blanket suppression of async drift outcomes.
+  const send = sendDeferredSeq([{ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 }]);
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    endpointUrl: 'https://x.example/ingest',
+  });
+  pipeline.record(DRIFT_EVENT());
+  send.resolveAt(0); // endpoint unchanged → fresh 415
+  assert.equal(pipeline.getRuntimeStatus().drifted, true, 'a fresh 415 arms the breaker');
+});
+
+test('clearRuntimeDrift clears an armed breaker and emits the transition (Test-connection reset)', () => {
+  const spy = statusSpy();
+  const send = sendReturning({ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 });
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send, onRuntimeStatus: spy });
+  pipeline.record(DRIFT_EVENT()); // arm
+  assert.equal(pipeline.getRuntimeStatus().drifted, true);
+  assert.deepEqual(spy.calls, [{ drifted: true }]);
+  pipeline.clearRuntimeDrift(); // user-driven clear (a 'connected' Test connection)
+  assert.equal(pipeline.getRuntimeStatus().drifted, false, 'breaker cleared');
+  assert.deepEqual(spy.calls, [{ drifted: true }, { drifted: false }], 'the clear was pushed');
+  pipeline.record(DRIFT_EVENT()); // sends resume
+  assert.equal(send.calls.length, 2, 'a send now goes through after the clear');
+});
+
+test('clearRuntimeDrift is a no-op (and emits nothing) when drift is not armed', () => {
+  const spy = statusSpy();
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send: fakeSend(), onRuntimeStatus: spy });
+  pipeline.clearRuntimeDrift();
+  assert.equal(pipeline.getRuntimeStatus().drifted, false);
+  assert.deepEqual(spy.calls, [], 'no transition fired when there was nothing to clear');
+});
+
 console.log(`\n✓ TELEMETRY PIPELINE TESTS PASS (${passed})`);
