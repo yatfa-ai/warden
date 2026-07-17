@@ -125,6 +125,13 @@ const DEFAULTS = {
   //   webhookAlertAttention — route newly stuck/erroring/waiting/blocked pane
   //                           transitions (server-side attention sweep).
   //   webhookAlertBudget    — route token-budget breach transitions (tickBudget).
+  //   webhookAlertDone      — route the POSITIVE "agent finished" transition
+  //                           (WARDEN-575): a recently-working agent going idle, and
+  //                           a container genuinely ending (lifecycle agent_ended).
+  //                           Non-alarming 'info' severity; defaults true so the
+  //                           missing positive half of the alert loop is on par with
+  //                           the problem half (the channel itself stays off until
+  //                           webhookEnabled).
   // (Watch-pattern alerts are deferred to a follow-up: watch patterns live
   // client-side, so there is no server-side transition to dispatch yet.)
   webhookUrl: '',
@@ -132,6 +139,7 @@ const DEFAULTS = {
   webhookSecret: '',
   webhookAlertAttention: true,
   webhookAlertBudget: true,
+  webhookAlertDone: true,
   // Safety
   confirmDestructiveActions: true, // boolean - confirm before destructive kills (force-kill tmux session, kill chat)
   notifyChatOps: true,           // chat operations (session kill, chat kill, resume, rename)

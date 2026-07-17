@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from 'react';
-import { TriangleAlert, Bell, BellOff, Clock } from 'lucide-react';
+import { TriangleAlert, Bell, BellOff, Clock, CheckCircle2 } from 'lucide-react';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { Button } from '@/components/ui/button';
 import {
@@ -97,7 +97,11 @@ export function AttentionBadge({
 
   // Zero-state: render nothing intrusive. (A neutral ✓ was considered per the AC,
   // but an absent element is the least-noise zero state for an always-on header.)
-  if (rollup.total === 0) return null;
+  // WARDEN-575: an all-finished fleet (no problems) is NOT zero — those agents are a
+  // positive "go review their work" cue — so the badge stays visible with a green
+  // tone when only `done` items remain. Only a truly idle fleet (no problems AND no
+  // recently-finished) renders nothing.
+  if (rollup.total === 0 && rollup.done.length === 0) return null;
 
   // The directed answer (WARDEN-384): the ONE pane a human should go to first,
   // "you're needed HERE, because X" — promoted above the flat rundown so the human
@@ -117,14 +121,25 @@ export function AttentionBadge({
   const { ranked } = rankAttention(rollup);
   const calloutTop = pickCalloutTop(ranked, focusedPaneKey);
 
-  const { critical, warning, stuck, erroring, waiting, blocked, custom, directives, errors, total } = rollup;
-  // Severity cue: red when something is broken (critical/stuck/erroring agent or a
-  // recent error), else amber (warnings / waiting / blocked / pending directives).
-  // Color is supplementary only — the count + alert glyph already convey "needs
-  // attention" (WCAG 1.4.1).
-  const tone = critical.length > 0 || stuck.length > 0 || erroring.length > 0 || errors > 0
-    ? 'text-red-500'
-    : 'text-yellow-500';
+  const { critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors, total } = rollup;
+  // WARDEN-575: when the only items are recently-finished agents (total === 0,
+  // done > 0), the badge reads as a POSITIVE cue (green) — not an alarm. Otherwise
+  // the severity cue is red when something is broken (critical/stuck/erroring agent
+  // or a recent error), else amber (warnings / waiting / blocked / pending
+  // directives). Color is supplementary only — the count + glyph already convey the
+  // state (WCAG 1.4.1).
+  const onlyDone = total === 0 && done.length > 0;
+  const tone = onlyDone
+    ? 'text-emerald-500'
+    : critical.length > 0 || stuck.length > 0 || erroring.length > 0 || errors > 0
+      ? 'text-red-500'
+      : 'text-yellow-500';
+  // The header count + glyph: problems show their total behind the alert glyph; an
+  // all-finished fleet shows the finished count behind a positive check glyph.
+  const headerCount = onlyDone ? done.length : total;
+  const headerLabel = onlyDone
+    ? `${done.length} agent${done.length !== 1 ? 's' : ''} finished`
+    : `${total} item${total !== 1 ? 's' : ''} need attention`;
 
   const openChat = (id: string) => {
     setOpen(false);
@@ -141,17 +156,23 @@ export function AttentionBadge({
         <Button
           variant="ghost"
           size="sm"
-          aria-label={`${total} item${total !== 1 ? 's' : ''} need attention`}
+          aria-label={headerLabel}
           className="h-7 gap-1 px-2 text-muted-foreground hover:text-foreground"
         >
-          <TriangleAlert className={cn('size-3.5', tone)} />
-          <span className={cn('text-xs font-medium tabular-nums', tone)}>{total}</span>
+          {onlyDone
+            ? <CheckCircle2 className={cn('size-3.5', tone)} />
+            : <TriangleAlert className={cn('size-3.5', tone)} />}
+          <span className={cn('text-xs font-medium tabular-nums', tone)}>{headerCount}</span>
         </Button>
       </PopoverTrigger>
       <PopoverContent align="end" className="w-72 p-0">
         <div className="flex items-center gap-2 px-3 py-2 border-b">
-          <TriangleAlert className={cn('size-3.5', tone)} />
-          <span className="text-sm font-semibold">{total} need attention</span>
+          {onlyDone
+            ? <CheckCircle2 className={cn('size-3.5', tone)} />
+            : <TriangleAlert className={cn('size-3.5', tone)} />}
+          <span className="text-sm font-semibold">
+            {onlyDone ? `${done.length} finished` : `${total} need attention`}
+          </span>
         </div>
         {calloutTop && ranked.length >= 2 && (
           <div className="px-1.5 pt-1.5">
@@ -250,6 +271,27 @@ export function AttentionBadge({
                     // detail = the matching line + the pattern name that matched it, so
                     // the human sees both WHAT printed and WHICH of their rules tripped.
                     detail={a.customMatch ? `'${a.customMatch.line}' (${a.customMatch.pattern})` : undefined}
+                    onClick={() => openChat(a.key || a.id)}
+                  />
+                ))}
+              </Section>
+            )}
+            {/*
+              WARDEN-575: the POSITIVE "Finished" section — agents that recently
+              completed a task (working→idle within the recent window). Green tone +
+              a check dot, distinct from the red/amber problem sections above: this is
+              "go review their work," not an alarm. Rendered LAST (after every problem
+              section) so alarms always read first; a non-alarming cue never outranks
+              a real problem. Deep-links into the pane for review.
+            */}
+            {done.length > 0 && (
+              <Section title="Finished" count={done.length} tone="text-emerald-500">
+                {done.map((a) => (
+                  <AgentRow
+                    key={a.key || a.id}
+                    agent={a}
+                    dot="bg-emerald-500"
+                    detail="Finished a task"
                     onClick={() => openChat(a.key || a.id)}
                   />
                 ))}

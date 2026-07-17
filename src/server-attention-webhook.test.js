@@ -112,8 +112,11 @@ describe('tickAttention — gated off (ZERO pane capture, ZERO network)', () => 
     assert.strictEqual(fetchImpl.count(), 0, 'no webhook POST while off');
   });
 
-  it('no-ops when enabled but webhookAlertAttention routing is off', async () => {
-    await put({ webhookEnabled: true, webhookUrl: URL, webhookAlertAttention: false });
+  it('no-ops when BOTH attention + done routing are off (sweep idle: zero capture, zero network)', async () => {
+    // WARDEN-575: the sweep serves two independent routings (attention + done) and
+    // runs while EITHER is on. With both off it is fully idle — zero pane capture,
+    // zero network — matching the original "routing off → no sweep" intent.
+    await put({ webhookEnabled: true, webhookUrl: URL, webhookAlertAttention: false, webhookAlertDone: false });
     let polled = 0;
     const fetchImpl = fetchRec();
     await tickAttention({
@@ -121,8 +124,28 @@ describe('tickAttention — gated off (ZERO pane capture, ZERO network)', () => 
       pollAgentStates: async () => { polled++; return []; },
       fetchImpl,
     });
-    assert.strictEqual(polled, 0, 'attention routing off → sweep does not run');
+    assert.strictEqual(polled, 0, 'both routings off → sweep does not run');
     assert.strictEqual(fetchImpl.count(), 0);
+  });
+
+  it('runs for DONE even when attention routing is off (the two routings are independent)', async () => {
+    // WARDEN-575: a human can opt into "tell me when an agent finishes" with the
+    // problem pings OFF. The sweep runs (done routing on) but dispatches NO
+    // attention-* event — only a done event on a working→idle transition.
+    await put({ webhookEnabled: true, webhookUrl: URL, webhookAlertAttention: false, webhookAlertDone: true });
+    const fetchImpl = fetchRec();
+    const poll = agentSeq([
+      [{ key: 'k1', state: 'active', signal: null, name: 'worker', host: '(local)' }], // prime (active)
+      [{ key: 'k1', state: 'idle', signal: null, name: 'worker', host: '(local)' }],   // active→idle = done
+    ]);
+    await tickAttention({ chats: STUB_CHATS, pollAgentStates: poll, fetchImpl }); await flush();
+    await tickAttention({ chats: STUB_CHATS, pollAgentStates: poll, fetchImpl }); await flush();
+    assert.strictEqual(fetchImpl.count(), 1, 'one done POST on the working→idle transition');
+    const body = JSON.parse(fetchImpl.calls[0].opts.body);
+    assert.strictEqual(body.event, 'done', 'no attention-* event — only the positive done event');
+    assert.strictEqual(body.severity, 'info', 'non-alarming positive severity');
+    assert.strictEqual(body.agent, 'worker');
+    assert.ok(body.reason.includes('Finished a task'), 'positive reason wording');
   });
 });
 
@@ -175,5 +198,57 @@ describe('tickAttention — baseline-prime then fire on a new transition', () =>
     await tickAttention({ chats: STUB_CHATS, pollAgentStates: poll, fetchImpl }); await flush();
     assert.strictEqual(fetchImpl.count(), 1, 'still one — a persistent state does not re-fire');
     assert.strictEqual(JSON.parse(fetchImpl.calls[0].opts.body).event, 'attention-waiting');
+  });
+});
+
+describe('tickAttention — positive done transition (WARDEN-575)', () => {
+  it('priming sweep fires nothing; active→idle after activity dispatches one positive done POST', async () => {
+    await put({ webhookEnabled: true, webhookUrl: URL, webhookAlertAttention: true, webhookAlertDone: true });
+    const fetchImpl = fetchRec();
+    const poll = agentSeq([
+      [{ key: 'k1', state: 'active', signal: 'implementing WARDEN-575', name: 'worker', host: '(local)' }],
+      [{ key: 'k1', state: 'idle', signal: null, name: 'worker', host: '(local)' }],
+    ]);
+    // Sweep 1: prime (active). No done POST (no prior working→idle transition yet).
+    await tickAttention({ chats: STUB_CHATS, pollAgentStates: poll, fetchImpl }); await flush();
+    assert.strictEqual(fetchImpl.count(), 0, 'priming sweep fires nothing');
+
+    // Sweep 2: active→idle = the agent finished → exactly one done POST.
+    await tickAttention({ chats: STUB_CHATS, pollAgentStates: poll, fetchImpl }); await flush();
+    assert.strictEqual(fetchImpl.count(), 1, 'one done POST on the working→idle transition');
+    const body = JSON.parse(fetchImpl.calls[0].opts.body);
+    assert.strictEqual(body.event, 'done');
+    assert.strictEqual(body.severity, 'info');
+    assert.strictEqual(body.agent, 'worker');
+    assert.ok(body.reason.includes('Finished a task'));
+  });
+
+  it('does NOT fire on idle→idle (dormant), a dormant newly-seen idle pane, or recovery', async () => {
+    await put({ webhookEnabled: true, webhookUrl: URL, webhookAlertDone: true });
+    const fetchImpl = fetchRec();
+    const poll = agentSeq([
+      // prime: one idle agent (dormant)
+      [{ key: 'k1', state: 'idle', signal: null, name: 'worker', host: '(local)' }],
+      // idle→idle (still dormant): no fire
+      [{ key: 'k1', state: 'idle', signal: null, name: 'worker', host: '(local)' }],
+      // active (started working): no done fire (this is recovery/start, not finish)
+      [{ key: 'k1', state: 'active', signal: null, name: 'worker', host: '(local)' }],
+    ]);
+    await tickAttention({ chats: STUB_CHATS, pollAgentStates: poll, fetchImpl }); await flush();
+    await tickAttention({ chats: STUB_CHATS, pollAgentStates: poll, fetchImpl }); await flush();
+    await tickAttention({ chats: STUB_CHATS, pollAgentStates: poll, fetchImpl }); await flush();
+    assert.strictEqual(fetchImpl.count(), 0, 'idle→idle and idle→active never fire a done ping');
+  });
+
+  it('respects the webhookAlertDone gate: done routing off → no done POST even on active→idle', async () => {
+    await put({ webhookEnabled: true, webhookUrl: URL, webhookAlertAttention: false, webhookAlertDone: false });
+    const fetchImpl = fetchRec();
+    const poll = agentSeq([
+      [{ key: 'k1', state: 'active', signal: null, name: 'worker', host: '(local)' }],
+      [{ key: 'k1', state: 'idle', signal: null, name: 'worker', host: '(local)' }],
+    ]);
+    await tickAttention({ chats: STUB_CHATS, pollAgentStates: poll, fetchImpl }); await flush();
+    await tickAttention({ chats: STUB_CHATS, pollAgentStates: poll, fetchImpl }); await flush();
+    assert.strictEqual(fetchImpl.count(), 0, 'done routing off → no done POST');
   });
 });

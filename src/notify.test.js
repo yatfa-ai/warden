@@ -5,8 +5,12 @@ import {
   makeWebhookPayload,
   dispatchWebhook,
   diffAttentionTransitions,
+  diffDoneTransitions,
   attentionSeverity,
   attentionReason,
+  doneSeverity,
+  doneReason,
+  doneEndedIdentity,
   _INTERNALS,
 } from './notify.js';
 
@@ -429,5 +433,133 @@ describe('attentionSeverity / attentionReason — formatting helpers', () => {
     assert.strictEqual(attentionReason('erroring', null), 'Erroring');
     assert.strictEqual(attentionReason('stuck', '  '), 'Stuck (repeating output)');
     assert.strictEqual(attentionReason('blocked', 'waiting for the reviewer'), 'Blocked on a dependency: waiting for the reviewer');
+  });
+});
+
+describe('diffDoneTransitions — the pure positive "finished" diff (WARDEN-575)', () => {
+  it('baseline-primed: an empty prevStates (first sweep) fires nothing', () => {
+    const agents = [{ key: 'a', state: 'idle', signal: null, name: 'worker' }];
+    assert.deepStrictEqual(diffDoneTransitions(new Map(), agents), []);
+    assert.deepStrictEqual(diffDoneTransitions(null, agents), []);
+  });
+
+  it('fires on active→idle after sustained recent activity (the primary completion signal)', () => {
+    const prev = new Map([['a', 'active'], ['b', 'idle']]);
+    const agents = [
+      { key: 'a', state: 'idle', signal: null, name: 'worker', host: 'h1' },
+      { key: 'b', state: 'idle', signal: null, name: 'reviewer', host: 'h1' },
+    ];
+    const out = diffDoneTransitions(prev, agents);
+    assert.strictEqual(out.length, 1);
+    assert.strictEqual(out[0].key, 'a');
+    assert.strictEqual(out[0].state, 'done');
+    assert.strictEqual(out[0].name, 'worker');
+    assert.strictEqual(out[0].host, 'h1');
+  });
+
+  it('fires ONLY on active→idle — a crash/stall/wait → idle is NOT a finish', () => {
+    // WARDEN-575 review: narrowed to genuine completion. erroring→idle most likely
+    // means the agent ERRORED OUT and returned to its prompt (a failure, not a
+    // finish); stuck→idle is an ambiguous-to-failure recovery; waiting→idle is
+    // usually human-driven. None of those should read as "Finished a task" — a crash
+    // that reads as success is the worst-case false positive (the human skips
+    // reviewing the failure). Only active→idle (the clean "was working → finished")
+    // fires. (The opt-in per-chat watch subsystem KEEPS the broader working set via
+    // chatWatch.detectWatchCompleted; the fleet done ping is not per-chat opt-in, so
+    // it does not propagate it.)
+    const prev = new Map([
+      ['a', 'active'], ['s', 'stuck'], ['e', 'erroring'], ['w', 'waiting'], ['b', 'blocked'],
+    ]);
+    const agents = [
+      { key: 'a', state: 'idle' }, { key: 's', state: 'idle' }, { key: 'e', state: 'idle' },
+      { key: 'w', state: 'idle' }, { key: 'b', state: 'idle' },
+    ];
+    const out = diffDoneTransitions(prev, agents);
+    assert.deepStrictEqual(out.map((t) => t.key), ['a'], 'only the active→idle flip fires');
+    assert.strictEqual(out[0].state, 'done');
+  });
+
+  it('does NOT fire on idle→idle (dormant) or a newly-seen idle pane (no prior activity)', () => {
+    const prev = new Map([['a', 'idle']]); // dormant last sweep
+    const agents = [
+      { key: 'a', state: 'idle' }, // idle→idle: dormant, no fire
+      { key: 'new', state: 'idle' }, // newly seen, idle: no prior working activity, no fire
+    ];
+    assert.deepStrictEqual(diffDoneTransitions(prev, agents), []);
+  });
+
+  it('does NOT fire on absence (a working agent missing from the current sweep)', () => {
+    // Absence is intentionally NOT treated as "finished" here — the attention sweep
+    // is not carry-forward-protected, so a host blip / pane detach / capture_failed
+    // must never read as a burst of done pings. A container GENUINELY ending is the
+    // lifecycle sweep's SSH-cleaned agent_ended event, bridged separately in server.js.
+    const prev = new Map([['a', 'active'], ['b', 'stuck']]);
+    const agents = [{ key: 'c', state: 'idle' }]; // a + b absent this sweep
+    assert.deepStrictEqual(diffDoneTransitions(prev, agents), []);
+  });
+
+  it('does NOT fire on recovery or no-change into a non-idle state', () => {
+    const prev = new Map([['a', 'erroring'], ['b', 'active']]);
+    const agents = [
+      { key: 'a', state: 'active' }, // erroring→active (recovery, still working): no done fire
+      { key: 'b', state: 'waiting' }, // active→waiting (still working): no done fire
+    ];
+    assert.deepStrictEqual(diffDoneTransitions(prev, agents), []);
+  });
+
+  it('re-arms after going active again: working→idle→active→idle fires on each finish', () => {
+    let prev = new Map();
+    // sweep 1: prime (active)
+    const s1 = [{ key: 'a', state: 'active' }];
+    assert.deepStrictEqual(diffDoneTransitions(prev, s1), []);
+    prev = new Map(s1.map((a) => [a.key, a.state]));
+    // sweep 2: active→idle → fires
+    const s2 = [{ key: 'a', state: 'idle' }];
+    assert.strictEqual(diffDoneTransitions(prev, s2).length, 1);
+    prev = new Map(s2.map((a) => [a.key, a.state]));
+    // sweep 3: idle→idle → no fire (dormant)
+    assert.deepStrictEqual(diffDoneTransitions(prev, s2), []);
+    prev = new Map(s2.map((a) => [a.key, a.state]));
+    // sweep 4: idle→active (started again) → no done fire
+    const s4 = [{ key: 'a', state: 'active' }];
+    assert.deepStrictEqual(diffDoneTransitions(prev, s4), []);
+    prev = new Map(s4.map((a) => [a.key, a.state]));
+    // sweep 5: active→idle → fires again (re-armed)
+    assert.strictEqual(diffDoneTransitions(prev, s2).length, 1);
+  });
+});
+
+describe('doneSeverity / doneReason / doneEndedIdentity — positive formatting (WARDEN-575)', () => {
+  it('doneSeverity is the non-alarming info tone (never critical/warning)', () => {
+    assert.strictEqual(doneSeverity(), 'info');
+  });
+
+  it('doneReason uses the shared "Finished a task" wording, appending the signal when present', () => {
+    assert.strictEqual(doneReason(null), 'Finished a task');
+    assert.strictEqual(doneReason('  '), 'Finished a task');
+    assert.strictEqual(doneReason('implemented WARDEN-575'), 'Finished a task: implemented WARDEN-575');
+  });
+
+  it('doneEndedIdentity derives an agent + reason from a lifecycle agent_ended event', () => {
+    const event = { type: 'agent_ended', id: '(local):worker', host: '(local)', container: 'payments-worker', role: 'worker', project: 'payments' };
+    const { agent, reason } = doneEndedIdentity(event);
+    assert.strictEqual(agent, 'payments-worker', 'prefers the container (most pane-specific handle)');
+    assert.ok(reason.includes('ended'), 'conveys the container-genuinely-ended signal');
+
+    // No container → falls back to the unique id (host:session), NOT the generic
+    // role/project which identify nothing on a phone ping.
+    assert.strictEqual(doneEndedIdentity({ id: '(local):s1', project: 'billing', role: 'worker' }).agent, '(local):s1');
+    assert.strictEqual(doneEndedIdentity({ id: 'only-id' }).agent, 'only-id');
+  });
+
+  it('DONE_WORKING_STATES is exactly the narrowed genuine-completion set (active only)', () => {
+    // WARDEN-575 review: narrowed from the broader working set the first pass mirrored
+    // from chatWatch.WORKING_STATES. Only `active` — the genuine "was working →
+    // finished" prior — fires a done ping; erroring/stuck/waiting/blocked → idle do
+    // NOT (see the "fires ONLY on active→idle" case above for the rationale).
+    assert.deepStrictEqual(
+      [..._INTERNALS.DONE_WORKING_STATES].sort(),
+      ['active'],
+    );
   });
 });

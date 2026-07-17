@@ -394,7 +394,9 @@ export interface UiState {
   // pane states (stuck/erroring/waiting/blocked) raise attention. Each defaults to
   // ON so every state surfaces; a human can silence a noisy "waiting" without losing
   // "erroring". Pure client-side pref; never sent to the backend / /api/config.
-  attentionStates?: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean };
+  // WARDEN-575: `done` gates the POSITIVE "finished" bucket + done desktop ping
+  // (same default-ON discipline); it is never sent to the backend either.
+  attentionStates?: { stuck?: boolean; erroring?: boolean; waiting?: boolean; blocked?: boolean; done?: boolean };
   // WARDEN-364 — per-severity routing for the desktop-alert channel, layered on
   // top of the `attentionDesktopAlerts` master switch. The master gates the whole
   // channel; these route WHICH of the four attention buckets may escalate to an
@@ -934,7 +936,7 @@ const DEFAULT_UI: UiState = {
   sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true,
   sidebarWidth: 220, observerWidth: 380, terminalFontSize: 14,
   attentionDesktopAlerts: false,
-  attentionStates: { stuck: true, erroring: true, waiting: true, blocked: true },
+  attentionStates: { stuck: true, erroring: true, waiting: true, blocked: true, done: true },
   alertCritical: true, alertWarning: true, alertDirective: true, alertError: true,
   mutedAlertKeys: [],
   // WARDEN-551: no snoozes by default (empty = today's exact behavior).
@@ -1009,6 +1011,9 @@ export function loadUi(): UiState {
           erroring: v.attentionStates?.erroring !== false,
           waiting: v.attentionStates?.waiting !== false,
           blocked: v.attentionStates?.blocked !== false,
+          // WARDEN-575: done defaults ON (only an explicit false silences it), so a
+          // partial/legacy payload never drops the finished signal silently.
+          done: v.attentionStates?.done !== false,
         },
         // WARDEN-364 — severity routing defaults ON (only an explicit `false`
         // opts a bucket out), so an upgrade or a partial payload preserves the

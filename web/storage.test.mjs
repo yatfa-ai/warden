@@ -1852,7 +1852,7 @@ test('every pref field of resetUiPrefsPreservingWorkspace(live) equals DEFAULT_U
   assert.deepEqual(r.defaultShellByHost, {});
   // Prefs added by tickets that landed after WARDEN-346 branched reset too.
   assert.equal(r.timestampFormat, 'relative');
-  assert.deepEqual(r.attentionStates, { stuck: true, erroring: true, waiting: true, blocked: true });
+  assert.deepEqual(r.attentionStates, { stuck: true, erroring: true, waiting: true, blocked: true, done: true });
   assert.equal(r.alertCritical, true);
   assert.equal(r.alertWarning, true);
   assert.equal(r.alertDirective, true);
@@ -1923,7 +1923,7 @@ test('round-trip: saveUi(resetUiPrefsPreservingWorkspace(live)) then loadUi() yi
   assert.deepEqual(after.defaultShellByHost, {});
   // Prefs added after WARDEN-346 round-trip to their defaults through loadUi too.
   assert.equal(after.timestampFormat, 'relative');
-  assert.deepEqual(after.attentionStates, { stuck: true, erroring: true, waiting: true, blocked: true });
+  assert.deepEqual(after.attentionStates, { stuck: true, erroring: true, waiting: true, blocked: true, done: true });
   assert.deepEqual(after.mutedAlertKeys, []);
   assert.deepEqual(after.watchedChats, []);
   assert.deepEqual(after.snippets, STARTER_SNIPPETS);

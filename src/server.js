@@ -692,6 +692,10 @@ app.get('/api/config', (_req, res) => res.json({
   webhookSecretTail: cfg.webhookSecret ? String(cfg.webhookSecret).slice(-4) : null,
   webhookAlertAttention: cfg.webhookAlertAttention !== false,
   webhookAlertBudget: cfg.webhookAlertBudget !== false,
+  // WARDEN-575: the positive "agent finished" routing. Same `!== false` default-true
+  // resolution as the problem-side toggles above so the missing positive half is on
+  // by default once the channel is enabled.
+  webhookAlertDone: cfg.webhookAlertDone !== false,
   confirmDestructiveActions: cfg.confirmDestructiveActions,
   notifyChatOps: cfg.notifyChatOps,
   notifyErrors: cfg.notifyErrors,
@@ -723,7 +727,7 @@ app.put('/api/config', (req, res) => {
           companionTransportEnabled,
           telemetryEndpoint, telemetryAuthToken,
           webhookUrl, webhookEnabled, webhookSecret,
-          webhookAlertAttention, webhookAlertBudget,
+          webhookAlertAttention, webhookAlertBudget, webhookAlertDone,
           confirmDestructiveActions,
           notifyChatOps, notifyErrors, notifySuccess, notifyObserver,
           showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges,
@@ -831,6 +835,9 @@ app.put('/api/config', (req, res) => {
   if (typeof webhookSecret === 'string' && webhookSecret.length > 0) cfg.webhookSecret = webhookSecret;
   if (typeof webhookAlertAttention === 'boolean') cfg.webhookAlertAttention = webhookAlertAttention;
   if (typeof webhookAlertBudget === 'boolean') cfg.webhookAlertBudget = webhookAlertBudget;
+  // WARDEN-575: the positive "agent finished" routing — same boolean type-guard as
+  // the problem-side toggles so a malformed body can't corrupt the pref.
+  if (typeof webhookAlertDone === 'boolean') cfg.webhookAlertDone = webhookAlertDone;
   // Safety preference: confirm before destructive actions (force-kill, kill chat)
   if (typeof confirmDestructiveActions === 'boolean') cfg.confirmDestructiveActions = confirmDestructiveActions;
   // Notification preferences (toast categories). Only accept booleans so a
@@ -4200,13 +4207,59 @@ let lifecycleRunning = false;
 
 const LIFECYCLE_INTERVAL_MS = 60_000;
 
-async function tickLifecycle() {
+async function tickLifecycle(deps = {}) {
   if (lifecycleRunning) return;
   lifecycleRunning = true;
-  return tickLifecycleBody().finally(() => { lifecycleRunning = false; });
+  return tickLifecycleBody(deps).finally(() => { lifecycleRunning = false; });
 }
 
-async function tickLifecycleBody() {
+// WARDEN-575: append a lifecycle event to the activity log AND, when it is a genuine
+// agent_ended (container gone, host reachable — already SSH-noise-cleaned by
+// buildSnapshot's carry-forward), bridge it to the POSITIVE done webhook so a human
+// away from the machine learns an agent FINISHED, not only that it broke. The
+// done-routing gate (webhookAlertDone) is checked here so the lifecycle sweep adds
+// ZERO webhook cost when the positive routing is off; the channel gate inside
+// dispatchWebhook is the second line of defense. Fire-and-forget + .catch so a slow
+// receiver never blocks the lifecycle sweep. Sibling of tickAttention's done
+// dispatch — same event id ('done') and non-alarming 'info' severity, so the
+// active→idle ("Finished a task", doneReason) and container-ended ("Agent finished
+// (container ended)", doneEndedIdentity) pings share a positive tone on the phone.
+//
+// Intentional TWO-signal design (WARDEN-575 review): the active→idle ping (tickAttention)
+// means "the agent stopped working — finished a task"; THIS agent_ended ping means "the
+// container was genuinely recycled." They fire at DIFFERENT times with DIFFERENT wording
+// and convey distinct events. The common yatfa sequence — agent finishes (active→idle),
+// then its container is torn down (agent_ended) — can therefore produce two positive
+// pings for one task. That is intentional, not a bug to dedup away: the two pings are
+// separable in time (active→idle when work stops; agent_ended later, on recycle) and the
+// container-ended ping is a distinct, SSH-cleaned confirmation worth surfacing on its
+// own. Suppressing one would lose that signal; the per-event wording lets the human tell
+// them apart. (The two sweeps also key agents differently — t.name||t.key here vs
+// container||id — so a cross-sweep dedup would add shared state + key normalization for
+// a marginal noise win; documented-intentional is the lower-risk call.)
+//
+// `deps` (test seam, defaults to {} in production) threads fetchImpl/sleepImpl to
+// the webhook transport — mirroring tickBudget/tickAttention so the bridge is
+// testable with ZERO real network. Production callers (the timer, startLifecyclePoll)
+// pass nothing → dispatchWebhook falls through to globalThis.fetch.
+function appendLifecycleEvent(event, deps = {}) {
+  try { appendEvent(event); } catch { /* ignore single-event write failures */ }
+  if (event && event.type === 'agent_ended' && cfg.webhookAlertDone) {
+    const { agent, reason } = notify.doneEndedIdentity(event);
+    notify.dispatchWebhook({
+      event: 'done',
+      severity: notify.doneSeverity(),
+      agent,
+      reason,
+      cfg,
+      now: Date.now(),
+      fetchImpl: deps.fetchImpl,
+      sleepImpl: deps.sleepImpl,
+    }).catch(() => {});
+  }
+}
+
+async function tickLifecycleBody(deps = {}) {
   // No remote hosts and no catalog → discoverAll has nothing to observe. But
   // FIRST drain any pending transitions in prevSnapshot against an empty fleet.
   // The last agent ending (or the user removing their last configured host) can
@@ -4219,7 +4272,7 @@ async function tickLifecycleBody() {
   if (!cfg.hosts.length && !loadCatalog().length) {
     if (prevSnapshot.size > 0) {
       for (const event of diffLifecycles(prevSnapshot, new Map())) {
-        try { appendEvent(event); } catch { /* ignore single-event write failures */ }
+        appendLifecycleEvent(event, deps);
       }
       prevSnapshot = new Map();
     }
@@ -4247,7 +4300,7 @@ async function tickLifecycleBody() {
   }
 
   for (const event of diffLifecycles(prevSnapshot, next)) {
-    try { appendEvent(event); } catch { /* ignore single-event write failures */ }
+    appendLifecycleEvent(event, deps);
   }
   prevSnapshot = next;
 }
@@ -4417,7 +4470,18 @@ let attentionRunning = false;
 // to the webhook transport — so a test drives the full gate → diff → dispatch
 // path with ZERO real pane capture and ZERO real network.
 async function tickAttention(deps = {}) {
-  if (!cfg.webhookEnabled || !cfg.webhookUrl || !cfg.webhookAlertAttention) {
+  // WARDEN-575: the sweep now serves TWO independent routings — the problem-side
+  // attention diff (webhookAlertAttention) AND the positive done diff
+  // (webhookAlertDone). It runs while the channel is on AND at least one routing is
+  // enabled, so a human can opt into "tell me when an agent finishes" even with the
+  // problem pings off (and vice versa). Each routing is gated separately inside, so
+  // neither dispatches when its own flag is off. The channel gate (webhookEnabled +
+  // webhookUrl) is unchanged: off / unconfigured → no sweep, zero capture cost.
+  if (!cfg.webhookEnabled || !cfg.webhookUrl) {
+    if (attentionTimer) { clearInterval(attentionTimer); attentionTimer = null; }
+    return;
+  }
+  if (!cfg.webhookAlertAttention && !cfg.webhookAlertDone) {
     if (attentionTimer) { clearInterval(attentionTimer); attentionTimer = null; }
     return;
   }
@@ -4465,7 +4529,16 @@ async function tickAttention(deps = {}) {
       });
     });
     const agents = await classify(chats);
-    const transitions = notify.diffAttentionTransitions(prevAttentionStates, agents);
+    // WARDEN-575: the done diff shares the SAME classified `agents` + the SAME
+    // prevAttentionStates baseline as the problem diff — zero extra capture cost
+    // (both are pure diffs over one classify pass). Computed before the baseline
+    // advances so it sees the working→idle transition against the prior sweep.
+    const doneTransitions = cfg.webhookAlertDone
+      ? notify.diffDoneTransitions(prevAttentionStates, agents)
+      : [];
+    const transitions = cfg.webhookAlertAttention
+      ? notify.diffAttentionTransitions(prevAttentionStates, agents)
+      : [];
     for (const t of transitions) {
       // Fire-and-forget: dispatchWebhook swallows terminal failure; the .catch
       // guarantees a slow/unreachable destination never escapes the sweep.
@@ -4474,6 +4547,22 @@ async function tickAttention(deps = {}) {
         severity: notify.attentionSeverity(t.state),
         agent: t.name || t.key,
         reason: notify.attentionReason(t.state, t.signal),
+        cfg,
+        now: Date.now(),
+        fetchImpl: deps.fetchImpl,
+        sleepImpl: deps.sleepImpl,
+      }).catch(() => {});
+    }
+    // WARDEN-575: dispatch the POSITIVE "finished" transitions with a non-alarming
+    // 'info' severity + a positive reason (distinct from the red/amber problem
+    // tones). Same fire-and-forget contract; the webhookAlertDone gate above already
+    // held the diff to zero when the routing is off.
+    for (const t of doneTransitions) {
+      notify.dispatchWebhook({
+        event: 'done',
+        severity: notify.doneSeverity(),
+        agent: t.name || t.key,
+        reason: notify.doneReason(t.signal),
         cfg,
         now: Date.now(),
         fetchImpl: deps.fetchImpl,
@@ -4506,7 +4595,10 @@ function startAttentionPoll() {
 // → stop + reset the baseline so the next enable gets a clean prime (no stale
 // state from a previous run). Mirrors restartBudgetPoll's shape.
 function restartAttentionPoll() {
-  if (cfg.webhookEnabled && cfg.webhookUrl && cfg.webhookAlertAttention) {
+  // WARDEN-575: run while the channel is on AND at least one routing (attention OR
+  // done) is enabled — mirrors tickAttention's gate so a Settings flip of either
+  // routing takes effect on the next sweep.
+  if (cfg.webhookEnabled && cfg.webhookUrl && (cfg.webhookAlertAttention || cfg.webhookAlertDone)) {
     if (!attentionTimer) attentionTimer = setInterval(tickAttention, ATTENTION_SWEEP_MS);
     prevAttentionStates = new Map(); // clean baseline prime on (re)enable
     tickAttention();

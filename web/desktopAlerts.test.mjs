@@ -114,6 +114,27 @@ test('directives landing raise the total → fires', () => {
   assert.equal(shouldFireAlert(roll(), roll({ directives: 1 })), true);
 });
 
+console.log('\napplySeverityPrefs: the positive "finished" (done) bucket passes through unchanged (WARDEN-575)');
+test('a rollup with done agents carries them through the routable view', () => {
+  const doneRow = { id: 'w1', key: 'w1', name: 'w1', state: 'idle' };
+  const r = applySeverityPrefs({ ...roll({ critical: [agent('c1')] }), done: [doneRow] }, ATTENTION_SEVERITY_DEFAULTS);
+  assert.equal(r.done.length, 1, 'done agents survive the severity filter');
+  assert.equal(r.done[0].key, 'w1');
+});
+test('done agents do NOT raise the routable total (a finish is not a problem increase)', () => {
+  // A finish alone must never trip the increase-only shouldFireAlert gate: the done
+  // bucket is excluded from the routable total, identical to the raw rollup.
+  const doneRow = { id: 'w1', key: 'w1', name: 'w1', state: 'idle' };
+  const prev = applySeverityPrefs({ ...roll(), done: [] }, ATTENTION_SEVERITY_DEFAULTS);
+  const next = applySeverityPrefs({ ...roll(), done: [doneRow] }, ATTENTION_SEVERITY_DEFAULTS);
+  assert.equal(next.total, 0, 'done does not inflate the routable total');
+  assert.equal(shouldFireAlert(prev, next), false, 'a finish never fires the problem alert');
+});
+test('a rollup without done degrades to an empty done bucket (defensive)', () => {
+  const r = applySeverityPrefs(roll({ critical: [agent('c1')] }), ATTENTION_SEVERITY_DEFAULTS);
+  assert.deepEqual(r.done, []);
+});
+
 console.log('\nformatAlertMessage: title carries the Warden prefix + accurate count');
 test('single item title is singular', () => {
   assert.equal(formatAlertMessage(roll({ critical: [agent('c1')] })).title, 'Warden: 1 item needs attention');
