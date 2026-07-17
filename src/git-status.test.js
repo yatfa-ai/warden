@@ -245,7 +245,7 @@ before(async () => {
 
   // Import server.js ONCE — after HOME/config/catalog/repos are in place.
   const server = await import('./server.js');
-  buildInProgressScript = server.buildInProgressScript;
+  ({ buildInProgressScript } = await import('./git.js'));
   parseInProgressDetail = server.parseInProgressDetail;
   httpServer = server.app.listen(0, '127.0.0.1');
   await new Promise((resolve, reject) => {

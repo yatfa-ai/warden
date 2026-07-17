@@ -19,7 +19,8 @@ const SERVER = path.join(__dirname, 'server.js');
 
 // Redirect HOME so importing server.js touches only a temp dir.
 process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gd-home-'));
-const { getLocalGitDiff, buildGitDiffScript, isPathWithinCwd, capDiff } = await import('./server.js');
+const { getLocalGitDiff } = await import('./server.js');
+const { buildGitDiffScript, isPathWithinCwd, capDiff } = await import('./git.js');
 
 // --- Syntax guard (same regression shape read-file.test.js pins) -------------
 describe('server.js compiles', () => {

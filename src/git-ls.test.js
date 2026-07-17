@@ -22,7 +22,8 @@ const SERVER = path.join(__dirname, 'server.js');
 // activity logs at module load) touches only a temp dir, never the real
 // ~/.yatfa-warden. Top-level await lets us import AFTER setting HOME.
 process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-ls-home-'));
-const { isSafeRelativePath, parseGitLsEntries, runGit } = await import('./server.js');
+const { parseGitLsEntries, runGit } = await import('./server.js');
+const { isSafeRelativePath } = await import('./git.js');
 const LOCAL = '(local)';
 
 // --- Syntax guard: server.js MUST compile ---------------------------------
