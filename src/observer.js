@@ -616,8 +616,16 @@ export async function readChats(ids, openOnly, openTabs, lastChats, capturePanes
 }
 
 export class Observer {
-  constructor(cfg, { sid, gate, onTool, onToolResult, onText, chatContext } = {}) {
+  constructor(cfg, { sid, gate, onTool, onToolResult, onText, chatContext, io } = {}) {
     this.cfg = cfg;
+    // Injectable I/O deps for the dispatch layer (_execTool + _refreshChats +
+    // _resolve). Production callers pass no `io`, so this defaults to the real
+    // module-level imports and behavior is byte-for-byte identical. Tests inject
+    // fakes to exercise dispatch routing end-to-end — Node 20 lacks
+    // mock.module (WARDEN-130), so the module bindings themselves can't be
+    // mocked, which is exactly why this DI seam exists. Mirrors the convention
+    // ssh.js/tmux.js/hostStatus.js and the readChats pure core already follow.
+    this._io = io || { discoverAll, capturePanes, resolveChat, readPane, sendPane };
     this.sid = sid || null;
     // gate: async (chat, directive) => { approved: boolean, edited?: string }
     this.gate = gate;
@@ -712,13 +720,13 @@ export class Observer {
   }
 
   async _refreshChats() {
-    const { chats } = await discoverAll(this.cfg.hosts, this.cfg);
+    const { chats } = await this._io.discoverAll(this.cfg.hosts, this.cfg);
     this.lastChats = chats;
     return chats;
   }
 
   async _resolve(id) {
-    const result = resolveChat(id, this.lastChats, null);
+    const result = this._io.resolveChat(id, this.lastChats, null);
 
     // If we got a definitive result, return it (converting to chat or error object)
     if (result.chat) return result.chat;
@@ -726,7 +734,7 @@ export class Observer {
 
     // No match in cache - refresh and try again
     const chats = await this._refreshChats();
-    const result2 = resolveChat(id, chats, null);
+    const result2 = this._io.resolveChat(id, chats, null);
 
     if (result2.chat) return result2.chat;
     if (result2.error) return { error: result2.error };
@@ -754,7 +762,7 @@ export class Observer {
       const chat = await this._resolve(input.id);
       if (chat.error) return chat;
       try {
-        const pane = await readPane(chat, this.cfg, input.lines || 120);
+        const pane = await this._io.readPane(chat, this.cfg, input.lines || 120);
         // WARDEN-166: cache the last-read pane state + content signature as a
         // side-effect of the read. Phase is left to the opt-in change-awareness
         // tools (summarize/read_chats with changed_only) so a plain read_chat
@@ -774,7 +782,7 @@ export class Observer {
       // narrowed to changed panes. A plain read_chats stays phase-free (cheap).
       const rtp = input.changed_only ? readTranscriptPhase : undefined;
       const res = await readChats(input.ids, !!input.open_only, this.effectiveOpenTabs(),
-        this.lastChats, capturePanes, this.cfg, input, rtp, this.lastReadState);
+        this.lastChats, this._io.capturePanes, this.cfg, input, rtp, this.lastReadState);
       this._mergeReadState(res.observedState);
       const out = { ...res };
       delete out.observedState;
@@ -787,7 +795,7 @@ export class Observer {
       if (!decision.approved) return { sent: false, reason: 'user declined the directive' };
       const text = decision.edited != null ? decision.edited : input.directive;
       try {
-        await sendPane(chat, this.cfg, text);
+        await this._io.sendPane(chat, this.cfg, text);
         logDirective(chat, text);
         // Record the *sent* directive in the activity log. This is the single
         // point that proves the directive actually reached an agent, so it

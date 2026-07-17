@@ -323,12 +323,13 @@ describe('readChats (batched concurrent read)', () => {
 });
 
 describe('Observer _execTool read_chats dispatch', () => {
-  // The success/content behavior is covered by the readChats pure-function suite
-  // above (mocked capturePanes). These dispatch tests cover only paths that run
-  // BEFORE capturePanes is reached — _execTool wires the real module-level
-  // capturePanes, which cannot be mocked on Node 20 (WARDEN-130), so a success
-  // assertion here would hit live SSH. The guard + wiring paths below exercise the
-  // dispatch without that constraint.
+  // The guard/wiring paths below stop BEFORE capturePanes is reached (no tabs /
+  // do not match / unknown id / usage errors). The success/content routing —
+  // _execTool → readChats → capturePanes — is covered by the end-to-end suite
+  // further down, which injects a fake capturePanes via the constructor's `io`
+  // deps bag (WARDEN-616) so a success assertion no longer risks live SSH.
+  // (Node 20 lacks mock.module per WARDEN-130, which is why the DI seam is the
+  // fix rather than a module mock.)
 
   it('open_only with empty openTabs returns the "no tabs" error', async () => {
     const obs = new Observer(cfg, {});
@@ -382,6 +383,131 @@ describe('Observer _execTool read_chats dispatch', () => {
     const result = await obs._execTool('read_chats', { ids: [] });
 
     assert.strictEqual(result.error, 'provide an array of ids or set open_only: true.');
+  });
+});
+
+// WARDEN-616: the constructor accepts an `io` deps bag so _execTool and its
+// helpers (_refreshChats, _resolve) resolve their I/O off `this._io` instead of
+// the bare module-level imports. Production callers pass no `io` → behavior is
+// byte-for-byte identical. These tests inject fakes to exercise FULL dispatch
+// routing end-to-end — the gap the guard/wiring suite above could not close (a
+// mis-routed call, wrong arg, or swallowed error would have passed every
+// dispatch test — the WARDEN-129 "round-trip illusion"). Node 20 lacks
+// mock.module (WARDEN-130), so the DI seam is the only way to reach this.
+describe('Observer _execTool dispatch (end-to-end via injected I/O)', () => {
+  // io bag whose deps throw if reached: each test overrides only the dep(s) its
+  // dispatch path should actually touch, so an accidental detour (the kind of
+  // mis-routing WARDEN-129 warns about) fails loudly instead of silently no-op'ing.
+  function makeIo(overrides = {}) {
+    const boom = () => { throw new Error('unexpected io dep reached for this dispatch path'); };
+    return {
+      discoverAll: boom,
+      capturePanes: boom,
+      resolveChat: boom,
+      readPane: boom,
+      sendPane: boom,
+      ...overrides,
+    };
+  }
+
+  it('read_chats success: routes a known id through readChats with the injected capturePanes', async () => {
+    const capturePanes = mock.fn(async (chats) => ({ [chats[0].key]: 'worker pane content' }));
+    const obs = new Observer(cfg, { io: makeIo({ capturePanes }) });
+    obs.openTabs = [];
+    obs.lastChats = [yatfaChat()];
+
+    const result = await obs._execTool('read_chats', { ids: ['myproject-worker'] });
+
+    // Reaching the fake capturePanes (not the live module-level import) proves
+    // _execTool wired this._io.capturePanes into readChats end-to-end.
+    assert.strictEqual(capturePanes.mock.callCount(), 1, 'dispatch reached the injected capturePanes, not the live import');
+    assert.strictEqual(result.count, 1);
+    assert.strictEqual(result.chats[0].id, 'myproject-worker');
+    assert.strictEqual(result.chats[0].pane, 'worker pane content',
+      'pane content flows all the way back through readChats');
+  });
+
+  it('read_chats surfaces a capturePanes failure as { error } (WARDEN-89: never silent)', async () => {
+    const capturePanes = mock.fn(async () => { throw new Error('ssh connection refused'); });
+    const obs = new Observer(cfg, { io: makeIo({ capturePanes }) });
+    obs.openTabs = [];
+    obs.lastChats = [yatfaChat()];
+
+    const result = await obs._execTool('read_chats', { ids: ['myproject-worker'] });
+
+    assert.strictEqual(result.error, 'ssh connection refused',
+      'a throwing capturePanes is surfaced as { error }, not swallowed or allowed to crash the dispatch');
+  });
+
+  it('read_chat success: resolves the chat and reads via the injected readPane', async () => {
+    const chat = yatfaChat();
+    const resolveChat = mock.fn(() => ({ chat }));
+    const readPane = mock.fn(async () => 'captured pane text');
+    const obs = new Observer(cfg, { io: makeIo({ resolveChat, readPane }) });
+    obs.lastChats = [chat];
+
+    const result = await obs._execTool('read_chat', { id: 'myproject-worker' });
+
+    assert.strictEqual(resolveChat.mock.callCount(), 1, '_resolve routed through this._io.resolveChat, not the live import');
+    assert.strictEqual(readPane.mock.callCount(), 1, 'dispatch reached the injected readPane, not the live import');
+    assert.strictEqual(readPane.mock.calls[0].arguments[0], chat, 'readPane received the resolved chat');
+    assert.strictEqual(result.id, 'myproject-worker');
+    assert.strictEqual(result.host, 'host1');
+    assert.strictEqual(result.pane, 'captured pane text');
+  });
+
+  it('read_chat surfaces a readPane failure as { error } (WARDEN-89: never silent)', async () => {
+    const chat = yatfaChat();
+    const resolveChat = mock.fn(() => ({ chat }));
+    const readPane = mock.fn(async () => { throw new Error('tmux capture failed'); });
+    const obs = new Observer(cfg, { io: makeIo({ resolveChat, readPane }) });
+    obs.lastChats = [chat];
+
+    const result = await obs._execTool('read_chat', { id: 'myproject-worker' });
+
+    assert.strictEqual(result.error, 'tmux capture failed',
+      'a throwing readPane is surfaced as { error }, not allowed to crash');
+  });
+
+  it('send_directive success: gate approves and the directive is sent via the injected sendPane', async () => {
+    const chat = yatfaChat();
+    const resolveChat = mock.fn(() => ({ chat }));
+    const sendPane = mock.fn(async () => undefined);
+    const gate = mock.fn(async () => ({ approved: true }));
+    // The success path also records the send in two ~/.yatfa-warden logs
+    // (logDirective + appendEvent), whose paths are pinned to the real HOME at
+    // module load. Snapshot + restore them so the test is hermetic.
+    const activityLog = path.join(os.homedir(), '.yatfa-warden', 'activity.jsonl');
+    const directivesLog = path.join(os.homedir(), '.yatfa-warden', 'directives.md');
+    const snap = (p) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null);
+    const restore = (p, prev) => {
+      try {
+        if (prev === null) { if (fs.existsSync(p)) fs.unlinkSync(p); }
+        else fs.writeFileSync(p, prev, 'utf8');
+      } catch { /* best-effort cleanup */ }
+    };
+    const actPrev = snap(activityLog);
+    const dirPrev = snap(directivesLog);
+    try {
+      const obs = new Observer(cfg, { io: makeIo({ resolveChat, sendPane }), gate });
+      obs.lastChats = [chat];
+
+      const result = await obs._execTool('send_directive', { id: 'myproject-worker', directive: 'ship it' });
+
+      assert.strictEqual(resolveChat.mock.callCount(), 1, '_resolve routed through this._io.resolveChat, not the live import');
+      assert.strictEqual(gate.mock.callCount(), 1, 'the gate was consulted');
+      assert.strictEqual(gate.mock.calls[0].arguments[0], chat, 'gate received the resolved chat');
+      assert.strictEqual(gate.mock.calls[0].arguments[1], 'ship it', 'gate received the directive text');
+      assert.strictEqual(sendPane.mock.callCount(), 1, 'dispatch reached the injected sendPane, not the live import');
+      assert.strictEqual(sendPane.mock.calls[0].arguments[0], chat, 'sendPane received the resolved chat');
+      assert.strictEqual(sendPane.mock.calls[0].arguments[2], 'ship it', 'sendPane received the approved directive text');
+      assert.strictEqual(result.sent, true);
+      assert.strictEqual(result.to, 'myproject-worker@host1');
+      assert.strictEqual(result.chars, 'ship it'.length);
+    } finally {
+      restore(activityLog, actPrev);
+      restore(directivesLog, dirPrev);
+    }
   });
 });
 
