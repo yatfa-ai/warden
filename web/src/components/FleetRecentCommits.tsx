@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { RotateCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -75,10 +75,30 @@ export function FleetRecentCommits({ agents }: Props) {
   const [open, setOpen] = useState(true);
 
   // The searchable fleet: active project agents, keyed & deduped by key, in
-  // catalog order. Memoized on `agents` so a stable array reference feeds the fetch
-  // effect's deps (avoids refiring on every re-render that didn't change membership).
+  // catalog order. Memoized on `agents` — a CHEAP filter, fine to recompute. NOTE:
+  // this array is NOT reference-stable across unchanged membership: `agents`
+  // (healthData.agents) is a fresh array every ~10s (HealthDashboard polls
+  // /api/health on a 10s setInterval and setHealthData()s a new res.json() object
+  // each tick), so useMemo([agents]) re-allocates every 10s even when the member
+  // SET is identical. The fan-out effect below must NOT key on this churned
+  // reference (that would refire N /api/git-log fetches every 10s — the silent
+  // auto-poll decision #1 + success criterion #3 forbid); it keys on `eligibleKey`.
   const eligible = useMemo(() => fleetCommitSearchEligible(agents), [agents]);
   const fleetN = eligible.length;
+  // A primitive SIGNATURE of the eligible fleet (the joined agent keys). A string is
+  // value-compared in the effect's deps, so it is identical across the 10s healthData
+  // array churn and changes ONLY when the actual member SET changes (a key
+  // added/removed/replaced). `fleetCommitSearchEligible` already dedupes by key, so
+  // the key list IS the fleet identity — this is what the fetch effect depends on,
+  // NOT the churned array reference.
+  const eligibleKey = eligible.map((a) => a.key).join('\n');
+  // Hand the effect the FRESHEST eligible fleet without putting that churned array
+  // reference in the deps: the effect dereferences this ref at fire time. (Reading
+  // `eligible` straight from the effect closure would also work — same membership
+  // between signature-unchanged renders — but the ref is unambiguously current and
+  // survives any future re-render mid-fan-out.)
+  const eligibleRef = useRef(eligible);
+  eligibleRef.current = eligible;
 
   const [result, setResult] = useState<FleetRecentCommitsResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -99,15 +119,19 @@ export function FleetRecentCommits({ agents }: Props) {
     return m;
   }, [agents]);
 
-  // Fetch-on-mount + manual refresh. NO 60s auto-poll (decision #1): this view's
-  // N-fetch fan-out is paid on demand, not on a steady cadence. `refreshTick` is the
-  // only way to force a refetch beyond mount — a stable identity dep so the effect
-  // doesn't refire on every render. `eligible` is memoized (stable across unchanged
-  // membership), so the effect fires on mount, on a membership change, or on refresh.
+  // Fetch-on-mount + manual refresh. NO auto-poll (decision #1 + success criterion
+  // #3): this view's N-fetch fan-out is paid on demand, never on a steady cadence.
+  // The effect keys on `eligibleKey` (a primitive signature of fleet membership) +
+  // `refreshTick` (the manual ↻ button) — NOT on the `eligible` array, whose
+  // reference churns every ~10s with healthData. So it fires ONLY on mount, on a
+  // real membership change (a key added/removed), or on a manual refresh — never on
+  // the 10s health tick. The freshest eligible fleet is read from `eligibleRef` at
+  // fire time so the fan-out always iterates the current fleet.
   useEffect(() => {
+    const cur = eligibleRef.current;
     // No searchable agents → resolve immediately to an empty result rather than
     // spinning the loading state forever (e.g. a fleet with no active project chats).
-    if (eligible.length === 0) {
+    if (cur.length === 0) {
       setResult({ rows: [], errorCount: 0 });
       setLoading(false);
       return;
@@ -122,7 +146,7 @@ export function FleetRecentCommits({ agents }: Props) {
       // history). Recent-only (decision #2): ONE fetch per agent (N, not 2N — no
       // outgoing ↑unpushed join).
       const settled = await Promise.allSettled(
-        eligible.map(async ({ key, project }) => {
+        cur.map(async ({ key, project }) => {
           const r = await fetch(buildFleetRecentCommitsUrl(key, FLEET_RECENT_LIMIT));
           // WARDEN-89: fetch() resolves (does NOT reject) on a 4xx/5xx — gate on r.ok
           // so an unreachable agent (404) throws and is counted as that agent's error
@@ -136,11 +160,11 @@ export function FleetRecentCommits({ agents }: Props) {
       if (cancelled) return;
       // Unwrap allSettled → outcomes in input (catalog) order; a rejected promise (a
       // thrown !r.ok, or a bad-JSON throw) becomes that agent's error outcome, keyed
-      // from the same `eligible` entry so it still carries key/project.
+      // from the same `cur` entry so it still carries key/project.
       const outcomes = settled.map((s, i) =>
         s.status === 'fulfilled'
           ? s.value
-          : { ok: false as const, key: eligible[i].key, project: eligible[i].project },
+          : { ok: false as const, key: cur[i].key, project: cur[i].project },
       );
       // WARDEN-89: never swallow a per-agent failure silently — log with context so a
       // network failure or bad JSON leaves a trace instead of "no commits."
@@ -151,7 +175,11 @@ export function FleetRecentCommits({ agents }: Props) {
       setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [eligible, refreshTick]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `eligibleKey` is the
+    // primitive membership signature (value-stable across the 10s healthData array
+    // churn); the fan-out reads the freshest fleet from `eligibleRef`, so `eligible`
+    // is intentionally NOT in deps — depending on the array would refire every 10s.
+  }, [eligibleKey, refreshTick]);
 
   // Fetch a commit's changed files + body via /api/git-show (the click-through path
   // the per-agent GitBadges row uses). Cached by `${key}:${hash}` (per-agent). A plain
@@ -192,9 +220,16 @@ export function FleetRecentCommits({ agents }: Props) {
   const rows = result?.rows.slice(0, FLEET_RECENT_LIMIT) ?? [];
   const errorCount = result?.errorCount ?? 0;
   const hasRows = rows.length > 0;
-  // Every agent failed (or no eligible fleet) → a true empty, surfaced honestly with
-  // the unreachable note rather than a silent "no commits" (WARDEN-89 false-empty guard).
-  const allFailed = fleetN > 0 && !hasRows && errorCount > 0;
+  // EVERY agent's fetch failed → a true "couldn't reach the fleet" empty, surfaced
+  // honestly with the unreachable note rather than a silent "no commits" (WARDEN-89
+  // false-empty guard). Requires errorCount to cover the WHOLE eligible fleet, not
+  // merely be > 0: a PARTIAL failure (some agents reached but barren, some
+  // unreachable) is NOT this case — those reached agents simply had no commits, so
+  // the body falls through to the "No recent commits" empty state while the yellow
+  // note above still names the unreachable count. (errorCount <= fleetN always — one
+  // outcome per eligible agent — so >= is "all"; !hasRows is implied but kept
+  // defensive in case errorCount accounting ever drifts.)
+  const allFailed = fleetN > 0 && errorCount >= fleetN && !hasRows;
   const hasEligible = fleetN > 0;
 
   return (
