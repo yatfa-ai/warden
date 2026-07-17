@@ -114,7 +114,8 @@ function defaultRedact(payload) {
 //                       validates the payload itself, so it cannot leak.
 //   .effectiveTier()  — the resolved tier (for tests + live introspection)
 //   .setConsent(fn) / .setRedact(fn) / .setValidate(fn) / .setSend(fn)
-//   .setEndpoint(url) / .setSchemaVersion(n)  — hot-swap seams (slice 1/3 wiring)
+//   .setEndpoint(url) / .setAuthToken(token) / .setSchemaVersion(n)
+//                     — hot-swap seams (slice 1/3 wiring + WARDEN-569 auth)
 function createTelemetryPipeline(opts) {
   const o = opts || {};
   let consent = typeof o.consent === 'function' ? o.consent : defaultConsent;
@@ -123,6 +124,11 @@ function createTelemetryPipeline(opts) {
   let transportSend = typeof o.send === 'function' ? o.send : noopSend;
   let schemaVersion = typeof o.schemaVersion === 'number' ? o.schemaVersion : SCHEMA_VERSION;
   let endpointUrl = typeof o.endpointUrl === 'string' && o.endpointUrl ? o.endpointUrl : null;
+  // Optional shared-secret auth token (WARDEN-569). Threaded through to the
+  // transport, which sends it as `Authorization: Bearer <token>` when non-empty.
+  // null/empty = no header = today's behavior (works against an open receiver).
+  // NOT a consent/endpoint gate — an unset token is a valid posture.
+  let authToken = typeof o.authToken === 'string' && o.authToken ? o.authToken : null;
   const fetchImpl = o.fetchImpl; // optional — threaded through to the transport
   const sleepImpl = o.sleepImpl; // optional — threaded through to the transport
 
@@ -171,6 +177,7 @@ function createTelemetryPipeline(opts) {
         consent: tier,
         endpointUrl,
         schemaVersion,
+        authToken,
         fetchImpl,
         sleepImpl,
       });
@@ -210,6 +217,9 @@ function createTelemetryPipeline(opts) {
     },
     setEndpoint(url) {
       endpointUrl = typeof url === 'string' && url ? url : null;
+    },
+    setAuthToken(token) {
+      authToken = typeof token === 'string' && token ? token : null;
     },
     setSchemaVersion(v) {
       if (typeof v === 'number') schemaVersion = v;

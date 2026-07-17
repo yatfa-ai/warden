@@ -89,7 +89,7 @@ test('only extended present (no base key) → off', () => {
 
 console.log('\nreadTelemetryPrefs — boot disk read (missing/malformed → safe all-off)');
 
-test('reads the three telemetry prefs verbatim from the config file', () => {
+test('reads the telemetry prefs verbatim from the config file', () => {
   const dir = mkdtempSync(join(tmpdir(), 'warden-telcfg-'));
   const cfgPath = join(dir, 'config.json');
   writeFileSync(cfgPath, JSON.stringify({
@@ -97,12 +97,14 @@ test('reads the three telemetry prefs verbatim from the config file', () => {
     telemetryBaseEnabled: true,
     telemetryExtendedEnabled: false,
     telemetryEndpoint: 'https://receiver.invalid/ingest',
+    telemetryAuthToken: 'shared-secret-token',
   }));
   try {
     assert.deepEqual(readTelemetryPrefs(cfgPath), {
       telemetryBaseEnabled: true,
       telemetryExtendedEnabled: false,
       telemetryEndpoint: 'https://receiver.invalid/ingest',
+      telemetryAuthToken: 'shared-secret-token',
     });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -116,6 +118,7 @@ test('missing telemetry keys default to off / empty (first-run posture)', () => 
       telemetryBaseEnabled: false,
       telemetryExtendedEnabled: false,
       telemetryEndpoint: '',
+      telemetryAuthToken: '',
     });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -126,6 +129,7 @@ test('a missing file → safe all-off defaults (never throws)', () => {
     telemetryBaseEnabled: false,
     telemetryExtendedEnabled: false,
     telemetryEndpoint: '',
+    telemetryAuthToken: '',
   });
 });
 
@@ -138,6 +142,7 @@ test('a malformed (unparseable) config → safe all-off defaults (never throws)'
       telemetryBaseEnabled: false,
       telemetryExtendedEnabled: false,
       telemetryEndpoint: '',
+      telemetryAuthToken: '',
     });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -150,12 +155,14 @@ test('non-boolean / non-string values are ignored (type-strict, never truthy-coe
     telemetryBaseEnabled: 'true',
     telemetryExtendedEnabled: 1,
     telemetryEndpoint: 42,
+    telemetryAuthToken: 99,
   }));
   try {
     assert.deepEqual(readTelemetryPrefs(cfgPath), {
       telemetryBaseEnabled: false,
       telemetryExtendedEnabled: false,
       telemetryEndpoint: '',
+      telemetryAuthToken: '',
     });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

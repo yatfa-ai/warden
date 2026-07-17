@@ -87,6 +87,7 @@ const telemetryPrefs = {
   telemetryBaseEnabled: false,
   telemetryExtendedEnabled: false,
   telemetryEndpoint: '',
+  telemetryAuthToken: '',
 };
 
 // The pipeline assembly (WARDEN-486). Constructed with the REAL injected
@@ -136,8 +137,17 @@ function applyTelemetryConfig(prefs) {
   if (typeof prefs.telemetryEndpoint === 'string') {
     telemetryPrefs.telemetryEndpoint = prefs.telemetryEndpoint;
   }
+  // Auth token (WARDEN-569) — same live-threading as the endpoint: held in
+  // telemetryPrefs (cleartext; main-process internal) and pushed to the pipeline
+  // so the transport sends `Authorization: Bearer <token>`. An empty/missing
+  // token clears the pipeline's token (→ no header → works against an open
+  // receiver). Forwarded over the fork's IPC channel alongside endpoint.
+  if (typeof prefs.telemetryAuthToken === 'string') {
+    telemetryPrefs.telemetryAuthToken = prefs.telemetryAuthToken;
+  }
   telemetry.setBaseConsent(telemetryPrefs.telemetryBaseEnabled === true);
   telemetryPipeline.setEndpoint(telemetryPrefs.telemetryEndpoint || '');
+  telemetryPipeline.setAuthToken(telemetryPrefs.telemetryAuthToken || '');
 }
 
 // Kill anything occupying the port (stale server from a previous run)
@@ -488,6 +498,7 @@ app.whenReady().then(async () => {
         telemetryBaseEnabled: msg.base,
         telemetryExtendedEnabled: msg.extended,
         telemetryEndpoint: msg.endpoint,
+        telemetryAuthToken: msg.authToken,
       });
     }
   });

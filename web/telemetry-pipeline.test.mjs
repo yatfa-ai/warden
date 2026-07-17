@@ -523,6 +523,55 @@ test('setEndpoint / setSchemaVersion thread through to the transport call', () =
   assert.equal(send.calls[0].schemaVersion, 2);
 });
 
+test('setAuthToken threads the auth token through to the transport call (WARDEN-569)', () => {
+  const send = fakeSend();
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+  });
+  pipeline.setEndpoint('https://telemetry.example.invalid/ingest');
+  pipeline.setAuthToken('shared-secret-token');
+  pipeline.record(validEventWithCredential());
+  assert.equal(send.calls[0].authToken, 'shared-secret-token', 'auth token reaches the transport');
+});
+
+test('authToken defaults to null — the transport gets no token when none is set (WARDEN-569)', () => {
+  const send = fakeSend();
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+  });
+  pipeline.record(validEventWithCredential());
+  assert.equal(send.calls[0].authToken, null, 'no token by default → open-receiver compatible');
+});
+
+test('setAuthToken with an empty/null value clears the token (→ no header)', () => {
+  const send = fakeSend();
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+  });
+  pipeline.setAuthToken('first-token');
+  pipeline.setAuthToken(''); // clear
+  pipeline.record(validEventWithCredential());
+  assert.equal(send.calls[0].authToken, null, 'empty string clears the token back to null');
+});
+
+test('authToken is also accepted at construction (opts.authToken)', () => {
+  const send = fakeSend();
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    authToken: 'constructed-token',
+  });
+  pipeline.record(validEventWithCredential());
+  assert.equal(send.calls[0].authToken, 'constructed-token');
+});
+
 test('fetchImpl / sleepImpl are threaded through to the transport (slice-3 retry contract)', () => {
   const send = fakeSend();
   const fetchImpl = () => Promise.resolve();

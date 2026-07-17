@@ -43,21 +43,30 @@ function resolveTelemetryTier(prefs) {
   return 'off';
 }
 
-// Read the three telemetry prefs off the on-disk config at boot. Missing keys
-// default to false / '' — EXACTLY the off / no-endpoint posture (mirrors
-// src/config.js DEFAULTS, so a first-run or partially-written config is safe).
-// Never throws: an unreadable / missing / malformed config yields the safe
-// all-off defaults, so a corrupt disk state can never accidentally enable
-// telemetry. Type-strict — only a real boolean/string is accepted.
+// Read the telemetry prefs off the on-disk config at boot. Missing keys
+// default to false / '' — EXACTLY the off / no-endpoint / no-token posture
+// (mirrors src/config.js DEFAULTS, so a first-run or partially-written config
+// is safe). Never throws: an unreadable / missing / malformed config yields the
+// safe all-off defaults, so a corrupt disk state can never accidentally enable
+// telemetry. Type-strict — only a real boolean/string is accepted. The auth
+// token is read in CLEARTEXT here (main-process boot read, same trust boundary
+// as the endpoint); it is only ever MASKED on the GET /api/config → renderer
+// path (src/server.js), never on this internal main-process read.
 function readTelemetryPrefs(configPath) {
   const file = typeof configPath === 'string' && configPath ? configPath : CONFIG_PATH;
-  const safe = { telemetryBaseEnabled: false, telemetryExtendedEnabled: false, telemetryEndpoint: '' };
+  const safe = {
+    telemetryBaseEnabled: false,
+    telemetryExtendedEnabled: false,
+    telemetryEndpoint: '',
+    telemetryAuthToken: '',
+  };
   try {
     const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (raw && typeof raw === 'object') {
       if (typeof raw.telemetryBaseEnabled === 'boolean') safe.telemetryBaseEnabled = raw.telemetryBaseEnabled;
       if (typeof raw.telemetryExtendedEnabled === 'boolean') safe.telemetryExtendedEnabled = raw.telemetryExtendedEnabled;
       if (typeof raw.telemetryEndpoint === 'string') safe.telemetryEndpoint = raw.telemetryEndpoint;
+      if (typeof raw.telemetryAuthToken === 'string') safe.telemetryAuthToken = raw.telemetryAuthToken;
     }
   } catch {
     // first run (no file) / unreadable / malformed JSON → safe all-off defaults

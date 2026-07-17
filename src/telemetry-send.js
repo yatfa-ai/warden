@@ -62,16 +62,24 @@ const noopLog = () => {};
 //                   AND echoed in the body so the version travels with the data
 //                   even if a proxy strips the header).
 //   events        — the already-redacted, schema-valid event objects to POST.
+//   authToken     — optional shared secret (WARDEN-569). When a non-empty string,
+//                   sent as `Authorization: Bearer <token>` so a receiver that set
+//                   AUTH_TOKEN accepts the batch. Empty/missing → header omitted →
+//                   today's behavior (works against an AUTH_TOKEN-unset receiver).
 //
 // Returns { headers, body }:
-//   headers — Content-Type + X-Telemetry-Schema (HTTP header names are
-//             case-insensitive on the wire; sent lowercase).
+//   headers — Content-Type + X-Telemetry-Schema (+ Authorization when a token is
+//             supplied). HTTP header names are case-insensitive on the wire; sent
+//             lowercase.
 //   body    — JSON string of { schemaVersion, events }.
-export function makePayload({ schemaVersion, events }) {
+export function makePayload({ schemaVersion, events, authToken }) {
   const headers = {
     'content-type': 'application/json',
     'x-telemetry-schema': String(schemaVersion),
   };
+  if (typeof authToken === 'string' && authToken.length > 0) {
+    headers['authorization'] = `Bearer ${authToken}`;
+  }
   const body = JSON.stringify({ schemaVersion, events });
   return { headers, body };
 }
@@ -99,6 +107,10 @@ export function makePayload({ schemaVersion, events }) {
 //   endpointUrl   the configured receiver ingest URL. Empty/missing → no-op
 //                 (unconfigured = sends nothing). Never a hardcoded SaaS host.
 //   schemaVersion the event-schema version for the handshake header.
+//   authToken     optional shared secret (WARDEN-569). When a non-empty string,
+//                 sent as `Authorization: Bearer <token>` (via makePayload). An
+//                 empty/missing token sends no Authorization header — so an unset
+//                 token still works against an AUTH_TOKEN-unset (open) receiver.
 //   fetchImpl     defaults to global fetch (Node >= 18). Injected in tests.
 //   sleepImpl     defaults to a real setTimeout sleep. Injected in tests so
 //                 backoff waits zero real time.
@@ -109,6 +121,7 @@ export async function send({
   consent,
   endpointUrl,
   schemaVersion,
+  authToken = '',
   fetchImpl = globalThis.fetch,
   sleepImpl = realSleep,
   log = noopLog,
@@ -117,11 +130,12 @@ export async function send({
   // is off/revoked (falsy) OR no endpoint is configured (empty), send NOTHING: do
   // not even open a connection. fetchImpl is never called. This is what makes
   // "off by default / revocable / halts all traffic" enforceable on the wire.
+  // (authToken is NOT a gate: an unset token is valid against an open receiver.)
   if (!consent || !endpointUrl) {
     return { ok: false, dropped: false, attempts: 0, status: null };
   }
 
-  const { headers, body } = makePayload({ schemaVersion, events });
+  const { headers, body } = makePayload({ schemaVersion, events, authToken });
 
   let status = null;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
