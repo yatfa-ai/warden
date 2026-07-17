@@ -35,6 +35,7 @@ const { createTelemetrySource, SCHEMA_VERSION, validateBaseEvent } = require('./
 const { createTelemetryPipeline } = require('./telemetry-pipeline.cjs');
 const { redact: redactTelemetry } = require('./telemetry-redact.cjs');
 const { resolveTelemetryTier, readTelemetryPrefs } = require('./telemetry-config.cjs');
+const { createTransmissionLog } = require('./telemetry-transmission-log.cjs');
 
 const PORT = parseInt(process.env.WARDEN_PORT || '7421', 10);
 const HOST = '127.0.0.1';
@@ -90,6 +91,17 @@ const telemetryPrefs = {
   telemetryAuthToken: '',
 };
 
+// The local transmission log of ACTUAL send outcomes (WARDEN-583) — verifiability's
+// third leg. Session-scoped, in-memory, bounded; records one metadata-only entry
+// per real send the pipeline initiates (outcome ok | dropped). It introduces NO
+// new data leaving the machine — it is a user-owned local audit of sends the
+// client already made. Surfacing it over IPC to the renderer verifiability panel
+// is a follow-on slice; THIS slice is the engine + pipeline instrumentation that
+// PRODUCES the data in production. The reference is held here so a future IPC
+// handler can read `telemetryTransmissionLog.entries()` without re-wiring the
+// pipeline.
+const telemetryTransmissionLog = createTransmissionLog();
+
 // The pipeline assembly (WARDEN-486). Constructed with the REAL injected
 // implementations: the CJS redact mirror (telemetry-redact.cjs), the source's
 // schema validator (validateBaseEvent) + version (SCHEMA_VERSION), and a consent
@@ -105,6 +117,7 @@ const telemetryPipeline = createTelemetryPipeline({
   redact: redactTelemetry,
   validate: validateBaseEvent,
   schemaVersion: SCHEMA_VERSION,
+  transmissionLog: telemetryTransmissionLog,
 });
 
 // Bind the source's record sink to the pipeline entry point — the wiring that was

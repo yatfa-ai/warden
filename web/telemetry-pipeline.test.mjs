@@ -50,6 +50,7 @@ const {
   createTelemetryPipeline,
 } = require('../electron/telemetry-pipeline.cjs');
 const { validateBaseEvent, buildErrorEvent } = require('../electron/telemetry-source.cjs');
+const { createTransmissionLog } = require('../electron/telemetry-transmission-log.cjs');
 
 let passed = 0;
 const test = (name, fn) => {
@@ -602,6 +603,196 @@ test('setValidate overrides the default source-contract validator (slice-1 canon
   pipeline.setValidate(() => false);
   pipeline.record(validEventWithCredential());
   assert.equal(send.calls.length, 1, 'the overridden validator now drops the event');
+});
+
+// ==========================================================================
+// Transmission log — ACTUAL send outcomes (WARDEN-583, verifiability's third leg)
+// ==========================================================================
+// The pipeline ROUTES the transport result into an injected transmissionLog
+// instead of swallowing it (the old `result.then(() => {}, () => {})`). These
+// prove the swallow-point wiring + the outcome mapping
+//   ok:true      → outcome 'ok'
+//   dropped:true → outcome 'dropped'
+//   gate no-op / undefined result → NO entry (absence of entries = gated-off)
+// with controllable fakes + an injected fixed-clock log. The end-to-end REAL
+// transport outcomes (2xx ok, 5xx/network dropped, consent-off stops entries) are
+// covered by telemetry-live-wire.test.mjs.
+
+// A fixed clock so recorded timestamps are pin-able (test discipline).
+const TLOG_CLOCK = () => 1719500000123;
+const TLOG_ENDPOINT = 'https://telemetry.example.invalid/v1/events';
+
+// A fake transport that returns a FIXED result object (sync) — stands in for the
+// real transport's resolved { ok, dropped, attempts, status }, recording calls.
+function sendReturning(result) {
+  const calls = [];
+  const fn = (args) => { calls.push(args); return result; };
+  fn.calls = calls;
+  return fn;
+}
+
+// A thenable that resolves SYNCHRONOUSLY when .then is called — exercises the
+// async `result.then` branch (the one the real Promise-based transport takes) and
+// records in the SAME tick, so the assertion does not depend on the test runner
+// awaiting. The real microtask-settling Promise path is covered by the live-wire
+// suite, which awaits.
+function sendThenable(result) {
+  const calls = [];
+  const fn = (args) => {
+    calls.push(args);
+    return { then(onFulfilled) { if (onFulfilled) onFulfilled(result); return this; } };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+test('a successful transport result records an outcome:ok entry (WARDEN-583)', () => {
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendReturning({ ok: true, dropped: false, attempts: 1, status: 200 });
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(validEventWithCredential());
+  assert.equal(log.size(), 1, 'exactly one entry for one send');
+  const e = log.entries()[0];
+  assert.equal(e.outcome, 'ok');
+  assert.equal(e.endpointHost, 'telemetry.example.invalid', 'host derived from the endpoint (no path/query)');
+  assert.equal(e.schemaVersion, SCHEMA_VERSION, 'the canonical schema version is threaded');
+  assert.equal(e.eventCount, 1, 'dispatch sends one event at a time');
+  assert.equal(e.attempts, 1);
+  assert.equal(e.status, 200);
+  assert.equal(e.timestamp, 1719500000123, "stamped by the log's injected clock");
+});
+
+test('a dropped transport result records an outcome:dropped entry', () => {
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendReturning({ ok: false, dropped: true, attempts: 3, status: 503 });
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(validEventWithCredential());
+  const e = log.entries()[0];
+  assert.equal(e.outcome, 'dropped', 'a lost batch is now VISIBLE (today it vanishes silently)');
+  assert.equal(e.attempts, 3);
+  assert.equal(e.status, 503);
+});
+
+test('the transport gate no-op {ok:false,dropped:false} records NO entry', () => {
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendReturning({ ok: false, dropped: false, attempts: 0, status: null });
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(validEventWithCredential());
+  assert.equal(log.size(), 0, 'the gate no-op is not a real send → absence of entries');
+});
+
+test('a transport returning undefined (the default no-op transport) records NO entry', () => {
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send: fakeSend(), // returns undefined — the default noopSend shape
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(validEventWithCredential());
+  assert.equal(log.size(), 0, 'a non-result-bearing transport records nothing');
+});
+
+test('consent OFF records NO entry (the dispatch guard returns before transportSend)', () => {
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendReturning({ ok: true, dropped: false, attempts: 1, status: 200 });
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.OFF),
+    redact,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(validEventWithCredential());
+  assert.equal(send.calls.length, 0, 'transport never called');
+  assert.equal(log.size(), 0, 'no entry — disabling halts all traffic (absence is the signal)');
+});
+
+test('a recorded entry is METADATA ONLY — no payload content, redacted text, or identifiers', () => {
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendReturning({ ok: true, dropped: false, attempts: 1, status: 200 });
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(validEventWithCredential()); // carries a credential in its message
+  const blob = JSON.stringify(log.entries());
+  assert.doesNotMatch(blob, /ghp_/, 'the raw credential never reaches the log');
+  assert.doesNotMatch(blob, /\[REDACTED/, 'not even the redacted payload text is retained');
+  const e = log.entries()[0];
+  assert.deepEqual(
+    Object.keys(e).sort(),
+    ['attempts', 'endpointHost', 'eventCount', 'outcome', 'schemaVersion', 'status', 'timestamp'],
+    'the entry is exactly the seven metadata fields',
+  );
+});
+
+test('a pipeline with NO transmissionLog injected still sends and records nothing (default no-op)', () => {
+  // The default collaborator is the frozen no-op recorder — an unconfigured pipeline
+  // behaves EXACTLY as before this slice: it still sends, and the no-op log absorbs
+  // the recordOutcome call without allocating or retaining anything.
+  const send = sendReturning({ ok: true, dropped: false, attempts: 1, status: 200 });
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    // no transmissionLog — default no-op recorder is used
+  });
+  assert.doesNotThrow(() => pipeline.record(validEventWithCredential()));
+  assert.equal(send.calls.length, 1, 'the pipeline still sends (the no-op log does not interfere)');
+});
+
+test('an async (thenable) transport result records the entry via the .then branch', () => {
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendThenable({ ok: true, dropped: false, attempts: 2, status: 200 });
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(validEventWithCredential());
+  // The thenable resolves synchronously, so the entry is recorded in the same tick.
+  assert.equal(log.size(), 1, 'the .then branch routed the resolved result into the log');
+  assert.equal(log.entries()[0].attempts, 2);
+});
+
+test('entries respect the injected log cap (bounded — oldest dropped)', () => {
+  const log = createTransmissionLog({ clock: TLOG_CLOCK, cap: 2 });
+  const send = sendReturning({ ok: true, dropped: false, attempts: 1, status: 200 });
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  for (let i = 0; i < 5; i++) pipeline.record(validEventWithCredential());
+  assert.equal(log.size(), 2, 'the pipeline-driven log respects its cap');
 });
 
 console.log(`\n✓ TELEMETRY PIPELINE TESTS PASS (${passed})`);
