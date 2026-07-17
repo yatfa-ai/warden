@@ -134,10 +134,18 @@ export function CollisionCompareDialog({ open, onOpenChange, path, agents, chats
     // per-agent reducer, so the rejected→error mapping stays in the tested pure
     // seam. The two fetches run in parallel via Promise.all so the A↔B panel
     // doesn't add a sequential round-trip on top of the per-agent fan-out.
-    // NOTE for impending collisions: the committer (agents[0]) has a CLEAN working
-    // tree for the path, so its working-tree bytes == its HEAD bytes == the version
-    // it is about to push — the A↔B working-tree-content diff is therefore ALREADY
-    // the "committed vs WIP" comparison, no special-casing needed (WARDEN-601).
+    // NOTE for impending AND outgoing×outgoing collisions: a committer (source
+    // 'outgoing') has a CLEAN working tree for the path, so its working-tree bytes
+    // == its HEAD bytes == the version it is about to push. For impending that makes
+    // the A↔B working-tree-content diff ALREADY the "committed vs WIP" comparison;
+    // for outgoing×outgoing BOTH agents are clean committers, so the same A↔B diff
+    // compares their two about-to-push (HEAD) versions directly — "committed vs
+    // committed," no special-casing needed in either case (WARDEN-601, WARDEN-639).
+    // The per-agent panels below already source each 'outgoing' contributor from its
+    // @{u}..HEAD range via buildCollisionDiffUrl (a.source → &range=outgoing), so for
+    // an outgoing×outgoing collision BOTH panels show the unpushed-commit change
+    // rather than an empty working-tree diff that would misclassify as 'already
+    // resolved'.
     (async () => {
       const perAgentPromise = Promise.allSettled(
         agents.map((a) =>
@@ -177,6 +185,12 @@ export function CollisionCompareDialog({ open, onOpenChange, path, agents, chats
 
   const loading = panels === null;
   const count = agents.length;
+  // Whether every contributor's change lives in an unpushed COMMIT (source 'outgoing')
+  // — true for an outgoing×outgoing collision (both sides committed, clean trees).
+  // Used to phrase the description accurately: a clean-committer collision is
+  // "committed" work about to be pushed, not live "editing", and the per-agent panels
+  // show the change vs UPSTREAM (the @{u}..HEAD range) rather than vs HEAD.
+  const allCommitted = count > 0 && agents.every((a) => a.source === 'outgoing');
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -187,7 +201,7 @@ export function CollisionCompareDialog({ open, onOpenChange, path, agents, chats
             <span className="truncate" title={path}>{path || 'collision'}</span>
           </DialogTitle>
           <DialogDescription>
-            {count} agent{count === 1 ? '' : 's'} editing this file — the <span className="text-amber-400/90">A ↔ B overlap</span> panel directly compares two agents’ working-tree versions so you can see whether their edits collide (true conflict) or are disjoint (false alarm). The panels below show each agent’s own change vs HEAD.
+            {count} agent{count === 1 ? '' : 's'} {allCommitted ? 'with unpushed commits to' : 'editing'} this file — the <span className="text-amber-400/90">A ↔ B overlap</span> panel directly compares two agents’ working-tree versions so you can see whether their edits collide (true conflict) or are disjoint (false alarm). The panels below show each agent’s own change {allCommitted ? 'vs upstream (the unpushed range)' : 'vs HEAD'}.
           </DialogDescription>
         </DialogHeader>
 

@@ -36,7 +36,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-gitstate-test-'));
 const tmpFile = join(tmpDir, 'gitStateSummary.mjs');
 writeFileSync(tmpFile, code);
-const { summarizeProjectGitState, detectProjectFileCollisions, detectProjectImpendingCollisions } = await import(tmpFile);
+const { summarizeProjectGitState, detectProjectFileCollisions, detectProjectImpendingCollisions, detectProjectOutgoingCollisions } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -856,3 +856,210 @@ test('empty inputs are safe', () => {
 });
 
 console.log(`\n✓ IMPENDING COLLISION TESTS PASS (${passed} cumulative)`);
+
+// ---------------------------------------------------------------------------
+// detectProjectOutgoingCollisions (WARDEN-639) — the OUTGOING×OUTGOING cross-agent
+// collision detector: a path that ≥2 DISTINCT active agents in the SAME project EACH
+// have in their unpushed commits (outgoingFiles) with CLEAN working trees for that
+// path. The matrix cell BOTH other detectors are blind to (both agents committed,
+// neither dirty → invisible to the live WIP join AND the impending editor side); it
+// surfaces only at push/merge/CI. Mirrors the other detectors' population (active &&
+// project, status by key||id), sparse perProject + union total shape, committer-clean
+// rule (reused from impending so a path already surfaced by live/impending is NOT
+// re-surfaced here), and deterministic chats-iteration ordering.
+//
+// Builders reuse the impending suite's `ostatus` (files + outgoingFiles) and `agsrc`
+// (key + source); `ocol` is the expected outgoing collision shape (path +
+// kind:'outgoing' + agents all source:'outgoing'); `detectOut` wraps the detector.
+const ocol = (path, agents) => ({ path, kind: 'outgoing', agents });
+const detectOut = (chats, gitStatus) => detectProjectOutgoingCollisions(chats, gitStatus);
+
+console.log('\noutgoing×outgoing collisions (WARDEN-639): committed-outgoing × committed-outgoing');
+test('two clean agents both committed src/auth.js → one outgoing path carrying both agent keys', () => {
+  const r = detectOut(
+    [agent('a1', 'warden'), agent('a2', 'warden')],
+    {
+      a1: ostatus([], ['src/auth.js']),  // committed auth.js, clean tree
+      a2: ostatus([], ['src/auth.js']),  // committed auth.js, clean tree
+    },
+  );
+  assert.deepEqual(r.perProject, { warden: { paths: [ocol('src/auth.js', [agsrc('a1', 'outgoing'), agsrc('a2', 'outgoing')])] } });
+  assert.deepEqual(r.total, { paths: [ocol('src/auth.js', [agsrc('a1', 'outgoing'), agsrc('a2', 'outgoing')])] });
+});
+
+test('outgoing entries are tagged kind:"outgoing" with every agent source:"outgoing" (the dialog reads source for the range)', () => {
+  // The compare dialog fetches the OUTGOING (@{u}..HEAD) diff for a source:'outgoing'
+  // agent — so the source tag is load-bearing, not cosmetic: BOTH panels must source
+  // from the outgoing range, not an empty working-tree diff that would misclassify as
+  // 'already resolved'.
+  const r = detectOut(
+    [agent('a1', 'warden'), agent('a2', 'warden')],
+    { a1: ostatus([], ['F']), a2: ostatus([], ['F']) },
+  );
+  assert.equal(r.perProject.warden.paths[0].kind, 'outgoing');
+  assert.deepEqual(r.perProject.warden.paths[0].agents, [agsrc('a1', 'outgoing'), agsrc('a2', 'outgoing')]);
+});
+
+test('agents appear in chats iteration order; three committers on one path', () => {
+  const r = detectOut(
+    [agent('a1', 'warden'), agent('a2', 'warden'), agent('a3', 'warden')],
+    { a1: ostatus([], ['README.md']), a2: ostatus([], ['README.md']), a3: ostatus([], ['README.md']) },
+  );
+  assert.deepEqual(r.perProject.warden.paths, [ocol('README.md', [agsrc('a1', 'outgoing'), agsrc('a2', 'outgoing'), agsrc('a3', 'outgoing')])]);
+});
+
+test('a single committer (no second agent) never outgoing-collides (needs ≥2 distinct committers)', () => {
+  const r = detectOut([agent('a1', 'warden')], { a1: ostatus([], ['src/auth.js']) });
+  assert.deepEqual(r.perProject, {});
+  assert.deepEqual(r.total, { paths: [] });
+});
+
+test('two paths each with a single (different) committer → neither collides (needs ≥2 on the SAME path)', () => {
+  // a1 committed F; a2 committed G. Different paths, 1 committer each → no collision.
+  const r = detectOut(
+    [agent('a1', 'warden'), agent('a2', 'warden')],
+    { a1: ostatus([], ['F']), a2: ostatus([], ['G']) },
+  );
+  assert.deepEqual(r.perProject, {});
+  assert.deepEqual(r.total, { paths: [] });
+});
+
+test('committer-clean rule: A has F BOTH outgoing AND dirty → NOT counted as a committer (the live/impending detectors own the dirty side)', () => {
+  // a1 committed F cleanly (outgoing, clean tree); a2 committed F AND is still editing
+  // F (F ∈ a2.files). a2 is excluded as a committer, leaving only a1 → 1 committer → no
+  // outgoing×outgoing collision. a2's dirty copy is already a live/impending signal.
+  const r = detectOut(
+    [agent('a1', 'warden'), agent('a2', 'warden')],
+    { a1: ostatus([], ['F']), a2: ostatus([file('F')], ['F']) },
+  );
+  assert.deepEqual(r.perProject, {});
+  // Sanity: this same setup IS an impending collision (a1 committed, a2 editing) —
+  // orthogonal, not a gap. The outgoing detector's silence is correct, not a miss.
+  const chats = [agent('a1', 'warden'), agent('a2', 'warden')];
+  assert.deepEqual(detectImp(chats, { a1: ostatus([], ['F']), a2: ostatus([file('F')], ['F']) }).total.paths, [
+    icol('F', [agsrc('a1', 'outgoing'), agsrc('a2', 'wip')]),
+  ]);
+});
+
+test('outgoingFiles:null is quiet (an in-sync agent contributes no committer)', () => {
+  const r = detectOut(
+    [agent('a1', 'warden'), agent('a2', 'warden')],
+    { a1: { files: [], outgoingFiles: null }, a2: ostatus([], ['F']) },
+  );
+  assert.deepEqual(r.perProject, {});
+  assert.deepEqual(r.total, { paths: [] });
+});
+
+test('the same path across two DIFFERENT projects does NOT cross-trigger (cross-project isolation)', () => {
+  // warden: a1 committed F. tinker: b1 committed F. Different projects → each has 1
+  // committer → no join.
+  const r = detectOut(
+    [agent('a1', 'warden'), agent('b1', 'tinker')],
+    { a1: ostatus([], ['F']), b1: ostatus([], ['F']) },
+  );
+  assert.deepEqual(r.perProject, {});
+  assert.deepEqual(r.total, { paths: [] });
+});
+
+test('multiple outgoing×outgoing paths are listed in first-appearance (outgoing) order, deterministically', () => {
+  // a1 committed auth then config (outgoing order); a2 committed both too. Path order
+  // follows a1's outgoing iteration → auth before config. Both carry [a1, a2] outgoing.
+  const r = detectOut(
+    [agent('a1', 'warden'), agent('a2', 'warden')],
+    {
+      a1: ostatus([], ['src/auth.js', 'src/config.js']),
+      a2: ostatus([], ['src/config.js', 'src/auth.js']),
+    },
+  );
+  assert.deepEqual(r.perProject.warden.paths, [
+    ocol('src/auth.js', [agsrc('a1', 'outgoing'), agsrc('a2', 'outgoing')]),
+    ocol('src/config.js', [agsrc('a1', 'outgoing'), agsrc('a2', 'outgoing')]),
+  ]);
+});
+
+test('missing outgoingFiles field contributes no committer', () => {
+  // Two clean-tree agents with no outgoingFiles field at all → no committer → nothing.
+  const r = detectOut(
+    [agent('a1', 'warden'), agent('a2', 'warden')],
+    { a1: { files: [] }, a2: { files: [] } },
+  );
+  assert.deepEqual(r.perProject, {});
+});
+
+test('files:null is tolerated — the agent can still be a committer via outgoing', () => {
+  // a1 committed F and reports files:null (no WIP set at all); a2 committed F cleanly.
+  // The detector must not crash on files:null and must still flag the outgoing pair
+  // (a1's wipPaths is empty, so F is not skipped as a committer).
+  const r = detectOut(
+    [agent('a1', 'warden'), agent('a2', 'warden')],
+    { a1: { files: null, outgoingFiles: ['F'] }, a2: ostatus([], ['F']) },
+  );
+  assert.deepEqual(r.perProject.warden.paths, [ocol('F', [agsrc('a1', 'outgoing'), agsrc('a2', 'outgoing')])]);
+});
+
+test('inactive / project-less chats are skipped (population matches the chips)', () => {
+  // a2 is inactive → even though it committed F, only active a1 counts → 1 committer →
+  // no collision. A project-less agent is skipped the same way.
+  const r = detectOut(
+    [agent('a1', 'warden'), { id: 'a2', project: 'warden', active: false }, { id: 'a3', active: true }],
+    { a1: ostatus([], ['F']), a2: ostatus([], ['F']), a3: ostatus([], ['F']) },
+  );
+  assert.deepEqual(r.perProject, {});
+});
+
+test('key || id resolution carries through to the outgoing agent keys', () => {
+  const r = detectOut(
+    [agent('raw-1', 'warden', 'warden-worker'), agent('raw-2', 'warden', 'warden-reviewer')],
+    { 'warden-worker': ostatus([], ['src/auth.js']), 'warden-reviewer': ostatus([], ['src/auth.js']) },
+  );
+  assert.deepEqual(r.perProject.warden.paths, [ocol('src/auth.js', [agsrc('warden-worker', 'outgoing'), agsrc('warden-reviewer', 'outgoing')])]);
+});
+
+test('total.paths is the union of outgoing paths across projects', () => {
+  const r = detectOut(
+    [agent('a1', 'warden'), agent('a2', 'warden'), agent('b1', 'tinker'), agent('b2', 'tinker')],
+    {
+      a1: ostatus([], ['lib/a.js']), a2: ostatus([], ['lib/a.js']),
+      b1: ostatus([], ['lib/b.js']), b2: ostatus([], ['lib/b.js']),
+    },
+  );
+  assert.deepEqual(r.perProject.warden.paths, [ocol('lib/a.js', [agsrc('a1', 'outgoing'), agsrc('a2', 'outgoing')])]);
+  assert.deepEqual(r.perProject.tinker.paths, [ocol('lib/b.js', [agsrc('b1', 'outgoing'), agsrc('b2', 'outgoing')])]);
+  assert.deepEqual(r.total.paths, [
+    ocol('lib/a.js', [agsrc('a1', 'outgoing'), agsrc('a2', 'outgoing')]),
+    ocol('lib/b.js', [agsrc('b1', 'outgoing'), agsrc('b2', 'outgoing')]),
+  ]);
+});
+
+test('orthogonal to live AND impending: A+B both clean committers, C editing → outgoing flags A+B, impending flags A+C, on the SAME path', () => {
+  // a1 + a2 each committed F cleanly (both unpushed, both clean) → outgoing×outgoing.
+  // a3 is editing F (dirty, no outgoing). The SAME path is ALSO an impending collision
+  // (a1/a2 committed, a3 editing) — two distinct risks, both correctly surfaced by
+  // their own detectors. No dedupe across classes (the detectors are independent).
+  const chats = [agent('a1', 'warden'), agent('a2', 'warden'), agent('a3', 'warden')];
+  const gs = {
+    a1: ostatus([], ['F']),
+    a2: ostatus([], ['F']),
+    a3: ostatus([file('F')], []),
+  };
+  // outgoing: a1 + a2 only (a3 is not a committer — F ∈ its wip).
+  assert.deepEqual(detectOut(chats, gs).total.paths, [ocol('F', [agsrc('a1', 'outgoing'), agsrc('a2', 'outgoing')])]);
+  // impending: a1/a2 committers + a3 editor.
+  assert.deepEqual(detectImp(chats, gs).total.paths, [
+    icol('F', [agsrc('a1', 'outgoing'), agsrc('a2', 'outgoing'), agsrc('a3', 'wip')]),
+  ]);
+});
+
+test('orthogonal to the live detector: a pure WIP-vs-WIP case flags live, not outgoing', () => {
+  // Both agents dirty on F, no outgoing at all. Live ⚠ flags it; outgoing stays empty.
+  const chats = [agent('a1', 'warden'), agent('a2', 'warden')];
+  const gs = { a1: fstatus([file('F')]), a2: fstatus([file('F')]) };
+  assert.deepEqual(detectOut(chats, gs).total, { paths: [] });
+  assert.deepEqual(detect(chats, gs).total.paths, [col('F', ['a1', 'a2'])]);
+});
+
+test('empty inputs are safe', () => {
+  assert.deepEqual(detectOut([], { a1: ostatus([], ['x']) }), { perProject: {}, total: { paths: [] } });
+});
+
+console.log(`\n✓ OUTGOING COLLISION TESTS PASS (${passed} cumulative)`);
