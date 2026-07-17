@@ -198,20 +198,31 @@ export function GitChangedFile({ file, onOpen, onOpenConflict, onOpenFile }: { f
 // are dirty without filtering the sidebar to the whole project and scanning it.
 // No new fetch: the contributing agents come from the cached gitStatus map via
 // summarizeProjectGitState; displayName/branch are joined here in the React layer.
-// Per-kind rendering config for GitStateBadge. Adding a third axis (behind,
-// WARDEN-297) is a row in this table rather than another branch in every
+// Per-kind rendering config for GitStateBadge. Adding an axis (behind WARDEN-297,
+// at-risk WARDEN-635) is a row in this table rather than another branch in every
 // ternary. Each kind picks its glyph, color, label, the predicate that matches
 // its popover rows, and the per-row branch-line suffix. Colors stay in the same
 // visual system as the per-row GitBranchBadge: dirty yellow ±, unpushed amber ↑,
-// behind blue ↓.
+// behind blue ↓, at-risk rose ⚑ (WARDEN-635 — distinct from the red ⚠ collision
+// glyph and the red ⚠ in-progress-op glyph, per WARDEN-68's distinct-vocabulary
+// rule: a different hue AND a different glyph so the four chip axes never collide).
+// atRisk reason → the per-row suffix label. 'op' is intentionally generic — the
+// agent's specific op (merge/rebase/cherry-pick/…) is not carried on ProjectGitAgent
+// (only the reason class); the per-row GitBranchBadge shows the op itself.
+const AT_RISK_REASON_LABEL: Record<NonNullable<ProjectGitAgent['atRiskReason']>, string> = {
+  detached: 'detached HEAD',
+  noUpstream: 'no upstream',
+  op: 'operation in progress',
+};
 const GIT_STATE_KIND = {
   dirty:   { glyph: '±', color: 'text-yellow-400 hover:text-yellow-300', label: 'uncommitted changes', match: (a: ProjectGitAgent) => a.dirty,     suffix: () => '' },
   unpushed: { glyph: '↑', color: 'text-amber-400 hover:text-amber-300',  label: 'unpushed commits',    match: (a: ProjectGitAgent) => a.ahead > 0, suffix: (a: ProjectGitAgent) => (a.ahead > 0 ? ` · ↑ ${a.ahead}` : '') },
   behind:   { glyph: '↓', color: 'text-blue-400 hover:text-blue-300',    label: 'behind upstream',     match: (a: ProjectGitAgent) => a.behind > 0, suffix: (a: ProjectGitAgent) => (a.behind > 0 ? ` · ↓ ${a.behind}` : '') },
+  atRisk:   { glyph: '⚑', color: 'text-rose-400 hover:text-rose-300',    label: 'at-risk repo state',  match: (a: ProjectGitAgent) => a.atRisk,     suffix: (a: ProjectGitAgent) => (a.atRiskReason ? ` · ${AT_RISK_REASON_LABEL[a.atRiskReason]}` : '') },
 } as const;
 
 function GitStateBadge({ kind, count, agents, chats, gitStatus, onOpenChat }: {
-  kind: 'dirty' | 'unpushed' | 'behind';
+  kind: 'dirty' | 'unpushed' | 'behind' | 'atRisk';
   count: number;
   // Already scoped to this chip (a project's subset, or `total.agents` for the
   // "All Projects" chip); filtered below by `kind`.
@@ -306,10 +317,11 @@ function GitStateBadge({ kind, count, agents, chats, gitStatus, onOpenChat }: {
   );
 }
 
-export function GitStateBadges({ dirty, unpushed, behind, agents, chats, gitStatus, onOpenChat }: {
+export function GitStateBadges({ dirty, unpushed, behind, atRisk, agents, chats, gitStatus, onOpenChat }: {
   dirty: number;
   unpushed: number;
   behind: number;
+  atRisk: number;
   agents: ProjectGitAgent[];
   chats: Chat[];
   gitStatus: Record<string, { branch: string | null }>;
@@ -320,6 +332,7 @@ export function GitStateBadges({ dirty, unpushed, behind, agents, chats, gitStat
       <GitStateBadge kind="dirty" count={dirty} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
       <GitStateBadge kind="unpushed" count={unpushed} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
       <GitStateBadge kind="behind" count={behind} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
+      <GitStateBadge kind="atRisk" count={atRisk} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
     </>
   );
 }
