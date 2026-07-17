@@ -31,7 +31,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-chat-watch-test-'));
 const tmpFile = join(tmpDir, 'chatWatch.mjs');
 writeFileSync(tmpFile, code);
-const { diffWatchAlerts, detectWatchCompleted, indexByWatchKey, applyWatchCooldown, WATCH_PING_COOLDOWN_MS, currentWatchNeed } = await import(tmpFile);
+const { diffWatchAlerts, detectWatchCompleted, indexByWatchKey, applyWatchCooldown, WATCH_PING_COOLDOWN_MS, currentWatchNeed, toggleWatchManyKeys } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -481,6 +481,63 @@ test('a row with customMatch → "custom" (precedence over the pane state)', () 
 test('a row with no customMatch falls through to the pane state (unchanged)', () => {
   assert.equal(currentWatchNeed(row('a', 'erroring')), 'erroring');
   assert.equal(currentWatchNeed(row('a', 'idle')), null);
+});
+
+// ---------------------------------------------------------------------------
+// toggleWatchManyKeys — the WARDEN-581 bulk setter (multi-select Watch/Unwatch).
+// on=true ADDS exactly the selected keys (union, order-preserving); on=false
+// REMOVES exactly them (difference). Idempotent for already-watched /
+// already-unwatched keys (never a duplicate, never an error).
+// ---------------------------------------------------------------------------
+console.log('\ntoggleWatchManyKeys (WARDEN-581): bulk watch/unwatch setter');
+test('on=true: adds exactly the selected keys to an empty watched set', () => {
+  assert.deepEqual(toggleWatchManyKeys([], ['a', 'b', 'c'], true), ['a', 'b', 'c']);
+});
+test('on=true: union preserves existing watches in order, appends new keys', () => {
+  // 'a' already watched; 'b','c' new → result keeps a first, then b, c.
+  assert.deepEqual(toggleWatchManyKeys(['a'], ['b', 'c'], true), ['a', 'b', 'c']);
+});
+test('on=true: idempotent for already-watched keys — no duplicate, no error', () => {
+  const once = toggleWatchManyKeys(['a'], ['b', 'c'], true);
+  const twice = toggleWatchManyKeys(once, ['b', 'c'], true);
+  assert.deepEqual(twice, ['a', 'b', 'c']);
+});
+test('on=true: a selected key already present is not re-added (no duplicate entry)', () => {
+  assert.deepEqual(toggleWatchManyKeys(['a', 'b'], ['a', 'c'], true), ['a', 'b', 'c']);
+});
+test('on=false: removes exactly the selected keys', () => {
+  assert.deepEqual(toggleWatchManyKeys(['a', 'b', 'c'], ['b'], false), ['a', 'c']);
+});
+test('on=false: removes every selected key (multi)', () => {
+  assert.deepEqual(toggleWatchManyKeys(['a', 'b', 'c', 'd'], ['a', 'c'], false), ['b', 'd']);
+});
+test('on=false: idempotent for already-unwatched keys — no error, others preserved', () => {
+  // 'zzz' isn't watched; removing it is a no-op; 'a' is removed.
+  assert.deepEqual(toggleWatchManyKeys(['a'], ['a', 'zzz'], false), []);
+});
+test('on=false on an empty watched set returns an empty array', () => {
+  assert.deepEqual(toggleWatchManyKeys([], ['a'], false), []);
+});
+test('empty key list returns a shallow copy (no change) for on=true and on=false', () => {
+  const prev = ['a', 'b'];
+  const onT = toggleWatchManyKeys(prev, [], true);
+  const onF = toggleWatchManyKeys(prev, [], false);
+  assert.deepEqual(onT, ['a', 'b']);
+  assert.deepEqual(onF, ['a', 'b']);
+});
+test('does not mutate the input array (returns a new array)', () => {
+  const prev = ['a', 'b'];
+  const out = toggleWatchManyKeys(prev, ['c'], true);
+  assert.notEqual(out, prev);
+  assert.deepEqual(prev, ['a', 'b']); // input untouched
+  assert.deepEqual(out, ['a', 'b', 'c']);
+});
+test('round-trip: watch a group then unwatch it returns to the original set', () => {
+  const start = ['x'];
+  const watched = toggleWatchManyKeys(start, ['a', 'b'], true);
+  assert.deepEqual(watched, ['x', 'a', 'b']);
+  const back = toggleWatchManyKeys(watched, ['a', 'b'], false);
+  assert.deepEqual(back, ['x']);
 });
 
 console.log(`\n✓ CHAT WATCH TESTS PASS (${passed})`);

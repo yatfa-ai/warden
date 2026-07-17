@@ -46,28 +46,39 @@ export function SectionToggle({ expanded, onClick, label, title }: {
 
 /**
  * The contextual action bar for multi-select (WARDEN-292 broadcast + WARDEN-328
- * batch kill + WARDEN-492 batch interrupt). Appears at the foot of a fleet view
- * only when ≥1 agent is selected, showing the live count and the selection
- * actions in a destructiveness gradient: select-all (within the current visible
- * list), clear, "Send to N…" (confirm-and-send), "Interrupt N…" (confirm-and-
- * signal, non-destructive), and "Kill N…" (confirm-and-stop, destructive). Built
- * on shadcn <Button> per the WARDEN-68 quality bar. shrink-0 so it stays pinned
- * at the bottom while the fleet list scrolls above it.
+ * batch kill + WARDEN-492 batch interrupt + WARDEN-581 bulk snooze/watch). Appears
+ * at the foot of a fleet view only when ≥1 agent is selected, showing the live
+ * count and the selection actions in a destructiveness gradient: select-all
+ * (within the current visible list), clear, "Send to N…" (confirm-and-send),
+ * "Interrupt N…" (confirm-and-signal, non-destructive), "Snooze N…" (confirm-and-
+ * snooze, local state), "Watch N"/"Unwatch N" (immediate, local state), and "Kill
+ * N…" (confirm-and-stop, destructive). Built on shadcn <Button> per the WARDEN-68
+ * quality bar. shrink-0 so it stays pinned at the bottom while the fleet list
+ * scrolls above it.
  *
- * `onSend` (broadcast) and `onInterrupt` (control-key send) are BOTH OPTIONAL: a
+ * `onSend` (broadcast), `onInterrupt` (control-key send), `onSnooze` (open the
+ * duration dialog), and `onWatch` (watch/unwatch, immediate) are ALL OPTIONAL: a
  * surface without one simply omits it and the matching button is not rendered.
- * Fleet Health (WARDEN-371) reuses this bar for batch-kill only — broadcast is
- * deliberately out of scope there — but interrupt IS the safe middle ground that
- * belongs on a health surface (stop the stuck/erroring agents without killing
- * them), so Fleet Health passes `onInterrupt`. The sidebar passes both `onSend`
- * and `onInterrupt`, so its bar is unchanged in shape.
+ * Fleet Health (WARDEN-371) reuses this bar for batch-kill only — broadcast,
+ * interrupt, snooze, and watch are deliberately out of scope there — so it passes
+ * none of them. The sidebar passes all four, so its bar exposes the full set.
+ *
+ * WARDEN-581 watch label: the button reads "Watch N" when the action will ADD
+ * watches (some selected agent isn't watched yet), else "Unwatch N" (every
+ * selected agent is already watched). `watchMode` ('watch' | 'unwatch') is
+ * precomputed by the parent from its current selection + watchedChats so the bar
+ * stays a dumb presentational component; it only renders the watch button when
+ * `onWatch` is present.
  */
-export function SelectionActionBar({ count, onSelectAll, onClear, onSend, onInterrupt, onKill }: {
+export function SelectionActionBar({ count, onSelectAll, onClear, onSend, onInterrupt, onSnooze, onWatch, watchMode, onKill }: {
   count: number;
   onSelectAll: () => void;
   onClear: () => void;
   onSend?: () => void;
   onInterrupt?: () => void;
+  onSnooze?: () => void;
+  onWatch?: () => void;
+  watchMode?: 'watch' | 'unwatch';
   onKill: () => void;
 }) {
   return (
@@ -85,6 +96,36 @@ export function SelectionActionBar({ count, onSelectAll, onClear, onSend, onInte
             title="send Ctrl-C / Esc to each selected agent's foreground process (non-destructive — the session survives)"
           >
             Interrupt {count}…
+          </Button>
+        )}
+        {/*
+          WARDEN-581 — bulk attention controls. Snooze opens the duration dialog
+          ("…"); watch/unwatch is immediate (no dialog), so its label carries no
+          ellipsis. Both are local-state ops (no tmux fan-out, no per-agent
+          failure), the non-destructive end of the bar's gradient. outline variant
+          matches Interrupt (a quiet, reversible action) rather than the default
+          Send or the destructive Kill.
+        */}
+        {onSnooze && (
+          <Button
+            variant="outline"
+            size="xs"
+            onClick={onSnooze}
+            title="temporarily silence desktop alerts for every selected agent until a chosen expiry (auto-rearms)"
+          >
+            Snooze {count}…
+          </Button>
+        )}
+        {onWatch && (
+          <Button
+            variant="outline"
+            size="xs"
+            onClick={onWatch}
+            title={watchMode === 'unwatch'
+              ? 'stop watching every selected agent (no targeted ping)'
+              : 'watch every selected agent for a targeted ping when it next needs you'}
+          >
+            {watchMode === 'unwatch' ? 'Unwatch' : 'Watch'} {count}
           </Button>
         )}
         <Button variant="destructive" size="xs" onClick={onKill} title="stop each selected agent's tmux session">Kill {count}…</Button>

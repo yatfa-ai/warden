@@ -20,6 +20,7 @@ import { CreateCollectionDialog } from './CreateCollectionDialog';
 import { BroadcastDialog } from './BroadcastDialog';
 import { KillDialog } from './KillDialog';
 import { KeySendDialog } from './KeySendDialog';
+import { SnoozeDialog } from './SnoozeDialog';
 import { summarizeBroadcast, formatBroadcastToast } from '@/lib/broadcast';
 import { formatKillToast, runKillFanout } from '@/lib/kill';
 import { formatKeySendToast, runKeySendFanout } from '@/lib/keysend';
@@ -39,6 +40,7 @@ import {
 } from '@/lib/agentFilter';
 import { chatMatchesCriteria } from '@/lib/collections';
 import { getLastSeen, WHATS_NEW_FETCH_LIMIT } from '@/lib/whatsNew';
+import type { SnoozeDuration } from '@/lib/snooze';
 import type { Chat, Collection, AgentStateRow } from '@/lib/types';
 import { StatusDot } from '@/components/StatusDot';
 import type { GitCommit, GitFile, ClaudeSession, DiffStat } from './sidebar/types';
@@ -118,6 +120,15 @@ interface Props {
   // fetch blip) → the row degrades to the neutral watch glyph (the safe default).
   watchedStates: Record<string, AgentStateRow>;
   onToggleWatch: (key: string) => void;
+  // WARDEN-581 — bulk attention controls for the multi-select action bar, the
+  // group twins of setAlertMute / toggleWatch. Snooze: time-box every selected
+  // key (no permanent-mute bulk path — out of scope). Watch: add/remove every
+  // selected key in one state write. Both owned by App (single writer of the
+  // `warden:ui` blob) and threaded down here as delegated handlers, mirroring
+  // onToggleWatch. The bar's Watch/Unwatch LABEL is computed here from
+  // watchedChats ∩ the selection (below), so these props stay pure callbacks.
+  onSnoozeMany: (keys: string[], mode: SnoozeDuration) => void;
+  onToggleWatchMany: (keys: string[], on: boolean) => void;
   // WARDEN-442: sidebar fleet Filter (all/yatfa/claude/manual) + Sort, shipped in
   // WARDEN-91. Owned by App and persisted by its saveUi effect (these were
   // previously ChatSidebar-local useState, which App's lossy saveUi spread then
@@ -133,7 +144,7 @@ interface Props {
 
 const LABEL: Record<string, string> = { '(local)': 'this machine' };
 
-export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, snippets, watchedChats, watchedStates, onToggleWatch, agentFilter, agentSort, onFilterChange, onSortChange }: Props) {
+export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, snippets, watchedChats, watchedStates, onToggleWatch, onSnoozeMany, onToggleWatchMany, agentFilter, agentSort, onFilterChange, onSortChange }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [offlineExpanded, setOfflineExpanded] = useState(false);
   const hostLabels = useHostLabels();
@@ -206,6 +217,8 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
   const [broadcastOpen, setBroadcastOpen] = useState(false);
   const [killOpen, setKillOpen] = useState(false);
   const [interruptOpen, setInterruptOpen] = useState(false);
+  // WARDEN-581 — bulk-snooze duration dialog (sibling of broadcast/kill/interrupt).
+  const [snoozeOpen, setSnoozeOpen] = useState(false);
 
   const fetchHostSessions = async (host: string) => {
     setLoadingHost(host);
@@ -432,6 +445,16 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
     [chats, selectedIds],
   );
 
+  // WARDEN-581 — drives the action bar's Watch/Unwatch button label. The button
+  // offers "Watch N" when ANY selected agent isn't currently watched (the action
+  // then adds the whole group), else "Unwatch N" (every selected agent is already
+  // watched, so the action removes the group). Recomputed each render from the
+  // live selection + watchedChats; defaults to 'watch' for an empty selection
+  // (the bar is hidden then anyway, so the value is unused).
+  const watchMode: 'watch' | 'unwatch' = selectedChats.some((c) => !watchedChats.has(c.key || c.id))
+    ? 'watch'
+    : 'unwatch';
+
   // WARDEN-342: host-view tag surfaces. These memos MUST live at the top level (not
   // inside the `view.kind === 'host'` branch) — hooks can't be called conditionally,
   // and the host branch is a conditional return. Guard on view.kind inside the body.
@@ -596,6 +619,36 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
     // re-select and retry if needed.
     setSelectedIds(new Set());
     return summary;
+  };
+
+  // WARDEN-581 — bulk snooze for the multi-select action bar. Snooze is pure
+  // local state (UiState.snoozedAlertKeys) with no tmux fan-out and no per-agent
+  // failure, so — unlike broadcast/kill/interrupt — there is no fan-out summary:
+  // route the selected keys + the dialog's chosen duration to App's snoozeMany
+  // (one state write for the whole set), surface a single confirmation toast, and
+  // clear the selection. The toast is shown unconditionally: it is a bulk-action
+  // CONFIRMATION (not a chat-op result), and the per-row bell it echoes shows no
+  // toast of its own, so no notifyChatOps/notifySuccess pref cleanly applies.
+  const handleSnoozeSelected = (mode: SnoozeDuration) => {
+    const keys = Array.from(selectedIds);
+    if (keys.length === 0) return;
+    onSnoozeMany(keys, mode);
+    toast.success(`Snoozed ${keys.length} agent${keys.length === 1 ? '' : 's'} ${mode === '1h' ? 'for 1 hour' : 'until tomorrow'}`);
+    setSelectedIds(new Set());
+  };
+
+  // WARDEN-581 — bulk watch/unwatch for the multi-select action bar. Like snooze
+  // this is pure local state (watchedChats) with no fan-out: route the selected
+  // keys + the computed on/off to App's toggleWatchMany (one state write; the OS
+  // permission request fires once inside it), surface a confirmation toast, and
+  // clear the selection. The bar's label (watchMode below) decides on vs off.
+  const handleWatchSelected = () => {
+    const keys = Array.from(selectedIds);
+    if (keys.length === 0) return;
+    const on = watchMode === 'watch';
+    onToggleWatchMany(keys, on);
+    toast.success(`${on ? 'Watching' : 'Stopped watching'} ${keys.length} agent${keys.length === 1 ? '' : 's'}`);
+    setSelectedIds(new Set());
   };
 
   const enterHost = (host: string) => {
@@ -866,6 +919,9 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
             onClear={clearSelection}
             onSend={() => setBroadcastOpen(true)}
             onInterrupt={() => setInterruptOpen(true)}
+            onSnooze={() => setSnoozeOpen(true)}
+            onWatch={handleWatchSelected}
+            watchMode={watchMode}
             onKill={() => setKillOpen(true)}
           />
         )}
@@ -891,6 +947,12 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
           onOpenChange={setInterruptOpen}
           targets={selectedChats}
           onSend={handleInterruptSelected}
+        />
+        <SnoozeDialog
+          open={snoozeOpen}
+          onOpenChange={setSnoozeOpen}
+          targets={selectedChats}
+          onSnooze={handleSnoozeSelected}
         />
       </div>
     );
@@ -1039,6 +1101,9 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
             onClear={clearSelection}
             onSend={() => setBroadcastOpen(true)}
             onInterrupt={() => setInterruptOpen(true)}
+            onSnooze={() => setSnoozeOpen(true)}
+            onWatch={handleWatchSelected}
+            watchMode={watchMode}
             onKill={() => setKillOpen(true)}
           />
         )}
@@ -1060,6 +1125,12 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
           onOpenChange={setInterruptOpen}
           targets={selectedChats}
           onSend={handleInterruptSelected}
+        />
+        <SnoozeDialog
+          open={snoozeOpen}
+          onOpenChange={setSnoozeOpen}
+          targets={selectedChats}
+          onSnooze={handleSnoozeSelected}
         />
       </div>
     );
@@ -1298,6 +1369,12 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, onOpen
         onOpenChange={setInterruptOpen}
         targets={selectedChats}
         onSend={handleInterruptSelected}
+      />
+      <SnoozeDialog
+        open={snoozeOpen}
+        onOpenChange={setSnoozeOpen}
+        targets={selectedChats}
+        onSnooze={handleSnoozeSelected}
       />
     </div>
   );
