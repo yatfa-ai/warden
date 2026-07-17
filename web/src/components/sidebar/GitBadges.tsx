@@ -1000,6 +1000,17 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   // guards on stashList === undefined, and the refresh button is disabled while loading).
   const fetchStash = async () => {
     setStashLoading(true);
+    // A refresh is an explicit request for FRESH data, so drop the per-stash caches
+    // and collapse any expanded stash row. Stash refs (`stash@{n}`) are reflog
+    // selectors, NOT immutable keys like commit hashes — `stash@{0}` shifts to a
+    // DIFFERENT stash whenever one is popped or created above it. Without this reset,
+    // after the agent adds/pops a stash the refreshed subject (e.g. "WIP: B") would
+    // render under a stale file list cached for the PREVIOUS stash@{0} (e.g. "WIP: A")
+    // — subject and files would disagree, and toggleStash's dedup guard would keep
+    // serving the stale entry on re-collapse. CommitFile's cache-by-hash pattern
+    // doesn't have this problem because a hash always names the same commit (WARDEN-340).
+    setStashShowCache({});
+    setExpandedStashRef(null);
     try {
       const r = await fetch(`/api/git-stash?id=${encodeURIComponent(chatId)}`);
       const j = await r.json();
