@@ -35,6 +35,7 @@ const { createTelemetrySource, SCHEMA_VERSION, validateBaseEvent } = require('..
 const { createTelemetryPipeline } = require('../electron/telemetry-pipeline.cjs');
 const { redact: redactCjs } = require('../electron/telemetry-redact.cjs');
 const { resolveTelemetryTier } = require('../electron/telemetry-config.cjs');
+const { createTransmissionLog } = require('../electron/telemetry-transmission-log.cjs');
 
 let passed = 0;
 const test = async (name, fn) => {
@@ -77,13 +78,33 @@ function fetchMustNotBeCalled() {
   fn.calls = [];
   return fn;
 }
+// fetch mock serving a fixed response sequence (one per call) — reuses the last if
+// over-served. { ok, status } for a response or { throw: err } for a network blip.
+// Used for the dropped-outcome cases (persistent 5xx / network error) the real
+// transport translates into a dropped batch.
+function fetchSeq(responses) {
+  let i = 0;
+  const calls = [];
+  const fn = async (url, opts) => {
+    calls.push({ url, opts });
+    const r = responses[Math.min(i, responses.length - 1)];
+    i++;
+    if (r.throw) throw r.throw;
+    return { ok: r.ok, status: r.status };
+  };
+  fn.calls = calls;
+  return fn;
+}
 
 // Build the EXACT wiring shape main.cjs constructs. Returns a handle exposing the
 // source's main emitter + an apply() that mirrors main.cjs's applyTelemetryConfig
 // (update the prefs holder, arm/disarm the source, push the endpoint to the
-// pipeline — the transport's last gate).
-function buildWire({ fetchImpl }) {
+// pipeline — the transport's last gate). The handle also exposes `log` — the
+// transmission log main.cjs injects (WARDEN-583) — so the actual-outcome criteria
+// assert on what the REAL transport produced.
+function buildWire({ fetchImpl, transmissionLog, logCap } = {}) {
   const prefs = { telemetryBaseEnabled: false, telemetryExtendedEnabled: false, telemetryEndpoint: '' };
+  const log = transmissionLog || createTransmissionLog({ clock: () => TS, cap: logCap });
   const pipeline = createTelemetryPipeline({
     consent: () => resolveTelemetryTier(prefs),
     redact: redactCjs,
@@ -92,6 +113,7 @@ function buildWire({ fetchImpl }) {
     send: realSend,
     fetchImpl,
     sleepImpl: () => Promise.resolve(),
+    transmissionLog: log,
   });
   const source = createTelemetrySource({
     record: pipeline.record,
@@ -110,7 +132,7 @@ function buildWire({ fetchImpl }) {
     source.setBaseConsent(prefs.telemetryBaseEnabled === true);
     pipeline.setEndpoint(prefs.telemetryEndpoint || '');
   };
-  return { prefs, pipeline, source, main, apply };
+  return { prefs, pipeline, source, main, apply, log };
 }
 
 // ==========================================================================
@@ -253,6 +275,112 @@ await test('a source signal with consent on never rejects out of the pipeline', 
   assert.doesNotThrow(() => w.main.emit('uncaughtExceptionMonitor', new Error('ok')));
   await tick();
   assert.equal(fetch.calls.length, 1);
+});
+
+// ==========================================================================
+// Transmission log — ACTUAL send outcomes (WARDEN-583, verifiability's third leg)
+// ==========================================================================
+// With the REAL transport wired (the exact main.cjs shape), prove the measurable
+// success criteria:
+//   (a) 2xx       → outcome:ok entry
+//   (b) unreachable → outcome:dropped entry (a lost batch is now VISIBLE)
+//   (c) disable    → no further entries (cessation IS the proof)
+//   (d) entries are metadata-only (no payload / token / path)
+//   (e) the live log is bounded
+
+await test('(a) a successful 2xx send records an outcome:ok entry (attempts:1, status:200)', async () => {
+  const fetch = fetchRecorder();
+  const w = buildWire({ fetchImpl: fetch });
+  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.main.emit('uncaughtExceptionMonitor', new Error(`token ${GH_TOKEN} leaked`));
+  await tick();
+  assert.equal(w.log.size(), 1, 'one ok entry for one successful send');
+  const e = w.log.entries()[0];
+  assert.equal(e.outcome, 'ok');
+  assert.equal(e.attempts, 1);
+  assert.equal(e.status, 200);
+  assert.equal(e.endpointHost, 'telemetry.example.selfhosted.net', 'host only — no path/query');
+  assert.equal(e.schemaVersion, 1);
+  assert.equal(e.eventCount, 1);
+});
+
+await test('(b) an unreachable receiver (persistent 503) records an outcome:dropped entry', async () => {
+  const fetch = fetchSeq([{ ok: false, status: 503 }]); // always 503 → exhausts MAX_ATTEMPTS
+  const w = buildWire({ fetchImpl: fetch });
+  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.main.emit('uncaughtExceptionMonitor', new Error('boom'));
+  await tick();
+  assert.equal(w.log.size(), 1, 'the lost batch is recorded — today it would vanish silently');
+  const e = w.log.entries()[0];
+  assert.equal(e.outcome, 'dropped');
+  assert.equal(e.attempts, 3, 'bounded — exhausted the retry cap');
+  assert.equal(e.status, 503);
+});
+
+await test('(b) a network error (fetch throws) records a dropped entry with status null', async () => {
+  const fetch = fetchSeq([{ throw: new Error('fetch failed: ECONNREFUSED') }]);
+  const w = buildWire({ fetchImpl: fetch });
+  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.main.emit('uncaughtExceptionMonitor', new Error('boom'));
+  await tick();
+  assert.equal(w.log.size(), 1);
+  const e = w.log.entries()[0];
+  assert.equal(e.outcome, 'dropped');
+  assert.equal(e.status, null, 'no response status on a network error');
+});
+
+await test('(c) consent OFF records NO entries (disabling halts all traffic)', async () => {
+  const fetch = fetchMustNotBeCalled();
+  const w = buildWire({ fetchImpl: fetch });
+  w.apply({ telemetryBaseEnabled: false, telemetryEndpoint: ENDPOINT }); // consent off
+  w.main.emit('uncaughtExceptionMonitor', new Error('boom'));
+  await tick();
+  assert.equal(w.log.size(), 0, 'no entries while consent is off');
+});
+
+await test('(c) revoking consent stops new entries — the cessation IS the proof', async () => {
+  const fetch = fetchRecorder();
+  const w = buildWire({ fetchImpl: fetch });
+  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.main.emit('uncaughtExceptionMonitor', new Error('on'));
+  await tick();
+  assert.equal(w.log.size(), 1, 'one ok entry while on');
+  w.apply({ telemetryBaseEnabled: false }); // revoke
+  w.main.emit('uncaughtExceptionMonitor', new Error('off'));
+  await tick();
+  assert.equal(w.log.size(), 1, 'no further entry after revoke — entries STOPPED');
+});
+
+await test('(d) recorded entries are METADATA ONLY — no payload, token, or file path', async () => {
+  const fetch = fetchRecorder();
+  const w = buildWire({ fetchImpl: fetch });
+  w.apply({ telemetryBaseEnabled: true, telemetryExtendedEnabled: true, telemetryEndpoint: ENDPOINT });
+  // The raw error carries a credential AND a file path; both are redacted before
+  // transport, and the log re-collects NEITHER (it is a pure metadata consumer).
+  w.main.emit('uncaughtExceptionMonitor', new Error(`token ${GH_TOKEN} leaked on /home/alice/secret`));
+  await tick();
+  const blob = JSON.stringify(w.log.entries());
+  assert.doesNotMatch(blob, /ghp_/, 'the raw token never reaches the log');
+  assert.doesNotMatch(blob, /\/home\/alice/, 'the file path never reaches the log');
+  assert.doesNotMatch(blob, /\[REDACTED/, 'not even redacted payload text is retained');
+  const e = w.log.entries()[0];
+  assert.deepEqual(
+    Object.keys(e).sort(),
+    ['attempts', 'endpointHost', 'eventCount', 'outcome', 'schemaVersion', 'status', 'timestamp'],
+    'exactly the seven metadata fields',
+  );
+});
+
+await test('(e) the live log is bounded — many sends never grow it past the cap', async () => {
+  const fetch = fetchRecorder();
+  const w = buildWire({ fetchImpl: fetch, logCap: 3 });
+  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  for (let i = 0; i < 6; i++) {
+    w.main.emit('uncaughtExceptionMonitor', new Error(`evt ${i}`));
+    await tick();
+  }
+  assert.equal(w.log.size(), 3, 'cap held at 3 across 6 sends (oldest dropped)');
+  assert.ok(w.log.entries().every((e) => e.outcome === 'ok'), 'remaining entries are all ok');
 });
 
 console.log(`\n✓ TELEMETRY LIVE-WIRE INTEGRATION TESTS PASS (${passed})`);

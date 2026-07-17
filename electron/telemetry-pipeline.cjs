@@ -72,6 +72,10 @@ const {
   BASE_EVENT_TYPES,
   validateBaseEvent,
 } = require('./telemetry-source.cjs');
+const {
+  hostOf,
+  noopTransmissionLog,
+} = require('./telemetry-transmission-log.cjs');
 
 // Effective consent tiers (mirrors slice 2's ConsentTier). Anything other than
 // 'base' / 'extended' resolves to 'off' (hard no-op) — a missing or corrupt
@@ -131,6 +135,16 @@ function createTelemetryPipeline(opts) {
   let authToken = typeof o.authToken === 'string' && o.authToken ? o.authToken : null;
   const fetchImpl = o.fetchImpl; // optional — threaded through to the transport
   const sleepImpl = o.sleepImpl; // optional — threaded through to the transport
+  // Optional local transmission log of ACTUAL send outcomes (WARDEN-583) —
+  // verifiability's third leg. Default is the frozen no-op recorder, so an
+  // unconfigured pipeline records nothing and behaves EXACTLY as before this
+  // slice. A real bounded ring is injected by main.cjs so production captures
+  // what actually landed on the wire (ok | dropped). It is a pure metadata-only
+  // consumer of the transport result + the endpoint host; see recordOutcome below.
+  const transmissionLog =
+    o.transmissionLog && typeof o.transmissionLog.record === 'function'
+      ? o.transmissionLog
+      : noopTransmissionLog;
 
   // Resolve the current effective tier. A throwing consent resolver (slice 1 bug,
   // missing pref, etc.) degrades to OFF — telemetry must never crash the host.
@@ -140,6 +154,42 @@ function createTelemetryPipeline(opts) {
     } catch {
       return TIERS.OFF;
     }
+  }
+
+  // Record one ACTUAL-outcome entry when the transport returns a real result —
+  // verifiability's third leg (WARDEN-583). Instead of swallowing the transport
+  // outcome, a metadata-only entry is appended to the injected transmissionLog.
+  // METADATA ONLY: endpointHost (hostname[:port], NEVER the full URL with path/
+  // query), schemaVersion, the event count, and the transport's outcome/attempts/
+  // status. Never the payload, a redacted field, or a chat/session identifier.
+  // The timestamp is owned by the log (its injected clock), so this module never
+  // touches Date.now().
+  //
+  // Only a REAL outcome is recorded:
+  //   ok:true      → outcome 'ok'
+  //   dropped:true → outcome 'dropped'
+  //   anything else (the transport's gate no-op {ok:false,dropped:false}, a non-
+  //   conforming/absent result, the default no-op transport) → NOTHING recorded.
+  // "Consent off / unconfigured" therefore manifests as an ABSENCE of entries —
+  // the observable proof that disabling halts all traffic — not a recorded
+  // 'gated-off' outcome. (The dispatch consent guard below returns before
+  // transportSend is ever called, so the real path never reaches here with the
+  // gate closed; this guard just keeps the contract honest against the transport's
+  // own defense-in-depth gate and against test fakes that return {ok:false,
+  // dropped:false}.)
+  function recordOutcome(res, eventCount) {
+    if (!res || typeof res !== 'object') return;
+    const ok = res.ok === true;
+    const dropped = res.dropped === true;
+    if (!ok && !dropped) return; // gate no-op / ambiguous → not a real send
+    transmissionLog.record({
+      endpointHost: hostOf(endpointUrl),
+      schemaVersion,
+      eventCount,
+      outcome: ok ? 'ok' : 'dropped',
+      attempts: typeof res.attempts === 'number' ? res.attempts : 0,
+      status: res.status === null || typeof res.status === 'number' ? res.status : null,
+    });
   }
 
   // The airtight processing core: resolve the tier → redact → validate → transport,
@@ -172,8 +222,9 @@ function createTelemetryPipeline(opts) {
     if (!ok) return; // schema-invalid → drop pre-send (never send an invalid payload)
 
     try {
+      const events = [redacted];
       const result = transportSend({
-        events: [redacted],
+        events,
         consent: tier,
         endpointUrl,
         schemaVersion,
@@ -181,8 +232,18 @@ function createTelemetryPipeline(opts) {
         fetchImpl,
         sleepImpl,
       });
+      // Route the transport outcome into the transmission log instead of
+      // swallowing it (WARDEN-583 — verifiability's third leg). The transport
+      // never throws here (this try wraps a synchronous call site) and the REAL
+      // transport never rejects (it resolves with dropped:true on failure), so
+      // every real attempt reaches recordOutcome. A rejection records nothing:
+      // the real transport does not produce one, and the absence of an entry for
+      // a contract-violating failure is acceptable (the absence is itself a
+      // signal, never a crash).
       if (result && typeof result.then === 'function') {
-        result.then(() => {}, () => {}); // swallow async transport rejections
+        result.then((res) => recordOutcome(res, events.length), () => {});
+      } else if (result && typeof result === 'object') {
+        recordOutcome(result, events.length); // a synchronous result-bearing transport
       }
     } catch {
       /* telemetry must never crash the host */
