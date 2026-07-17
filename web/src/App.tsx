@@ -10,11 +10,11 @@ import { type TimestampFormat } from '@/lib/formatTimestamp';
 import { type AgentFilter, type AgentSort } from '@/lib/agentFilter';
 import { stampLastSeen } from '@/lib/whatsNew';
 import { useWatchCatchup } from '@/lib/useWatchCatchup';
-import { indexByWatchKey } from '@/lib/chatWatch';
+import { indexByWatchKey, toggleWatchManyKeys } from '@/lib/chatWatch';
 import { requestAlertPermission, type AttentionSeverityPrefs } from '@/lib/desktopAlerts';
 import { useTokenBudget } from '@/lib/useTokenBudget';
 import { useAttentionRollup } from '@/lib/useAttentionRollup';
-import { snoozeExpiry, pruneExpired, withoutSnoozeKey, type AlertMuteMode } from '@/lib/snooze';
+import { snoozeExpiry, pruneExpired, withoutSnoozeKey, snoozeManyKeys, type AlertMuteMode, type SnoozeDuration } from '@/lib/snooze';
 import { rankAttention, hasReturnContent, attentionReason, type AttentionItem } from '@/lib/attentionRollup';
 import { cn } from '@/lib/utils';
 import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray } from '@/lib/electron';
@@ -1037,6 +1037,34 @@ function App() {
     if (turningOn) void requestAlertPermission();
   }, [watchedChats]);
 
+  // WARDEN-581 — bulk siblings of setAlertMute / toggleWatch for the sidebar's
+  // multi-select action bar. Both write the WHOLE selected-key set in a single
+  // state update (one persist, one re-render) via the pure bulk setters in
+  // snooze.ts / chatWatch.ts, instead of N per-key fan-outs.
+  //
+  // snoozeMany: snooze every selected key for `mode`. `now` is read ONCE so every
+  // selected key shares the same expiry base. Snoozing a key also clears any
+  // PERMANENT mute on it (mutual exclusion per key, mirroring setAlertMute) so
+  // 'un-mute' is never ambiguous. Permanent mute is deliberately NOT offered in
+  // bulk (WARDEN-581 out-of-scope: the forget-and-go-stale risk argues against
+  // one-click permanent mute on a group).
+  const snoozeMany = useCallback((keys: string[], mode: SnoozeDuration) => {
+    if (keys.length === 0) return;
+    const now = Date.now();
+    const keySet = new Set(keys);
+    setMutedAlertKeys((prev) => prev.some((k) => keySet.has(k)) ? prev.filter((k) => !keySet.has(k)) : prev);
+    setSnoozedAlertKeys((prev) => snoozeManyKeys(prev, keys, mode, now));
+  }, []);
+  // toggleWatchMany: add (on=true) or remove (on=false) every selected key. The OS
+  // notification permission request fires ONCE for a bulk watch-ON (not per key —
+  // requestAlertPermission is idempotent but a per-key spam is still wrong), hoisted
+  // out of the updater (updaters stay pure; StrictMode double-invokes them in dev).
+  const toggleWatchMany = useCallback((keys: string[], on: boolean) => {
+    if (keys.length === 0) return;
+    setWatchedChats((prev) => toggleWatchManyKeys(prev, keys, on));
+    if (on) void requestAlertPermission();
+  }, []);
+
   // Seamless cross-host resume: when an observer session bound to an agent is
   // opened, reconnect to that agent's chat. We prime the pane's host hint and
   // (for remote hosts) discover the host so the pane can attach, then open the
@@ -1845,6 +1873,8 @@ function App() {
               watchedChats={watchedChatSet}
               watchedStates={watchedStateByKey}
               onToggleWatch={toggleWatch}
+              onSnoozeMany={snoozeMany}
+              onToggleWatchMany={toggleWatchMany}
               agentFilter={agentFilter}
               agentSort={agentSort}
               onFilterChange={setAgentFilter}

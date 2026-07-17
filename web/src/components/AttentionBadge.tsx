@@ -9,7 +9,7 @@ import {
   type AttentionRollup,
   type AttentionItem,
 } from '@/lib/attentionRollup';
-import { activeSnoozedKeys, formatSnoozeRemaining, type AlertMuteMode, type SnoozeMap } from '@/lib/snooze';
+import { activeSnoozedKeys, formatSnoozeRemaining, SNOOZE_DURATION_OPTIONS, type AlertMuteMode, type SnoozeMap } from '@/lib/snooze';
 import type { AttentionAgent } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -438,8 +438,15 @@ function AgentRow({
             ) : (
               <>
                 <MuteMenuRow label="Mute permanently" onClick={() => { onSetAlertMute(muteKey, 'permanent'); setMuteMenuOpen(false); }} />
-                <MuteMenuRow label="Mute for 1 hour" onClick={() => { onSetAlertMute(muteKey, '1h'); setMuteMenuOpen(false); }} />
-                <MuteMenuRow label="Mute until tomorrow" onClick={() => { onSetAlertMute(muteKey, 'tomorrow'); setMuteMenuOpen(false); }} />
+                {/*
+                  The two time-boxed snooze durations come from the SHARED
+                  SNOOZE_DURATION_OPTIONS (snooze.ts) so the per-row menu and the
+                  bulk SnoozeDialog (WARDEN-581) offer byte-for-byte the same
+                  durations + wording — one snooze vocabulary, two entry points.
+                */}
+                {SNOOZE_DURATION_OPTIONS.map((o) => (
+                  <MuteMenuRow key={o.value} label={o.label} onClick={() => { onSetAlertMute(muteKey, o.value); setMuteMenuOpen(false); }} />
+                ))}
               </>
             )}
           </PopoverContent>

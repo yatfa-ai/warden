@@ -26,6 +26,19 @@ export type SnoozeMap = Record<string, number>;
 export type SnoozeDuration = '1h' | 'tomorrow';
 
 /**
+ * The two time-boxed snooze durations, with their menu/dialog labels. SHARED by
+ * the per-row bell menu (AttentionBadge) and the bulk SnoozeDialog (WARDEN-581)
+ * so the durations + wording stay identical across the two entry points — one
+ * snooze-duration vocabulary, two surfaces. Permanent mute is deliberately NOT a
+ * member: it is a separate, stronger commitment (the bulk surface is snooze-only
+ * per WARDEN-581's out-of-scope), and the per-row menu layers it on separately.
+ */
+export const SNOOZE_DURATION_OPTIONS: ReadonlyArray<{ value: SnoozeDuration; label: string }> = [
+  { value: '1h', label: 'Mute for 1 hour' },
+  { value: 'tomorrow', label: 'Mute until tomorrow' },
+];
+
+/**
  * The unified mute/snooze intent a row can be put into. `off` clears BOTH a
  * permanent mute and a snooze for the key (manual re-arm). `permanent` is the
  * WARDEN-364 permanent mute. `1h` / `tomorrow` are time-boxed snoozes. An agent
@@ -129,6 +142,36 @@ export function snoozeExpiry(duration: SnoozeDuration, now: number): number {
   const d = new Date(now);
   d.setHours(24, 0, 0, 0);
   return d.getTime();
+}
+
+/**
+ * Apply a time-boxed snooze of `duration` to EVERY key in `keys` at once — the
+ * bulk setter backing App's multi-select Snooze (WARDEN-581), so N selected
+ * agents snooze in a SINGLE state update (one write, one persist) instead of N
+ * per-key `setAlertMute` fan-outs. Each selected key is mapped to
+ * `snoozeExpiry(duration, now)` computed once (so every selected key shares the
+ * same expiry base — the "one update" framing). Keys NOT in `keys` are preserved
+ * untouched (a group snooze never disturbs another agent's existing snooze).
+ *
+ * Idempotent for already-snoozed keys: re-snoozing a key simply overwrites its
+ * expiry with a fresh window — a refresh, never an error, never a duplicate
+ * entry (a `Record` key is unique by construction). Returns the SAME reference
+ * when `keys` is empty so a no-op bulk snooze causes no re-render or persist,
+ * else a fresh object. Pure: takes `now`, returns a map. (The caller — App's
+ * `snoozeMany` — separately drops any selected key from the PERMANENT-mute set
+ * so the two channels stay mutually exclusive per key, mirroring `setAlertMute`.)
+ */
+export function snoozeManyKeys(
+  snoozed: SnoozeMap,
+  keys: readonly string[],
+  duration: SnoozeDuration,
+  now: number,
+): SnoozeMap {
+  if (keys.length === 0) return snoozed;
+  const out: SnoozeMap = { ...snoozed };
+  const expiresAt = snoozeExpiry(duration, now);
+  for (const key of keys) out[key] = expiresAt;
+  return out;
 }
 
 /**

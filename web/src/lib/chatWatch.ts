@@ -323,3 +323,44 @@ export function currentWatchNeed(row: AgentStateRow): WatchReason | null {
   if (s && WATCH_NEED_STATES.has(s)) return s as WatchReason;
   return null;
 }
+
+/**
+ * Apply a bulk watch / unwatch to every key in `keys` at once — the pure setter
+ * backing App's multi-select Watch/Unwatch (WARDEN-581). `on = true` ADDS the
+ * keys to the watched set (union — existing watches preserved); `on = false`
+ * REMOVES them (difference). Either way the result keeps stable order: existing
+ * watched keys keep their positions, newly added keys append in `keys` order, so
+ * a bulk watch never reshuffles the persisted list.
+ *
+ * Idempotent for already-watched / already-unwatched keys: watching a key that is
+ * already watched is a no-op (the Set dedupes); unwatching a key that isn't
+ * watched is a no-op (the filter keeps it out). Re-applying the same bulk op
+ * never produces a duplicate entry and never errors. Pure + dependency-free (no
+ * `import` — only reads its args), so chatWatch.test.mjs loads it standalone.
+ *
+ * (The OS notification permission request that a bulk watch-ON implies is a SIDE
+ * EFFECT and stays in App's `toggleWatchMany` wrapper — fired ONCE for the whole
+ * batch, not per key — so this helper remains pure and testable.)
+ */
+export function toggleWatchManyKeys(
+  watched: readonly string[],
+  keys: readonly string[],
+  on: boolean,
+): string[] {
+  if (keys.length === 0) return [...watched];
+  if (on) {
+    // Union preserving existing order; new keys append in `keys` order.
+    const existing = new Set(watched);
+    const out = [...watched];
+    for (const k of keys) {
+      if (!existing.has(k)) {
+        existing.add(k);
+        out.push(k);
+      }
+    }
+    return out;
+  }
+  // Difference: drop every key in `keys`.
+  const remove = new Set(keys);
+  return watched.filter((k) => !remove.has(k));
+}

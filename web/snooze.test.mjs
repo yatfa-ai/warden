@@ -35,6 +35,7 @@ const {
   withoutSnoozeKey,
   snoozeExpiry,
   formatSnoozeRemaining,
+  snoozeManyKeys,
 } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
@@ -223,6 +224,68 @@ test('formatSnoozeRemaining: hours + minutes beyond an hour', () => {
 test('formatSnoozeRemaining: a whole-hour remaining drops the minutes term', () => {
   assert.equal(formatSnoozeRemaining(NOW + 60 * 60_000, NOW), '1h');
   assert.equal(formatSnoozeRemaining(NOW + 3 * 60 * 60_000, NOW), '3h');
+});
+
+// ---------------------------------------------------------------------------
+// snoozeManyKeys — the WARDEN-581 bulk setter (multi-select Snooze).
+// Writes EXACTLY the selected-key set in one update; idempotent for keys that
+// are already snoozed; leaves un-selected keys (incl. their existing snoozes)
+// untouched. The "one snooze-duration vocabulary" guarantee is also pinned: the
+// bulk expiry for a duration equals snoozeExpiry for that duration.
+// ---------------------------------------------------------------------------
+test('snoozeManyKeys: writes every selected key at the duration expiry (exact selected set)', () => {
+  const out = snoozeManyKeys({}, ['a', 'b', 'c'], '1h', NOW);
+  // Each selected key is present; no extras; every expiry is exactly 1h from NOW.
+  assert.deepEqual(out, { a: NOW + 60 * 60 * 1000, b: NOW + 60 * 60 * 1000, c: NOW + 60 * 60 * 1000 });
+});
+
+test('snoozeManyKeys: every selected key is immediately suppressed after the bulk write', () => {
+  const out = snoozeManyKeys({}, ['a', 'b'], 'tomorrow', NOW);
+  assert.equal(isSuppressed('a', new Set(), out, NOW), true);
+  assert.equal(isSuppressed('b', new Set(), out, NOW), true);
+});
+
+test('snoozeManyKeys: preserves existing snoozes on UN-selected keys (group snooze is additive)', () => {
+  // 'zzz' was already snoozed; snoozing a,b,c must not disturb it.
+  const prev = { zzz: NOW + 999_999 };
+  const out = snoozeManyKeys(prev, ['a', 'b', 'c'], '1h', NOW);
+  assert.equal(out.zzz, NOW + 999_999);
+  assert.deepEqual(out.a, NOW + 60 * 60 * 1000);
+  assert.deepEqual(out.b, NOW + 60 * 60 * 1000);
+  assert.deepEqual(out.c, NOW + 60 * 60 * 1000);
+});
+
+test('snoozeManyKeys: idempotent for already-snoozed keys — re-snoozing refreshes, never errors or duplicates', () => {
+  const once = snoozeManyKeys({}, ['a', 'b'], '1h', NOW);
+  // Re-snooze the same keys at the same instant: identical result (a Record key
+  // is unique, so there is no "duplicate entry" failure mode to worry about).
+  const twice = snoozeManyKeys(once, ['a', 'b'], '1h', NOW);
+  assert.deepEqual(twice, once);
+});
+
+test('snoozeManyKeys: re-snoozing at a later instant overwrites the expiry with a fresh window', () => {
+  const first = snoozeManyKeys({}, ['a'], '1h', NOW);
+  const later = NOW + 10 * 60_000; // 10 minutes later
+  const second = snoozeManyKeys(first, ['a'], '1h', later);
+  assert.equal(second.a, later + 60 * 60 * 1000);
+});
+
+test('snoozeManyKeys: empty key list returns the SAME reference (no-op bulk snooze)', () => {
+  const map = { a: NOW + 60_000 };
+  assert.equal(snoozeManyKeys(map, [], '1h', NOW), map);
+});
+
+test('snoozeManyKeys: does not mutate the input map', () => {
+  const prev = { zzz: NOW + 60_000 };
+  const out = snoozeManyKeys(prev, ['a'], '1h', NOW);
+  assert.notEqual(out, prev);
+  assert.deepEqual(prev, { zzz: NOW + 60_000 }); // input untouched
+  assert.deepEqual(out, { zzz: NOW + 60_000, a: NOW + 60 * 60 * 1000 });
+});
+
+test('snoozeManyKeys: a duplicate id in the key list is harmless (last write wins, one entry)', () => {
+  const out = snoozeManyKeys({}, ['a', 'a', 'b'], '1h', NOW);
+  assert.deepEqual(out, { a: NOW + 60 * 60 * 1000, b: NOW + 60 * 60 * 1000 });
 });
 
 console.log(`\n✓ SNOOZE TESTS PASS (${passed})`);
