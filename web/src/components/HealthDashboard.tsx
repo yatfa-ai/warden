@@ -17,6 +17,7 @@ import {
 import { StatusDot, type StatusTone } from '@/components/StatusDot';
 import { Sparkline } from '@/components/Sparkline';
 import { FleetActivityHeatmap } from '@/components/FleetActivityHeatmap';
+import { FleetRecentCommits } from '@/components/FleetRecentCommits';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -643,6 +644,17 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
               agents={healthData.agents}
               timestampFormat={timestampFormat}
             />
+            {/*
+              Fleet-wide recent-commits feed (WARDEN-597). The commit-history analog
+              of the heatmap above: fans the per-agent /api/git-log?limit=N across the
+              same in-scope fleet agents and merges every returned commit by committer
+              epoch into one time-sorted "what the fleet just shipped" list. Sits right
+              under the activity matrix so a returning human scans behavior pattern,
+              then the actual shipments, before drilling into rows. Clicking a row
+              opens that commit's diff via /api/git-show. Pure additive — no new
+              endpoint/poll/SSH; fetch-on-mount + manual refresh (introduces its own
+              N-fetch fan-out, so it does NOT ride the 60s series poll like the heatmap). */}
+            <FleetRecentCommits agents={healthData.agents} />
             {groupBy === 'health' ? (
               HEALTH_SECTION_ORDER.filter(section => {
                 const agents = healthData.groups[section];

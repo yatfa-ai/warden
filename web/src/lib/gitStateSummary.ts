@@ -434,7 +434,7 @@ export interface FleetSearchAgent {
  * produce N error rows (the WARDEN-89 population gate the ticket calls out).
  * Emitted in chats iteration order so the downstream groups stay deterministic.
  */
-export function fleetCommitSearchEligible(chats: FleetSearchChat[]): FleetSearchAgent[] {
+export function fleetCommitSearchEligible(chats: readonly FleetSearchChat[]): FleetSearchAgent[] {
   const out: FleetSearchAgent[] = [];
   const seen = new Set<string>();
   for (const c of chats) {
@@ -563,6 +563,146 @@ export function buildFleetCommitGroups(outcomes: FleetCommitOutcome[]): FleetCom
     });
   }
   return { groups, errorCount };
+}
+
+// ---- Fleet-wide RECENT-commits feed (WARDEN-597) -----------------------------
+//
+// The no-query "what the fleet just shipped" rollup — the cross-fleet counterpart
+// to the per-agent recent-commit list (the GitBadges popover). Where the commit
+// search above (WARDEN-534/559) is QUERY-DRIVEN (a typed term fans out to find
+// WHERE a change landed), this is the unfiltered TIME-SORTED merge: fan
+// /api/git-log?limit=N across every active project agent, flatten every returned
+// commit into ONE list, and sort the whole by committer epoch (newest first). The
+// result is a glanceable cross-fleet feed — "who just shipped / who went quiet /
+// two agents committing the same area" — patterns the independent per-agent lists
+// cannot compose into in one glance. The commit-history analog of the
+// FleetActivityHeatmap (WARDEN-532), which did the same promotion for activity
+// volume; the identical gap existed for commits.
+//
+// Three load-bearing divergences from buildFleetCommitGroups (each called out in
+// WARDEN-597), which is why this gets its OWN aggregation rather than a flag:
+//
+//  1. FLAT, not grouped. buildFleetCommitGroups groups by agent (preserving
+//     per-agent order, dropping empties) — a "matches per agent" view. The recent
+//     feed needs every agent's commits in ONE stream, sorted by epoch across the
+//     whole fleet, so the newest commit anywhere is on top regardless of who
+//     shipped it. That cross-agent time-merge is a different aggregation → a new
+//     pure fn (mergeFleetCommitsByEpoch).
+//
+//  2. NO query, NO ↑unpushed join (decision #2 — recent-only MVP). Each agent fires
+//     ONE fetch (N, not the 2N the query-driven search pays for its outgoing
+//     ↑unpushed join). The ↑unpushed mark is a deferred follow-up that would reuse
+//     the existing outgoing fan-out; this slice ships recent-only to keep the
+//     fan-out cheap.
+//
+//  3. `epoch` is the merge key. /api/git-log returns commits carrying `epoch`
+//     (committer time, UNIX seconds from %ct). Sorting by epoch desc is the whole
+//     point. A degraded line with `epoch == null` (parseGitLogLine's null path,
+//     src/server.js:2294 — only partial/test inputs) is placed LAST, stably.
+//
+// Pure (no React import, no fetch) so it is unit-testable directly via node,
+// mirroring buildFleetCommitGroups / summarizeProjectGitState. The population gate
+// is REUSED (fleetCommitSearchEligible — mode-agnostic: active + project, keyed,
+// deduped); the fan-out lives in the React component (its own Promise.allSettled,
+// the fleet convention). Outcomes are flattened in caller (chats) order BEFORE the
+// sort, so equal-epoch ties break by input order — deterministic, so tests assert
+// deep equality, the convention the rest of this module follows.
+
+// One agent's recent-commits fan-out outcome (recent-only — NO outgoing join, per
+// WARDEN-597 decision #2). `ok: false` = that agent's /api/git-log fetch failed
+// (host unreachable / non-ok HTTP / network) — counted as an error but never
+// dropped silently, and never blanking the other agents' commits (the
+// Promise.allSettled contract). `ok: true` carries the agent's recent commits in
+// the order /api/git-log returned them (newest first). key + project ride along so
+// the merged rows can join key → displayName / project without a second lookup,
+// mirroring FleetCommitGroup.
+export type FleetRecentOutcome =
+  | { ok: true; key: string; project: string; commits: FleetCommitLike[] }
+  | { ok: false; key: string; project: string };
+
+// One merged commit row: the commit + which agent/project shipped it. Carried FLAT
+// (not grouped under an agent header) so the feed is a single time-sorted list —
+// the cross-fleet "who just shipped" picture the independent per-agent lists can't
+// compose into on their own. `commit` is the full FleetCommitLike so the React
+// layer has hash/subject/author/date/epoch for the row without a second lookup.
+export interface FleetRecentCommitRow {
+  key: string;
+  project: string;
+  commit: FleetCommitLike;
+}
+
+export interface FleetRecentCommitsResult {
+  // Every commit across the fleet, flat + sorted by epoch desc (null-epoch rows
+  // last, stably). The component slices this to its glance bound (top 20–30).
+  rows: FleetRecentCommitRow[];
+  // # of agents whose fetch failed — surfaced as a "(N unreachable)" note so a
+  // partial failure is honest, never a silent false-empty (WARDEN-89).
+  errorCount: number;
+}
+
+/**
+ * Turn N per-agent recent-commits outcomes into ONE flat, time-sorted list — the
+ * no-query "what the fleet just shipped" feed (WARDEN-597). Unlike
+ * buildFleetCommitGroups (which groups by agent and preserves per-agent order),
+ * this FLATTENS every agent's commits into one stream and sorts the whole by
+ * committer `epoch` desc, so the newest commit anywhere in the fleet is on top
+ * regardless of which agent shipped it.
+ *
+ * Recent-only (decision #2): NO outgoing join — each outcome carries just the
+ * agent's recent commits, so this is N outcomes for N fetches (not the 2N the
+ * query-driven search pays for its ↑unpushed mark). The ↑unpushed mark is a
+ * deferred follow-up that would reuse the existing outgoing fan-out.
+ *
+ * `epoch == null` (a degraded GIT_LOG_PRETTY line — see parseGitLogLine's null
+ * path, src/server.js:2294) is placed LAST, stably: two null-epoch rows keep their
+ * input order, and any null-epoch row sorts after every epoch-bearing row. That
+ * keeps a malformed/old line from leap-frogging real commits to the top of the feed.
+ *
+ * Outcomes are flattened in caller (chats) order BEFORE the sort, so equal-epoch
+ * ties break by input order (agent A's commit before agent B's when both shipped at
+ * the same epoch) — deterministic, so tests assert deep equality, the convention
+ * the rest of this module follows. Array.prototype.sort is stable on Node ≥12 / V8,
+ * so that pre-sort input order is preserved through the equal-epoch ties.
+ */
+export function mergeFleetCommitsByEpoch(outcomes: FleetRecentOutcome[]): FleetRecentCommitsResult {
+  const rows: FleetRecentCommitRow[] = [];
+  let errorCount = 0;
+  for (const o of outcomes) {
+    if (!o.ok) {
+      errorCount += 1;
+      continue;
+    }
+    for (const c of o.commits) rows.push({ key: o.key, project: o.project, commit: c });
+  }
+  // Stable sort (Array.prototype.sort is stable on Node ≥12 / V8): epoch desc, with
+  // null-epoch rows placed last and preserving input order among themselves. The
+  // rows array was built in chats order, so equal/null-epoch ties keep that order.
+  rows.sort((a, b) => {
+    const ae = a.commit.epoch;
+    const be = b.commit.epoch;
+    if (ae == null && be == null) return 0;  // both degraded → keep input order
+    if (ae == null) return 1;                 // degraded sorts after every real epoch
+    if (be == null) return -1;
+    return be - ae;                           // newest epoch first
+  });
+  return { rows, errorCount };
+}
+
+/**
+ * Build the per-agent fetch URL for the fleet recent-commits feed (WARDEN-597):
+ * `/api/git-log?id=<key>&limit=<limit>` — the NO-QUERY recent view. This is the
+ * recent-commits analog of buildFleetSearchBaseUrl, but WITHOUT a grep= / pickaxe=
+ * query param (those two always splice a query; the recent view shows the newest
+ * commits unfiltered). The `limit` reaches /api/git-log, which clamps it to [1,50]
+ * (src/server.js:2398); the component passes a bounded constant (top 20–30 across
+ * the fleet) so the merged feed stays a glance, not a firehose.
+ *
+ * Pure (no fetch) so it is unit-testable without a React runner, mirroring
+ * buildFleetSearchBaseUrl — the URL is the only mode-dependent line in the recent
+ * view's fan-out.
+ */
+export function buildFleetRecentCommitsUrl(key: string, limit: number): string {
+  return `/api/git-log?id=${encodeURIComponent(key)}&limit=${limit}`;
 }
 
 // ---- Fleet-wide working-tree CODE search aggregation (WARDEN-589) ------------
