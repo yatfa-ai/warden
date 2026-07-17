@@ -2509,6 +2509,49 @@ export function capDiff(diff) {
   return Buffer.from(diff, 'utf8').subarray(0, GIT_DIFF_MAX_BYTES).toString('utf8');
 }
 
+// Diff two arbitrary working-tree file CONTENTS against each other (NOT vs HEAD)
+// — the A↔B cross-agent compare (WARDEN-593). Writes both contents to temp files
+// under os.tmpdir() and runs `git diff --no-index`, the SAME diff engine Warden
+// uses everywhere (no new dependency): --no-index diffs two paths git does not
+// track, which is exactly what two agents' independently-staged working-tree blobs
+// are. Output is capped via capDiff (the shared 1MB guard), exactly like
+// /api/git-range-diff. Temp files are removed in a `finally` so a failed diff
+// never leaks scratch files into os.tmpdir().
+//
+// CRITICAL gotcha (load-bearing): `git diff --no-index` exits 1 when the two files
+// DIFFER (that is SUCCESS — a diff was produced) and 0 when they are IDENTICAL.
+// Only exit codes >1 are failures. This inverts the usual "non-zero = error"
+// reading, so the success check is `code === 0 || code === 1`, NOT `r.ok` (which
+// is `code === 0`): reading `r.ok` here would classify EVERY real diff as an error.
+// Exported so the exit-0-identical / exit-1-differ discipline has a direct test.
+export async function diffNoIndex(contentA, contentB, filePath) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-cross-agent-'));
+  try {
+    // A safe basename so the diff header names the file meaningfully; the A-/B-
+    // prefix labels the two sides in the `--- a/.../A-<name>` / `+++ b/.../B-<name>`
+    // headers — the same unified-diff primitive DiffBlock colorizes for every other
+    // diff view. Sanitized + length-capped so a hostile/odd path can't shape the
+    // temp filename.
+    const base = (path.basename(filePath || 'file').replace(/[^A-Za-z0-9._-]/g, '_') || 'file').slice(0, 64);
+    const fileA = path.join(tmpDir, `A-${base}`);
+    const fileB = path.join(tmpDir, `B-${base}`);
+    fs.writeFileSync(fileA, contentA ?? '');
+    fs.writeFileSync(fileB, contentB ?? '');
+    const r = await runLocalCapture('git', ['diff', '--no-index', fileA, fileB]);
+    if (r.code !== 0 && r.code !== 1) {
+      // >1 (or spawn failure → -1): a real git error, not "files differ". Surface
+      // stderr cleanly; never throw (the route folds this into never-500 { diff, error }).
+      const detail = (r.stderr || '').trim();
+      return { error: detail ? `diff failed: ${detail}` : 'diff failed' };
+    }
+    // code 0 → identical (empty stdout); code 1 → differ (a diff was produced). Both
+    // success; an empty stdout on the identical case is the genuine, useful signal.
+    return { diff: capDiff(r.stdout || '') };
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+}
+
 // Build the remote (SSH) shell script that diffs one file vs HEAD under `cwd`.
 // Extracted (and exported) so the fragile shell template is unit-tested directly,
 // the same way buildReadFileScript is. Containment uses `realpath -m` (NOT `-e`):
@@ -2724,6 +2767,65 @@ app.get('/api/git-range-diff', async (req, res) => {
       });
     }
     res.json({ diff: capDiff(r.stdout || ''), error: null });
+  } catch (e) {
+    res.json({ diff: null, error: e.message });
+  }
+});
+
+// ---- Cross-agent A↔B working-tree diff (WARDEN-593) -------------------------
+// The direct compare that answers the ONE question a same-file collision raises:
+// do these two agents' edits actually collide on the same lines, or are they
+// disjoint? Today the "Compare edits" dialog fans out /api/git-diff per agent and
+// renders each agent's diff vs its OWN HEAD as stacked panels — leaving the human
+// to mentally overlay two independent diffs. This route diffs the two agents'
+// CURRENT working-tree versions of the file DIRECTLY against each other, so the
+// overlap (or lack of it) is legible at a glance. Sits ALONGSIDE the per-agent
+// panels (which still answer "what did each agent change"); it does NOT replace
+// them. Strictly read-only (the WARDEN-199 no-mutation line): no 3-way merge
+// editor, no stash/write-back — it informs a human decision, it never makes one.
+//
+//   GET /api/cross-agent-diff?idA=<chatId>&idB=<chatId>&path=<file>
+//     → { diff: string|null, error: string|null }
+//
+// Implementation: resolve BOTH chats (resolve()), read each side's working-tree
+// file CONTENT by reusing the /api/read-file resolution primitives verbatim
+// (readWorkingTreeFile — resolveLocalFile + size/binary/read guards for LOCAL
+// chats; buildReadFileScript + run(host, script) for remote/yatfa), then
+// diffNoIndex() writes both to temp files and runs `git diff --no-index` (git is
+// already the diff engine — no new dependency). This working-tree-content read is
+// what makes the A↔B view handle the untracked/new-file case better than the
+// per-agent vs-HEAD panels: it diffs the bytes on disk regardless of tracked status.
+//
+// Never-500 discipline (mirrors /api/git-range-diff): a read failure on one side,
+// a binary file, a missing/deleted path, or a git error all collapse to
+// { diff: null, error: '<side>: <reason>' } — never thrown, never a 500. The error
+// is prefixed with the side (A/B) so the human knows which agent's read failed.
+// An empty diff is a genuine, useful signal: both working trees are byte-identical
+// → "both agents made the same change — no conflict."
+app.get('/api/cross-agent-diff', async (req, res) => {
+  const filePath = String(req.query.path || '').trim();
+  const idA = String(req.query.idA || '').trim();
+  const idB = String(req.query.idB || '').trim();
+  if (!filePath || !idA || !idB) {
+    return res.status(400).json({ diff: null, error: 'idA, idB, and path are required' });
+  }
+
+  try {
+    // Resolve both chats up front so a bad idA/idB fails fast (404, like /api/git-diff).
+    const [ra, rb] = await Promise.all([resolve(idA), resolve(idB)]);
+    if (ra.error) return res.status(404).json({ diff: null, error: `A: ${ra.error}` });
+    if (rb.error) return res.status(404).json({ diff: null, error: `B: ${rb.error}` });
+
+    // Read each side's working-tree content. A read failure (missing, binary,
+    // traversal, too large) surfaces as '<side>: <reason>' — never a 500.
+    const aRead = await readWorkingTreeFile(ra.chat, filePath);
+    if (aRead.error) return res.json({ diff: null, error: `A: ${aRead.error}` });
+    const bRead = await readWorkingTreeFile(rb.chat, filePath);
+    if (bRead.error) return res.json({ diff: null, error: `B: ${bRead.error}` });
+
+    const r = await diffNoIndex(aRead.content, bRead.content, filePath);
+    if (r.error) return res.json({ diff: null, error: r.error });
+    res.json({ diff: r.diff, error: null });
   } catch (e) {
     res.json({ diff: null, error: e.message });
   }
@@ -3554,6 +3656,56 @@ export function resolveLocalFile(cwd, filePath) {
     return { ok: false, status: 500, error: 'read failed' };
   }
   return { ok: true, resolvedPath };
+}
+
+// Read one agent's CURRENT working-tree file CONTENT (NOT a diff vs HEAD) for the
+// A↔B cross-agent compare (WARDEN-593). Mirrors /api/read-file's transport + guards
+// VERBATIM so a cross-agent read resolves EXACTLY as the FileViewer's single-file
+// read does: LOCAL chats (chat.host === LOCAL) go through resolveLocalFile → 1MB
+// size cap → isBinaryFile (by extension) + isBinaryBlob (NUL in content) →
+// readFileSync; remote/yatfa chats run buildReadFileScript over SSH (which carries
+// the same realpath + cwd-containment + size + binary-extension guards inside the
+// bash), with an isBinaryBlob pass on the returned content to catch a binary file
+// whose extension wasn't on the known list. Returns { content } or { error } —
+// never throws (the route folds .error into its never-500 { diff, error } response).
+// A deleted/missing path (status 'D') fails here and surfaces as 'file not found'.
+async function readWorkingTreeFile(chat, filePath) {
+  const cwd = chat.cwd || '.';
+  if (chat.host === LOCAL) {
+    const resolved = resolveLocalFile(cwd, filePath);
+    if (!resolved.ok) return { error: resolved.error };
+    try {
+      const stats = fs.statSync(resolved.resolvedPath);
+      if (stats.size > 1024 * 1024) return { error: 'file too large (max 1MB)' };
+      if (isBinaryFile(resolved.resolvedPath)) return { error: 'binary file' };
+      const content = fs.readFileSync(resolved.resolvedPath, 'utf8');
+      if (isBinaryBlob(content)) return { error: 'binary file' };
+      return { content };
+    } catch (e) {
+      if (e.code === 'ENOENT') return { error: 'file not found' };
+      if (e.code === 'EISDIR') return { error: 'path is a directory' };
+      return { error: 'read failed' };
+    }
+  }
+  // remote/yatfa: buildReadFileScript + run(host, script) — the same path
+  // /api/read-file takes for a non-LOCAL host. The script's diagnostics ("ERROR
+  // ...") land on stdout; pool/ssh failures land on stderr — check both, mapping
+  // the script's specific guards to the same error strings the local branch uses.
+  const script = buildReadFileScript(cwd, filePath);
+  const result = await run(chat.host, script, { timeout: 10000 });
+  if (!result.ok) {
+    const out = `${result.stdout || ''}${result.stderr || ''}`;
+    if (out.includes('ERROR cannot read binary files')) return { error: 'binary file' };
+    if (out.includes('ERROR file not found')) return { error: 'file not found' };
+    if (out.includes('ERROR path must be within working directory')) return { error: 'path must be within working directory' };
+    if (out.includes('ERROR file too large')) return { error: 'file too large (max 1MB)' };
+    if (out.includes('ERROR invalid path')) return { error: 'invalid path' };
+    if (out.includes('ERROR path is a directory')) return { error: 'path is a directory' };
+    if (out.includes('ERROR not a file')) return { error: 'not a file' };
+    return { error: 'read failed' };
+  }
+  if (isBinaryBlob(result.stdout)) return { error: 'binary file' };
+  return { content: result.stdout };
 }
 
 // POST /api/read-file — read a file from a chat's working directory.

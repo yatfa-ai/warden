@@ -113,3 +113,96 @@ export function reduceCollisionDiffs(
     return { key: agent.key, status: 'ok', diff, error: null };
   });
 }
+
+// ============================================================================
+// A↔B cross-agent working-tree diff (WARDEN-593)
+// ============================================================================
+// The per-agent reducer above classifies each agent's diff vs its OWN HEAD. This
+// sibling reducer classifies the SINGLE A↔B diff — two agents' CURRENT working-tree
+// versions of the same colliding path, diffed DIRECTLY against each other by
+// /api/cross-agent-diff (server.js) — so the dialog can render the top "A ↔ B
+// overlap" panel that answers the one question a collision raises (do the edits
+// overlap?) without making the human mentally overlay two independent vs-HEAD diffs.
+// Mirrors reduceCollisionDiffs' discipline: the fetch wraps its single request in
+// Promise.allSettled so the rejected→error mapping lives in THIS testable pure seam,
+// never in the component.
+
+/** /api/cross-agent-diff response shape (server.js /api/cross-agent-diff): a direct
+ *  A↔B diff of two agents' working-tree file content. `diff` is null on error or
+ *  an empty string when the two working trees are byte-identical. */
+export interface CrossAgentDiffResult {
+  diff: string | null;
+  error?: string | null;
+}
+
+/** The A↔B overlap panel classification the dialog branches on. Ordered from most-
+ *  to least-useful. 'identical' is DISTINCT from the per-agent 'empty' status: here
+ *  it means the two agents' working trees are byte-identical → "both made the same
+ *  change, no conflict" — a genuine resolution signal, not a no-op or a missing
+ *  diff. (The per-agent 'empty' means one agent matches its OWN HEAD — different
+ *  question, different word.) */
+export type CrossAgentDiffStatus = 'differ' | 'identical' | 'error';
+
+/** The A↔B overlap panel model. Display fields (the two agents' names/hosts) are
+ *  intentionally NOT here — the React layer joins keyA/keyB → displayName/host via
+ *  findChat + gitStatus, exactly as the per-agent panels do for one key. Keeping
+ *  the helper display-field-free is what makes it pure + testable with plain objs. */
+export interface CrossAgentDiffPanel {
+  keyA: string;
+  keyB: string;
+  status: CrossAgentDiffStatus;
+  /** The diff text. Empty unless status === 'differ' — `status` disambiguates WHY. */
+  diff: string;
+  /** A human-readable reason when status === 'error'; null otherwise. The server
+   *  prefixes the failing side (e.g. "A: file not found"); pass it straight through. */
+  error: string | null;
+}
+
+/**
+ * Reduce the single /api/cross-agent-diff fetch outcome into an A↔B overlap panel.
+ *
+ * `result` is the `PromiseSettledResult` of the one fetch (the dialog wraps its
+ * request in `Promise.allSettled([fetch(...)])[0]` so this reducer owns the
+ * rejected→error mapping, mirroring reduceCollisionDiffs). Classification:
+ *  - rejected promise          → 'error' (a network throw / unreachable host;
+ *                                 reason.message if an Error, else stringified)
+ *  - fulfilled with `.error`   → 'error' (a read failure on one side, binary file,
+ *                                 missing path, git error — the server prefixes the
+ *                                 side, e.g. "A: file not found")
+ *  - fulfilled, non-empty diff → 'differ' (the two working trees diverge → render it)
+ *  - fulfilled, empty/null diff → 'identical' (both agents made the same change —
+ *                                 no conflict; the resolution the dialog exists to surface)
+ *
+ * A missing outcome (undefined — fewer than 2 agents, or a buggy call site) is
+ * 'error' rather than crashing, so a mis-sized call surfaces instead of rendering
+ * a broken panel.
+ */
+export function reduceCrossAgentDiff(
+  keyA: string,
+  keyB: string,
+  result: PromiseSettledResult<CrossAgentDiffResult> | undefined,
+): CrossAgentDiffPanel {
+  if (!result) {
+    return { keyA, keyB, status: 'error', diff: '', error: 'unreachable' };
+  }
+  if (result.status === 'rejected') {
+    const reason = result.reason;
+    const error = reason instanceof Error
+      ? reason.message
+      : (reason === undefined || reason === null ? 'unreachable' : String(reason));
+    return { keyA, keyB, status: 'error', diff: '', error };
+  }
+  const v = result.value ?? {};
+  // The server folds every error shape (non-ok HTTP, 200-with-error, thrown-and-
+  // caught) into `.error`, often prefixed with the failing side (A:/B:).
+  if (v.error) {
+    return { keyA, keyB, status: 'error', diff: '', error: String(v.error) };
+  }
+  const diff = v.diff ?? '';
+  if (diff.length === 0) {
+    // The two working trees are byte-identical — a genuine "both made the same
+    // change, no conflict" signal, NOT a missing diff. Distinct from per-agent 'empty'.
+    return { keyA, keyB, status: 'identical', diff: '', error: null };
+  }
+  return { keyA, keyB, status: 'differ', diff, error: null };
+}

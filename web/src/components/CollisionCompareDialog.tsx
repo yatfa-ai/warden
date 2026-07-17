@@ -44,9 +44,18 @@ import {
   FileIcon,
   AlertCircleIcon,
   ExternalLink,
+  ArrowLeftRight,
+  CheckCircle2,
 } from 'lucide-react';
 import { DiffBlock } from './DiffBlock';
-import { reduceCollisionDiffs, type CollisionDiffPanel, type GitDiffResult } from '@/lib/collisionCompare';
+import {
+  reduceCollisionDiffs,
+  reduceCrossAgentDiff,
+  type CollisionDiffPanel,
+  type CrossAgentDiffPanel,
+  type CrossAgentDiffResult,
+  type GitDiffResult,
+} from '@/lib/collisionCompare';
 import type { FileCollision } from '@/lib/gitStateSummary';
 import { displayName, hostTagOf } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
@@ -73,6 +82,13 @@ export function CollisionCompareDialog({ open, onOpenChange, path, agents, chats
   // encoded per-panel, not by rejecting the whole fan-out).
   const [panels, setPanels] = useState<CollisionDiffPanel[] | null>(null);
 
+  // The A↔B overlap panel (WARDEN-593): a DIRECT diff of the first two agents'
+  // working-tree versions of the path, so the overlap (or lack of it) is legible
+  // without mentally overlaying the two vs-HEAD panels below. null = in flight OR
+  // <2 agents (nothing to pair); otherwise a single CrossAgentDiffPanel. Set in
+  // the SAME effect as the per-agent fan-out so the two land together.
+  const [abPanel, setAbPanel] = useState<CrossAgentDiffPanel | null>(null);
+
   // Stable identity for the effect dep so a new `agents` array reference each
   // parent render does NOT re-trigger the fan-out. The actual fetch keys are this
   // joined string; same keys → same value → effect skips.
@@ -81,12 +97,14 @@ export function CollisionCompareDialog({ open, onOpenChange, path, agents, chats
   useEffect(() => {
     if (!open || !path || agents.length === 0) {
       setPanels(null);
+      setAbPanel(null);
       return;
     }
 
     let cancelled = false;
     const keys = agents.map((a) => a.key);
     setPanels(null);
+    setAbPanel(null);
 
     // Fan out one /api/git-diff per colliding agent. Promise.allSettled (not
     // Promise.all) so a single down host never aborts the reachable ones — each
@@ -94,8 +112,15 @@ export function CollisionCompareDialog({ open, onOpenChange, path, agents, chats
     // fetch callback normalizes a non-ok HTTP status into `{ error }` (mirroring
     // broadcast.ts's fan-out mapping of 404/500 → { ok:false, error }) so the
     // reducer sees only settled data, never a Response object.
+    //
+    // Concurrently, for the common ≥2-agent case, fetch the SINGLE A↔B diff
+    // (/api/cross-agent-diff) for the first two agents and reduce it through
+    // reduceCrossAgentDiff — the same settled-result → status discipline as the
+    // per-agent reducer, so the rejected→error mapping stays in the tested pure
+    // seam. The two fetches run in parallel via Promise.all so the A↔B panel
+    // doesn't add a sequential round-trip on top of the per-agent fan-out.
     (async () => {
-      const results = await Promise.allSettled(
+      const perAgentPromise = Promise.allSettled(
         keys.map((id) =>
           fetch(`/api/git-diff?id=${encodeURIComponent(id)}&path=${encodeURIComponent(path)}`)
             .then(async (r): Promise<GitDiffResult> => {
@@ -105,8 +130,22 @@ export function CollisionCompareDialog({ open, onOpenChange, path, agents, chats
             }),
         ),
       );
+      // Wrap the single A↔B fetch in Promise.allSettled so the reducer receives a
+      // PromiseSettledResult (rejected → 'error' lives in the pure seam, not here).
+      const abPromise: Promise<PromiseSettledResult<CrossAgentDiffResult> | undefined> = keys.length >= 2
+        ? Promise.allSettled([
+            fetch(`/api/cross-agent-diff?idA=${encodeURIComponent(keys[0])}&idB=${encodeURIComponent(keys[1])}&path=${encodeURIComponent(path)}`)
+              .then(async (r): Promise<CrossAgentDiffResult> => {
+                const j = await r.json().catch(() => ({}));
+                if (!r.ok) return { diff: null, error: j.error || `HTTP ${r.status}` };
+                return { diff: j.diff ?? null, error: j.error ?? null };
+              }),
+          ]).then((a) => a[0])
+        : Promise.resolve(undefined);
+      const [results, abOutcome] = await Promise.all([perAgentPromise, abPromise]);
       if (cancelled) return;
       setPanels(reduceCollisionDiffs(agents, results));
+      setAbPanel(keys.length >= 2 ? reduceCrossAgentDiff(keys[0], keys[1], abOutcome) : null);
     })();
 
     return () => { cancelled = true; };
@@ -129,22 +168,44 @@ export function CollisionCompareDialog({ open, onOpenChange, path, agents, chats
             <span className="truncate" title={path}>{path || 'collision'}</span>
           </DialogTitle>
           <DialogDescription>
-            {count} agent{count === 1 ? '' : 's'} editing this file — each panel below is one agent's uncommitted diff vs HEAD. Stacked so you can see whether the touched regions overlap (true conflict) or are disjoint (false alarm).
+            {count} agent{count === 1 ? '' : 's'} editing this file — the <span className="text-amber-400/90">A ↔ B overlap</span> panel directly compares two agents’ working-tree versions so you can see whether their edits collide (true conflict) or are disjoint (false alarm). The panels below show each agent’s own change vs HEAD.
           </DialogDescription>
         </DialogHeader>
 
         <ScrollArea className="flex-1 min-h-0">
           <div className="flex flex-col gap-2 p-1 pr-3">
             {loading && (
-              // One skeleton per agent so the human sees how many panels are
-              // coming and roughly where, rather than a single opaque spinner.
-              Array.from({ length: Math.max(count, 1) }).map((_, i) => (
-                <div key={i} className="rounded-md border border-border p-2">
-                  <Skeleton className="h-4 w-40" />
-                  <Skeleton className="mt-2 h-2 w-full" />
-                  <Skeleton className="mt-1 h-2 w-3/4" />
-                </div>
-              ))
+              // The A↔B overlap skeleton (only when ≥2 agents — there is no A↔B
+              // panel to pair otherwise), then one skeleton per agent so the human
+              // sees how many panels are coming and roughly where, rather than a
+              // single opaque spinner.
+              <>
+                {count >= 2 && (
+                  <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-2">
+                    <Skeleton className="h-4 w-56" />
+                    <Skeleton className="mt-2 h-2 w-full" />
+                    <Skeleton className="mt-1 h-2 w-2/3" />
+                  </div>
+                )}
+                {Array.from({ length: Math.max(count, 1) }).map((_, i) => (
+                  <div key={i} className="rounded-md border border-border p-2">
+                    <Skeleton className="h-4 w-40" />
+                    <Skeleton className="mt-2 h-2 w-full" />
+                    <Skeleton className="mt-1 h-2 w-3/4" />
+                  </div>
+                ))}
+              </>
+            )}
+
+            {!loading && abPanel !== null && count >= 2 && (
+              <AbOverlapPanel
+                panel={abPanel}
+                chatA={findChat(chats, abPanel.keyA)}
+                chatB={findChat(chats, abPanel.keyB)}
+                branchA={gitStatus[abPanel.keyA]?.branch ?? null}
+                branchB={gitStatus[abPanel.keyB]?.branch ?? null}
+                totalAgents={count}
+              />
             )}
 
             {!loading && panels !== null && panels.length === 0 && (
@@ -262,6 +323,98 @@ function PanelBody({ panel }: { panel: CollisionDiffPanel }) {
       return (
         <div className="flex items-center gap-1.5 py-1 text-[11px] text-muted-foreground">
           <span>No changes — file matches HEAD. This agent may no longer be editing it.</span>
+        </div>
+      );
+    case 'error':
+      return (
+        <div className="flex items-start gap-1.5 py-1 text-[11px] text-red-400">
+          <AlertCircleIcon className="mt-px w-3.5 h-3.5 shrink-0" />
+          <span className="break-words">{panel.error}</span>
+        </div>
+      );
+    default:
+      return null;
+  }
+}
+
+/** The top "A ↔ B overlap" panel — a DIRECT, read-only diff of the two agents'
+ *  CURRENT working-tree versions of the colliding path (WARDEN-593). It answers the
+ *  one question a same-file collision raises — do the edits collide on the same
+ *  lines, or are they disjoint? — so the human no longer has to mentally overlay the
+ *  two vs-HEAD panels below. Sits ABOVE the per-agent panels (which stay unchanged,
+ *  still answering "what did each agent change"). Renders through the same stateless
+ *  DiffBlock the per-agent panels use, so an overlap reads identically to each
+ *  agent's own diff.
+ *
+ *  >2-agent edge case: a cross-agent diff is inherently PAIRWISE, so v1 compares the
+ *  FIRST two agents and notes "showing first two of N" rather than silently rendering
+ *  a wrong/empty panel for the 3+ case. The per-agent panels below still cover every
+ *  agent, so no contributor is hidden. */
+function AbOverlapPanel({ panel, chatA, chatB, branchA, branchB, totalAgents }: {
+  panel: CrossAgentDiffPanel;
+  chatA: Chat | undefined;
+  chatB: Chat | undefined;
+  branchA: string | null;
+  branchB: string | null;
+  totalAgents: number;
+}) {
+  const hostLabels = useHostLabels();
+  const nameA = displayName(chatA);
+  const nameB = displayName(chatB);
+  const hostA = chatA ? hostTagOf(chatA.host || '', hostLabels) : '?';
+  const hostB = chatB ? hostTagOf(chatB.host || '', hostLabels) : '?';
+  // >2 colliding agents: the pairwise A↔B compares the first two; call it out so the
+  // human isn't misled into thinking N agents were all pairwise-resolved.
+  const more = totalAgents > 2 ? totalAgents : 0;
+
+  return (
+    <section className="rounded-md border border-amber-500/40 bg-amber-500/[0.04]">
+      {/* Header: A ↔ B label · agent A · vs · agent B · (first-two-of-N note). */}
+      <div className="flex flex-wrap items-center gap-1.5 px-2 py-1.5 border-b border-amber-500/20 bg-amber-500/[0.06]">
+        <ArrowLeftRight className="w-3.5 h-3.5 shrink-0 text-amber-400/90" />
+        <span className="text-xs font-medium text-foreground">A ↔ B working-tree overlap</span>
+        <span className="ml-1 min-w-0 truncate text-xs">
+          <span className="font-medium text-foreground" title={nameA}>{nameA}</span>
+          <span className="ml-1 text-muted-foreground">· {hostA}</span>
+          {branchA && <span className="ml-1 text-cyan-400/80" title={branchA}>⎇ {branchA}</span>}
+        </span>
+        <span className="text-[10px] text-muted-foreground">vs</span>
+        <span className="min-w-0 truncate text-xs">
+          <span className="font-medium text-foreground" title={nameB}>{nameB}</span>
+          <span className="ml-1 text-muted-foreground">· {hostB}</span>
+          {branchB && <span className="ml-1 text-cyan-400/80" title={branchB}>⎇ {branchB}</span>}
+        </span>
+        {more > 0 && (
+          <span className="ml-auto text-[10px] text-muted-foreground">(showing first 2 of {more})</span>
+        )}
+      </div>
+
+      <div className="p-2">
+        <AbOverlapBody panel={panel} />
+      </div>
+    </section>
+  );
+}
+
+/** The diff/identical/error body of the A↔B overlap panel, branched on the pure
+ *  reducer's status. 'differ' renders the direct working-tree diff; 'identical' is
+ *  the resolution signal (both sides made the same change — no conflict); 'error'
+ *  surfaces the server-prefixed reason (e.g. "A: file not found"). Mirrors
+ *  PanelBody's branch vocabulary so the outcomes read consistently. */
+function AbOverlapBody({ panel }: { panel: CrossAgentDiffPanel }) {
+  switch (panel.status) {
+    case 'differ':
+      // The two working trees diverge — render the direct diff. A diff with NO
+      // hunks touching the SAME line on both sides still reads as disjoint edits;
+      // the human reads the overlap from the rendered hunks, same as any diff.
+      return <DiffBlock diff={panel.diff} />;
+    case 'identical':
+      // The load-bearing A↔B signal: both agents' working trees are byte-identical
+      // for this file → the collision is a false alarm (same change on both sides).
+      return (
+        <div className="flex items-center gap-1.5 py-1 text-[11px] text-emerald-400">
+          <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+          <span>No conflict — both agents’ working trees are identical for this file (same change on both sides).</span>
         </div>
       );
     case 'error':
