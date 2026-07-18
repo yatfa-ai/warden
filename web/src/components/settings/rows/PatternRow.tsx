@@ -113,7 +113,7 @@ export function PatternRow({
             if (e.key === 'Enter') e.currentTarget.blur();
             if (e.key === 'Escape') setExprDraft(pattern.expression);
           }}
-          className="h-8"
+          className="h-8 flex-1"
           placeholder={pattern.mode === 'regex' ? 'regex (e.g. payment (required|due))' : 'text to match (e.g. merge conflict)'}
           aria-label={`${pattern.name} match expression`}
           maxLength={WATCH_PATTERN_EXPRESSION_MAX}
