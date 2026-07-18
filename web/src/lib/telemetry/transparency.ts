@@ -35,7 +35,7 @@ import { redact, CONTENT_FIELDS, IDENTIFIER_FIELDS } from './redact';
 // ---------------------------------------------------------------------------
 
 /** Shared cross-repo schema version (client + receiver agree on a version). */
-export const SCHEMA_VERSION = 3 as const;
+export const SCHEMA_VERSION = 4 as const;
 
 /** The three anonymous base-event types a consent-gated client may emit. */
 export const BASE_EVENT_TYPES: ReadonlyArray<string> = Object.freeze([

@@ -34,11 +34,23 @@
 // shared cross-repo contract (client + receiver agree on a version).
 // ---------------------------------------------------------------------------
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall']);
 
 const RUNTIME = Object.freeze({ MAIN: 'main', RENDERER: 'renderer' });
+
+// WARDEN-687 — the synthetic `reason` for a main-process hard kill detected on
+// the NEXT launch by the crash sentinel (electron/crash-sentinel.cjs). A hard
+// kill (native segfault / OOM-kill / SIGKILL / power loss / abrupt process.exit)
+// bypasses `uncaughtExceptionMonitor` (which intercepts JS exceptions only), so
+// the reporter dies with the crash and emits nothing. The sentinel turns that
+// undetectable death into one normal base-tier crash event with this reason — a
+// fixed, non-identifying string (no message, no frames, no chat/session names).
+// It is NOT one of Electron's render-process-gone enums (oom/crashed/killed/…);
+// it is its own value so a maintainer can distinguish a detected main kill from a
+// renderer crash in /summary.
+const MAIN_CRASH_REASON = 'unexpected-termination';
 
 // Event-loop freeze heartbeat: poll every HEARTBEAT_INTERVAL_MS; if a tick
 // arrives more than STALL_THRESHOLD_MS past the expected cadence, the loop was
@@ -259,12 +271,17 @@ function buildCrashEvent(details, opts) {
   const o = opts || {};
   const d = details && typeof details === 'object' ? details : {};
   // Electron render-process-gone `reason` is a fixed enum (oom, crashed, killed,
-  // abnormal-exit, …) — not identifying — so it is passed through verbatim.
+  // abnormal-exit, …) — not identifying — so it is passed through verbatim. The
+  // crash sentinel (WARDEN-687) passes its own MAIN_CRASH_REASON here instead.
   const reason = typeof d.reason === 'string' && d.reason ? d.reason : 'unknown';
   const event = {
     schemaVersion: SCHEMA_VERSION,
     type: 'crash',
-    runtime: RUNTIME.RENDERER, // a render-process-gone is, by definition, the renderer
+    // WARDEN-687: a crash defaults to the renderer (a render-process-gone IS the
+    // renderer, so onRenderGone — which calls without a runtime — is byte-identical).
+    // An explicit `runtime: RUNTIME.MAIN` opts into a main-runtime crash event for a
+    // hard kill detected by the crash sentinel. Any other/absent value → renderer.
+    runtime: o.runtime === RUNTIME.MAIN ? RUNTIME.MAIN : RUNTIME.RENDERER,
     timestamp: typeof o.now === 'number' ? o.now : Date.now(),
     reason,
   };
@@ -606,6 +623,28 @@ function createTelemetrySource(opts) {
       if (!baseConsent) return;
       emit(buildErrorEvent(serialized, { now: nowFn(), runtime: RUNTIME.RENDERER, ...extendedNameFields(), ...versionOpt, ...platformOpt }));
     },
+    // WARDEN-687 — consent-gated entry point for a MAIN-process hard kill detected
+    // on the NEXT launch by the crash sentinel (electron/crash-sentinel.cjs). A hard
+    // kill (native segfault / OOM-kill / SIGKILL / power loss / abrupt process.exit)
+    // bypasses uncaughtExceptionMonitor, so the prior instance died emitting NOTHING;
+    // the sentinel writes a per-PID marker at startup and, on the next launch, finds
+    // markers whose PID is dead and calls this once per crashed instance. Mirrors
+    // recordRendererError: gated at the top (the FIRST "off = nothing" layer) so off =
+    // nothing is built or recorded; the emit() gate is the second layer.
+    //
+    // DELIBERATELY omits extendedNameFields(): the crash happened in a PRIOR session,
+    // so the current launch's focused chat/session name would be a wrong-session
+    // correlation. Per the WARDEN-687 trust model the event carries NO chat/session
+    // names — only the synthetic MAIN_CRASH_REASON + the session-independent
+    // appVersion/platform labels (a maintainer can still attribute the crash to a
+    // release/OS). buildCrashEvent honors the explicit `runtime: RUNTIME.MAIN`.
+    recordMainCrash() {
+      if (!baseConsent) return;
+      emit(buildCrashEvent(
+        { reason: MAIN_CRASH_REASON },
+        { now: nowFn(), runtime: RUNTIME.MAIN, ...versionOpt, ...platformOpt },
+      ));
+    },
     isConsentOn() {
       return baseConsent;
     },
@@ -626,6 +665,7 @@ module.exports = {
   SCHEMA_VERSION,
   BASE_EVENT_TYPES,
   RUNTIME,
+  MAIN_CRASH_REASON,
   DEFAULT_HEARTBEAT_INTERVAL_MS,
   DEFAULT_STALL_THRESHOLD_MS,
   UNCAUGHT_EVENT,
