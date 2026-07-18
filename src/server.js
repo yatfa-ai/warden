@@ -3577,54 +3577,89 @@ export function resolveLocalFile(cwd, filePath) {
   return { ok: true, resolvedPath };
 }
 
-// Read one agent's CURRENT working-tree file CONTENT (NOT a diff vs HEAD) for the
-// A↔B cross-agent compare (WARDEN-593). Mirrors /api/read-file's transport + guards
-// VERBATIM so a cross-agent read resolves EXACTLY as the FileViewer's single-file
-// read does: LOCAL chats (chat.host === LOCAL) go through resolveLocalFile → 1MB
-// size cap → isBinaryFile (by extension) + isBinaryBlob (NUL in content) →
-// readFileSync; remote/yatfa chats run buildReadFileScript over SSH (which carries
-// the same realpath + cwd-containment + size + binary-extension guards inside the
-// bash), with an isBinaryBlob pass on the returned content to catch a binary file
-// whose extension wasn't on the known list. Returns { content } or { error } —
-// never throws (the route folds .error into its never-500 { diff, error } response).
-// A deleted/missing path (status 'D') fails here and surfaces as 'file not found'.
-async function readWorkingTreeFile(chat, filePath) {
+// Map the remote read-script's diagnostics ("ERROR ...") to the canonical
+// { status, error } the LOCAL branch of readChatFile produces. ONE shared table
+// used by readChatFile's remote branch so a new facet added to buildReadFileScript
+// (a new binary extension, a new ERROR reason) lands here once instead of being
+// hand-copied into two parallel if-ladders — the per-new-facet drift tax that
+// once left readWorkingTreeFile and /api/read-file disagreeing on the binary
+// vocabulary ('binary file' vs 'cannot read binary files'). The script emits at
+// most ONE "ERROR ..." line then exits, so these out.includes() checks can never
+// overlap; order is therefore irrelevant. Returns { status, error }.
+function mapReadScriptError(out) {
+  if (out.includes('ERROR invalid path')) return { status: 400, error: 'invalid path' };
+  if (out.includes('ERROR file not found')) return { status: 404, error: 'file not found' };
+  if (out.includes('ERROR path must be within working directory')) return { status: 403, error: 'path must be within working directory' };
+  if (out.includes('ERROR path is a directory')) return { status: 400, error: 'path is a directory' };
+  if (out.includes('ERROR not a file')) return { status: 400, error: 'not a file' };
+  if (out.includes('ERROR file too large')) return { status: 413, error: 'file too large (max 1MB)' };
+  if (out.includes('ERROR cannot read binary files')) return { status: 400, error: 'cannot read binary files' };
+  return { status: 500, error: 'read failed' };
+}
+
+// The ONE shared local-vs-remote read-with-guards orchestration. Used by BOTH
+// POST /api/read-file (the FileViewer single-file read) and readWorkingTreeFile
+// (the A↔B cross-agent compare), so a future guard added here is paid ONCE
+// instead of drifted across two hand-maintained copies (WARDEN-674). Returns a
+// canonical discriminated result: { ok: true, content } | { ok: false, status, error }.
+//
+// LOCAL chats (chat.host === LOCAL): resolveLocalFile → 1MB statSync cap →
+// isBinaryFile (by extension) → readFileSync → isBinaryBlob (NUL in content).
+// REMOTE/yatfa chats: buildReadFileScript + run(host, script) — the script
+// carries the same realpath + cwd-containment + size + binary-extension guards
+// inside the bash, emitting "ERROR ..." diagnostics — then an isBinaryBlob pass
+// on the returned stdout to catch a binary file whose extension wasn't known.
+//
+// This is the canonical rule set that reconciles the two former copies: it
+// ADOPTS readWorkingTreeFile's isBinaryBlob-on-local check (closing the gap where
+// /api/read-file used to serve a binary-blob .txt/.log the compare already
+// rejected) and /api/read-file's 'cannot read binary files' vocabulary (so the
+// two no longer disagree on the string). Neither spec suite exercises a
+// local text-extension file containing NUL bytes (both test binary by EXTENSION,
+// caught earlier by isBinaryFile), so adopting the stricter check is a pure
+// correctness improvement with zero spec regression.
+async function readChatFile(chat, filePath) {
   const cwd = chat.cwd || '.';
   if (chat.host === LOCAL) {
     const resolved = resolveLocalFile(cwd, filePath);
-    if (!resolved.ok) return { error: resolved.error };
+    if (!resolved.ok) return { ok: false, status: resolved.status, error: resolved.error };
     try {
       const stats = fs.statSync(resolved.resolvedPath);
-      if (stats.size > 1024 * 1024) return { error: 'file too large (max 1MB)' };
-      if (isBinaryFile(resolved.resolvedPath)) return { error: 'binary file' };
+      if (stats.size > 1024 * 1024) return { ok: false, status: 413, error: 'file too large (max 1MB)' };
+      if (isBinaryFile(resolved.resolvedPath)) return { ok: false, status: 400, error: 'cannot read binary files' };
       const content = fs.readFileSync(resolved.resolvedPath, 'utf8');
-      if (isBinaryBlob(content)) return { error: 'binary file' };
-      return { content };
+      if (isBinaryBlob(content)) return { ok: false, status: 400, error: 'cannot read binary files' };
+      return { ok: true, content };
     } catch (e) {
-      if (e.code === 'ENOENT') return { error: 'file not found' };
-      if (e.code === 'EISDIR') return { error: 'path is a directory' };
-      return { error: 'read failed' };
+      if (e.code === 'ENOENT') return { ok: false, status: 404, error: 'file not found' };
+      if (e.code === 'EISDIR') return { ok: false, status: 400, error: 'path is a directory' };
+      return { ok: false, status: 500, error: 'read failed' };
     }
   }
-  // remote/yatfa: buildReadFileScript + run(host, script) — the same path
-  // /api/read-file takes for a non-LOCAL host. The script's diagnostics ("ERROR
-  // ...") land on stdout; pool/ssh failures land on stderr — check both, mapping
-  // the script's specific guards to the same error strings the local branch uses.
+  // remote/yatfa: buildReadFileScript + run(host, script). The script's
+  // diagnostics ("ERROR ...") land on stdout; pool/ssh failures land on stderr —
+  // mapReadScriptError inspects both via the shared table.
   const script = buildReadFileScript(cwd, filePath);
   const result = await run(chat.host, script, { timeout: 10000 });
   if (!result.ok) {
     const out = `${result.stdout || ''}${result.stderr || ''}`;
-    if (out.includes('ERROR cannot read binary files')) return { error: 'binary file' };
-    if (out.includes('ERROR file not found')) return { error: 'file not found' };
-    if (out.includes('ERROR path must be within working directory')) return { error: 'path must be within working directory' };
-    if (out.includes('ERROR file too large')) return { error: 'file too large (max 1MB)' };
-    if (out.includes('ERROR invalid path')) return { error: 'invalid path' };
-    if (out.includes('ERROR path is a directory')) return { error: 'path is a directory' };
-    if (out.includes('ERROR not a file')) return { error: 'not a file' };
-    return { error: 'read failed' };
+    return { ok: false, ...mapReadScriptError(out) };
   }
-  if (isBinaryBlob(result.stdout)) return { error: 'binary file' };
-  return { content: result.stdout };
+  if (isBinaryBlob(result.stdout)) return { ok: false, status: 400, error: 'cannot read binary files' };
+  return { ok: true, content: result.stdout };
+}
+
+// Read one agent's CURRENT working-tree file CONTENT (NOT a diff vs HEAD) for the
+// A↔B cross-agent compare (WARDEN-593). A thin fold over readChatFile (the shared
+// read-with-guards orchestration also used by /api/read-file) so the two paths
+// resolve identically — no per-new-facet drift, no split binary vocabulary.
+// Returns { content } on success or { error } on any read failure — never throws
+// (the /api/cross-agent-diff route folds .error into its never-500
+// { diff, error } response, prefixing the failing side A/B). A deleted/missing
+// path (status 'D') fails here and surfaces as 'file not found'.
+async function readWorkingTreeFile(chat, filePath) {
+  const r = await readChatFile(chat, filePath);
+  return r.ok ? { content: r.content } : { error: r.error };
 }
 
 // POST /api/read-file — read a file from a chat's working directory.
@@ -3637,61 +3672,15 @@ app.post('/api/read-file', async (req, res) => {
   const filePath = String(req.body?.path || '').trim();
   if (!filePath) return res.status(400).json({ error: 'path is required' });
 
-  const chat = r.chat;
-  const cwd = chat.cwd || '.';
-
-  // Security: resolve the path and verify it's within the chat's working directory.
-  // The shared resolution (realpath + cwd-containment + is-file) lives in
-  // resolveLocalFile so /api/file-exists enforces the identical rule; read-file
-  // then layers the 1MB/binary/read guards on top of the resolved path.
-  if (chat.host === LOCAL) {
-    const resolved = resolveLocalFile(cwd, filePath);
-    if (!resolved.ok) return res.status(resolved.status).json({ error: resolved.error });
-
-    try {
-      // Check file size (limit to 1MB to prevent server issues)
-      const stats = fs.statSync(resolved.resolvedPath);
-      if (stats.size > 1024 * 1024) {
-        return res.status(413).json({ error: 'file too large (max 1MB)' });
-      }
-
-      // Check for binary files by extension
-      if (isBinaryFile(resolved.resolvedPath)) {
-        return res.status(400).json({ error: 'cannot read binary files' });
-      }
-
-      // Read file content
-      const content = fs.readFileSync(resolved.resolvedPath, 'utf8');
-      return res.json({ content, path: filePath });
-    } catch (e) {
-      if (e.code === 'ENOENT') return res.status(404).json({ error: 'file not found' });
-      if (e.code === 'EISDIR') return res.status(400).json({ error: 'path is a directory' });
-      return res.status(500).json({ error: 'read failed' });
-    }
-  } else {
-    // Remote host: use SSH to read the file
-    // Build a safe command that reads the file and validates the path
-    // Security: use realpath -e to resolve symlinks and validate the final target
-    // Also check for binary files by extension
-    const script = buildReadFileScript(cwd, filePath);
-
-    const result = await run(chat.host, script, { timeout: 10000 });
-    if (!result.ok) {
-      // The remote script writes its diagnostics ("ERROR ...") via `echo` on stdout;
-      // pool/ssh failures land on stderr. Check both so specific errors map correctly.
-      const out = `${result.stdout || ''}${result.stderr || ''}`;
-      if (out.includes('ERROR invalid path')) return res.status(400).json({ error: 'invalid path' });
-      if (out.includes('ERROR file not found')) return res.status(404).json({ error: 'file not found' });
-      if (out.includes('ERROR path must be within working directory')) return res.status(403).json({ error: 'path must be within working directory' });
-      if (out.includes('ERROR path is a directory')) return res.status(400).json({ error: 'path is a directory' });
-      if (out.includes('ERROR not a file')) return res.status(400).json({ error: 'not a file' });
-      if (out.includes('ERROR file too large')) return res.status(413).json({ error: 'file too large (max 1MB)' });
-      if (out.includes('ERROR cannot read binary files')) return res.status(400).json({ error: 'cannot read binary files' });
-      return res.status(500).json({ error: 'read failed' });
-    }
-
-    return res.json({ content: result.stdout, path: filePath });
-  }
+  // The local-vs-remote read-with-guards orchestration (resolve + 1MB + binary +
+  // read, plus the remote ERROR→{status,error} mapping) lives in ONE place —
+  // readChatFile — shared with readWorkingTreeFile so the two paths can't drift
+  // apart on a new guard or a new error string (WARDEN-674). The handler keeps
+  // only its own pre-checks (the chat-resolution 404 and the `path is required`
+  // 400) and the response shaping ({content, path} / {error}).
+  const result = await readChatFile(r.chat, filePath);
+  if (!result.ok) return res.status(result.status).json({ error: result.error });
+  return res.json({ content: result.content, path: filePath });
 });
 
 // POST /api/file-exists — lightweight existence probe for the in-terminal file
