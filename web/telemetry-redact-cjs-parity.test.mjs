@@ -97,6 +97,13 @@ const BATTERY = [
   true,
   'leak: AKIAIOSFODNN7EXAMPLE and /home/a/b and ubuntu@host.local',
   '',
+  // Structured stack frames (WARDEN-680): a frame's `file`/`function` source
+  // basename must survive while host-shaped values still redact. Guards the
+  // mirror against drift on the frame-scoped preserveSource path across every
+  // tier — basename, host-shaped, dotted-host, and a ccTLD-colliding extension.
+  { frames: [{ function: 'handleSend', file: 'server.js', line: 601, column: 12 }, { function: 'render', file: 'App.tsx' }, { file: 'telemetry-pipeline.cjs' }] },
+  { error: { name: 'TypeError', message: 'boom at api.github.com and server.js', frames: [{ file: 'server.js', line: 1 }, { file: 'api.github.com', line: 443 }, { file: 'prod-db-01.corp.local' }] } },
+  { frames: [{ file: 'config.json' }, { file: 'index.ts' }, { file: 'main.cjs' }, { function: 'Object.defineProperty', file: 'redact.ts' }, { file: 'example.py' }] },
 ];
 
 console.log('\nparity — cjsRedact === tsRedact across the battery × every tier');

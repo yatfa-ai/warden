@@ -129,16 +129,54 @@ export function redact(payload: unknown, opts: RedactOptions = {}): unknown {
   return scrubValue(payload, allowNames);
 }
 
+// Source-code file extensions (lowercased, no leading dot). A stack frame's
+// `file`/`function` basename whose FINAL dot-segment is in this set is a source
+// filename, NOT a hostname, and must survive the FQDN rule (WARDEN-680). The
+// discriminator is the final dot-segment only: `server.js` → `js` (preserve),
+// `api.github.com` → `com` (redact), `prod-db-01.corp.local` → `local` (redact).
+// Several suffixes are simultaneously source extensions AND country-code TLDs
+// (`.ts`/Tunisia, `.py`/Paraguay, `.rs`/Serbia, `.sh`/Saint Helena, `.pl`/…);
+// that collision is harmless because this set is consulted ONLY in the
+// structured frame-field scrub path (the value was extracted from a real file
+// path by basename()) — never in generic free text. 1-char extensions (`.c`,
+// `.h`, `.s`) never reach rule 8 (its regex floor is `[A-Za-z]{2,}`), so they
+// are auto-preserved and intentionally omitted here.
+const SOURCE_EXTENSIONS: ReadonlySet<string> = new Set([
+  'js', 'jsx', 'ts', 'tsx', 'cjs', 'mjs', 'mts', 'json', 'json5', 'jsonc',
+  'html', 'htm', 'css', 'scss', 'sass', 'vue', 'svelte', 'astro',
+  'py', 'pyi', 'go', 'rs', 'java', 'rb', 'cs', 'cpp', 'cc', 'cxx', 'hpp', 'hxx',
+  'php', 'swift', 'kt', 'scala', 'lua', 'pl', 'sh', 'bash', 'zsh', 'ps1',
+  'sql', 'graphql', 'proto', 'toml', 'yaml', 'yml', 'ini', 'cfg', 'conf',
+  'env', 'map',
+]);
+
+// True iff `token`'s final dot-segment (lowercased) is a known source extension.
+// No length / multi-dot games — `telemetry-pipeline.cjs` → `cjs`, `App.tsx` →
+// `tsx`, `api.github.com` → `com` (not a source extension). Rule 8 only invokes
+// this on a regex match whose tail is `[A-Za-z]{2,}`, so `ext` is always ≥2
+// alpha chars; a digit-bearing suffix (`node.12`) never matches rule 8 and so
+// never reaches here.
+function isSourceFilename(token: string): boolean {
+  const dot = token.lastIndexOf('.');
+  if (dot < 0) return false;
+  return SOURCE_EXTENSIONS.has(token.slice(dot + 1).toLowerCase());
+}
+
 /**
  * The value-level recognizer pipeline. Applied to every retained string in a
  * payload (and exported for direct unit testing of each rule). Returns a new
  * string; never mutates. Every replacement is an inert placeholder — it contains
  * no secret / path / host pattern, so re-running is a no-op (idempotent).
  *
+ * `preserveSourceFilenames` (set ONLY for a stack frame's `file`/`function` by
+ * scrubValue) makes rule 8 leave a source basename (`server.js`, `App.tsx`)
+ * intact instead of `[REDACTED:host]`-ing it — see WARDEN-680. It defaults off,
+ * so all generic free-text redaction is byte-identical regardless of caller.
+ *
  * Rules run most-specific-first so a credential is fully replaced before any
  * later structural (path / host) rule could partially mangle it.
  */
-export function scrubString(value: string): string {
+export function scrubString(value: string, preserveSourceFilenames?: boolean): string {
   if (typeof value !== 'string' || value.length === 0) return value;
   let out = value;
 
@@ -218,9 +256,19 @@ export function scrubString(value: string): string {
   out = out.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\b/g, '[REDACTED:host]');
 
   // 8. FQDN / dotted hostnames (`api.github.com`, `db.internal.corp.local`).
+  //    When `preserveSourceFilenames` is set (ONLY for a stack frame's
+  //    `file`/`function` — see scrubValue), a token whose final dot-segment is a
+  //    known source extension (`server.js`, `App.tsx`, `telemetry-pipeline.cjs`)
+  //    is a source basename, not a hostname, and is left intact; a real
+  //    host-shaped value (`api.github.com` → `.com`, `prod-db-01.corp.local` →
+  //    `.local`) is still redacted. The scoping is what keeps generic free-text
+  //    redaction byte-identical AND sidesteps the ccTLD collision (`.ts`/`.py`/
+  //    `.rs` are both source extensions AND country-code TLDs) — only the
+  //    structured frame context, where the value came from a real file path,
+  //    ever preserves them. (WARDEN-680.)
   out = out.replace(
     /\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}\b/g,
-    '[REDACTED:host]',
+    (m) => (preserveSourceFilenames && isSourceFilename(m) ? m : '[REDACTED:host]'),
   );
 
   // 9. IPv4 addresses (4-octet — avoids dates / versions / times).
@@ -264,11 +312,14 @@ function looksLikeIPv6(token: string): boolean {
 
 // Deep scrub of a single value. Builds a fresh copy at every level so the input
 // tree is never mutated. `allowNames` is whether the effective tier permits
-// chat/session-name identifiers (only true at the extended tier).
-function scrubValue(value: unknown, allowNames: boolean): unknown {
+// chat/session-name identifiers (only true at the extended tier). `preserveSource`
+// is set ONLY while scrubbing a stack frame's `file`/`function` fields so a
+// source basename survives rule 8 (WARDEN-680) — it is never set for generic
+// free text, which stays byte-identical to before.
+function scrubValue(value: unknown, allowNames: boolean, preserveSource?: boolean): unknown {
   if (value === null || value === undefined) return value;
-  if (typeof value === 'string') return scrubString(value);
-  if (Array.isArray(value)) return value.map((v) => scrubValue(v, allowNames));
+  if (typeof value === 'string') return scrubString(value, preserveSource);
+  if (Array.isArray(value)) return value.map((v) => scrubValue(v, allowNames, false));
   if (typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
@@ -279,10 +330,25 @@ function scrubValue(value: unknown, allowNames: boolean): unknown {
       // Chat / session names: retained ONLY at the extended tier.
       if (IDENTIFIER_FIELDS.has(lower)) {
         if (!allowNames) continue;
-        out[key] = scrubValue(v, allowNames); // kept; still scrubbed for embedded secrets
+        out[key] = scrubValue(v, allowNames, false); // kept; still scrubbed for embedded secrets
         continue;
       }
-      out[key] = scrubValue(v, allowNames); // recurse into nested / scrub strings
+      // Structured stack frames (schema: `frames: StackFrame[]`). A frame's
+      // `file`/`function` carry a source basename (the directory was dropped at
+      // the collection boundary via basename()); preserve its extension through
+      // the FQDN rule (WARDEN-680). Detection is scoped to the `frames` array so
+      // ONLY a frame's `file`/`function` ever scrub with preserveSource=true —
+      // generic free text and the frame's other fields (`line`/`column`) are
+      // byte-identical to before.
+      if (lower === 'frames' && Array.isArray(v)) {
+        out[key] = v.map((frame) => scrubValue(frame, allowNames, true));
+        continue;
+      }
+      if (preserveSource && (lower === 'file' || lower === 'function')) {
+        out[key] = scrubValue(v, allowNames, true);
+        continue;
+      }
+      out[key] = scrubValue(v, allowNames, false); // recurse into nested / scrub strings
     }
     return out;
   }
