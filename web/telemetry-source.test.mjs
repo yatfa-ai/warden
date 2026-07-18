@@ -664,6 +664,76 @@ test('factory appVersion opt threads to every event family (error / crash / stal
   }
 });
 
+// ==========================================================================
+// (WARDEN-684) platform — the non-identifying base-tier OS label (darwin/win32/
+// linux). Same trust posture + threading shape as appVersion: the builders attach
+// it ONLY when a non-empty string is threaded via opts; the live source threads
+// it from the createTelemetrySource({ platform }) factory opt (main.cjs wires
+// process.platform). Omitted otherwise → today's anonymous event shape is
+// unchanged (the optional-field path: a v3 event without platform still validates).
+// ==========================================================================
+
+test('builders are pure: they attach platform ONLY when a non-empty string is threaded via opts', () => {
+  // No platform in opts → today's event (no platform key present at all).
+  const plain = buildErrorEvent(new Error('x'), { now: 1 });
+  assert.equal('platform' in plain, false);
+  // platform in opts → attached verbatim (the consent gate is the caller's job).
+  const labeled = buildErrorEvent(new Error('x'), { now: 1, platform: 'darwin' });
+  assert.equal(labeled.platform, 'darwin');
+  // All three event types honor the same opts threading.
+  assert.equal(buildCrashEvent({ reason: 'oom' }, { now: 1, platform: 'win32' }).platform, 'win32');
+  assert.equal(buildStallEvent(50, { now: 1, runtime: RUNTIME.MAIN, platform: 'linux' }).platform, 'linux');
+  // Empty-string / non-string platform is dropped (never an empty or garbage label).
+  assert.equal('platform' in buildErrorEvent(new Error('x'), { now: 1, platform: '' }), false, 'empty string dropped');
+  assert.equal('platform' in buildErrorEvent(new Error('x'), { now: 1, platform: 2 }), false, 'non-string dropped');
+  // A labeled event still validates as a base-tier event (platform is additive).
+  assert.ok(validateBaseEvent(labeled));
+});
+
+test('factory platform opt: emitted events carry the label when provided, omit it when not', () => {
+  // With the factory opt → every emitted event carries platform.
+  const recordOn = recorder();
+  const srcOn = makeSource({ record: recordOn, platform: 'darwin' });
+  const procOn = fakeEmitter();
+  srcOn.attachMain(procOn);
+  srcOn.setBaseConsent(true);
+  procOn.emit(UNCAUGHT_EVENT, new Error('boom'));
+  assert.equal(recordOn.calls.length, 1);
+  assert.equal(recordOn.calls[0].platform, 'darwin', 'emitted event carries the factory platform');
+  assert.ok(validateBaseEvent(recordOn.calls[0]));
+
+  // Without the opt → today's event shape (no platform key) — the optional-field
+  // path is proven: a source that cannot read process.platform emits nothing new.
+  const recordOff = recorder();
+  const srcOff = makeSource({ record: recordOff });
+  const procOff = fakeEmitter();
+  srcOff.attachMain(procOff);
+  srcOff.setBaseConsent(true);
+  procOff.emit(UNCAUGHT_EVENT, new Error('boom'));
+  assert.equal(recordOff.calls.length, 1);
+  assert.equal('platform' in recordOff.calls[0], false, 'no platform key when the opt is absent');
+});
+
+test('factory platform opt threads to every event family (error / crash / stall)', () => {
+  const record = recorder();
+  const src = makeSource({ record, platform: 'linux' });
+  const proc = fakeEmitter();
+  const wc = fakeEmitter();
+  src.attachMain(proc);
+  src.attachRenderer(wc);
+  src.setBaseConsent(true);
+
+  proc.emit(UNCAUGHT_EVENT, new Error('e1'));
+  wc.emit('render-process-gone', {}, { reason: 'oom' });
+  wc.emit('unresponsive');
+
+  assert.equal(record.calls.length, 3);
+  for (const ev of record.calls) {
+    assert.equal(ev.platform, 'linux', `${ev.type} event carries the factory platform`);
+    assert.ok(validateBaseEvent(ev), `${ev.type} still validates`);
+  }
+});
+
 test('(a) extended consent OFF → names NEVER attached even when context is set', () => {
   const record = recorder();
   const src = makeSource({ record });

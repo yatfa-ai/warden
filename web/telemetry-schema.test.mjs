@@ -79,9 +79,9 @@ const stallFixture = {
 // (a) The shared contract constants
 // ==========================================================================
 
-test('SCHEMA_VERSION is 2 (the version client + receiver agree on)', () => {
+test('SCHEMA_VERSION is 3 (the version client + receiver agree on)', () => {
   assert.equal(typeof SCHEMA_VERSION, 'number');
-  assert.equal(SCHEMA_VERSION, 2);
+  assert.equal(SCHEMA_VERSION, 3);
 });
 
 test('BASE_EVENT_TYPES is exactly the three anonymous base-tier kinds', () => {
@@ -206,6 +206,32 @@ test('validateEvent rejects a base event with a non-string appVersion', () => {
   assert.equal(validateEvent({ ...errorFixture, appVersion: 2 }), false, 'numeric appVersion rejected');
   assert.equal(validateEvent({ ...errorFixture, appVersion: { x: 1 } }), false, 'object appVersion rejected');
   assert.equal(validateEvent({ ...errorFixture, appVersion: null }), false, 'null appVersion rejected');
+});
+
+// ==========================================================================
+// (e3) platform (WARDEN-684) — an OPTIONAL base-tier OS label (darwin/win32/linux).
+// Same trust posture as appVersion. A v3 event WITH it validates; a v3 event
+// WITHOUT it ALSO validates (a source that cannot read process.platform omits
+// it); a non-string platform is rejected.
+// ==========================================================================
+
+test('validateEvent accepts a base event WITH an optional platform OS label', () => {
+  assert.equal(validateEvent({ ...errorFixture, platform: 'darwin' }), true);
+  assert.equal(validateEvent({ ...crashFixture, platform: 'win32' }), true);
+  assert.equal(validateEvent({ ...stallFixture, platform: 'linux' }), true);
+});
+
+test('validateEvent accepts a base event WITHOUT platform (optional — OS-unreadable source)', () => {
+  // The canonical fixtures carry no platform; they must still validate.
+  assert.equal(validateEvent(errorFixture), true);
+  assert.equal(validateEvent(crashFixture), true);
+  assert.equal(validateEvent(stallFixture), true);
+});
+
+test('validateEvent rejects a base event with a non-string platform', () => {
+  assert.equal(validateEvent({ ...errorFixture, platform: 2 }), false, 'numeric platform rejected');
+  assert.equal(validateEvent({ ...errorFixture, platform: { x: 1 } }), false, 'object platform rejected');
+  assert.equal(validateEvent({ ...errorFixture, platform: null }), false, 'null platform rejected');
 });
 
 test('validateEvent still rejects a malformed base event even with good extended fields', () => {

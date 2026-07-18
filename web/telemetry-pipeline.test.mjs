@@ -118,7 +118,7 @@ test('an unconfigured pipeline resolves to the OFF tier and sends nothing', () =
 });
 
 test('shared schema threaded from the shipped source module (SCHEMA_VERSION + types)', () => {
-  assert.equal(SCHEMA_VERSION, 2);
+  assert.equal(SCHEMA_VERSION, 3);
   assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall']);
   assert.equal(TIERS.BASE, 'base');
   assert.equal(TIERS.EXTENDED, 'extended');

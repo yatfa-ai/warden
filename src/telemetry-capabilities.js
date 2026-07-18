@@ -27,7 +27,7 @@
 // import them). The drift test (telemetry-capabilities.test.js) asserts this equals
 // the canonical schema.ts value, so it CANNOT fall out of sync silently — the same
 // discipline the warden-telemetry repo's drift.test.mjs uses against the client.
-export const CLIENT_SCHEMA_VERSION = 2;
+export const CLIENT_SCHEMA_VERSION = 3;
 
 // The receiver's config-time verification path (mirrors warden-telemetry's
 // CAPABILITIES_PATH). Appended to the derived origin to form the probe URL — the

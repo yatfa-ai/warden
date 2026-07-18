@@ -82,6 +82,13 @@ const telemetry = createTelemetrySource({
   // via Electron's app.getVersion() (0.1.19 today); injected here so the source
   // module stays testable without Electron (tests pass appVersion explicitly).
   appVersion: app.getVersion(),
+  // Non-identifying OS label (WARDEN-684): stamped on every emitted event so a
+  // maintainer can attribute volume to an OS (darwin/win32/linux). Coarser than
+  // appVersion (identical for millions of users, no version/host/user/device
+  // detail) → same BASE-tier trust posture, no redaction change. Read directly
+  // from the Electron main process's process.platform; injected here so the
+  // source module stays testable without Electron (tests pass platform explicitly).
+  platform: process.platform,
 });
 
 // The live telemetry prefs (off / empty-endpoint by default). Driven from the
