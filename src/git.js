@@ -198,6 +198,22 @@ export function isPathWithinCwd(cwd, filePath) {
   }
 }
 
+// ===== Shared input guards ================================================
+// (isSafeRelativePath lives just below — both are the pure input validators every
+// /api/git-* route reaches through, so they sit together as the route layer's gate.)
+
+// Validate a git object-name input (`hash` query param) is hex only, 4–40 chars —
+// the clamp every hash-bearing route (git-show / git-cat-file) applies BEFORE the
+// value reaches git or the remote shell, mirroring the shellQuote care taken in the
+// log/show transports. Anything else (e.g. "--version", shell metacharacters, a
+// short fragment) is rejected. Distinct from the 7–40 abbreviate-and-shorten helper
+// in server.js (shortObjName): that one VALIDATES a 7+ char SHA and shortens it for
+// DISPLAY; this one VALIDATES user input and rejects it. Exported so the routes (and
+// their tests) share one definition — WARDEN-645.
+export function isValidGitHash(hash) {
+  return /^[0-9a-f]{4,40}$/i.test(String(hash ?? ''));
+}
+
 // ===== Shared pathspec guard ===============================================
 
 // Validate a git-show per-file `path` param. We use a LEXICAL check (not realpath)
