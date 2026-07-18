@@ -285,6 +285,91 @@ test('free-text error.message is RETAINED but scrubbed of every secret/path/host
   assert.doesNotMatch(msg, /Authorization:\s*\S/); // no header value
 });
 
+console.log('\nstack frames — source basenames survive redaction, host-shaped values do not (WARDEN-680)');
+
+// A structured-frame event like the live pipeline emits: a real stack was parsed
+// at the collection boundary (parseStackFrames → basename), so `file` is a bare
+// source basename and `function` is a bare identifier. The sink's FQDN rule used
+// to treat the basename as a hostname and clobber it to [REDACTED:host],
+// destroying the single most useful debug field. These assertions pin the fix.
+const FRAMES_EVENT = {
+  type: 'error',
+  error: {
+    name: 'TypeError',
+    message: 'cannot read props of undefined at api.github.com',
+    frames: [
+      { function: 'handleSend', file: 'server.js', line: 601, column: 12 },
+      { function: 'render', file: 'App.tsx', line: 482 },
+      { function: 'runPipeline', file: 'telemetry-pipeline.cjs', line: 7 },
+      // Host-shaped values that must STILL be redacted — the sink's FQDN rule is
+      // the only guard against a host reaching frame.file (the source validator
+      // checks paths only). A stack line like `at foo (api.github.com:443:1)`
+      // parses to file:'api.github.com'.
+      { file: 'api.github.com', line: 443 },
+      { file: 'prod-db-01.corp.local', line: 2 },
+    ],
+  },
+};
+
+test('a structured frame.file basename with a source extension survives redact() at base AND extended tiers', () => {
+  for (const tier of ['base', 'extended']) {
+    const frames = redact(FRAMES_EVENT, { tier }).error.frames;
+    assert.equal(frames[0].file, 'server.js', `server.js preserved @ ${tier}`);
+    assert.equal(frames[0].function, 'handleSend', `function preserved @ ${tier}`);
+    assert.equal(frames[0].line, 601, `line preserved @ ${tier}`);
+    assert.equal(frames[0].column, 12, `column preserved @ ${tier}`);
+    assert.equal(frames[1].file, 'App.tsx', `App.tsx preserved @ ${tier}`);
+    assert.equal(frames[2].file, 'telemetry-pipeline.cjs', `telemetry-pipeline.cjs preserved @ ${tier}`);
+  }
+});
+
+test('common warden source basenames all survive frame.file (not just the three named in the spec)', () => {
+  const files = ['config.json', 'index.ts', 'main.cjs', 'redact.ts', 'client.mjs', 'settings.jsx', 'schema.ts', 'server.js'];
+  const out = redact({ frames: files.map((f) => ({ file: f })) }, { tier: 'base' });
+  out.frames.forEach((fr, i) => assert.equal(fr.file, files[i], `${files[i]} should be preserved`));
+});
+
+test('a host-shaped frame.file is STILL [REDACTED:host] (trust preserved)', () => {
+  for (const tier of ['base', 'extended']) {
+    const frames = redact(FRAMES_EVENT, { tier }).error.frames;
+    assert.equal(frames[3].file, '[REDACTED:host]', `api.github.com redacted @ ${tier}`);
+    assert.equal(frames[4].file, '[REDACTED:host]', `prod-db-01.corp.local redacted @ ${tier}`);
+  }
+});
+
+test('a dotted frame.function whose suffix is NOT a source extension is still [REDACTED:host]', () => {
+  // `Object.defineProperty` parses as a dotted token; only a known source
+  // extension is preserved, so a dotted identifier redacts exactly as before —
+  // the preserve scope does not broaden to every dotted frame value.
+  const out = redact({ frames: [{ function: 'Object.defineProperty', file: 'server.js' }] }, { tier: 'base' });
+  assert.equal(out.frames[0].function, '[REDACTED:host]');
+  assert.equal(out.frames[0].file, 'server.js');
+});
+
+test('free-text redaction is byte-identical — a basename or ccTLD-colliding token in a message stays [REDACTED:host]', () => {
+  // In free text a bare `server.js` is ambiguous (could be a hostname) and MUST
+  // stay redacted; the preservation is scoped to the structured frame context.
+  // `.ts`/`.py`/`.rs`/`.sh` are source extensions AND country-code TLDs — in free
+  // text they redact (no ccTLD leak), which is precisely why the fix is scoped.
+  assert.equal(scrubString('broke in server.js and App.tsx'), 'broke in [REDACTED:host] and [REDACTED:host]');
+  assert.equal(
+    scrubString('ccTLD hosts example.py example.rs example.sh example.ts'),
+    'ccTLD hosts [REDACTED:host] [REDACTED:host] [REDACTED:host] [REDACTED:host]',
+  );
+  // The same values, structured as frame.file, ARE preserved — proving the
+  // discriminator is the field context, not the token.
+  const out = redact({ frames: [{ file: 'example.py' }, { file: 'example.rs' }] }, { tier: 'base' });
+  assert.deepEqual(out.frames.map((f) => f.file), ['example.py', 'example.rs']);
+});
+
+test('frame-basename preservation is idempotent — re-redacting the kept-basename output is a no-op', () => {
+  const once = redact(FRAMES_EVENT, { tier: 'base' });
+  const twice = redact(once, { tier: 'base' });
+  assert.deepEqual(twice, once);
+  // The surviving basenames contain no secret/path/host pattern that re-triggers.
+  assert.equal(twice.error.frames[0].file, 'server.js');
+});
+
 console.log('\nstructural guarantees — non-mutation & idempotency');
 
 test('input payload is NOT mutated (defensive copy)', () => {

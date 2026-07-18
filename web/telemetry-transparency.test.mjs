@@ -86,6 +86,29 @@ function containsIdentifier(text) {
   );
 }
 
+// A source-code filename basename (final dot-segment is a known source
+// extension). Independently re-implemented here (the redactor does not export
+// its set) to mirror WARDEN-680's scoping: such a basename in a stack frame's
+// file/function is NON-identifying for warden's own code (schema designates
+// function/file/line non-identifying; the directory is dropped at the
+// collection boundary, leaving only the basename) and the redactor intentionally
+// PRESERVES it. A host-shaped value (`api.github.com` → `.com`) is NOT a source
+// basename, so the leak proof still flags it.
+const SOURCE_EXTENSIONS = new Set([
+  'js', 'jsx', 'ts', 'tsx', 'cjs', 'mjs', 'mts', 'json', 'json5', 'jsonc',
+  'html', 'htm', 'css', 'scss', 'sass', 'vue', 'svelte', 'astro',
+  'py', 'pyi', 'go', 'rs', 'java', 'rb', 'cs', 'cpp', 'cc', 'cxx', 'hpp', 'hxx',
+  'php', 'swift', 'kt', 'scala', 'lua', 'pl', 'sh', 'bash', 'zsh', 'ps1',
+  'sql', 'graphql', 'proto', 'toml', 'yaml', 'yml', 'ini', 'cfg', 'conf',
+  'env', 'map',
+]);
+function isSourceBasename(token) {
+  if (typeof token !== 'string') return false;
+  const dot = token.lastIndexOf('.');
+  if (dot < 0) return false;
+  return SOURCE_EXTENSIONS.has(token.slice(dot + 1).toLowerCase());
+}
+
 let passed = 0;
 const test = (name, fn) => {
   fn();
@@ -95,10 +118,27 @@ const test = (name, fn) => {
 
 // Recurse a payload and collect every string value — used by the identifier-
 // leak proof (criterion e) to assert NO string carries a path/host/IP/user@host.
-function collectStrings(v, out) {
-  if (typeof v === 'string') out.push(v);
-  else if (Array.isArray(v)) for (const x of v) collectStrings(x, out);
-  else if (v && typeof v === 'object') for (const x of Object.values(v)) collectStrings(x, out);
+// Each entry is tagged with whether it is a stack frame's `file`/`function`
+// field: those carry a NON-identifying source basename (WARDEN-680) that the
+// redactor intentionally preserves, so the proof exempts a recognized source
+// basename there while STILL flagging a host-shaped frame value. The `frames`
+// array is detected at any depth (top-level or nested under `error`).
+function collectStrings(v, out, inFrameMember) {
+  if (typeof v === 'string') {
+    out.push({ s: v, frameField: !!inFrameMember });
+  } else if (Array.isArray(v)) {
+    for (const x of v) collectStrings(x, out, false);
+  } else if (v && typeof v === 'object') {
+    for (const [k, x] of Object.entries(v)) {
+      const lower = String(k).toLowerCase();
+      if (lower === 'frames' && Array.isArray(x)) {
+        // Each element is a StackFrame object; mark its file/function children.
+        for (const frame of x) collectStrings(frame, out, true);
+      } else {
+        collectStrings(x, out, inFrameMember && (lower === 'file' || lower === 'function'));
+      }
+    }
+  }
 }
 
 // GitHub classic PAT: `ghp_` + 36 chars — caught by the known-format rule.
@@ -320,9 +360,26 @@ test('no path / host / IPv4 / IPv6 / user@host survives any preview (re-uses con
     const { payload } = previewPayload(CANDIDATE, t);
     const strings = [];
     collectStrings(payload, strings);
-    for (const s of strings) {
+    for (const { s, frameField } of strings) {
+      // A frame file/function source basename is NON-identifying (WARDEN-680) and
+      // intentionally preserved — exempt it ONLY when it is a recognized source
+      // basename, so a host-shaped frame value (api.github.com) is still caught.
+      if (frameField && isSourceBasename(s)) continue;
       assert.equal(containsIdentifier(s), false, `identifier leaked at tier ${t}: ${s}`);
     }
+  }
+});
+
+test('a stack frame source basename SURVIVES previewPayload (WARDEN-680 — non-identifying debug value)', () => {
+  // The redactor preserves a frame.file/function source basename; the preview is
+  // the EXACT transmitted payload, so it must reflect `loader.js`/`loadCreds`,
+  // NOT [REDACTED:host]. The single most useful debug field stays actionable.
+  for (const t of ['base', 'extended']) {
+    const { payload } = previewPayload(CANDIDATE, t);
+    const frame = payload.frames[0];
+    assert.equal(frame.file, 'loader.js', `frame.file basename preserved @ ${t}`);
+    assert.equal(frame.function, 'loadCreds', `frame.function preserved @ ${t}`);
+    assert.doesNotMatch(frame.file, /REDACTED/, `frame.file not clobbered @ ${t}`);
   }
 });
 
@@ -341,7 +398,8 @@ test('a candidate packed with every identifier shape is fully scrubbed at every 
     assert.equal(valid, true, `packed event still valid after scrub at tier ${t}`);
     const strings = [];
     collectStrings(payload, strings);
-    for (const s of strings) {
+    for (const { s, frameField } of strings) {
+      if (frameField && isSourceBasename(s)) continue;
       assert.equal(containsIdentifier(s), false, `identifier survived at tier ${t}: ${s}`);
     }
   }
