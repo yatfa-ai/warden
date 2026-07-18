@@ -36,7 +36,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-gitstate-test-'));
 const tmpFile = join(tmpDir, 'gitStateSummary.mjs');
 writeFileSync(tmpFile, code);
-const { summarizeProjectGitState, detectProjectFileCollisions, detectProjectImpendingCollisions, detectProjectOutgoingCollisions } = await import(tmpFile);
+const { summarizeProjectGitState, sortByHeadAgeDesc, detectProjectFileCollisions, detectProjectImpendingCollisions, detectProjectOutgoingCollisions } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -61,12 +61,14 @@ const agent = (id, project, key) => ({ id, project, active: true, key });
 // behind default kept older cases green.
 const status = (clean, ahead, behind = 0, extra = {}) => ({ clean, ahead, behind, ...extra });
 // The expected shape of a contributing-agent entry (WARDEN-268 + WARDEN-297 +
-// WARDEN-635 + WARDEN-667). behind defaults to 0 to mirror status(); atRisk
-// defaults to false + atRiskReason to null so a pre-635 expected agent reads as
-// not-at-risk without touching each call site; stashed defaults to false so a
-// pre-667 expected agent reads as not-stashed the same way — the implementation
-// treats absent fields the same.
-const ag = (key, dirty, ahead, behind = 0, atRisk = false, atRiskReason = null, stashed = false) => ({ key, dirty, ahead, behind, atRisk, atRiskReason, stashed });
+// WARDEN-635 + WARDEN-667 + WARDEN-669). behind defaults to 0 to mirror status();
+// atRisk defaults to false + atRiskReason to null so a pre-635 expected agent reads
+// as not-at-risk without touching each call site; stashed defaults to false so a
+// pre-667 expected agent reads as not-stashed the same way; headAgeMs defaults to
+// null so a pre-669 expected agent (no headDate in its fixture) reads as age-unknown
+// the same way — the implementation treats absent fields the same. A WARDEN-669 case
+// passes a finite 9th arg for a fixture that sets headDate.
+const ag = (key, dirty, ahead, behind = 0, atRisk = false, atRiskReason = null, stashed = false, headAgeMs = null) => ({ key, dirty, ahead, behind, atRisk, atRiskReason, stashed, headAgeMs });
 
 const sum = (chats, gitStatus) => summarizeProjectGitState(chats, gitStatus);
 
@@ -580,6 +582,156 @@ test('stashed totals accumulate per project and across projects independently', 
   assert.equal(r.perProject.warden.stashed, 2);
   assert.equal(r.perProject.tinker.stashed, 1);
   assert.equal(r.total.stashed, 3);
+});
+
+console.log('\nheadAgeMs axis (WARDEN-669): headDate-derived age reaches ProjectGitAgent for the unpushed popover');
+test('a valid ISO headDate derives a finite headAgeMs ≈ Date.now() - epoch, on perProject AND total agents', () => {
+  // headDate already ships on /api/git-status; this asserts the summarizer now CARRIES
+  // it through (previously dropped) as a derived AGE on ProjectGitAgent. The age is
+  // dynamic (Date.now()-based), so assert it is a finite number bounded by the test's
+  // own before/after Date.now() — NOT a hand-shaped constant. This fails if headAgeMs
+  // were the raw EPOCH (off by ~1.7e12), null (guard wrong), or negative.
+  const headDate = '2024-01-01T00:00:00+00:00';
+  const epoch = Date.parse(headDate);
+  const before = Date.now();
+  const r = sum([agent('a1', 'warden')], { a1: status(true, 3, 0, { headDate }) });
+  const after = Date.now();
+  const perProjectAge = r.perProject.warden.agents[0].headAgeMs;
+  const totalAge = r.total.agents[0].headAgeMs;
+  assert.equal(typeof perProjectAge, 'number');
+  assert.equal(typeof totalAge, 'number');
+  assert.ok(Number.isFinite(perProjectAge) && perProjectAge > 0, 'perProject headAgeMs is finite + positive');
+  assert.ok(Number.isFinite(totalAge) && totalAge > 0, 'total headAgeMs is finite + positive');
+  // The summarizer's internal Date.now() landed in [before, after], so the age is
+  // bounded by those (±1000ms slack for jitter). Catches an epoch-vs-age bug.
+  assert.ok(perProjectAge >= before - epoch - 1000 && perProjectAge <= after - epoch + 1000, 'perProject headAgeMs ≈ Date.now() - Date.parse(headDate)');
+  assert.equal(perProjectAge, totalAge, 'the SAME agent entry is shared by perProject and total (not rederived)');
+});
+
+test('a missing headDate derives headAgeMs:null (a not-yet-fetched / non-git cwd adds no age)', () => {
+  // No headDate field at all — the pre-WARDEN-669 shape every existing fixture uses.
+  // headAgeMs must be null so the popover renders no age label and sorts the row last.
+  const r = sum([agent('a1', 'warden')], { a1: status(true, 3) });
+  assert.equal(r.perProject.warden.agents[0].headAgeMs, null);
+  assert.equal(r.total.agents[0].headAgeMs, null);
+});
+
+test('headDate:null derives headAgeMs:null (explicit null, e.g. a detached-with-no-commits cwd)', () => {
+  const r = sum([agent('a1', 'warden')], { a1: status(true, 3, 0, { headDate: null }) });
+  assert.equal(r.perProject.warden.agents[0].headAgeMs, null);
+});
+
+test('an INVALID headDate derives headAgeMs:null (Date.parse → NaN is guarded, never an age)', () => {
+  // A malformed string must not leak NaN through as a "finite" age — the
+  // Number.isFinite guard mirrors the per-row GitBranchBadge headFresh derivation.
+  const r = sum([agent('a1', 'warden')], { a1: status(true, 3, 0, { headDate: 'not-a-date' }) });
+  assert.equal(r.perProject.warden.agents[0].headAgeMs, null);
+});
+
+test('an EMPTY-string headDate derives headAgeMs:null (the empty-string guard, not just falsy)', () => {
+  // An empty string is falsy AND Date.parse('') is NaN; the implementation guards on
+  // BOTH (a truthy string check + Number.isFinite). Asserted separately so a future
+  // refactor that drops the truthy-string short-circuit (relying only on isFinite)
+  // still passes, but documents the empty-string contract explicitly.
+  const r = sum([agent('a1', 'warden')], { a1: status(true, 3, 0, { headDate: '' }) });
+  assert.equal(r.perProject.warden.agents[0].headAgeMs, null);
+});
+
+test('headAgeMs carries through key || id resolution (the agent entry is keyed correctly)', () => {
+  // The age is derived from gitStatus[key], not gitStatus[id] — mirrors every other
+  // field's key||id resolution. A headDate under the bare id must be IGNORED.
+  const chats = [agent('raw-id', 'warden', 'warden-worker')];
+  const r = sum(chats, {
+    'raw-id': status(true, 3, 0, { headDate: '2024-01-01T00:00:00+00:00' }), // wrong key → ignored
+    'warden-worker': status(true, 3),                                         // no headDate → null age
+  });
+  assert.equal(r.perProject.warden.agents[0].key, 'warden-worker');
+  assert.equal(r.perProject.warden.agents[0].headAgeMs, null);
+});
+
+console.log('\nsortByHeadAgeDesc (WARDEN-669): oldest-HEAD-first for the unpushed popover, null-age last + stable');
+test('largest headAgeMs first (oldest WIP on top); null-age rows last', () => {
+  // 3-agent fixture spanning oldest → newest → null: the popover surfaces the
+  // longest-sitting WIP first, and a no-commits/non-git agent (null age) sinks to
+  // the bottom — the exact rank the ticket specifies.
+  const agents = [
+    ag('newest', true, 1, 0, false, null, false, 1_000),         // 1s old
+    ag('oldest', true, 1, 0, false, null, false, 10_000_000),    // ~115d old
+    ag('nullAge', true, 1, 0, false, null, false, null),          // no age
+  ];
+  assert.deepEqual(sortByHeadAgeDesc(agents).map((a) => a.key), ['oldest', 'newest', 'nullAge']);
+});
+
+test('stability: equal ages preserve input order; multiple nulls preserve input order among themselves', () => {
+  // Array.prototype.sort is stable on Node ≥12 / V8; this asserts the helper relies
+  // on that (no comparator tiebreak that would scramble equal/null rows). Two equal
+  // ages (a,b) keep order; two nulls (c,d) keep order; the non-null pair precedes
+  // the null pair.
+  const tied = [
+    ag('a', true, 1, 0, false, null, false, 5000),
+    ag('b', true, 1, 0, false, null, false, 5000),
+    ag('c', true, 1, 0, false, null, false, null),
+    ag('d', true, 1, 0, false, null, false, null),
+  ];
+  assert.deepEqual(sortByHeadAgeDesc(tied).map((x) => x.key), ['a', 'b', 'c', 'd']);
+});
+
+test('all-null input is a stable no-op order (no age → all tied at null)', () => {
+  assert.deepEqual(sortByHeadAgeDesc([ag('x', true, 1), ag('y', true, 1)]).map((a) => a.key), ['x', 'y']);
+});
+
+test('sortByHeadAgeDesc returns a NEW array and does NOT mutate its input', () => {
+  // Load-bearing: the summarizer's `agents` array is shared by the dirty/behind/atRisk
+  // popovers in chats-iteration order. If the helper mutated its input in place, the
+  // unpushed sort would scramble the other three popovers' determinism. The helper
+  // MUST copy ([...agents].sort) so the shared array is untouched.
+  const original = [ag('a', true, 1, 0, false, null, false, 1), ag('b', true, 1, 0, false, null, false, 100)];
+  const inputOrder = original.map((a) => a.key);
+  const sorted = sortByHeadAgeDesc(original);
+  assert.notEqual(sorted, original, 'returns a new array, not the same reference');
+  assert.deepEqual(original.map((a) => a.key), inputOrder, 'input array is unchanged (not mutated)');
+  assert.deepEqual(sorted.map((a) => a.key), ['b', 'a'], 'the new array IS sorted (oldest first)');
+});
+
+console.log('\nsummarizer agents STILL in chats iteration order (WARDEN-669 guard: the sort lives in the helper, NOT the summarizer)');
+test('summarizeProjectGitState does NOT reorder agents by headAge — chats order is preserved across perProject and total', () => {
+  // Guard against an accidental reorder inside the summarizer: its `agents` array
+  // MUST stay in chats iteration order (the deterministic-order invariant asserted
+  // throughout this suite and shared by the dirty/behind/atRisk popovers). The
+  // headDates here would sort a2 (oldest) first if the summarizer reordered — assert
+  // they DON'T (chats order a1, a2, a3 stands), so the per-kind sort stays isolated
+  // in sortByHeadAgeDesc (applied only to the unpushed popover at render time).
+  const chats = [agent('a1', 'warden'), agent('a2', 'warden'), agent('a3', 'warden')];
+  const gitStatus = {
+    a1: status(true, 1, 0, { headDate: '2024-03-01T00:00:00+00:00' }), // middle age
+    a2: status(true, 1, 0, { headDate: '2020-01-01T00:00:00+00:00' }), // OLDEST — would sort first if reordered
+    a3: status(true, 1, 0, { headDate: '2026-01-01T00:00:00+00:00' }), // newest
+  };
+  const r = sum(chats, gitStatus);
+  assert.deepEqual(r.total.agents.map((a) => a.key), ['a1', 'a2', 'a3'], 'total.agents in chats order, NOT headAge order');
+  assert.deepEqual(r.perProject.warden.agents.map((a) => a.key), ['a1', 'a2', 'a3'], 'perProject agents in chats order too');
+  // Sanity: the ages ARE derived (so a reorder would have had data to act on) — a2 oldest.
+  const ages = r.total.agents.reduce((m, a) => ({ ...m, [a.key]: a.headAgeMs }), {});
+  assert.ok(ages.a2 > ages.a1 && ages.a1 > ages.a3, 'a2 is the oldest, a3 the newest — yet chats order is preserved');
+});
+
+test('the unpushed-popover slice, when sorted by the helper, DOES go oldest-first (the render-time contract)', () => {
+  // End-to-end: the summarizer keeps chats order, then the RENDER layer sorts the
+  // unpushed slice via the helper. This simulates that two-step pipeline and asserts
+  // the popover a human sees is oldest-first — the whole point of WARDEN-669.
+  const chats = [agent('a1', 'warden'), agent('a2', 'warden'), agent('a3', 'warden'), agent('a4', 'warden')];
+  const gitStatus = {
+    a1: status(true, 1, 0, { headDate: '2024-03-01T00:00:00+00:00' }), // middle age (unpushed)
+    a2: status(true, 1, 0, { headDate: '2020-01-01T00:00:00+00:00' }), // OLDEST (unpushed)
+    a3: status(false, 0, 0),                                           // dirty only — NOT in the unpushed slice
+    a4: status(true, 1, 0, { headDate: '2026-01-01T00:00:00+00:00' }), // newest (unpushed)
+  };
+  const r = sum(chats, gitStatus);
+  // Summarizer: chats order, all four agents (a3 is dirty so it appears).
+  assert.deepEqual(r.total.agents.map((a) => a.key), ['a1', 'a2', 'a3', 'a4']);
+  // Render: the unpushed popover filters ahead>0 (drops a3) then sorts oldest-first.
+  const unpushed = r.total.agents.filter((a) => a.ahead > 0);
+  assert.deepEqual(sortByHeadAgeDesc(unpushed).map((a) => a.key), ['a2', 'a1', 'a4']);
 });
 
 console.log(`\n✓ GIT STATE SUMMARY TESTS PASS (${passed})`);

@@ -72,6 +72,18 @@ export interface GitStateStatus {
   // A number > 0 ⇒ stashed WIP; null/absent ⇒ unknown (treated as not-stashed, never
   // noise), the same null-is-quiet discipline ahead/behind follow.
   stashCount?: number | null;
+  // WARDEN-669: the strict ISO-8601 committer date of HEAD (`git log -1 --format=%cI
+  // HEAD`, normalized by normalizeHeadDate in src/gitStatus.js). It ALREADY ships on
+  // /api/git-status and is cached in the fleet gitStatus map ChatSidebar holds
+  // (ChatSidebar.tsx stores `headDate: j.headDate`), but this GitStateStatus slice
+  // previously dropped it — so the fleet summarizer had no temporal signal. Carried
+  // here as a STRING (not pre-parsed to epoch) to mirror normalizeHeadDate's strict
+  // ISO-8601 contract and avoid the epoch `*1000` footgun src/gitStatus.js documents
+  // — exactly as the cached map stores it, so extending this slice is structurally
+  // compatible (no fetch, no backend change). Deriving headAgeMs onto ProjectGitAgent
+  // (below) reaches the unpushed-popover renderer with zero prop widening. null/absent
+  // for a repo with no commits / a non-git cwd / a branch-less cwd (mirrors headFresh).
+  headDate?: string | null;
 }
 
 // One contributing agent for a project's WIP breakdown (WARDEN-268). The project
@@ -106,6 +118,22 @@ export interface ProjectGitAgent {
   // axis surfaces it. Mirrors the per-row GitBranchBadge's 🗄N badge (GitBadges.tsx)
   // so the chip and the row agree by construction.
   stashed: boolean;
+  // WARDEN-669: the age of this agent's HEAD commit — `Date.now() - headMs` (ms) —
+  // the fleet-level TEMPORAL signal the ↑N unpushed popover ranks oldest-first so a
+  // human clicking the fleet chip can integrate the longest-sitting WIP first
+  // (highest rot/collision risk). Derived from headDate (strict ISO-8601 from git
+  // %cI), mirroring the per-row GitBranchBadge's headMs derivation (the same
+  // `Number.isFinite(Date.parse(...))` guard at GitBadges.tsx). Named `headAgeMs`
+  // (kind-agnostic), NOT `unpushedAgeMs`: a HEAD-committer age is a property of the
+  // agent's HEAD, not of its unpushed-ness, so the field reads correctly when a
+  // later slice reuses it to rank the dirty/behind/atRisk popovers too (this slice
+  // consumes it in the unpushed popover only). It is a THRESHOLD-FREE rank — the
+  // popover just sorts by it and reuses the per-row badge's existing STALE_HEAD_AGE_MS
+  // tint for the label, so no new magic number ships here. null when headDate is
+  // missing/invalid/empty (a repo with no commits / non-git cwd) so the popover
+  // renders no age label and the row sorts last (mirrors headFresh / mergeFleetCommits
+  // ByEpoch's null-epoch-last convention).
+  headAgeMs: number | null;
 }
 
 export interface ProjectGitState {
@@ -212,10 +240,21 @@ export function summarizeProjectGitState(
     // invisible at the fleet level.
     if (!dirty && !unpushed && !behind && !atRisk && !stashed) continue;
 
+    // WARDEN-669: HEAD-commit age, derived from headDate (the strict ISO-8601 %cI
+    // string this slice now carries). Mirrors the per-row GitBranchBadge's headMs
+    // derivation verbatim — Date.parse → NaN for a missing/invalid/empty headDate,
+    // so headAgeMs is null then (no age label, sorts last). Computed as an AGE
+    // (Date.now() - headMs), not an epoch, because the unpushed-popover RANK needs
+    // "how long has this WIP been sitting" directly; the render layer reconstructs
+    // the epoch for the relative/absolute label formatters. Derived here (not in the
+    // React layer) so it reaches the popover via ProjectGitAgent with no prop widening.
+    const headMs = typeof status.headDate === 'string' && status.headDate ? Date.parse(status.headDate) : NaN;
+    const headAgeMs = Number.isFinite(headMs) ? Date.now() - headMs : null;
+
     // The agent entry shared by the per-project list and the global union. One
     // entry per contributing agent, so a both-dirty-and-at-risk agent appears a
     // single time with all signals (never duplicated).
-    const agent: ProjectGitAgent = { key: c.key || c.id, dirty, ahead, behind: behindCount, atRisk, atRiskReason, stashed };
+    const agent: ProjectGitAgent = { key: c.key || c.id, dirty, ahead, behind: behindCount, atRisk, atRiskReason, stashed, headAgeMs };
 
     const entry = perProject[c.project] ?? { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [] };
     if (dirty) entry.dirty += 1;
@@ -235,6 +274,34 @@ export function summarizeProjectGitState(
   }
 
   return { perProject, total };
+}
+
+/**
+ * Rank agents oldest-HEAD-first so the ↑N unpushed popover surfaces the
+ * longest-sitting WIP on top — a human clicking the fleet chip integrates the
+ * commits most at risk of rot/collision first (WARDEN-669). Largest `headAgeMs`
+ * first; null-age rows (a repo with no commits / non-git cwd — headDate missing/
+ * invalid/empty) sort LAST, stably, mirroring `mergeFleetCommitsByEpoch`'s null-
+ * epoch-last convention.
+ *
+ * Pure + returns a NEW array (does NOT mutate its input) so it is unit-testable
+ * without a React runner, matching the module's `diff.ts` philosophy. Critically,
+ * the SUMMARIZER's own `agents` array is NOT reordered by this helper: that array
+ * MUST stay in `chats` iteration order (its deterministic-order invariant, asserted
+ * throughout the test suite and shared by the dirty/behind/atRisk popovers). The
+ * sort is a per-kind RENDER-TIME concern — the React layer applies it ONLY to the
+ * unpushed popover's filtered slice. `Array.prototype.sort` is stable on Node ≥12 /
+ * V8, so null-age and equal-age ties preserve the pre-sort (chats) input order.
+ */
+export function sortByHeadAgeDesc(agents: ProjectGitAgent[]): ProjectGitAgent[] {
+  return [...agents].sort((a, b) => {
+    const aa = a.headAgeMs;
+    const bb = b.headAgeMs;
+    if (aa == null && bb == null) return 0;  // both null → keep input order
+    if (aa == null) return 1;                 // null sorts after every real age
+    if (bb == null) return -1;
+    return bb - aa;                           // largest age first (oldest WIP on top)
+  });
 }
 
 // A changed-file path that ≥2 distinct active agents in the SAME project both
