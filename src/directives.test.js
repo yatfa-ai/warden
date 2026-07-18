@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { agentTarget } from './chatMeta.js';
 
 /**
  * Unit tests for `readDirectives` (src/observer.js) — the inverse of
@@ -137,9 +138,14 @@ describe('readDirectives — parses directives.md back into structured records',
  * container-null chat — the exact user-facing surface WARDEN-642 corrupts. It
  * runs in its own HOME (cache-busted import) so it cannot perturb the
  * reader-focused describe above, which seeds and then deletes its own log.
+ *
+ * `agentTarget` is a pure helper (no HOME/module-level state), so it is imported
+ * statically from its canonical home ./chatMeta.js; only the state-bound
+ * `logDirective`/`readDirectives` (which read DIRECTIVES_LOG, evaluated at
+ * module load) need the cache-busted ./observer.js import.
  */
 describe('agentTarget + logDirective — never null@host for local/tmux chats (WARDEN-642)', () => {
-  let originalHome, tempHome, logPath, agentTarget, logDirective, readDirectives;
+  let originalHome, tempHome, logPath, logDirective, readDirectives;
 
   before(async () => {
     originalHome = process.env.HOME;
@@ -150,8 +156,8 @@ describe('agentTarget + logDirective — never null@host for local/tmux chats (W
     logPath = path.join(wdir, 'directives.md');
     // Cache-bust so this module instance re-evaluates os.homedir() against the
     // new temp HOME (DIRECTIVES_LOG is module-level), isolating its log file
-    // from the describe above.
-    ({ agentTarget, logDirective, readDirectives } = await import('./observer.js?warden642'));
+    // from the describe above. agentTarget is imported statically (pure helper).
+    ({ logDirective, readDirectives } = await import('./observer.js?warden642'));
   });
 
   after(() => {

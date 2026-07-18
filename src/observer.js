@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { discoverAll, capturePanes, resolveChat } from './chats.js';
+import { discoverAll, capturePanes, resolveChat, agentTarget } from './chats.js';
 import { run, shellQuote } from './ssh.js';
 import { read as readPane, send as sendPane } from './tmux.js';
 import { complete } from './llm.js';
@@ -110,24 +110,12 @@ export const TOOLS = [
   },
 ];
 
-// Single-source the agent-target identity (`<container-or-session>@<host>`) for
-// the directive log writer (logDirective) and the send_directive `to:` return
-// value. `container` is null for local/tmux chats (server.js buildAndSpawn and
-// resume factories both set `container: null, key: session`), and a bare
-// `${chat.container}` stringifies that null to the literal "null" — which
-// directives.md would then record as `null@host` and DirectiveHistory would
-// render in its badge and "Copy agent@host" payload verbatim (WARDEN-642). Fall
-// back to the session key (the tmux session name, always set for local chats),
-// then the session, then a literal "local" — matching the
-// `chatKey || container || host` lineage in this file's resume path and
-// ObserverPanel.tsx's container-fallback rendering. Docker/yatfa chats keep
-// their container name unchanged. The fallback MUST carry no `@`, `(`, `)`, or
-// space to round-trip through readDirectives' HEADER regex below; tmux session
-// names satisfy this in practice (NAME_RE: letters/digits/_-.), the same
-// constraint docker container names already impose on the existing writer.
-export function agentTarget(chat) {
-  return `${chat.container || chat.key || chat.session || 'local'}@${chat.host}`;
-}
+// `agentTarget(chat)` is imported above from ./chats.js (canonical home in
+// chatMeta.js). It renders `<container-or-session>@<host>` with a null-fallback
+// so a local/tmux chat's `container: null` never stringifies to "null@" here
+// (WARDEN-642). logDirective writes that string into directives.md, which the
+// DirectiveHistory tab reads back — see chatMeta.js for the fallback rationale
+// and the round-trip constraint the directives-header regex imposes.
 
 export function logDirective(chat, text) {
   fs.mkdirSync(path.dirname(DIRECTIVES_LOG), { recursive: true });

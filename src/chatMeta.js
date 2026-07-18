@@ -71,3 +71,27 @@ export function parseActivityTimestamp(line) {
 export function sortChats(chats) {
   return chats.sort((a, b) => (Number(b.active) - Number(a.active)) || a.key.localeCompare(b.key));
 }
+
+// Render a chat's agent-target identity as `<container-or-session>@<host>` —
+// the single string shown in the CLI (`warden send`/`tail`/`key`/`observe`) and
+// written into directives.md by the observer's `logDirective` writer (which the
+// DirectiveHistory tab's target badge + "Copy agent@host" payload read back).
+//
+// `container` is null for local/tmux chats (the manual kind: server.js's
+// buildAndSpawn / resume factories and chats.js's local discovery both set
+// `container: null, key: session`), and a bare `${chat.container}` stringifies
+// that null to the literal "null" — so directives.md would record `null@host`
+// and every CLI surface would print `null@(local)` (WARDEN-642). Fall back to
+// the session key (the tmux session name, always set for local chats), then the
+// session, then a literal "local" — matching the `chatKey || container || host`
+// lineage in observer.js's resume path and ObserverPanel.tsx's container-fallback
+// rendering. Docker/yatfa chats keep their container name unchanged.
+//
+// The fallback MUST carry no `@`, `(`, `)`, or space: directives.md's header is
+// parsed back by readDirectives' regex (`## <ts> → (.+)@([^ ]+) \(([^)]+)\)`),
+// and a value with any of those chars breaks the match and silently drops the
+// block. tmux session names satisfy this in practice (NAME_RE: letters/digits/
+// _-.) — the same constraint docker container names already impose on the writer.
+export function agentTarget(chat) {
+  return `${chat.container || chat.key || chat.session || 'local'}@${chat.host}`;
+}
