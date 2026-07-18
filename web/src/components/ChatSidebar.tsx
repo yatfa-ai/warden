@@ -1070,19 +1070,22 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
             onOpenChat={onOpenChat}
             showProject
           />
-          {/* WARDEN-635 (per WARDEN-565): the ±N/↑N/↓N/⚑N project git-state fleet
+          {/* WARDEN-635 (per WARDEN-565): the ±N/↑N/↓N/⚑N/🗄N project git-state fleet
               badges, re-homed into this host header the same way GitCollisionBadge
               was. Computed over hostChats (== the memo's viewChats for this host — a
-              host can run several projects). The 4th ⚑N axis rolls up detached-HEAD /
+              host can run several projects). The ⚑N axis rolls up detached-HEAD /
               no-upstream / mid-merge agents — a non-routine repo state that needs a
-              human's eye but was previously invisible at the fleet level. Renders
-              nothing when every axis is 0 (silent-when-clean); each popover lists the
-              contributing agents and deep-links to them. */}
+              human's eye but was previously invisible at the fleet level. The 🗄N
+              axis (WARDEN-667) rolls up agents with parked `git stash` WIP — the lone
+              current-state git signal that had no fleet chip. Renders nothing when
+              every axis is 0 (silent-when-clean); each popover lists the contributing
+              agents and deep-links to them. */}
           <GitStateBadges
             dirty={fleetGitState.dirty}
             unpushed={fleetGitState.unpushed}
             behind={fleetGitState.behind}
             atRisk={fleetGitState.atRisk}
+            stashed={fleetGitState.stashed}
             agents={fleetGitState.agents}
             chats={hostChats}
             gitStatus={gitStatus}
@@ -1305,17 +1308,20 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
           onOpenChat={onOpenChat}
           showProject
         />
-        {/* WARDEN-635 (per WARDEN-565): the ±N/↑N/↓N/⚑N project git-state fleet
+        {/* WARDEN-635 (per WARDEN-565): the ±N/↑N/↓N/⚑N/🗄N project git-state fleet
             badges, re-homed into the root fleet header alongside GitCollisionBadge
             and FleetCommitSearch. Computed over the whole chats fleet (== the memo's
             viewChats), mirroring those siblings which also fan across the full fleet
             from this header. The ⚑N axis rolls up detached-HEAD / no-upstream /
-            mid-merge agents across the fleet; renders nothing when every axis is 0. */}
+            mid-merge agents across the fleet; the 🗄N axis (WARDEN-667) rolls up
+            agents with parked `git stash` WIP across the fleet; renders nothing when
+            every axis is 0. */}
         <GitStateBadges
           dirty={fleetGitState.dirty}
           unpushed={fleetGitState.unpushed}
           behind={fleetGitState.behind}
           atRisk={fleetGitState.atRisk}
+          stashed={fleetGitState.stashed}
           agents={fleetGitState.agents}
           chats={chats}
           gitStatus={gitStatus}
