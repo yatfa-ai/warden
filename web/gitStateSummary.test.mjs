@@ -36,7 +36,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-gitstate-test-'));
 const tmpFile = join(tmpDir, 'gitStateSummary.mjs');
 writeFileSync(tmpFile, code);
-const { summarizeProjectGitState, sortByHeadAgeDesc, detectProjectFileCollisions, detectProjectImpendingCollisions, detectProjectOutgoingCollisions } = await import(tmpFile);
+const { summarizeProjectGitState, sortByHeadAgeDesc, detectProjectFileCollisions, detectProjectImpendingCollisions, detectProjectOutgoingCollisions, sortGitAgentsByMagnitudeDesc } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -61,14 +61,21 @@ const agent = (id, project, key) => ({ id, project, active: true, key });
 // behind default kept older cases green.
 const status = (clean, ahead, behind = 0, extra = {}) => ({ clean, ahead, behind, ...extra });
 // The expected shape of a contributing-agent entry (WARDEN-268 + WARDEN-297 +
-// WARDEN-635 + WARDEN-667 + WARDEN-669). behind defaults to 0 to mirror status();
-// atRisk defaults to false + atRiskReason to null so a pre-635 expected agent reads
-// as not-at-risk without touching each call site; stashed defaults to false so a
-// pre-667 expected agent reads as not-stashed the same way; headAgeMs defaults to
-// null so a pre-669 expected agent (no headDate in its fixture) reads as age-unknown
-// the same way — the implementation treats absent fields the same. A WARDEN-669 case
-// passes a finite 9th arg for a fixture that sets headDate.
-const ag = (key, dirty, ahead, behind = 0, atRisk = false, atRiskReason = null, stashed = false, headAgeMs = null) => ({ key, dirty, ahead, behind, atRisk, atRiskReason, stashed, headAgeMs });
+// The expected shape of a contributing-agent entry (WARDEN-268 + WARDEN-297 +
+// WARDEN-635 + WARDEN-667 + WARDEN-669 + WARDEN-670). behind defaults to 0 to mirror
+// status(); atRisk defaults to false + atRiskReason to null so a pre-635 expected agent
+// reads as not-at-risk without touching each call site; stashed defaults to false so a
+// pre-667 expected agent reads as not-stashed the same way; headAgeMs defaults to null
+// so a pre-669 expected agent (no headDate in its fixture) reads as age-unknown; diffstat
+// (WARDEN-670) defaults to null so EVERY pre-670 expected agent carries the field
+// (the implementation reads `status.diffstat ?? null`) -- absent fields are treated the
+// same by the implementation, so old cases stay green exactly as the behind/atRisk/
+// stashed/headAgeMs defaults kept their predecessors green. A WARDEN-669 case passes a
+// finite headAgeMs as the 8th arg (a fixture that sets headDate); a WARDEN-670 case
+// passes the inline { files, insertions, deletions } magnitude as the 9th (after a null
+// headAgeMs placeholder), mirroring how status()'s `extra` object carries diffstat on
+// the input side.
+const ag = (key, dirty, ahead, behind = 0, atRisk = false, atRiskReason = null, stashed = false, headAgeMs = null, diffstat = null) => ({ key, dirty, ahead, behind, atRisk, atRiskReason, stashed, headAgeMs, diffstat });
 
 const sum = (chats, gitStatus) => summarizeProjectGitState(chats, gitStatus);
 
@@ -732,6 +739,80 @@ test('the unpushed-popover slice, when sorted by the helper, DOES go oldest-firs
   // Render: the unpushed popover filters ahead>0 (drops a3) then sorts oldest-first.
   const unpushed = r.total.agents.filter((a) => a.ahead > 0);
   assert.deepEqual(sortByHeadAgeDesc(unpushed).map((a) => a.key), ['a2', 'a1', 'a4']);
+});
+
+console.log('\ndirty magnitude (WARDEN-670): the ±N popover carries each dirty agent\'s +N −M');
+test('a dirty agent carries diffstat from status.diffstat onto ProjectGitAgent', () => {
+  const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, { diffstat: { files: 3, insertions: 10, deletions: 2 } }) });
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [ag('a1', true, 0, 0, false, null, false, null, { files: 3, insertions: 10, deletions: 2 })] } });
+});
+
+test('a dirty agent whose status carries no diffstat gets diffstat: null (quiet — no false magnitude)', () => {
+  // Mirrors a pre-670 status map (no diffstat field) or an all-untracked agent the
+  // server hadn't magnitude-tagged: absent → null on the agent, so DiffStatChip's
+  // guard renders nothing (no misleading +0−0). The magnitude is carried as null,
+  // never invented from the file count.
+  const r = sum([agent('a1', 'warden')], { a1: status(false, 0) });
+  assert.deepEqual(r.perProject.warden.agents, [ag('a1', true, 0)]); // ag() default → diffstat: null
+  assert.equal(r.perProject.warden.agents[0].diffstat, null);
+});
+
+test('an all-untracked dirty agent (diffstat +0−0) carries the +0−0 object verbatim — the field is honest, the chip stays quiet', () => {
+  // The server serves { files, insertions: 0, deletions: 0 } for an all-untracked WIP
+  // (shortstat counts tracked edits only). The summarizer carries it as-is; DiffStatChip's
+  // own +0−0 guard then renders nothing. Asserting the object (not null) proves the field
+  // is the server's value, not a guess.
+  const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, { diffstat: { files: 2, insertions: 0, deletions: 0 } }) });
+  assert.deepEqual(r.perProject.warden.agents, [ag('a1', true, 0, 0, false, null, false, null, { files: 2, insertions: 0, deletions: 0 })]);
+});
+
+test('a non-dirty agent (at-risk only) also carries diffstat: null — the field rides on every ProjectGitAgent', () => {
+  // The shape contract: EVERY agent carries diffstat (the deep-equality invariant this
+  // suite asserts), not just dirty ones — so the React layer can read a.diffstat on any
+  // popover row without a present check changing per axis.
+  const r = sum([agent('a1', 'warden')], { a1: status(true, 0, 0, { detached: true, branch: 'HEAD' }) });
+  assert.deepEqual(r.perProject.warden.agents, [ag('a1', false, 0, 0, true, 'detached')]); // diffstat: null default
+  assert.equal(r.perProject.warden.agents[0].diffstat, null);
+});
+
+console.log('\ndirty popover sort (WARDEN-670): render-time heaviest-first, scoped to the dirty kind');
+test('summarizeProjectGitState does NOT reorder by magnitude — chats order is preserved (sort is render-time only)', () => {
+  // The load-bearing invariant: summarizeProjectGitState emits agents in chats order so
+  // its deep-equality holds AND the unpushed/behind/atRisk popovers stay deterministic.
+  // The heaviest-first sort is a per-kind RENDER-TIME concern (GIT_STATE_KIND.dirty.sort
+  // in GitStateBadge), NEVER inside the summarizer. This case puts a light agent FIRST
+  // in chats order and a heavy one second and asserts the summarizer leaves them there.
+  const r = sum([agent('light', 'warden'), agent('heavy', 'warden')], {
+    light: status(false, 0, 0, { diffstat: { files: 1, insertions: 1, deletions: 1 } }),    // mag 2
+    heavy: status(false, 0, 0, { diffstat: { files: 1, insertions: 500, deletions: 500 } }), // mag 1000
+  });
+  assert.deepEqual(r.perProject.warden.agents.map((a) => a.key), ['light', 'heavy']); // chats order, NOT sorted
+});
+
+test('sortGitAgentsByMagnitudeDesc ranks largest +N −M WIP first', () => {
+  const a = ag('a', true, 0, 0, false, null, false, null, { files: 1, insertions: 10, deletions: 2 });    // mag 12
+  const b = ag('b', true, 0, 0, false, null, false, null, { files: 1, insertions: 847, deletions: 203 }); // mag 1050 (heaviest)
+  const c = ag('c', true, 0, 0, false, null, false, null, { files: 1, insertions: 5, deletions: 0 });     // mag 5
+  assert.deepEqual(sortGitAgentsByMagnitudeDesc([a, b, c]).map((x) => x.key), ['b', 'a', 'c']);
+});
+
+test('magnitude-0 (all-untracked) and null-diffstat (detached) rows sort LAST, stably', () => {
+  const heavy = ag('heavy', true, 0, 0, false, null, false, null, { files: 1, insertions: 100, deletions: 0 }); // mag 100
+  const zero = ag('zero', true, 0, 0, false, null, false, null, { files: 2, insertions: 0, deletions: 0 });     // mag 0 (all-untracked)
+  const nul = ag('nul', true, 0, 0, false, null, false, null);                                            // null (detached)
+  // 0 and null both have magnitude 0 → tie → preserve input order (zero before nul);
+  // both land after every real WIP (heavy).
+  assert.deepEqual(sortGitAgentsByMagnitudeDesc([zero, heavy, nul]).map((x) => x.key), ['heavy', 'zero', 'nul']);
+});
+
+test('equal-magnitude ties preserve input order (stable); the helper does NOT mutate its input', () => {
+  const a = ag('a', true, 0, 0, false, null, false, null, { files: 1, insertions: 5, deletions: 5 }); // mag 10
+  const b = ag('b', true, 0, 0, false, null, false, null, { files: 1, insertions: 8, deletions: 2 }); // mag 10 (tie)
+  const input = [a, b];
+  const out = sortGitAgentsByMagnitudeDesc(input);
+  assert.deepEqual(out.map((x) => x.key), ['a', 'b']); // tie → input order preserved (stable)
+  assert.deepEqual(input.map((x) => x.key), ['a', 'b']); // input NOT mutated
+  assert.notEqual(out, input);                           // returns a NEW array
 });
 
 console.log(`\n✓ GIT STATE SUMMARY TESTS PASS (${passed})`);
