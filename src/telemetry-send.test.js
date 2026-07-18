@@ -592,3 +592,76 @@ describe('backoff growth is exponential (interval increases per retry)', () => {
     assert.ok(sleep.calls[0] > 0, 'real backoff, not a zero wait');
   });
 });
+
+// (WARDEN-671) A transient-exhausted drop — network errors, 429, or 5xx after all
+// MAX_ATTEMPTS — is the ONE outcome a bounded replay buffer can recover: a momentary
+// receiver outage (restart, wifi blip, sleep/wake, DNS hiccup) lost the event, but
+// the identical redacted+validated body would land once the receiver is back. The
+// transport flags these `replayable:true` so the pipeline can retain JUST this drop
+// and replay it on the next dispatch opportunity, instead of futilely re-POSTing a
+// payload the receiver is guaranteed to reject again (a non-retryable 4xx) or
+// fighting the existing drift circuit-breaker (a 415). `replayable` is present ONLY
+// on the exhausted-retry outcome; absent (undefined) everywhere else, so the result
+// shapes stay distinguishable end-to-end (the pipeline buffers iff
+// res.replayable === true — see telemetry-pipeline.test.mjs).
+describe('(WARDEN-671) transient-exhausted drop → replayable:true (the recoverable signal)', () => {
+  it('an exhausted 503 sets replayable:true (attempts == MAX_ATTEMPTS)', async () => {
+    const fetchImpl = fetchSeq([{ ok: false, status: 503 }]);
+    const r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl, sleepImpl: sleepRec().fn });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.dropped, true);
+    assert.strictEqual(r.replayable, true, 'a transient-exhausted drop is recoverable');
+    assert.strictEqual(r.attempts, _INTERNALS.MAX_ATTEMPTS);
+    assert.strictEqual(r.status, 503);
+  });
+
+  it('an exhausted network error (fetch throws) sets replayable:true (status null)', async () => {
+    const fetchImpl = fetchSeq([{ throw: new Error('fetch failed: ECONNREFUSED') }]);
+    const r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl, sleepImpl: sleepRec().fn });
+    assert.strictEqual(r.replayable, true);
+    assert.strictEqual(r.dropped, true);
+    assert.strictEqual(r.status, null, 'no response status on a network error');
+  });
+
+  it('an exhausted 429 (rate-limit) sets replayable:true', async () => {
+    const fetchImpl = fetchSeq([{ ok: false, status: 429 }]);
+    const r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl, sleepImpl: sleepRec().fn });
+    assert.strictEqual(r.replayable, true);
+    assert.strictEqual(r.dropped, true);
+    assert.strictEqual(r.status, 429);
+  });
+
+  it('a NON-retryable 4xx does NOT set replayable (replaying the identical body is futile)', async () => {
+    // 400/401/403/404/422 are permanent for this payload — re-POSTing the identical
+    // redacted body cannot fix them, so they are NOT recoverable. replayable stays
+    // undefined, so the pipeline never wastes the retry budget re-sending them.
+    for (const status of [400, 401, 403, 404, 422]) {
+      const fetchImpl = fetchSeq([{ ok: false, status }]);
+      const r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl });
+      assert.strictEqual(r.replayable, undefined, `${status} is not replayable`);
+      assert.strictEqual(r.dropped, true);
+    }
+  });
+
+  it('a 415 schema-drift drop does NOT set replayable (the drift breaker owns it)', async () => {
+    const fetchImpl = fetchSeq([{ ok: false, status: 415 }]);
+    const r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl });
+    assert.strictEqual(r.replayable, undefined, 'a 415 is not replayable — it is drifted, not transient');
+    assert.strictEqual(r.drifted, true);
+    assert.strictEqual(r.dropped, true);
+  });
+
+  it('a successful send, a revoke, and the gate no-op all leave replayable undefined', async () => {
+    // success
+    let r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl: fetchSeq([{ ok: true, status: 200 }]) });
+    assert.strictEqual(r.replayable, undefined, 'success is never replayable');
+    // revoke mid-loop
+    r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl: fetchSeq([{ ok: false, status: 503 }]), sleepImpl: sleepRec().fn, isConsentActive: consentSeq([true, false]) });
+    assert.strictEqual(r.replayable, undefined, 'a revoke is not replayable');
+    assert.strictEqual(r.revoked, true);
+    // gate no-op — deepStrictEqual pins the unchanged shape (replayable is absent).
+    r = await send({ events: EVENTS, consent: false, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl: fetchMustNotBeCalled() });
+    assert.strictEqual(r.replayable, undefined, 'the gate no-op is not replayable');
+    assert.deepStrictEqual(r, { ok: false, dropped: false, attempts: 0, status: null }, 'the gate no-op shape is unchanged');
+  });
+});

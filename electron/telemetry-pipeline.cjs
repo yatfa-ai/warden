@@ -8,12 +8,18 @@
 //
 //   record(event)
 //     → resolve effective tier (base / extended / off)
-//     → off / unknown / undefined?  HARD NO-OP  (drop, buffer nothing, never send)
+//     → off / unknown / undefined?  HARD NO-OP  (send nothing; also CLEAR the replay
+//       buffer so a buffered event never survives an opt-out — WARDEN-671)
+//     → flush the in-memory replay buffer first if non-empty (re-dispatch prior
+//       transient-exhausted drops through dispatch(), in arrival order — WARDEN-671)
 //     → redact(payload, { tier })                 [slice 2, SHIPPED — injected]
 //     → validate(redacted)                        [schema check — injected]
 //     → invalid?  drop pre-send (never send an invalid payload)
 //     → send({ events, consent, endpointUrl, schemaVersion, fetchImpl, sleepImpl })
 //                                                 [slice 3 contract — injected]
+//     → transient-exhausted drop (replayable)? retain in the bounded replay buffer
+//       and retry on the next dispatch opportunity (WARDEN-671); drifted / non-
+//       retryable drops are permanent and never retained.
 //
 // Two load-bearing guarantees become ACTUAL runtime behavior here, by construction:
 //   1. Consent-off is a HARD NO-OP at the entry point — nothing buffered, nothing
@@ -108,6 +114,14 @@ function defaultRedact(payload) {
   return payload === null || payload === undefined ? payload : null;
 }
 
+// Default cap for the in-memory replay buffer (WARDEN-671). Bounds memory over a
+// transient receiver outage: large enough to ride out a multi-event blip (a burst
+// of crash/error signals during a receiver restart, wifi drop, or sleep/wake), small
+// enough that a persistently-down receiver cannot grow memory unbounded (the
+// drop-oldest ring rotates). Tunable per-pipeline via `replayBufferCap` (tests
+// inject a small cap; main.cjs may override) — mirrors transmissionLog's cap seam.
+const DEFAULT_REPLAY_BUFFER_CAP = 64;
+
 // The pipeline factory. All collaborators are injected; every injection has a
 // safe default so an unconfigured pipeline sends nothing. Returns:
 //   .record(event)    — the assembled entry point: consent gate (layer 1) →
@@ -145,6 +159,40 @@ function createTelemetryPipeline(opts) {
     o.transmissionLog && typeof o.transmissionLog.record === 'function'
       ? o.transmissionLog
       : noopTransmissionLog;
+
+  // WARDEN-671 — bounded, session-scoped, IN-MEMORY replay buffer for transiently-
+  // dropped sends. Closes the last silent-signal-loss site: an event that passed
+  // every gate (consent → redact → validate) and reached the wire used to be DROPPED
+  // FOREVER if the receiver was transiently unreachable for longer than the
+  // transport's bounded-retry window (~1.4s of backoff). Now, when the transport
+  // returns a TRANSIENT-EXHAUSTED drop (flagged replayable:true — see
+  // src/telemetry-send.js), the redacted+validated payload is retained here and
+  // replayed through dispatch() on the next dispatch opportunity.
+  //
+  // TRUST MODEL (consistency with WARDEN-443):
+  //   1. IN-MEMORY ONLY — deliberately NOT persisted to disk. A durable on-disk
+  //      queue is a later, trust-heavier slice (lingering telemetry files). The
+  //      disk/privacy posture is unchanged: the raw payload was already in memory
+  //      en route to fetch; this buffer holds that same reference, never writes it.
+  //   2. BOUNDED ring, drop-oldest — hard cap so a long outage cannot grow memory
+  //      unbounded. Mirrors telemetry-transmission-log.cjs's ring discipline.
+  //   3. The flush routes through dispatch() — which re-resolves LIVE consent
+  //      (layer-2 guard), re-checks the drift circuit-breaker, AND re-runs redact →
+  //      validate. So a replayed payload CANNOT send when off/drifted and CANNOT
+  //      leak un-redacted or reach the wire schema-invalid. Buffering the RAW
+  //      payload (not a pre-redacted snapshot) is what makes re-validation free: a
+  //      schema that drifted while the event sat in the buffer is re-checked on flush.
+  //   4. NEVER buffers drifted (415) or non-retryable 4xx drops — only the
+  //      transient-exhausted (replayable) drop is recoverable (replaying the others
+  //      is futile and would fight the drift breaker / waste the retry budget).
+  //   5. CLEARS the instant the effective tier flips to off — no event lingers after
+  //      the user opts out (upholds "revocable"). record()'s layer-1 guard is the
+  //      clear site.
+  const replayBufferCap =
+    Number.isInteger(o.replayBufferCap) && o.replayBufferCap > 0
+      ? o.replayBufferCap
+      : DEFAULT_REPLAY_BUFFER_CAP;
+  const pendingRing = [];
 
   // WARDEN-631 — per-endpoint schema-drift circuit-breaker. Session-scoped,
   // in-memory, NEVER persisted (mirrors the transmission log's discipline): once
@@ -222,10 +270,10 @@ function createTelemetryPipeline(opts) {
   // The airtight processing core: resolve the tier → redact → validate → transport,
   // with its OWN consent guard. This redacts and validates the payload ITSELF (it
   // does not trust the caller to have done so), so no matter how it is reached —
-  // record() or a future durable-queue flush — only a redacted + schema-validated
-  // payload can ever reach transport, and only when the effective tier is not OFF.
-  // The consent guard here is the SECOND layer of "off = nothing"; record() is the
-  // first. Both layers re-resolve LIVE consent, so a consent revoked between the
+  // record(), or the replay-buffer flush (WARDEN-671) — only a redacted + schema-
+  // validated payload can ever reach transport, and only when the effective tier is
+  // not OFF. The consent guard here is the SECOND layer of "off = nothing"; record()
+  // is the first. Both layers re-resolve LIVE consent, so a consent revoked between the
   // entry gate and dispatch (or after a buffer held an event) still prevents a
   // send. Transport errors (sync throw OR async rejection) are swallowed: a
   // telemetry failure must never throw the instrumented process into a worse state
@@ -294,6 +342,22 @@ function createTelemetryPipeline(opts) {
       // signal, never a crash).
       const settle = (res) => {
         recordOutcome(res, events.length);
+        // WARDEN-671 — retain the payload on a TRANSIENT-EXHAUSTED drop (the
+        // transport flags these replayable:true) for replay on the next dispatch
+        // opportunity. Checked BEFORE the drift early-returns and independent of the
+        // stale-endpoint guard: staleness only governs DRIFT arming/clearing, not
+        // whether a recoverable event is worth keeping. The raw `payload` is held
+        // (not a pre-redacted snapshot) precisely so the flush re-runs redact →
+        // validate against the LIVE schema — a schema that drifted while the event
+        // sat in the buffer is re-checked, and a revoke that armed is honored (the
+        // flush's dispatch re-resolves live consent). Bounded drop-oldest ring,
+        // mirroring telemetry-transmission-log.cjs. A drifted (415) or non-retryable
+        // 4xx drop never carries replayable, so it is never retained (replaying it
+        // is futile / fights the drift breaker). IN-MEMORY ONLY — never persisted.
+        if (res && typeof res === 'object' && res.replayable === true) {
+          pendingRing.push(payload);
+          if (pendingRing.length > replayBufferCap) pendingRing.shift(); // drop-oldest
+        }
         // WARDEN-631 — a 415 arms the per-endpoint breaker (stop futile sends); a
         // 2xx success clears it (the endpoint is confirmed schema-matched again).
         // Only a real, recognized outcome flips the flag — the gate no-op, an
@@ -329,10 +393,33 @@ function createTelemetryPipeline(opts) {
   // The assembled pipeline entry point.
   function record(event) {
     // Layer 1 — resolve the effective tier. off / unknown / undefined → HARD
-    // NO-OP: buffer nothing (there is no buffer — a durable queue is a later,
-    // out-of-scope slice) and never hand anything to dispatch(). dispatch() guards
-    // again (layer 2), so the two layers are independent.
-    if (effectiveTier() === TIERS.OFF) return;
+    // NO-OP: never hand anything to dispatch() (dispatch() guards again — layer 2 —
+    // so the two layers are independent). WARDEN-671: off also CLEARS the replay
+    // buffer so no event lingers after the user opts out (upholds "revocable").
+    // Events recorded while off were never dispatched, so the ring is normally empty
+    // here, but a revoke that lands AFTER a replayable drop filled the ring must not
+    // let a buffered event survive the opt-out — clear it at the natural clear site.
+    const tier = effectiveTier();
+    if (tier === TIERS.OFF) {
+      pendingRing.length = 0;
+      return;
+    }
+    // WARDEN-671 — flush the replay buffer before the new event, in arrival order.
+    // A buffered event was a transient-exhausted drop; the next record() is the
+    // "next dispatch opportunity" to retry it. Only flush when dispatch can actually
+    // reach the transport — i.e. NOT drifted: a drifted dispatch short-circuits
+    // BEFORE transportSend, so settle never runs and a drained event would be LOST
+    // (not re-buffered). Gating on !drifted keeps the ring intact through a drift
+    // outage; it drains once drift clears (an endpoint/schema change or a later
+    // success). Fire-and-forget in arrival order (Q3): each dispatch() kicks off its
+    // own async transport, matching the existing model. A re-drop (receiver STILL
+    // down) re-buffers via settle; the bounded ring self-limits the churn (Q2 — a
+    // persistently-down receiver just rotates the ring, which is acceptable and
+    // preserves the "retain recent transiently-dropped sends" intent).
+    if (pendingRing.length > 0 && !drifted) {
+      const pending = pendingRing.splice(0); // drain (snapshot + clear); re-drops re-buffer
+      for (const p of pending) dispatch(p);
+    }
     dispatch(event);
   }
 
