@@ -30,7 +30,7 @@ import { checkHost } from './hostStatus.js';
 import {
   probeReceiverCapabilities,
 } from './telemetry-capabilities.js';
-import { parseGitStatusPorcelain, parseAheadBehind, parseOutgoingFiles, parseStashCount, parseStashList, parseReflog, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, parseGitRemotes, parseGitBranches, buildDockerGitArgv } from './gitStatus.js';
+import { parseGitStatusPorcelain, parseAheadBehind, parseOutgoingFiles, parseStashCount, parseStashList, parseReflog, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, parseGitRemotes, parseGitBranches, buildDockerGitArgv, unescapeGitPath } from './gitStatus.js';
 import { buildInProgressScript, GIT_LOG_PRETTY, parseGitLogLine, parseGitShowNameStatus, GIT_DIFF_MAX_BYTES, capDiff, buildGitDiffScript, isPathWithinCwd, isSafeRelativePath, isValidGitHash, parseGitBlame, buildGitBlameScript } from './git.js';
 import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep } from './companion.js';
 
@@ -3959,7 +3959,14 @@ export function parseGitLsEntries(raw, dir) {
   const dirs = new Set();
   const files = new Set();
   for (const rawLine of String(raw || '').split('\n')) {
-    const line = rawLine.replace(/\r$/, '').trim();
+    // git ls-files C-quotes any path with a backslash, double-quote, control
+    // char, or non-ASCII byte (core.quotePath=true default), quoting the ENTIRE
+    // path — dir prefix included — as one C-string. (It does NOT quote a plain
+    // space, so 'spa ce.js' arrives unquoted.) Unescape the whole line BEFORE
+    // the prefix startsWith/slice, because the prefix lives inside the quotes
+    // (e.g. "s\303\274b/caf\303\251.js" for süb/café.js). unescapeGitPath is a
+    // no-op on unquoted input, so plain-ASCII / plain-space paths are unchanged.
+    const line = unescapeGitPath(rawLine.replace(/\r$/, '').trim());
     if (!line) continue;
     // Strip the requested dir's prefix → path relative to it. A line not under
     // the prefix (can't happen with a pathspec, but defensive) is skipped.
