@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { parseJsonlTokenUsage, computeSessionTotals } from './server.js';
+import { parseJsonlTokenUsage, computeSessionTotals } from './claudeSessions.js';
 
 /**
  * Tests for the per-session LLM token-usage surface (WARDEN-367).

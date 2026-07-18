@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { mergeAndPaginateSessions } from './server.js';
+import { mergeAndPaginateSessions } from './claudeSessions.js';
 
 /**
  * Tests for the cross-host "All Sessions" pagination (WARDEN-176).

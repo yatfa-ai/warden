@@ -3,6 +3,13 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import {
+  extractTranscriptMessage,
+  buildTranscriptView,
+  transcriptWindow,
+  buildSessionReadScript,
+  parseSessionReadOutput,
+} from './claudeSessions.js';
 
 /**
  * Tests for the read-only single-session transcript viewer (WARDEN-233).
@@ -32,12 +39,8 @@ import os from 'node:os';
  *       - a huge session is bounded (truncated flag + message cap)
  */
 
-// ---- helpers under test (assigned from the dynamic import in before()) ----
-let extractTranscriptMessage;
-let buildTranscriptView;
-let transcriptWindow;
-let buildSessionReadScript;
-let parseSessionReadOutput;
+// ---- helpers under test (imported directly from the side-effect-free
+// claudeSessions.js module so unit assertions don't need server.js booted) ----
 
 let httpServer;
 let baseUrl;
@@ -112,11 +115,6 @@ before(async () => {
   writeSession(tempHome, 'projP', 'sess-view-paged', pagedLines, 4000);
 
   const server = await import('./server.js');
-  extractTranscriptMessage = server.extractTranscriptMessage;
-  buildTranscriptView = server.buildTranscriptView;
-  transcriptWindow = server.transcriptWindow;
-  buildSessionReadScript = server.buildSessionReadScript;
-  parseSessionReadOutput = server.parseSessionReadOutput;
   ({ catalogPath } = await import('./config.js'));
   httpServer = server.app.listen(0, '127.0.0.1');
   await new Promise((resolve, reject) => {

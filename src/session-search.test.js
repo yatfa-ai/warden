@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { extractMessageText, snippetFromLine } from './claudeSessions.js';
 
 /**
  * Tests for the cross-host full-content session search (WARDEN-161).
@@ -35,9 +36,11 @@ import os from 'node:os';
  *       - matches are recency-ranked
  */
 
-// ---- helpers under test (assigned from the dynamic import in before()) ----
-let extractMessageText;
-let snippetFromLine;
+// ---- helpers under test ----
+// extractMessageText + snippetFromLine imported directly from the side-effect-free
+// claudeSessions.js module; buildSessionSearchScript still lives in server.js, so
+// it is assigned from the dynamic import in before() (server.js is deferred until
+// HOME/config/archive are in place).
 let buildSessionSearchScript;
 
 let httpServer;
@@ -115,8 +118,6 @@ before(async () => {
 
   // Import server.js ONCE — after HOME/config/archive are in place.
   const server = await import('./server.js');
-  extractMessageText = server.extractMessageText;
-  snippetFromLine = server.snippetFromLine;
   buildSessionSearchScript = server.buildSessionSearchScript;
   httpServer = server.app.listen(0, '127.0.0.1');
   await new Promise((resolve, reject) => {
