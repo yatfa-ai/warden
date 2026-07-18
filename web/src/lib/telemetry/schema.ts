@@ -52,7 +52,7 @@ export function resolveConsentTier(value: unknown): ConsentTier {
 // ---------------------------------------------------------------------------
 // The schema version. Bumping this is a coordinated client + receiver change.
 // ---------------------------------------------------------------------------
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 // The base-tier event kinds. A discriminated union (below) keys off `type`.
 export const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall'] as const);
@@ -81,13 +81,19 @@ export interface StackFrame {
 // no such fields by design"). Free-text `message` is redacted at the collection
 // boundary (slice 4) before an event ever reaches this contract.
 //
-// `appVersion` (WARDEN-665) is the ONLY base-tier field that is not strictly
-// anonymous event data: it is a non-identifying app RELEASE LABEL (e.g. '0.1.19')
-// identical for every user on a release, carried so a maintainer can attribute
-// event volume to a release. It is NOT an identifier (no user/device/session
-// tie-break) and NOT content — it sits within the base tier, not behind extended
-// consent. It is OPTIONAL: a source that cannot read the version omits it, and a
-// v2 event without it still validates (graceful for that source).
+// `appVersion` (WARDEN-665) and `platform` (WARDEN-684) are the ONLY base-tier
+// fields that are not strictly anonymous event data: each is a non-identifying
+// LABEL identical across many users. `appVersion` is the app RELEASE LABEL (e.g.
+// '0.1.19'), identical for every user on a release; `platform` is the OS label
+// (one of `darwin` / `win32` / `linux`, from `process.platform`), identical for
+// millions of users on an OS. Both are carried so a maintainer can attribute
+// event volume to a release / OS instead of staring at un-attributable volume.
+// Neither is an identifier (no user/device/session tie-break) and neither is
+// content — both sit within the base tier, not behind extended consent. Both are
+// OPTIONAL: a source that cannot read the value omits the field, and a v3 event
+// without either still validates (graceful for that source). Redaction is a
+// no-op for both (fixed/coarse labels) — neither appears in any redaction
+// allowlist; base-tier labels pass through untouched.
 // ---------------------------------------------------------------------------
 
 /** An uncaught error / unhandled rejection (main or renderer). */
@@ -97,6 +103,7 @@ export interface ErrorEvent {
   runtime: Runtime;
   timestamp: number; // epoch-ms
   appVersion?: string; // non-identifying release label (e.g. '0.1.19'); optional
+  platform?: string; // non-identifying OS label (darwin/win32/linux); optional
   name: string; // e.g. 'TypeError' (Error#name); never identifying
   message: string; // redacted free text — no paths/hostnames/secrets survive
   frames: StackFrame[]; // structured, path-stripped stack frames
@@ -109,6 +116,7 @@ export interface CrashEvent {
   runtime: 'renderer';
   timestamp: number;
   appVersion?: string; // non-identifying release label (e.g. '0.1.19'); optional
+  platform?: string; // non-identifying OS label (darwin/win32/linux); optional
   reason: string; // Electron's fixed enum (oom, crashed, killed, …) — not identifying
   exitCode?: number;
 }
@@ -120,6 +128,7 @@ export interface StallEvent {
   runtime: Runtime;
   timestamp: number;
   appVersion?: string; // non-identifying release label (e.g. '0.1.19'); optional
+  platform?: string; // non-identifying OS label (darwin/win32/linux); optional
   lagMs: number; // how far the tick was overdue (≥0)
   source: 'event-loop' | 'unresponsive';
 }
@@ -198,8 +207,11 @@ export function validateEvent(event: unknown): event is TelemetryEvent {
   const e = event as unknown as Record<string, unknown>;
   if (e.chatName !== undefined && typeof e.chatName !== 'string') return false;
   if (e.sessionName !== undefined && typeof e.sessionName !== 'string') return false;
-  // appVersion (WARDEN-665) is an OPTIONAL base-tier release label — a v2 event
+  // appVersion (WARDEN-665) is an OPTIONAL base-tier release label — a v3 event
   // WITHOUT it still validates (a source that cannot read the version omits it).
   if (e.appVersion !== undefined && typeof e.appVersion !== 'string') return false;
+  // platform (WARDEN-684) is an OPTIONAL base-tier OS label — same trust posture
+  // as appVersion; a v3 event WITHOUT it still validates.
+  if (e.platform !== undefined && typeof e.platform !== 'string') return false;
   return true;
 }

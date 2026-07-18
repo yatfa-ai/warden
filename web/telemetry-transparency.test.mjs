@@ -118,6 +118,10 @@ const CANDIDATE = {
   // preview must disclose (a transparency panel that hides a collected field is
   // a lie of omission even when the data is benign).
   appVersion: '0.1.19',
+  // A non-identifying OS label (WARDEN-684). Same trust posture as appVersion
+  // (neither content nor an identifier) → it too must SURVIVE redaction unredacted
+  // at every tier, which the preview must disclose.
+  platform: 'darwin',
   name: 'Error',
   message:
     'Failed to load /home/alice/.ssh/aws-creds from host prod-db-01.corp.local (Authorization: Bearer ' +
@@ -213,6 +217,32 @@ test('describeCollection DISCLOSES the optional appVersion? field on every base-
   }
 });
 
+test('describeCollection DISCLOSES the optional platform? field on every base-event type (WARDEN-684)', () => {
+  // The transparency panel's contract is to list EVERY field a tier collects.
+  // Production attaches platform to every emitted event, so it MUST appear in the
+  // disclosed field catalog — modeled with the `?` suffix to document that a v3
+  // event WITHOUT it still validates. Removing platform? from BASE_EVENT_FIELDS
+  // turns this red.
+  for (const tier of ['base', 'extended']) {
+    const cat = describeCollection(tier);
+    assert.equal(cat.eventTypes.length, 3, `three event types at ${tier}`);
+    for (const et of cat.eventTypes) {
+      assert.ok(
+        et.fields.includes('platform?'),
+        `${et.type} discloses optional platform? at ${tier}`,
+      );
+    }
+  }
+  // platform is an OS label, NOT an identifier — it must not be classified as a
+  // chat/session-name identifier field (those are extended-only).
+  for (const tier of ['base', 'extended', 'off']) {
+    const cat = describeCollection(tier);
+    for (const id of cat.identifierFields) {
+      assert.ok(!/platform/.test(id), `platform is not an identifier field at ${tier}`);
+    }
+  }
+});
+
 console.log('\n(b) previewPayload — path/host/Authorization redacted + schema-valid');
 
 test('previewPayload replaces the file path, hostname, and Authorization header with [REDACTED:…]', () => {
@@ -242,6 +272,20 @@ test('a non-identifying appVersion release label SURVIVES redaction unredacted a
     const re = previewPayload(CANDIDATE, t);
     const touched = re.changes.some((c) => c.path === 'appVersion');
     assert.equal(touched, false, `appVersion is never a redacted/dropped path at tier ${t}`);
+  }
+});
+
+test('a non-identifying platform OS label SURVIVES redaction unredacted at every tier (WARDEN-684)', () => {
+  // platform is neither a content/prompt field nor a chat/session-name identifier,
+  // so the redactor neither drops nor rewrites it. Same as appVersion: a benign OS
+  // label (darwin/win32/linux) passing through intact — what the transparency
+  // panel's live preview must SHOW.
+  for (const t of ['base', 'extended', 'off', 'unknown', undefined]) {
+    const { payload } = previewPayload(CANDIDATE, t);
+    assert.equal(payload.platform, 'darwin', `platform survives unredacted at tier ${t}`);
+    const re = previewPayload(CANDIDATE, t);
+    const touched = re.changes.some((c) => c.path === 'platform');
+    assert.equal(touched, false, `platform is never a redacted/dropped path at tier ${t}`);
   }
 });
 

@@ -35,7 +35,7 @@ import { redact, CONTENT_FIELDS, IDENTIFIER_FIELDS } from './redact';
 // ---------------------------------------------------------------------------
 
 /** Shared cross-repo schema version (client + receiver agree on a version). */
-export const SCHEMA_VERSION = 2 as const;
+export const SCHEMA_VERSION = 3 as const;
 
 /** The three anonymous base-event types a consent-gated client may emit. */
 export const BASE_EVENT_TYPES: ReadonlyArray<string> = Object.freeze([
@@ -49,22 +49,25 @@ const RUNTIME_VALUES: ReadonlySet<string> = new Set(['main', 'renderer']);
 /**
  * The anonymous structural fields each base-event type carries (verbatim from
  * the builders in telemetry-source.cjs:153-197 + the appVersion attach at
- * :182-184). These are the fields `describeCollection` advertises per type —
- * none are content and none are chat/session identifiers, so they are collected
- * at every collecting tier. `exitCode?` is conditional (present only when the
- * crash reports one). `appVersion?` is OPTIONAL (a source that cannot read the
- * release version omits it; a v2 event without it still validates) — and unlike
- * the other fields it is NOT strictly anonymous event data: it is a
- * non-identifying app RELEASE LABEL identical for every user on a release,
- * carried so a maintainer can attribute event volume to a release. It is
- * disclosed here precisely BECAUSE the panel's contract is to list every field
- * a tier collects — omitting a newly-collected field would be a lie of omission
- * even when (as here) the data is benign. See schema.ts:84-90.
+ * :182-184 + the platform attach at :195-197). These are the fields
+ * `describeCollection` advertises per type — none are content and none are
+ * chat/session identifiers, so they are collected at every collecting tier.
+ * `exitCode?` is conditional (present only when the crash reports one).
+ * `appVersion?` and `platform?` are OPTIONAL (a source that cannot read the
+ * value omits the field; a v3 event without it still validates) — and unlike
+ * the other fields they are NOT strictly anonymous event data: `appVersion?`
+ * is a non-identifying app RELEASE LABEL identical for every user on a release,
+ * and `platform?` is a non-identifying OS LABEL (darwin/win32/linux) identical
+ * for millions of users on an OS. Both are carried so a maintainer can attribute
+ * event volume to a release / OS. They are disclosed here precisely BECAUSE the
+ * panel's contract is to list every field a tier collects — omitting a newly-
+ * collected field would be a lie of omission even when (as here) the data is
+ * benign. See schema.ts:84-97.
  */
 const BASE_EVENT_FIELDS: Record<string, readonly string[]> = {
-  error: ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'name', 'message', 'frames'],
-  crash: ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'reason', 'exitCode?'],
-  'performance-stall': ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'lagMs', 'source'],
+  error: ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'platform?', 'name', 'message', 'frames'],
+  crash: ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'platform?', 'reason', 'exitCode?'],
+  'performance-stall': ['schemaVersion', 'type', 'runtime', 'timestamp', 'appVersion?', 'platform?', 'lagMs', 'source'],
 };
 
 // Identifier-proof patterns — NON-GLOBAL, stateless `.test` twins of the

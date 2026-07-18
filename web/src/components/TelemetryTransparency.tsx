@@ -43,6 +43,11 @@ const SAMPLE_ERROR_EVENT = {
   // Included in the sample to SHOW it survives redaction — reinforcing, not
   // undermining, the trust model (it is neither content nor an identifier).
   appVersion: '0.1.19',
+  // A non-identifying OS LABEL (process.platform — darwin/win32/linux; identical
+  // for millions of users on an OS), attached to every emitted event so volume
+  // can be attributed to an OS. Same trust posture as appVersion: neither content
+  // nor an identifier, and redaction is a no-op for it.
+  platform: 'darwin',
   name: 'TypeError',
   message:
     'Failed to load config from /home/user/secrets/config.json: connect to db.internal.corp.local failed (token=Bearer sk-ant-abc123def456ghi789jkl012mno345pqr678stu901)',
@@ -204,7 +209,10 @@ export function TelemetryTransparency({ telemetryBaseEnabled, telemetryExtendedE
             A trailing <code className="font-mono">?</code> marks an optional field.{' '}
             <code className="font-mono">appVersion?</code> is a non-identifying app release label (the version of warden
             you installed) — not content, not a chat/session identifier — carried only so a maintainer can attribute event
-            volume to a release. It is sent on every event when the version is readable.
+            volume to a release.{' '}
+            <code className="font-mono">platform?</code> is its sibling: a non-identifying OS label (one of{' '}
+            <code className="font-mono">darwin</code>/<code className="font-mono">win32</code>/<code className="font-mono">linux</code>) carried so a maintainer can tell whether a spike is
+            Mac / Windows / Linux-specific. Both are sent on every event when the value is readable.
           </p>
         </div>
 
