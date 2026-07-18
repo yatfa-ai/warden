@@ -1086,6 +1086,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
             behind={fleetGitState.behind}
             atRisk={fleetGitState.atRisk}
             stashed={fleetGitState.stashed}
+            stalled={fleetGitState.stalled}
             agents={fleetGitState.agents}
             chats={hostChats}
             gitStatus={gitStatus}
@@ -1322,6 +1323,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
           behind={fleetGitState.behind}
           atRisk={fleetGitState.atRisk}
           stashed={fleetGitState.stashed}
+          stalled={fleetGitState.stalled}
           agents={fleetGitState.agents}
           chats={chats}
           gitStatus={gitStatus}

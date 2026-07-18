@@ -16,7 +16,11 @@
 // and a mid merge/rebase/cherry-pick/revert/bisect op. A 5th axis, stashed ⇒
 // fuchsia `🗄N` (WARDEN-667), carries the parked-WIP count `stashCount` the backend
 // already ships and the per-row badge already renders — the lone current-state
-// git signal that had no fleet rollup chip.
+// git signal that had no fleet rollup chip. A 6th axis, stalled ⇒ sky `💤N`
+// (WARDEN-682), carries the last-commit freshness signal `headDate` (shipped by
+// WARDEN-545) the per-row badge already renders as `· Nd` — a clean, pushed,
+// up-to-date, routine-state, stash-free agent whose HEAD is >7d old reads ZERO on
+// every other axis and was previously invisible at the fleet level; this surfaces it.
 //
 // Pure (no React import) so it is unit-testable directly via node, mirroring
 // diff.ts (extracted in WARDEN-151 "so it's testable without a React runner").
@@ -72,17 +76,21 @@ export interface GitStateStatus {
   // A number > 0 ⇒ stashed WIP; null/absent ⇒ unknown (treated as not-stashed, never
   // noise), the same null-is-quiet discipline ahead/behind follow.
   stashCount?: number | null;
-  // WARDEN-669: the strict ISO-8601 committer date of HEAD (`git log -1 --format=%cI
-  // HEAD`, normalized by normalizeHeadDate in src/gitStatus.js). It ALREADY ships on
-  // /api/git-status and is cached in the fleet gitStatus map ChatSidebar holds
-  // (ChatSidebar.tsx stores `headDate: j.headDate`), but this GitStateStatus slice
-  // previously dropped it — so the fleet summarizer had no temporal signal. Carried
-  // here as a STRING (not pre-parsed to epoch) to mirror normalizeHeadDate's strict
-  // ISO-8601 contract and avoid the epoch `*1000` footgun src/gitStatus.js documents
-  // — exactly as the cached map stores it, so extending this slice is structurally
-  // compatible (no fetch, no backend change). Deriving headAgeMs onto ProjectGitAgent
-  // (below) reaches the unpushed-popover renderer with zero prop widening. null/absent
-  // for a repo with no commits / a non-git cwd / a branch-less cwd (mirrors headFresh).
+  // WARDEN-669 + WARDEN-682: the strict ISO-8601 committer date of HEAD
+  // (`git log -1 --format=%cI HEAD`, normalized by normalizeHeadDate in
+  // src/gitStatus.js). It ALREADY ships on /api/git-status (WARDEN-545) and is
+  // cached in the fleet gitStatus map ChatSidebar holds (ChatSidebar.tsx stores
+  // `headDate: j.headDate`), but this GitStateStatus slice previously dropped it —
+  // so the fleet summarizer had no temporal signal. Carried here as a STRING (not
+  // pre-parsed to epoch) to mirror normalizeHeadDate's strict ISO-8601 contract and
+  // avoid the epoch `*1000` footgun src/gitStatus.js documents — exactly as the
+  // cached map stores it, so extending this slice is structurally compatible (no
+  // fetch, no backend change). TWO fleet rollups read off it, derived as ONE
+  // `headAgeMs` field on ProjectGitAgent (below): the ↑N unpushed-popover oldest-
+  // first rank (WARDEN-669), and the 6th 💤N stalled axis — a HEAD older than
+  // STALE_HEAD_AGE_MS (7d) (WARDEN-682). null/absent/invalid for a repo with no
+  // commits / a non-git cwd / a branch-less cwd (mirrors headFresh); the derivations
+  // treat that as age-unknown + not-stalled, never noise.
   headDate?: string | null;
   // WARDEN-670: the per-agent uncommitted-WIP magnitude — insertions/deletions from
   // `git diff HEAD --shortstat` (parsed by parseDiffStat in src/gitStatus.js and
@@ -132,22 +140,30 @@ export interface ProjectGitAgent {
   // axis surfaces it. Mirrors the per-row GitBranchBadge's 🗄N badge (GitBadges.tsx)
   // so the chip and the row agree by construction.
   stashed: boolean;
-  // WARDEN-669: the age of this agent's HEAD commit — `Date.now() - headMs` (ms) —
-  // the fleet-level TEMPORAL signal the ↑N unpushed popover ranks oldest-first so a
-  // human clicking the fleet chip can integrate the longest-sitting WIP first
-  // (highest rot/collision risk). Derived from headDate (strict ISO-8601 from git
-  // %cI), mirroring the per-row GitBranchBadge's headMs derivation (the same
-  // `Number.isFinite(Date.parse(...))` guard at GitBadges.tsx). Named `headAgeMs`
-  // (kind-agnostic), NOT `unpushedAgeMs`: a HEAD-committer age is a property of the
-  // agent's HEAD, not of its unpushed-ness, so the field reads correctly when a
-  // later slice reuses it to rank the dirty/behind/atRisk popovers too (this slice
-  // consumes it in the unpushed popover only). It is a THRESHOLD-FREE rank — the
-  // popover just sorts by it and reuses the per-row badge's existing STALE_HEAD_AGE_MS
-  // tint for the label, so no new magic number ships here. null when headDate is
-  // missing/invalid/empty (a repo with no commits / non-git cwd) so the popover
-  // renders no age label and the row sorts last (mirrors headFresh /
-  // mergeFleetCommitsByEpoch's null-epoch-last convention).
+  // WARDEN-669 + WARDEN-682: the age of this agent's HEAD commit — `now - headMs`
+  // (ms) — the fleet-level TEMPORAL signal. WARDEN-669 ranks the ↑N unpushed popover
+  // oldest-first off it (longest-sitting WIP on top = highest rot/collision risk);
+  // WARDEN-682 derives the 6th 💤N stalled axis off the SAME field (headAgeMs >
+  // STALE_HEAD_AGE_MS). Named `headAgeMs` (kind-agnostic), NOT `unpushedAgeMs`/
+  // `stalledAgeMs`: a HEAD-committer age is a property of the agent's HEAD, so the
+  // field reads correctly when any later slice reuses it to rank the dirty/behind/
+  // atRisk popovers too. Derived from headDate (strict ISO-8601 from git %cI) via
+  // `Number.isFinite(Date.parse(...))`, mirroring the per-row GitBranchBadge's headMs
+  // derivation. WARDEN-682's coordination note planned ONE head-time field reused by
+  // both the unpushed-axis rank and the stalled-axis membership test — this is it
+  // (no parallel `headMs` field on the agent). null when headDate is missing/invalid/
+  // empty (a repo with no commits / non-git cwd) so the unpushed popover renders no
+  // age label + sorts the row last (mirrors headFresh / mergeFleetCommitsByEpoch's
+  // null-epoch-last convention), and the stalled axis treats it as not-stalled.
   headAgeMs: number | null;
+  // WARDEN-682: stalled ⇒ headAgeMs is a finite age older than STALE_HEAD_AGE_MS
+  // (7d) — a clean, pushed, up-to-date, routine-state, stash-free agent whose HEAD
+  // is >7d old reads ZERO on every other axis and was previously invisible at the
+  // fleet level; this 6th axis (💤N) surfaces it. The 💤N popover filters
+  // `agents.filter(a => a.stalled)`; the branch-line suffix reads headAgeMs. Mirrors
+  // the per-row GitBranchBadge's `headStale` computation (GitBadges.tsx) so the chip
+  // and the row agree on the SAME 7d threshold.
+  stalled: boolean;
   // WARDEN-670: this agent's uncommitted-WIP magnitude (+N −M) — the dirty-axis
   // per-agent detail the ±N popover renders via DiffStatChip and ranks heaviest-first
   // (sortGitAgentsByMagnitudeDesc). Carried as the full split { insertions, deletions }
@@ -171,48 +187,69 @@ export interface ProjectGitState {
   behind: number;    // # of the project's active agents behind their upstream
   atRisk: number;    // # of the project's active agents in a non-routine repo state (WARDEN-635)
   stashed: number;   // # of the project's active agents with parked WIP (stashCount > 0, WARDEN-667)
+  stalled: number;   // # of the project's active agents whose last commit is >7d old (headDate, WARDEN-682)
   // The contributing agents behind those counts, in `chats` iteration order
   // (deterministic, so tests assert deep equality). The ±N popover filters
   // `agents.filter(a => a.dirty)`; the ↑N popover filters `agents.filter(a =>
   // a.ahead > 0)`; the ↓N popover filters `agents.filter(a => a.behind > 0)`; the
   // ⚑N popover filters `agents.filter(a => a.atRisk)` (WARDEN-635); the 🗄N popover
-  // filters `agents.filter(a => a.stashed)` (WARDEN-667). An agent dirty AND
-  // unpushed AND behind AND at-risk AND stashed appears ONCE with all signals.
-  // `dirty`/`unpushed`/`behind`/`atRisk`/`stashed` are retained (the chip still
-  // reads them) even though they're now derivable — avoids churn at the two call
-  // sites.
+  // filters `agents.filter(a => a.stashed)` (WARDEN-667); the 💤N popover filters
+  // `agents.filter(a => a.stalled)` (WARDEN-682). An agent dirty AND
+  // unpushed AND behind AND at-risk AND stashed AND stalled appears ONCE with all
+  // signals. `dirty`/`unpushed`/`behind`/`atRisk`/`stashed`/`stalled` are retained
+  // (the chip still reads them) even though they're now derivable — avoids churn at
+  // the two call sites.
   agents: ProjectGitAgent[];
 }
 
 export interface ProjectGitSummary {
   // Sparse "needs attention" map: only projects with at least one dirty,
-  // unpushed, behind, at-risk, OR stashed agent get an entry, so a clean project
-  // yields no key (the chip's sub-badges hide on absence exactly as they hide on a
-  // 0 count).
+  // unpushed, behind, at-risk, stashed, OR stalled agent get an entry, so a clean
+  // project yields no key (the chip's sub-badges hide on absence exactly as they
+  // hide on a 0 count).
   perProject: Record<string, ProjectGitState>;
   total: ProjectGitState;  // the sum across all projects
 }
 
+// WARDEN-682: the last-commit freshness threshold — a HEAD commit older than this
+// marks an agent "stalled" (💤). ⚠️ This MUST mirror `STALE_HEAD_AGE_MS` in
+// web/src/components/sidebar/GitBadges.tsx so the fleet chip and the per-row `· Nd`
+// append agree on EXACTLY who is stalled (fleet/row agreement rides on this shared
+// 7d threshold, not on a shared color — the per-row stale tint is amber, the chip is
+// sky). Kept as a LOCAL copy (NOT imported from the .tsx) so this pure module stays
+// unit-testable directly via node (gitStateSummary.test.mjs imports the transpiled
+// module); a runtime import of GitBadges.tsx would pull React/radix-ui/lucide and
+// break every test in that file. The per-row badge keeps its own copy; this is the
+// summarizer's own, comment-linked so the two stay in sync.
+const STALE_HEAD_AGE_MS = 7 * 86400_000;
+
 /**
  * Summarize uncommitted (`dirty`), unpushed (`unpushed`), behind-upstream
- * (`behind`), at-risk-repo-state (`atRisk`, WARDEN-635), and parked-WIP
- * (`stashed`, WARDEN-667) agent counts per project and globally, over the cached
- * per-chat `gitStatus` map.
+ * (`behind`), at-risk-repo-state (`atRisk`, WARDEN-635), parked-WIP (`stashed`,
+ * WARDEN-667), and last-commit-freshness (`stalled`, WARDEN-682) agent counts per
+ * project and globally, over the cached per-chat `gitStatus` map.
  *
  * Only active chats with a project are considered (the same population the chips'
  * `projectCounts` are drawn from). A chat missing from `gitStatus` — still
  * loading, or a non-git cwd — is treated as neither (no guess). `total` is the
  * sum of the per-project counts. Each `ProjectGitState` also carries the
  * contributing `agents` (in `chats` iteration order) so the chip badges can list
- * exactly who is dirty/unpushed/behind/at-risk — `total.agents` is the union across
- * projects.
+ * exactly who is dirty/unpushed/behind/at-risk/stashed/stalled — `total.agents` is
+ * the union across projects.
+ *
+ * `now` (defaulting to `Date.now()`) is the staleness reference: an agent is
+ * `stalled` when its `headDate` parses to a finite ms older than `now -
+ * STALE_HEAD_AGE_MS`. The default keeps the lone production call site
+ * (ChatSidebar.tsx) unchanged; tests pass a fixed `now` so assertions are
+ * deterministic (the module stays pure — no `Date.now()` read inside the body).
  */
 export function summarizeProjectGitState(
   chats: GitStateChat[],
   gitStatus: Record<string, GitStateStatus>,
+  now: number = Date.now(),
 ): ProjectGitSummary {
   const perProject: Record<string, ProjectGitState> = {};
-  const total: ProjectGitState = { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [] };
+  const total: ProjectGitState = { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [] };
 
   for (const c of chats) {
     // Match projectCounts' population exactly (active && has a project) so the
@@ -259,6 +296,24 @@ export function summarizeProjectGitState(
     // the per-row GitBranchBadge's `stashN` computation (GitBadges.tsx).
     const stashCount = typeof status.stashCount === 'number' ? status.stashCount : 0;
     const stashed = stashCount > 0;
+    // WARDEN-669 + WARDEN-682: HEAD-commit time → age, derived from headDate (the
+    // strict ISO-8601 last-commit time /api/git-status already ships via WARDEN-545
+    // and the cached gitStatus map holds). Date.parse → NaN for a missing/invalid/
+    // empty headDate (a repo with no commits / non-git cwd). The age is computed
+    // against the fixed `now` arg (NOT Date.now()) so the module stays pure/
+    // deterministic and tests are stable — a strict improvement over WARDEN-669's
+    // original Date.now()-based derivation, and it keeps the two consumers (the
+    // unpushed-popover age rank, WARDEN-669; the stalled-axis membership test,
+    // WARDEN-682) reading off ONE `headAgeMs` field, reconciled per WARDEN-682's
+    // coordination note so the agent carries a single head-time field, not two.
+    const headMs = typeof status.headDate === 'string' && status.headDate ? Date.parse(status.headDate) : NaN;
+    const headAgeMs = Number.isFinite(headMs) ? now - headMs : null;
+    // WARDEN-682: stalled ⇒ headAgeMs is a finite age older than STALE_HEAD_AGE_MS
+    // (7d) — a clean/pushed/in-sync/routine/stash-free agent whose HEAD is >7d old
+    // previously read ZERO across every chip; this 6th axis surfaces it. Fleet/row
+    // agreement rides on this shared 7d threshold (the per-row GitBranchBadge's own
+    // headStale uses the same constant).
+    const stalled = headAgeMs != null && headAgeMs > STALE_HEAD_AGE_MS;
     // A clean, pushed, up-to-date, routine-state, stash-free agent contributes
     // nothing — skip it so clean projects stay absent from the sparse map (and off
     // the chips). An at-risk-only agent is KEPT here (WARDEN-635) — the mirror of
@@ -266,19 +321,11 @@ export function summarizeProjectGitState(
     // stashed-only agent is KEPT here too (WARDEN-667) — the same mirror for this
     // 5th axis: a clean, pushed, up-to-date, routine-state agent that holds parked
     // WIP (the canonical stash case) previously read ZERO across every chip and was
-    // invisible at the fleet level.
-    if (!dirty && !unpushed && !behind && !atRisk && !stashed) continue;
-
-    // WARDEN-669: HEAD-commit age, derived from headDate (the strict ISO-8601 %cI
-    // string this slice now carries). Mirrors the per-row GitBranchBadge's headMs
-    // derivation verbatim — Date.parse → NaN for a missing/invalid/empty headDate,
-    // so headAgeMs is null then (no age label, sorts last). Computed as an AGE
-    // (Date.now() - headMs), not an epoch, because the unpushed-popover RANK needs
-    // "how long has this WIP been sitting" directly; the render layer reconstructs
-    // the epoch for the relative/absolute label formatters. Derived here (not in the
-    // React layer) so it reaches the popover via ProjectGitAgent with no prop widening.
-    const headMs = typeof status.headDate === 'string' && status.headDate ? Date.parse(status.headDate) : NaN;
-    const headAgeMs = Number.isFinite(headMs) ? Date.now() - headMs : null;
+    // invisible at the fleet level. A stalled-only agent is KEPT here too (WARDEN-682)
+    // — the same mirror for this 6th axis: a clean, pushed, up-to-date,
+    // routine-state, stash-free agent whose HEAD is >7d old previously read ZERO
+    // across every chip and was invisible at the fleet level.
+    if (!dirty && !unpushed && !behind && !atRisk && !stashed && !stalled) continue;
 
     // WARDEN-670: carry this agent's uncommitted-WIP magnitude (status.diffstat,
     // already cached — no new fetch) onto ProjectGitAgent so the ±N popover can render
@@ -291,14 +338,15 @@ export function summarizeProjectGitState(
     // The agent entry shared by the per-project list and the global union. One
     // entry per contributing agent, so a both-dirty-and-at-risk agent appears a
     // single time with all signals (never duplicated).
-    const agent: ProjectGitAgent = { key: c.key || c.id, dirty, ahead, behind: behindCount, atRisk, atRiskReason, stashed, headAgeMs, diffstat };
+    const agent: ProjectGitAgent = { key: c.key || c.id, dirty, ahead, behind: behindCount, atRisk, atRiskReason, stashed, headAgeMs, stalled, diffstat };
 
-    const entry = perProject[c.project] ?? { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [] };
+    const entry = perProject[c.project] ?? { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [] };
     if (dirty) entry.dirty += 1;
     if (unpushed) entry.unpushed += 1;
     if (behind) entry.behind += 1;
     if (atRisk) entry.atRisk += 1;
     if (stashed) entry.stashed += 1;
+    if (stalled) entry.stalled += 1;
     entry.agents.push(agent);
     perProject[c.project] = entry;
 
@@ -307,6 +355,7 @@ export function summarizeProjectGitState(
     if (behind) total.behind += 1;
     if (atRisk) total.atRisk += 1;
     if (stashed) total.stashed += 1;
+    if (stalled) total.stalled += 1;
     total.agents.push(agent);
   }
 

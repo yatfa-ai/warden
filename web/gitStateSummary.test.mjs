@@ -61,50 +61,58 @@ const agent = (id, project, key) => ({ id, project, active: true, key });
 // behind default kept older cases green.
 const status = (clean, ahead, behind = 0, extra = {}) => ({ clean, ahead, behind, ...extra });
 // The expected shape of a contributing-agent entry (WARDEN-268 + WARDEN-297 +
-// The expected shape of a contributing-agent entry (WARDEN-268 + WARDEN-297 +
-// WARDEN-635 + WARDEN-667 + WARDEN-669 + WARDEN-670). behind defaults to 0 to mirror
-// status(); atRisk defaults to false + atRiskReason to null so a pre-635 expected agent
-// reads as not-at-risk without touching each call site; stashed defaults to false so a
-// pre-667 expected agent reads as not-stashed the same way; headAgeMs defaults to null
-// so a pre-669 expected agent (no headDate in its fixture) reads as age-unknown; diffstat
-// (WARDEN-670) defaults to null so EVERY pre-670 expected agent carries the field
-// (the implementation reads `status.diffstat ?? null`) -- absent fields are treated the
-// same by the implementation, so old cases stay green exactly as the behind/atRisk/
-// stashed/headAgeMs defaults kept their predecessors green. A WARDEN-669 case passes a
-// finite headAgeMs as the 8th arg (a fixture that sets headDate); a WARDEN-670 case
-// passes the inline { files, insertions, deletions } magnitude as the 9th (after a null
-// headAgeMs placeholder), mirroring how status()'s `extra` object carries diffstat on
-// the input side.
-const ag = (key, dirty, ahead, behind = 0, atRisk = false, atRiskReason = null, stashed = false, headAgeMs = null, diffstat = null) => ({ key, dirty, ahead, behind, atRisk, atRiskReason, stashed, headAgeMs, diffstat });
+// WARDEN-635 + WARDEN-667 + WARDEN-669 + WARDEN-670 + WARDEN-682). behind defaults to 0
+// to mirror status(); atRisk defaults to false + atRiskReason to null so a pre-635
+// expected agent reads as not-at-risk without touching each call site; stashed defaults
+// to false so a pre-667 expected agent reads as not-stashed the same way; headAgeMs
+// defaults to null (WARDEN-669) so a pre-669 fixture (no headDate) reads as age-unknown;
+// diffstat (WARDEN-670) defaults to null so EVERY pre-670 expected agent carries the
+// field (the implementation reads `status.diffstat ?? null`) -- absent fields are
+// treated the same by the implementation, so old cases stay green exactly as the
+// behind/atRisk/stashed/headAgeMs defaults kept their predecessors green; stalled
+// (WARDEN-682) defaults to false so a pre-682 expected agent reads as not-stalled the
+// same way. A WARDEN-669 case passes a finite headAgeMs as the 8th arg (a fixture that
+// sets headDate); a WARDEN-670 case passes the inline { files, insertions, deletions }
+// magnitude as the 9th (after a null headAgeMs placeholder), mirroring how status()'s
+// `extra` object carries diffstat on the input side; a WARDEN-682 stalled case passes
+// headAgeMs (8th, the >7d age), a null diffstat placeholder (9th), and stalled:true (10th).
+const ag = (key, dirty, ahead, behind = 0, atRisk = false, atRiskReason = null, stashed = false, headAgeMs = null, diffstat = null, stalled = false) => ({ key, dirty, ahead, behind, atRisk, atRiskReason, stashed, headAgeMs, diffstat, stalled });
 
-const sum = (chats, gitStatus) => summarizeProjectGitState(chats, gitStatus);
+// WARDEN-682: a fixed `now` so the stalled (>7d) assertions are deterministic — the
+// module's `now` arg defaults to Date.now() in production (ChatSidebar); stalled-axis
+// tests pass NOW explicitly so a headDate = NOW−9d yields a stable headAgeMs = 9d.
+// `sum` forwards an OPTIONAL now: WARDEN-669's headAgeMs bound-check tests call
+// `sum(chats, gitStatus)` (no now) so they keep the Date.now() default and their
+// before/after bounds hold; stalled tests pass NOW as the 3rd arg for determinism.
+const NOW = 1_700_000_000_000;
+const sum = (chats, gitStatus, now) => summarizeProjectGitState(chats, gitStatus, now);
 
 console.log('\nclean project → no counts (badges hidden)');
 test('a clean, pushed, up-to-date agent yields no per-project entry and zero totals', () => {
   const r = sum([agent('a1', 'warden')], { a1: status(true, 0) });
   assert.deepEqual(r.perProject, {});
-  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [] });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [] });
 });
 
 console.log('\ndirty-only → counts toward dirty, not unpushed/behind');
 test('clean===false with ahead 0 → dirty:1, unpushed:0', () => {
   const r = sum([agent('a1', 'warden')], { a1: status(false, 0) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [ag('a1', true, 0)] } });
-  assert.deepEqual(r.total, { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [ag('a1', true, 0)] });
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', true, 0)] } });
+  assert.deepEqual(r.total, { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', true, 0)] });
 });
 
 console.log('\nunpushed-only → counts toward unpushed, not dirty/behind');
 test('clean repo with ahead 3 → dirty:0, unpushed:1', () => {
   const r = sum([agent('a1', 'warden')], { a1: status(true, 3) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 1, behind: 0, atRisk: 0, stashed: 0, agents: [ag('a1', false, 3)] } });
-  assert.deepEqual(r.total, { dirty: 0, unpushed: 1, behind: 0, atRisk: 0, stashed: 0, agents: [ag('a1', false, 3)] });
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 1, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', false, 3)] } });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 1, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', false, 3)] });
 });
 
 console.log('\nboth → one agent contributes once to each counter (not doubled)');
 test('clean===false AND ahead 2 → dirty:1, unpushed:1', () => {
   const r = sum([agent('a1', 'warden')], { a1: status(false, 2) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 1, behind: 0, atRisk: 0, stashed: 0, agents: [ag('a1', true, 2)] } });
-  assert.deepEqual(r.total, { dirty: 1, unpushed: 1, behind: 0, atRisk: 0, stashed: 0, agents: [ag('a1', true, 2)] });
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 1, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', true, 2)] } });
+  assert.deepEqual(r.total, { dirty: 1, unpushed: 1, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', true, 2)] });
 });
 
 console.log('\nmulti-project aggregation');
@@ -125,40 +133,40 @@ test('counts accumulate per project and across projects independently', () => {
   };
   const r = sum(chats, gitStatus);
   assert.deepEqual(r.perProject, {
-    warden: { dirty: 2, unpushed: 1, behind: 0, atRisk: 0, stashed: 0, agents: [ag('a1', true, 0), ag('a2', true, 2)] },
-    tinker: { dirty: 0, unpushed: 1, behind: 0, atRisk: 0, stashed: 0, agents: [ag('b1', false, 5)] },
+    warden: { dirty: 2, unpushed: 1, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', true, 0), ag('a2', true, 2)] },
+    tinker: { dirty: 0, unpushed: 1, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('b1', false, 5)] },
   });
-  assert.deepEqual(r.total, { dirty: 2, unpushed: 2, behind: 0, atRisk: 0, stashed: 0, agents: [ag('a1', true, 0), ag('a2', true, 2), ag('b1', false, 5)] });
+  assert.deepEqual(r.total, { dirty: 2, unpushed: 2, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', true, 0), ag('a2', true, 2), ag('b1', false, 5)] });
 });
 
 console.log('\nunknown status (missing from gitStatus) counts as NEITHER, never clean');
 test('an active project agent absent from the map → no entry, no totals', () => {
   const r = sum([agent('a1', 'warden')], {});
   assert.deepEqual(r.perProject, {});
-  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [] });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [] });
 });
 test('a still-loading agent never masks a dirty sibling in the same project', () => {
   // a1 dirty & known, a2 unknown: a2 must NOT be treated as clean and must not
   // dilute a1's dirty count (the false-clean trap this slice guards against).
   const r = sum([agent('a1', 'warden'), agent('a2', 'warden')], { a1: status(false, 0) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [ag('a1', true, 0)] } });
-  assert.deepEqual(r.total, { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [ag('a1', true, 0)] });
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', true, 0)] } });
+  assert.deepEqual(r.total, { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', true, 0)] });
 });
 
 console.log('\nnull/unknown field values are quiet, not counted');
 test('clean:null is not dirty (only explicit clean===false is)', () => {
   const r = sum([agent('a1', 'warden')], { a1: status(null, 1) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 1, behind: 0, atRisk: 0, stashed: 0, agents: [ag('a1', false, 1)] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 1, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', false, 1)] } });
 });
 test('ahead:null is not unpushed (only a number > 0 is)', () => {
   const r = sum([agent('a1', 'warden')], { a1: status(false, null) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [ag('a1', true, 0)] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', true, 0)] } });
 });
 test('behind:null is not behind (only a number > 0 is) — a non-tracking agent (detached / no upstream) stays quiet', () => {
   // Mirrors ahead:null ⇒ not unpushed. behind:null means there is no @{u} to
   // compare against, so the agent must NOT surface as behind.
   const r = sum([agent('a1', 'warden')], { a1: status(false, 0, null) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [ag('a1', true, 0, 0)] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', true, 0, 0)] } });
 });
 test('ahead:0 is not unpushed', () => {
   const r = sum([agent('a1', 'warden')], { a1: status(false, 0) });
@@ -173,12 +181,12 @@ console.log('\npopulation matches projectCounts: inactive / project-less chats a
 test('inactive agent (active:false) is ignored even when dirty', () => {
   const r = sum([{ id: 'a1', project: 'warden', active: false }], { a1: status(false, 5) });
   assert.deepEqual(r.perProject, {});
-  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [] });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [] });
 });
 test('active agent without a project is ignored (chips are project-scoped)', () => {
   const r = sum([{ id: 'a1', active: true }], { a1: status(false, 5) });
   assert.deepEqual(r.perProject, {});
-  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [] });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [] });
 });
 
 console.log('\nkey resolution: status is looked up by key || id (matches per-row lookups)');
@@ -192,12 +200,12 @@ test('when key is set, the status is read from gitStatus[key], not gitStatus[id]
   };
   const r = sum(chats, gitStatus);
   assert.deepEqual(r.perProject, {});
-  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [] });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [] });
 });
 test('when no key, the status is read from gitStatus[id]', () => {
   const chats = [{ id: 'chat-1', project: 'warden', active: true }];
   const r = sum(chats, { 'chat-1': status(false, 0) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [ag('chat-1', true, 0)] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('chat-1', true, 0)] } });
 });
 
 console.log('\ntotal always equals the sum across projects');
@@ -225,7 +233,7 @@ console.log('\nempty inputs are safe');
 test('no chats → empty per-project, zero totals', () => {
   const r = sum([], { x: status(false, 5) });
   assert.deepEqual(r.perProject, {});
-  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [] });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [] });
 });
 
 console.log('\nagents breakdown: which agents have uncommitted/unpushed work (WARDEN-268)');
@@ -313,8 +321,8 @@ test('a behind-only agent now surfaces (behind:1, no dirty/unpushed) — the key
   // Before WARDEN-297 the skip-clean guard dropped a behind-only agent entirely
   // (it was neither dirty nor unpushed). Now it must appear so the chip can show ↓N.
   const r = sum([agent('a1', 'warden')], { a1: status(true, 0, 4) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 1, atRisk: 0, stashed: 0, agents: [ag('a1', false, 0, 4)] } });
-  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 1, atRisk: 0, stashed: 0, agents: [ag('a1', false, 0, 4)] });
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 1, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', false, 0, 4)] } });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 1, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', false, 0, 4)] });
 });
 
 test('an agent both dirty AND behind appears ONCE with both signals', () => {
@@ -349,12 +357,12 @@ test('a behind agent mixes with dirty/unpushed siblings across the same project'
   assert.deepEqual(r.perProject, {
     warden: {
       dirty: 2, unpushed: 1, behind: 2, atRisk: 0,
-      stashed: 0, agents: [ag('a1', true, 0, 0), ag('a2', false, 0, 7), ag('a3', true, 2, 3)],
+      stashed: 0, stalled: 0, agents: [ag('a1', true, 0, 0), ag('a2', false, 0, 7), ag('a3', true, 2, 3)],
     },
   });
   assert.deepEqual(r.total, {
     dirty: 2, unpushed: 1, behind: 2, atRisk: 0,
-    stashed: 0, agents: [ag('a1', true, 0, 0), ag('a2', false, 0, 7), ag('a3', true, 2, 3)],
+    stashed: 0, stalled: 0, agents: [ag('a1', true, 0, 0), ag('a2', false, 0, 7), ag('a3', true, 2, 3)],
   });
 });
 
@@ -383,7 +391,7 @@ test('a behind-only project gets a sparse-map entry (it would have been absent p
     a1: status(true, 0, 9), // behind only
     b1: status(true, 0, 0), // clean → tinker absent
   });
-  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 1, atRisk: 0, stashed: 0, agents: [ag('a1', false, 0, 9)] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 1, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', false, 0, 9)] } });
   assert.equal('tinker' in r.perProject, false);
 });
 
@@ -393,8 +401,8 @@ test('a detached-only agent now surfaces (atRisk:1) where it was previously drop
   // tree entirely (it was neither dirty nor unpushed nor behind — ahead/behind are
   // null on detached). Now it must appear so the chip can show ⚑N · detached HEAD.
   const r = sum([agent('a1', 'warden')], { a1: status(true, 0, 0, { detached: true, branch: 'HEAD' }) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 1, stashed: 0, agents: [ag('a1', false, 0, 0, true, 'detached')] } });
-  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 1, stashed: 0, agents: [ag('a1', false, 0, 0, true, 'detached')] });
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 1, stashed: 0, stalled: 0, agents: [ag('a1', false, 0, 0, true, 'detached')] } });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 1, stashed: 0, stalled: 0, agents: [ag('a1', false, 0, 0, true, 'detached')] });
 });
 
 test('detached:true wins over a mid-merge op (a detached HEAD surfaces via the detached reason, not op)', () => {
@@ -409,7 +417,7 @@ test('a no-upstream agent (named branch, upstream:null) surfaces with reason "no
   // A branch never `push -u`'d: local-only, unbacked work — ahead/behind are null
   // (no @{u}), so this is invisible to the ±N/↑N/↓N chips without the 4th axis.
   const r = sum([agent('a1', 'warden')], { a1: status(true, 0, 0, { branch: 'feature/x', upstream: null }) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 1, stashed: 0, agents: [ag('a1', false, 0, 0, true, 'noUpstream')] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 1, stashed: 0, stalled: 0, agents: [ag('a1', false, 0, 0, true, 'noUpstream')] } });
 });
 
 test('a tracking branch (upstream set) is NOT at-risk — the noUpstream gate', () => {
@@ -421,7 +429,7 @@ test('a tracking branch (upstream set) is NOT at-risk — the noUpstream gate', 
     a1: status(false, 0, 0, { branch: 'feature/x', upstream: 'origin/feature/x' }), // tracking → dirty, not at-risk
     a2: status(false, 0, 0, { branch: 'feature/y', upstream: null }),               // no upstream → dirty, at-risk
   });
-  assert.deepEqual(r.perProject, { warden: { dirty: 2, unpushed: 0, behind: 0, atRisk: 1, stashed: 0, agents: [ag('a1', true, 0, 0, false, null), ag('a2', true, 0, 0, true, 'noUpstream')] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 2, unpushed: 0, behind: 0, atRisk: 1, stashed: 0, stalled: 0, agents: [ag('a1', true, 0, 0, false, null), ag('a2', true, 0, 0, true, 'noUpstream')] } });
   assert.equal(r.total.atRisk, 1);
 });
 
@@ -431,7 +439,7 @@ test('branch:null + upstream:null is NOT noUpstream (the !!branch gate disambigu
   // (unborn HEAD / non-git), so it must NOT read as a no-upstream RISK. Surfaced via
   // a dirty tree so the agent isn't skipped — isolating the discriminator.
   const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, { branch: null, upstream: null }) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [ag('a1', true, 0, 0, false, null)] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', true, 0, 0, false, null)] } });
 });
 
 test('branch:"HEAD" literal is NOT noUpstream (detached owns it; a literal HEAD is not a named branch)', () => {
@@ -446,7 +454,7 @@ test('a mid-merge agent surfaces with reason "op"; operation:null does not', () 
   // inProgress.operation truthy ⇒ mid merge/rebase/cherry-pick/revert/bisect. A
   // tracking branch (upstream set) so the ONLY at-risk signal is the in-progress op.
   const r = sum([agent('a1', 'warden')], { a1: status(true, 0, 0, { branch: 'main', upstream: 'origin/main', inProgress: { operation: 'merge' } }) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 1, stashed: 0, agents: [ag('a1', false, 0, 0, true, 'op')] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 1, stashed: 0, stalled: 0, agents: [ag('a1', false, 0, 0, true, 'op')] } });
   // operation:null (or absent) ⇒ the op is over / unknown ⇒ not at-risk (clean → skipped).
   const r2 = sum([agent('a2', 'warden')], { a2: status(true, 0, 0, { branch: 'main', upstream: 'origin/main', inProgress: { operation: null } }) });
   assert.deepEqual(r2.perProject, {});
@@ -491,7 +499,7 @@ test('an at-risk-only project gets a sparse-map entry (clean tree, no dirty/unpu
     a1: status(true, 0, 0, { detached: true, branch: 'HEAD' }), // at-risk only
     b1: status(true, 0, 0, { branch: 'main', upstream: 'origin/main' }), // clean → tinker absent
   });
-  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 1, stashed: 0, agents: [ag('a1', false, 0, 0, true, 'detached')] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 1, stashed: 0, stalled: 0, agents: [ag('a1', false, 0, 0, true, 'detached')] } });
   assert.equal('tinker' in r.perProject, false);
 });
 
@@ -515,8 +523,8 @@ test('a stash-only agent now surfaces (stashed:1, clean tree) — the key behavi
   // nor unpushed nor behind nor at-risk). Now it must appear so the chip can show
   // 🗄N — the canonical `git stash` case the other four axes are all blind to.
   const r = sum([agent('a1', 'warden')], { a1: status(true, 0, 0, { stashCount: 2 }) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 1, agents: [ag('a1', false, 0, 0, false, null, true)] } });
-  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 1, agents: [ag('a1', false, 0, 0, false, null, true)] });
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 1, stalled: 0, agents: [ag('a1', false, 0, 0, false, null, true)] } });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 1, stalled: 0, agents: [ag('a1', false, 0, 0, false, null, true)] });
 });
 
 test('stashCount:null is not stashed (only a number > 0 is) — a detached / non-git agent stays quiet', () => {
@@ -525,7 +533,7 @@ test('stashCount:null is not stashed (only a number > 0 is) — a detached / non
   // agent must NOT surface as stashed. Made dirty so the agent isn't skipped —
   // isolating stashCount as the SOLE discriminator (it must read stashed:0).
   const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, { stashCount: null }) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [ag('a1', true, 0, 0, false, null, false)] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', true, 0, 0, false, null, false)] } });
 });
 
 test('stashCount:0 is not stashed', () => {
@@ -574,7 +582,7 @@ test('a stashed-only project gets a sparse-map entry (clean tree, no dirty/unpus
     a1: status(true, 0, 0, { stashCount: 1 }), // stashed only
     b1: status(true, 0, 0),                    // clean → tinker absent
   });
-  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 1, agents: [ag('a1', false, 0, 0, false, null, true)] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 1, stalled: 0, agents: [ag('a1', false, 0, 0, false, null, true)] } });
   assert.equal('tinker' in r.perProject, false);
 });
 
@@ -741,10 +749,112 @@ test('the unpushed-popover slice, when sorted by the helper, DOES go oldest-firs
   assert.deepEqual(sortByHeadAgeDesc(unpushed).map((a) => a.key), ['a2', 'a1', 'a4']);
 });
 
+console.log('\nstalled axis (WARDEN-682): 💤N surfaces last-commit freshness — a clean/pushed/in-sync agent >7d old, the lone per-row signal with no fleet chip');
+test('a stalled-only agent now surfaces (stalled:1, clean tree) — the key behavioral change', () => {
+  // Before WARDEN-682 the skip-clean guard dropped a stalled-only agent entirely (a
+  // clean, pushed, up-to-date, routine-state, stash-free tree whose last commit was
+  // >7d old was neither dirty nor unpushed nor behind nor at-risk nor stashed). Now
+  // it must appear so the chip can show 💤N — the exact mirror of WARDEN-667's
+  // stash-only case, applied to the last per-row GitBranchBadge signal with no rollup.
+  // sum(..., NOW) pins the staleness reference so headDate = NOW−9d ⇒ headAgeMs = 9d
+  // deterministically (the reconciled headAgeMs field is an AGE, asserted as 9d).
+  const stale9d = new Date(NOW - 9 * 86400_000).toISOString();
+  const r = sum([agent('a1', 'warden')], { a1: status(true, 0, 0, { headDate: stale9d }) }, NOW);
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 1, agents: [ag('a1', false, 0, 0, false, null, false, 9 * 86400_000, null, true)] } });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 1, agents: [ag('a1', false, 0, 0, false, null, false, 9 * 86400_000, null, true)] });
+});
+
+test('a fresh agent (headDate <7d) does NOT appear in stalled — and reads ZERO across every chip', () => {
+  // The negative case: a 1d-old HEAD is fresh, so the agent is NOT stalled. Made
+  // clean/pushed/in-sync/routine/stash-free so it has NO other axis — it must read
+  // ZERO across every chip (absent from the sparse map entirely), proving the 7d
+  // threshold gates membership rather than any-headDate-counting. Pinned to NOW so a
+  // 1d-old HEAD reads headAgeMs = 1d (< 7d) regardless of wall-clock time.
+  const fresh1d = new Date(NOW - 86400_000).toISOString();
+  const r = sum([agent('a1', 'warden')], { a1: status(true, 0, 0, { headDate: fresh1d }) }, NOW);
+  assert.deepEqual(r.perProject, {});
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [] });
+});
+
+test('headDate:null is not stalled (only a finite >7d date is) — a no-commit / non-git agent stays quiet', () => {
+  // Mirrors ahead:null ⇒ not unpushed and stashCount:null ⇒ not stashed. headDate is
+  // null when there is no commit / non-git (server.js gates it on `branch`), so the
+  // agent must NOT surface as stalled. Made dirty so the agent isn't skipped —
+  // isolating headDate as the SOLE discriminator (it must read stalled:0, headAgeMs:null).
+  const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, { headDate: null }) }, NOW);
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', true, 0, 0, false, null, false, null, null, false)] } });
+});
+
+test('an invalid headDate string is not stalled (Date.parse → null on the agent, never NaN)', () => {
+  // A malformed headDate must not crash Date.parse nor leak NaN onto the agent.
+  // Normalized to headAgeMs:null ⇒ not stalled (the ticket's "null when missing/
+  // invalid" contract). Made dirty to surface the agent and isolate the discriminator.
+  const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, { headDate: 'not-a-date' }) }, NOW);
+  assert.deepEqual(r.perProject.warden.agents, [ag('a1', true, 0, 0, false, null, false, null, null, false)]);
+  assert.equal(r.perProject.warden.stalled, 0);
+});
+
+test('an agent both dirty AND stalled appears ONCE with both signals (single-entry contract)', () => {
+  // dirty tree + stale HEAD: one entry, dirty + stalled, counted in each. Never two
+  // entries — the ±N list and the 💤N list filter this SAME entry.
+  const stale9d = new Date(NOW - 9 * 86400_000).toISOString();
+  const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, { headDate: stale9d }) }, NOW);
+  assert.equal(r.perProject.warden.agents.length, 1);
+  assert.deepEqual(r.perProject.warden.agents, [ag('a1', true, 0, 0, false, null, false, 9 * 86400_000, null, true)]);
+  assert.equal(r.perProject.warden.dirty, 1);
+  assert.equal(r.perProject.warden.stalled, 1);
+});
+
+test('the stalled filter matches 💤N (the popover contract), mirroring ±N / ↑N / ↓N / ⚑N / 🗄N', () => {
+  // The 💤N chip popover lists agents.filter(a => a.stalled); that filtered length
+  // must equal the chip's stalled count field — exact parity with the other axes.
+  const stale9d = new Date(NOW - 9 * 86400_000).toISOString();
+  const chats = [agent('a1', 'warden'), agent('a2', 'warden'), agent('a3', 'warden')];
+  const gitStatus = {
+    a1: status(true, 0, 0, { headDate: stale9d }),  // stalled only (clean tree)
+    a2: status(false, 0, 0, { headDate: stale9d }), // dirty + stalled
+    a3: status(false, 0, 0),                        // dirty only (no headDate → not stalled)
+  };
+  const r = sum(chats, gitStatus, NOW);
+  const agents = r.perProject.warden.agents;
+  // Iteration order is preserved: a1 (stalled only) then a2 (dirty + stalled); a3
+  // has no headDate so it is not stalled and is filtered out.
+  assert.deepEqual(agents.filter((a) => a.stalled), [ag('a1', false, 0, 0, false, null, false, 9 * 86400_000, null, true), ag('a2', true, 0, 0, false, null, false, 9 * 86400_000, null, true)]);
+  assert.equal(r.perProject.warden.stalled, agents.filter((a) => a.stalled).length);
+});
+
+test('a stalled-only project gets a sparse-map entry (clean tree, no dirty/unpushed/behind/at-risk/stashed)', () => {
+  // The sparse "needs attention" map now keys on stalled too: a project whose only
+  // active agent is stalled (clean tree, HEAD >7d old) must NOT be dropped — the
+  // exact mirror of the WARDEN-297 behind-only, WARDEN-635 at-risk-only, and
+  // WARDEN-667 stashed-only sparse-entry changes.
+  const stale9d = new Date(NOW - 9 * 86400_000).toISOString();
+  const r = sum([agent('a1', 'warden'), agent('b1', 'tinker')], {
+    a1: status(true, 0, 0, { headDate: stale9d }), // stalled only
+    b1: status(true, 0, 0),                        // clean → tinker absent
+  }, NOW);
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 1, agents: [ag('a1', false, 0, 0, false, null, false, 9 * 86400_000, null, true)] } });
+  assert.equal('tinker' in r.perProject, false);
+});
+
+test('stalled totals accumulate per project and across projects independently', () => {
+  const stale9d = new Date(NOW - 9 * 86400_000).toISOString();
+  const chats = [agent('a1', 'warden'), agent('a2', 'warden'), agent('b1', 'tinker')];
+  const gitStatus = {
+    a1: status(true, 0, 0, { headDate: stale9d }), // warden stalled
+    a2: status(true, 0, 0, { headDate: stale9d }), // warden stalled
+    b1: status(true, 0, 0, { headDate: stale9d }), // tinker stalled
+  };
+  const r = sum(chats, gitStatus, NOW);
+  assert.equal(r.perProject.warden.stalled, 2);
+  assert.equal(r.perProject.tinker.stalled, 1);
+  assert.equal(r.total.stalled, 3);
+});
+
 console.log('\ndirty magnitude (WARDEN-670): the ±N popover carries each dirty agent\'s +N −M');
 test('a dirty agent carries diffstat from status.diffstat onto ProjectGitAgent', () => {
   const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, { diffstat: { files: 3, insertions: 10, deletions: 2 } }) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [ag('a1', true, 0, 0, false, null, false, null, { files: 3, insertions: 10, deletions: 2 })] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', true, 0, 0, false, null, false, null, { files: 3, insertions: 10, deletions: 2 })] } });
 });
 
 test('a dirty agent whose status carries no diffstat gets diffstat: null (quiet — no false magnitude)', () => {
