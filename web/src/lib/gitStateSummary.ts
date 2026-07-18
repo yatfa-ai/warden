@@ -84,6 +84,20 @@ export interface GitStateStatus {
   // (below) reaches the unpushed-popover renderer with zero prop widening. null/absent
   // for a repo with no commits / a non-git cwd / a branch-less cwd (mirrors headFresh).
   headDate?: string | null;
+  // WARDEN-670: the per-agent uncommitted-WIP magnitude — insertions/deletions from
+  // `git diff HEAD --shortstat` (parsed by parseDiffStat in src/gitStatus.js and
+  // served at /api/git-status as `diffstat: branch ? diffstat : null`). It ALREADY
+  // ships on /api/git-status and is cached in the fleet gitStatus map ChatSidebar
+  // holds (ChatSidebar.tsx stores `diffstat: j.diffstat`), but this GitStateStatus
+  // slice previously dropped it — so the fleet summarizer had no per-agent magnitude,
+  // and the ±N dirty popover was the only chip axis whose rows carried no per-agent
+  // detail. Defined INLINE (the SAME shape /api/git-status serves), NOT imported from
+  // sidebar/types — this module deliberately stays decoupled from React-layer types so
+  // it remains unit-testable with plain objects (the decoupling GitStateChat relies
+  // on). null for a detached/no-branch chat (the server serves null when there is no
+  // branch) and +0−0 for an all-untracked WIP (shortstat counts tracked edits only);
+  // both stay quiet downstream (DiffStatChip's own +0−0/null guard).
+  diffstat?: { files: number; insertions: number; deletions: number } | null;
 }
 
 // One contributing agent for a project's WIP breakdown (WARDEN-268). The project
@@ -131,9 +145,24 @@ export interface ProjectGitAgent {
   // popover just sorts by it and reuses the per-row badge's existing STALE_HEAD_AGE_MS
   // tint for the label, so no new magic number ships here. null when headDate is
   // missing/invalid/empty (a repo with no commits / non-git cwd) so the popover
-  // renders no age label and the row sorts last (mirrors headFresh / mergeFleetCommits
-  // ByEpoch's null-epoch-last convention).
+  // renders no age label and the row sorts last (mirrors headFresh /
+  // mergeFleetCommitsByEpoch's null-epoch-last convention).
   headAgeMs: number | null;
+  // WARDEN-670: this agent's uncommitted-WIP magnitude (+N −M) — the dirty-axis
+  // per-agent detail the ±N popover renders via DiffStatChip and ranks heaviest-first
+  // (sortGitAgentsByMagnitudeDesc). Carried as the full split { insertions, deletions }
+  // (NOT a scalar magnitude) because DiffStatChip needs insertions and deletions
+  // SEPARATELY to render `+N −M` (DiffStatChip.tsx); a scalar would suffice for
+  // SORTING but could not render the split chip. Read from status.diffstat (already
+  // cached at the ChatSidebar call site — no new fetch, no backend change). null for a
+  // detached/no-branch agent (the server serves diffstat: null when there is no
+  // branch) and +0−0 for an all-untracked WIP; DiffStatChip's own +0−0/null guard
+  // renders nothing then, so a dirty agent with no tracked edits shows no false
+  // magnitude (not a lie). Mirrors the per-row DiffStatChip the row already renders
+  // (ChatRows.tsx, GitBadges.tsx) — the fleet popover now speaks the same +N −M
+  // language as the row, completing the dirty axis the way unpushed/behind/atRisk
+  // already complete theirs.
+  diffstat: { files: number; insertions: number; deletions: number } | null;
 }
 
 export interface ProjectGitState {
@@ -251,10 +280,18 @@ export function summarizeProjectGitState(
     const headMs = typeof status.headDate === 'string' && status.headDate ? Date.parse(status.headDate) : NaN;
     const headAgeMs = Number.isFinite(headMs) ? Date.now() - headMs : null;
 
+    // WARDEN-670: carry this agent's uncommitted-WIP magnitude (status.diffstat,
+    // already cached — no new fetch) onto ProjectGitAgent so the ±N popover can render
+    // +N −M per row (via DiffStatChip) and rank heaviest-first. `?? null` coerces an
+    // absent field to null so EVERY agent carries the field — the deep-equality shape
+    // the test suite asserts — matching how the server serves null when there is no
+    // branch. null/+0−0 stay quiet downstream via DiffStatChip's own guard.
+    const diffstat = status.diffstat ?? null;
+
     // The agent entry shared by the per-project list and the global union. One
     // entry per contributing agent, so a both-dirty-and-at-risk agent appears a
     // single time with all signals (never duplicated).
-    const agent: ProjectGitAgent = { key: c.key || c.id, dirty, ahead, behind: behindCount, atRisk, atRiskReason, stashed, headAgeMs };
+    const agent: ProjectGitAgent = { key: c.key || c.id, dirty, ahead, behind: behindCount, atRisk, atRiskReason, stashed, headAgeMs, diffstat };
 
     const entry = perProject[c.project] ?? { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [] };
     if (dirty) entry.dirty += 1;
@@ -302,6 +339,32 @@ export function sortByHeadAgeDesc(agents: ProjectGitAgent[]): ProjectGitAgent[] 
     if (bb == null) return -1;
     return bb - aa;                           // largest age first (oldest WIP on top)
   });
+}
+
+/**
+ * Rank dirty agents heaviest-WIP-first so the ±N popover surfaces the largest
+ * uncommitted change on top — a human clicking the fleet chip triages the highest-
+ * integration-effort WIP first (a 2-line tweak no longer crowds out a +847 −203
+ * mid-refactor) (WARDEN-670). Largest magnitude (`diffstat.insertions + deletions`)
+ * first; a magnitude-0 row (an all-untracked dirty agent whose shortstat is +0−0) and
+ * a null-diffstat row (detached, no branch) sort LAST, stably — magnitude 0 is simply
+ * the smallest value, so the descending comparator places it under every real WIP,
+ * and `Array.prototype.sort` is stable on Node ≥12 / V8 so magnitude-0 / equal-
+ * magnitude ties preserve the pre-sort (chats) input order.
+ *
+ * Pure + returns a NEW array (does NOT mutate its input) so it is unit-testable
+ * without a React runner, matching the module's `diff.ts` philosophy. Critically,
+ * the SUMMARIZER's own `agents` array is NOT reordered by this helper: that array
+ * MUST stay in `chats` iteration order (its deterministic-order invariant, asserted
+ * throughout the test suite and shared by the unpushed/behind/atRisk popovers, which
+ * must NOT be reordered). The sort is a per-kind RENDER-TIME concern — the React
+ * layer (GitBadges.tsx's GIT_STATE_KIND.dirty.sort) applies it ONLY to the dirty
+ * popover's filtered slice, never inside summarizeProjectGitState.
+ */
+export function sortGitAgentsByMagnitudeDesc(agents: ProjectGitAgent[]): ProjectGitAgent[] {
+  const magnitude = (a: ProjectGitAgent): number =>
+    (a.diffstat?.insertions ?? 0) + (a.diffstat?.deletions ?? 0);
+  return [...agents].sort((a, b) => magnitude(b) - magnitude(a));
 }
 
 // A changed-file path that ≥2 distinct active agents in the SAME project both

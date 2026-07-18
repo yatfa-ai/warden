@@ -16,7 +16,12 @@ import { CollisionCompareDialog } from '../CollisionCompareDialog';
 import { cn } from '@/lib/utils';
 import { findChat } from '@/lib/agentFilter';
 import { displayName } from '@/lib/chatDisplay';
-import { type ProjectGitAgent, type FileCollision, sortByHeadAgeDesc } from '@/lib/gitStateSummary';
+import {
+  type ProjectGitAgent,
+  type FileCollision,
+  sortByHeadAgeDesc,
+  sortGitAgentsByMagnitudeDesc,
+} from '@/lib/gitStateSummary';
 import { formatWhatsNewLine, type WhatsNewSummary } from '@/lib/whatsNew';
 import { formatRelative, formatAbsoluteFull } from '@/lib/formatTimestamp';
 import type { Chat } from '@/lib/types';
@@ -225,7 +230,35 @@ const AT_RISK_REASON_LABEL: Record<NonNullable<ProjectGitAgent['atRiskReason']>,
   op: 'operation in progress',
 };
 const GIT_STATE_KIND = {
-  dirty:   { glyph: '±', color: 'text-yellow-400 hover:text-yellow-300', label: 'uncommitted changes', match: (a: ProjectGitAgent) => a.dirty,     suffix: () => '' },
+  dirty:   {
+    glyph: '±',
+    color: 'text-yellow-400 hover:text-yellow-300',
+    label: 'uncommitted changes',
+    match: (a: ProjectGitAgent) => a.dirty,
+    // WARDEN-670: the per-agent +N −M WIP magnitude — the dirty-axis detail the other
+    // three axes already had (unpushed · ↑ N, behind · ↓ N, at-risk · reason) but dirty
+    // lacked. Reuses DiffStatChip EXACTLY as the per-row chip does (ChatRows.tsx:324/
+    // 516, GitBadges.tsx:1435) — do not reinvent the glyph/color language. DiffStatChip
+    // already no-ops on null / +0−0 (an all-untracked dirty agent whose shortstat counts
+    // no tracked edits), so the magnitude guard is built in for the CHIP; the leading
+    // ` · ` separator mirrors the three sibling suffixes so the four axes read as one
+    // system, gated on the SAME established magnitude guard (insertions + deletions > 0)
+    // so an all-untracked dirty agent renders no dangling separator (no ` · ` alone).
+    suffix: (a: ProjectGitAgent) => {
+      const ins = a.diffstat?.insertions ?? 0;
+      const del = a.diffstat?.deletions ?? 0;
+      if (ins + del === 0) return null;
+      return <> · <DiffStatChip diffstat={a.diffstat} /></>;
+    },
+    // WARDEN-670: rank the dirty popover heaviest-first (largest +N −M WIP on top) so a
+    // human triaging the fleet's uncommitted work prioritizes the highest-integration-
+    // effort change first. `'sort' in cfg` in GitStateBadge scopes this to the dirty
+    // popover ONLY — the unpushed/behind/atRisk popovers keep chats iteration order
+    // (deterministic deep-equality, asserted in gitStateSummary.test.mjs). A pure, NEW-
+    // array sort (does not mutate): summarizeProjectGitState's agents array stays in
+    // chats order; only this popover's filtered slice is reordered at render time.
+    sort: sortGitAgentsByMagnitudeDesc,
+  },
   unpushed: { glyph: '↑', color: 'text-amber-400 hover:text-amber-300',  label: 'unpushed commits',    match: (a: ProjectGitAgent) => a.ahead > 0, suffix: (a: ProjectGitAgent) => (a.ahead > 0 ? ` · ↑ ${a.ahead}` : '') },
   behind:   { glyph: '↓', color: 'text-blue-400 hover:text-blue-300',    label: 'behind upstream',     match: (a: ProjectGitAgent) => a.behind > 0, suffix: (a: ProjectGitAgent) => (a.behind > 0 ? ` · ↓ ${a.behind}` : '') },
   atRisk:   { glyph: '⚑', color: 'text-rose-400 hover:text-rose-300',    label: 'at-risk repo state',  match: (a: ProjectGitAgent) => a.atRisk,     suffix: (a: ProjectGitAgent) => (a.atRiskReason ? ` · ${AT_RISK_REASON_LABEL[a.atRiskReason]}` : '') },
@@ -247,16 +280,23 @@ function GitStateBadge({ kind, count, agents, chats, gitStatus, onOpenChat }: {
   const [open, setOpen] = useState(false);
   if (count <= 0) return null;
   const cfg = GIT_STATE_KIND[kind];
-  // WARDEN-669: the unpushed popover ranks oldest-HEAD-first so the longest-sitting
-  // WIP surfaces on top (integrate the most rot-prone commits first). The sort is a
-  // per-kind render-time concern — dirty/behind/atRisk stay in `chats` iteration
-  // order (their popovers are out of scope for this slice). sortByHeadAgeDesc returns
-  // a NEW array (does not mutate `agents`), so the shared summarizer-order invariant
-  // the other three popovers rely on is untouched. `now` is captured once so the
-  // reconstructed HEAD epoch (now - headAgeMs) is consistent between the relative
-  // label and the absolute title within a row.
+  // WARDEN-669 + WARDEN-670: per-kind render-time sort of THIS popover's filtered
+  // slice only. The summarizer's own `agents` array is NEVER reordered here -- its
+  // deterministic chats-iteration-order invariant is asserted throughout
+  // gitStateSummary.test.mjs and shared by the behind/atRisk/stash popovers, which
+  // stay unsorted. The unpushed popover ranks oldest-HEAD-first (WARDEN-669: surface
+  // the most rot-prone commits on top so a human integrates them first); the dirty
+  // popover ranks heaviest-WIP-first via the table's `sort` (WARDEN-670: largest
+  // insertions+deletions magnitude on top). `'sort' in cfg` narrows to the dirty entry
+  // (the only kind carrying a `sort`), so this never reorders behind/atRisk/stash.
+  // Both sort helpers return NEW arrays (no mutation of `agents`). `now` is captured
+  // once so the reconstructed HEAD epoch (now - headAgeMs) is consistent between a
+  // row's relative label and its absolute title (WARDEN-669).
   const matched = agents.filter(cfg.match);
-  const shown = kind === 'unpushed' ? sortByHeadAgeDesc(matched) : matched;
+  const shown =
+    kind === 'unpushed' ? sortByHeadAgeDesc(matched)
+      : 'sort' in cfg && cfg.sort ? cfg.sort(matched)
+      : matched;
   const now = Date.now();
   const title = `${count} agent${count === 1 ? '' : 's'} with ${cfg.label} — click to list`;
   return (
