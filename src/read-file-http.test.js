@@ -28,6 +28,7 @@ import os from 'node:os';
  *   - a directory                             → 400 'path is a directory'
  *   - a path outside cwd (traversal)          → 403 'path must be within working directory'
  *   - a binary-by-extension file              → 400 'cannot read binary files'
+ *   - a text file with NUL bytes in content   → 400 'cannot read binary files' (Drift 1)
  *   - a >1MB file                             → 413 'file too large (max 1MB)'
  *   - an empty path                           → 400 'path is required'
  *   - an unknown chat id                      → 404 (resolve failure)
@@ -131,6 +132,23 @@ describe('/api/read-file (real Express app, LOCAL chat)', () => {
 
   it('returns 400 "cannot read binary files" for a binary-by-extension file', async () => {
     const { status, body } = await read({ id: 'warden-rf', path: 'pic.png' });
+    assert.strictEqual(status, 400);
+    assert.strictEqual(body.error, 'cannot read binary files');
+  });
+
+  it('returns 400 "cannot read binary files" for a local text file with NUL bytes (Drift 1)', async () => {
+    // Text extension (.log is NOT in isBinaryFile's list), but BINARY CONTENT
+    // (an embedded NUL byte). isBinaryFile (the extension check) does NOT catch
+    // this — only the isBinaryBlob(content) guard does. That guard is the ONE
+    // behavior change WARDEN-674 introduces on the route: before the shared
+    // readChatFile, /api/read-file served this file as garbled content while the
+    // cross-agent compare (readWorkingTreeFile) already rejected it. Pin the
+    // guard here so a future "cleanup" can't delete it and silently recreate the
+    // exact drift this ticket was filed to eliminate. Verified red against the
+    // current code with the LOCAL guard deleted (would return 200 + garbled
+    // content); green with it in place.
+    fs.writeFileSync(path.join(cwdDir, 'looks-text.log'), `before${'\0'}after\n`);
+    const { status, body } = await read({ id: 'warden-rf', path: 'looks-text.log' });
     assert.strictEqual(status, 400);
     assert.strictEqual(body.error, 'cannot read binary files');
   });
