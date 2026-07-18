@@ -1116,4 +1116,220 @@ test('clearRuntimeDrift is a no-op (and emits nothing) when drift is not armed',
   assert.deepEqual(spy.calls, [], 'no transition fired when there was nothing to clear');
 });
 
+// ==========================================================================
+// WARDEN-671 — bounded in-memory replay buffer for transiently-dropped sends
+// ==========================================================================
+// An event that passed every gate (consent → redact → validate) and reached the
+// wire used to be DROPPED FOREVER if the receiver was transiently unreachable for
+// longer than the transport's bounded-retry window (~1.4s of 200/400/800ms
+// backoff). Now a TRANSIENT-EXHAUSTED drop — which the transport flags
+// replayable:true (see src/telemetry-send.js + telemetry-live-wire.test.mjs) — is
+// retained in a bounded, session-scoped, IN-MEMORY ring and re-dispatched through
+// dispatch() on the next record() (the "next dispatch opportunity"). Drifted (415)
+// and non-retryable 4xx drops are permanent and NEVER retained.
+//
+// The buffer is observed purely through what the transport SEE — which events are
+// (re-)dispatched, identified by a distinguishing timestamp — not through internal
+// state, so each assertion holds against the actual replay contract. settle runs
+// synchronously for the sync fakes below, so no awaits are needed.
+
+// A schema-valid base-tier error with a distinguishing timestamp. The timestamp is
+// a number, so it survives redact (which targets strings) AND validate (which
+// requires a number) unchanged — letting a test tell WHICH event was (re-)sent.
+function eventAt(ts) {
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    type: 'error',
+    runtime: 'main',
+    timestamp: ts,
+    name: 'Error',
+    message: 'transient receiver outage',
+    frames: [],
+  };
+}
+
+// The transient-exhausted drop shape the REAL transport returns after exhausting
+// its retry budget on a network error / 429 / 5xx (WARDEN-671 adds replayable:true).
+const REPLAYABLE_DROP = { ok: false, dropped: true, replayable: true, attempts: 3, status: 503 };
+const OK_RESULT = { ok: true, dropped: false, attempts: 1, status: 200 };
+
+// A fake transport that returns a SEQUENCE of fixed results (sync), one per call,
+// reusing the last when the sequence is exhausted — so a test can script "drop,
+// then succeed." Records every call's redacted-event timestamp so a test can assert
+// WHICH events were (re-)dispatched and in what order.
+function sendSeq(results) {
+  const calls = [];
+  let i = 0;
+  const fn = (args) => {
+    calls.push(args);
+    const r = results[Math.min(i, results.length - 1)];
+    i += 1;
+    return r;
+  };
+  fn.calls = calls;
+  fn.timestamps = () => calls.map((c) => (c.events[0] ? c.events[0].timestamp : undefined));
+  return fn;
+}
+
+test('a transient-exhausted (replayable) drop is buffered and replayed on the next record()', () => {
+  // First record → replayable drop → buffered. The second record is the "next
+  // dispatch opportunity": the buffered event is flushed (re-dispatched) BEFORE the
+  // new event, and this time it lands.
+  const send = sendSeq([REPLAYABLE_DROP, OK_RESULT]);
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  pipeline.record(eventAt(100));
+  assert.equal(send.calls.length, 1, 'the first record dispatched the event once');
+  pipeline.record(eventAt(200));
+  assert.equal(send.calls.length, 3, 'the buffered event was re-dispatched (call 2) + the new event (call 3)');
+  assert.deepEqual(
+    send.timestamps(),
+    [100, 100, 200],
+    'the buffered event (ts 100) was sent AGAIN before the new event (ts 200) — it was retained, not lost',
+  );
+});
+
+test('once the replayed event lands it leaves the buffer — no replay churn', () => {
+  // After the replay succeeds the buffer is empty, so a THIRD record must NOT
+  // re-dispatch the earlier event again. Proves the buffer drains on success.
+  const send = sendSeq([REPLAYABLE_DROP, OK_RESULT]);
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  pipeline.record(eventAt(100)); // drop → buffer
+  pipeline.record(eventAt(200)); // flush 100 (ok) + dispatch 200 (ok)
+  send.calls.length = 0;
+  pipeline.record(eventAt(300)); // buffer empty → only 300 dispatched
+  assert.equal(send.calls.length, 1, 'no replay churn after the buffered event landed');
+  assert.equal(send.timestamps()[0], 300);
+});
+
+test('a NON-retryable 4xx drop is NOT buffered (replaying the identical body is futile)', () => {
+  // A 400 is permanent for this payload — re-POSTing the identical redacted body
+  // cannot fix it. The transport OMITS replayable, so the pipeline must not retain
+  // it (replaying would just waste the retry budget on a guaranteed re-rejection).
+  const send = sendSeq([{ ok: false, dropped: true, attempts: 1, status: 400 }, OK_RESULT]);
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  pipeline.record(eventAt(100)); // 400 drop → NOT buffered
+  pipeline.record(eventAt(200)); // nothing to flush → only 200 dispatched
+  assert.equal(send.calls.length, 2, 'the non-retryable 400 drop was not replayed');
+  assert.deepEqual(send.timestamps(), [100, 200]);
+});
+
+test('a 415 schema-drift drop is NOT buffered (the drift circuit-breaker owns it)', () => {
+  // A 415 carries drifted:true (NOT replayable) — the per-endpoint breaker
+  // (WARDEN-631) handles it by short-circuiting further sends. The replay buffer
+  // must not also retain it (that would fight the breaker AND replay a payload the
+  // receiver is guaranteed to reject again).
+  const send = sendSeq([{ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 }, OK_RESULT]);
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  pipeline.record(eventAt(100)); // 415 → arms drift, NOT buffered
+  assert.equal(pipeline.getRuntimeStatus().drifted, true, 'the existing WARDEN-631 drift path still arms');
+  pipeline.record(eventAt(200)); // drifted → dispatch short-circuits; nothing was buffered to flush
+  assert.equal(send.calls.length, 1, 'the 415 was not buffered — no replay, and drift short-circuits the next send');
+});
+
+test('consent revoke CLEARS the buffer — a buffered event does not survive opt-out', () => {
+  // Fill the buffer, then revoke. record() while off clears the buffer at its
+  // layer-1 guard (the natural clear site) and sends nothing. Re-enabling must NOT
+  // replay the old event — it was cleared, not retained.
+  const down = sendSeq([REPLAYABLE_DROP]); // always replayable
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send: down });
+  pipeline.record(eventAt(100)); // → buffered
+  assert.equal(down.calls.length, 1);
+
+  pipeline.setConsent(consentReturning(TIERS.OFF));
+  pipeline.record(eventAt(200)); // off → CLEAR the buffer + no-op (no send, no flush)
+  assert.equal(down.calls.length, 1, 'nothing sent while off');
+
+  // Re-enable with a SUCCESS transport. Had the buffer survived the revoke, the old
+  // event (ts 100) would be flushed first; since it was cleared, only the new event.
+  const ok = sendSeq([OK_RESULT]);
+  pipeline.setSend(ok);
+  pipeline.setConsent(consentReturning(TIERS.BASE));
+  pipeline.record(eventAt(300));
+  assert.deepEqual(
+    ok.timestamps(),
+    [300],
+    'the revoked-while-buffered event was cleared — only the new event is sent after re-enable',
+  );
+});
+
+test('the replay buffer is RETAINED through a drift outage and drains once drift clears', () => {
+  // The flush is gated on !drifted: a drifted dispatch short-circuits BEFORE
+  // transportSend, so settle never runs and a drained event could not re-buffer —
+  // it would be LOST. Gating the flush on !drifted keeps the ring intact through a
+  // drift outage; it drains once drift clears. This is the critical correctness
+  // property that makes the buffer safe to coexist with the drift breaker.
+  const send = sendSeq([REPLAYABLE_DROP, REPLAYABLE_DROP, { ok: false, dropped: true, drifted: true, attempts: 1, status: 415 }, OK_RESULT, OK_RESULT]);
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send });
+  pipeline.record(eventAt(100)); // → replayable drop → buffer 100. (call 1)
+  // record(200): flush 100 (re-drops → re-buffered), then dispatch 200 → 415 → arms drift.
+  pipeline.record(eventAt(200));
+  assert.equal(pipeline.getRuntimeStatus().drifted, true, 'drift armed on the 200 send');
+  const callsBeforeDriftedRecord = send.calls.length;
+  // record(300) WHILE drifted: the flush is gated off (drifted) so 100 is RETAINED,
+  // and 300 short-circuits at the drift guard → zero new transport calls.
+  pipeline.record(eventAt(300));
+  assert.equal(send.calls.length, callsBeforeDriftedRecord, 'the buffered event was NOT flushed during drift (retained), and the drifted send short-circuited');
+  // Clear drift (e.g. a "Test connection" reset), then record(400): 100 SURVIVED and
+  // is now flushed (re-dispatched) before 400.
+  pipeline.clearRuntimeDrift();
+  assert.equal(pipeline.getRuntimeStatus().drifted, false);
+  pipeline.record(eventAt(400));
+  assert.ok(
+    send.timestamps().slice(-2).includes(100),
+    'the buffered event (ts 100) survived the drift outage and was replayed after drift cleared',
+  );
+});
+
+test('bounded ring — drop-oldest past the cap retains the MOST RECENT events', () => {
+  // A persistently-down receiver (always replayable) fills the ring; past the cap the
+  // OLDEST entries are evicted (drop-oldest), so memory cannot grow unbounded. With
+  // replayBufferCap:3 and 5 replayable drops (ts 10..50), only the 3 most recent are
+  // retained; when the receiver comes back (ok), the final record flushes EXACTLY
+  // those 3 (+ the new event) — proving the cap held AND the oldest (10, 20) were
+  // evicted, not the newest.
+  const down = sendSeq([REPLAYABLE_DROP]);
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send: down,
+    replayBufferCap: 3,
+  });
+  for (const ts of [10, 20, 30, 40, 50]) pipeline.record(eventAt(ts)); // all drop → fill + rotate the ring
+  const ok = sendSeq([OK_RESULT]);
+  pipeline.setSend(ok);
+  pipeline.record(eventAt(60)); // receiver back → flush the retained ring, then send 60
+  assert.deepEqual(
+    ok.timestamps(),
+    [30, 40, 50, 60],
+    'cap held at 3 (10 and 20 evicted as the oldest); the 3 most recent (30,40,50) were retained and replayed',
+  );
+});
+
+test('off-by-default: the default no-op transport never fills the buffer (no regression)', () => {
+  // With no send injected (default noopSend → returns undefined), settle's
+  // replayable guard never fires (undefined is not replayable), so an unconfigured
+  // pipeline behaves EXACTLY as before this slice. Proven by swapping in a success
+  // transport after several noop records: NONE of the noop'd events is phantomly
+  // replayed (the buffer stayed empty throughout).
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact });
+  for (let i = 0; i < 5; i++) pipeline.record(eventAt(100 + i)); // noopSend → nothing sent, nothing buffered
+  const ok = sendSeq([OK_RESULT]);
+  pipeline.setSend(ok);
+  pipeline.record(eventAt(999));
+  assert.deepEqual(ok.timestamps(), [999], 'no phantom replay — the noopSend events were never buffered');
+});
+
+test('the replay buffer is IN-MEMORY only — the pipeline exposes no disk/persistence seam', () => {
+  // Trust-model guard (WARDEN-443): the buffer is deliberately NOT durable. The
+  // pipeline factory accepts only the existing injectables + replayBufferCap (a
+  // cap override); it exposes NO fs/path/persist option. A durable on-disk queue is
+  // a later, trust-heavier slice. This pins that no persistence seam crept in here.
+  const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send: sendSeq([REPLAYABLE_DROP]) });
+  const publicSurface = Object.keys(pipeline);
+  assert.ok(
+    !publicSurface.some((k) => /persist|disk|fs|path|file|store|queue/i.test(k)),
+    'no persistence/disk surface — the replay buffer is in-memory only',
+  );
+});
+
 console.log(`\n✓ TELEMETRY PIPELINE TESTS PASS (${passed})`);

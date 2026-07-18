@@ -89,10 +89,13 @@ export function makePayload({ schemaVersion, events, authToken }) {
 // caller/tests can observe the outcome without try/catch:
 //
 //   ok       true iff the POST succeeded (2xx). Everything else is false.
-//   dropped  true iff the batch was DROPPED (non-retryable 4xx, or transient
-//            failures exhausted MAX_ATTEMPTS). A dropped batch is gone — there is
-//            no retry queue. false for the consent/endpoint no-op (the gate was
-//            simply closed; nothing was attempted or discarded).
+//   dropped  true iff the batch was DROPPED (non-retryable 4xx, 415 schema drift, or
+//            transient failures exhausted MAX_ATTEMPTS). A dropped batch is gone at
+//            the TRANSPORT level — there is no retry queue HERE — but a transient-
+//            exhausted drop ALSO carries replayable:true (see below) so the pipeline
+//            MAY retain it in its bounded in-memory replay buffer (WARDEN-671). false
+//            for the consent/endpoint no-op (the gate was simply closed; nothing was
+//            attempted or discarded).
 //   revoked  true iff the batch was HALTED mid-loop because LIVE consent flipped
 //            off between attempts (or before the first, as defense-in-depth).
 //            Distinct from dropped: nothing was discarded — the user revoked, so
@@ -109,6 +112,18 @@ export function makePayload({ schemaVersion, events, authToken }) {
 //            this outcome; absent (undefined) elsewhere (the other non-retryable
 //            4xx — 400/401/403/404/422 — stay generic drops), so existing result
 //            assertions are unaffected (WARDEN-631).
+//   replayable true iff the batch was a TRANSIENT-EXHAUSTED drop — network errors,
+//            429, or 5xx after all MAX_ATTEMPTS. Distinct from the other drops: a
+//            non-retryable 4xx (400/401/403/404/422) and a 415 schema drift are
+//            permanent for THIS payload (re-POSTing the identical body cannot fix
+//            them), so they are NOT replayable. The flag lets the pipeline retain
+//            ONLY the recoverable drop in its bounded replay buffer and replay it on
+//            the next dispatch opportunity (WARDEN-671), instead of futilely
+//            re-POSTing a payload the receiver is guaranteed to reject again (4xx)
+//            or fighting the existing drift circuit-breaker (415). Only present on
+//            the exhausted-retry outcome; absent (undefined) elsewhere (the gate
+//            no-op, a revoke, a non-retryable 4xx, a 415, and a 2xx success), so
+//            existing result assertions are unaffected (WARDEN-671).
 //   attempts number of fetchImpl calls actually made (0 when gated off or revoked
 //            before the first attempt).
 //   status   last HTTP status observed (null when gated off or a network error
@@ -221,9 +236,15 @@ export async function send({
   }
 
   // Exhausted all attempts on transient failures — drop the batch. Per the
-  // best-effort rule this is logged + swallowed, NEVER thrown to the caller.
+  // best-effort rule this is logged + swallowed, NEVER thrown to the caller. This
+  // is the ONLY outcome a bounded replay buffer can recover: a momentary receiver
+  // outage (restart, wifi blip, sleep/wake, DNS hiccup, 429, 5xx) lost the event,
+  // but the identical redacted+validated body would land once the receiver is back.
+  // Flag it distinctly from the permanent drops (non-retryable 4xx, 415 drift —
+  // neither of which replaying can fix) so the pipeline can retain JUST this one
+  // (WARDEN-671). Absent on every other outcome, so existing assertions are intact.
   log('warn', `telemetry: exhausted ${MAX_ATTEMPTS} attempts; dropping batch (last status ${status})`);
-  return { ok: false, dropped: true, attempts: MAX_ATTEMPTS, status };
+  return { ok: false, dropped: true, replayable: true, attempts: MAX_ATTEMPTS, status };
 }
 
 // Exported for tests / introspection. Not part of the public transport contract.
