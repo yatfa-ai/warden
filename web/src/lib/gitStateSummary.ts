@@ -13,7 +13,10 @@
 // hasn't pulled (WARDEN-297). A 4th axis, at-risk ⇒ rose `⚑N` (WARDEN-635), folds
 // the three non-routine repo states the per-row badge renders individually but the
 // fleet rollup previously dropped: detached HEAD, no-upstream (local-only work),
-// and a mid merge/rebase/cherry-pick/revert/bisect op.
+// and a mid merge/rebase/cherry-pick/revert/bisect op. A 5th axis, stashed ⇒
+// fuchsia `🗄N` (WARDEN-667), carries the parked-WIP count `stashCount` the backend
+// already ships and the per-row badge already renders — the lone current-state
+// git signal that had no fleet rollup chip.
 //
 // Pure (no React import) so it is unit-testable directly via node, mirroring
 // diff.ts (extracted in WARDEN-151 "so it's testable without a React runner").
@@ -61,6 +64,14 @@ export interface GitStateStatus {
   detached?: boolean | null;
   upstream?: string | null;
   inProgress?: { operation: string | null; detail?: string | null } | null;
+  // WARDEN-667: the parked-WIP count `/api/git-status` already returns top-level
+  // — `stashCount` (shipped by WARDEN-211, parsed from `git stash list`) — which the
+  // per-row GitBranchBadge already renders as 🗄N but the fleet rollup previously
+  // dropped. Already lives in the cached gitStatus map ChatSidebar's useState holds,
+  // so extending this slice is structurally compatible — no fetch, no backend change.
+  // A number > 0 ⇒ stashed WIP; null/absent ⇒ unknown (treated as not-stashed, never
+  // noise), the same null-is-quiet discipline ahead/behind follow.
+  stashCount?: number | null;
 }
 
 // One contributing agent for a project's WIP breakdown (WARDEN-268). The project
@@ -87,6 +98,14 @@ export interface ProjectGitAgent {
   // GitBadges.tsx (the `noUpstream` line) so the chip and the row agree by construction.
   atRisk: boolean;
   atRiskReason: 'detached' | 'noUpstream' | 'op' | null;
+  // WARDEN-667: parked WIP — `stashCount > 0`, surfaced as the 5th project chip
+  // (🗄N). `git stash` parks uncommitted work off the tree (porcelain status reads
+  // clean while real WIP sits in the reflog), so a clean, pushed, up-to-date,
+  // routine-state agent that holds parked WIP — the canonical stash case — was
+  // previously invisible at the fleet level: it read ZERO across every chip. This
+  // axis surfaces it. Mirrors the per-row GitBranchBadge's 🗄N badge (GitBadges.tsx)
+  // so the chip and the row agree by construction.
+  stashed: boolean;
 }
 
 export interface ProjectGitState {
@@ -94,29 +113,34 @@ export interface ProjectGitState {
   unpushed: number;  // # of the project's active agents with unpushed commits
   behind: number;    // # of the project's active agents behind their upstream
   atRisk: number;    // # of the project's active agents in a non-routine repo state (WARDEN-635)
+  stashed: number;   // # of the project's active agents with parked WIP (stashCount > 0, WARDEN-667)
   // The contributing agents behind those counts, in `chats` iteration order
   // (deterministic, so tests assert deep equality). The ±N popover filters
   // `agents.filter(a => a.dirty)`; the ↑N popover filters `agents.filter(a =>
   // a.ahead > 0)`; the ↓N popover filters `agents.filter(a => a.behind > 0)`; the
-  // ⚑N popover filters `agents.filter(a => a.atRisk)` (WARDEN-635). An agent dirty
-  // AND unpushed AND behind AND at-risk appears ONCE with all signals.
-  // `dirty`/`unpushed`/`behind`/`atRisk` are retained (the chip still reads them) even
-  // though they're now derivable — avoids churn at the two call sites.
+  // ⚑N popover filters `agents.filter(a => a.atRisk)` (WARDEN-635); the 🗄N popover
+  // filters `agents.filter(a => a.stashed)` (WARDEN-667). An agent dirty AND
+  // unpushed AND behind AND at-risk AND stashed appears ONCE with all signals.
+  // `dirty`/`unpushed`/`behind`/`atRisk`/`stashed` are retained (the chip still
+  // reads them) even though they're now derivable — avoids churn at the two call
+  // sites.
   agents: ProjectGitAgent[];
 }
 
 export interface ProjectGitSummary {
   // Sparse "needs attention" map: only projects with at least one dirty,
-  // unpushed, behind, OR at-risk agent get an entry, so a clean project yields no
-  // key (the chip's sub-badges hide on absence exactly as they hide on a 0 count).
+  // unpushed, behind, at-risk, OR stashed agent get an entry, so a clean project
+  // yields no key (the chip's sub-badges hide on absence exactly as they hide on a
+  // 0 count).
   perProject: Record<string, ProjectGitState>;
   total: ProjectGitState;  // the sum across all projects
 }
 
 /**
  * Summarize uncommitted (`dirty`), unpushed (`unpushed`), behind-upstream
- * (`behind`), and at-risk-repo-state (`atRisk`, WARDEN-635) agent counts per
- * project and globally, over the cached per-chat `gitStatus` map.
+ * (`behind`), at-risk-repo-state (`atRisk`, WARDEN-635), and parked-WIP
+ * (`stashed`, WARDEN-667) agent counts per project and globally, over the cached
+ * per-chat `gitStatus` map.
  *
  * Only active chats with a project are considered (the same population the chips'
  * `projectCounts` are drawn from). A chat missing from `gitStatus` — still
@@ -131,7 +155,7 @@ export function summarizeProjectGitState(
   gitStatus: Record<string, GitStateStatus>,
 ): ProjectGitSummary {
   const perProject: Record<string, ProjectGitState> = {};
-  const total: ProjectGitState = { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, agents: [] };
+  const total: ProjectGitState = { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [] };
 
   for (const c of chats) {
     // Match projectCounts' population exactly (active && has a project) so the
@@ -170,24 +194,35 @@ export function summarizeProjectGitState(
           ? 'op'
           : null;
     const atRisk = atRiskReason !== null;
-    // A clean, pushed, up-to-date, routine-state agent contributes nothing — skip
-    // it so clean projects stay absent from the sparse map (and off the chips). An
-    // at-risk-only agent is KEPT here (WARDEN-635) — the mirror of WARDEN-297's
-    // "a behind-only agent now surfaces" change, for this 4th axis: a detached /
-    // no-upstream / mid-merge agent with a clean tree previously read ZERO across
-    // all chips and was invisible at the fleet level.
-    if (!dirty && !unpushed && !behind && !atRisk) continue;
+    // WARDEN-667: parked WIP — `git stash` parks uncommitted work off the tree, so
+    // the stashCount signal is INDEPENDENT of the dirty/ahead/behind/atRisk axes
+    // (a stash can sit alongside a clean, pushed, up-to-date, routine-state tree).
+    // `stashCount: number > 0` ⇒ stashed; null/absent ⇒ unknown, treated as
+    // not-stashed (the same null-is-quiet discipline ahead/behind follow). Mirrors
+    // the per-row GitBranchBadge's `stashN` computation (GitBadges.tsx).
+    const stashCount = typeof status.stashCount === 'number' ? status.stashCount : 0;
+    const stashed = stashCount > 0;
+    // A clean, pushed, up-to-date, routine-state, stash-free agent contributes
+    // nothing — skip it so clean projects stay absent from the sparse map (and off
+    // the chips). An at-risk-only agent is KEPT here (WARDEN-635) — the mirror of
+    // WARDEN-297's "a behind-only agent now surfaces" change, for that axis. A
+    // stashed-only agent is KEPT here too (WARDEN-667) — the same mirror for this
+    // 5th axis: a clean, pushed, up-to-date, routine-state agent that holds parked
+    // WIP (the canonical stash case) previously read ZERO across every chip and was
+    // invisible at the fleet level.
+    if (!dirty && !unpushed && !behind && !atRisk && !stashed) continue;
 
     // The agent entry shared by the per-project list and the global union. One
     // entry per contributing agent, so a both-dirty-and-at-risk agent appears a
     // single time with all signals (never duplicated).
-    const agent: ProjectGitAgent = { key: c.key || c.id, dirty, ahead, behind: behindCount, atRisk, atRiskReason };
+    const agent: ProjectGitAgent = { key: c.key || c.id, dirty, ahead, behind: behindCount, atRisk, atRiskReason, stashed };
 
-    const entry = perProject[c.project] ?? { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, agents: [] };
+    const entry = perProject[c.project] ?? { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, agents: [] };
     if (dirty) entry.dirty += 1;
     if (unpushed) entry.unpushed += 1;
     if (behind) entry.behind += 1;
     if (atRisk) entry.atRisk += 1;
+    if (stashed) entry.stashed += 1;
     entry.agents.push(agent);
     perProject[c.project] = entry;
 
@@ -195,6 +230,7 @@ export function summarizeProjectGitState(
     if (unpushed) total.unpushed += 1;
     if (behind) total.behind += 1;
     if (atRisk) total.atRisk += 1;
+    if (stashed) total.stashed += 1;
     total.agents.push(agent);
   }
 
