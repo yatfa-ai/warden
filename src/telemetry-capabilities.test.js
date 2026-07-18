@@ -96,14 +96,14 @@ test('capabilitiesUrlFromEndpoint returns null for empty/blank (no guess — cal
 // ── mapCapabilitiesVerdict — the four states ────────────────────────────────────
 
 test('connected: 200 + matching schemaVersion + authRequired:false → ok, open-receiver copy', () => {
-  const v = mapCapabilitiesVerdict({ status: 200, body: { schemaVersion: 1, authRequired: false } });
+  const v = mapCapabilitiesVerdict({ status: 200, body: { schemaVersion: CLIENT_SCHEMA_VERSION, authRequired: false } });
   assert.equal(v.kind, 'connected');
   assert.equal(v.ok, true);
   assert.match(v.message, /reachable and schema-matched/);
 });
 
 test('connected: 200 + matching schemaVersion + authRequired:true → ok, token-accepted copy', () => {
-  const v = mapCapabilitiesVerdict({ status: 200, body: { schemaVersion: 1, authRequired: true } });
+  const v = mapCapabilitiesVerdict({ status: 200, body: { schemaVersion: CLIENT_SCHEMA_VERSION, authRequired: true } });
   assert.equal(v.kind, 'connected');
   assert.equal(v.ok, true);
   assert.match(v.message, /token was accepted/);
@@ -120,11 +120,13 @@ test('connected tracks the client schema version (a future bump is reflected, no
 });
 
 test('schema-drift: 200 + a different schemaVersion → not ok, names BOTH versions', () => {
-  const v = mapCapabilitiesVerdict({ status: 200, body: { schemaVersion: 2, authRequired: false } });
+  // A version the client does NOT speak (one ahead of the current contract).
+  const remote = CLIENT_SCHEMA_VERSION + 1;
+  const v = mapCapabilitiesVerdict({ status: 200, body: { schemaVersion: remote, authRequired: false } });
   assert.equal(v.kind, 'schema-drift');
   assert.equal(v.ok, false);
-  assert.match(v.message, /v1/); // the client's version
-  assert.match(v.message, /v2/); // the receiver's version
+  assert.match(v.message, new RegExp(`v${CLIENT_SCHEMA_VERSION}`)); // the client's version
+  assert.match(v.message, new RegExp(`v${remote}`)); // the receiver's version
   assert.match(v.message, /415/); // the consequence (rejected at /ingest)
 });
 
@@ -225,7 +227,7 @@ function fakeFetch({ status = 200, json = {}, ok = status >= 200 && status < 300
 }
 
 test('probe: 200 + matching schema → connected, probes origin + /capabilities from the /ingest endpoint', async () => {
-  const fetchImpl = fakeFetch({ status: 200, json: { schemaVersion: 1, authRequired: false } });
+  const fetchImpl = fakeFetch({ status: 200, json: { schemaVersion: CLIENT_SCHEMA_VERSION, authRequired: false } });
   const v = await probeReceiverCapabilities({
     endpoint: 'https://receiver.example/ingest',
     fetchImpl,
@@ -238,19 +240,19 @@ test('probe: 200 + matching schema → connected, probes origin + /capabilities 
 });
 
 test('probe: a draft token is sent as Authorization: Bearer', async () => {
-  const fetchImpl = fakeFetch({ status: 200, json: { schemaVersion: 1, authRequired: true } });
+  const fetchImpl = fakeFetch({ status: 200, json: { schemaVersion: CLIENT_SCHEMA_VERSION, authRequired: true } });
   await probeReceiverCapabilities({ endpoint: 'https://r.example/ingest', token: 'draft-tok', fetchImpl });
   assert.equal(fetchImpl.calls[0].init.headers.authorization, 'Bearer draft-tok');
 });
 
 test('probe: with no draft token, the fallback (persisted) token is sent as Bearer', async () => {
-  const fetchImpl = fakeFetch({ status: 200, json: { schemaVersion: 1, authRequired: true } });
+  const fetchImpl = fakeFetch({ status: 200, json: { schemaVersion: CLIENT_SCHEMA_VERSION, authRequired: true } });
   await probeReceiverCapabilities({ endpoint: 'https://r.example/ingest', fallbackToken: 'saved-tok', fetchImpl });
   assert.equal(fetchImpl.calls[0].init.headers.authorization, 'Bearer saved-tok');
 });
 
 test('probe: a draft token takes precedence over the fallback token', async () => {
-  const fetchImpl = fakeFetch({ status: 200, json: { schemaVersion: 1, authRequired: true } });
+  const fetchImpl = fakeFetch({ status: 200, json: { schemaVersion: CLIENT_SCHEMA_VERSION, authRequired: true } });
   await probeReceiverCapabilities({
     endpoint: 'https://r.example/ingest',
     token: 'draft-tok',
@@ -261,7 +263,7 @@ test('probe: a draft token takes precedence over the fallback token', async () =
 });
 
 test('probe: with no draft AND no fallback, NO Authorization header is sent (open receiver)', async () => {
-  const fetchImpl = fakeFetch({ status: 200, json: { schemaVersion: 1, authRequired: false } });
+  const fetchImpl = fakeFetch({ status: 200, json: { schemaVersion: CLIENT_SCHEMA_VERSION, authRequired: false } });
   await probeReceiverCapabilities({ endpoint: 'https://r.example/ingest', fetchImpl });
   assert.ok(!('authorization' in fetchImpl.calls[0].init.headers), 'no auth header for a token-less probe');
 });
@@ -281,7 +283,7 @@ test('probe: a 401 with no token → auth-required, "a token is required" copy (
 });
 
 test('probe: a 200 with a mismatched schemaVersion → schema-drift', async () => {
-  const fetchImpl = fakeFetch({ status: 200, json: { schemaVersion: 2, authRequired: false } });
+  const fetchImpl = fakeFetch({ status: 200, json: { schemaVersion: CLIENT_SCHEMA_VERSION + 1, authRequired: false } });
   const v = await probeReceiverCapabilities({ endpoint: 'https://r.example/ingest', fetchImpl });
   assert.equal(v.kind, 'schema-drift');
 });

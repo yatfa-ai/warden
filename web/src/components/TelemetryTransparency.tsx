@@ -17,6 +17,7 @@ import { Button } from '@/components/ui/button';
 import { Check, ChevronDown, Minus, ShieldCheck } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
+  SCHEMA_VERSION,
   describeCollection,
   previewPayload,
   type PreviewChange,
@@ -32,7 +33,7 @@ import type { ConsentTier } from '@/lib/telemetry/redact';
  * in-component so the user can inspect the exact output.
  */
 const SAMPLE_ERROR_EVENT = {
-  schemaVersion: 1,
+  schemaVersion: SCHEMA_VERSION,
   type: 'error' as const,
   runtime: 'renderer' as const,
   timestamp: 1718000000000,

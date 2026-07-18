@@ -79,9 +79,9 @@ const stallFixture = {
 // (a) The shared contract constants
 // ==========================================================================
 
-test('SCHEMA_VERSION is 1 (the version client + receiver agree on)', () => {
+test('SCHEMA_VERSION is 2 (the version client + receiver agree on)', () => {
   assert.equal(typeof SCHEMA_VERSION, 'number');
-  assert.equal(SCHEMA_VERSION, 1);
+  assert.equal(SCHEMA_VERSION, 2);
 });
 
 test('BASE_EVENT_TYPES is exactly the three anonymous base-tier kinds', () => {
@@ -181,6 +181,31 @@ test('validateEvent accepts base fixtures and base + extended name fields', () =
 test('validateEvent rejects a base event with non-string extended fields', () => {
   assert.equal(validateEvent({ ...errorFixture, chatName: 42 }), false);
   assert.equal(validateEvent({ ...errorFixture, sessionName: { x: 1 } }), false);
+});
+
+// ==========================================================================
+// (e2) appVersion (WARDEN-665) — an OPTIONAL base-tier release label. A v2 event
+// WITH it validates; a v2 event WITHOUT it ALSO validates (a source that cannot
+// read the version omits it); a non-string appVersion is rejected.
+// ==========================================================================
+
+test('validateEvent accepts a base event WITH an optional appVersion release label', () => {
+  assert.equal(validateEvent({ ...errorFixture, appVersion: '0.1.19' }), true);
+  assert.equal(validateEvent({ ...crashFixture, appVersion: '0.1.19' }), true);
+  assert.equal(validateEvent({ ...stallFixture, appVersion: '0.1.19' }), true);
+});
+
+test('validateEvent accepts a base event WITHOUT appVersion (optional — version-unreadable source)', () => {
+  // The canonical fixtures carry no appVersion; they must still validate.
+  assert.equal(validateEvent(errorFixture), true);
+  assert.equal(validateEvent(crashFixture), true);
+  assert.equal(validateEvent(stallFixture), true);
+});
+
+test('validateEvent rejects a base event with a non-string appVersion', () => {
+  assert.equal(validateEvent({ ...errorFixture, appVersion: 2 }), false, 'numeric appVersion rejected');
+  assert.equal(validateEvent({ ...errorFixture, appVersion: { x: 1 } }), false, 'object appVersion rejected');
+  assert.equal(validateEvent({ ...errorFixture, appVersion: null }), false, 'null appVersion rejected');
 });
 
 test('validateEvent still rejects a malformed base event even with good extended fields', () => {

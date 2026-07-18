@@ -595,6 +595,75 @@ test('builders are pure: they attach chatName/sessionName ONLY when threaded via
   assert.ok(validateBaseEvent(named));
 });
 
+// ==========================================================================
+// (WARDEN-665) appVersion — the non-identifying base-tier release label. The
+// builders attach it ONLY when a non-empty string is threaded via opts; the live
+// source threads it from the createTelemetrySource({ appVersion }) factory opt.
+// Omitted otherwise → today's anonymous event shape is unchanged (the optional-
+// field path: a v2 event without appVersion still validates).
+// ==========================================================================
+
+test('builders are pure: they attach appVersion ONLY when a non-empty string is threaded via opts', () => {
+  // No appVersion in opts → today's event (no appVersion key present at all).
+  const plain = buildErrorEvent(new Error('x'), { now: 1 });
+  assert.equal('appVersion' in plain, false);
+  // appVersion in opts → attached verbatim (the consent gate is the caller's job).
+  const versioned = buildErrorEvent(new Error('x'), { now: 1, appVersion: '0.1.19' });
+  assert.equal(versioned.appVersion, '0.1.19');
+  // All three event types honor the same opts threading.
+  assert.equal(buildCrashEvent({ reason: 'oom' }, { now: 1, appVersion: '0.1.19' }).appVersion, '0.1.19');
+  assert.equal(buildStallEvent(50, { now: 1, runtime: RUNTIME.MAIN, appVersion: '0.1.19' }).appVersion, '0.1.19');
+  // Empty-string / non-string appVersion is dropped (never an empty or garbage label).
+  assert.equal('appVersion' in buildErrorEvent(new Error('x'), { now: 1, appVersion: '' }), false, 'empty string dropped');
+  assert.equal('appVersion' in buildErrorEvent(new Error('x'), { now: 1, appVersion: 2 }), false, 'non-string dropped');
+  // A versioned event still validates as a base-tier event (appVersion is additive).
+  assert.ok(validateBaseEvent(versioned));
+});
+
+test('factory appVersion opt: emitted events carry the label when provided, omit it when not', () => {
+  // With the factory opt → every emitted event carries appVersion.
+  const recordOn = recorder();
+  const srcOn = makeSource({ record: recordOn, appVersion: '0.1.19' });
+  const procOn = fakeEmitter();
+  srcOn.attachMain(procOn);
+  srcOn.setBaseConsent(true);
+  procOn.emit(UNCAUGHT_EVENT, new Error('boom'));
+  assert.equal(recordOn.calls.length, 1);
+  assert.equal(recordOn.calls[0].appVersion, '0.1.19', 'emitted event carries the factory appVersion');
+  assert.ok(validateBaseEvent(recordOn.calls[0]));
+
+  // Without the opt → today's event shape (no appVersion key) — the optional-field
+  // path is proven: a source that cannot read the version emits nothing new.
+  const recordOff = recorder();
+  const srcOff = makeSource({ record: recordOff });
+  const procOff = fakeEmitter();
+  srcOff.attachMain(procOff);
+  srcOff.setBaseConsent(true);
+  procOff.emit(UNCAUGHT_EVENT, new Error('boom'));
+  assert.equal(recordOff.calls.length, 1);
+  assert.equal('appVersion' in recordOff.calls[0], false, 'no appVersion key when the opt is absent');
+});
+
+test('factory appVersion opt threads to every event family (error / crash / stall)', () => {
+  const record = recorder();
+  const src = makeSource({ record, appVersion: '0.2.0' });
+  const proc = fakeEmitter();
+  const wc = fakeEmitter();
+  src.attachMain(proc);
+  src.attachRenderer(wc);
+  src.setBaseConsent(true);
+
+  proc.emit(UNCAUGHT_EVENT, new Error('e1'));
+  wc.emit('render-process-gone', {}, { reason: 'oom' });
+  wc.emit('unresponsive');
+
+  assert.equal(record.calls.length, 3);
+  for (const ev of record.calls) {
+    assert.equal(ev.appVersion, '0.2.0', `${ev.type} event carries the factory appVersion`);
+    assert.ok(validateBaseEvent(ev), `${ev.type} still validates`);
+  }
+});
+
 test('(a) extended consent OFF → names NEVER attached even when context is set', () => {
   const record = recorder();
   const src = makeSource({ record });

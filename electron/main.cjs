@@ -77,6 +77,11 @@ const telemetry = createTelemetrySource({
   // on), so binding it captures nothing on its own.
   record: null,
   now: () => Date.now(),
+  // Non-identifying app release label (WARDEN-665): stamped on every emitted event
+  // so a maintainer can attribute volume to a release. Read live from package.json
+  // via Electron's app.getVersion() (0.1.19 today); injected here so the source
+  // module stays testable without Electron (tests pass appVersion explicitly).
+  appVersion: app.getVersion(),
 });
 
 // The live telemetry prefs (off / empty-endpoint by default). Driven from the

@@ -54,7 +54,7 @@ for (const name of ['redact', 'transparency']) {
   }
   writeFileSync(join(tmpDir, `${name}.mjs`), code);
 }
-const { describeCollection, previewPayload, isValidBaseEvent } = await import(
+const { describeCollection, previewPayload, isValidBaseEvent, SCHEMA_VERSION } = await import(
   join(tmpDir, 'transparency.mjs')
 );
 rmSync(tmpDir, { recursive: true, force: true });
@@ -109,7 +109,7 @@ const GH_TOKEN = 'ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789';
 // alongside tier-gated identifier + content fields. After redaction it MUST
 // still conform to the schema (valid === true) — criterion (b).
 const CANDIDATE = {
-  schemaVersion: 1,
+  schemaVersion: SCHEMA_VERSION,
   type: 'error',
   runtime: 'renderer',
   timestamp: 1719500000123,
@@ -201,13 +201,13 @@ test('previewPayload replaces the file path, hostname, and Authorization header 
 
 test('previewPayload is valid for a well-formed crash and performance-stall event too', () => {
   const crash = previewPayload(
-    { schemaVersion: 1, type: 'crash', runtime: 'renderer', timestamp: 1, reason: 'oom' },
+    { schemaVersion: SCHEMA_VERSION, type: 'crash', runtime: 'renderer', timestamp: 1, reason: 'oom' },
     'base',
   );
   assert.equal(crash.valid, true);
   assert.equal(validateBaseEvent(crash.payload), true);
   const stall = previewPayload(
-    { schemaVersion: 1, type: 'performance-stall', runtime: 'main', timestamp: 1, lagMs: 2500, source: 'event-loop' },
+    { schemaVersion: SCHEMA_VERSION, type: 'performance-stall', runtime: 'main', timestamp: 1, lagMs: 2500, source: 'event-loop' },
     'base',
   );
   assert.equal(stall.valid, true);
@@ -216,12 +216,12 @@ test('previewPayload is valid for a well-formed crash and performance-stall even
 
 test('previewPayload flags an INVALID candidate (missing required field) without throwing', () => {
   // No message/name/frames → not a conformant error event.
-  const bad = previewPayload({ schemaVersion: 1, type: 'error', runtime: 'renderer', timestamp: 1 }, 'base');
+  const bad = previewPayload({ schemaVersion: SCHEMA_VERSION, type: 'error', runtime: 'renderer', timestamp: 1 }, 'base');
   assert.equal(bad.valid, false);
   assert.equal(isValidBaseEvent(bad.payload), false);
   // Unknown event type → invalid.
   const unknown = previewPayload(
-    { schemaVersion: 1, type: 'mystery', runtime: 'renderer', timestamp: 1 },
+    { schemaVersion: SCHEMA_VERSION, type: 'mystery', runtime: 'renderer', timestamp: 1 },
     'base',
   );
   assert.equal(unknown.valid, false);
@@ -282,7 +282,7 @@ test('no path / host / IPv4 / IPv6 / user@host survives any preview (re-uses con
 
 test('a candidate packed with every identifier shape is fully scrubbed at every tier', () => {
   const packed = {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     type: 'error',
     runtime: 'main',
     timestamp: 1,

@@ -33,6 +33,7 @@ writeFileSync(join(tmpDir, 'schema.mjs'), schemaCode);
 // resolves (OXC may emit either quote style, so match both).
 writeFileSync(join(tmpDir, 'client.mjs'), clientCode.replace(/from\s+(['"])\.\/schema\1/g, 'from "./schema.mjs"'));
 const { createTelemetryClient } = await import(join(tmpDir, 'client.mjs'));
+const { SCHEMA_VERSION } = await import(join(tmpDir, 'schema.mjs'));
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -44,7 +45,7 @@ const test = (name, fn) => {
 
 // A schema-valid base-tier event (matches slice 4's error-builder shape).
 const errorEvent = {
-  schemaVersion: 1,
+  schemaVersion: SCHEMA_VERSION,
   type: 'error',
   runtime: 'main',
   timestamp: 1,

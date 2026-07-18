@@ -57,6 +57,9 @@ const PEM_KEY = [
 const CANONICAL = {
   type: 'renderer_crash',
   timestamp: 1719500000123,
+  // Non-identifying release label (WARDEN-665) — a pass-through string both
+  // redactors leave untouched (in neither CONTENT_FIELDS nor IDENTIFIER_FIELDS).
+  appVersion: '0.1.19',
   chatName: 'Refactor auth module',
   sessionName: 'claude-7b3a2f1',
   error: {

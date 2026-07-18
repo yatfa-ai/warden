@@ -52,7 +52,7 @@ export function resolveConsentTier(value: unknown): ConsentTier {
 // ---------------------------------------------------------------------------
 // The schema version. Bumping this is a coordinated client + receiver change.
 // ---------------------------------------------------------------------------
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 // The base-tier event kinds. A discriminated union (below) keys off `type`.
 export const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall'] as const);
@@ -80,6 +80,14 @@ export interface StackFrame {
 // no identifiers BY DESIGN (the guardrail: "ensure the schema's base tier carries
 // no such fields by design"). Free-text `message` is redacted at the collection
 // boundary (slice 4) before an event ever reaches this contract.
+//
+// `appVersion` (WARDEN-665) is the ONLY base-tier field that is not strictly
+// anonymous event data: it is a non-identifying app RELEASE LABEL (e.g. '0.1.19')
+// identical for every user on a release, carried so a maintainer can attribute
+// event volume to a release. It is NOT an identifier (no user/device/session
+// tie-break) and NOT content — it sits within the base tier, not behind extended
+// consent. It is OPTIONAL: a source that cannot read the version omits it, and a
+// v2 event without it still validates (graceful for that source).
 // ---------------------------------------------------------------------------
 
 /** An uncaught error / unhandled rejection (main or renderer). */
@@ -88,6 +96,7 @@ export interface ErrorEvent {
   type: 'error';
   runtime: Runtime;
   timestamp: number; // epoch-ms
+  appVersion?: string; // non-identifying release label (e.g. '0.1.19'); optional
   name: string; // e.g. 'TypeError' (Error#name); never identifying
   message: string; // redacted free text — no paths/hostnames/secrets survive
   frames: StackFrame[]; // structured, path-stripped stack frames
@@ -99,6 +108,7 @@ export interface CrashEvent {
   type: 'crash';
   runtime: 'renderer';
   timestamp: number;
+  appVersion?: string; // non-identifying release label (e.g. '0.1.19'); optional
   reason: string; // Electron's fixed enum (oom, crashed, killed, …) — not identifying
   exitCode?: number;
 }
@@ -109,6 +119,7 @@ export interface StallEvent {
   type: 'performance-stall';
   runtime: Runtime;
   timestamp: number;
+  appVersion?: string; // non-identifying release label (e.g. '0.1.19'); optional
   lagMs: number; // how far the tick was overdue (≥0)
   source: 'event-loop' | 'unresponsive';
 }
@@ -187,5 +198,8 @@ export function validateEvent(event: unknown): event is TelemetryEvent {
   const e = event as unknown as Record<string, unknown>;
   if (e.chatName !== undefined && typeof e.chatName !== 'string') return false;
   if (e.sessionName !== undefined && typeof e.sessionName !== 'string') return false;
+  // appVersion (WARDEN-665) is an OPTIONAL base-tier release label — a v2 event
+  // WITHOUT it still validates (a source that cannot read the version omits it).
+  if (e.appVersion !== undefined && typeof e.appVersion !== 'string') return false;
   return true;
 }

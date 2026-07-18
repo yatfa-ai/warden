@@ -34,7 +34,7 @@
 // shared cross-repo contract (client + receiver agree on a version).
 // ---------------------------------------------------------------------------
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall']);
 
@@ -172,6 +172,18 @@ function attachExtendedNames(event, o) {
   if (typeof o.sessionName === 'string' && o.sessionName) event.sessionName = o.sessionName;
 }
 
+// Attach the base-tier app release label (WARDEN-665) when the caller threaded a
+// non-empty string via opts. Pure: attaches exactly what it is given. appVersion
+// is a NON-IDENTIFYING release label (identical for every user on a release — not
+// an identifier, not content), so it attaches unconditionally on the opt,
+// independent of the extended-tier name gate. Omitted when absent/empty → a v2
+// event without appVersion still validates (a source that cannot read the version
+// emits today's shape).
+function attachAppVersion(event, o) {
+  if (!event || !o) return;
+  if (typeof o.appVersion === 'string' && o.appVersion) event.appVersion = o.appVersion;
+}
+
 // Coerce an error-like value into a { name, message, stack } triple for
 // buildErrorEvent. Three shapes are handled:
 //   1. A real Error instance (the MAIN-process uncaught/rejection path).
@@ -224,6 +236,7 @@ function buildErrorEvent(err, opts) {
     message: redactIdentifiers(e.message),
     frames: parseStackFrames(e.stack),
   };
+  attachAppVersion(event, o);
   attachExtendedNames(event, o);
   return event;
 }
@@ -242,6 +255,7 @@ function buildCrashEvent(details, opts) {
     reason,
   };
   if (typeof d.exitCode === 'number') event.exitCode = d.exitCode;
+  attachAppVersion(event, o);
   attachExtendedNames(event, o);
   return event;
 }
@@ -257,6 +271,7 @@ function buildStallEvent(lagMs, opts) {
     lagMs: lag,
     source: o.source === 'unresponsive' ? 'unresponsive' : 'event-loop',
   };
+  attachAppVersion(event, o);
   attachExtendedNames(event, o);
   return event;
 }
@@ -362,6 +377,18 @@ function createTelemetrySource(opts) {
   const heartbeatMs = typeof o.heartbeatMs === 'number' ? o.heartbeatMs : DEFAULT_HEARTBEAT_INTERVAL_MS;
   const thresholdMs = typeof o.thresholdMs === 'number' ? o.thresholdMs : DEFAULT_STALL_THRESHOLD_MS;
 
+  // BASE-tier app release label (WARDEN-665). A non-identifying release version
+  // (identical for every user on a release — not an identifier, not content)
+  // threaded into every builder so emitted events carry it for release attribution
+  // on the receiver. Injected here like `now`/`record` so the module stays
+  // testable under node --test without Electron; null/absent → no field is attached
+  // (a v2 event without appVersion still validates). main.cjs wires app.getVersion().
+  const appVersion = typeof o.appVersion === 'string' && o.appVersion ? o.appVersion : null;
+  // A reusable spread fragment threaded into every builder call below — `appVersion`
+  // is captured once and never mutated per-factory, so a constant fragment (mirroring
+  // the ...extendedNameFields() spread) is correct and keeps the gate in ONE place.
+  const versionOpt = appVersion ? { appVersion } : {};
+
   let baseConsent = false;
   // EXTENDED-tier producer state (WARDEN-538). `extendedConsent` mirrors the sink
   // client's extended-requires-base invariant (client.ts: clamped to false unless
@@ -409,19 +436,19 @@ function createTelemetrySource(opts) {
   // --- signal handlers (gated by consent at emit time) ---
   const onUncaught = (err) => {
     if (!baseConsent) return;
-    emit(buildErrorEvent(err, { now: nowFn(), runtime: RUNTIME.MAIN, ...extendedNameFields() }));
+    emit(buildErrorEvent(err, { now: nowFn(), runtime: RUNTIME.MAIN, ...extendedNameFields(), ...versionOpt }));
   };
   const onRejection = (reason) => {
     if (!baseConsent) return;
-    emit(buildErrorEvent(reason, { now: nowFn(), runtime: RUNTIME.MAIN, ...extendedNameFields() }));
+    emit(buildErrorEvent(reason, { now: nowFn(), runtime: RUNTIME.MAIN, ...extendedNameFields(), ...versionOpt }));
   };
   const onRenderGone = (_event, details) => {
     if (!baseConsent) return;
-    emit(buildCrashEvent(details, { now: nowFn(), ...extendedNameFields() }));
+    emit(buildCrashEvent(details, { now: nowFn(), ...extendedNameFields(), ...versionOpt }));
   };
   const onUnresponsive = () => {
     if (!baseConsent) return;
-    emit(buildStallEvent(0, { now: nowFn(), runtime: RUNTIME.RENDERER, source: 'unresponsive', ...extendedNameFields() }));
+    emit(buildStallEvent(0, { now: nowFn(), runtime: RUNTIME.RENDERER, source: 'unresponsive', ...extendedNameFields(), ...versionOpt }));
   };
 
   // --- heartbeat: measures real wall-clock lag between timer callbacks ---
@@ -433,7 +460,7 @@ function createTelemetrySource(opts) {
       const overdue = t - lastTick - heartbeatMs; // how late this tick arrived
       lastTick = t;
       if (isStall(overdue, thresholdMs)) {
-        emit(buildStallEvent(overdue, { now: t, runtime: RUNTIME.MAIN, source: 'event-loop', ...extendedNameFields() }));
+        emit(buildStallEvent(overdue, { now: t, runtime: RUNTIME.MAIN, source: 'event-loop', ...extendedNameFields(), ...versionOpt }));
       }
     }, heartbeatMs);
     // The telemetry heartbeat must never keep the process alive on its own —
@@ -550,7 +577,7 @@ function createTelemetrySource(opts) {
     // listener forwards unconditionally and main drops it here (refinement D).
     recordRendererError(serialized) {
       if (!baseConsent) return;
-      emit(buildErrorEvent(serialized, { now: nowFn(), runtime: RUNTIME.RENDERER, ...extendedNameFields() }));
+      emit(buildErrorEvent(serialized, { now: nowFn(), runtime: RUNTIME.RENDERER, ...extendedNameFields(), ...versionOpt }));
     },
     isConsentOn() {
       return baseConsent;
