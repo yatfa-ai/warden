@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
-import { loadUi, saveUi, persistUiState, PERSISTED_PREF_KEYS, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, STARTER_SNIPPETS, type UiState, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
+import { loadUi, saveUi, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, STARTER_SNIPPETS, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
 import { clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/layout';
 import { displayName, type HostLabels } from '@/lib/chatDisplay';
 import { HostLabelsContext } from '@/lib/hostLabels';
@@ -37,6 +37,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Button } from '@/components/ui/button';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
+import { useConfigPersistence, type PersistedPrefSnapshot } from '@/lib/useConfigPersistence';
 import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS } from '@/lib/pollInterval';
 import { toast } from 'sonner';
 
@@ -590,19 +591,14 @@ function App() {
     applyDensity(density);
   }, [density]);
 
-  // The persisted-pref snapshot: ONE typed bag, bidirectionally locked to
-  // PERSISTED_PREF_KEYS via Required<Pick<...>>. A key present in the source but
-  // missing here is a missing-property compile error; a key present here but
-  // absent from the source is an excess-property compile error. This replaces
-  // the two duplicated, UNCHECKED hand-lists (the object literal AND the dep
-  // array) that caused WARDEN-442/468/500: a dropped key was type-valid (every
-  // UiState field is optional ?), so saveUi silently stopped persisting it and
-  // the pref reset to its default on reload. Now the only enumerated list in App
-  // is this snapshot — type-enforced against the single PERSISTED_PREF_KEYS
-  // source in storage.ts (which itself is exhaustiveness-tested).
-  const persistedSnapshot: Required<
-    Pick<Omit<UiState, 'restoreOnStartup'>, (typeof PERSISTED_PREF_KEYS)[number]>
-  > = {
+  // The persisted-pref snapshot assembled here (App is the composition root) and
+  // passed to useConfigPersistence, which owns the saveUi WRITE effect +
+  // handleConfigChange (WARDEN-696). Typed as PersistedPrefSnapshot — bidirectionally
+  // locked to PERSISTED_PREF_KEYS (a key in the source but missing here is a
+  // missing-property compile error; a key here but absent from the source is an
+  // excess-property error). This single type-checked list replaced the two
+  // duplicated UNCHECKED hand-lists that caused WARDEN-442/468/500.
+  const persistedSnapshot: PersistedPrefSnapshot = {
     workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed,
     healthCollapsed, sourceControlCollapsed, sidebarWidth, observerWidth,
     terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical,
@@ -615,22 +611,6 @@ function App() {
     agentFilter, agentSort, healthGroupBy, fileViewerViewMode, healthCollapsedHosts,
     hostLabels,
   };
-
-  // Persist live UI state, honoring the "Restore workspace on startup" pref.
-  // persistUiState carries the on-disk workspace forward (instead of the live
-  // arrays) whenever the pref is 'empty' OR this launch started empty — otherwise
-  // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
-  // overwrite and destroy the last saved workspace.
-  useEffect(() => {
-    saveUi(persistUiState(persistedSnapshot, restoreOnStartup, loadUi(), startedEmpty));
-    // The dependency is every VALUE in persistedSnapshot (one per
-    // PERSISTED_PREF_KEYS entry — derived from the same single source as the
-    // snapshot object, not a second hand-list) plus the two non-pref args.
-    // Object.values yields a per-key Object.is comparison, so the effect re-fires
-    // ONLY when a persisted pref (or restoreOnStartup/startedEmpty) actually
-    // changes — preserving the prior firing semantics exactly.
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- non-literal by design: the dep set is every value of persistedSnapshot (one per PERSISTED_PREF_KEYS entry), derived from the same type-checked source as the snapshot object. Completeness is compile-enforced (a key in the source but missing from the snapshot is a TS error) + exhaustiveness-tested, not literal-enumerable — so a forgotten pref key can no longer silently drop out of the dep array (the WARDEN-442/468/500 class).
-  }, [...Object.values(persistedSnapshot), restoreOnStartup, startedEmpty]);
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
   // workspace, so switching clears it (WARDEN-256: maximized resets on switch).
@@ -720,14 +700,22 @@ function App() {
     }
   }, []);
 
-  // Called after Settings saves: reload chats/ssh-hosts, refresh notification prefs
-  // everywhere (the shared hook broadcasts to all subscribers), and refresh config
-  // preferences — so all toggles take effect immediately without a page reload.
-  const handleConfigChange = useCallback(() => {
-    refresh();
-    reloadNotificationPrefs();
-    refreshConfigPrefs();
-  }, [refresh, reloadNotificationPrefs, refreshConfigPrefs]);
+  // Persist the live pref snapshot to disk (honoring "Restore workspace on
+  // startup") and expose handleConfigChange — the post-Settings orchestration
+  // that reloads chats/ssh-hosts, re-broadcasts notification prefs, and refreshes
+  // backend config prefs so toggles take effect without a page reload. The saveUi
+  // WRITE effect + this callback live in useConfigPersistence (WARDEN-696); the
+  // snapshot above is assembled here (composition root) and passed in. This call
+  // sits AFTER refresh/refreshConfigPrefs/reloadNotificationPrefs are defined so
+  // the deps are initialized (no TDZ).
+  const { handleConfigChange } = useConfigPersistence({
+    persistedSnapshot,
+    restoreOnStartup,
+    startedEmpty,
+    refresh,
+    reloadNotificationPrefs,
+    refreshConfigPrefs,
+  });
 
   // Write-through setter for the main-owned "remember window bounds" flag: update
   // the display mirror AND persist to main via IPC. A stable callback so the
