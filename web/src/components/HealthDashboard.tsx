@@ -305,9 +305,24 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
 
   useEffect(() => {
     fetchHealth();
-    // Poll every 10 seconds for updates
-    const interval = setInterval(fetchHealth, 10000);
-    return () => clearInterval(interval);
+    // Poll every 10 seconds for updates, gated on Page Visibility so a
+    // backgrounded tab never burns a fetch + render churn every tick — the same
+    // invariant every other poller in the app applies (useHostStatuses,
+    // useActivitySeries, useTokenBudget, the App.tsx catalog poll). On regaining
+    // focus we poll immediately because state may be stale while hidden. (WARDEN-661)
+    const tick = () => {
+      if (document.visibilityState === 'visible') void fetchHealth();
+    };
+    const onVisibility = () => {
+      // On regaining focus, poll immediately — state may be stale while hidden.
+      if (document.visibilityState === 'visible') void fetchHealth();
+    };
+    const interval = setInterval(tick, 10000);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, []);
 
   // Bucket agents by host, order hosts degraded-first (offline → critical-heavy
