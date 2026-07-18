@@ -382,6 +382,11 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
   // a stale id can never pin the layout to a single column either.
   const { effectiveMax, visible } = resolveVisibleTiles(maximized, tiles);
   const n = visible.length;
+  // WARDEN-660: whether the grid div is currently mounted. PaneGrid is always
+  // mounted (its keydown handler needs it), but the grid div itself is rendered
+  // only on the `n > 0` branch below — so this bool tracks the grid node's
+  // presence and is the dep the geometry effect re-runs on (see that effect).
+  const gridMounted = n > 0;
   // `cols`/`rows` (the non-maximized grid shape) are resolved above via
   // gridShape(paneLayout, tiles.length). 'auto' reproduces today's exact grid
   // (cols = ceil(sqrt(nAll)), rows = ceil(nAll/cols)); 'stacked' forces a single
@@ -440,6 +445,21 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
   // overlay to the grid's scroll offset so handles track their gutters when the
   // grid scrolls horizontally (overflow-x-auto: side-by-side + many panes) —
   // direct DOM transform, no re-render per scroll frame.
+  //
+  // Dep is `[gridMounted]` (i.e. `n > 0`), NOT `[]`: PaneGrid is ALWAYS mounted
+  // (its keydown handler needs it), but the grid div is conditionally rendered —
+  // only when there are panes (n > 0) does the `n === 0 ? empty-state : <grid div>`
+  // branch below actually mount the node `gridRef` points at. If PaneGrid mounts
+  // with 0 open panes (first run, or empty state — exactly where the "click a chat
+  // to open a live pane" affordance invites a click), gridRef.current is null
+  // here, the guard below bails, and the ResizeObserver never attaches; with `[]`
+  // deps the effect would never re-run, so the click-to-open path that opens panes
+  // AFTER mount would leave gridGeom at {0,0} → gutterCenters returns [] → no
+  // overlay → the feature is invisible until a reload happens to restore panes on
+  // mount. `[gridMounted]` re-runs the effect (reattaching the observer + reading
+  // geometry) exactly on the 0→positive transition when the grid appears, and
+  // cleans up on the positive→0 transition when it disappears. It does NOT re-run
+  // for n: 1→2→3→4 — the already-attached ResizeObserver handles that reflow.
   useLayoutEffect(() => {
     const gridEl = gridRef.current;
     if (!gridEl) return;
@@ -471,7 +491,8 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
       ro.disconnect();
       gridEl.removeEventListener('scroll', syncScroll);
     };
-  }, []);
+    // re-run when the grid div mounts/unmounts (0→positive transition) — see note above
+  }, [gridMounted]);
 
   // WARDEN-660 drag handlers. startAxisDrag measures the grabbed pair's pixel
   // widths + the floor in px (so the px→ratio redistribution is exact regardless

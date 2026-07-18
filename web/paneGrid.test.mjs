@@ -460,6 +460,46 @@ test('gutterCenters: an all-clamped overflow grid still places handles over the 
   assert.deepEqual(centers, [148, 300]);
 });
 
+console.log('\ngutterCenters: post-load measurement gate (WARDEN-660 audit — gutters stay hidden until the grid is measured)');
+// The primary-flow blocker from the round-4 audit: PaneGrid is always mounted
+// (its keydown handler needs it), so when it mounts with 0 open panes the
+// `n === 0 ? empty-state : <grid div>` branch renders NO grid div and gridRef is
+// null — the geometry useLayoutEffect bails before attaching the ResizeObserver.
+// With a `[]` dep it never re-ran, so the click-to-open flow (open panes AFTER
+// mount) left gridGeom at {0,0} → gutterCenters returned [] → the whole overlay
+// gated off → no handles to drag. The fix is `[n > 0]` so the effect re-attaches
+// on the 0→positive transition. That dep is component-lifecycle wiring — it has
+// no pure seam to assert (per the file header note on measurement plumbing) and
+// is verified by build + the reviewer's live browser. What IS unit-testable is
+// the CONTRACT the effect upholds: the handle set is empty whenever the axis is
+// unmeasured (size 0), no matter how valid the ratios are, and full once it is.
+// Pinning this here means a future change that drops the size guard (so handles
+// render over an unmeasured grid at bogus positions) turns this red.
+
+test('POST-LOAD REGRESSION: valid ratios + an UNMEASURED grid (size 0) → NO handles; measuring it reveals them', () => {
+  const ratios = [1, 3]; // a persisted unequal split (2 cols)
+  const gap = 8, floor = 144;
+  // mount / unmeasured (gridGeom.w === 0): NO handles, even with valid ratios.
+  assert.deepEqual(gutterCenters(ratios, 0, gap, floor), [], 'unmeasured grid hides the handle (floor passed)');
+  assert.deepEqual(gutterCenters(ratios, 0, gap), [], 'unmeasured grid hides the handle (no floor, rows)');
+  // after the effect measures the grid (gridGeom.w > 0): the handle appears.
+  const measured = gutterCenters(ratios, 800, gap, floor);
+  assert.equal(measured.length, 1, 'a measured grid reveals the internal gutter handle');
+  assert.ok(measured[0] > 0, 'and it sits at a real position');
+});
+
+test('handle count == tracks-1 when measured, ALWAYS 0 when unmeasured — across shapes', () => {
+  // The invariant the overlay gate (`centers.length > 0`) relies on: an
+  // unmeasured axis never produces handles, a measured axis produces exactly one
+  // per internal gutter. Holds for every shape, with and without the floor.
+  const gap = 8, floor = 144;
+  for (const r of [[1, 1], [1, 1, 1], [2, 1, 1], [1, 1, 1, 1]]) {
+    assert.equal(gutterCenters(r, 0, gap, floor).length, 0, `${r.length}-track grid unmeasured → 0 handles (floored)`);
+    assert.equal(gutterCenters(r, 0, gap).length, 0, `${r.length}-track grid unmeasured → 0 handles (no floor)`);
+    assert.equal(gutterCenters(r, 800, gap, floor).length, r.length - 1, `${r.length}-track grid measured → ${r.length - 1} handles`);
+  }
+});
+
 console.log('\nresolveJunctionAxis: route a crossing-pad drag by its initial direction (WARDEN-660 crossing fix)');
 // A crossing pad sits on BOTH a col and a row gutter, so it can't pick an axis at
 // pointer down — it defers to resolveJunctionAxis on the first decisive move. This
