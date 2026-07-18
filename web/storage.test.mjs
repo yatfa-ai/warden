@@ -40,7 +40,7 @@ const tmpDir = mkdtempSync(join(tmpdir(), 'warden-storage-test-'));
 writeFileSync(join(tmpDir, 'themes.mjs'), themesCode);
 const tmpFile = join(tmpDir, 'storage.mjs');
 writeFileSync(tmpFile, storageCode.replaceAll('@/lib/themes', './themes.mjs'));
-const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, mergeRecentlyClosed, RECENTLY_CLOSED_CAP, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, validateSnippetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, SNIPPET_MAX_COUNT, STARTER_SNIPPETS, validatePatternName, isValidRegex, WATCH_PATTERN_NAME_MAX, resetUiPrefsPreservingWorkspace } = await import(tmpFile);
+const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, mergeRecentlyClosed, RECENTLY_CLOSED_CAP, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, validateSnippetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, SNIPPET_MAX_COUNT, STARTER_SNIPPETS, validatePatternName, isValidRegex, WATCH_PATTERN_NAME_MAX, resetUiPrefsPreservingWorkspace, DEFAULT_UI, PERSISTED_PREF_KEYS } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -1884,6 +1884,37 @@ test('the helper is pure — it does not mutate the input live object', () => {
   const snapshot = JSON.parse(JSON.stringify(live));
   resetUiPrefsPreservingWorkspace(live);
   assert.deepEqual(live, snapshot, 'input live object is unchanged');
+});
+
+// PERSISTED_PREF_KEYS is the single source of truth for what App's saveUi effect
+// persists. This exhaustiveness guard fails loudly the moment a UiState pref key
+// stops round-tripping — the regression net that would have caught
+// WARDEN-442/468/500 at build time instead of in production. restoreOnStartup is
+// the ONE non-persisted UiState pref (App passes it to persistUiState as a
+// separate arg, not in the live object), so every OTHER DEFAULT_UI key must be
+// listed in PERSISTED_PREF_KEYS, and vice versa. (App.tsx separately type-locks
+// its saveUi snapshot to PERSISTED_PREF_KEYS via Required<Pick<...>>, so a key
+// present in the source but missing from the snapshot is a compile error.)
+test('PERSISTED_PREF_KEYS is exactly the persisted UiState pref set (exhaustiveness guard for WARDEN-442/468/500)', () => {
+  const defaultKeys = Object.keys(DEFAULT_UI);
+  const persistedDefaultKeys = defaultKeys.filter((k) => k !== 'restoreOnStartup');
+  const sortedUnique = (arr) => JSON.stringify([...new Set(arr)].sort());
+
+  // restoreOnStartup must be the ONLY non-persisted UiState field.
+  assert.ok(defaultKeys.includes('restoreOnStartup'),
+    'restoreOnStartup is a UiState field (the one non-persisted pref)');
+
+  // The persisted key set equals DEFAULT_UI minus restoreOnStartup — sorted &
+  // deduped, so order/duplicates can't mask a drift.
+  assert.equal(sortedUnique([...PERSISTED_PREF_KEYS]), sortedUnique(persistedDefaultKeys),
+    'PERSISTED_PREF_KEYS == Object.keys(DEFAULT_UI) minus restoreOnStartup');
+
+  // No duplicates in the source tuple, and its length is exactly one less than
+  // DEFAULT_UI (the single restoreOnStartup exclusion).
+  assert.equal(PERSISTED_PREF_KEYS.length, new Set(PERSISTED_PREF_KEYS).size,
+    'PERSISTED_PREF_KEYS has no duplicate keys');
+  assert.equal(PERSISTED_PREF_KEYS.length, defaultKeys.length - 1,
+    'PERSISTED_PREF_KEYS length == Object.keys(DEFAULT_UI).length - 1');
 });
 
 console.log(`\n✓ STORAGE TESTS PASS (${passed})`);

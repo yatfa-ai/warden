@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
-import { loadUi, saveUi, persistUiState, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, STARTER_SNIPPETS, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
+import { loadUi, saveUi, persistUiState, PERSISTED_PREF_KEYS, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, STARTER_SNIPPETS, type UiState, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
 import { clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/layout';
 import { displayName, type HostLabels } from '@/lib/chatDisplay';
 import { HostLabelsContext } from '@/lib/hostLabels';
@@ -590,14 +590,47 @@ function App() {
     applyDensity(density);
   }, [density]);
 
+  // The persisted-pref snapshot: ONE typed bag, bidirectionally locked to
+  // PERSISTED_PREF_KEYS via Required<Pick<...>>. A key present in the source but
+  // missing here is a missing-property compile error; a key present here but
+  // absent from the source is an excess-property compile error. This replaces
+  // the two duplicated, UNCHECKED hand-lists (the object literal AND the dep
+  // array) that caused WARDEN-442/468/500: a dropped key was type-valid (every
+  // UiState field is optional ?), so saveUi silently stopped persisting it and
+  // the pref reset to its default on reload. Now the only enumerated list in App
+  // is this snapshot — type-enforced against the single PERSISTED_PREF_KEYS
+  // source in storage.ts (which itself is exhaustiveness-tested).
+  const persistedSnapshot: Required<
+    Pick<Omit<UiState, 'restoreOnStartup'>, (typeof PERSISTED_PREF_KEYS)[number]>
+  > = {
+    workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed,
+    healthCollapsed, sourceControlCollapsed, sidebarWidth, observerWidth,
+    terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical,
+    alertWarning, alertDirective, alertError, mutedAlertKeys, snoozedAlertKeys,
+    watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme,
+    terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout,
+    onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset,
+    defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd,
+    defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost,
+    agentFilter, agentSort, healthGroupBy, fileViewerViewMode, healthCollapsedHosts,
+    hostLabels,
+  };
+
   // Persist live UI state, honoring the "Restore workspace on startup" pref.
   // persistUiState carries the on-disk workspace forward (instead of the live
   // arrays) whenever the pref is 'empty' OR this launch started empty — otherwise
   // a clean/'empty' launch, or flipping back to "Reopen previous" from one, would
   // overwrite and destroy the last saved workspace.
   useEffect(() => {
-    saveUi(persistUiState({ workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sourceControlCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, snoozedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy, fileViewerViewMode, healthCollapsedHosts, hostLabels }, restoreOnStartup, loadUi(), startedEmpty));
-  }, [workspaces, activeWorkspaceId, sidebarCollapsed, observerCollapsed, healthCollapsed, sourceControlCollapsed, sidebarWidth, observerWidth, terminalFontSize, attentionDesktopAlerts, attentionStates, alertCritical, alertWarning, alertDirective, alertError, mutedAlertKeys, snoozedAlertKeys, watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme, terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout, onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset, defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd, defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost, agentFilter, agentSort, healthGroupBy, fileViewerViewMode, healthCollapsedHosts, hostLabels, restoreOnStartup, startedEmpty]);
+    saveUi(persistUiState(persistedSnapshot, restoreOnStartup, loadUi(), startedEmpty));
+    // The dependency is every VALUE in persistedSnapshot (one per
+    // PERSISTED_PREF_KEYS entry — derived from the same single source as the
+    // snapshot object, not a second hand-list) plus the two non-pref args.
+    // Object.values yields a per-key Object.is comparison, so the effect re-fires
+    // ONLY when a persisted pref (or restoreOnStartup/startedEmpty) actually
+    // changes — preserving the prior firing semantics exactly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- non-literal by design: the dep set is every value of persistedSnapshot (one per PERSISTED_PREF_KEYS entry), derived from the same type-checked source as the snapshot object. Completeness is compile-enforced (a key in the source but missing from the snapshot is a TS error) + exhaustiveness-tested, not literal-enumerable — so a forgotten pref key can no longer silently drop out of the dep array (the WARDEN-442/468/500 class).
+  }, [...Object.values(persistedSnapshot), restoreOnStartup, startedEmpty]);
 
   // Reset maximized when switching workspaces: a maximized pane belongs to its
   // workspace, so switching clears it (WARDEN-256: maximized resets on switch).

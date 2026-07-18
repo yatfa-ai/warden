@@ -936,7 +936,7 @@ function readVersioned(prefix: string, version: number): string | null {
 // fallback and every "missing field" coercion agree on one set of values.
 // The default owns exactly one empty workspace (the active one).
 const DEFAULT_WORKSPACE = makeWorkspace(DEFAULT_WORKSPACE_NAME);
-const DEFAULT_UI: UiState = {
+export const DEFAULT_UI: UiState = {
   workspaces: [DEFAULT_WORKSPACE],
   activeWorkspaceId: DEFAULT_WORKSPACE.id,
   sidebarCollapsed: false, observerCollapsed: false, healthCollapsed: true,
@@ -964,6 +964,36 @@ const DEFAULT_UI: UiState = {
   defaultShell: '', defaultShellByHost: {},
   paneHost: {}, agentFilter: 'all', agentSort: 'manual', healthGroupBy: 'health', healthCollapsedHosts: {}, hostLabels: {},
 };
+
+// The single type-checked source for the set of UiState prefs App's saveUi effect
+// persists. `restoreOnStartup` is the ONE UiState field that is NOT persisted
+// through the `live` object — App passes it to persistUiState as a separate arg —
+// so every OTHER UiState field must be listed here.
+//
+// The `satisfies` clause makes an INVALID key (one not in Omit<UiState,
+// 'restoreOnStartup'>) a compile error, and the exhaustiveness test in
+// storage.test.mjs (PERSISTED_PREF_KEYS == Object.keys(DEFAULT_UI) minus
+// restoreOnStartup) makes a MISSING key a test failure. Together they close the
+// loophole that the optional-? UiState fields open: until this tuple existed, a
+// pref dropped from App's saveUi spread was type-valid, so saveUi silently
+// stopped persisting it and the pref reset to its default on reload — the same
+// bug patched three times (WARDEN-442/468/500). App now derives BOTH the
+// persisted object and the effect dependency from this one source (see App.tsx).
+export const PERSISTED_PREF_KEYS = [
+  'workspaces', 'activeWorkspaceId',
+  'sidebarCollapsed', 'observerCollapsed', 'healthCollapsed', 'sourceControlCollapsed',
+  'sidebarWidth', 'observerWidth', 'terminalFontSize',
+  'attentionDesktopAlerts', 'attentionStates',
+  'alertCritical', 'alertWarning', 'alertDirective', 'alertError',
+  'mutedAlertKeys', 'snoozedAlertKeys', 'watchedChats',
+  'terminalScrollback', 'terminalFontFamily', 'terminalColorScheme', 'terminalCursorStyle',
+  'copyOnSelect', 'timestampFormat', 'fileViewerViewMode',
+  'theme', 'density', 'paneLayout', 'onExitBehavior', 'autoFocusNewPane',
+  'defaultNewChatPreset', 'defaultNewChatPresetByHost', 'defaultNewChatHost',
+  'defaultNewChatCwd', 'defaultNewChatCwdByHost', 'customPresets', 'snippets',
+  'defaultShell', 'defaultShellByHost',
+  'paneHost', 'agentFilter', 'agentSort', 'healthGroupBy', 'healthCollapsedHosts', 'hostLabels',
+] as const satisfies readonly (keyof Omit<UiState, 'restoreOnStartup'>)[];
 
 export function loadUi(): UiState {
   try {
