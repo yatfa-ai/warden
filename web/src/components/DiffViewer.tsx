@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -15,8 +15,8 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
-import { Loader2Icon, FileIcon, GitCompare, AlertCircleIcon } from 'lucide-react';
-import { classifyDiffLine, DIFF_LINE_CLASS } from '@/lib/diff';
+import { Loader2Icon, FileIcon, GitCompare, AlertCircleIcon, ChevronUp, ChevronDown } from 'lucide-react';
+import { classifyDiffLine, DIFF_LINE_CLASS, collectChangeRegions } from '@/lib/diff';
 import { copyText } from '@/lib/clipboard';
 import { basename } from '@/lib/chatDisplay';
 import { toast } from 'sonner';
@@ -105,7 +105,35 @@ export function DiffViewer({ chatId, filePath, staged, range, count, diffstat, o
     return () => { cancelled = true; };
   }, [chatId, filePath, staged, range, isRange, open]);
 
+  // WARDEN-663: prev/next changed-region nav. The changed regions are the maximal
+  // runs of added/removed lines (collectChangeRegions collapses each run to its
+  // first line index). `lineRefs` holds one ref per rendered diff line so a region's
+  // jump target can be scrolled into view; `currentRegion` is the index into
+  // `regions` the indicator reflects. Recompute regions purely from the loaded diff
+  // string (no fetch, no data-model change) and reset the cursor whenever the diff
+  // changes so a freshly-opened modal always starts at the first region.
+  const lineRefs = useRef<(HTMLSpanElement | null)[]>([]);
+  const regions = useMemo(() => (diff ? collectChangeRegions(diff) : []), [diff]);
+  const [currentRegion, setCurrentRegion] = useState(0);
+  useEffect(() => { setCurrentRegion(0); }, [diff]);
+
+  const jumpTo = (idx: number) => {
+    if (idx < 0 || idx >= regions.length) return;
+    setCurrentRegion(idx);
+    const lineIdx = regions[idx];
+    // rAF guarantees the per-line DOM is committed before we scroll, mirroring
+    // FileViewer's scrollIntoView call inside the same Radix ScrollArea (WARDEN-227).
+    requestAnimationFrame(() => {
+      lineRefs.current[lineIdx]?.scrollIntoView({ block: 'center', behavior: 'auto' });
+    });
+  };
+
   const empty = !loading && !error && diff !== null && diff.length === 0;
+  // WARDEN-663 / WARDEN-68 (no dead chrome): only mount the prev/next control when
+  // a real diff with >= 2 changed regions is on screen — never during loading,
+  // error, empty, or untracked states, and never for a single-region/no-region diff
+  // (one change has nowhere to jump).
+  const showNav = !loading && !error && !untracked && !empty && regions.length >= 2;
   // Range mode titles the modal by the change set; single-file mode by the path.
   // Worktree has no commit count — its magnitude is the `+N −M` chip rendered inline
   // next to the title below (the SAME `git diff HEAD` set the chip counts).
@@ -148,47 +176,91 @@ export function DiffViewer({ chatId, filePath, staged, range, count, diffstat, o
               </DialogTitle>
             </DialogHeader>
 
-            <ScrollArea className="h-[60vh] w-full rounded-md border bg-muted/50">
-              <div className="p-4">
-                {loading && (
-                  <div className="flex items-center justify-center gap-2 py-8 text-muted-foreground">
-                    <Loader2Icon className="w-5 h-5 animate-spin" />
-                    <span>Loading diff...</span>
-                  </div>
-                )}
+            <div className="relative">
+              <ScrollArea className="h-[60vh] w-full rounded-md border bg-muted/50">
+                <div className="p-4">
+                  {loading && (
+                    <div className="flex items-center justify-center gap-2 py-8 text-muted-foreground">
+                      <Loader2Icon className="w-5 h-5 animate-spin" />
+                      <span>Loading diff...</span>
+                    </div>
+                  )}
 
-                {error && (
-                  <div className="flex items-center gap-2 py-8 text-red-400">
-                    <AlertCircleIcon className="w-5 h-5" />
-                    <span>{error}</span>
-                  </div>
-                )}
+                  {error && (
+                    <div className="flex items-center gap-2 py-8 text-red-400">
+                      <AlertCircleIcon className="w-5 h-5" />
+                      <span>{error}</span>
+                    </div>
+                  )}
 
-                {!loading && !error && untracked && (
-                  <div className="flex items-center justify-center py-8 text-muted-foreground">
-                    Untracked file — no diff yet.
-                  </div>
-                )}
+                  {!loading && !error && untracked && (
+                    <div className="flex items-center justify-center py-8 text-muted-foreground">
+                      Untracked file — no diff yet.
+                    </div>
+                  )}
 
-                {!loading && !error && empty && (
-                  <div className="flex items-center justify-center py-8 text-muted-foreground">
-                    {isRange
-                      ? (range === 'worktree' ? 'No tracked changes vs HEAD.' : 'No net changes between the two tips.')
-                      : 'No changes — file matches HEAD.'}
-                  </div>
-                )}
+                  {!loading && !error && empty && (
+                    <div className="flex items-center justify-center py-8 text-muted-foreground">
+                      {isRange
+                        ? (range === 'worktree' ? 'No tracked changes vs HEAD.' : 'No net changes between the two tips.')
+                        : 'No changes — file matches HEAD.'}
+                    </div>
+                  )}
 
-                {!loading && !error && diff !== null && diff.length > 0 && (
-                  <pre className="text-sm font-mono whitespace-pre">
-                    {diff.split('\n').map((line, i) => (
-                      <span key={i} className={`block ${DIFF_LINE_CLASS[classifyDiffLine(line)]}`}>
-                        {line || ' '}
-                      </span>
-                    ))}
-                  </pre>
-                )}
-              </div>
-            </ScrollArea>
+                  {!loading && !error && diff !== null && diff.length > 0 && (
+                    <pre className="text-sm font-mono whitespace-pre">
+                      {diff.split('\n').map((line, i) => (
+                        <span
+                          key={i}
+                          ref={(el) => { lineRefs.current[i] = el; }}
+                          className={`block ${DIFF_LINE_CLASS[classifyDiffLine(line)]}`}
+                        >
+                          {line || ' '}
+                        </span>
+                      ))}
+                    </pre>
+                  )}
+                </div>
+              </ScrollArea>
+              {/* WARDEN-663: on-screen prev/next changed-region nav (pointer-accessible
+                  only — no hotkeys, per the standing prohibition). Clamps at the ends
+                  (buttons disable rather than wrapping) so the indicator is an honest
+                  position, and lives as a floating control over the ScrollArea so it
+                  groups with the content it navigates. `showNav` already excludes the
+                  loading/error/empty/untracked and <2-region cases (WARDEN-68). */}
+              {showNav && (
+                <div className="absolute right-3 top-3 z-10 flex items-center gap-1 rounded-md border bg-background/95 p-1 shadow-sm backdrop-blur">
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="h-7 w-7"
+                    disabled={currentRegion === 0}
+                    onClick={() => jumpTo(currentRegion - 1)}
+                    title="Previous change"
+                    aria-label="Previous change"
+                  >
+                    <ChevronUp className="h-4 w-4" />
+                  </Button>
+                  <span
+                    className="min-w-[3.5rem] text-center text-xs tabular-nums text-muted-foreground"
+                    aria-label={`change ${currentRegion + 1} of ${regions.length}`}
+                  >
+                    {currentRegion + 1} / {regions.length}
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="h-7 w-7"
+                    disabled={currentRegion === regions.length - 1}
+                    onClick={() => jumpTo(currentRegion + 1)}
+                    title="Next change"
+                    aria-label="Next change"
+                  >
+                    <ChevronDown className="h-4 w-4" />
+                  </Button>
+                </div>
+              )}
+            </div>
 
             <DialogClose asChild>
               <Button variant="outline" className="w-full sm:w-auto">Close</Button>

@@ -36,6 +36,34 @@ export function classifyDiffLine(line: string): DiffLineKind {
   return 'context';
 }
 
+// Collect the indices of changed regions in a unified diff for prev/next nav
+// (WARDEN-663). A "changed region" is a maximal RUN of consecutive added/removed
+// lines; the jump target is the FIRST line of each run, so the position indicator
+// counts REGIONS (one per hunk's worth of +/- lines), not individual +/- lines —
+// giving a sensible "3 / 11" count for a multi-file, multi-hunk diff rather than a
+// line-count. A line belongs to a run when classifyDiffLine returns 'add' or
+// 'remove'; everything else (context, hunk headers, file/metadata banners) breaks
+// the run. Returns 0-based line indices into the array produced by diff.split('\n').
+// Pure (no React) so it can be unit-tested directly via node, mirroring
+// classifyDiffLine above. An empty/blank diff yields [] (caller hides the nav then).
+export function collectChangeRegions(diff: string): number[] {
+  const lines = diff.split('\n');
+  const regions: number[] = [];
+  let inRegion = false;
+  for (let i = 0; i < lines.length; i++) {
+    const kind = classifyDiffLine(lines[i]);
+    const changed = kind === 'add' || kind === 'remove';
+    if (changed && !inRegion) {
+      // Start of a new run — this first changed line is the jump target.
+      regions.push(i);
+      inRegion = true;
+    } else if (!changed) {
+      inRegion = false;
+    }
+  }
+  return regions;
+}
+
 // Shared palette mapping a DiffLineKind → Tailwind class. Used by BOTH the modal
 // working-tree diff viewer (DiffViewer, WARDEN-151) and the inline committed-diff
 // block (DiffBlock in ChatSidebar, WARDEN-180) so a file's diff renders identically
