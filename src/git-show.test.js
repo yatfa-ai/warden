@@ -195,6 +195,47 @@ describe('parseGitShowNameStatus', () => {
     ]);
   });
 
+  // ---- WARDEN-675: `git show --name-status` / `git stash show --name-status`
+  // C-quote any path with a double-quote, backslash, control char, or non-ASCII
+  // byte (core.quotePath=true by default). Unlike porcelain, a SPACE is NOT quoted
+  // here (TAB is the field delimiter), which is why the plain-space test above
+  // passes without unescaping. The parser must unescape the special/non-ASCII
+  // cases so the row renders the real filename AND the per-file diff round-trip
+  // resolves — the two server.js callers feed `.path` straight back into git as a
+  // pathspec (`git show <hash> -- <path>` / `git diff <ref>^ <ref> -- <path>`).
+  describe('C-quoted paths (non-ASCII / special chars)', () => {
+    it('unquotes a non-ASCII path git emitted as octal UTF-8 bytes', () => {
+      // 'café.js' → git emits the é (UTF-8 0xC3 0xA9) as the two octal escapes
+      // \303\251. The parser must reassemble them into the single character, else
+      // the row renders `"caf\303\251.js"` and its per-file diff 404s.
+      assert.deepStrictEqual(parseGitShowNameStatus('M\t"caf\\303\\251.js"\n'), [
+        { status: 'M', path: 'café.js' },
+      ]);
+    });
+
+    it('unquotes a backslash path', () => {
+      assert.deepStrictEqual(parseGitShowNameStatus('M\t"back\\\\slash.js"\n'), [
+        { status: 'M', path: 'back\\slash.js' },
+      ]);
+    });
+
+    it('unquotes a path with an embedded double quote', () => {
+      assert.deepStrictEqual(parseGitShowNameStatus('M\t"quote\\"in.js"\n'), [
+        { status: 'M', path: 'quote"in.js' },
+      ]);
+    });
+
+    it('unquotes only the NEW path of a quoted rename (each name quoted independently)', () => {
+      // `R100\t"caf\303\251-old.js"\t"caf\303\251-new.js"` — git quotes each rename
+      // name INDEPENDENTLY. The new path is sliced off after the 2nd TAB and THEN
+      // unescaped; unescaping the whole `rest` first would merge the two quoted
+      // names. Mirrors WARDEN-650's porcelain-rename property.
+      assert.deepStrictEqual(parseGitShowNameStatus('R100\t"caf\\303\\251-old.js"\t"caf\\303\\251-new.js"\n'), [
+        { status: 'R', path: 'café-new.js' },
+      ]);
+    });
+  });
+
   it('tolerates CRLF and blank lines (e.g. output arriving over SSH)', () => {
     assert.deepStrictEqual(parseGitShowNameStatus('\r\nA\tx.txt\r\n\r\n'), [
       { status: 'A', path: 'x.txt' },
