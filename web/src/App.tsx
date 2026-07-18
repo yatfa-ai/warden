@@ -232,6 +232,14 @@ function App() {
   const [resolvedThemeId, setResolvedThemeId] = useState<ThemeId>(() => resolveThemeId(uiState.theme ?? 'system'));
   const [density, setDensity] = useState<Density>(() => uiState.density ?? 'comfortable');
   const [paneLayout, setPaneLayout] = useState<PaneLayout>(() => uiState.paneLayout ?? 'auto');
+  // Draggable resize-gutter ratios (WARDEN-660): per-axis PaneGrid track
+  // weights ([] = equal split, the default). Pure client-side pref (like
+  // paneLayout/terminalFontSize): persisted by the saveUi effect below, never
+  // sent to the backend. PaneGrid holds a LOCAL working copy so a drag re-
+  // templates the grid at 60fps without a localStorage write per pointermove;
+  // it commits the final ratios up through these setters on pointerUp only.
+  const [paneColRatios, setPaneColRatios] = useState<number[]>(() => uiState.paneColRatios ?? []);
+  const [paneRowRatios, setPaneRowRatios] = useState<number[]>(() => uiState.paneRowRatios ?? []);
   // "Pane on agent exit" behavior: what an already-open pane does when its agent
   // process exits (chat.active goes true→false). 'keep' (default) is today's exact
   // behavior (dead terminal left for manual close); 'dim' marks it exited while
@@ -605,6 +613,7 @@ function App() {
     alertWarning, alertDirective, alertError, mutedAlertKeys, snoozedAlertKeys,
     watchedChats, terminalScrollback, terminalFontFamily, terminalColorScheme,
     terminalCursorStyle, copyOnSelect, timestampFormat, theme, density, paneLayout,
+    paneColRatios, paneRowRatios,
     onExitBehavior, autoFocusNewPane, paneHost, defaultNewChatPreset,
     defaultNewChatPresetByHost, defaultNewChatHost, defaultNewChatCwd,
     defaultNewChatCwdByHost, customPresets, snippets, defaultShell, defaultShellByHost,
@@ -1909,6 +1918,10 @@ function App() {
             scrollback={terminalScrollback}
             fontFamily={terminalFontFamily}
             paneLayout={paneLayout}
+            paneColRatios={paneColRatios}
+            paneRowRatios={paneRowRatios}
+            onPaneColRatiosChange={setPaneColRatios}
+            onPaneRowRatiosChange={setPaneRowRatios}
             terminalThemeId={terminalThemeId}
             terminalCursorStyle={terminalCursorStyle}
             copyOnSelect={copyOnSelect}

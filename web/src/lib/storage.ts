@@ -487,6 +487,14 @@ export interface UiState {
   // grid: cols = ceil(sqrt(n))), 'stacked' (single column), or 'side-by-side'
   // (single row). Pure client-side pref; never sent to the backend.
   paneLayout?: PaneLayout;
+  // Draggable resize-gutter ratios (WARDEN-660): per-axis fractional track
+  // weights for PaneGrid's columns / rows. Each entry is a unitless `fr` value
+  // (gridTemplateColumns: `${r}fr …`); an all-equal array — or empty — is
+  // today's uniform grid. Mismatched-length arrays are discarded on load and
+  // reset on shape change, so stale ratios from a 4-pane grid never distort a
+  // 2-pane grid. Pure client-side pref; never sent to the backend.
+  paneColRatios?: number[];
+  paneRowRatios?: number[];
   // What happens to an already-open pane when its agent process exits: 'keep'
   // (default = today's behavior), 'dim' (overlay + reduced opacity, keep last
   // output), or 'auto-close' (remove via closePane once). Pure client-side pref;
@@ -835,6 +843,23 @@ function parseMutedKeys(raw: unknown): string[] {
   return out;
 }
 
+// WARDEN-660: coerce a persisted gutter-ratio array to a valid number[] (each
+// entry a positive finite fr weight) or [] (equal split). A non-array, or ANY
+// non-finite / non-positive entry, degrades the WHOLE array to [] — a partial
+// array would misalign tracks with the grid shape, so one bad entry is treated
+// as corrupt rather than silently dropped (mirroring the all-or-nothing
+// discipline that keeps a hand-edited / legacy payload from distorting the
+// grid). [] is the meaningful "equal split" default the rest of the code reads.
+function parseRatioArray(raw: unknown): number[] {
+  if (!Array.isArray(raw)) return [];
+  const out: number[] = [];
+  for (const r of raw) {
+    if (typeof r !== 'number' || !Number.isFinite(r) || r <= 0) return [];
+    out.push(r);
+  }
+  return out;
+}
+
 // Sanitize a raw snoozedAlertKeys value (chat key → expiry ms) into a valid
 // Record<string, number> (WARDEN-551 — mirrors parseMutedKeys's drop-bad-entries
 // discipline, the WARDEN-89 defensive norm). Each entry requires a non-empty
@@ -957,6 +982,7 @@ export const DEFAULT_UI: UiState = {
   timestampFormat: 'relative',
   fileViewerViewMode: 'rendered',
   theme: 'system', density: 'comfortable', paneLayout: 'auto',
+  paneColRatios: [], paneRowRatios: [],
   onExitBehavior: 'keep',
   autoFocusNewPane: true,
   restoreOnStartup: 'previous',
@@ -988,7 +1014,7 @@ export const PERSISTED_PREF_KEYS = [
   'mutedAlertKeys', 'snoozedAlertKeys', 'watchedChats',
   'terminalScrollback', 'terminalFontFamily', 'terminalColorScheme', 'terminalCursorStyle',
   'copyOnSelect', 'timestampFormat', 'fileViewerViewMode',
-  'theme', 'density', 'paneLayout', 'onExitBehavior', 'autoFocusNewPane',
+  'theme', 'density', 'paneLayout', 'paneColRatios', 'paneRowRatios', 'onExitBehavior', 'autoFocusNewPane',
   'defaultNewChatPreset', 'defaultNewChatPresetByHost', 'defaultNewChatHost',
   'defaultNewChatCwd', 'defaultNewChatCwdByHost', 'customPresets', 'snippets',
   'defaultShell', 'defaultShellByHost',
@@ -1092,6 +1118,9 @@ export function loadUi(): UiState {
         theme: normalizeThemePref(v.theme),
         density: v.density === 'compact' ? 'compact' : 'comfortable',
         paneLayout: (v.paneLayout === 'stacked' || v.paneLayout === 'side-by-side') ? v.paneLayout : 'auto',
+        // WARDEN-660: a corrupt/non-array value degrades to [] (equal split).
+        paneColRatios: parseRatioArray(v.paneColRatios),
+        paneRowRatios: parseRatioArray(v.paneRowRatios),
         onExitBehavior: ['keep', 'dim', 'auto-close'].includes(v.onExitBehavior) ? v.onExitBehavior : 'keep',
         // Only an explicit false opts out; absent/unknown defaults to true so a
         // partial payload never silently disables focus-stealing.

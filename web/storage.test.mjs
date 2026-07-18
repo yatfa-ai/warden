@@ -278,6 +278,64 @@ test('a missing field loads as "auto"', () => {
   assert.equal(loadUi().paneLayout, 'auto');
 });
 
+console.log('\npaneColRatios / paneRowRatios (resize-gutter ratios) round-trip through loadUi/saveUi — WARDEN-660');
+test('default to [] (equal split) when nothing is stored', () => {
+  reset();
+  assert.deepEqual(loadUi().paneColRatios, []);
+  assert.deepEqual(loadUi().paneRowRatios, []);
+});
+test('a custom ratio array round-trips', () => {
+  reset();
+  saveUi({ ...loadUi(), paneColRatios: [1, 3], paneRowRatios: [2, 1, 1] });
+  assert.deepEqual(loadUi().paneColRatios, [1, 3]);
+  assert.deepEqual(loadUi().paneRowRatios, [2, 1, 1]);
+});
+test('[] (equal split) round-trips', () => {
+  reset();
+  saveUi({ ...loadUi(), paneColRatios: [], paneRowRatios: [] });
+  assert.deepEqual(loadUi().paneColRatios, []);
+  assert.deepEqual(loadUi().paneRowRatios, []);
+});
+test('a non-array value coerces to [] on load', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], paneColRatios: 'wide', paneRowRatios: 3 }));
+  assert.deepEqual(loadUi().paneColRatios, []);
+  assert.deepEqual(loadUi().paneRowRatios, []);
+});
+test('an array with a non-finite entry degrades the WHOLE array to [] (no partial)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], paneColRatios: [1, Infinity, 2] }));
+  assert.deepEqual(loadUi().paneColRatios, [], 'one bad entry corrupts the whole array, not just itself');
+});
+test('an array with a non-positive entry degrades to [] (ratios are fr weights)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], paneRowRatios: [1, 0, 2] }));
+  assert.deepEqual(loadUi().paneRowRatios, []);
+});
+test('a missing field loads as []', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
+  assert.deepEqual(loadUi().paneColRatios, []);
+  assert.deepEqual(loadUi().paneRowRatios, []);
+});
+test('persistUiState carries the ratios from the live object (not workspace-frozen)', () => {
+  // Like paneLayout, the ratios are a pref — NOT a workspace-restoration field —
+  // so persistUiState must spread them from `live` even when the workspace is
+  // frozen (restoreOnStartup='empty'). WARDEN-109 Facet C-style guard.
+  reset();
+  const d0 = loadUi();
+  saveUi(persistUiState({ ...d0, paneColRatios: [3, 1], paneRowRatios: [1, 2] }, 'empty', d0, true));
+  assert.deepEqual(loadUi().paneColRatios, [3, 1]);
+  assert.deepEqual(loadUi().paneRowRatios, [1, 2]);
+});
+test('resetUiPrefsPreservingWorkspace resets the ratios to [] (equal split)', () => {
+  reset();
+  const d0 = loadUi();
+  const r = resetUiPrefsPreservingWorkspace({ ...d0, paneColRatios: [1, 9], paneRowRatios: [5, 1] });
+  assert.deepEqual(r.paneColRatios, []);
+  assert.deepEqual(r.paneRowRatios, []);
+});
+
 console.log('\nterminal color scheme (auto/dark/light) round-trips through loadUi/saveUi');
 test('defaults to "auto" when nothing is stored', () => {
   reset();

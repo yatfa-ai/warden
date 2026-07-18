@@ -29,3 +29,116 @@ export function resolveVisibleTiles<T extends { id: string }>(
   const visible = effectiveMax ? tiles.filter((t) => t.id === effectiveMax) : tiles;
   return { effectiveMax, visible };
 }
+
+// --- Draggable resize gutters (WARDEN-660) -----------------------------------
+//
+// The grid lays out its panes in a CSS grid whose column/row track COUNT comes
+// from gridShape() and whose track SIZES come from a per-axis ratio array
+// (unitless `fr` weights: gridTemplateColumns = `${ratio}fr`). Equal split =
+// all 1s (today's uniform grid, bit-for-bit). Dragging an internal gutter
+// redistributes the combined weight of its two adjacent tracks between them;
+// double-clicking a gutter resets that axis to equal.
+//
+// Floors are enforced by clamping the drag (redistributeRatios), NOT by CSS
+// minmax on every track — the column template still carries a `minmax(9rem,…)`
+// safety net matching the pre-resize floor, but rows use `minmax(0,…)` so the
+// grid reflows at any height (the row floor is a drag limit, not a layout
+// limit). This keeps the floor a property of the *gesture* (you can't drag a
+// pane below it) while the *layout* stays fluid.
+
+// Column floor in rem — matches the historic `minmax(9rem, 1fr)` minimum a pane
+// could never be crushed below (PaneGrid.tsx pre-WARDEN-660). The drag clamps
+// at this many rem × the root font size.
+export const PANE_COL_FLOOR_REM = 9;
+// Row floor in rem — "a few terminal lines". Rows have no pre-resize CSS floor
+// (they were `minmax(0, 1fr)`), so this floor exists only as a drag limit: you
+// can't drag a row shorter than roughly this before the gutter clamps.
+export const PANE_ROW_FLOOR_REM = 6;
+
+export type PaneLayoutShape = 'auto' | 'stacked' | 'side-by-side';
+
+// Resolve the grid's column/row COUNT for a pane count + layout mode. 'auto'
+// reproduces the historic square-ish grid (cols = ceil(sqrt(n))); 'stacked'
+// forces a single column; 'side-by-side' forces a single row. Extracted from
+// PaneGrid (where it was inline `colsFor` + an if/else) so the resize-gutter
+// shape logic — reset-on-shape-change, "which gutters exist" — is unit-testable
+// against the real function. n === 0 yields cols ≥ 1 / rows 0 (PaneGrid renders
+// its empty-state message instead of the grid, so the template is unused then).
+export function gridShape(layout: PaneLayoutShape, n: number): { cols: number; rows: number } {
+  if (layout === 'stacked') return { cols: 1, rows: n };
+  if (layout === 'side-by-side') return { cols: n, rows: n > 0 ? 1 : 0 };
+  const cols = n <= 1 ? 1 : Math.ceil(Math.sqrt(n));
+  return { cols, rows: n > 0 ? Math.ceil(n / cols) : 0 };
+}
+
+// A fresh equal-split ratio array for `count` tracks (all 1s). count <= 0 → []
+// (no tracks). The default before any drag, and the reset target when the grid
+// shape changes (stale ratios from a 4-pane grid must not distort a 2-pane one).
+export function equalRatios(count: number): number[] {
+  return count > 0 ? new Array(count).fill(1) : [];
+}
+
+// The ratios actually applied to the grid: the persisted array when its length
+// matches the current track count, otherwise a fresh equal split. A length
+// mismatch happens after a shape change (persisted ratios for a different
+// shape) or before any drag — both fall through to equal. Pure: no DOM/React.
+export function effectiveRatios(persisted: number[], count: number): number[] {
+  return count > 0 && persisted.length === count ? persisted.slice() : equalRatios(count);
+}
+
+// Redistribute one gutter's drag between its two adjacent tracks. Given the
+// current ratios, the LEFT track index `g` of the pair, the pair's measured
+// pixel widths at drag start (t0, t1), the pointer delta `dx` in px (positive
+// enlarges the left track), and the minimum track width `floorPx`: returns a
+// NEW ratio array with the pair's combined weight (ratios[g] + ratios[g+1])
+// reallocated — left track grows by dx, right shrinks by dx — CLAMPED so
+// neither track falls below floorPx. Non-adjacent tracks are untouched.
+// Returns null when the inputs are unusable (caller treats null as "no change"),
+// so a measurement glitch or a stale-shape mismatch can never produce NaN/neg.
+export function redistributeRatios(
+  ratios: number[],
+  g: number,
+  t0: number,
+  t1: number,
+  dx: number,
+  floorPx: number,
+): number[] | null {
+  if (!Array.isArray(ratios) || g < 0 || g >= ratios.length - 1) return null;
+  if (!(t0 > 0) || !(t1 > 0)) return null; // need real, positive measured widths
+  const pairSum = ratios[g] + ratios[g + 1];
+  if (!(pairSum > 0)) return null;
+  // Clamp dx so each track stays >= its floor: left can't shrink below floor
+  // (minDx), right can't shrink below floor either (maxDx). A drag always
+  // starts from a valid layout (both tracks >= floor), so minDx <= 0 <= maxDx
+  // initially and the clamp is well-ordered.
+  const minDx = floorPx - t0; // left track hits its floor
+  const maxDx = t1 - floorPx; // right track hits its floor
+  const clamped = Math.max(minDx, Math.min(maxDx, dx));
+  const newLeft = (pairSum * (t0 + clamped)) / (t0 + t1);
+  const next = ratios.slice();
+  next[g] = newLeft;
+  next[g + 1] = pairSum - newLeft;
+  return next;
+}
+
+// Pixel centers (relative to the grid's content box) of each internal gutter on
+// one axis, given that axis's ratio array, the grid's content size on that axis,
+// and the gap between tracks. Used to position the overlay drag handles over the
+// visual gutters without a per-pointermove layout query. gutter i sits between
+// track i and i+1; its center = (sum of track[0..i] widths) + (i + 0.5) * gap.
+// Returns [] when there are fewer than 2 tracks (no internal gutters) or the
+// size is unknown (first paint) — PaneGrid renders no handles in that case.
+export function gutterCenters(ratios: number[], size: number, gap: number): number[] {
+  const n = ratios.length;
+  if (n <= 1 || !(size > 0)) return [];
+  const total = ratios.reduce((a, b) => a + b, 0);
+  if (!(total > 0)) return [];
+  const distributable = Math.max(0, size - (n - 1) * gap);
+  const out: number[] = [];
+  let cumTrack = 0; // running sum of track[0..i] widths
+  for (let i = 0; i < n - 1; i++) {
+    cumTrack += (ratios[i] / total) * distributable;
+    out.push(cumTrack + (i + 0.5) * gap);
+  }
+  return out;
+}

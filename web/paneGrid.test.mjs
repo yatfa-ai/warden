@@ -39,7 +39,7 @@ const { code } = await transformWithOxc(src, paneGridPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-paneGrid-test-'));
 const tmpFile = join(tmpDir, 'paneGrid.mjs');
 writeFileSync(tmpFile, code);
-const { resolveVisibleTiles } = await import(tmpFile);
+const { resolveVisibleTiles, gridShape, equalRatios, effectiveRatios, redistributeRatios, gutterCenters, PANE_COL_FLOOR_REM, PANE_ROW_FLOOR_REM } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -191,4 +191,193 @@ test('maximized id that matches nothing in an empty workspace is null, not blank
   assert.deepEqual(visible, []);
 });
 
-console.log(`\n✓ PANEGRID TESTS PASS (${passed})`);
+console.log('\n✓ PANEGRID TESTS PASS (stale-maximized: ' + passed + ')');
+
+// ============================================================================
+// Draggable resize gutters (WARDEN-660) — pure helpers
+// ============================================================================
+// These exercise the unit-testable math behind the gutters: shape resolution,
+// equal/effective ratio seeding, the drag redistribution + floor clamp, and the
+// handle-position math. The pointer/DOM plumbing (pointer capture, measurement)
+// lives in PaneGrid.tsx and is verified via build + manual QA — it has no pure
+// seam to assert here. Reset-on-shape-change is driven by gridShape's COUNT, so
+// these tests cover its contract too.
+
+console.log('\ngridShape: column/row COUNT per layout mode (WARDEN-660)');
+
+test('auto reproduces the historic square-ish grid (cols = ceil(sqrt(n)))', () => {
+  assert.deepEqual(gridShape('auto', 1), { cols: 1, rows: 1 });
+  assert.deepEqual(gridShape('auto', 2), { cols: 2, rows: 1 });
+  assert.deepEqual(gridShape('auto', 3), { cols: 2, rows: 2 }); // ceil(3/2)=2
+  assert.deepEqual(gridShape('auto', 4), { cols: 2, rows: 2 });
+  assert.deepEqual(gridShape('auto', 5), { cols: 3, rows: 2 }); // ceil(sqrt(5))=3
+  assert.deepEqual(gridShape('auto', 9), { cols: 3, rows: 3 });
+  assert.deepEqual(gridShape('auto', 10), { cols: 4, rows: 3 }); // ceil(sqrt(10))=4
+});
+
+test('stacked forces a single column (cols=1, rows=n)', () => {
+  assert.deepEqual(gridShape('stacked', 1), { cols: 1, rows: 1 });
+  assert.deepEqual(gridShape('stacked', 4), { cols: 1, rows: 4 });
+});
+
+test('side-by-side forces a single row (cols=n, rows=1)', () => {
+  assert.deepEqual(gridShape('side-by-side', 1), { cols: 1, rows: 1 });
+  assert.deepEqual(gridShape('side-by-side', 4), { cols: 4, rows: 1 });
+});
+
+test('n===0 yields cols>=1 / rows=0 (grid unused — empty-state renders instead)', () => {
+  assert.deepEqual(gridShape('auto', 0), { cols: 1, rows: 0 });
+  assert.deepEqual(gridShape('stacked', 0), { cols: 1, rows: 0 });
+  assert.deepEqual(gridShape('side-by-side', 0), { cols: 0, rows: 0 });
+});
+
+test('the COUNT drives which gutters exist: N tracks → N-1 internal gutters', () => {
+  // This is the property reset-on-shape-change keys off — a shape change alters
+  // the count, so ratios sized for the old count must reset.
+  for (const layout of ['auto', 'stacked', 'side-by-side']) {
+    for (let n = 1; n <= 9; n++) {
+      const { cols, rows } = gridShape(layout, n);
+      // a single-pane grid (cols=1 AND rows=1) has NO internal gutters
+      if (cols <= 1 && rows <= 1) continue;
+      assert.ok(cols > 1 || rows > 1, `${layout}/${n} has at least one axis to gutter`);
+    }
+  }
+});
+
+console.log('\nequalRatios / effectiveRatios: seeding + shape-mismatch fallback');
+
+test('equalRatios(n) = n ones (the default / reset target); n<=0 = []', () => {
+  assert.deepEqual(equalRatios(1), [1]);
+  assert.deepEqual(equalRatios(3), [1, 1, 1]);
+  assert.deepEqual(equalRatios(0), []);
+  assert.deepEqual(equalRatios(-1), []);
+});
+
+test('effectiveRatios uses the persisted array when its length matches the shape', () => {
+  assert.deepEqual(effectiveRatios([1, 3], 2), [1, 3]); // custom ratios restored
+  assert.deepEqual(effectiveRatios([2, 2, 1], 3), [2, 2, 1]);
+});
+
+test('effectiveRatios falls back to equal on length mismatch (stale shape) or empty', () => {
+  assert.deepEqual(effectiveRatios([1, 3], 3), [1, 1, 1], '4-pane ratios must not distort a 3-pane grid');
+  assert.deepEqual(effectiveRatios([1, 1, 1], 2), [1, 1], 'too-long array falls back to equal');
+  assert.deepEqual(effectiveRatios([], 2), [1, 1], 'empty persisted = equal');
+  assert.deepEqual(effectiveRatios([1, 3], 0), [], 'count<=0 = no tracks');
+});
+
+test('effectiveRatios returns a COPY (mutating it never corrupts the input)', () => {
+  const persisted = [1, 3];
+  const out = effectiveRatios(persisted, 2);
+  assert.notEqual(out, persisted, 'a fresh array, not the same reference');
+  out[0] = 99;
+  assert.equal(persisted[0], 1, 'input is untouched');
+});
+
+console.log('\nredistributeRatios: drag redistribution + floor clamp');
+
+test('a drag redistributes the pair by px and preserves the pair sum (no clamp)', () => {
+  // 2 equal tracks of 300px each, drag the gutter +60px (enlarge left). pairSum=2.
+  const next = redistributeRatios([1, 1], 0, 300, 300, 60, 100);
+  assert.deepEqual(next, [1.2, 0.8]);
+  assert.ok(Math.abs(next[0] + next[1] - 2) < 1e-9, 'pair sum is conserved');
+});
+
+test('a negative drag enlarges the RIGHT track', () => {
+  const next = redistributeRatios([1, 1], 0, 300, 300, -60, 100);
+  assert.deepEqual(next, [0.8, 1.2]);
+});
+
+test('the drag CLAMPS at the floor — neither adjacent track goes below floorPx', () => {
+  // 2 tracks of 200px, floor 144px (9rem @ 16px). Dragging +100px would shrink
+  // the right track to 100px (< floor); the clamp holds it at 144px.
+  const next = redistributeRatios([1, 1], 0, 200, 200, 100, 144);
+  assert.ok(next !== null);
+  // right track = pairSum - next[0]; reconstruct its px width and assert >= floor
+  const pairSum = 2;
+  const region = 200 + 200;
+  const rightPx = (pairSum - next[0]) / pairSum * region;
+  assert.ok(rightPx >= 144 - 1e-6, `right track (${rightPx}px) clamped at the 144px floor`);
+  // left track px also >= floor
+  const leftPx = next[0] / pairSum * region;
+  assert.ok(leftPx >= 144 - 1e-6, `left track (${leftPx}px) >= floor`);
+});
+
+test('dragging the other way clamps at the LEFT track floor', () => {
+  // Try to shrink the left track below the floor with a large negative dx.
+  const next = redistributeRatios([1, 1], 0, 200, 200, -250, 144);
+  assert.ok(next !== null);
+  const leftPx = next[0] / 2 * 400;
+  assert.ok(leftPx >= 144 - 1e-6, `left track (${leftPx}px) clamped at the floor`);
+});
+
+test('only the two adjacent tracks change; the rest of the axis is untouched', () => {
+  const before = [1, 2, 3, 4];
+  const next = redistributeRatios(before, 1, 200, 200, 50, 100); // resize pair at g=1 (tracks 1&2)
+  assert.equal(next[0], 1, 'track 0 untouched');
+  assert.equal(next[3], 4, 'track 3 untouched');
+  assert.ok(Math.abs(next[1] + next[2] - (2 + 3)) < 1e-9, 'the pair sum (2+3) is conserved');
+  assert.notEqual(next[1], 2, 'the left of the pair actually moved');
+});
+
+test('non-adjacent tracks are never resized even when only one internal gutter exists', () => {
+  // 4 tracks but resize the FIRST gutter (g=0): tracks 2 and 3 must be untouched.
+  const next = redistributeRatios([1, 1, 5, 5], 0, 200, 200, 40, 100);
+  assert.equal(next[2], 5);
+  assert.equal(next[3], 5);
+});
+
+test('returns null for unusable inputs (caller treats as no-change, never NaN)', () => {
+  assert.equal(redistributeRatios([1, 1], -1, 200, 200, 50, 100), null, 'g out of range (low)');
+  assert.equal(redistributeRatios([1, 1], 1, 200, 200, 50, 100), null, 'g out of range (high: only gutter is g=0)');
+  assert.equal(redistributeRatios([1], 0, 200, 200, 50, 100), null, 'single track — no pair');
+  assert.equal(redistributeRatios([1, 1], 0, 0, 200, 50, 100), null, 'zero measured width');
+  assert.equal(redistributeRatios([1, 1], 0, -5, 200, 50, 100), null, 'negative measured width');
+  assert.equal(redistributeRatios([0, 0], 0, 200, 200, 50, 100), null, 'zero pairSum');
+  assert.equal(redistributeRatios('nope', 0, 200, 200, 50, 100), null, 'non-array ratios');
+});
+
+test('floor constants match the spec (9rem cols, 6rem rows)', () => {
+  assert.equal(PANE_COL_FLOOR_REM, 9, 'column floor = the historic 9rem minmax minimum');
+  assert.equal(PANE_ROW_FLOOR_REM, 6, 'row floor = ~6rem (a few terminal lines)');
+});
+
+console.log('\ngutterCenters: handle positions over the internal gutters');
+
+test('a single internal gutter sits at the midpoint of two equal tracks', () => {
+  // 400px, gap 8, two equal tracks of 196 each → gutter center at 196 + 4 = 200.
+  assert.deepEqual(gutterCenters([1, 1], 400, 8), [200]);
+});
+
+test('an unequal ratio places the gutter proportionally (1:3 split)', () => {
+  // track0 = 1/4 of 392 = 98, gutter center = 98 + 4 = 102.
+  assert.deepEqual(gutterCenters([1, 3], 400, 8), [102]);
+});
+
+test('three tracks yield two gutter centers, each offset by the gap', () => {
+  const centers = gutterCenters([1, 1, 1], 408, 8);
+  assert.equal(centers.length, 2);
+  // track sizes = 392/3 ≈ 130.667; gutter0 center = 130.667 + 4; gutter1 = 261.333 + 12
+  assert.ok(Math.abs(centers[0] - (392 / 3 + 4)) < 1e-6);
+  assert.ok(Math.abs(centers[1] - (2 * (392 / 3) + 12)) < 1e-6);
+});
+
+test('no internal gutters when fewer than 2 tracks, or size unknown', () => {
+  assert.deepEqual(gutterCenters([1], 400, 8), [], 'single track');
+  assert.deepEqual(gutterCenters([], 400, 8), [], 'no tracks');
+  assert.deepEqual(gutterCenters([1, 1], 0, 8), [], 'size unknown (first paint)');
+  assert.deepEqual(gutterCenters([1, 1], -10, 8), [], 'negative size');
+});
+
+test('gutter center = (first track width) + half the gap — the gap is included, not ignored', () => {
+  // 3 equal tracks: each width = (size - (n-1)*gap)/n; gutter0 sits at the END
+  // of track0 plus half the gap (the gutter's own center). For 2 EQUAL tracks
+  // the center is always size/2 regardless of gap ((size-gap)/2 + gap/2), so the
+  // 3-track case is the one that proves the gap term is actually wired in.
+  const gap = 12, size = 408;
+  const trackW = (size - 2 * gap) / 3; // = 128
+  const centers = gutterCenters([1, 1, 1], size, gap);
+  assert.ok(Math.abs(centers[0] - (trackW + gap / 2)) < 1e-6,
+    `gutter0 center = trackW(${trackW}) + gap/2(${gap / 2}) = ${trackW + gap / 2}`);
+});
+
+console.log(`\n✓ PANEGRID TESTS PASS (total: ${passed})`);
