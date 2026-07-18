@@ -1755,68 +1755,43 @@ function App() {
         <SettingsPage
           onClose={() => setSettingsOpen(false)}
           onConfigChange={handleConfigChange}
-          theme={theme}
-          setTheme={setTheme}
-          density={density}
-          setDensity={setDensity}
-          paneLayout={paneLayout}
-          setPaneLayout={setPaneLayout}
-          onExitBehavior={onExitBehavior}
-          setOnExitBehavior={setOnExitBehavior}
-          autoFocusNewPane={autoFocusNewPane}
-          setAutoFocusNewPane={setAutoFocusNewPane}
-          restoreOnStartup={restoreOnStartup}
-          setRestoreOnStartup={setRestoreOnStartup}
-          terminalFontSize={terminalFontSize}
-          setTerminalFontSize={setTerminalFontSize}
-          attentionDesktopAlerts={attentionDesktopAlerts}
-          setAttentionDesktopAlerts={setAttentionDesktopAlerts}
-          attentionStates={attentionStates}
-          setAttentionStates={setAttentionStates}
-          alertCritical={alertCritical}
-          setAlertCritical={setAlertCritical}
-          alertWarning={alertWarning}
-          setAlertWarning={setAlertWarning}
-          alertDirective={alertDirective}
-          setAlertDirective={setAlertDirective}
-          alertError={alertError}
-          setAlertError={setAlertError}
-          terminalScrollback={terminalScrollback}
-          setTerminalScrollback={setTerminalScrollback}
-          terminalFontFamily={terminalFontFamily}
-          setTerminalFontFamily={setTerminalFontFamily}
-          terminalColorScheme={terminalColorScheme}
-          setTerminalColorScheme={setTerminalColorScheme}
-          terminalCursorStyle={terminalCursorStyle}
-          setTerminalCursorStyle={setTerminalCursorStyle}
-          copyOnSelect={copyOnSelect}
-          setCopyOnSelect={setCopyOnSelect}
-          timestampFormat={timestampFormat}
-          setTimestampFormat={setTimestampFormat}
-          defaultNewChatPreset={defaultNewChatPreset}
-          setDefaultNewChatPreset={setDefaultNewChatPreset}
-          defaultNewChatPresetByHost={defaultNewChatPresetByHost}
-          setDefaultNewChatPresetByHost={setDefaultNewChatPresetByHost}
-          defaultNewChatHost={defaultNewChatHost}
-          setDefaultNewChatHost={setDefaultNewChatHost}
-          defaultNewChatCwd={defaultNewChatCwd}
-          setDefaultNewChatCwd={setDefaultNewChatCwd}
-          defaultNewChatCwdByHost={defaultNewChatCwdByHost}
-          setDefaultNewChatCwdByHost={setDefaultNewChatCwdByHost}
-          customPresets={customPresets}
-          setCustomPresets={setCustomPresets}
-          snippets={snippets}
-          setSnippets={setSnippets}
-          defaultShell={defaultShell}
-          setDefaultShell={setDefaultShell}
-          defaultShellByHost={defaultShellByHost}
-          setDefaultShellByHost={setDefaultShellByHost}
-          rememberWindowBounds={rememberWindowBounds}
-          setRememberWindowBounds={setRememberWindowBounds}
-          launchAtLogin={launchAtLogin}
-          setLaunchAtLogin={setLaunchAtLogin}
-          closeToTray={closeToTray}
-          setCloseToTray={setCloseToTray}
+          appearance={{
+            theme, setTheme,
+            density, setDensity,
+            paneLayout, setPaneLayout,
+            onExitBehavior, setOnExitBehavior,
+            autoFocusNewPane, setAutoFocusNewPane,
+            restoreOnStartup, setRestoreOnStartup,
+            terminalFontSize, setTerminalFontSize,
+            terminalScrollback, setTerminalScrollback,
+            terminalFontFamily, setTerminalFontFamily,
+            terminalColorScheme, setTerminalColorScheme,
+            terminalCursorStyle, setTerminalCursorStyle,
+            copyOnSelect, setCopyOnSelect,
+            timestampFormat, setTimestampFormat,
+            rememberWindowBounds, setRememberWindowBounds,
+            launchAtLogin, setLaunchAtLogin,
+            closeToTray, setCloseToTray,
+          }}
+          newChats={{
+            defaultNewChatPreset, setDefaultNewChatPreset,
+            defaultNewChatPresetByHost, setDefaultNewChatPresetByHost,
+            defaultNewChatHost, setDefaultNewChatHost,
+            defaultNewChatCwd, setDefaultNewChatCwd,
+            defaultNewChatCwdByHost, setDefaultNewChatCwdByHost,
+            customPresets, setCustomPresets,
+            defaultShell, setDefaultShell,
+            defaultShellByHost, setDefaultShellByHost,
+          }}
+          snippets={{ snippets, setSnippets }}
+          alerts={{
+            attentionDesktopAlerts, setAttentionDesktopAlerts,
+            alertCritical, setAlertCritical,
+            alertWarning, setAlertWarning,
+            alertDirective, setAlertDirective,
+            alertError, setAlertError,
+            attentionStates, setAttentionStates,
+          }}
           hostLabels={hostLabels}
           setHostLabels={setHostLabels}
           resetUiPrefsToDefaults={resetUiPrefsToDefaults}
