@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useLayoutEffect } from 'react';
+import { useState, useEffect, useRef, useLayoutEffect, useMemo, useCallback } from 'react';
 import { hostLabelFor } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
 import {
@@ -11,13 +11,15 @@ import {
 } from '@/components/ui/dialog';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
-import { EyeIcon, AlertCircleIcon, Loader2Icon } from 'lucide-react';
+import { EyeIcon, AlertCircleIcon, Loader2Icon, SearchIcon, ChevronUpIcon, ChevronDownIcon, XIcon } from 'lucide-react';
 import { ObserverMarkdown } from './ObserverMarkdown';
 import { cn } from '@/lib/utils';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTokens } from '@/lib/formatTokens';
+import { findTranscriptMatches, stepMatchIndex, activeMatchMessageIndex } from '@/lib/transcriptSearch';
 
 // A single transcript message from GET /api/claude-session (one JSONL line mapped
 // through the server's extractTranscriptMessage: role + human text + timestamp).
@@ -61,6 +63,31 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [earlierError, setEarlierError] = useState('');
 
+  // In-view find-with-prev/next (WARDEN-513). Mirrors PaneTile's ⌕ search affordance
+  // but over the LOADED messages (client-side): a query → match indices → ↑/↓ cycles
+  // the active match, scrolling it into view + ringing its bubble. Composes with
+  // WARDEN-510 pagination: `matches` recomputes over `messages`, so loading earlier
+  // pages widens the search automatically. Substring-highlight inside ObserverMarkdown
+  // is intentionally out of scope — highlighting the whole matching bubble conveys the
+  // same "this is the one" signal the live-pane search does.
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchInput, setSearchInput] = useState('');        // raw input (immediate)
+  const [debouncedQuery, setDebouncedQuery] = useState('');  // trimmed, drives matching
+  const [currentMatch, setCurrentMatch] = useState(0);        // index into `matches`
+  // Maps a message's array index → its outer bubble DOM node, so ↑/↓ can scroll the
+  // active match into view. Keyed by index (same key the list uses); rebuilt each render
+  // via callback refs, so it stays in lockstep with the current `messages` array even
+  // after a WARDEN-510 prepend shifts every index.
+  const bubbleRefs = useRef(new Map<number, HTMLDivElement>());
+  // Stable so it can run inside the open/session reset effect without re-triggering it.
+  const clearSearchState = useCallback(() => {
+    setShowSearch(false);
+    setSearchInput('');
+    setDebouncedQuery('');
+    setCurrentMatch(0);
+    bubbleRefs.current.clear();
+  }, []);
+
   // The scrollable element is the Radix ScrollArea viewport (data-slot). We reach it
   // from the content wrapper via closest() so prepending older messages can preserve
   // the user's reading position instead of jumping to the top.
@@ -86,6 +113,7 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
       setPrevCursor(null);
       setLoadingEarlier(false);
       setEarlierError('');
+      clearSearchState();
       activeSessionIdRef.current = null;
       return;
     }
@@ -101,6 +129,7 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
     setPrevCursor(null);
     setLoadingEarlier(false);
     setEarlierError('');
+    clearSearchState();
 
     (async () => {
       try {
@@ -131,7 +160,7 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
     })();
 
     return () => { cancelled = true; };
-  }, [open, session]);
+  }, [open, session, clearSearchState]);
 
   // Fetch the next-older bounded window and PREPEND it. Each window stays within the
   // server's caps; remote paging is one SSH call per page. The control is hidden once
@@ -180,6 +209,87 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
     vp.scrollTop = prevTopRef.current + Math.max(0, added);
   }, [messages]);
 
+  // In-view find (WARDEN-513): debounce the raw input so each keystroke doesn't
+  // recompute matches over the (up to 500+) message array. The trimmed value drives
+  // matching; clearing the input clears matches one debounce later.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(searchInput.trim()), 150);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
+  // Case-insensitive match indices over the currently-loaded messages. Recomputes on
+  // `messages` too, so a WARDEN-510 prepend of older pages widens the search set
+  // automatically — no extra wiring when "load earlier" surfaces new hits.
+  const matches = useMemo<number[]>(
+    () => findTranscriptMatches(messages, debouncedQuery),
+    [messages, debouncedQuery],
+  );
+
+  // Restart at the first match whenever the result set changes (new query, or older
+  // messages were prepended). Keeps `currentMatch` valid as `matches` grows/shrinks.
+  useEffect(() => {
+    setCurrentMatch(0);
+  }, [matches]);
+
+  // The message index of the active match — what gets ringed + scrolled into view.
+  // Clamped inside the helper so a transiently-out-of-range currentMatch can never
+  // index past the end; -1 when there are no matches (no ring rendered).
+  const activeMatchIdx = activeMatchMessageIndex(matches, currentMatch);
+
+  // Reveal the active match: center it in the scroll viewport. Fires on navigate
+  // (currentMatch) and on result-set change (matches), so the first hit is revealed as
+  // soon as a query resolves and ↑/↓ keeps the active one centered. It only runs while
+  // a query is active (matches non-empty), so it never interferes with WARDEN-510's
+  // scroll-position preservation during plain pagination.
+  useEffect(() => {
+    if (matches.length === 0) return;
+    const el = bubbleRefs.current.get(activeMatchIdx);
+    if (el) el.scrollIntoView({ block: 'center' });
+  }, [activeMatchIdx, matches]);
+
+  // ↑/↓ with wrap-around, mirroring xterm's findNext/findPrevious (the live-pane
+  // search wraps, so this surface does too — identical feel).
+  const stepMatch = useCallback((dir: 1 | -1) => {
+    setCurrentMatch((cur) => stepMatchIndex(cur, dir, matches.length));
+  }, [matches.length]);
+
+  // Toggle the search panel. Closing also clears the query so highlights drop
+  // immediately rather than lingering for one debounce tick.
+  const toggleSearch = useCallback(() => {
+    setShowSearch((s) => {
+      if (s) {
+        setSearchInput('');
+        setDebouncedQuery('');
+        setCurrentMatch(0);
+      }
+      return !s;
+    });
+  }, []);
+
+  // Escape closes ONLY the search bar, not the whole dialog — mirrors PaneTile
+  // (WARDEN-513 criterion #5). Radix's DismissableLayer handles Escape on
+  // `document` in the CAPTURE phase, so a preventDefault() inside its own
+  // onEscapeKeyDown prop would need to run there — but in this stacked setup
+  // (the viewer sits over OpenChatBrowserPage, which has its own window-bubble
+  // Escape listener gated on !defaultPrevented) that prop proved inert at
+  // runtime and Escape dismissed the viewer regardless. A WINDOW-level capture
+  // listener runs before document capture: stopPropagation() halts before Radix's
+  // dismissal ever fires, then toggleSearch() closes just the bar (mirrors ×).
+  // Re-registering on `showSearch` is what makes the second Escape fall through —
+  // when the bar is already closed the listener early-returns and Radix dismisses
+  // the dialog normally, giving the two-Escape feel (close search, then dialog)
+  // identical to PaneTile.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || !showSearch) return;
+      e.preventDefault();
+      e.stopPropagation();
+      toggleSearch();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [showSearch, toggleSearch]);
+
   // WARDEN-490: a labeled host shows its friendly name; an unlabeled host keeps
   // the exact prior string ('this machine' for this host) — byte-identical to
   // today when there is no label.
@@ -206,12 +316,97 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <EyeIcon className="size-4 shrink-0" />
-            <span className="truncate">{session?.label || 'Session transcript'}</span>
+            <span className="min-w-0 truncate">{session?.label || 'Session transcript'}</span>
+            {/* In-view find (WARDEN-513): mirrors PaneTile's ⌕ affordance. Disabled
+                unless messages are loaded; aria-expanded picks up the ghost variant's
+                built-in active (muted) styling, same as the live-pane toggle. */}
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              className="ml-auto shrink-0"
+              aria-label="Find in transcript"
+              aria-expanded={showSearch}
+              title="Find in transcript"
+              disabled={status !== 'ready'}
+              onClick={toggleSearch}
+            >
+              <SearchIcon />
+            </Button>
           </DialogTitle>
           <DialogDescription className="truncate">
             Read-only transcript — no process is started · {hostLabel}{cwd ? ` · ${cwd}` : ''}
           </DialogDescription>
         </DialogHeader>
+
+        {/* Search bar (WARDEN-513): query input + match count + ↑/↓ + ×. Enter→next,
+            Shift+Enter→prev, Escape→close — identical keyboard to PaneTile's search. */}
+        {showSearch && (
+          <div className="flex flex-wrap items-center gap-1.5 rounded-md border bg-muted/40 px-2 py-1.5">
+            {/* shadcn <Input> — never a raw form element (WARDEN-68); <Input> already
+                ships focus-visible:ring-3 / min-w-0 / bg + dark variants, so the raw
+                className reinvents nothing here. autoFocus/onKeyDown/value/onChange
+                pass straight through {...props}. */}
+            <Input
+              autoFocus
+              aria-label="Find in transcript"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  stepMatch(e.shiftKey ? -1 : 1);
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  toggleSearch();
+                }
+              }}
+              placeholder="find in transcript…"
+              className="h-7 flex-1 text-xs"
+            />
+            <span
+              aria-live="polite"
+              className="shrink-0 text-xs tabular-nums text-muted-foreground"
+            >
+              {debouncedQuery
+                ? matches.length > 0
+                  ? `${Math.min(currentMatch, matches.length - 1) + 1}/${matches.length}`
+                  : 'no matches'
+                : ''}
+            </span>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              className="shrink-0"
+              aria-label="Previous match"
+              title="Previous match (Shift+Enter)"
+              disabled={matches.length === 0}
+              onClick={() => stepMatch(-1)}
+            >
+              <ChevronUpIcon />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              className="shrink-0"
+              aria-label="Next match"
+              title="Next match (Enter)"
+              disabled={matches.length === 0}
+              onClick={() => stepMatch(1)}
+            >
+              <ChevronDownIcon />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              className="shrink-0"
+              aria-label="Close search"
+              title="Close search (Escape)"
+              onClick={toggleSearch}
+            >
+              <XIcon />
+            </Button>
+          </div>
+        )}
 
         <ScrollArea className="h-[60vh] w-full rounded-md border bg-muted/30">
           <div ref={scrollRef} className="flex flex-col gap-3 p-4">
@@ -241,6 +436,18 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
 
             {status === 'ready' && (
               <>
+                {/* No silent miss at the pagination boundary (WARDEN-513): when a query
+                    finds nothing in the loaded window but older messages remain unloaded
+                    (hasMore), say so and point at "load earlier" — instead of a bare
+                    "no results" that hides that more messages are searchable. Gated on
+                    hasMore (not truncated): once every page is loaded, hasMore is false
+                    and a miss is a genuine whole-transcript miss (mirrors WARDEN-510's
+                    token-badge qualifier gating). */}
+                {debouncedQuery && matches.length === 0 && hasMore && (
+                  <div className="rounded-md border border-blue-500/30 bg-blue-500/10 px-3 py-1.5 text-xs text-blue-300">
+                    No matches in loaded messages — load earlier to search more.
+                  </div>
+                )}
                 {/* Load earlier messages (WARDEN-510): pages BACKWARDS through the
                     transcript one bounded byte-window at a time, prepending older
                     messages. Shown only while hasMore is true (disappears at the true
@@ -287,7 +494,16 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
                   </div>
                 )}
                 {messages.map((m, i) => (
-                  <MessageBubble key={i} message={m} timestampFormat={timestampFormat} />
+                  <MessageBubble
+                    key={i}
+                    message={m}
+                    timestampFormat={timestampFormat}
+                    isActive={i === activeMatchIdx}
+                    bubbleRef={(el) => {
+                      if (el) bubbleRefs.current.set(i, el);
+                      else bubbleRefs.current.delete(i);
+                    }}
+                  />
                 ))}
               </>
             )}
@@ -302,15 +518,28 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
   );
 }
 
-function MessageBubble({ message, timestampFormat }: { message: TranscriptMessage; timestampFormat: TimestampFormat }) {
+function MessageBubble({
+  message,
+  timestampFormat,
+  isActive,
+  bubbleRef,
+}: {
+  message: TranscriptMessage;
+  timestampFormat: TimestampFormat;
+  // WARDEN-513: ring the active search match + register its node so ↑/↓ can scroll
+  // it into view. Both optional so non-search callers render unchanged.
+  isActive?: boolean;
+  bubbleRef?: (el: HTMLDivElement | null) => void;
+}) {
   const isUser = message.role === 'user';
   const usage = message.usage;
   const usageLabel = usage ? formatTokens(usage.total) : '';
   return (
-    <div className={cn('flex', isUser ? 'justify-end' : 'justify-start')}>
+    <div ref={bubbleRef} className={cn('flex', isUser ? 'justify-end' : 'justify-start')}>
       <div className={cn(
         'max-w-[85%] rounded-lg border px-3 py-2',
         isUser ? 'border-primary/30 bg-primary/10' : 'border-border bg-background',
+        isActive && 'ring-2 ring-blue-500/70 ring-offset-1 ring-offset-background',
       )}>
         <div className="mb-1 flex items-center gap-2">
           <span className="text-xs font-medium text-muted-foreground">{isUser ? 'You' : 'Assistant'}</span>
