@@ -13,6 +13,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { shellQuote } from './ssh.js';
+import { unescapeGitPath } from './gitStatus.js';
 
 // ===== In-progress operation detection (status) =============================
 
@@ -112,6 +113,21 @@ function toEpoch(raw) {
 // `GitChangedFile` row renders touched files unchanged. For rename/copy we report the
 // NEW path (it exists at that commit, so a per-file `git show` on it works) and a
 // single-letter status. Exported for unit tests. See WARDEN-180.
+//
+// Paths are C-unquoted via `unescapeGitPath` (the helper WARDEN-650 added to
+// gitStatus.js for the porcelain / --name-only parsers): `git show --name-status` /
+// `git stash show --name-status` C-quote any path containing a double-quote,
+// backslash, control char, or — with the default core.quotePath=true — any non-ASCII
+// byte (e.g. `M\t"caf\303\251.js"` for café.js). The two callers (server.js' commit
+// `/api/git-show` and stash `/api/git-stash-show` files lists) feed `.path` back into
+// git as the per-file `git show <hash> -- <path>` / `git diff <ref>^ <ref> -- <path>`
+// pathspec, so without unquoting a non-ASCII / special-char row renders literal
+// quotes+escapes AND its per-file diff 404s (the mangled path is not on the
+// filesystem). `unescapeGitPath` is a no-op when the path doesn't start with `"`, so
+// plain-ASCII paths (and today's passing space test) are zero behavior change. Both
+// branches unescape the already-extracted NEW path: git quotes each name
+// independently (`R100\t"old n.js"\t"new n.js"`), so unquoting the whole `rest` would
+// wrongly merge the two — same property WARDEN-650 relied on for porcelain renames.
 export function parseGitShowNameStatus(output) {
   const raw = (output ?? '').toString();
   const out = [];
@@ -123,9 +139,11 @@ export function parseGitShowNameStatus(output) {
     const rest = line.slice(tab + 1);
     const letter = code[0]; // A / M / D / T / R / C
     // Rename (R<score>) / copy (C<score>): "R100\told\tnew" → take the new path.
-    // Otherwise: "M\tpath".
-    const path = (letter === 'R' || letter === 'C') ? rest.slice(rest.indexOf('\t') + 1) : rest;
-    if (path) out.push({ status: letter || code, path });
+    // Otherwise: "M\tpath". Unescape the resulting path (C-quoted by git for any
+    // special / non-ASCII byte) so it is the real filesystem path — see note above.
+    const rawPath = (letter === 'R' || letter === 'C') ? rest.slice(rest.indexOf('\t') + 1) : rest;
+    const filePath = unescapeGitPath(rawPath);
+    if (filePath) out.push({ status: letter || code, path: filePath });
   }
   return out;
 }
