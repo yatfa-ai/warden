@@ -333,7 +333,14 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
     };
     ws.onerror = (e) => {
       if (!mountedRef.current) return;
-      setConnectionError('WebSocket connection error. Will attempt to reconnect...');
+      // WARDEN-653 — gate on the same guard as the 15s timeout so a single
+      // failed connection reports one error. If onerror fires first (e.g.
+      // ECONNREFUSED), set the guard so the pending timeout is suppressed and
+      // doesn't flip the message or pop a spurious late "timeout" toast.
+      if (!connectionTimeoutShownRef.current) {
+        connectionTimeoutShownRef.current = true;
+        setConnectionError('WebSocket connection error. Will attempt to reconnect...');
+      }
       console.error('WebSocket error:', e);
     };
     ws.onmessage = (e) => {
