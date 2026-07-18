@@ -288,7 +288,21 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[80vh]">
+      <DialogContent
+        className="max-w-4xl max-h-[80vh]"
+        onEscapeKeyDown={(e) => {
+          // When the find bar is open, Escape must close ONLY the search bar, not
+          // the whole dialog — mirrors PaneTile (WARDEN-513 criterion #5). Radix's
+          // DismissableLayer handles Escape on `document` in the CAPTURE phase,
+          // before the Input's bubble-phase onKeyDown runs, so a preventDefault()
+          // down in the Input arrives too late and the dialog dismisses anyway.
+          // preventDefault HERE (still in Radix's capture handler, before its own
+          // `if (!event.defaultPrevented) onDismiss()` check) suppresses that, then
+          // the Input's handler below closes just the search bar. When the bar is
+          // already closed we fall through, so Escape still dismisses the dialog.
+          if (showSearch) e.preventDefault();
+        }}
+      >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <EyeIcon className="size-4 shrink-0" />
