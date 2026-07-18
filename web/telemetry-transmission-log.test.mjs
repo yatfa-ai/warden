@@ -25,6 +25,7 @@ const {
   createTransmissionLog,
   hostOf,
   noopTransmissionLog,
+  readSnapshot,
   DEFAULT_CAP,
 } = require('../electron/telemetry-transmission-log.cjs');
 
@@ -232,6 +233,56 @@ test('noopTransmissionLog records nothing and reads as empty', () => {
 
 test('noopTransmissionLog is frozen — the default singleton cannot be re-shaped', () => {
   assert.ok(Object.isFrozen(noopTransmissionLog), 'the shared no-op default is frozen');
+});
+
+// ==========================================================================
+// readSnapshot — the IPC surfacing seam (WARDEN-668). The main-process handler
+// `telemetry:transmission-log` is a thin delegate to this pure function. main.cjs
+// cannot be require()'d in a test (it imports 'electron'), so the handler's
+// defensive contract — return entries() on success, [] on ANY failure — is pinned
+// here against the REAL function (not a re-implementation).
+// ==========================================================================
+
+test('readSnapshot returns the log entries() snapshot (the live ring is not handed out)', () => {
+  const clock = sequencedClock(100, 10);
+  const log = createTransmissionLog({ clock });
+  log.record({ outcome: 'ok', attempts: 1, status: 200, endpointHost: 'host.example' });
+  log.record({ outcome: 'dropped', attempts: 3, status: 503 });
+  const snap = readSnapshot(log);
+  assert.equal(snap.length, 2, 'both recorded entries surface');
+  assert.deepEqual(
+    snap.map((e) => e.outcome),
+    ['ok', 'dropped'],
+    'the snapshot is the same oldest→newest view as entries()',
+  );
+  // Mutating the snapshot the IPC handler returned must not touch the live ring —
+  // a renderer must never mutate pipeline state through the verifiability panel.
+  snap.length = 0;
+  assert.equal(log.size(), 2, 'clearing the returned snapshot did not clear the ring');
+});
+
+test('readSnapshot of an empty ring returns [] (honest "no sends" — the panel empty state)', () => {
+  const log = createTransmissionLog({ clock: () => 1 });
+  assert.deepEqual(readSnapshot(log), [], 'a fresh ring surfaces as empty, not undefined/null');
+});
+
+test('readSnapshot degrades to [] when entries() throws (a pipeline failure never crashes the host)', () => {
+  // A log whose entries() blows up (e.g. a corrupted internal state) must surface
+  // as "no sends" rather than propagate the throw across the IPC boundary.
+  const broken = { entries() { throw new Error('corrupted ring'); }, size() { return 0; } };
+  assert.doesNotThrow(() => {
+    const out = readSnapshot(broken);
+    assert.deepEqual(out, [], 'the throw was swallowed and [] returned');
+  });
+});
+
+test('readSnapshot degrades to [] for a non-log argument (null / undefined / wrong shape)', () => {
+  // A partially-wired pipeline (no log injected yet, or a malformed collaborator)
+  // must not crash the IPC handler — it surfaces as "no sends".
+  for (const bad of [null, undefined, {}, { entries: 'not a function' }, 42, 'string']) {
+    assert.deepEqual(readSnapshot(bad), [], `${JSON.stringify(bad)} → [] (no throw)`);
+  }
+  assert.doesNotThrow(() => readSnapshot(undefined));
 });
 
 console.log(`\n✓ TELEMETRY TRANSMISSION-LOG TESTS PASS (${passed})`);

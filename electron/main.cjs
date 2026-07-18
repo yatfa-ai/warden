@@ -35,7 +35,7 @@ const { createTelemetrySource, SCHEMA_VERSION, validateBaseEvent } = require('./
 const { createTelemetryPipeline } = require('./telemetry-pipeline.cjs');
 const { redact: redactTelemetry } = require('./telemetry-redact.cjs');
 const { resolveTelemetryTier, readTelemetryPrefs } = require('./telemetry-config.cjs');
-const { createTransmissionLog } = require('./telemetry-transmission-log.cjs');
+const { createTransmissionLog, readSnapshot } = require('./telemetry-transmission-log.cjs');
 
 const PORT = parseInt(process.env.WARDEN_PORT || '7421', 10);
 const HOST = '127.0.0.1';
@@ -549,6 +549,20 @@ ipcMain.handle('telemetry:clear-runtime-drift', () => {
     return { drifted: false };
   }
 });
+
+// WARDEN-668 — PULL the local transmission log of ACTUAL send outcomes —
+// verifiability's THIRD leg (the promise + preview legs ship in the renderer's
+// TelemetryTransparency panel; this is what really landed on the wire). The ring
+// is the same in-memory, session-scoped, bounded (cap 200) log the pipeline feeds
+// on every real send (WARDEN-583). Read-only: readSnapshot returns entries() — a
+// SNAPSHOT copy — so the renderer can never mutate pipeline state through it.
+// Defensive: any failure degrades to [] (readSnapshot also guards a non-log),
+// so the verifiability panel shows an honest "no sends" rather than crashing.
+// Metadata only (entry shape: timestamp, endpointHost, schemaVersion, eventCount,
+// outcome, attempts, status — host-only, never the full URL or payload). No new
+// consent flag, no new data leaving the machine — this only makes already-
+// recorded, user-owned data visible to the user who owns it.
+ipcMain.handle('telemetry:transmission-log', () => readSnapshot(telemetryTransmissionLog));
 
 // WARDEN-538 — RECEIVE the focused chat/session name context from the renderer.
 // The renderer pushes { chatName?, sessionName? } on focus / active-pane change;

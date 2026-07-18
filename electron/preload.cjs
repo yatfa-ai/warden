@@ -45,6 +45,13 @@ contextBridge.exposeInMainWorld('wardenWindow', {
 // the Electron app, and the web layer no-ops cleanly when it is missing.
 contextBridge.exposeInMainWorld('wardenTelemetry', {
   getRuntimeStatus: () => ipcRenderer.invoke('telemetry:get-runtime-status'),
+  // WARDEN-668 — pull the local transmission log of ACTUAL send outcomes (the
+  // verifiability third leg). Returns a snapshot array of metadata-only entries
+  // the pipeline already records on every real send; the renderer's Settings
+  // verifiability panel calls this on mount + a refresh interval. Read-only: the
+  // main handler returns a copy (entries()), so this never exposes the live ring.
+  // Degrades to [] on the main side (readSnapshot) when the pipeline throws.
+  getTransmissionLog: () => ipcRenderer.invoke('telemetry:transmission-log'),
   // WARDEN-631 — clear the drift breaker when a Test-connection probe confirms the
   // receiver is schema-matched again (the in-session recovery path for a receiver
   // fixed at the same url). No-op when drift is not armed.

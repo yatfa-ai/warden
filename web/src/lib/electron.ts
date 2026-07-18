@@ -150,12 +150,31 @@ export interface TelemetryRuntimeStatus {
   drifted: boolean;
 }
 
+// WARDEN-668 — one metadata-only entry in the local transmission log of ACTUAL
+// send outcomes (verifiability's third leg). Mirrors the FIXED shape the CJS
+// module stores (electron/telemetry-transmission-log.cjs): exactly these seven
+// fields, nothing else. `endpointHost` is hostname[:port] ONLY (never the full
+// URL with path/query); `status`/`outcome`/`endpointHost`/`schemaVersion` are
+// nullable for a malformed/unreachable send. No payload content, no identifiers.
+export interface TransmissionLogEntry {
+  timestamp: number;
+  endpointHost: string | null;
+  schemaVersion: number | null;
+  eventCount: number;
+  outcome: 'ok' | 'dropped' | null;
+  attempts: number;
+  status: number | null;
+}
+
 interface WardenTelemetryBridge {
   getRuntimeStatus: () => Promise<TelemetryRuntimeStatus>;
   clearRuntimeDrift: () => Promise<TelemetryRuntimeStatus>;
   // WARDEN-538 — push the focused chat/session name to main so extended-tier
   // events can attach it. Fire-and-forget context; resolves once main has stored it.
   setContext: (ctx: TelemetryContext) => Promise<void>;
+  // WARDEN-668 — pull the bounded, session-scoped log of actual send outcomes.
+  // Resolves to a snapshot array (metadata only); degrades to [] on the main side.
+  getTransmissionLog: () => Promise<TransmissionLogEntry[]>;
   onRuntimeStatus: (cb: (status: TelemetryRuntimeStatus) => void) => () => void;
   // WARDEN-637 — forward a serialized renderer JS error { name, message, stack }
   // to main's consent-gated source. Fire-and-forget (send); resolves to void.
@@ -231,6 +250,32 @@ export async function clearTelemetryRuntimeDrift(): Promise<TelemetryRuntimeStat
   } catch (e) {
     console.warn('[warden:electron] clearTelemetryRuntimeDrift failed', e);
     return { drifted: false };
+  }
+}
+
+// WARDEN-668 — pull the bounded, session-scoped log of ACTUAL send outcomes (the
+// verifiability third leg: promise → preview → ACTUAL). The ring lives in MAIN
+// (the pipeline records one metadata-only entry per real send); this is the
+// renderer's read-only window onto it, called when the Settings verifiability
+// panel mounts (and on a refresh interval while open). Resolves to [] when the
+// bridge is absent (browser/dev/smoke — a non-Electron host has no main-process
+// ring) — the panel then renders its honest "no sends this session yet" state
+// rather than crashing, identical to an empty ring. Never rejects: a throwing
+// bridge (or a non-array result) also degrades to [] so the panel always renders.
+export async function getTelemetryTransmissionLog(): Promise<TransmissionLogEntry[]> {
+  const b = telemetryBridge();
+  // An absent bridge (browser/dev/smoke) OR an older preload that predates
+  // WARDEN-668 (no getTransmissionLog method) both degrade SILENTLY to [] — the
+  // panel's refresh interval re-pulls every few seconds, so a console.warn here
+  // would spam on an older bridge that simply lacks the method. Only a present
+  // method that genuinely THROWS warns (a real main-side failure worth surfacing).
+  if (!b || typeof b.getTransmissionLog !== 'function') return [];
+  try {
+    const entries = await b.getTransmissionLog();
+    return Array.isArray(entries) ? (entries as TransmissionLogEntry[]) : [];
+  } catch (e) {
+    console.warn('[warden:electron] getTelemetryTransmissionLog failed', e);
+    return [];
   }
 }
 
