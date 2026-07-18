@@ -51,6 +51,14 @@
  * additive `renamedFrom` (absent on ordinary M/A/D/??/conflict rows). The split is on
  * the LAST ` -> ` so a source path that itself contains the arrow literal is preserved.
  *
+ * Paths are C-unquoted via `unescapeGitPath`: git wraps any path containing a space,
+ * double-quote, backslash, control char, or non-ASCII byte in double quotes with
+ * backslash/octal escapes. Unquoting makes `.path`/`renamedFrom` real filesystem
+ * paths (file-open resolves, sidebar renders cleanly) AND makes the join against
+ * `parseOutgoingFiles` symmetric — porcelain quotes a space while `--name-only` does
+ * NOT, so without unquoting the two never string-equal and cross-agent collision
+ * detection silently misses the most common colliding shape (WARDEN-601/650).
+ *
  * @param {string|Buffer|undefined} output - Raw stdout from `git status --porcelain`.
  * @returns {Array<{path: string, status: string, staged: string, worktree: string, conflict: boolean, renamedFrom?: string}>} Changed files, or `[]` when clean.
  */
@@ -195,6 +203,110 @@ export function parseHeadDate(output, exitCode) {
   return iso || null;
 }
 
+/**
+ * Unescape a git C-quoted path (git's `quote_c_style`) into the real filesystem
+ * path it represents.
+ *
+ * `git status --porcelain` and `git diff --name-only` C-quote a path iff it
+ * contains a byte that needs quoting — a SPACE, double-quote, backslash, control
+ * char, or, with the default `core.quotePath=true`, any non-ASCII byte. The
+ * quoted form wraps the path in double quotes and escapes the special bytes:
+ *
+ *   "file with space.js"        ← a plain space → quoted (the common case)
+ *   "caf\303\251.js"            ← non-ASCII → octal-escaped UTF-8 bytes + quoted
+ *   "back\\slash.js"            ← backslash-escaped + quoted
+ *   "quote\"in.js"              ← embedded literal-quote-escaped + quoted
+ *
+ * Without unquoting, the literal quotes and escapes land verbatim in `.path`,
+ * which breaks three things:
+ *   1. Cross-agent collision detection (WARDEN-601) — `status --porcelain`
+ *      QUOTES a space while `diff --name-only` does NOT, so the porcelain WIP
+ *      `"file with space.js"` never string-equals the outgoing `file with space.js`
+ *      and the impending-conflict ⚠ badge is silently dead on the single most
+ *      common colliding path shape (a multi-word filename).
+ *   2. File-open — the real file is `file with space.js`, not `"file with space.js"`,
+ *      so the changed-file row 404s.
+ *   3. The sidebar list / diffstat chip rendering the literal quote characters.
+ *
+ * Spec: https://git-scm.com/docs/git-config#Documentation/git-config.txt-corequotePath
+ *
+ * A path that does NOT start with `"` is already literal (the common plain-ASCII
+ * case) and is returned UNCHANGED — a zero-behavior-change no-op for today's
+ * passing tests and real-world plain paths. Otherwise the outer quotes are
+ * stripped and the interior escapes resolved: `\\`, `\"`, the control-letter
+ * escapes (`\t`/`\n`/`\r`/`\a`/`\b`/`\v`/`\f`), and `\ooo` octal. Octal escapes
+ * are collected as raw bytes and the whole buffer decoded as UTF-8 at the end so
+ * a multi-byte sequence git emitted as adjacent octals (e.g. `é` = `\303\251` =
+ * 0xC3 0xA9) reassembles into the original character. Pure (no git, no fs) so the
+ * C-quoting round-trip is unit-testable in isolation. See WARDEN-650.
+ *
+ * @param {string|Buffer|undefined} rawPath - The raw (possibly C-quoted) path.
+ * @returns {string} the unquoted filesystem path (unchanged when not quoted).
+ */
+export function unescapeGitPath(rawPath) {
+  const str = (rawPath ?? '').toString();
+  // Not quoted → already a literal filesystem path (the common ASCII case).
+  // Return unchanged so plain paths are a zero-behavior-change no-op.
+  if (str.length === 0 || str[0] !== '"') return str;
+  // Strip the wrapping double quotes — the opening `"` is at [0]; the closing
+  // one is the LAST char (git's own quotes inside the path are escaped as \",
+  // so the final unescaped " is unambiguously the delimiter). A path that opens
+  // with " but does not close with one is malformed (git never emits this) —
+  // unescape whatever interior remains rather than throwing.
+  const interior = str[str.length - 1] === '"' ? str.slice(1, -1) : str.slice(1);
+  // Walk the interior resolving each escape into its raw byte. Literal chars
+  // contribute their own UTF-8 bytes; collecting EVERYTHING into one byte array
+  // (then decoding once) is what lets adjacent \ooo octals for a multi-byte UTF-8
+  // sequence reassemble into the original character — a char-by-char string build
+  // would split the sequence and corrupt it.
+  const bytes = [];
+  for (let i = 0; i < interior.length; i++) {
+    const ch = interior[i];
+    if (ch !== '\\') {
+      for (const b of Buffer.from(ch, 'utf8')) bytes.push(b);
+      continue;
+    }
+    const esc = interior[++i];
+    switch (esc) {
+      case 'a': bytes.push(0x07); break;            // bell
+      case 'b': bytes.push(0x08); break;            // backspace
+      case 't': bytes.push(0x09); break;            // horizontal tab
+      case 'n': bytes.push(0x0a); break;            // newline
+      case 'v': bytes.push(0x0b); break;            // vertical tab
+      case 'f': bytes.push(0x0c); break;            // form feed
+      case 'r': bytes.push(0x0d); break;            // carriage return
+      case '"': bytes.push(0x22); break;            // literal double quote
+      case '\\': bytes.push(0x5c); break;           // literal backslash
+      default:
+        if (esc >= '0' && esc <= '7') {
+          // Octal \ooo — git emits exactly 3 digits for a byte needing it, but
+          // tolerate 1-3 (the first digit was consumed as `esc`). 0xff mask is a
+          // guard against an over-long run somehow exceeding one byte.
+          let octal = esc;
+          while (
+            octal.length < 3 &&
+            i + 1 < interior.length &&
+            interior[i + 1] >= '0' &&
+            interior[i + 1] <= '7'
+          ) {
+            octal += interior[++i];
+          }
+          bytes.push(parseInt(octal, 8) & 0xff);
+        } else {
+          // Unknown escape (git never emits these — e.g. \xNN, which it would
+          // instead emit as octal). Fall back to the literal escaped char so a
+          // byte is never silently dropped. `esc` is undefined when a stray
+          // trailing backslash ends the interior (malformed) → push nothing.
+          if (esc !== undefined) {
+            for (const b of Buffer.from(esc, 'utf8')) bytes.push(b);
+          }
+        }
+        break;
+    }
+  }
+  return Buffer.from(bytes).toString('utf8');
+}
+
 export function parseGitStatusPorcelain(output) {
   const raw = (output ?? '').toString();
   return raw
@@ -227,6 +339,21 @@ export function parseGitStatusPorcelain(output) {
           filePath = rawPath.slice(arrow + ' -> '.length).trim();
         }
       }
+      // Git C-quotes any path containing a space, double-quote, backslash, control
+      // char, or non-ASCII byte (core.quotePath=true by default), wrapping it in
+      // double quotes with backslash/octal escapes. Without unquoting the literal
+      // quotes/escapes land in `.path`, which (1) silently kills the cross-agent
+      // collision detector on space/special paths — `status --porcelain` quotes a
+      // space while `diff --name-only` does NOT, so the two sides never
+      // string-equal (WARDEN-601); (2) 404s file-open (the real file is `a b.js`,
+      // not `"a b.js"`); and (3) renders the literal quotes in the sidebar list.
+      // Unescape AFTER the rename ` -> ` split: the arrow is literal and lives
+      // OUTSIDE the C-strings, and git quotes each rename name INDEPENDENTLY
+      // (`R  "old name.js" -> "new name.js"`), so unescaping each name separately
+      // is what keeps a path legitimately containing ` -> ` inside its quotes from
+      // being mangled (WARDEN-650).
+      filePath = unescapeGitPath(filePath);
+      if (renamedFrom !== undefined) renamedFrom = unescapeGitPath(renamedFrom);
       // Preserve the porcelain X/Y position so a STAGED-for-commit file is no longer
       // indistinguishable from an unstaged WIP file (WARDEN-369). `status` is the
       // collapsed/trimmed code existing consumers already read (kept verbatim for
@@ -306,6 +433,12 @@ export function parseOutgoingFiles(output) {
     .split('\n')
     .map((line) => line.replace(/\r$/, '')) // tolerate CRLF (e.g. over SSH)
     .map((line) => line.trim())
+    // `git diff --name-only` does NOT quote a plain space, but it DOES C-quote a
+    // backslash, double-quote, or non-ASCII byte in a path — the SAME quoting as
+    // porcelain, just rarer here. Unescape so the outgoing path is a real
+    // filesystem path that string-equals the porcelain WIP path for the
+    // cross-agent collision detector's join (WARDEN-601/650).
+    .map((line) => unescapeGitPath(line))
     .filter((line) => line.length > 0);
 }
 
