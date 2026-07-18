@@ -140,6 +140,17 @@ export interface ProjectGitAgent {
   // axis surfaces it. Mirrors the per-row GitBranchBadge's 🗄N badge (GitBadges.tsx)
   // so the chip and the row agree by construction.
   stashed: boolean;
+  // WARDEN-689: the MAGNITUDE of this agent's parked WIP — `stashCount` (> 0 ⇔
+  // `stashed`), the count `git stash list` returns that /api/git-status already
+  // ships (WARDEN-211) and the summarizer already READS (the `stashCount` local
+  // below) but previously DISCARDED to the `stashed` boolean before it reached the
+  // popover. Mirrors how `ahead`/`behind` carry their counts alongside their > 0
+  // booleans (the ↑N/↓N popovers render `a.ahead`/`a.behind`), so the 🗄N popover
+  // can render ` · 🗄 N` per agent and rank heaviest-parker-first — an agent that
+  // parked 12 stashes reads distinctly from one that parked 1. 0 when `stashCount`
+  // is absent/null on the status (null ⇒ unknown ⇒ 0, never noise), the same
+  // null-is-quiet discipline ahead/behind/stashed follow.
+  stashCount: number;
   // WARDEN-669 + WARDEN-682: the age of this agent's HEAD commit — `now - headMs`
   // (ms) — the fleet-level TEMPORAL signal. WARDEN-669 ranks the ↑N unpushed popover
   // oldest-first off it (longest-sitting WIP on top = highest rot/collision risk);
@@ -338,7 +349,7 @@ export function summarizeProjectGitState(
     // The agent entry shared by the per-project list and the global union. One
     // entry per contributing agent, so a both-dirty-and-at-risk agent appears a
     // single time with all signals (never duplicated).
-    const agent: ProjectGitAgent = { key: c.key || c.id, dirty, ahead, behind: behindCount, atRisk, atRiskReason, stashed, headAgeMs, stalled, diffstat };
+    const agent: ProjectGitAgent = { key: c.key || c.id, dirty, ahead, behind: behindCount, atRisk, atRiskReason, stashed, stashCount, headAgeMs, stalled, diffstat };
 
     const entry = perProject[c.project] ?? { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [] };
     if (dirty) entry.dirty += 1;
@@ -414,6 +425,30 @@ export function sortGitAgentsByMagnitudeDesc(agents: ProjectGitAgent[]): Project
   const magnitude = (a: ProjectGitAgent): number =>
     (a.diffstat?.insertions ?? 0) + (a.diffstat?.deletions ?? 0);
   return [...agents].sort((a, b) => magnitude(b) - magnitude(a));
+}
+
+/**
+ * Rank agents heaviest-parker-first so the 🗄N stash popover surfaces the agent
+ * with the MOST parked WIP on top — a human clicking the fleet chip integrates the
+ * biggest stash first (highest drift/loss risk: a 12-stash agent holds far more
+ * parked, easily-forgotten work than a 1-stash one) (WARDEN-689). Largest
+ * `stashCount` first; `0` (a stash-free agent — which never appears in the stash
+ * popover's `.stashed`-filtered slice anyway) sorts last, stably, mirroring
+ * sortByHeadAgeDesc's null/zero-last convention.
+ *
+ * Pure + returns a NEW array (does NOT mutate its input) so it is unit-testable
+ * without a React runner, matching sortByHeadAgeDesc / sortGitAgentsByMagnitudeDesc
+ * / the module's diff.ts philosophy. Critically, the SUMMARIZER's own `agents`
+ * array is NOT reordered by this helper: that array MUST stay in `chats` iteration
+ * order (its deterministic-order invariant, asserted throughout the test suite and
+ * shared by the dirty/behind/atRisk/stalled popovers). The sort is a per-kind
+ * RENDER-TIME concern — the React layer (GitBadges.tsx's GIT_STATE_KIND.stash.sort)
+ * applies it ONLY to the stash popover's filtered slice, never inside
+ * summarizeProjectGitState. Array.prototype.sort is stable on Node ≥12 / V8, so
+ * equal-count (and all-0) ties preserve the pre-sort (chats) input order.
+ */
+export function sortByStashCountDesc(agents: ProjectGitAgent[]): ProjectGitAgent[] {
+  return [...agents].sort((a, b) => b.stashCount - a.stashCount);  // largest count first
 }
 
 // A changed-file path that ≥2 distinct active agents in the SAME project both
