@@ -23,6 +23,7 @@ const {
   SCHEMA_VERSION,
   BASE_EVENT_TYPES,
   RUNTIME,
+  MAIN_CRASH_REASON,
   UNCAUGHT_EVENT,
   REJECTION_EVENT,
   redactIdentifiers,
@@ -252,6 +253,101 @@ test('buildCrashEvent tolerates missing/odd details', () => {
   assert.equal(ev.reason, 'unknown');
   assert.equal(ev.exitCode, undefined);
   assert.ok(validateBaseEvent(ev));
+});
+
+// ==========================================================================
+// (WARDEN-687) Main-process hard kill → a MAIN-runtime crash event. The crash
+// sentinel (electron/crash-sentinel.cjs) detects a hard kill on the NEXT launch
+// and calls the source's consent-gated recordMainCrash(), which builds a crash
+// with runtime:'main' + the synthetic MAIN_CRASH_REASON. buildCrashEvent honors
+// an explicit runtime opt (default renderer, so onRenderGone is byte-identical).
+// ==========================================================================
+
+test('MAIN_CRASH_REASON is the synthetic non-identifying hard-kill reason', () => {
+  assert.equal(typeof MAIN_CRASH_REASON, 'string');
+  assert.equal(MAIN_CRASH_REASON, 'unexpected-termination');
+});
+
+test('buildCrashEvent runtime defaults to renderer (onRenderGone byte-identical); explicit MAIN opt-in', () => {
+  // default (no runtime) → renderer (a render-process-gone, unchanged behavior)
+  const render = buildCrashEvent({ reason: 'oom' }, { now: 5 });
+  assert.equal(render.runtime, 'renderer');
+  assert.ok(validateBaseEvent(render));
+  // explicit MAIN → a main-runtime crash (the sentinel's hard-kill event)
+  const main = buildCrashEvent({ reason: MAIN_CRASH_REASON }, { now: 5, runtime: RUNTIME.MAIN });
+  assert.equal(main.runtime, 'main');
+  assert.equal(main.reason, 'unexpected-termination');
+  assert.equal(main.schemaVersion, SCHEMA_VERSION);
+  assert.ok(validateBaseEvent(main), 'a main-runtime crash validates against the schema');
+  // any non-MAIN value still defaults to renderer (the safe, unchanged direction)
+  assert.equal(buildCrashEvent({ reason: 'oom' }, { now: 1, runtime: 'bogus' }).runtime, 'renderer');
+  assert.equal(buildCrashEvent({ reason: 'oom' }, { now: 1, runtime: RUNTIME.RENDERER }).runtime, 'renderer');
+});
+
+test('recordMainCrash: consent ON → exactly ONE main-runtime crash event that validates', () => {
+  const record = recorder();
+  const src = makeSource({ record });
+  src.setBaseConsent(true);
+  src.recordMainCrash();
+  assert.equal(record.calls.length, 1, 'exactly one event per call');
+  const ev = record.calls[0];
+  assert.equal(ev.type, 'crash');
+  assert.equal(ev.runtime, 'main');
+  assert.equal(ev.reason, MAIN_CRASH_REASON);
+  assert.equal(ev.schemaVersion, SCHEMA_VERSION);
+  assert.ok(validateBaseEvent(ev), 'the hard-kill crash validates against the schema');
+});
+
+test('recordMainCrash: consent OFF → nothing built or recorded (first off-gate)', () => {
+  const record = recorder();
+  const src = makeSource({ record });
+  // consent stays OFF (the default) — a detected prior crash is dropped before build.
+  src.recordMainCrash();
+  assert.equal(record.calls.length, 0);
+});
+
+test('recordMainCrash: a throwing record() sink is swallowed (telemetry must not crash main)', () => {
+  const src = makeSource({ record: () => { throw new Error('sink down'); } });
+  src.setBaseConsent(true);
+  assert.doesNotThrow(() => src.recordMainCrash());
+});
+
+test('recordMainCrash NEVER attaches chat/session names — even with extended consent on + context held', () => {
+  // The detected crash happened in a PRIOR session, so the current focused
+  // chat/session name would be a wrong-session correlation. Per the WARDEN-687
+  // trust model the event carries NO names — only the synthetic reason + the
+  // session-independent appVersion/platform labels.
+  const record = recorder();
+  const src = makeSource({ record, appVersion: '0.1.19', platform: 'darwin' });
+  src.setBaseConsent(true);
+  src.setExtendedConsent(true);
+  src.setContext({ chatName: 'would-be-wrong-session', sessionName: 'also-wrong' });
+  src.recordMainCrash();
+  assert.equal(record.calls.length, 1);
+  const ev = record.calls[0];
+  assert.equal('chatName' in ev, false, 'no chatName on a main crash');
+  assert.equal('sessionName' in ev, false, 'no sessionName on a main crash');
+  // session-independent labels ARE attached (release/OS attribution is fine).
+  assert.equal(ev.appVersion, '0.1.19');
+  assert.equal(ev.platform, 'darwin');
+  assert.ok(validateBaseEvent(ev));
+});
+
+test('recordMainCrash is idempotent-per-call: N prior crashes → N emits when called N times', () => {
+  // The sentinel calls recordMainCrash once per crashed marker; each call emits
+  // exactly one event (one-emit-per-crash is enforced by the caller's per-marker
+  // loop, not by de-duping inside the entry point).
+  const record = recorder();
+  const src = makeSource({ record });
+  src.setBaseConsent(true);
+  src.recordMainCrash();
+  src.recordMainCrash();
+  src.recordMainCrash();
+  assert.equal(record.calls.length, 3);
+  for (const ev of record.calls) {
+    assert.equal(ev.runtime, 'main');
+    assert.equal(ev.reason, MAIN_CRASH_REASON);
+  }
 });
 
 // ==========================================================================

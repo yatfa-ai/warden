@@ -52,7 +52,16 @@ export function resolveConsentTier(value: unknown): ConsentTier {
 // ---------------------------------------------------------------------------
 // The schema version. Bumping this is a coordinated client + receiver change.
 // ---------------------------------------------------------------------------
-export const SCHEMA_VERSION = 3;
+// v4 (WARDEN-687): relaxed `CrashEvent.runtime` from the literal `'renderer'`
+// to the full `Runtime` so a main-process hard kill (native segfault / OOM-kill
+// / SIGKILL / power loss / abrupt process.exit) — invisible to the main-process
+// uncaughtExceptionMonitor, which only intercepts JS exceptions — can be turned
+// into a normal base-tier crash event by a next-launch sentinel. The `runtime`
+// field was already a non-identifying enum, and the main-crash `reason` is a
+// synthetic non-identifying string, so this is a shape relaxation, not new data
+// collection. Client + receiver bump together so the x-telemetry-schema
+// handshake (the receiver's ingest.mjs) does not 415.
+export const SCHEMA_VERSION = 4;
 
 // The base-tier event kinds. A discriminated union (below) keys off `type`.
 export const BASE_EVENT_TYPES = Object.freeze(['error', 'crash', 'performance-stall'] as const);
@@ -60,7 +69,9 @@ export type BaseEventType = (typeof BASE_EVENT_TYPES)[number];
 
 // Which process an event originated in. `main` = the Electron/Node main process;
 // `renderer` = a web-contents (browser) process. Error events may be either;
-// crash events are always renderer (a render-process-gone); stalls may be either.
+// crash events may be either (a render-process-gone is `renderer`; a main-process
+// hard kill detected on next launch by the crash sentinel (WARDEN-687) is `main`);
+// stalls may be either.
 export const RUNTIME = Object.freeze({ MAIN: 'main', RENDERER: 'renderer' } as const);
 export type Runtime = (typeof RUNTIME)[keyof typeof RUNTIME];
 
@@ -109,11 +120,15 @@ export interface ErrorEvent {
   frames: StackFrame[]; // structured, path-stripped stack frames
 }
 
-/** A render-process-gone crash (always the renderer). */
+/** A process crash. `runtime` is `renderer` for a render-process-gone (Electron's
+ *  fixed-enum `reason`: oom, crashed, killed, …) or `main` for a main-process
+ *  hard kill detected on the NEXT launch by the crash sentinel (WARDEN-687),
+ *  whose `reason` is the synthetic non-identifying string `'unexpected-termination'`.
+ *  Either runtime is a non-identifying label; no new identifying field is added. */
 export interface CrashEvent {
   schemaVersion: typeof SCHEMA_VERSION;
   type: 'crash';
-  runtime: 'renderer';
+  runtime: Runtime;
   timestamp: number;
   appVersion?: string; // non-identifying release label (e.g. '0.1.19'); optional
   platform?: string; // non-identifying OS label (darwin/win32/linux); optional
@@ -188,8 +203,11 @@ export function validateBaseEvent(event: unknown): event is BaseEvent {
         typeof e.message === 'string' &&
         Array.isArray(e.frames);
     case 'crash':
-      // crash is the renderer by definition; a `main` crash is malformed.
-      return e.runtime === RUNTIME.RENDERER && typeof e.reason === 'string';
+      // WARDEN-687: a crash may be the renderer (a render-process-gone) OR the
+      // main process (a hard kill detected on next launch by the crash sentinel).
+      // `runtime` is already validated as a known Runtime by isRuntime above; the
+      // crash-specific field is the non-identifying `reason` string.
+      return typeof e.reason === 'string';
     case 'performance-stall':
       return typeof e.lagMs === 'number' &&
         (e.source === 'event-loop' || e.source === 'unresponsive');

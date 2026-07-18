@@ -27,6 +27,17 @@ const {
 // constants + validator it exports (SCHEMA_VERSION, validateBaseEvent) are the
 // shared cross-module contract the pipeline threads.
 const { createTelemetrySource, SCHEMA_VERSION, validateBaseEvent } = require('./telemetry-source.cjs');
+// Crash sentinel (WARDEN-687) — pure decision logic that detects a main-process
+// HARD kill (segfault / OOM-kill / SIGKILL / abrupt exit) on the NEXT launch via
+// per-PID marker files. Same pattern as window-state.cjs above: main.cjs wires
+// the live fs + process APIs to these pure decisions; the behavior is unit-tested
+// in web/crash-sentinel.test.mjs. Wired into app.whenReady() + before-quit below.
+const {
+  parseMarker,
+  markerFileName,
+  isCrashSentinelFile,
+  detectCrashes,
+} = require('./crash-sentinel.cjs');
 // Telemetry PIPELINE assembly (WARDEN-486) + the CJS redact mirror + the pure
 // tier resolver (WARDEN-524). main.cjs constructs the pipeline with the REAL
 // injected implementations and binds the source's record sink to it — the
@@ -325,6 +336,118 @@ function attachWindowStateCapture(window) {
     if (captureTimer) { clearTimeout(captureTimer); captureTimer = null; }
     flushBoundsCapture(window);
   });
+}
+
+// --- Crash sentinel (WARDEN-687) ------------------------------------------------
+// Detect a main-process HARD kill (native segfault / OOM-kill / SIGKILL / power
+// loss / abrupt process.exit) on the NEXT launch. Such a kill bypasses
+// uncaughtExceptionMonitor (which intercepts JS exceptions only), so the prior
+// instance died emitting NOTHING; a per-PID marker file turns that undetectable
+// death into one normal base-tier crash event. Pure decision logic lives in
+// crash-sentinel.cjs (same pattern as window-state.cjs); these helpers only do
+// the fs I/O + live-liveness wiring. Wired in app.whenReady() + before-quit.
+
+// A per-startup nonce written into THIS instance's marker. Guards against PID
+// reuse (a stale marker whose pid the OS recycled) and gives each instance a
+// distinct, traceable marker. crypto.randomUUID() is available in the Electron
+// main process (Node ≥ 19) and is unique per startup; the fallback keeps the
+// nonce non-empty on any older runtime.
+const thisInstanceNonce =
+  typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${process.pid}-${Math.random().toString(36).slice(2)}`;
+
+function crashSentinelDir() {
+  return app.getPath('userData');
+}
+
+// True iff `pid` identifies a LIVE process. signal-0 (`process.kill(pid, 0)`)
+// throws ESRCH for a dead pid and EPERM for an alive pid the user may not signal
+// (same-user warden processes are signalable, so EPERM is rare — but it still
+// means the process EXISTS → alive). Never throws.
+function isPidAlive(pid) {
+  if (typeof pid !== 'number' || !Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return !!(e && e.code === 'EPERM');
+  }
+}
+
+// Read every crash-sentinel-<pid>.json in userData into parsed markers. Returns
+// [] when userData is unreadable/empty (a fresh install — nothing to detect).
+function readCrashSentinelMarkers() {
+  let files = [];
+  try {
+    files = fs.readdirSync(crashSentinelDir());
+  } catch {
+    return [];
+  }
+  const markers = [];
+  for (const name of files) {
+    if (!isCrashSentinelFile(name)) continue;
+    let raw;
+    try {
+      raw = fs.readFileSync(path.join(crashSentinelDir(), name), 'utf8');
+    } catch {
+      continue; // a marker file vanished mid-scan → skip it
+    }
+    const marker = parseMarker(raw);
+    if (marker) markers.push(marker);
+  }
+  return markers;
+}
+
+// The startup detection pass. For each marker whose PID is dead (a prior instance
+// died hard) emit exactly ONE consent-gated main-crash event, then delete the
+// marker file. The DELETE is consent-INdependent (so a second relaunch never
+// re-emits — DONE criterion #4); the EMIT is consent-gated inside recordMainCrash
+// (off → nothing built or recorded — DONE criterion #3). Markers whose PID is
+// still alive belong to a concurrent instance and are LEFT untouched (DONE
+// criterion #6). At most one emit per crashed instance.
+function runCrashSentinelDetection() {
+  const markers = readCrashSentinelMarkers();
+  const { crashed } = detectCrashes(markers, isPidAlive);
+  for (const marker of crashed) {
+    try {
+      telemetry.recordMainCrash();
+    } catch {
+      /* a telemetry emit must never crash the host */
+    }
+    try {
+      fs.unlinkSync(path.join(crashSentinelDir(), markerFileName(marker.pid)));
+    } catch {
+      /* a marker we failed to clear may re-emit next launch — safe direction */
+    }
+  }
+}
+
+// Write THIS instance's marker AFTER the detection pass (so the pass never
+// detects the current instance): crash-sentinel-<pid>.json holding the pid +
+// per-startup nonce. A hard kill skips before-quit, leaving this file for the
+// next launch to detect. Overwrites any stale same-pid file (warden PID reuse).
+function writeThisInstanceMarker() {
+  try {
+    fs.writeFileSync(
+      path.join(crashSentinelDir(), markerFileName(process.pid)),
+      JSON.stringify({ pid: process.pid, nonce: thisInstanceNonce }),
+    );
+  } catch (e) {
+    console.warn('[warden:crash-sentinel] failed to write marker', e);
+  }
+}
+
+// before-quit: clear ONLY this instance's marker (per-PID keying — a concurrent
+// instance's marker is untouched). A real quit covers every clean-exit path; a
+// hard kill never reaches here, so the marker stays for the next launch (as
+// intended). DONE criterion #2 (a clean quit → relaunch lands zero events).
+function clearThisInstanceMarker() {
+  try {
+    fs.unlinkSync(path.join(crashSentinelDir(), markerFileName(process.pid)));
+  } catch {
+    /* already gone (fresh launch that never wrote one) — nothing to clear */
+  }
 }
 
 function createWindow() {
@@ -682,6 +805,15 @@ app.whenReady().then(async () => {
   // preserved (the transport is the last gate). WARDEN-524.
   applyTelemetryConfig(readTelemetryPrefs());
 
+  // Crash sentinel (WARDEN-687): detect a main-process hard kill from a PRIOR
+  // run BEFORE writing this instance's marker (so the pass never detects itself).
+  // Emits one consent-gated crash per dead-PID marker (off → nothing), clears
+  // those markers (consent-independent — no re-emit on a second relaunch), then
+  // writes THIS instance's marker. Runs synchronously at startup — before the
+  // window loads — so a crash during window load is still captured next launch.
+  runCrashSentinelDetection();
+  writeThisInstanceMarker();
+
   waitForServer(createWindow);
 });
 
@@ -710,5 +842,10 @@ app.on('before-quit', () => {
     if (captureTimer) { clearTimeout(captureTimer); captureTimer = null; }
     flushBoundsCapture(win);
   }
+  // Crash sentinel (WARDEN-687): clear THIS instance's marker on a real quit so a
+  // clean quit → relaunch lands ZERO crash events (DONE criterion #2). Per-PID
+  // keying means a concurrent instance's marker is untouched. A hard kill never
+  // reaches before-quit, so the marker stays for the next launch to detect.
+  clearThisInstanceMarker();
   cleanup();
 });

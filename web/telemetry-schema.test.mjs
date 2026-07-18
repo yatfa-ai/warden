@@ -79,9 +79,9 @@ const stallFixture = {
 // (a) The shared contract constants
 // ==========================================================================
 
-test('SCHEMA_VERSION is 3 (the version client + receiver agree on)', () => {
+test('SCHEMA_VERSION is 4 (the version client + receiver agree on)', () => {
   assert.equal(typeof SCHEMA_VERSION, 'number');
-  assert.equal(SCHEMA_VERSION, 3);
+  assert.equal(SCHEMA_VERSION, 4);
 });
 
 test('BASE_EVENT_TYPES is exactly the three anonymous base-tier kinds', () => {
@@ -156,10 +156,19 @@ test('validateBaseEvent type-specific shape checks (error needs message+name+fra
   assert.equal(validateBaseEvent({ ...errorFixture, frames: [] }), true);
 });
 
-test('validateBaseEvent crash needs a string reason AND must be the renderer', () => {
+test('validateBaseEvent crash needs a string reason; runtime may be main OR renderer (WARDEN-687)', () => {
   assert.equal(validateBaseEvent({ ...crashFixture, reason: 5 }), false, 'crash reason must be string');
   assert.equal(validateBaseEvent({ ...crashFixture, reason: undefined }), false, 'crash needs a reason');
-  assert.equal(validateBaseEvent({ ...crashFixture, runtime: 'main' }), false, 'crash is renderer by definition');
+  // WARDEN-687: a main-runtime crash (a hard kill detected on next launch by the
+  // crash sentinel) now validates — runtime was already a non-identifying enum, so
+  // accepting `main` is a shape relaxation, not new data collection.
+  assert.equal(
+    validateBaseEvent({ ...crashFixture, runtime: RUNTIME.MAIN, reason: 'unexpected-termination' }),
+    true,
+    'a main-runtime crash (hard kill) validates post-v4',
+  );
+  assert.equal(validateBaseEvent(crashFixture), true, 'a renderer-runtime crash still validates');
+  assert.equal(validateBaseEvent({ ...crashFixture, runtime: 'worker' }), false, 'an unknown runtime is still rejected');
 });
 
 test('validateBaseEvent stall needs a numeric lagMs and a known source', () => {
