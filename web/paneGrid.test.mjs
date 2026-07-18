@@ -39,7 +39,7 @@ const { code } = await transformWithOxc(src, paneGridPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-paneGrid-test-'));
 const tmpFile = join(tmpDir, 'paneGrid.mjs');
 writeFileSync(tmpFile, code);
-const { resolveVisibleTiles, gridShape, equalRatios, effectiveRatios, redistributeRatios, gutterCenters, resolveTrackWidths, PANE_COL_FLOOR_REM, PANE_ROW_FLOOR_REM } = await import(tmpFile);
+const { resolveVisibleTiles, gridShape, equalRatios, effectiveRatios, redistributeRatios, resolveJunctionAxis, gutterCenters, resolveTrackWidths, PANE_COL_FLOOR_REM, PANE_ROW_FLOOR_REM } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -458,6 +458,52 @@ test('gutterCenters: an all-clamped overflow grid still places handles over the 
   // land on those rendered gutters, not the pure-fr 134.67 / 273.33 spots.
   const centers = gutterCenters([1, 1, 1], 400, 8, 144);
   assert.deepEqual(centers, [148, 300]);
+});
+
+console.log('\nresolveJunctionAxis: route a crossing-pad drag by its initial direction (WARDEN-660 crossing fix)');
+// A crossing pad sits on BOTH a col and a row gutter, so it can't pick an axis at
+// pointer down — it defers to resolveJunctionAxis on the first decisive move. This
+// is the rule that makes the col gutter grabbable at the row-crossing (the 2×2
+// dead-center grab): pre-fix the row strip swallowed the crossing, so a horizontal
+// drag there was a no-op. Now a horizontal drag routes to 'col'.
+
+test('a mostly-horizontal drag resolves to COLS (|dx| >= |dy|)', () => {
+  assert.equal(resolveJunctionAxis(40, 2, 3), 'col', 'drag right → col-resize');
+  assert.equal(resolveJunctionAxis(-40, 2, 3), 'col', 'drag left → col-resize (sign-agnostic)');
+  assert.equal(resolveJunctionAxis(40, 40, 3), 'col', 'exact tie breaks to col');
+});
+
+test('a mostly-vertical drag resolves to ROWS (|dy| > |dx|)', () => {
+  assert.equal(resolveJunctionAxis(2, 40, 3), 'row', 'drag down → row-resize');
+  assert.equal(resolveJunctionAxis(2, -40, 3), 'row', 'drag up → row-resize (sign-agnostic)');
+});
+
+test('sub-threshold travel resolves to NULL — no drag committed (lets onDoubleClick fire)', () => {
+  // A still click or a hair-trigger jitter travels less than the threshold on BOTH
+  // axes, so the pad commits no drag. This is what lets a double-click land: the
+  // intervening pointerdown/up move < threshold, the session never starts, and the
+  // reset handler wins.
+  assert.equal(resolveJunctionAxis(0, 0, 3), null, 'still click');
+  assert.equal(resolveJunctionAxis(2, 2, 3), null, 'jitter under threshold');
+  assert.equal(resolveJunctionAxis(2, 0, 3), null, 'dx under threshold even if it dominates dy');
+  assert.equal(resolveJunctionAxis(-2, 1, 3), null, 'negative jitter under threshold');
+});
+
+test('the threshold is per-axis: clearing it on one axis resolves even if the other is ~0', () => {
+  // The 2×2 dead-center repro: a horizontal drag (large dx, ~0 dy) at the crossing
+  // must resolve to COLS so the column gutter resizes — the exact case that was a
+  // silent no-op when the row strip captured the crossing.
+  assert.equal(resolveJunctionAxis(20, 0, 3), 'col', 'pure horizontal drag → col (the dead-center repro)');
+  assert.equal(resolveJunctionAxis(0, 20, 3), 'row', 'pure vertical drag → row');
+});
+
+test('the threshold boundary: travel equal to threshold is decisive (>=, not strictly >)', () => {
+  // abs(dx) === threshold is treated as decisive (the guard is `< threshold`, so
+  // equal passes). Pinned because a strictly-greater gate would let a slow drag
+  // stall at exactly the threshold.
+  assert.equal(resolveJunctionAxis(3, 0, 3), 'col', 'dx == threshold → decisive');
+  assert.equal(resolveJunctionAxis(2, 3, 3), 'row', 'dy == threshold, dx under → decisive row');
+  assert.equal(resolveJunctionAxis(2, 2, 3), null, 'both == threshold-1 → still null');
 });
 
 console.log(`\n✓ PANEGRID TESTS PASS (total: ${passed})`);

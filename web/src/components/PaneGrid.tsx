@@ -22,6 +22,7 @@ import {
   equalRatios,
   effectiveRatios,
   redistributeRatios,
+  resolveJunctionAxis,
   gutterCenters,
   PANE_COL_FLOOR_REM,
   PANE_ROW_FLOOR_REM,
@@ -49,6 +50,18 @@ interface DragSession {
   last: number[];      // most recent ratio array produced during the drag
 }
 
+// WARDEN-660: a crossing-pad grab BEFORE its axis is resolved. A pad sits at a
+// col-gutter × row-gutter intersection where BOTH axes are valid, so it can't
+// commit to one at pointer down — it stashes both pair indices + the start x/y
+// and lets the shared move handler pick the axis from the pointer's initial
+// direction (|dx|>=|dy| → columns, else rows) before seeding a DragSession.
+interface PendingJunction {
+  gCol: number;     // col-gutter index (left track of the resized col pair)
+  gRow: number;     // row-gutter index (top track of the resized row pair)
+  startX: number;   // clientX at pointer down
+  startY: number;   // clientY at pointer down
+}
+
 // WARDEN-660: the invisible gutter hit area is wider than the visual gap so it's
 // easy to grab (it straddles the two adjacent panes); the 1px visible line sits
 // centered inside it. A constant — not a Tailwind class — because it sizes a
@@ -56,6 +69,13 @@ interface DragSession {
 // classes, not hit-area geometry derived from a measured gutter center).
 const HANDLE_W_PX = 10;
 const HANDLE_HALF_PX = HANDLE_W_PX / 2;
+
+// WARDEN-660: a crossing pad waits for the pointer to travel at least this far
+// before committing to an axis, so a hair-trigger jitter (or a still click)
+// doesn't mis-route a junction grab. Small enough to feel instant, large enough
+// to rise above sub-pixel noise — and it's what lets a plain click land cleanly
+// so the pad's onDoubleClick can fire unmolested.
+const JUNCTION_THRESH_PX = 3;
 
 interface Props {
   tiles: OpenTile[];
@@ -200,6 +220,11 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
   // that toggles the grid's `transition-all` OFF during a drag so the dragged
   // edge tracks the pointer 1:1 instead of lagging behind the transition.
   const dragRef = useRef<DragSession | null>(null);
+  // WARDEN-660: a crossing-pad grab whose axis hasn't been resolved yet (null
+  // unless a junction pad is actively pressed but the pointer hasn't moved
+  // decisively). Kept in a ref — not state — because the shared move/up handlers
+  // read it live without re-binding, exactly like dragRef.
+  const pendingRef = useRef<PendingJunction | null>(null);
   const [dragging, setDragging] = useState<DragAxis | null>(null);
   // The grid container — measured (content box + resolved gap) via a
   // ResizeObserver to position the overlay drag handles over the visual gutters
@@ -448,44 +473,54 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
     };
   }, []);
 
-  // WARDEN-660 drag handlers. beginDrag captures the pair's measured pixel
-  // widths + the floor in px at pointer down (so the px→ratio redistribution is
-  // exact regardless of CSS minmax floors, and no per-move layout query is
-  // needed); move/up are attached to every handle and read the live session from
-  // dragRef. The redistribution is ABSOLUTE — each move recomputes the pair's
-  // ratios from the fixed start geometry + the current dx — so a stale closure
-  // (multiple pointermoves before a re-render) still produces the correct result
-  // (pairSum is conserved, non-pair tracks are invariant during the drag). Only
-  // the primary button starts a drag; double-click is a separate gesture whose
-  // intervening pointerdown/up moves ~0px and commits the unchanged ratios, so
-  // the reset wins.
+  // WARDEN-660 drag handlers. startAxisDrag measures the grabbed pair's pixel
+  // widths + the floor in px (so the px→ratio redistribution is exact regardless
+  // of CSS minmax floors, with no per-move layout query) and stashes a
+  // DragSession. It's shared by the single-axis gutter strips (beginDrag — axis
+  // known at pointer down) AND the crossing pads (beginJunctionDrag — axis
+  // resolved from the first decisive move). move/up are attached to every handle
+  // and read the live session from dragRef. The redistribution is ABSOLUTE —
+  // each move recomputes the pair's ratios from the fixed start geometry + the
+  // current dx — so a stale closure (multiple pointermoves before a re-render)
+  // still produces the correct result (pairSum is conserved, non-pair tracks are
+  // invariant during the drag). Only the primary button starts a drag;
+  // double-click is a separate gesture whose intervening pointerdown/up moves
+  // ~0px and commits the unchanged ratios, so the reset wins.
   const floorPxFor = (axis: DragAxis): number => {
     const rem = axis === 'col' ? PANE_COL_FLOOR_REM : PANE_ROW_FLOOR_REM;
     const rootPx = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
     return rem * rootPx;
   };
 
-  const beginDrag = (axis: DragAxis, g: number) => (e: React.PointerEvent<HTMLDivElement>) => {
-    if (effectiveMax) return; // no gutters while maximized (none render anyway)
-    if (e.button !== 0) return; // primary button only
+  // Seed dragRef for a known axis/pair. Returns false (so the caller skips, no
+  // preventDefault) when the shape is mid-transition or the index is out of
+  // range — the same guards the inline version had. Split out so a crossing pad
+  // can call it AFTER resolving its axis from the pointer's initial direction.
+  const startAxisDrag = (axis: DragAxis, g: number, startClient: number): boolean => {
     const gridEl = gridRef.current;
-    if (!gridEl) return;
+    if (!gridEl) return false;
     const cs = getComputedStyle(gridEl);
     const tracks = (axis === 'col' ? cs.gridTemplateColumns : cs.gridTemplateRows)
       .split(/\s+/).filter(Boolean).map(parseFloat);
-    if (g < 0 || g >= tracks.length - 1) return;
+    if (g < 0 || g >= tracks.length - 1) return false;
     const ratios = axis === 'col' ? colRatios : rowRatios;
-    if (ratios.length !== tracks.length) return; // shape mid-transition — bail
-    e.preventDefault();
-    e.stopPropagation();
+    if (ratios.length !== tracks.length) return false; // shape mid-transition — bail
     dragRef.current = {
-      axis, g,
-      startClient: axis === 'col' ? e.clientX : e.clientY,
-      t0: tracks[g],
-      t1: tracks[g + 1],
+      axis, g, startClient,
+      t0: tracks[g], t1: tracks[g + 1],
       floorPx: floorPxFor(axis),
       last: ratios.slice(),
     };
+    return true;
+  };
+
+  const beginDrag = (axis: DragAxis, g: number) => (e: React.PointerEvent<HTMLDivElement>) => {
+    if (effectiveMax) return; // no gutters while maximized (none render anyway)
+    if (e.button !== 0) return; // primary button only
+    const startClient = axis === 'col' ? e.clientX : e.clientY;
+    if (!startAxisDrag(axis, g, startClient)) return;
+    e.preventDefault();
+    e.stopPropagation();
     setDragging(axis);
     // Suppress text selection globally for the drag so an accidental selection
     // doesn't fight the pointermove. Cleared on pointerUp.
@@ -493,7 +528,48 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* best-effort */ }
   };
 
+  // WARDEN-660 crossing pad: at every col-gutter × row-gutter intersection both
+  // axes are valid, so the pad can't commit to one at pointer down. It stashes a
+  // PendingJunction (both pair indices + the pointer's start x/y) and lets the
+  // shared move handler resolve the axis from the first decisive movement before
+  // startAxisDrag runs. This is the fix for the 2×2 dead-center grab: previously
+  // the row strip (rendered above the col strip) universally captured the
+  // crossing, so a horizontal drag there — which the row strip ignores — was a
+  // silent no-op at the most natural grab point. The pad sits ON TOP of both
+  // strips at the crossing (it's rendered last), so neither strip can pre-empt
+  // it; away from crossings the strips are the only thing under the pointer and
+  // keep their direct single-axis behavior. `dragging` is intentionally NOT set
+  // here — no ratios change until the axis resolves, so the transition can stay
+  // on through the pending phase; the move handler sets it (batched with the
+  // first ratio change) the instant the axis is picked.
+  const beginJunctionDrag = (gCol: number, gRow: number) => (e: React.PointerEvent<HTMLDivElement>) => {
+    if (effectiveMax) return; // no gutters while maximized (none render anyway)
+    if (e.button !== 0) return; // primary button only
+    e.preventDefault();
+    e.stopPropagation();
+    pendingRef.current = { gCol, gRow, startX: e.clientX, startY: e.clientY };
+    document.body.style.userSelect = 'none';
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* best-effort */ }
+  };
+
   const onHandlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    // Resolve a pending junction grab on the first decisive move: pick the axis
+    // the pointer is mostly traveling along, seed its DragSession, then fall
+    // through to apply this move like any single-axis drag. Until the move is
+    // decisive (sub-threshold jitter, or a plain click) nothing happens — which
+    // is what lets a double-click on a pad fire onDoubleClick unmolested.
+    const p = pendingRef.current;
+    if (p) {
+      const pdx = e.clientX - p.startX;
+      const pdy = e.clientY - p.startY;
+      const axis = resolveJunctionAxis(pdx, pdy, JUNCTION_THRESH_PX);
+      if (!axis) return; // sub-threshold jitter / a still click — no drag yet
+      const g = axis === 'col' ? p.gCol : p.gRow;
+      const startClient = axis === 'col' ? p.startX : p.startY;
+      pendingRef.current = null;
+      if (!startAxisDrag(axis, g, startClient)) return; // shape mid-transition — bail
+      setDragging(axis);
+    }
     const d = dragRef.current;
     if (!d) return;
     const cur = d.axis === 'col' ? e.clientX : e.clientY;
@@ -507,12 +583,16 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
   };
 
   const onHandlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    // A pending junction that never resolved (plain click, or sub-threshold
+    // jitter) commits nothing — only a resolved session does.
+    const wasPending = pendingRef.current !== null;
+    pendingRef.current = null;
     const d = dragRef.current;
     dragRef.current = null;
     setDragging(null);
     document.body.style.userSelect = '';
     try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* best-effort */ }
-    if (!d) return;
+    if (wasPending || !d) return;
     // Commit the final ratios to App for persistence — ONE write per drag, not
     // one per pointermove (the per-move updates were local-only).
     if (d.axis === 'col') {
@@ -538,6 +618,24 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
       setRowRatios(eq);
       onPaneRowRatiosChange(eq);
     }
+  };
+
+  // Double-click a crossing pad → reset BOTH axes to equal. A pad sits on both a
+  // col and a row gutter, so committing to a single axis would be arbitrary;
+  // resetting both matches "reset what you can see diverging" and stays the
+  // symmetric counterpart to the single-axis strips (a col strip resets cols, a
+  // row strip resets rows). Same pushedRef + commit pattern as resetAxis so the
+  // reset survives the sync effect and reload.
+  const resetBothAxes = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    const eqCol = equalRatios(cols);
+    const eqRow = equalRatios(rows);
+    pushedRef.current.col = eqCol;
+    pushedRef.current.row = eqRow;
+    setColRatios(eqCol);
+    setRowRatios(eqRow);
+    onPaneColRatiosChange(eqCol);
+    onPaneRowRatiosChange(eqRow);
   };
 
   // WARDEN-660: ref callback for the gutter overlay. On mount it stashes the
@@ -628,10 +726,14 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
             {/* WARDEN-660: draggable resize gutters. One transparent hit area per
                 internal gutter, positioned over the visual gap between two
                 adjacent tracks. The rest of this overlay is pointer-events-none
-                so it never blocks the panes; only the gutter strips capture
-                pointers. A 1px line reveals on hover as the affordance. Double-
-                click resets the axis to equal. Rendered only on a real multi-
-                track grid (never maximized / single-pane). */}
+                so it never blocks the panes; only the gutter strips (and the
+                crossing pads below) capture pointers. A 1px line reveals on
+                hover as the affordance. Double-click resets the axis to equal.
+                Rendered only on a real multi-track grid (never maximized /
+                single-pane). Strips are single-axis (col strips → col-resize,
+                row strips → row-resize); crossing pads (rendered last, on top at
+                each intersection) route by the drag's initial direction so
+                neither axis is ungrabbable where the gutters cross. */}
             {showGutters && (colCenters.length > 0 || rowCenters.length > 0) && (
               <div ref={setOverlayRef} className="absolute inset-0 pointer-events-none z-10">
                 {colCenters.map((left, g) => (
@@ -654,6 +756,36 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     <div className="absolute top-1/2 left-0 right-0 h-px -translate-y-1/2 bg-border opacity-0 transition-opacity duration-100 group-hover/gutter:opacity-100" />
                   </div>
                 ))}
+                {/* WARDEN-660 crossing pads: one per col-gutter × row-gutter
+                    intersection, rendered LAST so each sits above BOTH strips at
+                    the crossing. A pad covers exactly the two strips' overlap
+                    (a HANDLE_W_PX square), so away from crossings the
+                    single-axis strips stay the undisputed target and keep their
+                    direct behavior, while AT a crossing the pad wins and routes
+                    the drag by its initial direction (beginJunctionDrag →
+                    |dx|>=|dy| ? cols : rows). Without it the row strip — painted
+                    above the col strip — silently swallowed horizontal drags at
+                    the crossing, the 2×2 dead-center grab. The pad's own hover
+                    affordance is a small plus (arms extend half a handle past
+                    the square) signalling "drag either way", distinct from a
+                    lone strip's single line; double-click resets both axes. */}
+                {colCenters.map((left, gCol) => rowCenters.map((top, gRow) => (
+                  <div key={`x${gCol}-${gRow}`} role="separator"
+                    aria-label="Resize columns or rows"
+                    onPointerDown={beginJunctionDrag(gCol, gRow)}
+                    onPointerMove={onHandlePointerMove}
+                    onPointerUp={onHandlePointerUp}
+                    onDoubleClick={resetBothAxes}
+                    className="group/gutter pointer-events-auto absolute cursor-grab"
+                    style={{ left: left - HANDLE_HALF_PX, top: top - HANDLE_HALF_PX, width: HANDLE_W_PX, height: HANDLE_W_PX, touchAction: 'none' }}>
+                    <div aria-hidden
+                      className="absolute left-1/2 w-px -translate-x-1/2 bg-border opacity-0 transition-opacity duration-100 group-hover/gutter:opacity-100"
+                      style={{ top: -HANDLE_HALF_PX, bottom: -HANDLE_HALF_PX }} />
+                    <div aria-hidden
+                      className="absolute top-1/2 h-px -translate-y-1/2 bg-border opacity-0 transition-opacity duration-100 group-hover/gutter:opacity-100"
+                      style={{ left: -HANDLE_HALF_PX, right: -HANDLE_HALF_PX }} />
+                  </div>
+                )))}
               </div>
             )}
           </div>

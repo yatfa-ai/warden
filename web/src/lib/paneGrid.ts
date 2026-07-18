@@ -121,6 +121,29 @@ export function redistributeRatios(
   return next;
 }
 
+// Resolve a crossing-pad (junction) drag to an axis from the pointer's travel
+// since pointer down. A junction sits on BOTH a col and a row gutter, so the
+// axis can't be chosen at pointer down — it's picked from the FIRST decisive
+// movement: |dx| >= |dy| → columns (a mostly-horizontal drag), else rows. Returns
+// null until the pointer has traveled past `threshold` on at least one axis, so a
+// still click or sub-threshold jitter commits no drag — which is what lets a pad's
+// onDoubleClick fire unmolested (the intervening pointerdown/up moves < threshold
+// and the reset wins).
+//
+// This is the routing rule that fixes the 2×2 dead-center grab: pre-fix, the row
+// strip (painted above the col strip) universally captured the crossing, so a
+// horizontal drag there — which the row strip ignores — was a silent no-op at the
+// single most natural grab point. The crossing pad defers to THIS rule instead.
+// Pure: no DOM/React — extracted so the routing decision is unit-testable.
+export function resolveJunctionAxis(
+  dx: number,
+  dy: number,
+  threshold: number,
+): 'col' | 'row' | null {
+  if (Math.abs(dx) < threshold && Math.abs(dy) < threshold) return null;
+  return Math.abs(dx) >= Math.abs(dy) ? 'col' : 'row';
+}
+
 // Resolve each track's pixel width on one axis under a CSS
 // `minmax(floorPx, r fr)` distribution: each track's fr-share of the
 // distributable space, clamped to floorPx, with the deficit redistributed
