@@ -18,7 +18,7 @@ import { useHostStatuses } from '@/lib/useHostStatuses';
 import { snoozeExpiry, pruneExpired, withoutSnoozeKey, snoozeManyKeys, type AlertMuteMode, type SnoozeDuration } from '@/lib/snooze';
 import { rankAttention, hasReturnContent, attentionReason, type AttentionItem } from '@/lib/attentionRollup';
 import { cn } from '@/lib/utils';
-import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext } from '@/lib/electron';
+import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext, forwardRendererError, installRendererErrorCapture } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ChatSidebar } from '@/components/ChatSidebar';
@@ -68,6 +68,13 @@ function applyOptimisticGuard(list: Chat[], killed: Set<string>, renamed: Map<st
       return pendingName === undefined ? c : { ...c, name: pendingName };
     });
 }
+
+// Install the renderer's global error/unhandled-rejection listeners once, at
+// module load, so non-React renderer errors (the half WARDEN-637's React
+// ErrorBoundary `onError` does NOT cover) are forwarded to main's consent-gated
+// telemetry source. Runs in the renderer's main world; no-ops outside the
+// Electron app (no bridge). Idempotent.
+installRendererErrorCapture();
 
 function App() {
   const [chats, setChats] = useState<Chat[]>([]);
@@ -1840,7 +1847,7 @@ function App() {
             onMouseDown={handleSidebarMouseDown}
             title="Drag to resize sidebar"
           />
-          <ErrorBoundary>
+          <ErrorBoundary onError={(error, info) => forwardRendererError(error, info.componentStack)}>
             <ChatSidebar
               chats={chats}
               sshHosts={sshHosts}
@@ -1923,7 +1930,7 @@ function App() {
             onMouseDown={handleObserverMouseDown}
             title="Drag to resize observer panel"
           />
-          <ErrorBoundary>
+          <ErrorBoundary onError={(error, info) => forwardRendererError(error, info.componentStack)}>
             <ObserverTabs externalViewMode={externalViewMode} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} timestampFormat={timestampFormat} />
           </ErrorBoundary>
         </section>

@@ -410,6 +410,108 @@ test('injected render-process-gone routes to a crash event; unresponsive to a re
 });
 
 // ==========================================================================
+// (WARDEN-637) Renderer-process JS errors → base-tier error event, runtime renderer
+// A renderer error is forwarded across the contextBridge as a plain serializable
+// { name, message, stack } (Error instances do not survive the clone), so
+// buildErrorEvent must read that shape directly and the source exposes a
+// consent-gated recordRendererError entry point for the IPC forward.
+// ==========================================================================
+
+test('buildErrorEvent reads a SERIALIZED { name, message, stack } shape directly (renderer forward, refinement B)', () => {
+  // The exact shape preload.cjs forwards for a renderer error.
+  const serialized = {
+    name: 'TypeError',
+    message: 'cannot read /home/alicedoe/secrets/key.pem of undefined at sync.prod.internal',
+    stack: [
+      'TypeError: cannot read of undefined',
+      '    at renderRow (/home/alicedoe/app/Row.js:12:9)',
+      '    at ChatSidebar (http://localhost:7421/src/ChatSidebar.tsx:88:15)',
+    ].join('\n'),
+  };
+  const ev = buildErrorEvent(serialized, { now: 7, runtime: RUNTIME.RENDERER });
+  assert.equal(ev.type, 'error');
+  assert.equal(ev.runtime, 'renderer');
+  assert.equal(ev.timestamp, 7);
+  assert.equal(ev.schemaVersion, SCHEMA_VERSION);
+  // The renderer's REAL name/message survive — NOT collapsed to '[object Object]'.
+  assert.equal(ev.name, 'TypeError');
+  assert.ok(ev.message.includes('cannot read'), `renderer message preserved (got: ${ev.message})`);
+  assert.ok(!ev.message.includes('[object Object]'), 'must not collapse the object to [object Object]');
+  // message is redacted — no path/host survives.
+  for (const needle of ['alicedoe', 'secrets', '/home', 'key.pem', 'prod.internal', 'localhost']) {
+    assert.ok(!ev.message.includes(needle), `message must not leak "${needle}"`);
+  }
+  // The renderer's frames survive, parsed from the FORWARDED stack (NOT a fresh
+  // main-process stack where `new Error` would otherwise have run).
+  assert.ok(ev.frames.length >= 2, `renderer frames parsed (got ${ev.frames.length})`);
+  assert.equal(ev.frames[0].function, 'renderRow');
+  assert.equal(ev.frames[0].file, 'Row.js'); // basename only — renderer path stripped
+  assert.equal(ev.frames[0].line, 12);
+  assert.equal(ev.frames[0].column, 9);
+  // A renderer http:// URL is reduced to its basename too (no host leak).
+  assert.equal(ev.frames[1].function, 'ChatSidebar');
+  assert.equal(ev.frames[1].file, 'ChatSidebar.tsx');
+  assert.ok(validateBaseEvent(ev));
+});
+
+test('buildErrorEvent serialized shape: missing name/stack degrade gracefully (still renderer-correct)', () => {
+  const ev = buildErrorEvent({ message: 'just a message' }, { now: 1, runtime: RUNTIME.RENDERER });
+  assert.equal(ev.name, 'Error'); // no name → 'Error'
+  assert.equal(ev.message, 'just a message');
+  assert.deepEqual(ev.frames, []); // no stack → no frames
+  assert.ok(validateBaseEvent(ev));
+});
+
+test('buildErrorEvent serialized shape is NOT confused by a non-error object lacking a `message` field', () => {
+  // A rejection reason like { code, msg } (no `message`) must NOT be read as a
+  // serialized error — it falls through to the wrapping path (unchanged behavior),
+  // so existing main-process callers are unaffected by the renderer-shape fix.
+  const ev = buildErrorEvent({ code: 'EX', msg: 'boom /etc/secret' }, { now: 1 });
+  assert.equal(ev.runtime, 'main');
+  assert.equal(ev.name, 'Error');
+  assert.equal(ev.message, '[object Object]'); // wrapped, as before WARDEN-637
+  assert.ok(validateBaseEvent(ev));
+});
+
+test('recordRendererError: consent ON → a forwarded serialized error routes to a renderer error event', () => {
+  const record = recorder();
+  const src = makeSource({ record });
+  src.setBaseConsent(true);
+  // The exact payload the IPC handler forwards to this method.
+  src.recordRendererError({
+    name: 'TypeError',
+    message: 'render /home/alicedoe/x threw',
+    stack: '    at f (/home/alicedoe/app/x.js:1:1)',
+  });
+  assert.equal(record.calls.length, 1);
+  const ev = record.calls[0];
+  assert.equal(ev.type, 'error');
+  assert.equal(ev.runtime, 'renderer'); // renderer, NOT main
+  assert.equal(ev.schemaVersion, SCHEMA_VERSION);
+  assert.equal(ev.name, 'TypeError');
+  assert.ok(ev.message.includes('render'), `renderer message preserved (got: ${ev.message})`);
+  assert.ok(!ev.message.includes('alicedoe'), 'renderer message redacted');
+  assert.ok(ev.frames.length >= 1);
+  assert.equal(ev.frames[0].file, 'x.js'); // renderer stack frame survives (basename)
+  assert.ok(validateBaseEvent(ev));
+});
+
+test('recordRendererError: consent OFF → nothing built or recorded (gate in main, refinement D)', () => {
+  const record = recorder();
+  const src = makeSource({ record });
+  // consent stays OFF (the default) — the preload forward still arrives, but main
+  // drops it before building anything.
+  src.recordRendererError({ name: 'TypeError', message: 'x', stack: '' });
+  assert.equal(record.calls.length, 0);
+});
+
+test('recordRendererError: a throwing record() sink is swallowed (telemetry must not crash main)', () => {
+  const src = makeSource({ record: () => { throw new Error('sink down'); } });
+  src.setBaseConsent(true);
+  assert.doesNotThrow(() => src.recordRendererError({ name: 'Error', message: 'x', stack: '' }));
+});
+
+// ==========================================================================
 // Robustness — a telemetry sink must never throw the host into a worse state
 // ==========================================================================
 
