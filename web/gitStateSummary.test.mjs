@@ -36,7 +36,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-gitstate-test-'));
 const tmpFile = join(tmpDir, 'gitStateSummary.mjs');
 writeFileSync(tmpFile, code);
-const { summarizeProjectGitState, sortByHeadAgeDesc, detectProjectFileCollisions, detectProjectImpendingCollisions, detectProjectOutgoingCollisions, sortGitAgentsByMagnitudeDesc } = await import(tmpFile);
+const { summarizeProjectGitState, sortByHeadAgeDesc, sortByStashCountDesc, detectProjectFileCollisions, detectProjectImpendingCollisions, detectProjectOutgoingCollisions, sortGitAgentsByMagnitudeDesc } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -61,22 +61,29 @@ const agent = (id, project, key) => ({ id, project, active: true, key });
 // behind default kept older cases green.
 const status = (clean, ahead, behind = 0, extra = {}) => ({ clean, ahead, behind, ...extra });
 // The expected shape of a contributing-agent entry (WARDEN-268 + WARDEN-297 +
-// WARDEN-635 + WARDEN-667 + WARDEN-669 + WARDEN-670 + WARDEN-682). behind defaults to 0
-// to mirror status(); atRisk defaults to false + atRiskReason to null so a pre-635
-// expected agent reads as not-at-risk without touching each call site; stashed defaults
-// to false so a pre-667 expected agent reads as not-stashed the same way; headAgeMs
+// WARDEN-635 + WARDEN-667 + WARDEN-669 + WARDEN-670 + WARDEN-682 + WARDEN-689). behind
+// defaults to 0 to mirror status(); atRisk defaults to false + atRiskReason to null so
+// a pre-635 expected agent reads as not-at-risk without touching each call site;
+// stashed defaults to false so a pre-667 expected agent reads as not-stashed the same
+// way; stashCount (WARDEN-689, 8th arg — right after the `stashed` boolean it
+// magnifies, mirroring how `ahead`/`behind` carry their counts alongside their > 0
+// booleans) defaults to 0 so any pre-689 expected agent reads as stash-free the same
+// way (absent stashCount on the status ⇒ 0 ⇒ stashed:false ⇒ consistent); headAgeMs
 // defaults to null (WARDEN-669) so a pre-669 fixture (no headDate) reads as age-unknown;
 // diffstat (WARDEN-670) defaults to null so EVERY pre-670 expected agent carries the
 // field (the implementation reads `status.diffstat ?? null`) -- absent fields are
 // treated the same by the implementation, so old cases stay green exactly as the
-// behind/atRisk/stashed/headAgeMs defaults kept their predecessors green; stalled
-// (WARDEN-682) defaults to false so a pre-682 expected agent reads as not-stalled the
-// same way. A WARDEN-669 case passes a finite headAgeMs as the 8th arg (a fixture that
-// sets headDate); a WARDEN-670 case passes the inline { files, insertions, deletions }
-// magnitude as the 9th (after a null headAgeMs placeholder), mirroring how status()'s
-// `extra` object carries diffstat on the input side; a WARDEN-682 stalled case passes
-// headAgeMs (8th, the >7d age), a null diffstat placeholder (9th), and stalled:true (10th).
-const ag = (key, dirty, ahead, behind = 0, atRisk = false, atRiskReason = null, stashed = false, headAgeMs = null, diffstat = null, stalled = false) => ({ key, dirty, ahead, behind, atRisk, atRiskReason, stashed, headAgeMs, diffstat, stalled });
+// behind/atRisk/stashed/stashCount/headAgeMs defaults kept their predecessors green;
+// stalled (WARDEN-682) defaults to false so a pre-682 expected agent reads as
+// not-stalled the same way. A WARDEN-669 case passes a finite headAgeMs as the 9th arg
+// (after a 0 stashCount); a WARDEN-670 case passes the inline { files, insertions,
+// deletions } magnitude as the 10th (after a 0 stashCount + null headAgeMs
+// placeholder), mirroring how status()'s `extra` object carries diffstat on the input
+// side; a WARDEN-682 stalled case passes headAgeMs (9th, the >7d age), a null diffstat
+// placeholder (10th), and stalled:true (11th). A stashed:true case MUST pass its
+// explicit count as the 8th arg (its input stashCount), since stashed:true ⇔
+// stashCount > 0 and deep-equality checks the magnitude.
+const ag = (key, dirty, ahead, behind = 0, atRisk = false, atRiskReason = null, stashed = false, stashCount = 0, headAgeMs = null, diffstat = null, stalled = false) => ({ key, dirty, ahead, behind, atRisk, atRiskReason, stashed, stashCount, headAgeMs, diffstat, stalled });
 
 // WARDEN-682: a fixed `now` so the stalled (>7d) assertions are deterministic — the
 // module's `now` arg defaults to Date.now() in production (ChatSidebar); stalled-axis
@@ -523,8 +530,8 @@ test('a stash-only agent now surfaces (stashed:1, clean tree) — the key behavi
   // nor unpushed nor behind nor at-risk). Now it must appear so the chip can show
   // 🗄N — the canonical `git stash` case the other four axes are all blind to.
   const r = sum([agent('a1', 'warden')], { a1: status(true, 0, 0, { stashCount: 2 }) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 1, stalled: 0, agents: [ag('a1', false, 0, 0, false, null, true)] } });
-  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 1, stalled: 0, agents: [ag('a1', false, 0, 0, false, null, true)] });
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 1, stalled: 0, agents: [ag('a1', false, 0, 0, false, null, true, 2)] } });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 1, stalled: 0, agents: [ag('a1', false, 0, 0, false, null, true, 2)] });
 });
 
 test('stashCount:null is not stashed (only a number > 0 is) — a detached / non-git agent stays quiet', () => {
@@ -551,7 +558,7 @@ test('an agent both dirty AND stashed appears ONCE with both signals (single-ent
   // entries — the ±N list and the 🗄N list filter this SAME entry.
   const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, { stashCount: 3 }) });
   assert.equal(r.perProject.warden.agents.length, 1);
-  assert.deepEqual(r.perProject.warden.agents, [ag('a1', true, 0, 0, false, null, true)]);
+  assert.deepEqual(r.perProject.warden.agents, [ag('a1', true, 0, 0, false, null, true, 3)]);
   assert.equal(r.perProject.warden.dirty, 1);
   assert.equal(r.perProject.warden.stashed, 1);
 });
@@ -569,7 +576,7 @@ test('the stashed filter matches 🗄N (the popover contract), mirroring ±N / �
   const agents = r.perProject.warden.agents;
   // Iteration order is preserved: a1 (stashed only) then a2 (dirty + stashed); a3
   // is not stashed so it is filtered out.
-  assert.deepEqual(agents.filter((a) => a.stashed), [ag('a1', false, 0, 0, false, null, true), ag('a2', true, 0, 0, false, null, true)]);
+  assert.deepEqual(agents.filter((a) => a.stashed), [ag('a1', false, 0, 0, false, null, true, 2), ag('a2', true, 0, 0, false, null, true, 1)]);
   assert.equal(r.perProject.warden.stashed, agents.filter((a) => a.stashed).length);
 });
 
@@ -582,7 +589,7 @@ test('a stashed-only project gets a sparse-map entry (clean tree, no dirty/unpus
     a1: status(true, 0, 0, { stashCount: 1 }), // stashed only
     b1: status(true, 0, 0),                    // clean → tinker absent
   });
-  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 1, stalled: 0, agents: [ag('a1', false, 0, 0, false, null, true)] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 1, stalled: 0, agents: [ag('a1', false, 0, 0, false, null, true, 1)] } });
   assert.equal('tinker' in r.perProject, false);
 });
 
@@ -670,9 +677,9 @@ test('largest headAgeMs first (oldest WIP on top); null-age rows last', () => {
   // longest-sitting WIP first, and a no-commits/non-git agent (null age) sinks to
   // the bottom — the exact rank the ticket specifies.
   const agents = [
-    ag('newest', true, 1, 0, false, null, false, 1_000),         // 1s old
-    ag('oldest', true, 1, 0, false, null, false, 10_000_000),    // ~115d old
-    ag('nullAge', true, 1, 0, false, null, false, null),          // no age
+    ag('newest', true, 1, 0, false, null, false, 0, 1_000),         // 1s old
+    ag('oldest', true, 1, 0, false, null, false, 0, 10_000_000),    // ~115d old
+    ag('nullAge', true, 1, 0, false, null, false, 0, null),          // no age
   ];
   assert.deepEqual(sortByHeadAgeDesc(agents).map((a) => a.key), ['oldest', 'newest', 'nullAge']);
 });
@@ -683,10 +690,10 @@ test('stability: equal ages preserve input order; multiple nulls preserve input 
   // ages (a,b) keep order; two nulls (c,d) keep order; the non-null pair precedes
   // the null pair.
   const tied = [
-    ag('a', true, 1, 0, false, null, false, 5000),
-    ag('b', true, 1, 0, false, null, false, 5000),
-    ag('c', true, 1, 0, false, null, false, null),
-    ag('d', true, 1, 0, false, null, false, null),
+    ag('a', true, 1, 0, false, null, false, 0, 5000),
+    ag('b', true, 1, 0, false, null, false, 0, 5000),
+    ag('c', true, 1, 0, false, null, false, 0, null),
+    ag('d', true, 1, 0, false, null, false, 0, null),
   ];
   assert.deepEqual(sortByHeadAgeDesc(tied).map((x) => x.key), ['a', 'b', 'c', 'd']);
 });
@@ -700,7 +707,7 @@ test('sortByHeadAgeDesc returns a NEW array and does NOT mutate its input', () =
   // popovers in chats-iteration order. If the helper mutated its input in place, the
   // unpushed sort would scramble the other three popovers' determinism. The helper
   // MUST copy ([...agents].sort) so the shared array is untouched.
-  const original = [ag('a', true, 1, 0, false, null, false, 1), ag('b', true, 1, 0, false, null, false, 100)];
+  const original = [ag('a', true, 1, 0, false, null, false, 0, 1), ag('b', true, 1, 0, false, null, false, 0, 100)];
   const inputOrder = original.map((a) => a.key);
   const sorted = sortByHeadAgeDesc(original);
   assert.notEqual(sorted, original, 'returns a new array, not the same reference');
@@ -760,8 +767,8 @@ test('a stalled-only agent now surfaces (stalled:1, clean tree) — the key beha
   // deterministically (the reconciled headAgeMs field is an AGE, asserted as 9d).
   const stale9d = new Date(NOW - 9 * 86400_000).toISOString();
   const r = sum([agent('a1', 'warden')], { a1: status(true, 0, 0, { headDate: stale9d }) }, NOW);
-  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 1, agents: [ag('a1', false, 0, 0, false, null, false, 9 * 86400_000, null, true)] } });
-  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 1, agents: [ag('a1', false, 0, 0, false, null, false, 9 * 86400_000, null, true)] });
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 1, agents: [ag('a1', false, 0, 0, false, null, false, 0, 9 * 86400_000, null, true)] } });
+  assert.deepEqual(r.total, { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 1, agents: [ag('a1', false, 0, 0, false, null, false, 0, 9 * 86400_000, null, true)] });
 });
 
 test('a fresh agent (headDate <7d) does NOT appear in stalled — and reads ZERO across every chip', () => {
@@ -782,7 +789,7 @@ test('headDate:null is not stalled (only a finite >7d date is) — a no-commit /
   // agent must NOT surface as stalled. Made dirty so the agent isn't skipped —
   // isolating headDate as the SOLE discriminator (it must read stalled:0, headAgeMs:null).
   const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, { headDate: null }) }, NOW);
-  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', true, 0, 0, false, null, false, null, null, false)] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', true, 0, 0, false, null, false, 0, null, null, false)] } });
 });
 
 test('an invalid headDate string is not stalled (Date.parse → null on the agent, never NaN)', () => {
@@ -790,7 +797,7 @@ test('an invalid headDate string is not stalled (Date.parse → null on the agen
   // Normalized to headAgeMs:null ⇒ not stalled (the ticket's "null when missing/
   // invalid" contract). Made dirty to surface the agent and isolate the discriminator.
   const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, { headDate: 'not-a-date' }) }, NOW);
-  assert.deepEqual(r.perProject.warden.agents, [ag('a1', true, 0, 0, false, null, false, null, null, false)]);
+  assert.deepEqual(r.perProject.warden.agents, [ag('a1', true, 0, 0, false, null, false, 0, null, null, false)]);
   assert.equal(r.perProject.warden.stalled, 0);
 });
 
@@ -800,7 +807,7 @@ test('an agent both dirty AND stalled appears ONCE with both signals (single-ent
   const stale9d = new Date(NOW - 9 * 86400_000).toISOString();
   const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, { headDate: stale9d }) }, NOW);
   assert.equal(r.perProject.warden.agents.length, 1);
-  assert.deepEqual(r.perProject.warden.agents, [ag('a1', true, 0, 0, false, null, false, 9 * 86400_000, null, true)]);
+  assert.deepEqual(r.perProject.warden.agents, [ag('a1', true, 0, 0, false, null, false, 0, 9 * 86400_000, null, true)]);
   assert.equal(r.perProject.warden.dirty, 1);
   assert.equal(r.perProject.warden.stalled, 1);
 });
@@ -819,7 +826,7 @@ test('the stalled filter matches 💤N (the popover contract), mirroring ±N / �
   const agents = r.perProject.warden.agents;
   // Iteration order is preserved: a1 (stalled only) then a2 (dirty + stalled); a3
   // has no headDate so it is not stalled and is filtered out.
-  assert.deepEqual(agents.filter((a) => a.stalled), [ag('a1', false, 0, 0, false, null, false, 9 * 86400_000, null, true), ag('a2', true, 0, 0, false, null, false, 9 * 86400_000, null, true)]);
+  assert.deepEqual(agents.filter((a) => a.stalled), [ag('a1', false, 0, 0, false, null, false, 0, 9 * 86400_000, null, true), ag('a2', true, 0, 0, false, null, false, 0, 9 * 86400_000, null, true)]);
   assert.equal(r.perProject.warden.stalled, agents.filter((a) => a.stalled).length);
 });
 
@@ -833,7 +840,7 @@ test('a stalled-only project gets a sparse-map entry (clean tree, no dirty/unpus
     a1: status(true, 0, 0, { headDate: stale9d }), // stalled only
     b1: status(true, 0, 0),                        // clean → tinker absent
   }, NOW);
-  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 1, agents: [ag('a1', false, 0, 0, false, null, false, 9 * 86400_000, null, true)] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 1, agents: [ag('a1', false, 0, 0, false, null, false, 0, 9 * 86400_000, null, true)] } });
   assert.equal('tinker' in r.perProject, false);
 });
 
@@ -854,7 +861,7 @@ test('stalled totals accumulate per project and across projects independently', 
 console.log('\ndirty magnitude (WARDEN-670): the ±N popover carries each dirty agent\'s +N −M');
 test('a dirty agent carries diffstat from status.diffstat onto ProjectGitAgent', () => {
   const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, { diffstat: { files: 3, insertions: 10, deletions: 2 } }) });
-  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', true, 0, 0, false, null, false, null, { files: 3, insertions: 10, deletions: 2 })] } });
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [ag('a1', true, 0, 0, false, null, false, 0, null, { files: 3, insertions: 10, deletions: 2 })] } });
 });
 
 test('a dirty agent whose status carries no diffstat gets diffstat: null (quiet — no false magnitude)', () => {
@@ -873,7 +880,7 @@ test('an all-untracked dirty agent (diffstat +0−0) carries the +0−0 object v
   // own +0−0 guard then renders nothing. Asserting the object (not null) proves the field
   // is the server's value, not a guess.
   const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, { diffstat: { files: 2, insertions: 0, deletions: 0 } }) });
-  assert.deepEqual(r.perProject.warden.agents, [ag('a1', true, 0, 0, false, null, false, null, { files: 2, insertions: 0, deletions: 0 })]);
+  assert.deepEqual(r.perProject.warden.agents, [ag('a1', true, 0, 0, false, null, false, 0, null, { files: 2, insertions: 0, deletions: 0 })]);
 });
 
 test('a non-dirty agent (at-risk only) also carries diffstat: null — the field rides on every ProjectGitAgent', () => {
@@ -900,29 +907,164 @@ test('summarizeProjectGitState does NOT reorder by magnitude — chats order is 
 });
 
 test('sortGitAgentsByMagnitudeDesc ranks largest +N −M WIP first', () => {
-  const a = ag('a', true, 0, 0, false, null, false, null, { files: 1, insertions: 10, deletions: 2 });    // mag 12
-  const b = ag('b', true, 0, 0, false, null, false, null, { files: 1, insertions: 847, deletions: 203 }); // mag 1050 (heaviest)
-  const c = ag('c', true, 0, 0, false, null, false, null, { files: 1, insertions: 5, deletions: 0 });     // mag 5
+  const a = ag('a', true, 0, 0, false, null, false, 0, null, { files: 1, insertions: 10, deletions: 2 });    // mag 12
+  const b = ag('b', true, 0, 0, false, null, false, 0, null, { files: 1, insertions: 847, deletions: 203 }); // mag 1050 (heaviest)
+  const c = ag('c', true, 0, 0, false, null, false, 0, null, { files: 1, insertions: 5, deletions: 0 });     // mag 5
   assert.deepEqual(sortGitAgentsByMagnitudeDesc([a, b, c]).map((x) => x.key), ['b', 'a', 'c']);
 });
 
 test('magnitude-0 (all-untracked) and null-diffstat (detached) rows sort LAST, stably', () => {
-  const heavy = ag('heavy', true, 0, 0, false, null, false, null, { files: 1, insertions: 100, deletions: 0 }); // mag 100
-  const zero = ag('zero', true, 0, 0, false, null, false, null, { files: 2, insertions: 0, deletions: 0 });     // mag 0 (all-untracked)
-  const nul = ag('nul', true, 0, 0, false, null, false, null);                                            // null (detached)
+  const heavy = ag('heavy', true, 0, 0, false, null, false, 0, null, { files: 1, insertions: 100, deletions: 0 }); // mag 100
+  const zero = ag('zero', true, 0, 0, false, null, false, 0, null, { files: 2, insertions: 0, deletions: 0 });     // mag 0 (all-untracked)
+  const nul = ag('nul', true, 0, 0, false, null, false, 0, null);                                            // null (detached)
   // 0 and null both have magnitude 0 → tie → preserve input order (zero before nul);
   // both land after every real WIP (heavy).
   assert.deepEqual(sortGitAgentsByMagnitudeDesc([zero, heavy, nul]).map((x) => x.key), ['heavy', 'zero', 'nul']);
 });
 
 test('equal-magnitude ties preserve input order (stable); the helper does NOT mutate its input', () => {
-  const a = ag('a', true, 0, 0, false, null, false, null, { files: 1, insertions: 5, deletions: 5 }); // mag 10
-  const b = ag('b', true, 0, 0, false, null, false, null, { files: 1, insertions: 8, deletions: 2 }); // mag 10 (tie)
+  const a = ag('a', true, 0, 0, false, null, false, 0, null, { files: 1, insertions: 5, deletions: 5 }); // mag 10
+  const b = ag('b', true, 0, 0, false, null, false, 0, null, { files: 1, insertions: 8, deletions: 2 }); // mag 10 (tie)
   const input = [a, b];
   const out = sortGitAgentsByMagnitudeDesc(input);
   assert.deepEqual(out.map((x) => x.key), ['a', 'b']); // tie → input order preserved (stable)
   assert.deepEqual(input.map((x) => x.key), ['a', 'b']); // input NOT mutated
   assert.notEqual(out, input);                           // returns a NEW array
+});
+
+console.log('\nstashCount magnitude (WARDEN-689): the parked-WIP COUNT reaches ProjectGitAgent + the 🗄N popover ranks heaviest-parker-first');
+test('stashCount is carried onto ProjectGitAgent.stashCount (the magnitude the popover renders · 🗄 N)', () => {
+  // The summarizer already READ status.stashCount (the WARDEN-667 local) but previously
+  // DISCARDED it to the `stashed` boolean. WARDEN-689 carries the magnitude through so
+  // the 🗄N popover can render it per agent. A 12-stash agent must read distinctly from
+  // a 1-stash one — the whole point of the slice.
+  const r = sum([agent('a1', 'warden')], { a1: status(true, 0, 0, { stashCount: 12 }) });
+  assert.equal(r.perProject.warden.agents[0].stashCount, 12);
+  assert.equal(r.total.agents[0].stashCount, 12);
+  const r2 = sum([agent('a2', 'warden')], { a2: status(true, 0, 0, { stashCount: 1 }) });
+  assert.equal(r2.perProject.warden.agents[0].stashCount, 1);
+});
+
+test('a stash-only agent carries its EXACT stashCount via deep-equal (magnitude on the entry)', () => {
+  const r = sum([agent('a1', 'warden')], { a1: status(true, 0, 0, { stashCount: 7 }) });
+  assert.deepEqual(r.perProject.warden.agents, [ag('a1', false, 0, 0, false, null, true, 7)]);
+  assert.deepEqual(r.total.agents, [ag('a1', false, 0, 0, false, null, true, 7)]);
+});
+
+test('stashCount carries through key || id resolution (the magnitude is read from gitStatus[key], not [id])', () => {
+  // Mirrors every other field's key||id resolution: a stashCount under the bare id is
+  // IGNORED, so the entry reads the key's count (2 here), NOT the id's (9) — a yatfa
+  // agent is never misread from a stale id-keyed row.
+  const chats = [agent('raw-id', 'warden', 'warden-worker')];
+  const r = sum(chats, {
+    'raw-id': status(true, 0, 0, { stashCount: 9 }),       // wrong key → ignored
+    'warden-worker': status(true, 0, 0, { stashCount: 2 }), // correct key → 2
+  });
+  assert.equal(r.perProject.warden.agents[0].key, 'warden-worker');
+  assert.equal(r.perProject.warden.agents[0].stashCount, 2);
+});
+
+test('an absent stashCount ⇒ stashCount:0 on the agent (null-safe, no crash) — renders no suffix', () => {
+  // No stashCount field at all (the pre-WARDEN-211 shape, or a status that omits it):
+  // the agent gains stashCount:0, so the popover suffix guard `a.stashCount > 0` is
+  // false → no ` · 🗄 N` renders. Made dirty so the agent surfaces, proving the
+  // 0-default rather than undefined/noise.
+  const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0) });
+  assert.equal(r.perProject.warden.agents[0].stashCount, 0);
+});
+
+test('stashCount:null ⇒ stashCount:0 (null ⇒ unknown ⇒ 0, never noise)', () => {
+  const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, { stashCount: null }) });
+  assert.equal(r.perProject.warden.agents[0].stashCount, 0);
+});
+
+test('stashCount:0 ⇒ stashCount:0 and stashed:false (a zero count is not parked WIP)', () => {
+  const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, { stashCount: 0 }) });
+  // dirty so the agent surfaces; its stashCount is 0 and stashed false.
+  assert.equal(r.perProject.warden.agents[0].stashCount, 0);
+  assert.equal(r.perProject.warden.agents[0].stashed, false);
+});
+
+console.log('\nsortByStashCountDesc (WARDEN-689): heaviest-parker-first for the stash popover, 0-count last + stable');
+test('largest stashCount first (heaviest parker on top); smaller counts after', () => {
+  // 3-agent fixture spanning heavy → light: the popover surfaces the biggest stash
+  // first — the exact rank the ticket specifies (a 12-stash agent holds far more
+  // parked, easily-forgotten work than a 1-stash one).
+  const agents = [
+    ag('light', false, 0, 0, false, null, true, 1),
+    ag('heavy', false, 0, 0, false, null, true, 12),
+    ag('mid', false, 0, 0, false, null, true, 3),
+  ];
+  assert.deepEqual(sortByStashCountDesc(agents).map((a) => a.key), ['heavy', 'mid', 'light']);
+});
+
+test('stability: equal stashCounts preserve input order (ties keep chats order)', () => {
+  // Array.prototype.sort is stable on Node ≥12 / V8; this asserts the helper relies on
+  // that (no comparator tiebreak that would scramble equal-count rows). Two equal
+  // counts (a,b) keep their input order.
+  const tied = [
+    ag('a', false, 0, 0, false, null, true, 2),
+    ag('b', false, 0, 0, false, null, true, 2),
+  ];
+  assert.deepEqual(sortByStashCountDesc(tied).map((x) => x.key), ['a', 'b']);
+});
+
+test('all-zero input is a stable no-op order (no stash → all tied at 0)', () => {
+  assert.deepEqual(sortByStashCountDesc([ag('x', true, 1), ag('y', true, 1)]).map((a) => a.key), ['x', 'y']);
+});
+
+test('sortByStashCountDesc returns a NEW array and does NOT mutate its input', () => {
+  // Load-bearing: the summarizer's `agents` array is shared by the dirty/behind/atRisk/
+  // stalled popovers in chats-iteration order. If the helper mutated its input in place,
+  // the stash sort would scramble the other popovers' determinism. The helper MUST copy
+  // ([...agents].sort) so the shared array is untouched — mirroring sortByHeadAgeDesc.
+  const original = [ag('a', false, 0, 0, false, null, true, 1), ag('b', false, 0, 0, false, null, true, 5)];
+  const inputOrder = original.map((a) => a.key);
+  const sorted = sortByStashCountDesc(original);
+  assert.notEqual(sorted, original, 'returns a new array, not the same reference');
+  assert.deepEqual(original.map((a) => a.key), inputOrder, 'input array is unchanged (not mutated)');
+  assert.deepEqual(sorted.map((a) => a.key), ['b', 'a'], 'the new array IS sorted (heaviest first)');
+});
+
+test('summarizeProjectGitState does NOT reorder agents by stashCount — chats order is preserved', () => {
+  // Guard against an accidental reorder inside the summarizer: its `agents` array MUST
+  // stay in chats iteration order (the deterministic-order invariant shared by the
+  // dirty/behind/atRisk/stalled popovers). The stashCounts here would sort a2 (heaviest)
+  // first if the summarizer reordered — assert they DON'T (chats order a1, a2, a3
+  // stands), so the per-kind sort stays isolated in sortByStashCountDesc (render-time
+  // only).
+  const chats = [agent('a1', 'warden'), agent('a2', 'warden'), agent('a3', 'warden')];
+  const gitStatus = {
+    a1: status(true, 0, 0, { stashCount: 1 }),
+    a2: status(true, 0, 0, { stashCount: 12 }), // HEAVIEST — would sort first if reordered
+    a3: status(true, 0, 0, { stashCount: 3 }),
+  };
+  const r = sum(chats, gitStatus);
+  assert.deepEqual(r.total.agents.map((a) => a.key), ['a1', 'a2', 'a3'], 'total.agents in chats order, NOT stashCount order');
+  assert.deepEqual(r.perProject.warden.agents.map((a) => a.key), ['a1', 'a2', 'a3'], 'perProject agents in chats order too');
+  // Sanity: the counts ARE carried (so a reorder would have had data to act on) — a2 heaviest.
+  const counts = r.total.agents.reduce((m, a) => ({ ...m, [a.key]: a.stashCount }), {});
+  assert.ok(counts.a2 > counts.a3 && counts.a3 > counts.a1, 'a2 is heaviest, a3 mid, a1 light — yet chats order is preserved');
+});
+
+test('the stash-popover slice, when sorted by the helper, DOES go heaviest-first (the render-time contract)', () => {
+  // End-to-end: the summarizer keeps chats order, then the RENDER layer sorts the stash
+  // slice via the helper (GitStateBadge's `sort: sortByStashCountDesc`). This simulates
+  // that two-step pipeline and asserts the popover a human sees is heaviest-parker-first
+  // — the whole point of WARDEN-689.
+  const chats = [agent('a1', 'warden'), agent('a2', 'warden'), agent('a3', 'warden'), agent('a4', 'warden')];
+  const gitStatus = {
+    a1: status(true, 0, 0, { stashCount: 1 }),
+    a2: status(true, 0, 0, { stashCount: 12 }), // heaviest
+    a3: status(false, 0, 0),                    // dirty only — NOT in the stash slice
+    a4: status(true, 0, 0, { stashCount: 3 }),
+  };
+  const r = sum(chats, gitStatus);
+  // Summarizer: chats order, all four agents (a3 is dirty so it appears).
+  assert.deepEqual(r.total.agents.map((a) => a.key), ['a1', 'a2', 'a3', 'a4']);
+  // Render: the stash popover filters stashed (drops a3) then sorts heaviest-first.
+  const stashed = r.total.agents.filter((a) => a.stashed);
+  assert.deepEqual(sortByStashCountDesc(stashed).map((a) => a.key), ['a2', 'a4', 'a1']);
 });
 
 console.log(`\n✓ GIT STATE SUMMARY TESTS PASS (${passed})`);

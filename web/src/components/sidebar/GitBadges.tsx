@@ -21,6 +21,7 @@ import {
   type FileCollision,
   sortByHeadAgeDesc,
   sortGitAgentsByMagnitudeDesc,
+  sortByStashCountDesc,
 } from '@/lib/gitStateSummary';
 import { formatWhatsNewLine, type WhatsNewSummary } from '@/lib/whatsNew';
 import { formatRelative, formatAbsoluteFull } from '@/lib/formatTimestamp';
@@ -269,7 +270,30 @@ const GIT_STATE_KIND = {
   unpushed: { glyph: '↑', color: 'text-amber-400 hover:text-amber-300',  label: 'unpushed commits',    match: (a: ProjectGitAgent) => a.ahead > 0, suffix: (a: ProjectGitAgent) => (a.ahead > 0 ? ` · ↑ ${a.ahead}` : '') },
   behind:   { glyph: '↓', color: 'text-blue-400 hover:text-blue-300',    label: 'behind upstream',     match: (a: ProjectGitAgent) => a.behind > 0, suffix: (a: ProjectGitAgent) => (a.behind > 0 ? ` · ↓ ${a.behind}` : '') },
   atRisk:   { glyph: '⚑', color: 'text-rose-400 hover:text-rose-300',    label: 'at-risk repo state',  match: (a: ProjectGitAgent) => a.atRisk,     suffix: (a: ProjectGitAgent) => (a.atRiskReason ? ` · ${AT_RISK_REASON_LABEL[a.atRiskReason]}` : '') },
-  stash:    { glyph: '🗄', color: 'text-fuchsia-400 hover:text-fuchsia-300', label: 'stashed WIP',       match: (a: ProjectGitAgent) => a.stashed,    suffix: () => '' },
+  stash:    {
+    glyph: '🗄',
+    color: 'text-fuchsia-400 hover:text-fuchsia-300',
+    label: 'stashed WIP',
+    match: (a: ProjectGitAgent) => a.stashed,
+    // WARDEN-689: the per-agent parked-WIP COUNT — the stash-axis magnitude the
+    // other magnitude-bearing axes already rendered (unpushed · ↑ N, behind · ↓ N,
+    // at-risk · reason, dirty · +N −M) but stash lacked (its suffix was () => '').
+    // stashCount already ships on /api/git-status (WARDEN-211) and reaches this row
+    // via ProjectGitAgent.stashCount; rendering ` · 🗄 N` reuses the same ` · `
+    // branch-line suffix pattern the sibling rows render via cfg.suffix(a) below, so
+    // an agent that parked 12 stashes reads distinctly from one that parked 1.
+    // Gated on `stashCount > 0` (⇔ `stashed`, which the popover's match already
+    // filters on) so the suffix is never noise; a 0/absent count renders nothing.
+    suffix: (a: ProjectGitAgent) => (a.stashCount > 0 ? ` · 🗄 ${a.stashCount}` : ''),
+    // WARDEN-689: rank the stash popover heaviest-parker-first (most parked WIP on
+    // top) so a human triaging the fleet integrates the biggest stash first (a
+    // 12-stash agent holds far more easily-forgotten, drift-prone work than a
+    // 1-stash one). `'sort' in cfg` in GitStateBadge scopes this to the stash popover
+    // the SAME way dirty's `sort` is scoped — a pure, NEW-array sort (does not
+    // mutate): summarizeProjectGitState's agents array stays in chats order; only
+    // this popover's filtered slice is reordered at render time.
+    sort: sortByStashCountDesc,
+  },
   stalled:  { glyph: '💤', color: 'text-sky-400 hover:text-sky-300',     label: 'stalled (>7d)',       match: (a: ProjectGitAgent) => a.stalled,    suffix: (a: ProjectGitAgent) => (a.stalled && a.headAgeMs != null ? ` · 💤 ${formatRelative(Date.now() - a.headAgeMs)}` : '') },
 } as const;
 
@@ -288,18 +312,20 @@ function GitStateBadge({ kind, count, agents, chats, gitStatus, onOpenChat }: {
   const [open, setOpen] = useState(false);
   if (count <= 0) return null;
   const cfg = GIT_STATE_KIND[kind];
-  // WARDEN-669 + WARDEN-670: per-kind render-time sort of THIS popover's filtered
-  // slice only. The summarizer's own `agents` array is NEVER reordered here -- its
-  // deterministic chats-iteration-order invariant is asserted throughout
-  // gitStateSummary.test.mjs and shared by the behind/atRisk/stash popovers, which
-  // stay unsorted. The unpushed popover ranks oldest-HEAD-first (WARDEN-669: surface
-  // the most rot-prone commits on top so a human integrates them first); the dirty
-  // popover ranks heaviest-WIP-first via the table's `sort` (WARDEN-670: largest
-  // insertions+deletions magnitude on top). `'sort' in cfg` narrows to the dirty entry
-  // (the only kind carrying a `sort`), so this never reorders behind/atRisk/stash.
-  // Both sort helpers return NEW arrays (no mutation of `agents`). `now` is captured
-  // once so the reconstructed HEAD epoch (now - headAgeMs) is consistent between a
-  // row's relative label and its absolute title (WARDEN-669).
+  // WARDEN-669 + WARDEN-670 + WARDEN-689: per-kind render-time sort of THIS
+  // popover's filtered slice only. The summarizer's own `agents` array is NEVER
+  // reordered here -- its deterministic chats-iteration-order invariant is asserted
+  // throughout gitStateSummary.test.mjs and shared by the behind/atRisk/stalled
+  // popovers, which stay unsorted. The unpushed popover ranks oldest-HEAD-first
+  // (WARDEN-669: surface the most rot-prone commits on top so a human integrates
+  // them first); the dirty popover ranks heaviest-WIP-first (WARDEN-670: largest
+  // insertions+deletions magnitude on top); the stash popover ranks heaviest-parker-
+  // first (WARDEN-689: most parked WIP on top) — each via the table's `sort`.
+  // `'sort' in cfg` narrows to the dirty + stash entries (the kinds carrying a
+  // `sort`), so this never reorders behind/atRisk/stalled. All sort helpers return
+  // NEW arrays (no mutation of `agents`). `now` is captured once so the
+  // reconstructed HEAD epoch (now - headAgeMs) is consistent between a row's
+  // relative label and its absolute title (WARDEN-669).
   const matched = agents.filter(cfg.match);
   const shown =
     kind === 'unpushed' ? sortByHeadAgeDesc(matched)
