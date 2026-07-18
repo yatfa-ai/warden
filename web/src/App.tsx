@@ -29,6 +29,7 @@ import { ObserverTabs } from '@/components/ObserverTabs';
 import { SettingsPage } from '@/components/SettingsPage';
 import { OpenChatBrowserPage } from '@/components/OpenChatBrowserPage';
 import { GlobalSearchDialog } from '@/components/GlobalSearchDialog';
+import { SessionTranscriptViewer } from '@/components/SessionTranscriptViewer';
 import { HealthDashboard, type GroupMode } from '@/components/HealthDashboard';
 import { AttentionBadge, dotForState } from '@/components/AttentionBadge';
 import { WatchCatchup } from '@/components/WatchCatchup';
@@ -209,6 +210,11 @@ function App() {
   const [bannerDismissed, setBannerDismissed] = useState(false);
   const [externalViewMode, setExternalViewMode] = useState<'sessions' | 'activity' | 'directives' | null>(null);
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
+  // The past-conversation whose read-only transcript is open from a global-search
+  // result (WARDEN-719). Lifted to App level — NOT inside GlobalSearchDialog —
+  // because that dialog auto-closes on result-click, which would unmount a viewer
+  // rendered within it. Mirrors OpenChatBrowserPage's internal `viewing` state.
+  const [viewingSession, setViewingSession] = useState<{ id: string; host: string; label: string } | null>(null);
   const [externalSearchQuery, setExternalSearchQuery] = useState<{ paneId: string; query: string } | null>(null);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(uiState.sidebarCollapsed);
@@ -1965,6 +1971,20 @@ function App() {
         openPanes={openPanes}
         onFocusPane={handleFocusPane}
         onJumpToMatch={handleJumpToMatch}
+        onOpenSession={(id, host, label) => {
+          // Set the App-level viewing session, then close the search dialog. The
+          // viewer (rendered just below) survives the dialog closing because its
+          // open state + session live here, not inside the dialog.
+          setViewingSession({ id, host, label });
+          setShowGlobalSearch(false);
+        }}
+        timestampFormat={timestampFormat}
+      />
+      <SessionTranscriptViewer
+        open={!!viewingSession}
+        onOpenChange={(o) => { if (!o) setViewingSession(null); }}
+        session={viewingSession}
+        timestampFormat={timestampFormat}
       />
       <ConfirmDialog
         open={killTarget !== null}
