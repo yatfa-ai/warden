@@ -36,7 +36,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-gitstate-test-'));
 const tmpFile = join(tmpDir, 'gitStateSummary.mjs');
 writeFileSync(tmpFile, code);
-const { summarizeProjectGitState, sortByHeadAgeDesc, sortByStashCountDesc, detectProjectFileCollisions, detectProjectImpendingCollisions, detectProjectOutgoingCollisions, sortGitAgentsByMagnitudeDesc } = await import(tmpFile);
+const { summarizeProjectGitState, sortByHeadAgeDesc, sortByStashCountDesc, detectProjectFileCollisions, detectProjectImpendingCollisions, detectProjectOutgoingCollisions, sortGitAgentsByMagnitudeDesc, sortGitAgentsByConflictFirst } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -61,29 +61,35 @@ const agent = (id, project, key) => ({ id, project, active: true, key });
 // behind default kept older cases green.
 const status = (clean, ahead, behind = 0, extra = {}) => ({ clean, ahead, behind, ...extra });
 // The expected shape of a contributing-agent entry (WARDEN-268 + WARDEN-297 +
-// WARDEN-635 + WARDEN-667 + WARDEN-669 + WARDEN-670 + WARDEN-682 + WARDEN-689). behind
-// defaults to 0 to mirror status(); atRisk defaults to false + atRiskReason to null so
-// a pre-635 expected agent reads as not-at-risk without touching each call site;
-// stashed defaults to false so a pre-667 expected agent reads as not-stashed the same
-// way; stashCount (WARDEN-689, 8th arg — right after the `stashed` boolean it
-// magnifies, mirroring how `ahead`/`behind` carry their counts alongside their > 0
-// booleans) defaults to 0 so any pre-689 expected agent reads as stash-free the same
-// way (absent stashCount on the status ⇒ 0 ⇒ stashed:false ⇒ consistent); headAgeMs
-// defaults to null (WARDEN-669) so a pre-669 fixture (no headDate) reads as age-unknown;
-// diffstat (WARDEN-670) defaults to null so EVERY pre-670 expected agent carries the
-// field (the implementation reads `status.diffstat ?? null`) -- absent fields are
-// treated the same by the implementation, so old cases stay green exactly as the
-// behind/atRisk/stashed/stashCount/headAgeMs defaults kept their predecessors green;
-// stalled (WARDEN-682) defaults to false so a pre-682 expected agent reads as
-// not-stalled the same way. A WARDEN-669 case passes a finite headAgeMs as the 9th arg
+// WARDEN-635 + WARDEN-667 + WARDEN-669 + WARDEN-670 + WARDEN-682 + WARDEN-689 +
+// WARDEN-701). behind defaults to 0 to mirror status(); atRisk defaults to false +
+// atRiskReason to null so a pre-635 expected agent reads as not-at-risk without
+// touching each call site; stashed defaults to false so a pre-667 expected agent
+// reads as not-stashed the same way; stashCount (WARDEN-689, 8th arg — right after
+// the `stashed` boolean it magnifies, mirroring how `ahead`/`behind` carry their
+// counts alongside their > 0 booleans) defaults to 0 so any pre-689 expected agent
+// reads as stash-free the same way (absent stashCount on the status ⇒ 0 ⇒ stashed:
+// false ⇒ consistent); headAgeMs defaults to null (WARDEN-669) so a pre-669 fixture
+// (no headDate) reads as age-unknown; diffstat (WARDEN-670) defaults to null so EVERY
+// pre-670 expected agent carries the field (the implementation reads `status.diffstat
+// ?? null`) -- absent fields are treated the same by the implementation, so old cases
+// stay green exactly as the behind/atRisk/stashed/stashCount/headAgeMs defaults kept
+// their predecessors green; stalled (WARDEN-682) defaults to false so a pre-682
+// expected agent reads as not-stalled the same way; conflictCount (WARDEN-701) defaults
+// to 0 so EVERY pre-701 expected agent carries the field (the implementation counts
+// status.files conflict flags, 0 when none) -- absent fields are treated the same by
+// the implementation, so old cases stay green exactly as the earlier defaults kept
+// their predecessors green. A WARDEN-669 case passes a finite headAgeMs as the 9th arg
 // (after a 0 stashCount); a WARDEN-670 case passes the inline { files, insertions,
 // deletions } magnitude as the 10th (after a 0 stashCount + null headAgeMs
 // placeholder), mirroring how status()'s `extra` object carries diffstat on the input
 // side; a WARDEN-682 stalled case passes headAgeMs (9th, the >7d age), a null diffstat
 // placeholder (10th), and stalled:true (11th). A stashed:true case MUST pass its
 // explicit count as the 8th arg (its input stashCount), since stashed:true ⇔
-// stashCount > 0 and deep-equality checks the magnitude.
-const ag = (key, dirty, ahead, behind = 0, atRisk = false, atRiskReason = null, stashed = false, stashCount = 0, headAgeMs = null, diffstat = null, stalled = false) => ({ key, dirty, ahead, behind, atRisk, atRiskReason, stashed, stashCount, headAgeMs, diffstat, stalled });
+// stashCount > 0 and deep-equality checks the magnitude. A WARDEN-701 conflict case
+// passes the atRiskReason 'conflict' (6th) and conflictCount N (12th, after the
+// stalled placeholder) for a merge-conflict-blocked agent.
+const ag = (key, dirty, ahead, behind = 0, atRisk = false, atRiskReason = null, stashed = false, stashCount = 0, headAgeMs = null, diffstat = null, stalled = false, conflictCount = 0) => ({ key, dirty, ahead, behind, atRisk, atRiskReason, stashed, stashCount, headAgeMs, diffstat, stalled, conflictCount });
 
 // WARDEN-682: a fixed `now` so the stalled (>7d) assertions are deterministic — the
 // module's `now` arg defaults to Date.now() in production (ChatSidebar); stalled-axis
@@ -1065,6 +1071,170 @@ test('the stash-popover slice, when sorted by the helper, DOES go heaviest-first
   // Render: the stash popover filters stashed (drops a3) then sorts heaviest-first.
   const stashed = r.total.agents.filter((a) => a.stashed);
   assert.deepEqual(sortByStashCountDesc(stashed).map((a) => a.key), ['a2', 'a4', 'a1']);
+});
+
+console.log('\nconflict axis (WARDEN-701): ⚑ surfaces a merge-conflict-BLOCKED agent distinctly as a 4th atRiskReason');
+test('a conflicted agent (unmerged paths) derives atRiskReason:"conflict", NOT "op", even with inProgress.operation set — precedence over op', () => {
+  // A blocked merge ships BOTH inProgress.operation (the running merge) AND conflicted
+  // porcelain paths (UU/AA/…). conflict ⟹ op, but a blocked merge cannot self-resolve,
+  // so 'conflict' is the MORE specific/urgent reason and MUST win the precedence over
+  // the generic 'op' — the whole point of WARDEN-701 (otherwise it reads identically to
+  // a clean, auto-completing rebase under ⚑'s "operation in progress" label).
+  const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, {
+    branch: 'feature', upstream: 'origin/feature',
+    inProgress: { operation: 'merge' },
+    files: [{ path: 'a.ts', conflict: true }, { path: 'b.ts', conflict: true }, { path: 'c.ts' }],
+  }) });
+  assert.deepEqual(r.perProject, { warden: { dirty: 1, unpushed: 0, behind: 0, atRisk: 1, stashed: 0, stalled: 0, agents: [ag('a1', true, 0, 0, true, 'conflict', false, 0, null, null, false, 2)] } });
+});
+
+test('conflictCount counts ONLY conflicted files (a single unmerged path → 1)', () => {
+  // The count behind the ⚑ suffix "merge conflict · N unmerged" — only files carrying
+  // the porcelain `conflict` flag count; ordinary staged/unstaged paths alongside do not.
+  const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, {
+    branch: 'feature', upstream: 'origin/feature',
+    inProgress: { operation: 'merge' },
+    files: [{ path: 'only.ts', conflict: true }],
+  }) });
+  assert.equal(r.perProject.warden.agents[0].conflictCount, 1);
+  assert.equal(r.perProject.warden.agents[0].atRiskReason, 'conflict');
+});
+
+test('a conflicted agent with NO inProgress.operation still derives "conflict" — conflicted paths are at-risk regardless', () => {
+  // Defensive: porcelain conflict markers without a recorded inProgress.operation (an
+  // unusual but possible state) must STILL surface as 'conflict', never fall through to
+  // null — a conflicted tree needs a human regardless of whether the op is recorded.
+  const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, {
+    branch: 'feature', upstream: 'origin/feature',
+    files: [{ path: 'a.ts', conflict: true }],
+  }) });
+  assert.deepEqual(r.perProject.warden.agents, [ag('a1', true, 0, 0, true, 'conflict', false, 0, null, null, false, 1)]);
+});
+
+test('precedence chain: detached > noUpstream > conflict > op — a noUpstream agent WITH conflicted files reads "noUpstream"', () => {
+  // Locks the full ternary order the ticket specifies. The conflict-vs-op precedence is
+  // the primary fix; this asserts the rest of the chain so the ordering is explicit and
+  // reviewed. A no-upstream branch mid a local merge with conflicts is an edge case, but
+  // the noUpstream branch precedes the conflict branch, so it wins.
+  const chats = [agent('det', 'warden'), agent('noUp', 'warden'), agent('conf', 'warden'), agent('opA', 'warden')];
+  const gitStatus = {
+    det: status(false, 0, 0, { detached: true, branch: 'HEAD', files: [{ path: 'd.ts', conflict: true }] }),           // detached wins over conflict
+    noUp: status(false, 0, 0, { branch: 'feature', upstream: null, files: [{ path: 'n.ts', conflict: true }] }),         // noUpstream wins over conflict
+    conf: status(false, 0, 0, { branch: 'feature', upstream: 'origin/feature', inProgress: { operation: 'merge' }, files: [{ path: 'c.ts', conflict: true }] }), // conflict (op present but conflict wins)
+    opA: status(false, 0, 0, { branch: 'feature', upstream: 'origin/feature', inProgress: { operation: 'rebase' } }),   // op only
+  };
+  const r = sum(chats, gitStatus);
+  const reasons = r.total.agents.reduce((m, a) => ({ ...m, [a.key]: a.atRiskReason }), {});
+  assert.equal(reasons.det, 'detached');
+  assert.equal(reasons.noUp, 'noUpstream');
+  assert.equal(reasons.conf, 'conflict');
+  assert.equal(reasons.opA, 'op');
+});
+
+test('a conflict-only agent is retained even when otherwise clean — the atRisk-only retain, mirrored for the 4th reason', () => {
+  // Mirrors the at-risk-only retain (the detached case at the WARDEN-635 section): a
+  // project whose only agent is at-risk MUST NOT be dropped from the sparse map. Here
+  // the sole at-risk driver is the conflict; clean:true isolates atRisk as the ONLY
+  // retain reason (in reality a conflicted tree is also dirty, but this asserts the
+  // conflict-derived atRisk retains the agent independent of the dirty axis).
+  const r = sum([agent('a1', 'warden'), agent('b1', 'tinker')], {
+    a1: status(true, 0, 0, { branch: 'feature', upstream: 'origin/feature', files: [{ path: 'x.ts', conflict: true }] }), // conflict only (clean tree asserted)
+    b1: status(true, 0, 0), // clean → tinker absent
+  });
+  assert.deepEqual(r.perProject, { warden: { dirty: 0, unpushed: 0, behind: 0, atRisk: 1, stashed: 0, stalled: 0, agents: [ag('a1', false, 0, 0, true, 'conflict', false, 0, null, null, false, 1)] } });
+  assert.equal('tinker' in r.perProject, false);
+});
+
+test('every non-conflict agent carries conflictCount:0 (the field rides on every ProjectGitAgent, mirroring diffstat/stashCount)', () => {
+  // The deep-equality shape contract: EVERY agent carries conflictCount, not just
+  // conflict ones — so the React layer can read a.conflictCount on any atRisk row
+  // without a present check. A detached agent (no conflicted files) reads conflictCount:0.
+  const r = sum([agent('a1', 'warden')], { a1: status(true, 0, 0, { detached: true, branch: 'HEAD' }) });
+  assert.deepEqual(r.perProject.warden.agents, [ag('a1', false, 0, 0, true, 'detached')]); // conflictCount:0 default
+  assert.equal(r.perProject.warden.agents[0].conflictCount, 0);
+});
+
+test('the atRisk filter still matches ⚑N with the conflict agent folded in (the popover contract holds)', () => {
+  // The ⚑N chip popover lists agents.filter(a => a.atRisk); that filtered length must
+  // still equal the chip's atRisk count field now that conflict is a 4th reason class —
+  // a conflict agent is at-risk (atRiskReason !== null ⇒ atRisk true), counted once.
+  const chats = [agent('a1', 'warden'), agent('a2', 'warden'), agent('a3', 'warden')];
+  const gitStatus = {
+    a1: status(true, 0, 0, { detached: true, branch: 'HEAD' }),                                                                     // at-risk (detached)
+    a2: status(true, 0, 0, { branch: 'main', upstream: 'origin/main', inProgress: { operation: 'merge' }, files: [{ path: 'm.ts', conflict: true }] }), // at-risk (conflict)
+    a3: status(true, 0, 0, { branch: 'main', upstream: 'origin/main' }),                                                            // tracking, clean → not at-risk, skipped
+  };
+  const r = sum(chats, gitStatus);
+  const agents = r.perProject.warden.agents;
+  assert.deepEqual(agents.filter((a) => a.atRisk), [
+    ag('a1', false, 0, 0, true, 'detached'),
+    ag('a2', false, 0, 0, true, 'conflict', false, 0, null, null, false, 1),
+  ]);
+  assert.equal(r.perProject.warden.atRisk, agents.filter((a) => a.atRisk).length);
+  assert.equal(r.perProject.warden.atRisk, 2);
+});
+
+console.log('\natRisk popover sort (WARDEN-701): render-time conflict-first, scoped to the atRisk kind');
+test('summarizeProjectGitState does NOT reorder atRisk agents conflict-first — chats order is preserved (sort is render-time only)', () => {
+  // The load-bearing invariant: summarizeProjectGitState emits agents in chats order so
+  // its deep-equality holds AND the dirty/behind/stash/stalled popovers stay deterministic.
+  // The conflict-first sort is a per-kind RENDER-TIME concern (GIT_STATE_KIND.atRisk.sort
+  // in GitStateBadge), NEVER inside the summarizer. This case puts an op agent FIRST in
+  // chats order and a conflict agent second and asserts the summarizer leaves them there.
+  const chats = [agent('a1', 'warden'), agent('a2', 'warden'), agent('a3', 'warden')];
+  const gitStatus = {
+    a1: status(false, 0, 0, { branch: 'feature', upstream: 'origin/feature', inProgress: { operation: 'rebase' } }),                                  // op
+    a2: status(false, 0, 0, { branch: 'feature', upstream: 'origin/feature', inProgress: { operation: 'merge' }, files: [{ path: 'x.ts', conflict: true }] }), // conflict
+    a3: status(false, 0, 0, { detached: true, branch: 'HEAD' }),                                                                                       // detached
+  };
+  const r = sum(chats, gitStatus);
+  assert.deepEqual(r.total.agents.map((a) => a.key), ['a1', 'a2', 'a3'], 'total.agents in chats order, NOT conflict-first');
+  assert.deepEqual(r.perProject.warden.agents.map((a) => a.key), ['a1', 'a2', 'a3'], 'perProject agents in chats order too');
+  // End-to-end: the render layer filters atRisk then sorts conflict-first → a2 on top.
+  const atRisk = r.total.agents.filter((a) => a.atRisk);
+  assert.deepEqual(sortGitAgentsByConflictFirst(atRisk).map((a) => a.key), ['a2', 'a1', 'a3']);
+});
+
+test('sortGitAgentsByConflictFirst ranks a conflict agent above op/noUpstream/detached agents', () => {
+  // A 4-agent atRisk slice spanning every reason class, in an order no sort would
+  // produce by accident (op, noUpstream, conflict, detached): the blocked merge
+  // (conflict) MUST bubble to the top — the one repo state that cannot self-resolve.
+  const agents = [
+    ag('opA', false, 0, 0, true, 'op'),
+    ag('noUpA', false, 0, 0, true, 'noUpstream'),
+    ag('confA', false, 0, 0, true, 'conflict', false, 0, null, null, false, 3),
+    ag('detA', false, 0, 0, true, 'detached'),
+  ];
+  assert.deepEqual(sortGitAgentsByConflictFirst(agents).map((a) => a.key), ['confA', 'opA', 'noUpA', 'detA']);
+});
+
+test('sortGitAgentsByConflictFirst: multiple conflicts keep input order, non-conflicts keep input order, stable', () => {
+  // Array.prototype.sort is stable on Node ≥12 / V8; this asserts the helper relies on
+  // that (no comparator tiebreak that would scramble equal rows). Two conflicts (conf1,
+  // conf2) keep order and lead; two non-conflicts (op1, op2) keep order and trail.
+  const input = [
+    ag('op1', false, 0, 0, true, 'op'),
+    ag('conf1', false, 0, 0, true, 'conflict', false, 0, null, null, false, 1),
+    ag('conf2', false, 0, 0, true, 'conflict', false, 0, null, null, false, 5),
+    ag('op2', false, 0, 0, true, 'op'),
+  ];
+  assert.deepEqual(sortGitAgentsByConflictFirst(input).map((a) => a.key), ['conf1', 'conf2', 'op1', 'op2']);
+});
+
+test('sortGitAgentsByConflictFirst returns a NEW array and does NOT mutate its input', () => {
+  // Load-bearing: the summarizer's `agents` array is shared by the dirty/behind/stash/
+  // stalled popovers in chats-iteration order. If the helper mutated its input in place,
+  // the atRisk sort would scramble the other popovers' determinism. The helper MUST copy.
+  const original = [ag('opA', false, 0, 0, true, 'op'), ag('confA', false, 0, 0, true, 'conflict', false, 0, null, null, false, 2)];
+  const inputOrder = original.map((a) => a.key);
+  const sorted = sortGitAgentsByConflictFirst(original);
+  assert.notEqual(sorted, original, 'returns a new array, not the same reference');
+  assert.deepEqual(original.map((a) => a.key), inputOrder, 'input array is unchanged (not mutated)');
+  assert.deepEqual(sorted.map((a) => a.key), ['confA', 'opA'], 'the new array IS sorted (conflict first)');
+});
+
+test('all-non-conflict input is a stable no-op order (no conflict → all tied at 0)', () => {
+  assert.deepEqual(sortGitAgentsByConflictFirst([ag('x', false, 0, 0, true, 'op'), ag('y', false, 0, 0, true, 'detached')]).map((a) => a.key), ['x', 'y']);
 });
 
 console.log(`\n✓ GIT STATE SUMMARY TESTS PASS (${passed})`);

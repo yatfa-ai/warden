@@ -55,7 +55,13 @@ export interface GitStateStatus {
   clean?: boolean | null;
   ahead?: number | null;
   behind?: number | null;
-  files?: { path: string }[] | null;
+  // The changed-file list /api/git-status already returns per chat (parsed from
+  // `git status --porcelain`) — the join key detectProjectFileCollisions compares
+  // across agents, AND (WARDEN-701) each file object carries the porcelain `conflict`
+  // flag (parsed in src/gitStatus.js via isConflictStatus for the unmerged status codes
+  // DD/AU/UD/UA/DU/AA/UU) so summarizeProjectGitState can count unmerged paths and
+  // surface a blocked merge distinctly under ⚑. null for a detached/no-branch chat.
+  files?: { path: string; conflict?: boolean }[] | null;
   outgoingFiles?: string[] | null;
   // WARDEN-635: the at-risk repo-state signals `/api/git-status` already returns
   // top-level — `detached` (WARDEN-239), `upstream` (WARDEN-243, null when none),
@@ -127,11 +133,27 @@ export interface ProjectGitAgent {
   // previously dropped: detached HEAD (commits not on a branch; at risk if reflog
   // expires), no-upstream (a named branch never `push -u`'d — local-only, unbacked
   // work), or a mid merge/rebase/cherry-pick/revert/bisect op. `atRiskReason`
-  // disambiguates WHICH of the three it is so the popover can label the specific risk;
+  // disambiguates WHICH of those it is so the popover can label the specific risk;
   // null when the agent is not at-risk. Mirrors the per-row discriminator at
   // GitBadges.tsx (the `noUpstream` line) so the chip and the row agree by construction.
+  // WARDEN-701: a 4th reason class, `'conflict'` (unmerged UU/AA/UD/… paths), slots
+  // BEFORE `'op'` in the precedence (conflict ⟹ op — conflicts only arise mid-merge/
+  // rebase/cherry-pick ⇒ inProgress.operation is truthy in practice — but a blocked
+  // merge cannot self-resolve, so it is the MORE specific/urgent at-risk signal and the
+  // one a human must act on RIGHT NOW). Distinct from `'op'` (a clean, auto-completing
+  // rebase) so a blocked merge no longer reads identically to it under ⚑'s generic
+  // "operation in progress" label.
   atRisk: boolean;
-  atRiskReason: 'detached' | 'noUpstream' | 'op' | null;
+  atRiskReason: 'detached' | 'noUpstream' | 'op' | 'conflict' | null;
+  // WARDEN-701: the # of unmerged (conflicted) paths this agent carries — the count
+  // behind the `'conflict'` atRiskReason, surfaced as the per-row ⚑ suffix
+  // "merge conflict · N unmerged". Derived by counting files with the porcelain
+  // `conflict` flag in the cached status.files array (no new fetch, no backend change
+  // — the flag already ships on /api/git-status). 0 for every non-conflict reason
+  // (detached/noUpstream/op) so the field reads truthy-count-equivalent to "is a
+  // blocked merge", mirroring how stashCount/diffstat/headAgeMs were carried onto
+  // ProjectGitAgent (WARDEN-667/670/669): a present, deep-equal field on every entry.
+  conflictCount: number;
   // WARDEN-667: parked WIP — `stashCount > 0`, surfaced as the 5th project chip
   // (🗄N). `git stash` parks uncommitted work off the tree (porcelain status reads
   // clean while real WIP sits in the reflog), so a clean, pushed, up-to-date,
@@ -287,17 +309,31 @@ export function summarizeProjectGitState(
     // across detached / no-upstream / non-git-unborn (all read upstream:null).
     // server.js gates inProgress.operation on `branch` (null for detached), so a
     // detached agent surfaces via 'detached', never also 'op' — folded into one axis.
+    //
+    // WARDEN-701: a 4th reason class, `'conflict'` (unmerged UU/AA/UD/… paths), slots
+    // BEFORE `'op'`. conflict ⟹ op — conflicts only arise mid-merge/rebase/cherry-pick
+    // ⇒ inProgress.operation is truthy in practice — but a blocked merge CANNOT self-
+    // resolve (unlike a clean, auto-completing rebase), so it is the more specific/
+    // urgent at-risk signal and the one a human must act on RIGHT NOW. Counting the
+    // porcelain `conflict` flags already on the cached status.files array (no new
+    // fetch, no backend change). hasConflict reads truthy even if inProgress.operation
+    // is somehow absent (porcelain conflict markers without a recorded op) — a
+    // conflicted tree is at-risk regardless, so the branch never falls through to null.
     const isDetached = status.detached === true;
     const branch = status.branch ?? null;
     const upstream = status.upstream ?? null;
     const op = status.inProgress?.operation || null;
+    const conflictCount = (status.files ?? []).filter((f) => f?.conflict).length;
+    const hasConflict = conflictCount > 0;
     const atRiskReason: ProjectGitAgent['atRiskReason'] = isDetached
       ? 'detached'
       : (!isDetached && !!branch && branch !== 'HEAD' && !upstream)
         ? 'noUpstream'
-        : op
-          ? 'op'
-          : null;
+        : hasConflict
+          ? 'conflict'
+          : op
+            ? 'op'
+            : null;
     const atRisk = atRiskReason !== null;
     // WARDEN-667: parked WIP — `git stash` parks uncommitted work off the tree, so
     // the stashCount signal is INDEPENDENT of the dirty/ahead/behind/atRisk axes
@@ -349,7 +385,7 @@ export function summarizeProjectGitState(
     // The agent entry shared by the per-project list and the global union. One
     // entry per contributing agent, so a both-dirty-and-at-risk agent appears a
     // single time with all signals (never duplicated).
-    const agent: ProjectGitAgent = { key: c.key || c.id, dirty, ahead, behind: behindCount, atRisk, atRiskReason, stashed, stashCount, headAgeMs, stalled, diffstat };
+    const agent: ProjectGitAgent = { key: c.key || c.id, dirty, ahead, behind: behindCount, atRisk, atRiskReason, stashed, stashCount, headAgeMs, stalled, diffstat, conflictCount };
 
     const entry = perProject[c.project] ?? { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [] };
     if (dirty) entry.dirty += 1;
@@ -449,6 +485,31 @@ export function sortGitAgentsByMagnitudeDesc(agents: ProjectGitAgent[]): Project
  */
 export function sortByStashCountDesc(agents: ProjectGitAgent[]): ProjectGitAgent[] {
   return [...agents].sort((a, b) => b.stashCount - a.stashCount);  // largest count first
+}
+
+/**
+ * Rank the ⚑ atRisk popover conflict-first so a merge-conflict-BLOCKED agent sits on
+ * top — a human clicking the fleet chip triages the one repo state that CANNOT self-
+ * resolve and needs a human RIGHT NOW before every clean auto-completing rebase,
+ * no-upstream parker, or detached HEAD (WARDEN-701). Conflict-reason agents
+ * (`atRiskReason === 'conflict'`) sort above every other atRiskReason; ties (both
+ * conflict, or both not) preserve the pre-sort (chats) input order, so the
+ * remainder stays in chats iteration order and conflict agents keep their relative
+ * order among themselves.
+ *
+ * Pure + returns a NEW array (does NOT mutate its input) so it is unit-testable
+ * without a React runner, matching the module's `diff.ts` philosophy and the three
+ * sibling sorts. Critically, the SUMMARIZER's own `agents` array is NOT reordered by
+ * this helper: that array MUST stay in `chats` iteration order (its deterministic-order
+ * invariant, asserted throughout the test suite and shared by the dirty/behind/stash/
+ * stalled popovers). The sort is a per-kind RENDER-TIME concern — the React layer
+ * (GitBadges.tsx's GIT_STATE_KIND.atRisk.sort) applies it ONLY to the atRisk popover's
+ * filtered slice, never inside summarizeProjectGitState. `Array.prototype.sort` is
+ * stable on Node ≥12 / V8, so conflict/non-conflict ties preserve the input order.
+ */
+export function sortGitAgentsByConflictFirst(agents: ProjectGitAgent[]): ProjectGitAgent[] {
+  const rank = (a: ProjectGitAgent): number => (a.atRiskReason === 'conflict' ? 1 : 0);
+  return [...agents].sort((a, b) => rank(b) - rank(a));  // conflict (1) above the rest (0)
 }
 
 // A changed-file path that ≥2 distinct active agents in the SAME project both
