@@ -16,7 +16,7 @@ import { CollisionCompareDialog } from '../CollisionCompareDialog';
 import { cn } from '@/lib/utils';
 import { findChat } from '@/lib/agentFilter';
 import { displayName } from '@/lib/chatDisplay';
-import { type ProjectGitAgent, type FileCollision } from '@/lib/gitStateSummary';
+import { type ProjectGitAgent, type FileCollision, sortByHeadAgeDesc } from '@/lib/gitStateSummary';
 import { formatWhatsNewLine, type WhatsNewSummary } from '@/lib/whatsNew';
 import { formatRelative, formatAbsoluteFull } from '@/lib/formatTimestamp';
 import type { Chat } from '@/lib/types';
@@ -208,6 +208,14 @@ export function GitChangedFile({ file, onOpen, onOpenConflict, onOpenFile }: { f
 // from all four other chip hues AND from the red ⚠ collision glyph and the red ⚠
 // in-progress-op glyph, per WARDEN-68's distinct-vocabulary rule: a different hue
 // AND a different glyph so the five chip axes never collide).
+// WARDEN-669: the >7d HEAD-commit staleness threshold, SHARED between the per-row
+// GitBranchBadge (WARDEN-545) and the fleet ↑N unpushed popover (WARDEN-669) so the
+// fleet and the row agree by construction — a HEAD the per-row badge tints amber is
+// the SAME age the fleet popover tints amber, no second magic number to drift. Hoisted
+// to module scope (from GitBranchBadge's local const) so the unpushed popover reuses
+// it without redefining it. The age field on ProjectGitAgent is a threshold-FREE rank;
+// this const only governs the label TINT, exactly as it does for the per-row badge.
+const STALE_HEAD_AGE_MS = 7 * 86400_000;
 // atRisk reason → the per-row suffix label. 'op' is intentionally generic — the
 // agent's specific op (merge/rebase/cherry-pick/…) is not carried on ProjectGitAgent
 // (only the reason class); the per-row GitBranchBadge shows the op itself.
@@ -239,7 +247,17 @@ function GitStateBadge({ kind, count, agents, chats, gitStatus, onOpenChat }: {
   const [open, setOpen] = useState(false);
   if (count <= 0) return null;
   const cfg = GIT_STATE_KIND[kind];
-  const shown = agents.filter(cfg.match);
+  // WARDEN-669: the unpushed popover ranks oldest-HEAD-first so the longest-sitting
+  // WIP surfaces on top (integrate the most rot-prone commits first). The sort is a
+  // per-kind render-time concern — dirty/behind/atRisk stay in `chats` iteration
+  // order (their popovers are out of scope for this slice). sortByHeadAgeDesc returns
+  // a NEW array (does not mutate `agents`), so the shared summarizer-order invariant
+  // the other three popovers rely on is untouched. `now` is captured once so the
+  // reconstructed HEAD epoch (now - headAgeMs) is consistent between the relative
+  // label and the absolute title within a row.
+  const matched = agents.filter(cfg.match);
+  const shown = kind === 'unpushed' ? sortByHeadAgeDesc(matched) : matched;
+  const now = Date.now();
   const title = `${count} agent${count === 1 ? '' : 's'} with ${cfg.label} — click to list`;
   return (
     <RadixPopover.Root open={open} onOpenChange={setOpen}>
@@ -306,6 +324,20 @@ function GitStateBadge({ kind, count, agents, chats, gitStatus, onOpenChat }: {
                       {branch && (
                         <span className="block truncate text-[10px] text-cyan-400/80" title={branch}>
                           ⎇ {branch}{cfg.suffix(a)}
+                          {/* WARDEN-669: relative AGE label on each unpushed row, so the
+                              ranked-oldest-first popover also says HOW long the WIP has sat.
+                              headAgeMs is an AGE; formatRelative/formatAbsoluteFull take an
+                              EPOCH, so reconstruct it (now - headAgeMs) — `now` is captured
+                              once above, so the label and the absolute title agree exactly.
+                              The >7d amber tint reuses the per-row badge's STALE_HEAD_AGE_MS
+                              (shared module const) so fleet and row agree by construction —
+                              no new threshold. null age (no commits / non-git cwd) renders
+                              nothing, mirroring headFresh. Unpushed-only (minimal slice). */}
+                          {kind === 'unpushed' && a.headAgeMs != null && (
+                            <span className={a.headAgeMs > STALE_HEAD_AGE_MS ? 'text-amber-400' : 'text-muted-foreground'} title={`last commit ${formatAbsoluteFull(now - a.headAgeMs)}`}>
+                              {` · ${formatRelative(now - a.headAgeMs)}`}
+                            </span>
+                          )}
                         </span>
                       )}
                     </span>
@@ -851,7 +883,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   // for detached), so this proves the unconditional fetch reaches detached agents
   // too — the whole point of the Refinement-1 fix. Stale (>7d) gets an amber tint
   // so quiet agents pop; fresh stays muted so active ones recede into the row.
-  const STALE_HEAD_AGE_MS = 7 * 86400_000;
+  // STALE_HEAD_AGE_MS is the module-level const shared with the fleet popover (WARDEN-669).
   const headMs = typeof headDate === 'string' && headDate ? Date.parse(headDate) : NaN;
   const headFresh = Number.isFinite(headMs);
   const headStale = headFresh && Date.now() - headMs > STALE_HEAD_AGE_MS;
