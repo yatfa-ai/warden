@@ -121,23 +121,92 @@ export function redistributeRatios(
   return next;
 }
 
+// Resolve each track's pixel width on one axis under a CSS
+// `minmax(floorPx, r fr)` distribution: each track's fr-share of the
+// distributable space, clamped to floorPx, with the deficit redistributed
+// proportionally among the still-unclamped tracks — iterated to a fixed point
+// so a redistribution that pushes another track below floorPx re-clamps it.
+// This mirrors how CSS Grid resolves `minmax(floor, Xfr)` track sizes, so the
+// predicted track widths (and thus the predicted gutter centers) track the
+// RENDERED layout even when the floor binds: a narrow window after a drag, or
+// more columns than the width can fit (side-by-side overflow). With floorPx = 0
+// it reduces bit-for-bit to a pure `fr` distribution, which is why the ROW axis
+// (template `minmax(0, …)`, no floor) was already exact and stays a pure-fr call.
+//
+// Pure: no DOM/React — unit-testable against the browser's resolved layout.
+// `distributable` is the axis size already minus the (n-1) gaps; the caller
+// (gutterCenters) owns the gap subtraction so this helper stays about tracks.
+export function resolveTrackWidths(
+  ratios: number[],
+  distributable: number,
+  floorPx: number,
+): number[] {
+  const n = ratios.length;
+  if (n === 0) return [];
+  const total = ratios.reduce((a, b) => a + b, 0);
+  if (!(total > 0)) return new Array(n).fill(0);
+  // fr-share of the distributable space for each track (the pure-fr layout).
+  let widths = ratios.map((r) => (r / total) * distributable);
+  if (!(floorPx > 0)) return widths; // no floor → pure fr (rows)
+  // Iteratively pin sub-floor tracks at floorPx and redistribute the deficit.
+  // Each pass pins at least one more track (or breaks), so at most n passes
+  // converge to the CSS minmax fixed point. `clamped` is sticky: once a track
+  // is pinned at its floor it is never deficit-redistributed away from it.
+  const clamped = new Array<boolean>(n).fill(false);
+  for (let pass = 0; pass < n; pass++) {
+    let pinned = false;
+    for (let i = 0; i < n; i++) {
+      if (!clamped[i] && widths[i] < floorPx) {
+        clamped[i] = true;
+        pinned = true;
+      }
+    }
+    if (!pinned) break; // no track below floor → fixed point reached
+    const pinnedCount = clamped.filter(Boolean).length;
+    const remaining = distributable - pinnedCount * floorPx;
+    const freeTotal = ratios.reduce((a, r, i) => a + (clamped[i] ? 0 : r), 0);
+    if (freeTotal <= 0) {
+      // Every track is pinned (or has zero ratio) → all at floor; the grid
+      // overflows its container (more tracks than the width fits), which
+      // PaneGrid handles via overflow-x-auto. Centers still place the handles
+      // over the rendered gutters (equally spaced at floorPx + gap).
+      widths = clamped.map((c) => (c ? floorPx : 0));
+      break;
+    }
+    widths = ratios.map((r, i) => (clamped[i] ? floorPx : (r / freeTotal) * remaining));
+  }
+  return widths;
+}
+
 // Pixel centers (relative to the grid's content box) of each internal gutter on
 // one axis, given that axis's ratio array, the grid's content size on that axis,
-// and the gap between tracks. Used to position the overlay drag handles over the
-// visual gutters without a per-pointermove layout query. gutter i sits between
-// track i and i+1; its center = (sum of track[0..i] widths) + (i + 0.5) * gap.
+// the gap between tracks, and (optionally) the per-track floor in px. Used to
+// position the overlay drag handles over the visual gutters without a per-
+// pointermove layout query. gutter i sits between track i and i+1; its center =
+// (sum of track[0..i] widths) + (i + 0.5) * gap.
+//
+// `floorPx` models the column template's `minmax(9rem, …)` floor so predicted
+// centers track the RENDERED gutters even when the floor binds (a track pinned
+// at 9rem by a narrow window, or by side-by-side overflow) — without it the
+// handle overlays drift off the visual gutters and become ungrabbable right
+// after a window resize. Pass 0 (the default) for an axis with no CSS floor:
+// rows use `minmax(0, …)`, the pure-fr math is exact there, and the default is
+// correct. PaneGrid passes the column floor for colCenters and omits it for
+// rowCenters.
+//
 // Returns [] when there are fewer than 2 tracks (no internal gutters) or the
 // size is unknown (first paint) — PaneGrid renders no handles in that case.
-export function gutterCenters(ratios: number[], size: number, gap: number): number[] {
+export function gutterCenters(ratios: number[], size: number, gap: number, floorPx = 0): number[] {
   const n = ratios.length;
   if (n <= 1 || !(size > 0)) return [];
   const total = ratios.reduce((a, b) => a + b, 0);
   if (!(total > 0)) return [];
   const distributable = Math.max(0, size - (n - 1) * gap);
+  const widths = resolveTrackWidths(ratios, distributable, floorPx);
   const out: number[] = [];
   let cumTrack = 0; // running sum of track[0..i] widths
   for (let i = 0; i < n - 1; i++) {
-    cumTrack += (ratios[i] / total) * distributable;
+    cumTrack += widths[i];
     out.push(cumTrack + (i + 0.5) * gap);
   }
   return out;

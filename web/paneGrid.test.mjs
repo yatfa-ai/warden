@@ -39,7 +39,7 @@ const { code } = await transformWithOxc(src, paneGridPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-paneGrid-test-'));
 const tmpFile = join(tmpDir, 'paneGrid.mjs');
 writeFileSync(tmpFile, code);
-const { resolveVisibleTiles, gridShape, equalRatios, effectiveRatios, redistributeRatios, gutterCenters, PANE_COL_FLOOR_REM, PANE_ROW_FLOOR_REM } = await import(tmpFile);
+const { resolveVisibleTiles, gridShape, equalRatios, effectiveRatios, redistributeRatios, gutterCenters, resolveTrackWidths, PANE_COL_FLOOR_REM, PANE_ROW_FLOOR_REM } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -378,6 +378,86 @@ test('gutter center = (first track width) + half the gap — the gap is included
   const centers = gutterCenters([1, 1, 1], size, gap);
   assert.ok(Math.abs(centers[0] - (trackW + gap / 2)) < 1e-6,
     `gutter0 center = trackW(${trackW}) + gap/2(${gap / 2}) = ${trackW + gap / 2}`);
+});
+
+console.log('\ngutterCenters / resolveTrackWidths: floor-aware column positioning (WARDEN-660 audit fix)');
+
+test('FLOOR REGRESSION: a sub-floor column track is pinned at the floor (handle tracks the rendered gutter)', () => {
+  // 2 cols [0.5,1] @400px, gap 8, floor 144 (9rem @16px root). col0's pure-fr
+  // share is 130.67px (< 144), so CSS clamps it to 144 and gives col1 the rest
+  // (248). The rendered gutter center is 144 + 4 = 148 — NOT the pure-fr 134.67.
+  // Pre-audit gutterCenters ignored the floor and returned ~134.67, drifting the
+  // 10px handle off the rendered gutter (13px error → ungrabbable after a window
+  // resize). This is the exact case the reviewer measured at 13.33px.
+  const floored = gutterCenters([0.5, 1], 400, 8, 144);
+  assert.equal(floored.length, 1);
+  assert.ok(Math.abs(floored[0] - 148) < 1e-6,
+    `floored center ${floored[0]} ≈ 148 (col0 pinned at the 144px floor)`);
+  // And it must DIFFER from the pure-fr (no-floor) prediction — this is what
+  // makes the test fail if the floor handling regresses (mutation probe).
+  const pure = gutterCenters([0.5, 1], 400, 8);
+  assert.ok(Math.abs(pure[0] - (0.5 / 1.5 * 392 + 4)) < 1e-6, 'pure-fr center ≈ 134.67');
+  assert.ok(Math.abs(floored[0] - pure[0]) > 13, 'floor shifts the center ~13px off the pure-fr spot');
+});
+
+test('no floor binding ⇒ floor-aware == pure-fr bit-for-bit (the common path is unperturbed)', () => {
+  // 2 cols [1.5,1] @800px, gap 8, floor 144: both pure-fr shares (475.2 / 316.8)
+  // sit above the floor, so the minmax distribution clamps nothing. The floor-
+  // aware call must reproduce the pure-fr centers to sub-pixel, proving the
+  // floor param doesn't perturb the wide-window path (the reviewer's ~0px rows).
+  const floored = gutterCenters([1.5, 1], 800, 8, 144);
+  const pure = gutterCenters([1.5, 1], 800, 8);
+  assert.equal(floored.length, pure.length);
+  for (let i = 0; i < floored.length; i++) {
+    assert.ok(Math.abs(floored[i] - pure[i]) < 1e-9,
+      `center ${i}: floor-aware (${floored[i]}) == pure-fr (${pure[i]})`);
+  }
+});
+
+test('resolveTrackWidths: clamped track pinned at floor, deficit absorbed by the neighbor', () => {
+  // [0.5,1] over 392 distributable, floor 144: col0 clamps to 144, col1 gets the
+  // remainder 248 (its 261.33 pure-fr share minus the 13.33px deficit). The pair
+  // total is conserved (144 + 248 == 392 == the two pure-fr shares summed), and
+  // neither track is below the floor.
+  const w = resolveTrackWidths([0.5, 1], 392, 144);
+  assert.deepEqual(w, [144, 248]);
+  assert.ok(Math.abs(w[0] + w[1] - 392) < 1e-9, 'pair total conserved (deficit stays in-axis)');
+  assert.ok(w[0] >= 144 - 1e-9 && w[1] >= 144 - 1e-9, 'neither track below the floor');
+});
+
+test('resolveTrackWidths: overflow clamps every track to the floor (side-by-side + many panes)', () => {
+  // 3 equal cols @384 distributable, floor 144: each pure-fr share is 128 (< 144)
+  // so all clamp; the grid overflows (3*144 = 432 > 384) and panes lay out at
+  // their floors — exactly the side-by-side overflow case the reviewer flagged
+  // (281.6px error when the floor went unmodeled).
+  assert.deepEqual(resolveTrackWidths([1, 1, 1], 384, 144), [144, 144, 144]);
+});
+
+test('resolveTrackWidths: fixed-point iteration re-clamps a track pushed below floor by redistribution', () => {
+  // [1,1,0.1] over 400 distributable, floor 144. Pass 1 clamps the tiny track2
+  // (share ~19px) and redistributes, leaving tracks 0 & 1 at 128px each — ALSO
+  // below the floor. Pass 2 must re-clamp them (a single pass would leave them
+  // at 128, below the floor). Without the loop the result is [128,128,144], not
+  // all-144 — so this pins that the iteration actually runs to convergence.
+  const w = resolveTrackWidths([1, 1, 0.1], 400, 144);
+  assert.deepEqual(w, [144, 144, 144], 'all three tracks pinned at the floor after iteration');
+  for (const x of w) assert.ok(x >= 144 - 1e-9, `track ${x} at/above floor (loop converged)`);
+});
+
+test('resolveTrackWidths: floor=0 reduces to pure fr (rows have no floor)', () => {
+  // Rows use `minmax(0, Xfr)` — no CSS floor — so passing floor 0 must reproduce
+  // the pure-fr shares bit-for-bit. This is why the row axis was already exact
+  // and the row gutterCenters call omits the floor.
+  assert.deepEqual(resolveTrackWidths([1, 3], 392, 0), [98, 294]);
+  assert.deepEqual(resolveTrackWidths([1, 1, 1], 392, 0), [392 / 3, 392 / 3, 392 / 3]);
+});
+
+test('gutterCenters: an all-clamped overflow grid still places handles over the rendered gutters', () => {
+  // 3 cols @400px (gap 8, floor 144): all clamp to 144, so the grid overflows and
+  // the gutters render at 144 and 288 (+half-gaps). The floor-aware centers must
+  // land on those rendered gutters, not the pure-fr 134.67 / 273.33 spots.
+  const centers = gutterCenters([1, 1, 1], 400, 8, 144);
+  assert.deepEqual(centers, [148, 300]);
 });
 
 console.log(`\n✓ PANEGRID TESTS PASS (total: ${passed})`);

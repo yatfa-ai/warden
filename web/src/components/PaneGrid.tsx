@@ -209,7 +209,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
   // listener in the layout effect) so handles stay aligned over their gutters
   // when the grid scrolls horizontally (side-by-side + many panes overflow).
   const overlayRef = useRef<HTMLDivElement>(null);
-  const [gridGeom, setGridGeom] = useState({ w: 0, h: 0, colGap: 0, rowGap: 0 });
+  const [gridGeom, setGridGeom] = useState({ w: 0, h: 0, colGap: 0, rowGap: 0, rootFontPx: 16 });
 
   const focusedChat = focused ? chats.find((c) => (c.key || c.id) === focused) : null;
 
@@ -420,11 +420,17 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
     if (!gridEl) return;
     const read = () => {
       const cs = getComputedStyle(gridEl);
+      // Root font size drives the column floor in px (9rem × rootFontPx) so the
+      // handle overlays can model the `minmax(9rem, …)` distribution. Read here
+      // (once + on resize) rather than per-render: ctrl+plus zoom and any
+      // root-font change resize the grid, so the ResizeObserver refreshes it.
+      const rootFontPx = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
       setGridGeom({
         w: gridEl.clientWidth,
         h: gridEl.clientHeight,
         colGap: parseFloat(cs.columnGap) || 0,
         rowGap: parseFloat(cs.rowGap) || 0,
+        rootFontPx,
       });
     };
     const syncScroll = () => {
@@ -563,8 +569,15 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
     : rowRatios.map((r) => `minmax(0, ${r}fr)`).join(' ');
   // Internal-gutter center positions (px from the grid's content-box left/top),
   // derived from the live ratios + the measured geometry. Empty while maximized
-  // or when fewer than 2 tracks exist on an axis (no internal gutters).
-  const colCenters = showGutters ? gutterCenters(colRatios, gridGeom.w, gridGeom.colGap) : [];
+  // or when fewer than 2 tracks exist on an axis (no internal gutters). The
+  // column call passes the 9rem floor in px so the centers model the template's
+  // `minmax(9rem, …)` distribution and track the RENDERED gutters even when the
+  // floor binds (a narrow window after a drag, or side-by-side overflow) —
+  // without it the handles drift off the visual gutters and go ungrabbable. The
+  // row call omits the floor: rows are `minmax(0, …)` (no CSS floor), so the
+  // pure-fr math is exact there (gutterCenters' default floorPx = 0).
+  const colFloorPx = PANE_COL_FLOOR_REM * gridGeom.rootFontPx;
+  const colCenters = showGutters ? gutterCenters(colRatios, gridGeom.w, gridGeom.colGap, colFloorPx) : [];
   const rowCenters = showGutters ? gutterCenters(rowRatios, gridGeom.h, gridGeom.rowGap) : [];
 
   return (
