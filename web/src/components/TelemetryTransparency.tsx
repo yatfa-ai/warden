@@ -23,6 +23,7 @@ import {
   type PreviewChange,
 } from '@/lib/telemetry/transparency';
 import type { ConsentTier } from '@/lib/telemetry/redact';
+import { TelemetryTransmissionLog } from '@/components/TelemetryTransmissionLog';
 
 /**
  * A representative `error` base event (valid per the base-event contract) whose
@@ -343,6 +344,17 @@ export function TelemetryTransparency({ telemetryBaseEnabled, telemetryExtendedE
           )}
         </div>
       </div>
+
+      <div className="h-px bg-border" role="separator" />
+
+      {/* 3 — ACTUAL send outcomes (WARDEN-668). The promise (describeCollection)
+          and the preview (previewPayload) are the first two legs; this is what
+          really landed on the wire — a read-only, live, session-scoped view of
+          the same ring the pipeline records on every real send. Read from the
+          telemetry:transmission-log IPC bridge; degrades to an honest "no sends
+          this session yet" empty state when the bridge is absent or the ring is
+          empty (e.g. telemetry off). */}
+      <TelemetryTransmissionLog />
     </div>
   );
 }

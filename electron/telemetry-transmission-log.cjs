@@ -116,9 +116,32 @@ function createTransmissionLog(opts) {
   return { record, entries, size };
 }
 
+// Defensive snapshot reader for the IPC surfacing seam (WARDEN-668). The main-
+// process IPC handler `telemetry:transmission-log` is a thin delegate to this:
+// it returns `log.entries()` (already a snapshot copy — the live ring is never
+// handed out) on success and degrades to `[]` on ANY throw, so a renderer query
+// can never crash the main process or block the verifiability panel. The same
+// `[]`-on-failure contract the renderer accessor (getTelemetryTransmissionLog)
+// uses on its side of the bridge — both seams degrade to "no sends" identically.
+//
+// Exported (not inlined in main.cjs) precisely SO the IPC handler's defensive
+// contract is unit-testable in isolation: main.cjs cannot be require()'d in a
+// test (it imports 'electron'), but this pure function can. A non-log argument
+// (null/undefined/an object without entries()) also degrades to [] — a
+// partially-wired pipeline must surface as "no sends", never as a crash.
+function readSnapshot(log) {
+  try {
+    if (log && typeof log.entries === 'function') return log.entries();
+  } catch {
+    /* a renderer query must never crash the host — degrade to empty */
+  }
+  return [];
+}
+
 module.exports = {
   createTransmissionLog,
   hostOf,
   noopTransmissionLog,
+  readSnapshot,
   DEFAULT_CAP,
 };
