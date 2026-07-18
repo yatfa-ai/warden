@@ -142,6 +142,50 @@ describe('parseGitLsEntries (immediate-children parser)', () => {
     assert.deepEqual(parseGitLsEntries('\n  \n', ''), []);
     assert.deepEqual(parseGitLsEntries(null, ''), []);
   });
+
+  // C-quoted paths (WARDEN-676). `git ls-files` C-quotes any path containing a
+  // backslash, double-quote, control char, or non-ASCII byte (core.quotePath=true
+  // default), and it quotes the ENTIRE path — dir prefix included — as one
+  // C-string. parseGitLsEntries must unescape BEFORE the prefix startsWith/slice,
+  // or a non-ASCII subdir lists EMPTY and root names come back mangled with
+  // literal quotes + octal escapes. These mirror gitStatus.test.js's
+  // unescapeGitPath block, but against the parser that consumes ls-files output.
+
+  it('decodes a C-quoted non-ASCII file name at root (no literal quotes/escapes)', () => {
+    // 'é' = U+00E9 = UTF-8 0xC3 0xA9 = octal \303 \251 → café.js
+    assert.deepEqual(parseGitLsEntries('"caf\\303\\251.js"', ''), [
+      { name: 'café.js', type: 'file' },
+    ]);
+  });
+
+  it('decodes C-quoted backslash and embedded-quote paths at root', () => {
+    assert.deepEqual(parseGitLsEntries('"back\\\\slash.js"', ''), [
+      { name: 'back\\slash.js', type: 'file' },
+    ]);
+    assert.deepEqual(parseGitLsEntries('"quote\\"in.js"', ''), [
+      { name: 'quote"in.js', type: 'file' },
+    ]);
+  });
+
+  it('unescapes the whole quoted line so a non-ASCII dir prefix strips correctly', () => {
+    // The killer case: git quotes the ENTIRE "süb/café.js" as ONE C-string
+    // ("s\303\274b/caf\303\251.js"), so the 'süb/' prefix lives INSIDE the
+    // quotes. Unescape first → 'süb/café.js' → startsWith('süb/') is true →
+    // 'café.js'. Before the fix this listed EMPTY (startsWith saw a leading ").
+    // 'ü' = U+00FC = UTF-8 0xC3 0xBC = octal \303 \274.
+    assert.deepEqual(parseGitLsEntries('"s\\303\\274b/caf\\303\\251.js"', 'süb'), [
+      { name: 'café.js', type: 'file' },
+    ]);
+  });
+
+  it('leaves a plain-space path unchanged (ls-files does not quote spaces)', () => {
+    // `git ls-files` does NOT C-quote a plain space, so the line is unquoted →
+    // unescapeGitPath is a no-op → 'spa ce.js' survives verbatim. (Contrast
+    // `git status --porcelain`, which DOES quote spaces — different parser.)
+    assert.deepEqual(parseGitLsEntries('spa ce.js', ''), [
+      { name: 'spa ce.js', type: 'file' },
+    ]);
+  });
 });
 
 // Run the EXACT command the endpoint runs for a LOCAL chat — `git ls-files
