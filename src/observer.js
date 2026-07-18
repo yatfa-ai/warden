@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { discoverAll, capturePanes, resolveChat } from './chats.js';
+import { discoverAll, capturePanes, resolveChat, agentTarget } from './chats.js';
 import { run, shellQuote } from './ssh.js';
 import { read as readPane, send as sendPane } from './tmux.js';
 import { complete } from './llm.js';
@@ -110,11 +110,18 @@ export const TOOLS = [
   },
 ];
 
-function logDirective(chat, text) {
+// `agentTarget(chat)` is imported above from ./chats.js (canonical home in
+// chatMeta.js). It renders `<container-or-session>@<host>` with a null-fallback
+// so a local/tmux chat's `container: null` never stringifies to "null@" here
+// (WARDEN-642). logDirective writes that string into directives.md, which the
+// DirectiveHistory tab reads back — see chatMeta.js for the fallback rationale
+// and the round-trip constraint the directives-header regex imposes.
+
+export function logDirective(chat, text) {
   fs.mkdirSync(path.dirname(DIRECTIVES_LOG), { recursive: true });
   const header = fs.existsSync(DIRECTIVES_LOG) ? '' : '# Yatfa Warden directives log\n';
   const ts = new Date().toISOString();
-  const entry = `${header}\n## ${ts} → ${chat.container}@${chat.host} (${chat.role || 'agent'})\n\n${text}\n`;
+  const entry = `${header}\n## ${ts} → ${agentTarget(chat)} (${chat.role || 'agent'})\n\n${text}\n`;
   fs.appendFileSync(DIRECTIVES_LOG, entry);
 }
 
@@ -804,7 +811,7 @@ export class Observer {
         // banner/timeline count `directive_sent` (not `directive_proposed`) so
         // rejected directives are no longer miscounted as sent.
         appendEvent({ type: 'directive_sent', container: chat.container, host: chat.host, role: chat.role, directive: text });
-        return { sent: true, to: `${chat.container}@${chat.host}`, chars: text.length };
+        return { sent: true, to: agentTarget(chat), chars: text.length };
       } catch (e) { return { error: e.message }; }
     }
     if (name === 'write_file') {

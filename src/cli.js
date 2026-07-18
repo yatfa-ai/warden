@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { load, save, configPath, cachePath } from './config.js';
-import { discover, discoverAll, resolveChatWithRefresh } from './chats.js';
+import { discover, discoverAll, resolveChatWithRefresh, agentTarget } from './chats.js';
 import { read, send, sendKey, attachInteractive } from './tmux.js';
 import { run } from './ssh.js';
 
@@ -101,7 +101,7 @@ async function cmdTail(argv, cfg) {
     try {
       const pane = await read(chat, cfg, lines);
       process.stdout.write('\x1b[2J\x1b[H');
-      process.stdout.write(paint(`${chat.container}@${chat.host}  (Ctrl-C to exit)\n`, C.dim));
+      process.stdout.write(paint(`${agentTarget(chat)}  (Ctrl-C to exit)\n`, C.dim));
       process.stdout.write(pane);
     } catch (e) {
       process.stdout.write('\x1b[2J\x1b[H' + paint(`error: ${e.message}\n`, C.red));
@@ -118,9 +118,9 @@ async function cmdSend(argv, cfg) {
   const msg = positional.slice(1).join(' ');
   if (!idArg || !msg) die('usage: warden send <id> <message...>');
   const chat = await resolveChat(idArg, cfg);
-  if (!chat.active) console.error(paint(`warning: ${chat.container} has no active agent session — sending anyway.`, C.yellow));
+  if (!chat.active) console.error(paint(`warning: ${chat.container || chat.key || 'local'} has no active agent session — sending anyway.`, C.yellow));
   await send(chat, cfg, msg);
-  console.log(paint(`✓ sent to ${chat.container}@${chat.host}`, C.green));
+  console.log(paint(`✓ sent to ${agentTarget(chat)}`, C.green));
 }
 
 async function cmdKey(argv, cfg) {
@@ -129,7 +129,7 @@ async function cmdKey(argv, cfg) {
   if (!idArg || !k) die('usage: warden key <id> <C-c|Escape|Up|Down|Enter|...>');
   const chat = await resolveChat(idArg, cfg);
   await sendKey(chat, cfg, k);
-  console.log(paint(`✓ ${k} → ${chat.container}@${chat.host}`, C.green));
+  console.log(paint(`✓ ${k} → ${agentTarget(chat)}`, C.green));
 }
 
 async function cmdAttach(argv, cfg) {
@@ -217,7 +217,7 @@ async function cmdObserve(_argv, cfg) {
 
   // Human-in-the-loop gate around every send to a live agent.
   const gate = async (chat, directive) => {
-    console.log('\n' + paint(`── proposed directive → ${chat.container}@${chat.host} ──`, C.cyan));
+    console.log('\n' + paint(`── proposed directive → ${agentTarget(chat)} ──`, C.cyan));
     console.log(directive);
     const raw = await ask(paint('send? [y]es / [n]o / [e]dit: ', C.yellow));
     if (raw === null) return { approved: false }; // stdin closed

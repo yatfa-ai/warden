@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { agentTarget } from './chatMeta.js';
 
 /**
  * Unit tests for `readDirectives` (src/observer.js) — the inverse of
@@ -121,5 +122,115 @@ describe('readDirectives — parses directives.md back into structured records',
     // matching activity.js readEvents' missing-file contract (never a 500).
     fs.unlinkSync(logPath);
     assert.deepStrictEqual(readDirectives(), []);
+  });
+});
+
+/**
+ * WARDEN-642: `logDirective` must not stringify a local/tmux chat's
+ * `container: null` to the literal "null". Both the on-disk directive header
+ * (read back by DirectiveHistory's target badge + "Copy agent@host" payload) and
+ * the `send_directive` `to:` return value must show `<session>@<host>`, never
+ * `null@host`. The fix single-sources the identity through `agentTarget(chat)`
+ * with the `container || key || session || 'local'` fallback.
+ *
+ * This block exercises the helper directly (both the container-set and
+ * container-null paths) AND the writer→file→reader round-trip for a real
+ * container-null chat — the exact user-facing surface WARDEN-642 corrupts. It
+ * runs in its own HOME (cache-busted import) so it cannot perturb the
+ * reader-focused describe above, which seeds and then deletes its own log.
+ *
+ * `agentTarget` is a pure helper (no HOME/module-level state), so it is imported
+ * statically from its canonical home ./chatMeta.js; only the state-bound
+ * `logDirective`/`readDirectives` (which read DIRECTIVES_LOG, evaluated at
+ * module load) need the cache-busted ./observer.js import.
+ */
+describe('agentTarget + logDirective — never null@host for local/tmux chats (WARDEN-642)', () => {
+  let originalHome, tempHome, logPath, logDirective, readDirectives;
+
+  before(async () => {
+    originalHome = process.env.HOME;
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-directives-null-'));
+    process.env.HOME = tempHome;
+    const wdir = path.join(tempHome, '.yatfa-warden');
+    fs.mkdirSync(wdir, { recursive: true });
+    logPath = path.join(wdir, 'directives.md');
+    // Cache-bust so this module instance re-evaluates os.homedir() against the
+    // new temp HOME (DIRECTIVES_LOG is module-level), isolating its log file
+    // from the describe above. agentTarget is imported statically (pure helper).
+    ({ logDirective, readDirectives } = await import('./observer.js?warden642'));
+  });
+
+  after(() => {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  it('agentTarget: uses the container for docker/yatfa chats (unchanged)', () => {
+    assert.strictEqual(
+      agentTarget({ container: 'proj-worker', host: 'hostA' }),
+      'proj-worker@hostA',
+    );
+  });
+
+  it('agentTarget: falls back to the session key for local/tmux chats (container: null)', () => {
+    // server.js buildAndSpawn / resume factories construct local chats as
+    // { key: session, container: null, session, host, ... } — chat.key is the
+    // tmux session name and is always set, so the helper must resolve to it
+    // rather than stringifying null to "null".
+    const target = agentTarget({ container: null, key: 'myproject', session: 'myproject', host: '(local)' });
+    assert.strictEqual(target, 'myproject@(local)');
+    assert.ok(!target.startsWith('null@'), 'must not stringify a null container to "null@"');
+  });
+
+  it('agentTarget: container → key → session → "local" fallback chain', () => {
+    // container wins when set (docker), even if key/session differ.
+    assert.strictEqual(agentTarget({ container: 'c', key: 'k', session: 's', host: 'h' }), 'c@h');
+    // container null → key.
+    assert.strictEqual(agentTarget({ container: null, key: 'k', session: 's', host: 'h' }), 'k@h');
+    // container + key null → session.
+    assert.strictEqual(agentTarget({ container: null, key: null, session: 's', host: 'h' }), 's@h');
+    // nothing set → literal "local" (never the bare string "null").
+    assert.strictEqual(agentTarget({ container: null, key: null, session: null, host: 'h' }), 'local@h');
+  });
+
+  it('logDirective: writes <session>@<host> for a local chat and round-trips through readDirectives', () => {
+    // A local/tmux chat exactly as server.js:3340 constructs it (container: null).
+    const localChat = {
+      id: '(local):myproject', key: 'myproject', kind: 'tmux', host: '(local)',
+      container: null, session: 'myproject', project: 'manual', role: 'claude',
+    };
+    logDirective(localChat, 'show git status');
+
+    // On-disk header must be session@host — never null@host (the WARDEN-642 bug).
+    const onDisk = fs.readFileSync(logPath, 'utf8');
+    assert.ok(onDisk.includes(' → myproject@(local) ('), 'header uses session@host');
+    assert.ok(!onDisk.includes('null@'), 'never null@host');
+
+    // DirectiveHistory reads via readDirectives — the parsed container must be
+    // the session key, not the literal string "null" the old writer produced.
+    const out = readDirectives();
+    assert.strictEqual(out.length, 1, 'one directive parsed');
+    assert.strictEqual(out[0].container, 'myproject');
+    assert.strictEqual(out[0].host, '(local)');
+    assert.notStrictEqual(out[0].container, 'null');
+  });
+
+  it('logDirective: docker/yatfa chat header unchanged (container@host)', () => {
+    const dockerChat = {
+      id: 'hostA:agent', key: 'agent', kind: 'yatfa', host: 'hostA',
+      container: 'proj-worker', session: 'agent', project: 'proj', role: 'worker',
+    };
+    logDirective(dockerChat, 'list the open tickets');
+
+    const onDisk = fs.readFileSync(logPath, 'utf8');
+    assert.ok(onDisk.includes(' → proj-worker@hostA ('), 'docker header is container@host');
+    assert.ok(!onDisk.includes('null@'), 'never null@host');
+
+    // Two directives now (local above + this docker one); the docker record
+    // parses back with its true container.
+    const docker = readDirectives().find((d) => d.container === 'proj-worker');
+    assert.ok(docker, 'docker directive parsed');
+    assert.strictEqual(docker.host, 'hostA');
   });
 });

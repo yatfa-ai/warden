@@ -5,9 +5,9 @@
 // whether `container` is set, and uses `session` for the tmux target.
 import { run, runWithPool, runLocalTmux, shellQuote } from './ssh.js';
 import { loadCatalog, stampCatalogActivity } from './config.js';
-import { ROLES, parseContainerName, buildChat, sortChats, parseActivityTimestamp } from './chatMeta.js';
+import { ROLES, parseContainerName, buildChat, sortChats, parseActivityTimestamp, agentTarget } from './chatMeta.js';
 // Re-export for any external consumer; the canonical home is now ./chatMeta.js.
-export { ROLES, parseContainerName };
+export { ROLES, parseContainerName, agentTarget };
 import { isCompanionTransportEnabled, discover as discoverViaCompanion, capturePanes as capturePanesViaCompanion, hasFreshPaneDelta, readPaneDeltas } from './companion.js';
 
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
