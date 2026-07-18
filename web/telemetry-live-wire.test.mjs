@@ -154,9 +154,9 @@ await test('a real source error signal POSTs once with x-telemetry-schema=1 + a 
   assert.equal(url, ENDPOINT, 'destination is exactly the configured endpoint');
   assert.equal(opts.method, 'POST');
   assert.equal(opts.headers['content-type'], 'application/json');
-  assert.equal(opts.headers['x-telemetry-schema'], '1', 'schema-version handshake header present and = 1');
+  assert.equal(opts.headers['x-telemetry-schema'], String(SCHEMA_VERSION), 'schema-version handshake header present and = SCHEMA_VERSION');
   const body = JSON.parse(opts.body);
-  assert.equal(body.schemaVersion, 1, 'schema version echoed in the body');
+  assert.equal(body.schemaVersion, SCHEMA_VERSION, 'schema version echoed in the body');
   assert.ok(Array.isArray(body.events) && body.events.length === 1);
   assert.equal(body.events[0].type, 'error');
   assert.equal(body.events[0].runtime, 'main');
@@ -301,7 +301,7 @@ await test('(a) a successful 2xx send records an outcome:ok entry (attempts:1, s
   assert.equal(e.attempts, 1);
   assert.equal(e.status, 200);
   assert.equal(e.endpointHost, 'telemetry.example.selfhosted.net', 'host only — no path/query');
-  assert.equal(e.schemaVersion, 1);
+  assert.equal(e.schemaVersion, SCHEMA_VERSION);
   assert.equal(e.eventCount, 1);
 });
 

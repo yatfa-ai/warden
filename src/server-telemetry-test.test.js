@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import http from 'node:http';
+import { CLIENT_SCHEMA_VERSION } from './telemetry-capabilities.js';
 
 let httpServer;
 let baseUrl;
@@ -85,7 +86,7 @@ async function postTelemetryTest(body) {
 // or a `throwErr`, then call the route. Records every call's url + headers.
 function makeProbe() {
   const calls = [];
-  let next = { status: 200, json: { schemaVersion: 1, authRequired: false } };
+  let next = { status: 200, json: { schemaVersion: CLIENT_SCHEMA_VERSION, authRequired: false } };
   let throwErr = null;
   const fetchImpl = async (url, init) => {
     calls.push({ url, init });
@@ -98,7 +99,7 @@ function makeProbe() {
     calls,
     set next(value) { next = value; },
     set throw(value) { throwErr = value; },
-    reset() { calls.length = 0; next = { status: 200, json: { schemaVersion: 1, authRequired: false } }; throwErr = null; },
+    reset() { calls.length = 0; next = { status: 200, json: { schemaVersion: CLIENT_SCHEMA_VERSION, authRequired: false } }; throwErr = null; },
   };
 }
 
@@ -111,7 +112,7 @@ describe('POST /api/telemetry-test (WARDEN-595)', () => {
 
   it('returns a connected verdict when the probe reaches a schema-matched open receiver', async () => {
     probe.reset();
-    probe.next = { status: 200, json: { schemaVersion: 1, authRequired: false } };
+    probe.next = { status: 200, json: { schemaVersion: CLIENT_SCHEMA_VERSION, authRequired: false } };
     const { status, body } = await postTelemetryTest({ endpoint: 'https://receiver.example/ingest' });
     assert.equal(status, 200);
     assert.equal(body.kind, 'connected');
@@ -129,7 +130,7 @@ describe('POST /api/telemetry-test (WARDEN-595)', () => {
     // config.json was seeded with telemetryAuthToken: 'persisted-tok' in before();
     // the route reads cfg.telemetryAuthToken live.
     probe.reset();
-    probe.next = { status: 200, json: { schemaVersion: 1, authRequired: true } };
+    probe.next = { status: 200, json: { schemaVersion: CLIENT_SCHEMA_VERSION, authRequired: true } };
     await postTelemetryTest({ endpoint: 'https://receiver.example/ingest' });
     assert.equal(
       probe.calls[0].init.headers.authorization,
@@ -140,7 +141,7 @@ describe('POST /api/telemetry-test (WARDEN-595)', () => {
 
   it('a draft token from the body takes precedence over the persisted token', async () => {
     probe.reset();
-    probe.next = { status: 200, json: { schemaVersion: 1, authRequired: true } };
+    probe.next = { status: 200, json: { schemaVersion: CLIENT_SCHEMA_VERSION, authRequired: true } };
     await postTelemetryTest({ endpoint: 'https://receiver.example/ingest', token: 'draft-tok' });
     assert.equal(probe.calls[0].init.headers.authorization, 'Bearer draft-tok');
   });
@@ -155,7 +156,7 @@ describe('POST /api/telemetry-test (WARDEN-595)', () => {
 
   it('returns a schema-drift verdict when the receiver schemaVersion differs', async () => {
     probe.reset();
-    probe.next = { status: 200, json: { schemaVersion: 2, authRequired: false } };
+    probe.next = { status: 200, json: { schemaVersion: CLIENT_SCHEMA_VERSION + 1, authRequired: false } };
     const { body } = await postTelemetryTest({ endpoint: 'https://receiver.example/ingest' });
     assert.equal(body.kind, 'schema-drift');
   });

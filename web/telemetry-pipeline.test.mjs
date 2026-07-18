@@ -118,7 +118,7 @@ test('an unconfigured pipeline resolves to the OFF tier and sends nothing', () =
 });
 
 test('shared schema threaded from the shipped source module (SCHEMA_VERSION + types)', () => {
-  assert.equal(SCHEMA_VERSION, 1);
+  assert.equal(SCHEMA_VERSION, 2);
   assert.deepEqual(BASE_EVENT_TYPES, ['error', 'crash', 'performance-stall']);
   assert.equal(TIERS.BASE, 'base');
   assert.equal(TIERS.EXTENDED, 'extended');
@@ -997,7 +997,7 @@ test('setSchemaVersion change clears an armed breaker (the client re-versioned)'
   assert.equal(pipeline.getRuntimeStatus().drifted, true);
   pipeline.setSchemaVersion(SCHEMA_VERSION); // same → no-op
   assert.equal(pipeline.getRuntimeStatus().drifted, true, 'same schema version does not clear');
-  pipeline.setSchemaVersion(2); // different → clears
+  pipeline.setSchemaVersion(SCHEMA_VERSION + 1); // different → clears
   assert.equal(pipeline.getRuntimeStatus().drifted, false, 'a schema-version change cleared the breaker');
   pipeline.record(DRIFT_EVENT());
   assert.equal(send.calls.length, 2, 'a send now goes through after the schema change');

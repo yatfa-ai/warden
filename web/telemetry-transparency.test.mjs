@@ -54,7 +54,7 @@ for (const name of ['redact', 'transparency']) {
   }
   writeFileSync(join(tmpDir, `${name}.mjs`), code);
 }
-const { describeCollection, previewPayload, isValidBaseEvent } = await import(
+const { describeCollection, previewPayload, isValidBaseEvent, SCHEMA_VERSION } = await import(
   join(tmpDir, 'transparency.mjs')
 );
 rmSync(tmpDir, { recursive: true, force: true });
@@ -109,10 +109,15 @@ const GH_TOKEN = 'ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789';
 // alongside tier-gated identifier + content fields. After redaction it MUST
 // still conform to the schema (valid === true) — criterion (b).
 const CANDIDATE = {
-  schemaVersion: 1,
+  schemaVersion: SCHEMA_VERSION,
   type: 'error',
   runtime: 'renderer',
   timestamp: 1719500000123,
+  // A non-identifying release label (WARDEN-665). Neither content nor an
+  // identifier → it must SURVIVE redaction unredacted at every tier, which the
+  // preview must disclose (a transparency panel that hides a collected field is
+  // a lie of omission even when the data is benign).
+  appVersion: '0.1.19',
   name: 'Error',
   message:
     'Failed to load /home/alice/.ssh/aws-creds from host prod-db-01.corp.local (Authorization: Bearer ' +
@@ -182,6 +187,32 @@ test('describeCollection lists content/prompt fields as HARD-EXCLUDED at every t
   }
 });
 
+test('describeCollection DISCLOSES the optional appVersion? field on every base-event type (WARDEN-665)', () => {
+  // The transparency panel's contract is to list EVERY field a tier collects.
+  // Production attaches appVersion to every emitted event, so it MUST appear in
+  // the disclosed field catalog — modeled with the `?` suffix (like `exitCode?`)
+  // to document that a v2 event WITHOUT it still validates. This is the forcing
+  // function: removing appVersion? from BASE_EVENT_FIELDS turns this red.
+  for (const tier of ['base', 'extended']) {
+    const cat = describeCollection(tier);
+    assert.equal(cat.eventTypes.length, 3, `three event types at ${tier}`);
+    for (const et of cat.eventTypes) {
+      assert.ok(
+        et.fields.includes('appVersion?'),
+        `${et.type} discloses optional appVersion? at ${tier}`,
+      );
+    }
+  }
+  // appVersion is a release label, NOT an identifier — it must not be classified
+  // as a chat/session-name identifier field (those are extended-only).
+  for (const tier of ['base', 'extended', 'off']) {
+    const cat = describeCollection(tier);
+    for (const id of cat.identifierFields) {
+      assert.ok(!/appversion/.test(id), `appVersion is not an identifier field at ${tier}`);
+    }
+  }
+});
+
 console.log('\n(b) previewPayload — path/host/Authorization redacted + schema-valid');
 
 test('previewPayload replaces the file path, hostname, and Authorization header with [REDACTED:…]', () => {
@@ -199,15 +230,30 @@ test('previewPayload replaces the file path, hostname, and Authorization header 
   assert.equal(validateBaseEvent(payload), true, 'real validateBaseEvent agrees valid');
 });
 
+test('a non-identifying appVersion release label SURVIVES redaction unredacted at every tier (WARDEN-665)', () => {
+  // appVersion is neither a content/prompt field nor a chat/session-name
+  // identifier, so the redactor neither drops nor rewrites it. This is exactly
+  // what the transparency panel's live preview must SHOW: a benign release label
+  // passing through intact — reinforcing, not undermining, the trust model.
+  for (const t of ['base', 'extended', 'off', 'unknown', undefined]) {
+    const { payload } = previewPayload(CANDIDATE, t);
+    assert.equal(payload.appVersion, '0.1.19', `appVersion survives unredacted at tier ${t}`);
+    // And it is never enumerated as a redaction change (it was not transformed).
+    const re = previewPayload(CANDIDATE, t);
+    const touched = re.changes.some((c) => c.path === 'appVersion');
+    assert.equal(touched, false, `appVersion is never a redacted/dropped path at tier ${t}`);
+  }
+});
+
 test('previewPayload is valid for a well-formed crash and performance-stall event too', () => {
   const crash = previewPayload(
-    { schemaVersion: 1, type: 'crash', runtime: 'renderer', timestamp: 1, reason: 'oom' },
+    { schemaVersion: SCHEMA_VERSION, type: 'crash', runtime: 'renderer', timestamp: 1, reason: 'oom' },
     'base',
   );
   assert.equal(crash.valid, true);
   assert.equal(validateBaseEvent(crash.payload), true);
   const stall = previewPayload(
-    { schemaVersion: 1, type: 'performance-stall', runtime: 'main', timestamp: 1, lagMs: 2500, source: 'event-loop' },
+    { schemaVersion: SCHEMA_VERSION, type: 'performance-stall', runtime: 'main', timestamp: 1, lagMs: 2500, source: 'event-loop' },
     'base',
   );
   assert.equal(stall.valid, true);
@@ -216,12 +262,12 @@ test('previewPayload is valid for a well-formed crash and performance-stall even
 
 test('previewPayload flags an INVALID candidate (missing required field) without throwing', () => {
   // No message/name/frames → not a conformant error event.
-  const bad = previewPayload({ schemaVersion: 1, type: 'error', runtime: 'renderer', timestamp: 1 }, 'base');
+  const bad = previewPayload({ schemaVersion: SCHEMA_VERSION, type: 'error', runtime: 'renderer', timestamp: 1 }, 'base');
   assert.equal(bad.valid, false);
   assert.equal(isValidBaseEvent(bad.payload), false);
   // Unknown event type → invalid.
   const unknown = previewPayload(
-    { schemaVersion: 1, type: 'mystery', runtime: 'renderer', timestamp: 1 },
+    { schemaVersion: SCHEMA_VERSION, type: 'mystery', runtime: 'renderer', timestamp: 1 },
     'base',
   );
   assert.equal(unknown.valid, false);
@@ -282,7 +328,7 @@ test('no path / host / IPv4 / IPv6 / user@host survives any preview (re-uses con
 
 test('a candidate packed with every identifier shape is fully scrubbed at every tier', () => {
   const packed = {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     type: 'error',
     runtime: 'main',
     timestamp: 1,
