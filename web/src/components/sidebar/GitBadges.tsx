@@ -22,6 +22,7 @@ import {
   sortByHeadAgeDesc,
   sortGitAgentsByMagnitudeDesc,
   sortByStashCountDesc,
+  sortGitAgentsByConflictFirst,
 } from '@/lib/gitStateSummary';
 import { formatWhatsNewLine, type WhatsNewSummary } from '@/lib/whatsNew';
 import { formatRelative, formatAbsoluteFull } from '@/lib/formatTimestamp';
@@ -231,11 +232,16 @@ export function GitChangedFile({ file, onOpen, onOpenConflict, onOpenFile }: { f
 const STALE_HEAD_AGE_MS = 7 * 86400_000;
 // atRisk reason → the per-row suffix label. 'op' is intentionally generic — the
 // agent's specific op (merge/rebase/cherry-pick/…) is not carried on ProjectGitAgent
-// (only the reason class); the per-row GitBranchBadge shows the op itself.
+// (only the reason class); the per-row GitBranchBadge shows the op itself. 'conflict'
+// (WARDEN-701) is the base label for a merge-conflict-BLOCKED agent; the count of
+// unmerged paths is substituted per-agent in the atRisk suffix below (the static record
+// value alone has no N to read), so a blocked merge reads distinctly from a clean,
+// auto-completing rebase instead of both collapsing to "operation in progress".
 const AT_RISK_REASON_LABEL: Record<NonNullable<ProjectGitAgent['atRiskReason']>, string> = {
   detached: 'detached HEAD',
   noUpstream: 'no upstream',
   op: 'operation in progress',
+  conflict: 'merge conflict',
 };
 const GIT_STATE_KIND = {
   dirty:   {
@@ -269,7 +275,30 @@ const GIT_STATE_KIND = {
   },
   unpushed: { glyph: '↑', color: 'text-amber-400 hover:text-amber-300',  label: 'unpushed commits',    match: (a: ProjectGitAgent) => a.ahead > 0, suffix: (a: ProjectGitAgent) => (a.ahead > 0 ? ` · ↑ ${a.ahead}` : '') },
   behind:   { glyph: '↓', color: 'text-blue-400 hover:text-blue-300',    label: 'behind upstream',     match: (a: ProjectGitAgent) => a.behind > 0, suffix: (a: ProjectGitAgent) => (a.behind > 0 ? ` · ↓ ${a.behind}` : '') },
-  atRisk:   { glyph: '⚑', color: 'text-rose-400 hover:text-rose-300',    label: 'at-risk repo state',  match: (a: ProjectGitAgent) => a.atRisk,     suffix: (a: ProjectGitAgent) => (a.atRiskReason ? ` · ${AT_RISK_REASON_LABEL[a.atRiskReason]}` : '') },
+  atRisk:   {
+    glyph: '⚑',
+    color: 'text-rose-400 hover:text-rose-300',
+    label: 'at-risk repo state',
+    match: (a: ProjectGitAgent) => a.atRisk,
+    // WARDEN-701: for a 'conflict' agent substitute the unmerged-path count into the
+    // suffix ("merge conflict · N unmerged") so a BLOCKED merge reads distinctly from
+    // a clean, auto-completing rebase (the generic 'op' label) under the same ⚑ chip.
+    // The static AT_RISK_REASON_LABEL['conflict'] is the base ("merge conflict") with
+    // no count to read; the count lives on ProjectGitAgent.conflictCount, so it is
+    // substituted here per-row. Every other reason renders the static label verbatim.
+    suffix: (a: ProjectGitAgent) => {
+      if (!a.atRiskReason) return '';
+      if (a.atRiskReason === 'conflict') return ` · ${AT_RISK_REASON_LABEL.conflict} · ${a.conflictCount} unmerged`;
+      return ` · ${AT_RISK_REASON_LABEL[a.atRiskReason]}`;
+    },
+    // WARDEN-701: rank the ⚑ popover conflict-first so a merge-conflict-BLOCKED agent
+    // (the one repo state that cannot self-resolve and needs a human RIGHT NOW) sits
+    // above every clean auto-completing rebase / no-upstream parker / detached HEAD.
+    // `'sort' in cfg` in GitStateBadge scopes this to the atRisk popover ONLY. A pure,
+    // NEW-array sort (does not mutate): summarizeProjectGitState's agents array stays in
+    // chats order; only this popover's filtered slice is reordered at render time.
+    sort: sortGitAgentsByConflictFirst,
+  },
   stash:    {
     glyph: '🗄',
     color: 'text-fuchsia-400 hover:text-fuchsia-300',
@@ -312,18 +341,19 @@ function GitStateBadge({ kind, count, agents, chats, gitStatus, onOpenChat }: {
   const [open, setOpen] = useState(false);
   if (count <= 0) return null;
   const cfg = GIT_STATE_KIND[kind];
-  // WARDEN-669 + WARDEN-670 + WARDEN-689: per-kind render-time sort of THIS
-  // popover's filtered slice only. The summarizer's own `agents` array is NEVER
+  // WARDEN-669 + WARDEN-670 + WARDEN-689 + WARDEN-701: per-kind render-time sort of
+  // THIS popover's filtered slice only. The summarizer's own `agents` array is NEVER
   // reordered here -- its deterministic chats-iteration-order invariant is asserted
-  // throughout gitStateSummary.test.mjs and shared by the behind/atRisk/stalled
-  // popovers, which stay unsorted. The unpushed popover ranks oldest-HEAD-first
-  // (WARDEN-669: surface the most rot-prone commits on top so a human integrates
-  // them first); the dirty popover ranks heaviest-WIP-first (WARDEN-670: largest
-  // insertions+deletions magnitude on top); the stash popover ranks heaviest-parker-
-  // first (WARDEN-689: most parked WIP on top) — each via the table's `sort`.
-  // `'sort' in cfg` narrows to the dirty + stash entries (the kinds carrying a
-  // `sort`), so this never reorders behind/atRisk/stalled. All sort helpers return
-  // NEW arrays (no mutation of `agents`). `now` is captured once so the
+  // throughout gitStateSummary.test.mjs and shared by the behind/stalled popovers,
+  // which stay unsorted. The unpushed popover ranks oldest-HEAD-first (WARDEN-669:
+  // surface the most rot-prone commits on top so a human integrates them first); the
+  // dirty popover ranks heaviest-WIP-first (WARDEN-670: largest insertions+deletions
+  // magnitude on top); the stash popover ranks heaviest-parker-first (WARDEN-689: most
+  // parked WIP on top); the atRisk popover ranks conflict-first (WARDEN-701: a merge-
+  // conflict-BLOCKED agent on top of every clean auto-completing rebase) — each via the
+  // table's `sort`. `'sort' in cfg` narrows to the dirty + atRisk + stash entries (the
+  // kinds carrying a `sort`), so this never reorders behind/stalled. All sort helpers
+  // return NEW arrays (no mutation of `agents`). `now` is captured once so the
   // reconstructed HEAD epoch (now - headAgeMs) is consistent between a row's
   // relative label and its absolute title (WARDEN-669).
   const matched = agents.filter(cfg.match);
