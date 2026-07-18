@@ -467,4 +467,209 @@ test('dispose detaches all taps + stops the heartbeat', () => {
   assert.equal(src.isConsentOn(), false);
 });
 
+// ==========================================================================
+// (WARDEN-538) Extended-tier producer — focused chat/session names attach ONLY
+// when extended consent is on AND a context value is held; otherwise today's
+// anonymous event. Mirrors the sink client's extended-requires-base clamp.
+// ==========================================================================
+
+test('builders are pure: they attach chatName/sessionName ONLY when threaded via opts', () => {
+  // No names in opts → today's anonymous event (no name keys present at all).
+  const plain = buildErrorEvent(new Error('x'), { now: 1 });
+  assert.equal('chatName' in plain, false);
+  assert.equal('sessionName' in plain, false);
+  // Names in opts → attached verbatim (the consent gate is the caller's job).
+  const named = buildErrorEvent(new Error('x'), { now: 1, chatName: 'plan-a', sessionName: 'sess-1' });
+  assert.equal(named.chatName, 'plan-a');
+  assert.equal(named.sessionName, 'sess-1');
+  // All three event types honor the same opts threading.
+  assert.equal(buildCrashEvent({ reason: 'oom' }, { now: 1, chatName: 'plan-a' }).chatName, 'plan-a');
+  assert.equal(buildStallEvent(50, { now: 1, runtime: RUNTIME.MAIN, chatName: 'plan-a' }).chatName, 'plan-a');
+  // Empty-string / non-string names are dropped (never an empty identifier).
+  const empties = buildErrorEvent(new Error('x'), { now: 1, chatName: '', sessionName: 42 });
+  assert.equal('chatName' in empties, false);
+  assert.equal('sessionName' in empties, false);
+  // A name-bearing event still validates as a base-tier event (names are additive).
+  assert.ok(validateBaseEvent(named));
+});
+
+test('(a) extended consent OFF → names NEVER attached even when context is set', () => {
+  const record = recorder();
+  const src = makeSource({ record });
+  const proc = fakeEmitter();
+  src.attachMain(proc);
+  src.setBaseConsent(true); // base on, extended never enabled (default off)
+  src.setContext({ chatName: 'should-not-attach', sessionName: 'nor-this' });
+
+  proc.emit(UNCAUGHT_EVENT, new Error('boom'));
+  assert.equal(record.calls.length, 1);
+  assert.equal(record.calls[0].chatName, undefined, 'no chatName when extended off');
+  assert.equal(record.calls[0].sessionName, undefined, 'no sessionName when extended off');
+
+  // Explicitly setting extended OFF while context is held must also stay anonymous.
+  src.setExtendedConsent(false);
+  proc.emit(UNCAUGHT_EVENT, new Error('boom2'));
+  assert.equal(record.calls[1].chatName, undefined);
+  assert.equal(record.calls[1].sessionName, undefined);
+});
+
+test('(b) extended consent ON + context held → focused chatName attaches to every event type', () => {
+  const record = recorder();
+  const src = makeSource({ record });
+  const proc = fakeEmitter();
+  const wc = fakeEmitter();
+  src.attachMain(proc);
+  src.attachRenderer(wc);
+  src.setBaseConsent(true);
+  src.setExtendedConsent(true);
+  src.setContext({ chatName: 'refactor-auth' });
+
+  // Each signal family attaches the focused chat name; sessionName stays absent
+  // (the renderer sends only chatName for now — the holder still accepts it).
+  proc.emit(UNCAUGHT_EVENT, new Error('e1'));
+  proc.emit(REJECTION_EVENT, 'r1');
+  wc.emit('render-process-gone', {}, { reason: 'oom', exitCode: 7 });
+  wc.emit('unresponsive');
+
+  assert.equal(record.calls.length, 4);
+  for (const ev of record.calls) {
+    assert.equal(ev.chatName, 'refactor-auth', `${ev.type} event must carry the focused chatName`);
+    assert.equal(ev.sessionName, undefined);
+    assert.ok(validateBaseEvent(ev), `${ev.type} must still validate as a base event`);
+  }
+});
+
+test('heartbeat stall attaches the focused chatName when extended on + context held', () => {
+  const clock = fakeClock();
+  const record = recorder();
+  const src = createTelemetrySource({
+    record, now: clock.now, setInterval: clock.setInterval, clearInterval: clock.clearInterval,
+    heartbeatMs: 500, thresholdMs: 100,
+  });
+  src.setBaseConsent(true); // lastTick = 1000
+  src.setExtendedConsent(true);
+  src.setContext({ chatName: 'heartbeat-chat' });
+
+  // Tick arrives 250ms late → overdue 250 > 100 → stall carrying the focused name.
+  clock.state.now = 1000 + 500 + 250;
+  clock.state.tickFn();
+  assert.equal(record.calls.length, 1);
+  assert.equal(record.calls[0].type, 'performance-stall');
+  assert.equal(record.calls[0].chatName, 'heartbeat-chat');
+});
+
+test('(c) extended consent ON but NO context held → anonymous event (graceful)', () => {
+  const record = recorder();
+  const src = makeSource({ record });
+  const proc = fakeEmitter();
+  src.attachMain(proc);
+  src.setBaseConsent(true);
+  src.setExtendedConsent(true);
+  // No setContext call — nothing focused yet.
+
+  proc.emit(UNCAUGHT_EVENT, new Error('no context'));
+  assert.equal(record.calls.length, 1);
+  assert.equal(record.calls[0].chatName, undefined, 'no name when no context held');
+  assert.equal(record.calls[0].sessionName, undefined);
+  // A later context push attaches on subsequent events (recovery).
+  src.setContext({ chatName: 'now-focused' });
+  proc.emit(UNCAUGHT_EVENT, new Error('with context'));
+  assert.equal(record.calls[1].chatName, 'now-focused');
+});
+
+test('extended-requires-base: setExtendedConsent(true) while base OFF is clamped (no names)', () => {
+  const record = recorder();
+  const src = makeSource({ record });
+  const proc = fakeEmitter();
+  src.attachMain(proc);
+  src.setContext({ chatName: 'clamped' });
+  // Extended on BEFORE base — must be clamped to false.
+  src.setExtendedConsent(true);
+  src.setBaseConsent(true); // base flips on; extended stays false (not re-affirmed)
+
+  proc.emit(UNCAUGHT_EVENT, new Error('x'));
+  assert.equal(record.calls.length, 1);
+  assert.equal(record.calls[0].chatName, undefined, 'extended enabled without base must not attach names');
+});
+
+test('turning base OFF after extended on clears extended → names stop attaching', () => {
+  const record = recorder();
+  const src = makeSource({ record });
+  const proc = fakeEmitter();
+  src.attachMain(proc);
+  src.setBaseConsent(true);
+  src.setExtendedConsent(true);
+  src.setContext({ chatName: 'going-away' });
+  proc.emit(UNCAUGHT_EVENT, new Error('named'));
+  assert.equal(record.calls[0].chatName, 'going-away');
+
+  // Base off → extended is dropped (mirror of the sink client clamp).
+  src.setBaseConsent(false);
+  // Re-enable base without re-affirming extended: names must NOT return.
+  src.setBaseConsent(true);
+  proc.emit(UNCAUGHT_EVENT, new Error('anonymous again'));
+  assert.equal(record.calls[1].chatName, undefined, 'base off must clear extended consent');
+});
+
+test('setContext ignores garbage: non-strings / empty / non-object never inject an identifier', () => {
+  const record = recorder();
+  const src = makeSource({ record });
+  const proc = fakeEmitter();
+  src.attachMain(proc);
+  src.setBaseConsent(true);
+  src.setExtendedConsent(true);
+  for (const garbage of [null, undefined, 'nope', 42, { chatName: 99 }, { chatName: '' }, { sessionName: { x: 1 } }]) {
+    src.setContext(garbage);
+  }
+  proc.emit(UNCAUGHT_EVENT, new Error('x'));
+  assert.equal(record.calls.length, 1);
+  assert.equal(record.calls[0].chatName, undefined);
+  assert.equal(record.calls[0].sessionName, undefined);
+});
+
+test('(d) base-consent path unchanged: a base-tier (extended-off) user gets byte-identical anonymous events', () => {
+  // The pre-WARDEN-538 behavior: base on, extended off. Every emitted event must
+  // carry NO name keys at all — the same shape the sink always saw.
+  const record = recorder();
+  const src = makeSource({ record });
+  const proc = fakeEmitter();
+  const wc = fakeEmitter();
+  src.attachMain(proc);
+  src.attachRenderer(wc);
+  src.setBaseConsent(true);
+  // Context pushed but extended never enabled — must be a complete no-op.
+  src.setContext({ chatName: 'invisible' });
+
+  proc.emit(UNCAUGHT_EVENT, new Error('bad /home/alicedoe/x'));
+  wc.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 1 });
+
+  assert.equal(record.calls.length, 2);
+  for (const ev of record.calls) {
+    const keys = Object.keys(ev);
+    assert.ok(!keys.includes('chatName'), 'base-tier event must not carry chatName');
+    assert.ok(!keys.includes('sessionName'), 'base-tier event must not carry sessionName');
+    assert.ok(validateBaseEvent(ev));
+  }
+  // Redaction still applies (WARDEN-538 changed nothing about the message path).
+  assert.ok(!record.calls[0].message.includes('alicedoe'));
+});
+
+test('dispose resets extended consent + context so a reused source starts anonymous', () => {
+  const record = recorder();
+  const src = makeSource({ record });
+  const proc = fakeEmitter();
+  src.attachMain(proc);
+  src.setBaseConsent(true);
+  src.setExtendedConsent(true);
+  src.setContext({ chatName: 'pre-dispose' });
+  src.dispose();
+  // After dispose the handle holds no consent and no context; re-arming base only
+  // (not extended) must yield anonymous events.
+  src.attachMain(proc);
+  src.setBaseConsent(true);
+  proc.emit(UNCAUGHT_EVENT, new Error('x'));
+  assert.equal(record.calls.length, 1);
+  assert.equal(record.calls[0].chatName, undefined);
+});
+
 console.log(`\n✓ TELEMETRY-SOURCE TESTS PASS (${passed})`);

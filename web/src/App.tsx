@@ -18,7 +18,7 @@ import { useHostStatuses } from '@/lib/useHostStatuses';
 import { snoozeExpiry, pruneExpired, withoutSnoozeKey, snoozeManyKeys, type AlertMuteMode, type SnoozeDuration } from '@/lib/snooze';
 import { rankAttention, hasReturnContent, attentionReason, type AttentionItem } from '@/lib/attentionRollup';
 import { cn } from '@/lib/utils';
-import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray } from '@/lib/electron';
+import { getRememberWindowBounds, setRememberWindowBounds as persistRememberWindowBounds, getLaunchAtLogin, setLaunchAtLogin as persistLaunchAtLogin, getCloseToTray, setCloseToTray as persistCloseToTray, setTelemetryContext } from '@/lib/electron';
 import type { Chat } from '@/lib/types';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ChatSidebar } from '@/components/ChatSidebar';
@@ -941,6 +941,18 @@ function App() {
   // matching a transient row sharing the old key.
   const focusedChat = chats.find((c) => (c.key || c.id) === focused) || null;
   const focusedPaneKey = focusedChat?.key || focusedChat?.id || null;
+  // WARDEN-538 — push the focused chat's name to the telemetry source so an
+  // extended-tier opt-in's error/crash/stall events carry the correlation
+  // identifier. The source attaches the name ONLY when extended consent is on
+  // (which requires base), and the sink's redactor retains it only at the
+  // extended tier — so this push is inert until the user opts in, and never
+  // leaks a name at base/off. No sessionName: the focused Chat carries no
+  // distinct Claude session name (the summary is folded into `.name` on resume),
+  // per the WARDEN-538 planner decision. Fire-and-forget; a clean no-op outside
+  // the Electron app (browser/dev/smoke have no telemetry source).
+  useEffect(() => {
+    setTelemetryContext({ chatName: focusedChat?.name });
+  }, [focusedChat?.name]);
   const { rollup: attentionRollup, watchedStates: watchedAgentStates } = useAttentionRollup(
     attentionDesktopAlerts, openPanes, attentionStates, attentionSeverityPrefs, mutedAlertKeys, snoozedAlertKeys, watchedChats, openChat, focusedPaneKey,
   );

@@ -165,6 +165,11 @@ function applyTelemetryConfig(prefs) {
     telemetryPrefs.telemetryAuthToken = prefs.telemetryAuthToken;
   }
   telemetry.setBaseConsent(telemetryPrefs.telemetryBaseEnabled === true);
+  // WARDEN-538 — thread the EXTENDED consent pref to the source so it can attach
+  // the focused chat/session name to built events. MUST follow setBaseConsent:
+  // the source's setExtendedConsent clamps to `value && baseConsent`, so base has
+  // to be current first (mirrors the sink client's extended-requires-base order).
+  telemetry.setExtendedConsent(telemetryPrefs.telemetryExtendedEnabled === true);
   telemetryPipeline.setEndpoint(telemetryPrefs.telemetryEndpoint || '');
   telemetryPipeline.setAuthToken(telemetryPrefs.telemetryAuthToken || '');
 }
@@ -537,6 +542,25 @@ ipcMain.handle('telemetry:clear-runtime-drift', () => {
     return telemetryPipeline.getRuntimeStatus();
   } catch {
     return { drifted: false };
+  }
+});
+
+// WARDEN-538 — RECEIVE the focused chat/session name context from the renderer.
+// The renderer pushes { chatName?, sessionName? } on focus / active-pane change;
+// main forwards it to the source's context holder so an extended-tier event can
+// attach the correlation identifier. Pure context storage: the source attaches
+// names ONLY when extended consent is on (which requires base), so this stores
+// nothing-identifying-useful until the user has opted into the extended tier —
+// and even then the sink's live-tier redactor is the final retain/drop gate.
+// Always forwarded (not skipped when base is off): storing two strings is cheap,
+// and keeping the context current means a name attaches the instant extended is
+// later enabled rather than waiting for the next focus change. Defensive: a bad
+// payload is normalized to "no context" by setContext itself.
+ipcMain.handle('telemetry:set-context', (_event, ctx) => {
+  try {
+    telemetry.setContext(ctx);
+  } catch {
+    /* a context update must never crash the host */
   }
 });
 

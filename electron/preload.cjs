@@ -49,6 +49,11 @@ contextBridge.exposeInMainWorld('wardenTelemetry', {
   // receiver is schema-matched again (the in-session recovery path for a receiver
   // fixed at the same url). No-op when drift is not armed.
   clearRuntimeDrift: () => ipcRenderer.invoke('telemetry:clear-runtime-drift'),
+  // WARDEN-538 — push the focused chat/session name to main so extended-tier
+  // events can attach the correlation identifier. The renderer calls this on
+  // focus / active-pane change. Pure context storage on the main side; names
+  // attach only when the user has opted into the extended tier.
+  setContext: (ctx) => ipcRenderer.invoke('telemetry:set-context', ctx),
   onRuntimeStatus: (cb) => {
     const listener = (_event, status) => {
       try { cb(status); } catch { /* a renderer callback must never crash main */ }

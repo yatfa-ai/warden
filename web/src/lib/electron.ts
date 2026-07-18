@@ -153,6 +153,9 @@ export interface TelemetryRuntimeStatus {
 interface WardenTelemetryBridge {
   getRuntimeStatus: () => Promise<TelemetryRuntimeStatus>;
   clearRuntimeDrift: () => Promise<TelemetryRuntimeStatus>;
+  // WARDEN-538 — push the focused chat/session name to main so extended-tier
+  // events can attach it. Fire-and-forget context; resolves once main has stored it.
+  setContext: (ctx: TelemetryContext) => Promise<void>;
   onRuntimeStatus: (cb: (status: TelemetryRuntimeStatus) => void) => () => void;
 }
 
@@ -218,5 +221,32 @@ export async function clearTelemetryRuntimeDrift(): Promise<TelemetryRuntimeStat
   } catch (e) {
     console.warn('[warden:electron] clearTelemetryRuntimeDrift failed', e);
     return { drifted: false };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// WARDEN-538 — push the FOCUSED chat/session name to main so the telemetry
+// source can attach it to extended-tier events. App.tsx calls this on focus /
+// active-pane change with `{ chatName: focusedChat?.name }` (sessionName is left
+// unset for now — the focused Chat carries no distinct Claude session name; see
+// the WARDEN-538 planner decision). Main stores it in the source's context
+// holder; names attach ONLY when the user has opted into the extended tier, so
+// this payload is inert until then. A clean no-op when the bridge is absent
+// (browser/dev/smoke have no main-process telemetry source). Never rejects.
+// ---------------------------------------------------------------------------
+
+/** The focused-name context pushed to main for extended-tier event attachment. */
+export interface TelemetryContext {
+  chatName?: string;
+  sessionName?: string;
+}
+
+export async function setTelemetryContext(ctx: TelemetryContext): Promise<void> {
+  const b = telemetryBridge();
+  if (!b) return;
+  try {
+    await b.setContext(ctx ?? {});
+  } catch (e) {
+    console.warn('[warden:electron] setTelemetryContext failed', e);
   }
 }
