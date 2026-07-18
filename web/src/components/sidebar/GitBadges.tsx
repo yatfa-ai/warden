@@ -204,22 +204,29 @@ export function GitChangedFile({ file, onOpen, onOpenConflict, onOpenFile }: { f
 // No new fetch: the contributing agents come from the cached gitStatus map via
 // summarizeProjectGitState; displayName/branch are joined here in the React layer.
 // Per-kind rendering config for GitStateBadge. Adding an axis (behind WARDEN-297,
-// at-risk WARDEN-635, stashed WARDEN-667) is a row in this table rather than
-// another branch in every ternary. Each kind picks its glyph, color, label, the
-// predicate that matches its popover rows, and the per-row branch-line suffix.
-// Colors stay in the same visual system as the per-row GitBranchBadge: dirty
+// at-risk WARDEN-635, stashed WARDEN-667, stalled WARDEN-682) is a row in this table
+// rather than another branch in every ternary. Each kind picks its glyph, color,
+// label, the predicate that matches its popover rows, and the per-row branch-line
+// suffix. Colors stay in the same visual system as the per-row GitBranchBadge: dirty
 // yellow ±, unpushed amber ↑, behind blue ↓, at-risk rose ⚑ (WARDEN-635), stashed
 // fuchsia 🗄 (WARDEN-667 — matching the per-row stash badge color, and distinct
 // from all four other chip hues AND from the red ⚠ collision glyph and the red ⚠
 // in-progress-op glyph, per WARDEN-68's distinct-vocabulary rule: a different hue
-// AND a different glyph so the five chip axes never collide).
+// AND a different glyph so the chip axes never collide), stalled sky 💤 (WARDEN-682).
+// The stalled hue is sky, NOT the per-row stale amber tint (amber is already taken by
+// unpushed ↑ and the impending ⏱ collision glyph) and NOT indigo (taken by the
+// WhatsNewMarker ✦) — fleet/row agreement rides on the shared STALE_HEAD_AGE_MS 7d
+// threshold, not a shared color, so the chip and the per-row amber `· Nd` append can
+// differ in hue while agreeing on WHO is stalled.
 // WARDEN-669: the >7d HEAD-commit staleness threshold, SHARED between the per-row
-// GitBranchBadge (WARDEN-545) and the fleet ↑N unpushed popover (WARDEN-669) so the
-// fleet and the row agree by construction — a HEAD the per-row badge tints amber is
-// the SAME age the fleet popover tints amber, no second magic number to drift. Hoisted
-// to module scope (from GitBranchBadge's local const) so the unpushed popover reuses
-// it without redefining it. The age field on ProjectGitAgent is a threshold-FREE rank;
-// this const only governs the label TINT, exactly as it does for the per-row badge.
+// GitBranchBadge (WARDEN-545), the fleet ↑N unpushed popover (WARDEN-669), and the
+// fleet 💤N stalled chip (WARDEN-682) so the row and both fleet surfaces agree by
+// construction — a HEAD the per-row badge tints amber is the SAME age the fleet
+// popover/chip act on, no second magic number to drift. Hoisted to module scope
+// (from GitBranchBadge's local const) so the unpushed popover + stalled chip reuse it
+// without redefining it. The age field on ProjectGitAgent (headAgeMs) is a threshold-
+// FREE rank; this const governs the unpushed label TINT here, and — via the reconciled
+// headAgeMs field — the stalled chip's membership test in gitStateSummary.ts.
 const STALE_HEAD_AGE_MS = 7 * 86400_000;
 // atRisk reason → the per-row suffix label. 'op' is intentionally generic — the
 // agent's specific op (merge/rebase/cherry-pick/…) is not carried on ProjectGitAgent
@@ -263,10 +270,11 @@ const GIT_STATE_KIND = {
   behind:   { glyph: '↓', color: 'text-blue-400 hover:text-blue-300',    label: 'behind upstream',     match: (a: ProjectGitAgent) => a.behind > 0, suffix: (a: ProjectGitAgent) => (a.behind > 0 ? ` · ↓ ${a.behind}` : '') },
   atRisk:   { glyph: '⚑', color: 'text-rose-400 hover:text-rose-300',    label: 'at-risk repo state',  match: (a: ProjectGitAgent) => a.atRisk,     suffix: (a: ProjectGitAgent) => (a.atRiskReason ? ` · ${AT_RISK_REASON_LABEL[a.atRiskReason]}` : '') },
   stash:    { glyph: '🗄', color: 'text-fuchsia-400 hover:text-fuchsia-300', label: 'stashed WIP',       match: (a: ProjectGitAgent) => a.stashed,    suffix: () => '' },
+  stalled:  { glyph: '💤', color: 'text-sky-400 hover:text-sky-300',     label: 'stalled (>7d)',       match: (a: ProjectGitAgent) => a.stalled,    suffix: (a: ProjectGitAgent) => (a.stalled && a.headAgeMs != null ? ` · 💤 ${formatRelative(Date.now() - a.headAgeMs)}` : '') },
 } as const;
 
 function GitStateBadge({ kind, count, agents, chats, gitStatus, onOpenChat }: {
-  kind: 'dirty' | 'unpushed' | 'behind' | 'atRisk' | 'stash';
+  kind: 'dirty' | 'unpushed' | 'behind' | 'atRisk' | 'stash' | 'stalled';
   count: number;
   // Already scoped to this chip (a project's subset, or `total.agents` for the
   // "All Projects" chip); filtered below by `kind`.
@@ -392,12 +400,13 @@ function GitStateBadge({ kind, count, agents, chats, gitStatus, onOpenChat }: {
   );
 }
 
-export function GitStateBadges({ dirty, unpushed, behind, atRisk, stashed, agents, chats, gitStatus, onOpenChat }: {
+export function GitStateBadges({ dirty, unpushed, behind, atRisk, stashed, stalled, agents, chats, gitStatus, onOpenChat }: {
   dirty: number;
   unpushed: number;
   behind: number;
   atRisk: number;
   stashed: number;
+  stalled: number;
   agents: ProjectGitAgent[];
   chats: Chat[];
   gitStatus: Record<string, { branch: string | null }>;
@@ -410,6 +419,7 @@ export function GitStateBadges({ dirty, unpushed, behind, atRisk, stashed, agent
       <GitStateBadge kind="behind" count={behind} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
       <GitStateBadge kind="atRisk" count={atRisk} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
       <GitStateBadge kind="stash" count={stashed} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
+      <GitStateBadge kind="stalled" count={stalled} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
     </>
   );
 }
