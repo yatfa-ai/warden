@@ -25,7 +25,11 @@ export type TransmissionOutcomeTone = 'ok' | 'dropped' | 'unknown';
 export interface TransmissionRowDescriptor {
   /** Stable key + sort basis (newest-first). 0 only for a malformed timestamp. */
   timestamp: number;
-  /** 'Delivered' | 'Dropped' | 'Unknown'. */
+  /** The user-visible row label — 'Delivered' | 'Dropped' | 'Unknown'. This is
+   *  the SINGLE source of truth for the rendered label string: the component
+   *  reads `d.outcomeLabel` directly (it does NOT hardcode the strings), so the
+   *  outcomeLabel assertions below are genuine coverage of what the user sees —
+   *  change the label here and both the row text and the tests move together. */
   outcomeLabel: string;
   /** Drives the row's icon + color. 'unknown' covers a null outcome. */
   outcomeTone: TransmissionOutcomeTone;

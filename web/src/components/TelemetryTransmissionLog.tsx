@@ -74,13 +74,15 @@ export function TelemetryTransmissionLog() {
         <h4 className="text-xs font-semibold text-foreground">Recent send outcomes</h4>
         {!loading && summary.total > 0 && (
           <div className="flex flex-wrap items-center gap-1.5">
-            <Badge
-              variant="outline"
-              className="gap-1 border-green-500/40 text-green-600 dark:text-green-400"
-            >
-              <Check className="size-3" aria-hidden />
-              {summary.delivered} delivered
-            </Badge>
+            {summary.delivered > 0 && (
+              <Badge
+                variant="outline"
+                className="gap-1 border-green-500/40 text-green-600 dark:text-green-400"
+              >
+                <Check className="size-3" aria-hidden />
+                {summary.delivered} delivered
+              </Badge>
+            )}
             {summary.dropped > 0 && (
               <Badge variant="outline" className="gap-1 border-destructive/40 text-destructive">
                 <X className="size-3" aria-hidden />
@@ -113,20 +115,28 @@ export function TelemetryTransmissionLog() {
                 key={`${d.timestamp}-${i}`}
                 className="flex flex-wrap items-center gap-1.5 text-[11px]"
               >
+                {/*
+                  The label text comes from `d.outcomeLabel` — the SINGLE source
+                  of truth (set in describeTransmissionEntry), so a label change
+                  is one edit and the descriptor's outcomeLabel tests genuinely
+                  cover the user-visible string. outcomeTone only drives the
+                  icon + color (green Check / red X / muted HelpCircle) — three
+                  distinct render paths, not a duplicated label mapping.
+                */}
                 {d.outcomeTone === 'ok' ? (
                   <span className="inline-flex items-center gap-1 font-medium text-green-600 dark:text-green-400">
                     <Check className="size-3 shrink-0" aria-hidden />
-                    Delivered
+                    {d.outcomeLabel}
                   </span>
                 ) : d.outcomeTone === 'dropped' ? (
                   <span className="inline-flex items-center gap-1 font-medium text-destructive">
                     <X className="size-3 shrink-0" aria-hidden />
-                    Dropped
+                    {d.outcomeLabel}
                   </span>
                 ) : (
                   <span className="inline-flex items-center gap-1 font-medium text-muted-foreground">
                     <HelpCircle className="size-3 shrink-0" aria-hidden />
-                    Unknown
+                    {d.outcomeLabel}
                   </span>
                 )}
                 <span className="text-muted-foreground/50" aria-hidden>·</span>
