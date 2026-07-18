@@ -37,6 +37,11 @@ const SAMPLE_ERROR_EVENT = {
   type: 'error' as const,
   runtime: 'renderer' as const,
   timestamp: 1718000000000,
+  // A non-identifying app RELEASE LABEL (identical for every user on a release),
+  // attached to every emitted event so volume can be attributed to a release.
+  // Included in the sample to SHOW it survives redaction — reinforcing, not
+  // undermining, the trust model (it is neither content nor an identifier).
+  appVersion: '0.1.19',
   name: 'TypeError',
   message:
     'Failed to load config from /home/user/secrets/config.json: connect to db.internal.corp.local failed (token=Bearer sk-ant-abc123def456ghi789jkl012mno345pqr678stu901)',
@@ -194,6 +199,12 @@ export function TelemetryTransparency({ telemetryBaseEnabled, telemetryExtendedE
               </div>
             ))}
           </div>
+          <p className="text-[10px] leading-relaxed text-muted-foreground/70">
+            A trailing <code className="font-mono">?</code> marks an optional field.{' '}
+            <code className="font-mono">appVersion?</code> is a non-identifying app release label (the version of warden
+            you installed) — not content, not a chat/session identifier — carried only so a maintainer can attribute event
+            volume to a release. It is sent on every event when the version is readable.
+          </p>
         </div>
 
         <div className="flex flex-col gap-1.5">

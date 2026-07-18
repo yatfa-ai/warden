@@ -113,6 +113,11 @@ const CANDIDATE = {
   type: 'error',
   runtime: 'renderer',
   timestamp: 1719500000123,
+  // A non-identifying release label (WARDEN-665). Neither content nor an
+  // identifier → it must SURVIVE redaction unredacted at every tier, which the
+  // preview must disclose (a transparency panel that hides a collected field is
+  // a lie of omission even when the data is benign).
+  appVersion: '0.1.19',
   name: 'Error',
   message:
     'Failed to load /home/alice/.ssh/aws-creds from host prod-db-01.corp.local (Authorization: Bearer ' +
@@ -182,6 +187,32 @@ test('describeCollection lists content/prompt fields as HARD-EXCLUDED at every t
   }
 });
 
+test('describeCollection DISCLOSES the optional appVersion? field on every base-event type (WARDEN-665)', () => {
+  // The transparency panel's contract is to list EVERY field a tier collects.
+  // Production attaches appVersion to every emitted event, so it MUST appear in
+  // the disclosed field catalog — modeled with the `?` suffix (like `exitCode?`)
+  // to document that a v2 event WITHOUT it still validates. This is the forcing
+  // function: removing appVersion? from BASE_EVENT_FIELDS turns this red.
+  for (const tier of ['base', 'extended']) {
+    const cat = describeCollection(tier);
+    assert.equal(cat.eventTypes.length, 3, `three event types at ${tier}`);
+    for (const et of cat.eventTypes) {
+      assert.ok(
+        et.fields.includes('appVersion?'),
+        `${et.type} discloses optional appVersion? at ${tier}`,
+      );
+    }
+  }
+  // appVersion is a release label, NOT an identifier — it must not be classified
+  // as a chat/session-name identifier field (those are extended-only).
+  for (const tier of ['base', 'extended', 'off']) {
+    const cat = describeCollection(tier);
+    for (const id of cat.identifierFields) {
+      assert.ok(!/appversion/.test(id), `appVersion is not an identifier field at ${tier}`);
+    }
+  }
+});
+
 console.log('\n(b) previewPayload — path/host/Authorization redacted + schema-valid');
 
 test('previewPayload replaces the file path, hostname, and Authorization header with [REDACTED:…]', () => {
@@ -197,6 +228,21 @@ test('previewPayload replaces the file path, hostname, and Authorization header 
   assert.doesNotMatch(s, /ghp_/);
   // Belt-and-suspenders: the REAL main-process validator agrees the payload is valid.
   assert.equal(validateBaseEvent(payload), true, 'real validateBaseEvent agrees valid');
+});
+
+test('a non-identifying appVersion release label SURVIVES redaction unredacted at every tier (WARDEN-665)', () => {
+  // appVersion is neither a content/prompt field nor a chat/session-name
+  // identifier, so the redactor neither drops nor rewrites it. This is exactly
+  // what the transparency panel's live preview must SHOW: a benign release label
+  // passing through intact — reinforcing, not undermining, the trust model.
+  for (const t of ['base', 'extended', 'off', 'unknown', undefined]) {
+    const { payload } = previewPayload(CANDIDATE, t);
+    assert.equal(payload.appVersion, '0.1.19', `appVersion survives unredacted at tier ${t}`);
+    // And it is never enumerated as a redaction change (it was not transformed).
+    const re = previewPayload(CANDIDATE, t);
+    const touched = re.changes.some((c) => c.path === 'appVersion');
+    assert.equal(touched, false, `appVersion is never a redacted/dropped path at tier ${t}`);
+  }
 });
 
 test('previewPayload is valid for a well-formed crash and performance-stall event too', () => {

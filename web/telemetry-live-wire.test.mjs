@@ -301,7 +301,7 @@ await test('(a) a successful 2xx send records an outcome:ok entry (attempts:1, s
   assert.equal(e.attempts, 1);
   assert.equal(e.status, 200);
   assert.equal(e.endpointHost, 'telemetry.example.selfhosted.net', 'host only — no path/query');
-  assert.equal(e.schemaVersion, 2);
+  assert.equal(e.schemaVersion, SCHEMA_VERSION);
   assert.equal(e.eventCount, 1);
 });
 
