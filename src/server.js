@@ -31,7 +31,7 @@ import {
   probeReceiverCapabilities,
 } from './telemetry-capabilities.js';
 import { parseGitStatusPorcelain, parseAheadBehind, parseOutgoingFiles, parseStashCount, parseStashList, parseReflog, parseDiffStat, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, parseGitRemotes, parseGitBranches, buildDockerGitArgv } from './gitStatus.js';
-import { buildInProgressScript, GIT_LOG_PRETTY, parseGitLogLine, parseGitShowNameStatus, GIT_DIFF_MAX_BYTES, capDiff, buildGitDiffScript, isPathWithinCwd, isSafeRelativePath, parseGitBlame, buildGitBlameScript } from './git.js';
+import { buildInProgressScript, GIT_LOG_PRETTY, parseGitLogLine, parseGitShowNameStatus, GIT_DIFF_MAX_BYTES, capDiff, buildGitDiffScript, isPathWithinCwd, isSafeRelativePath, isValidGitHash, parseGitBlame, buildGitBlameScript } from './git.js';
 import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep } from './companion.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1954,6 +1954,76 @@ export function gitCwd(chat) {
   return chat.cwd || (chat.host === LOCAL ? process.cwd() : '');
 }
 
+// Collapse the duplicated control-flow prelude hand-copied across every /api/git-*
+// route into ONE place (WARDEN-645). Owns ONLY the boilerplate the routes duplicated:
+//   resolve(chatId) → 404 on unknown id   (NOT 200 — the routes are deliberate about
+//       this 404-vs-200 split, so the wrapper preserves it)
+//   route-specific validate(req) → 200 (or a route-chosen status) short-circuit on bad
+//       input (hex hash / stash ref / path guards)
+//   gitCwd(chat) → graceful 'no cwd' empty contract (200, never a 500)
+//   try/catch → 200 { ...defaults, error } on any thrown error (never a 500)
+// The route BODY (the runGit calls + parsers) stays in `handler`, which receives `res`
+// so its existing res.json / res.status calls work byte-for-byte — only the prelude is
+// hoisted; the body is unchanged. This is the route-layer finish to WARDEN-606 (which
+// extracted only the pure parsers/script-builders into git.js): the transport layer
+// (runGit) and parser layer (gitStatus.js + git.js) were already extracted; the route
+// layer was the last un-extracted frontier in this 4,800-line file.
+//
+// Options:
+//   validate(req)   optional. null/undefined to continue; otherwise { status?, body }
+//                   to short-circuit (status defaults 200). Returning the FULL body
+//                   (not just an error key) lets each route reproduce its exact
+//                   validation-failure shape verbatim — incl. git-blame's
+//                   { lines: [], error: null } empty-path "success" and git-conflict's
+//                   path-bearing contract.
+//   defaults        object | (chat, req) => object. The empty contract spread into the
+//                   'no cwd' and catch responses. A function for routes whose empty
+//                   contract carries chat state (git-status / git-ls use chat.cwd).
+//                   When 'no cwd' fires chat.cwd is always falsy (gitCwd returns '' only
+//                   when chat.cwd is absent), so `chat.cwd || ''` reproduces the
+//                   hand-written `cwd: ''` no-cwd body there exactly.
+//   notFoundEmpty   when true, the unknown-id 404 carries the route's empty contract
+//                   ({ ...defaults, error }) instead of the bare { error } most routes
+//                   emit. git-diff / git-conflict / git-range-diff set this.
+//   catchError      string | (e, chat) => string. The error string spread into the
+//                   catch response. Defaults to e.message; git-ls passes 'ls failed'.
+//   handler({chat,cwd,req,res})  the route body, unchanged. Responds via res itself.
+async function withGitRepo(req, res, { validate, defaults, notFoundEmpty, catchError, handler }) {
+  const chatId = String(req.query.id || '');
+  const { chat, error } = await resolve(chatId);
+  if (error) {
+    return res.status(404).json(notFoundEmpty ? { ...gitDefaults(defaults, null, req), error } : { error });
+  }
+
+  if (validate) {
+    const v = validate(req);
+    if (v) {
+      if (v.status) return res.status(v.status).json(v.body);
+      return res.json(v.body);
+    }
+  }
+
+  try {
+    const cwd = gitCwd(chat);
+    if (!cwd) return res.json({ ...gitDefaults(defaults, chat, req), error: 'no cwd' });
+    await handler({ chat, cwd, req, res });
+  } catch (e) {
+    const msg = typeof catchError === 'function' ? catchError(e, chat) : (catchError ?? e.message);
+    res.json({ ...gitDefaults(defaults, chat, req), error: msg });
+  }
+}
+
+// Resolve a route's `defaults` option to a plain object. Usually a static literal
+// ({ commits: [] }, { files: [], diff: null }, …); a handful of routes whose empty
+// contract carries chat state (git-status, git-ls) pass a function. `chat` is null on
+// the 404 path (resolve failed before we had a chat) — the routes that set
+// notFoundEmpty carry only query-derived state (filePath / dir) in their defaults,
+// never chat, so the null is never dereferenced there.
+function gitDefaults(defaults, chat, req) {
+  if (typeof defaults === 'function') return defaults(chat, req);
+  return defaults || {};
+}
+
 // Run `git <args>` for a chat, choosing the transport by kind/host (WARDEN-235).
 // Returns { ok, code, stdout, stderr } with STRING stdout/stderr so call sites
 // read `.stdout` directly (no `.toString()`). Mirrors runLocalGit's windowsHide
@@ -2125,172 +2195,170 @@ async function detectInProgress(chat, cwd) {
 }
 
 app.get('/api/git-status', async (req, res) => {
-  const chatId = String(req.query.id || '');
-  const { chat, error } = await resolve(chatId);
-  if (error) return res.status(404).json({ error });
+  // defaults carries `cwd: chat.cwd || ''`. The hand-written no-cwd body used the
+  // literal `cwd: ''` and the catch used `cwd: chat.cwd || ''`; these are identical
+  // on the no-cwd path (gitCwd returns '' only when chat.cwd is absent, so
+  // `chat.cwd || ''` is '' there too — see gitCwd), so one function serves both.
+  await withGitRepo(req, res, {
+    defaults: (chat) => ({ branch: null, detached: false, headSha: null, headDate: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, upstream: null, inProgress: { operation: null, detail: null }, stashCount: null, diffstat: null, files: null, outgoingFiles: null }),
+    handler: async ({ chat, cwd, res }) => {
+      // branch / status / ahead-behind / detached / stash all run via runGit: argv
+      // (no shell) for the LOCAL transports, ssh for the remote ones — and for yatfa
+      // chats (container set) each call is wrapped in `docker exec … git -C <cwd>` so
+      // git runs INSIDE the container against the in-container path (WARDEN-235).
+      // The old per-transport if/else collapses into one runGit call per probe; the
+      // detached-HEAD detection (WARDEN-239) rides the same transport so it lights
+      // up for yatfa agents too.
+      const branchR = await runGit(chat, ['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
+      const branch = branchR.ok ? branchR.stdout.trim() : '';
 
-  try {
-    const cwd = gitCwd(chat);
-    if (!cwd) return res.json({ branch: null, detached: false, headSha: null, headDate: null, clean: null, cwd: '', ahead: null, behind: null, upstream: null, inProgress: { operation: null, detail: null }, stashCount: null, diffstat: null, files: null, outgoingFiles: null, error: 'no cwd' });
+      const statusR = await runGit(chat, ['status', '--porcelain'], cwd);
+      // NOTE: parse the raw bytes — git status codes can start with a leading
+      // space (" M" = unstaged mod), so the output must NOT be trimmed as a
+      // whole or the first file's path is corrupted. See parseGitStatusPorcelain.
+      const files = parseGitStatusPorcelain(statusR.ok ? statusR.stdout : '');
+      const clean = files.length === 0;
 
-    // branch / status / ahead-behind / detached / stash all run via runGit: argv
-    // (no shell) for the LOCAL transports, ssh for the remote ones — and for yatfa
-    // chats (container set) each call is wrapped in `docker exec … git -C <cwd>` so
-    // git runs INSIDE the container against the in-container path (WARDEN-235).
-    // The old per-transport if/else collapses into one runGit call per probe; the
-    // detached-HEAD detection (WARDEN-239) rides the same transport so it lights
-    // up for yatfa agents too.
-    const branchR = await runGit(chat, ['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
-    const branch = branchR.ok ? branchR.stdout.trim() : '';
+      // ahead/behind upstream: @{u}...HEAD symmetric diff. Non-zero exit (no
+      // upstream, detached HEAD, non-git cwd) → empty stdout → nulls. See parseAheadBehind.
+      const abR = await runGit(chat, ['rev-list', '--left-right', '--count', '@{u}...HEAD'], cwd);
+      const { ahead, behind } = parseAheadBehind(abR.ok ? abR.stdout : '');
 
-    const statusR = await runGit(chat, ['status', '--porcelain'], cwd);
-    // NOTE: parse the raw bytes — git status codes can start with a leading
-    // space (" M" = unstaged mod), so the output must NOT be trimmed as a
-    // whole or the first file's path is corrupted. See parseGitStatusPorcelain.
-    const files = parseGitStatusPorcelain(statusR.ok ? statusR.stdout : '');
-    const clean = files.length === 0;
+      // Upstream tracking branch (WARDEN-243). `git rev-parse --abbrev-ref @{u}`
+      // prints the short upstream name (e.g. origin/feature) + exit 0 when one is
+      // configured, and exits non-zero with empty stdout when HEAD has NO upstream
+      // — a named branch never `push -u`'d. ahead/behind alone can't tell that
+      // branch from a synced 0/0 one (both → nulls with no @{u}), so without this
+      // a never-pushed branch renders as a bare cyan label indistinguishable from
+      // in-sync: a durability risk (local-only work, no remote backup) a human
+      // needs to see at a glance. Same `@{u}` rev spec + runGit transport as the
+      // ahead/behind call above (so it lights up for yatfa containers too,
+      // WARDEN-235) and shellQuote'd on the remote branch inside runGit (the
+      // WARDEN-122 brace-expansion lesson — `@{u}` must not reach a shell bare).
+      const upR = await runGit(chat, ['rev-parse', '--abbrev-ref', '@{u}'], cwd);
+      const upstream = parseUpstream(upR.ok ? upR.stdout : '');
 
-    // ahead/behind upstream: @{u}...HEAD symmetric diff. Non-zero exit (no
-    // upstream, detached HEAD, non-git cwd) → empty stdout → nulls. See parseAheadBehind.
-    const abR = await runGit(chat, ['rev-list', '--left-right', '--count', '@{u}...HEAD'], cwd);
-    const { ahead, behind } = parseAheadBehind(abR.ok ? abR.stdout : '');
+      // Detached-HEAD detection (WARDEN-239). `git symbolic-ref -q HEAD` exits
+      // non-zero iff HEAD is detached (it prints refs/heads/<name> + exit 0 when on
+      // a branch) — the canonical test, more reliable than `branch === 'HEAD'` (a
+      // branch could in principle be named "HEAD"). Run via runGit so it ALSO works
+      // inside a yatfa container (WARDEN-235). Guarded by `branch` (truthy ⟺ the
+      // rev-parse above succeeded ⟺ we're inside a real repo) so a NON-git cwd —
+      // where symbolic-ref also fails — is NOT misread as detached. The short SHA
+      // replaces the misleading literal "HEAD" label the badge would otherwise show;
+      // it's only fetched when detached to keep the normal branch path's command
+      // set unchanged.
+      const symRefResult = await runGit(chat, ['symbolic-ref', '-q', 'HEAD'], cwd);
+      const detached = isDetachedHead(symRefResult.code, !!branch);
+      let headSha = null;
+      if (detached) {
+        const shaResult = await runGit(chat, ['rev-parse', '--short', 'HEAD'], cwd);
+        headSha = normalizeHeadSha(shaResult.stdout, shaResult.code);
+      }
 
-    // Upstream tracking branch (WARDEN-243). `git rev-parse --abbrev-ref @{u}`
-    // prints the short upstream name (e.g. origin/feature) + exit 0 when one is
-    // configured, and exits non-zero with empty stdout when HEAD has NO upstream
-    // — a named branch never `push -u`'d. ahead/behind alone can't tell that
-    // branch from a synced 0/0 one (both → nulls with no @{u}), so without this
-    // a never-pushed branch renders as a bare cyan label indistinguishable from
-    // in-sync: a durability risk (local-only work, no remote backup) a human
-    // needs to see at a glance. Same `@{u}` rev spec + runGit transport as the
-    // ahead/behind call above (so it lights up for yatfa containers too,
-    // WARDEN-235) and shellQuote'd on the remote branch inside runGit (the
-    // WARDEN-122 brace-expansion lesson — `@{u}` must not reach a shell bare).
-    const upR = await runGit(chat, ['rev-parse', '--abbrev-ref', '@{u}'], cwd);
-    const upstream = parseUpstream(upR.ok ? upR.stdout : '');
+      // Last-commit freshness (WARDEN-545): `git log -1 --format=%cI HEAD` prints
+      // the strict ISO-8601 committer date of HEAD. Fetched UNCONDITIONALLY for any
+      // repo with a branch — deliberately NOT inside `if (detached)` above — so a
+      // normally-committing BRANCH agent that has gone quiet (committed days ago,
+      // silent since) is the one that lights up. `headSha` is detached-only (it
+      // merely relabels the "HEAD" string), but freshness must reach the branch
+      // agents that are its actual target; gating it on `if (detached)` would make
+      // the marker render only for detached-HEAD agents and defeat the purpose. A
+      // single rev, ~free. Nulls naturally on an unborn branch / non-git cwd
+      // (`git log` errors → non-zero exit → parseHeadDate returns null). Same
+      // runGit transport as the probes above, so it runs inside yatfa containers
+      // via `docker exec … git -C <cwd>` too (WARDEN-235).
+      const headDateR = await runGit(chat, ['log', '-1', '--format=%cI', 'HEAD'], cwd);
+      const headDate = parseHeadDate(headDateR.ok ? headDateR.stdout : '', headDateR.code);
 
-    // Detached-HEAD detection (WARDEN-239). `git symbolic-ref -q HEAD` exits
-    // non-zero iff HEAD is detached (it prints refs/heads/<name> + exit 0 when on
-    // a branch) — the canonical test, more reliable than `branch === 'HEAD'` (a
-    // branch could in principle be named "HEAD"). Run via runGit so it ALSO works
-    // inside a yatfa container (WARDEN-235). Guarded by `branch` (truthy ⟺ the
-    // rev-parse above succeeded ⟺ we're inside a real repo) so a NON-git cwd —
-    // where symbolic-ref also fails — is NOT misread as detached. The short SHA
-    // replaces the misleading literal "HEAD" label the badge would otherwise show;
-    // it's only fetched when detached to keep the normal branch path's command
-    // set unchanged.
-    const symRefResult = await runGit(chat, ['symbolic-ref', '-q', 'HEAD'], cwd);
-    const detached = isDetachedHead(symRefResult.code, !!branch);
-    let headSha = null;
-    if (detached) {
-      const shaResult = await runGit(chat, ['rev-parse', '--short', 'HEAD'], cwd);
-      headSha = normalizeHeadSha(shaResult.stdout, shaResult.code);
-    }
+      const inProgressState = await detectInProgress(chat, cwd);
 
-    // Last-commit freshness (WARDEN-545): `git log -1 --format=%cI HEAD` prints
-    // the strict ISO-8601 committer date of HEAD. Fetched UNCONDITIONALLY for any
-    // repo with a branch — deliberately NOT inside `if (detached)` above — so a
-    // normally-committing BRANCH agent that has gone quiet (committed days ago,
-    // silent since) is the one that lights up. `headSha` is detached-only (it
-    // merely relabels the "HEAD" string), but freshness must reach the branch
-    // agents that are its actual target; gating it on `if (detached)` would make
-    // the marker render only for detached-HEAD agents and defeat the purpose. A
-    // single rev, ~free. Nulls naturally on an unborn branch / non-git cwd
-    // (`git log` errors → non-zero exit → parseHeadDate returns null). Same
-    // runGit transport as the probes above, so it runs inside yatfa containers
-    // via `docker exec … git -C <cwd>` too (WARDEN-235).
-    const headDateR = await runGit(chat, ['log', '-1', '--format=%cI', 'HEAD'], cwd);
-    const headDate = parseHeadDate(headDateR.ok ? headDateR.stdout : '', headDateR.code);
+      // Shelved WIP: `git stash list` emits one line per stash, empty when none.
+      // --porcelain status never surfaces stashes, so a clean tree with parked work
+      // would otherwise read clean:true — count the list so the badge can show 🗄️ N
+      // (WARDEN-211). Non-git/empty → parseStashCount nulls it.
+      const stashR = await runGit(chat, ['stash', 'list'], cwd);
+      const stashCount = parseStashCount(stashR.ok ? stashR.stdout : '');
 
-    const inProgressState = await detectInProgress(chat, cwd);
+      // Working-tree WIP magnitude (WARDEN-411): `git diff HEAD --shortstat` prints
+      // a one-line "N files changed, N insertions(+), N deletions(-)" summary of the
+      // combined (staged + unstaged) edits vs HEAD. Where stashCount surfaces PARKED
+      // work and the porcelain file list surfaces WHICH files are dirty, this surfaces
+      // HOW MUCH — a 4-file WIP could be four one-line tweaks or a 1000-line rewrite,
+      // and this is the only signal that distinguishes them at a glance. Read-only
+      // (the withdrawn WARDEN-199 branch-switch slice is the cautionary tale; this
+      // stays on the read side). Same runGit transport as the probes above, so it runs
+      // inside yatfa containers via `docker exec … git -C <cwd>` too (WARDEN-235).
+      // parseDiffStat nulls empty/garbage (incl. a clean tree and an all-untracked
+      // WIP — `git diff HEAD` counts tracked edits only); the `branch` gate keeps
+      // non-git/detached consistent with stashCount.
+      const diffstatR = await runGit(chat, ['diff', 'HEAD', '--shortstat'], cwd);
+      const diffstat = parseDiffStat(diffstatR.ok ? diffstatR.stdout : '');
 
-    // Shelved WIP: `git stash list` emits one line per stash, empty when none.
-    // --porcelain status never surfaces stashes, so a clean tree with parked work
-    // would otherwise read clean:true — count the list so the badge can show 🗄️ N
-    // (WARDEN-211). Non-git/empty → parseStashCount nulls it.
-    const stashR = await runGit(chat, ['stash', 'list'], cwd);
-    const stashCount = parseStashCount(stashR.ok ? stashR.stdout : '');
+      // Outgoing (unpushed-commit) changed-file set (WARDEN-601): `git diff --name-only
+      // @{u}..HEAD` lists the files touched by the agent's local commits that @{u}
+      // (upstream) doesn't have yet — the join key for the IMPENDING cross-agent file-
+      // conflict detector. Where `files` (porcelain) surfaces working-tree WIP and
+      // ahead/behind surface the COUNT of unpushed/incoming commits, this surfaces
+      // WHICH paths are in the unpushed set, so the detector can flag the case the
+      // working-tree×working-tree join is blind to: agent A committed F (clean tree →
+      // contributes nothing to the WIP join) while agent B has F dirty — B's next pull
+      // (after A pushes) collides on F. Read-only (the WARDEN-199 line: a `git diff
+      // --name-only` over a range is a pure read). One more git call in a route that
+      // already runs @{u} rev-lists, gated on `branch && ahead > 0` so a non-git /
+      // detached / in-sync agent pays nothing and reads null (mirroring the ahead/files
+      // gating). Same runGit transport as the probes above, so it runs inside yatfa
+      // containers via `docker exec … git -C <cwd>` too (WARDEN-235). parseOutgoingFiles
+      // returns [] for empty; the `branch && ahead > 0` gate below nulls it otherwise.
+      let outgoingFiles = null;
+      if (branch && typeof ahead === 'number' && ahead > 0) {
+        const outR = await runGit(chat, ['diff', '--name-only', '@{u}..HEAD'], cwd);
+        outgoingFiles = parseOutgoingFiles(outR.ok ? outR.stdout : '');
+      }
 
-    // Working-tree WIP magnitude (WARDEN-411): `git diff HEAD --shortstat` prints
-    // a one-line "N files changed, N insertions(+), N deletions(-)" summary of the
-    // combined (staged + unstaged) edits vs HEAD. Where stashCount surfaces PARKED
-    // work and the porcelain file list surfaces WHICH files are dirty, this surfaces
-    // HOW MUCH — a 4-file WIP could be four one-line tweaks or a 1000-line rewrite,
-    // and this is the only signal that distinguishes them at a glance. Read-only
-    // (the withdrawn WARDEN-199 branch-switch slice is the cautionary tale; this
-    // stays on the read side). Same runGit transport as the probes above, so it runs
-    // inside yatfa containers via `docker exec … git -C <cwd>` too (WARDEN-235).
-    // parseDiffStat nulls empty/garbage (incl. a clean tree and an all-untracked
-    // WIP — `git diff HEAD` counts tracked edits only); the `branch` gate keeps
-    // non-git/detached consistent with stashCount.
-    const diffstatR = await runGit(chat, ['diff', 'HEAD', '--shortstat'], cwd);
-    const diffstat = parseDiffStat(diffstatR.ok ? diffstatR.stdout : '');
-
-    // Outgoing (unpushed-commit) changed-file set (WARDEN-601): `git diff --name-only
-    // @{u}..HEAD` lists the files touched by the agent's local commits that @{u}
-    // (upstream) doesn't have yet — the join key for the IMPENDING cross-agent file-
-    // conflict detector. Where `files` (porcelain) surfaces working-tree WIP and
-    // ahead/behind surface the COUNT of unpushed/incoming commits, this surfaces
-    // WHICH paths are in the unpushed set, so the detector can flag the case the
-    // working-tree×working-tree join is blind to: agent A committed F (clean tree →
-    // contributes nothing to the WIP join) while agent B has F dirty — B's next pull
-    // (after A pushes) collides on F. Read-only (the WARDEN-199 line: a `git diff
-    // --name-only` over a range is a pure read). One more git call in a route that
-    // already runs @{u} rev-lists, gated on `branch && ahead > 0` so a non-git /
-    // detached / in-sync agent pays nothing and reads null (mirroring the ahead/files
-    // gating). Same runGit transport as the probes above, so it runs inside yatfa
-    // containers via `docker exec … git -C <cwd>` too (WARDEN-235). parseOutgoingFiles
-    // returns [] for empty; the `branch && ahead > 0` gate below nulls it otherwise.
-    let outgoingFiles = null;
-    if (branch && typeof ahead === 'number' && ahead > 0) {
-      const outR = await runGit(chat, ['diff', '--name-only', '@{u}..HEAD'], cwd);
-      outgoingFiles = parseOutgoingFiles(outR.ok ? outR.stdout : '');
-    }
-
-    res.json({
-      branch: branch || null,
-      // detached: true only inside a real repo whose HEAD is not on a branch.
-      // headSha: the short SHA shown in place of the misleading "HEAD" label.
-      // The branch ? gate is kept so files/clean/inProgress still surface on a
-      // detached HEAD (you still want to see uncommitted changes); ahead/behind
-      // are already null there (parseAheadBehind returns nulls with no @{u})
-      // (WARDEN-239).
-      detached,
-      headSha,
-      clean: branch ? clean : null,
-      cwd,
-      ahead: branch ? ahead : null,
-      behind: branch ? behind : null,
-      // upstream: the short tracking branch name (e.g. origin/feature), or null
-      // when HEAD has no upstream — gated on `branch` like ahead/behind so a
-      // detached HEAD / non-git cwd reads null (WARDEN-243). ahead/behind are
-      // already null there, so this is what lets the badge tell a never-pushed
-      // branch from a synced 0/0 one.
-      upstream: branch ? upstream : null,
-      inProgress: { operation: branch ? inProgressState.operation : null, detail: branch ? inProgressState.detail : null },
-      stashCount: branch ? stashCount : null,
-      // diffstat: net insertions/deletions of the working-tree edits vs HEAD
-      // (WARDEN-411), or null for a clean / non-git / detached repo. Gated on
-      // `branch` like stashCount; parseDiffStat already nulls an all-untracked WIP.
-      diffstat: branch ? diffstat : null,
-      // headDate: the last-commit freshness of HEAD (strict ISO-8601 committer
-      // date from `git log -1 --format=%cI`), gated on `branch` like the other
-      // derived fields so a non-git cwd reads null. Rendered as an always-on
-      // `· Nd` append on the badge so a human can spot a synced-but-stalled agent
-      // (WARDEN-545); fetched unconditionally above (not detached-only).
-      headDate: branch ? headDate : null,
-      files: branch ? files : null,
-      // outgoingFiles: the unpushed-commit changed-file set (WARDEN-601), or null for
-      // a non-git / detached / in-sync (ahead 0) repo. Gated on `branch && ahead > 0`
-      // like the other derived fields so a clean agent reads null (zero noise for the
-      // impending-conflict detector); a repo with unpushed commits reads its outgoing
-      // path list (possibly empty if the range touches nothing).
-      outgoingFiles: branch && typeof ahead === 'number' && ahead > 0 ? outgoingFiles : null,
-      error: null,
-    });
-  } catch (e) {
-    res.json({ branch: null, detached: false, headSha: null, headDate: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, upstream: null, inProgress: { operation: null, detail: null }, stashCount: null, diffstat: null, files: null, outgoingFiles: null, error: e.message });
-  }
+      res.json({
+        branch: branch || null,
+        // detached: true only inside a real repo whose HEAD is not on a branch.
+        // headSha: the short SHA shown in place of the misleading "HEAD" label.
+        // The branch ? gate is kept so files/clean/inProgress still surface on a
+        // detached HEAD (you still want to see uncommitted changes); ahead/behind
+        // are already null there (parseAheadBehind returns nulls with no @{u})
+        // (WARDEN-239).
+        detached,
+        headSha,
+        clean: branch ? clean : null,
+        cwd,
+        ahead: branch ? ahead : null,
+        behind: branch ? behind : null,
+        // upstream: the short tracking branch name (e.g. origin/feature), or null
+        // when HEAD has no upstream — gated on `branch` like ahead/behind so a
+        // detached HEAD / non-git cwd reads null (WARDEN-243). ahead/behind are
+        // already null there, so this is what lets the badge tell a never-pushed
+        // branch from a synced 0/0 one.
+        upstream: branch ? upstream : null,
+        inProgress: { operation: branch ? inProgressState.operation : null, detail: branch ? inProgressState.detail : null },
+        stashCount: branch ? stashCount : null,
+        // diffstat: net insertions/deletions of the working-tree edits vs HEAD
+        // (WARDEN-411), or null for a clean / non-git / detached repo. Gated on
+        // `branch` like stashCount; parseDiffStat already nulls an all-untracked WIP.
+        diffstat: branch ? diffstat : null,
+        // headDate: the last-commit freshness of HEAD (strict ISO-8601 committer
+        // date from `git log -1 --format=%cI`), gated on `branch` like the other
+        // derived fields so a non-git cwd reads null. Rendered as an always-on
+        // `· Nd` append on the badge so a human can spot a synced-but-stalled agent
+        // (WARDEN-545); fetched unconditionally above (not detached-only).
+        headDate: branch ? headDate : null,
+        files: branch ? files : null,
+        // outgoingFiles: the unpushed-commit changed-file set (WARDEN-601), or null for
+        // a non-git / detached / in-sync (ahead 0) repo. Gated on `branch && ahead > 0`
+        // like the other derived fields so a clean agent reads null (zero noise for the
+        // impending-conflict detector); a repo with unpushed commits reads its outgoing
+        // path list (possibly empty if the range touches nothing).
+        outgoingFiles: branch && typeof ahead === 'number' && ahead > 0 ? outgoingFiles : null,
+        error: null,
+      });
+    },
+  });
 });
 
 // Which remote repo a checkout points at + its web host URL (WARDEN-528). The one
@@ -2308,20 +2376,14 @@ app.get('/api/git-status', async (req, res) => {
 // kind. parseGitRemotes (gitStatus.js) dedupes the fetch/push duplicate per remote
 // and parses each URL; empty/non-git stdout → [].
 app.get('/api/git-remote', async (req, res) => {
-  const chatId = String(req.query.id || '');
-  const { chat, error } = await resolve(chatId);
-  if (error) return res.status(404).json({ error });
-
-  try {
-    const cwd = gitCwd(chat);
-    if (!cwd) return res.json({ remotes: [], error: 'no cwd' });
-
-    const remoteR = await runGit(chat, ['remote', '-v'], cwd);
-    const remotes = parseGitRemotes(remoteR.ok ? remoteR.stdout : '');
-    res.json({ remotes, error: null });
-  } catch (e) {
-    res.json({ remotes: [], error: e.message });
-  }
+  await withGitRepo(req, res, {
+    defaults: { remotes: [] },
+    handler: async ({ chat, cwd, res }) => {
+      const remoteR = await runGit(chat, ['remote', '-v'], cwd);
+      const remotes = parseGitRemotes(remoteR.ok ? remoteR.stdout : '');
+      res.json({ remotes, error: null });
+    },
+  });
 });
 
 // Strip a commit message's subject line so only the BODY shows in an expanded
@@ -2359,7 +2421,6 @@ const GIT_LOG_GREP_MAX = 200;
 // wider window. All three filters are read-only flags to the permitted `git log`
 // subcommand; absent any ⇒ byte-for-byte today's behavior.
 app.get('/api/git-log', async (req, res) => {
-  const chatId = String(req.query.id || '');
   const limit = Math.min(Math.max(parseInt(String(req.query.limit || '5'), 10) || 5, 1), 50);
   // range selects a commit window:
   //   incoming → HEAD..@{u}  (commits @{u} has that HEAD doesn't — the "behind" list)
@@ -2399,59 +2460,53 @@ app.get('/api/git-log', async (req, res) => {
   // searchLimit, so it widens automatically).
   const pickaxe = String(req.query.pickaxe || '').trim().slice(0, 128);
   const pickaxeRegex = req.query.pickaxeRegex === '1';
-  const { chat, error } = await resolve(chatId);
-  if (error) return res.status(404).json({ error });
+  await withGitRepo(req, res, {
+    defaults: { commits: [] },
+    // Reject unsafe per-file paths (absolute / traversal) before any git invocation —
+    // mirrors git-show's isSafeRelativePath guard. Bad path → empty list, never a 500.
+    validate: () => (filePath && !isSafeRelativePath(filePath)
+      ? { body: { commits: [], error: 'invalid path' } }
+      : null),
+    handler: async ({ chat, cwd, res }) => {
+      // short hash | subject | author | relative date | committer epoch (GIT_LOG_PRETTY).
+      // runGit passes
+      // --pretty (and the range rev) as a single argv element (no shell on the LOCAL
+      // branch) so the '|' separators can't be read as pipes and the @{u}..HEAD range
+      // stays brace-expansion-safe; the remote branch shellQuotes each arg for the same
+      // reason (WARDEN-122). yatfa chats run this inside the container (WARDEN-235).
+      // range=incoming/outgoing splices in the corresponding rev; absent → HEAD log.
+      // WARDEN-498: a present `grep` splices `--grep=<term>` + `-i` (case-insensitive,
+      // matches subject AND body) as the FIRST log options — before the limit/range/pretty
+      // args — and widens the window to GIT_LOG_GREP_MAX (an old commit may sit beyond the
+      // 50-commit browse cap; the point of search is to FIND it). WARDEN-559: a present
+      // `pickaxe` splices `-S<term>` (or `-G<term>` with pickaxeRegex) FIRST, alongside the
+      // grep splice — a hit may sit beyond the 50-commit browse cap too, so it also widens
+      // the window. The two splice independently (a user may pass both). Absent both ⇒
+      // searchLimit === limit, so the browse path is byte-for-byte unchanged.
+      const searchLimit = (grep || pickaxe) ? GIT_LOG_GREP_MAX : limit;
+      const args = ['log'];
+      if (pickaxe) args.push(pickaxeRegex ? `-G${pickaxe}` : `-S${pickaxe}`);
+      if (grep) args.push(`--grep=${grep}`, '-i');
+      if (filePath) {
+        // File-history mode (WARDEN-319): --follow tracks the file across renames and
+        // yields every commit that touched it (newest first). incoming/outgoing is a
+        // repo-wide range concept that doesn't apply to one file's full history, so
+        // rangeRev is intentionally NOT spliced here. `--follow` must precede --pretty
+        // and the pathspec must be the single path after `--` (--follow requires exactly
+        // one pathspec); `--` terminates option parsing so a path named like a flag
+        // can't inject options — same WARDEN-122 discipline as git-show's per-file path.
+        args.push(`-${searchLimit}`, '--follow', `--pretty=format:${GIT_LOG_PRETTY}`, '--', filePath);
+      } else {
+        if (rangeRev) args.push(rangeRev);
+        args.push(`-${searchLimit}`, `--pretty=format:${GIT_LOG_PRETTY}`);
+      }
+      const r = await runGit(chat, args, cwd);
+      const raw = r.ok ? r.stdout.trim() : '';
 
-  // Reject unsafe per-file paths (absolute / traversal) before any git invocation —
-  // mirrors git-show's isSafeRelativePath guard. Bad path → empty list, never a 500.
-  if (filePath && !isSafeRelativePath(filePath)) {
-    return res.json({ commits: [], error: 'invalid path' });
-  }
-
-  try {
-    const cwd = gitCwd(chat);
-    if (!cwd) return res.json({ commits: [], error: 'no cwd' });
-
-    // short hash | subject | author | relative date | committer epoch (GIT_LOG_PRETTY).
-    // runGit passes
-    // --pretty (and the range rev) as a single argv element (no shell on the LOCAL
-    // branch) so the '|' separators can't be read as pipes and the @{u}..HEAD range
-    // stays brace-expansion-safe; the remote branch shellQuotes each arg for the same
-    // reason (WARDEN-122). yatfa chats run this inside the container (WARDEN-235).
-    // range=incoming/outgoing splices in the corresponding rev; absent → HEAD log.
-    // WARDEN-498: a present `grep` splices `--grep=<term>` + `-i` (case-insensitive,
-    // matches subject AND body) as the FIRST log options — before the limit/range/pretty
-    // args — and widens the window to GIT_LOG_GREP_MAX (an old commit may sit beyond the
-    // 50-commit browse cap; the point of search is to FIND it). WARDEN-559: a present
-    // `pickaxe` splices `-S<term>` (or `-G<term>` with pickaxeRegex) FIRST, alongside the
-    // grep splice — a hit may sit beyond the 50-commit browse cap too, so it also widens
-    // the window. The two splice independently (a user may pass both). Absent both ⇒
-    // searchLimit === limit, so the browse path is byte-for-byte unchanged.
-    const searchLimit = (grep || pickaxe) ? GIT_LOG_GREP_MAX : limit;
-    const args = ['log'];
-    if (pickaxe) args.push(pickaxeRegex ? `-G${pickaxe}` : `-S${pickaxe}`);
-    if (grep) args.push(`--grep=${grep}`, '-i');
-    if (filePath) {
-      // File-history mode (WARDEN-319): --follow tracks the file across renames and
-      // yields every commit that touched it (newest first). incoming/outgoing is a
-      // repo-wide range concept that doesn't apply to one file's full history, so
-      // rangeRev is intentionally NOT spliced here. `--follow` must precede --pretty
-      // and the pathspec must be the single path after `--` (--follow requires exactly
-      // one pathspec); `--` terminates option parsing so a path named like a flag
-      // can't inject options — same WARDEN-122 discipline as git-show's per-file path.
-      args.push(`-${searchLimit}`, '--follow', `--pretty=format:${GIT_LOG_PRETTY}`, '--', filePath);
-    } else {
-      if (rangeRev) args.push(rangeRev);
-      args.push(`-${searchLimit}`, `--pretty=format:${GIT_LOG_PRETTY}`);
-    }
-    const r = await runGit(chat, args, cwd);
-    const raw = r.ok ? r.stdout.trim() : '';
-
-    const commits = raw ? raw.split('\n').map(parseGitLogLine) : [];
-    res.json({ commits, error: null });
-  } catch (e) {
-    res.json({ commits: [], error: e.message });
-  }
+      const commits = raw ? raw.split('\n').map(parseGitLogLine) : [];
+      res.json({ commits, error: null });
+    },
+  });
 });
 
 // ---- Per-file git diff (WARDEN-151) ----------------------------------------
@@ -2602,28 +2657,25 @@ app.get('/api/git-diff', async (req, res) => {
   // (mirroring /api/git-range-diff's rangeRev map discipline, WARDEN-398).
   const rangeParam = String(req.query.range || '').trim();
   const rangeRev = rangeParam === 'outgoing' ? '@{u}..HEAD' : null;
+  await withGitRepo(req, res, {
+    defaults: { diff: null, untracked: false, path: filePath },
+    // The unknown-id 404 carries this route's path-bearing contract (not the bare
+    // { error } most routes emit), so notFoundEmpty spreads `defaults` into the 404.
+    notFoundEmpty: true,
+    handler: async ({ chat, cwd, res }) => {
+      // manual-LOCAL can stat the worktree on the host fs (getLocalGitDiff). Every
+      // other transport — yatfa container (the cwd is in-container) or manual-remote
+      // — runs the diff in-context via docker-exec/ssh (getDeliveredGitDiff), so the
+      // realpath containment + git diff resolve where the repo actually lives.
+      const result = (!chat.container && chat.host === LOCAL)
+        ? await getLocalGitDiff(cwd, filePath, staged, rangeRev)
+        : await getDeliveredGitDiff(chat, cwd, filePath, staged, rangeRev);
 
-  const { chat, error } = await resolve(String(req.query.id || ''));
-  if (error) return res.status(404).json({ diff: null, untracked: false, path: filePath, error });
-
-  try {
-    const cwd = gitCwd(chat);
-    if (!cwd) return res.json({ diff: null, untracked: false, path: filePath, error: 'no cwd' });
-
-    // manual-LOCAL can stat the worktree on the host fs (getLocalGitDiff). Every
-    // other transport — yatfa container (the cwd is in-container) or manual-remote
-    // — runs the diff in-context via docker-exec/ssh (getDeliveredGitDiff), so the
-    // realpath containment + git diff resolve where the repo actually lives.
-    const result = (!chat.container && chat.host === LOCAL)
-      ? await getLocalGitDiff(cwd, filePath, staged, rangeRev)
-      : await getDeliveredGitDiff(chat, cwd, filePath, staged, rangeRev);
-
-    if (result.status) return res.status(result.status).json({ diff: null, untracked: false, path: filePath, error: result.error });
-    if (result.error) return res.json({ diff: null, untracked: false, path: filePath, error: result.error });
-    res.json({ diff: result.diff, untracked: !!result.untracked, path: filePath, error: null });
-  } catch (e) {
-    res.json({ diff: null, untracked: false, path: filePath, error: e.message });
-  }
+      if (result.status) return res.status(result.status).json({ diff: null, untracked: false, path: filePath, error: result.error });
+      if (result.error) return res.json({ diff: null, untracked: false, path: filePath, error: result.error });
+      res.json({ diff: result.diff, untracked: !!result.untracked, path: filePath, error: null });
+    },
+  });
 });
 
 // ---- Aggregated range diff (WARDEN-398) ------------------------------------
@@ -2658,7 +2710,6 @@ app.get('/api/git-diff', async (req, res) => {
 //   worktree on an unborn HEAD (fresh repo, no commits)     → 'no commits yet ...'
 // mirroring how every other git route tolerates a non-git/no-upstream repo.
 app.get('/api/git-range-diff', async (req, res) => {
-  const chatId = String(req.query.id || '');
   const range = String(req.query.range || '');
   // Same rev map as /api/git-log (outgoing → @{u}..HEAD, incoming → HEAD..@{u}),
   // reused verbatim so the diff honors the identical range definition the commit
@@ -2671,40 +2722,35 @@ app.get('/api/git-range-diff', async (req, res) => {
     : range === 'incoming' ? 'HEAD..@{u}'
     : range === 'worktree' ? 'HEAD'
     : null;
-  const { chat, error } = await resolve(chatId);
-  if (error) return res.status(404).json({ diff: null, error });
-
-  // Reject any range value other than outgoing/incoming/worktree cleanly — never a 500
-  // (mirrors /api/git-show's rejection of a malformed hash: 200 + error string).
-  if (!rangeRev) {
-    return res.json({ diff: null, error: 'invalid range' });
-  }
-
-  try {
-    const cwd = gitCwd(chat);
-    if (!cwd) return res.json({ diff: null, error: 'no cwd' });
-
-    // runGit passes the range rev as a single argv element (no shell on the LOCAL
-    // branch) so @{u}..HEAD stays brace-expansion-safe; the remote branch
-    // shellQuotes it (WARDEN-122). yatfa chats run this inside the container
-    // (WARDEN-235). `git diff @{u}..HEAD` exits non-zero when no upstream is
-    // configured (or HEAD is detached) → surfaced as a clean user-facing error
-    // rather than a 500. For worktree (`git diff HEAD`) the realistic non-zero is
-    // an unborn HEAD (fresh repo, no commits) — unrelated to upstream, so the error
-    // is range-aware: it says so rather than misleadingly claiming "no upstream".
-    const r = await runGit(chat, ['diff', rangeRev], cwd);
-    if (!r.ok) {
-      return res.json({
-        diff: null,
-        error: range === 'worktree'
-          ? 'no commits yet (nothing to compare against HEAD)'
-          : 'no upstream configured',
-      });
-    }
-    res.json({ diff: capDiff(r.stdout || ''), error: null });
-  } catch (e) {
-    res.json({ diff: null, error: e.message });
-  }
+  await withGitRepo(req, res, {
+    defaults: { diff: null },
+    // The unknown-id 404 carries this route's contract ({ diff: null, error }), so
+    // notFoundEmpty spreads `defaults` into the 404.
+    notFoundEmpty: true,
+    // Reject any range value other than outgoing/incoming/worktree cleanly — never a 500
+    // (mirrors /api/git-show's rejection of a malformed hash: 200 + error string).
+    validate: () => (rangeRev ? null : { body: { diff: null, error: 'invalid range' } }),
+    handler: async ({ chat, cwd, res }) => {
+      // runGit passes the range rev as a single argv element (no shell on the LOCAL
+      // branch) so @{u}..HEAD stays brace-expansion-safe; the remote branch
+      // shellQuotes it (WARDEN-122). yatfa chats run this inside the container
+      // (WARDEN-235). `git diff @{u}..HEAD` exits non-zero when no upstream is
+      // configured (or HEAD is detached) → surfaced as a clean user-facing error
+      // rather than a 500. For worktree (`git diff HEAD`) the realistic non-zero is
+      // an unborn HEAD (fresh repo, no commits) — unrelated to upstream, so the error
+      // is range-aware: it says so rather than misleadingly claiming "no upstream".
+      const r = await runGit(chat, ['diff', rangeRev], cwd);
+      if (!r.ok) {
+        return res.json({
+          diff: null,
+          error: range === 'worktree'
+            ? 'no commits yet (nothing to compare against HEAD)'
+            : 'no upstream configured',
+        });
+      }
+      res.json({ diff: capDiff(r.stdout || ''), error: null });
+    },
+  });
 });
 
 // ---- Cross-agent A↔B working-tree diff (WARDEN-593) -------------------------
@@ -2796,53 +2842,45 @@ async function commitMessage(chat, hash, cwd) {
 }
 
 app.get('/api/git-show', async (req, res) => {
-  const chatId = String(req.query.id || '');
   const hash = String(req.query.hash || '');
   const filePath = String(req.query.path || '').trim();
-  const { chat, error } = await resolve(chatId);
-  if (error) return res.status(404).json({ error });
+  await withGitRepo(req, res, {
+    defaults: { files: [], diff: null },
+    // Reject malformed hashes before any git invocation: hex only, 4–40 chars.
+    // Reject unsafe per-file paths (absolute / traversal). Bad path → empty, never 500.
+    validate: () => {
+      if (!isValidGitHash(hash)) return { body: { files: [], diff: null, error: 'invalid hash' } };
+      if (filePath && !isSafeRelativePath(filePath)) return { body: { files: [], diff: null, error: 'invalid path' } };
+      return null;
+    },
+    handler: async ({ chat, cwd, res }) => {
+      // runGit collapses the local/remote branches and runs inside the container
+      // for yatfa chats (WARDEN-235). `hash` is already hex-validated above and the
+      // per-file `path` is a git pathspec (isSafeRelativePath), so both are safe as
+      // argv after `git -C <cwd>` / the shellQuoted remote form.
+      let files = [];
+      let diff = null;
+      let message = '';
+      if (filePath) {
+        // --format= strips the commit header (author/date/message) so we get ONLY the
+        // file's patch — exactly what inspecting a single file should surface. The
+        // commit's full message rides a separate --no-patch call (commitMessage) so the
+        // FileViewer blame/history popover can show the "why" above this diff too.
+        const r = await runGit(chat, ['show', '--format=', hash, '--', filePath], cwd);
+        diff = capDiff(r.ok ? r.stdout : '');
+        message = await commitMessage(chat, hash, cwd);
+      } else {
+        const r = await runGit(chat, ['show', '--name-status', '--pretty=format:', hash], cwd);
+        files = parseGitShowNameStatus(r.ok ? r.stdout : '');
+        // The commit's full message (body) rides this same detail fetch — no extra
+        // round-trip for the primary path. parseGitShowNameStatus stays untouched (the
+        // %B fetch is deliberately separate so the name-status parser isn't complicated).
+        message = await commitMessage(chat, hash, cwd);
+      }
 
-  // Reject malformed hashes before any git invocation: hex only, 4–40 chars.
-  if (!/^[0-9a-f]{4,40}$/i.test(hash)) {
-    return res.json({ files: [], diff: null, error: 'invalid hash' });
-  }
-  // Reject unsafe per-file paths (absolute / traversal). Bad path → empty, never 500.
-  if (filePath && !isSafeRelativePath(filePath)) {
-    return res.json({ files: [], diff: null, error: 'invalid path' });
-  }
-
-  try {
-    const cwd = gitCwd(chat);
-    if (!cwd) return res.json({ files: [], diff: null, error: 'no cwd' });
-
-    // runGit collapses the local/remote branches and runs inside the container
-    // for yatfa chats (WARDEN-235). `hash` is already hex-validated above and the
-    // per-file `path` is a git pathspec (isSafeRelativePath), so both are safe as
-    // argv after `git -C <cwd>` / the shellQuoted remote form.
-    let files = [];
-    let diff = null;
-    let message = '';
-    if (filePath) {
-      // --format= strips the commit header (author/date/message) so we get ONLY the
-      // file's patch — exactly what inspecting a single file should surface. The
-      // commit's full message rides a separate --no-patch call (commitMessage) so the
-      // FileViewer blame/history popover can show the "why" above this diff too.
-      const r = await runGit(chat, ['show', '--format=', hash, '--', filePath], cwd);
-      diff = capDiff(r.ok ? r.stdout : '');
-      message = await commitMessage(chat, hash, cwd);
-    } else {
-      const r = await runGit(chat, ['show', '--name-status', '--pretty=format:', hash], cwd);
-      files = parseGitShowNameStatus(r.ok ? r.stdout : '');
-      // The commit's full message (body) rides this same detail fetch — no extra
-      // round-trip for the primary path. parseGitShowNameStatus stays untouched (the
-      // %B fetch is deliberately separate so the name-status parser isn't complicated).
-      message = await commitMessage(chat, hash, cwd);
-    }
-
-    res.json({ files, diff, message, error: null });
-  } catch (e) {
-    res.json({ files: [], diff: null, error: e.message });
-  }
+      res.json({ files, diff, message, error: null });
+    },
+  });
 });
 
 // ---- File blob at a historical commit (WARDEN-354) --------------------------
@@ -2864,69 +2902,63 @@ app.get('/api/git-show', async (req, res) => {
 // remotely). A non-git cwd, a deleted-at-commit path, or an invalid hash yields
 // a clean empty/error result — never a 500.
 app.get('/api/git-cat-file', async (req, res) => {
-  const chatId = String(req.query.id || '');
   const hash = String(req.query.hash || '');
   const filePath = String(req.query.path || '').trim();
-  const { chat, error } = await resolve(chatId);
-  if (error) return res.status(404).json({ error });
+  await withGitRepo(req, res, {
+    defaults: { content: null },
+    // Reject malformed hashes before any git invocation: hex only, 4–40 chars.
+    // Empty path → nothing to read; unsafe path → 'invalid path' (never 500).
+    validate: () => {
+      if (!isValidGitHash(hash)) return { body: { content: null, error: 'invalid hash' } };
+      if (!filePath) return { body: { content: null, error: 'path is required' } };
+      if (!isSafeRelativePath(filePath)) return { body: { content: null, error: 'invalid path' } };
+      return null;
+    },
+    handler: async ({ chat, cwd, res }) => {
+      // Binary by extension: mirror /api/read-file (a .png at a commit is still a
+      // .png). Checked before any git call so we never transfer garbled bytes.
+      if (isBinaryFile(filePath)) {
+        return res.json({ content: null, error: 'cannot read binary files' });
+      }
 
-  // Reject malformed hashes before any git invocation: hex only, 4–40 chars.
-  if (!/^[0-9a-f]{4,40}$/i.test(hash)) {
-    return res.json({ content: null, error: 'invalid hash' });
-  }
-  // Empty path → nothing to read; unsafe path → 'invalid path' (never 500).
-  if (!filePath) return res.json({ content: null, error: 'path is required' });
-  if (!isSafeRelativePath(filePath)) return res.json({ content: null, error: 'invalid path' });
+      // Pre-check existence + size with `git cat-file -s` (tiny output, never hits
+      // a maxBuffer). An oversize blob is a clean size error BEFORE we transfer its
+      // bytes — mirroring /api/read-file's stat-before-read (a blob is full file
+      // content, so a truncation would mislead; we error instead). A path that
+      // doesn't exist at this commit (deleted/never touched) exits non-zero here.
+      const sizeR = await runGit(chat, ['cat-file', '-s', `${hash}:${filePath}`], cwd);
+      if (!sizeR.ok) {
+        // Distinguish a non-git cwd (soft failure → clean empty, mirroring git-show)
+        // from a path that doesn't exist at this commit (→ helpful 'not found at
+        // commit'). Both are 200, never a 500.
+        const probe = await runGit(chat, ['rev-parse', '--is-inside-work-tree'], cwd);
+        const isRepo = probe.ok && (probe.stdout || '').trim() === 'true';
+        return res.json({ content: null, error: isRepo ? 'not found at commit' : null });
+      }
+      const size = parseInt(sizeR.stdout || '', 10);
+      if (Number.isNaN(size)) return res.json({ content: null, error: 'not found at commit' });
+      if (size > GIT_DIFF_MAX_BYTES) {
+        return res.json({ content: null, error: 'file too large (max 1MB)' });
+      }
 
-  try {
-    const cwd = gitCwd(chat);
-    if (!cwd) return res.json({ content: null, error: 'no cwd' });
-
-    // Binary by extension: mirror /api/read-file (a .png at a commit is still a
-    // .png). Checked before any git call so we never transfer garbled bytes.
-    if (isBinaryFile(filePath)) {
-      return res.json({ content: null, error: 'cannot read binary files' });
-    }
-
-    // Pre-check existence + size with `git cat-file -s` (tiny output, never hits
-    // a maxBuffer). An oversize blob is a clean size error BEFORE we transfer its
-    // bytes — mirroring /api/read-file's stat-before-read (a blob is full file
-    // content, so a truncation would mislead; we error instead). A path that
-    // doesn't exist at this commit (deleted/never touched) exits non-zero here.
-    const sizeR = await runGit(chat, ['cat-file', '-s', `${hash}:${filePath}`], cwd);
-    if (!sizeR.ok) {
-      // Distinguish a non-git cwd (soft failure → clean empty, mirroring git-show)
-      // from a path that doesn't exist at this commit (→ helpful 'not found at
-      // commit'). Both are 200, never a 500.
-      const probe = await runGit(chat, ['rev-parse', '--is-inside-work-tree'], cwd);
-      const isRepo = probe.ok && (probe.stdout || '').trim() === 'true';
-      return res.json({ content: null, error: isRepo ? 'not found at commit' : null });
-    }
-    const size = parseInt(sizeR.stdout || '', 10);
-    if (Number.isNaN(size)) return res.json({ content: null, error: 'not found at commit' });
-    if (size > GIT_DIFF_MAX_BYTES) {
-      return res.json({ content: null, error: 'file too large (max 1MB)' });
-    }
-
-    // `git show <hash>:<path>` emits the full blob bytes. hash is hex-validated
-    // and filePath is isSafeRelativePath-checked, so `<hash>:<path>` is safe as
-    // one argv element after `git -C <cwd>` / the shellQuoted remote form. The
-    // size pre-check above guarantees the blob fits the transport's maxBuffer.
-    const r = await runGit(chat, ['show', `${hash}:${filePath}`], cwd);
-    if (!r.ok) {
-      return res.json({ content: null, error: 'not found at commit' });
-    }
-    const raw = r.stdout || '';
-    // Defense-in-depth: a file with a non-binary extension but binary content
-    // (e.g. an extension-less blob) would decode to garbled UTF-8. Detect a NUL
-    // byte anywhere in the content — git's own binary heuristic.
-    if (isBinaryBlob(raw)) {
-      return res.json({ content: null, error: 'cannot read binary files' });
-    }
-    res.json({ content: raw, error: null });
-  } catch (e) {
-    res.json({ content: null, error: e.message });
-  }
+      // `git show <hash>:<path>` emits the full blob bytes. hash is hex-validated
+      // and filePath is isSafeRelativePath-checked, so `<hash>:<path>` is safe as
+      // one argv element after `git -C <cwd>` / the shellQuoted remote form. The
+      // size pre-check above guarantees the blob fits the transport's maxBuffer.
+      const r = await runGit(chat, ['show', `${hash}:${filePath}`], cwd);
+      if (!r.ok) {
+        return res.json({ content: null, error: 'not found at commit' });
+      }
+      const raw = r.stdout || '';
+      // Defense-in-depth: a file with a non-binary extension but binary content
+      // (e.g. an extension-less blob) would decode to garbled UTF-8. Detect a NUL
+      // byte anywhere in the content — git's own binary heuristic.
+      if (isBinaryBlob(raw)) {
+        return res.json({ content: null, error: 'cannot read binary files' });
+      }
+      res.json({ content: raw, error: null });
+    },
+  });
 });
 
 // ---- Per-side conflict content (WARDEN-428) --------------------------------
@@ -2968,69 +3000,68 @@ app.get('/api/git-cat-file', async (req, res) => {
 // the WARDEN-199 read-only line the git-status/log/diff/show/cat-file/blame set
 // already honors.
 app.get('/api/git-conflict', async (req, res) => {
-  const chatId = String(req.query.id || '');
   const filePath = String(req.query.path || '').trim();
-  const { chat, error } = await resolve(chatId);
-  if (error) return res.status(404).json({ ours: null, theirs: null, path: filePath, error });
-
-  // Empty path → nothing to read; unsafe path → 'invalid path' (never 500),
-  // mirroring cat-file's guards exactly.
-  if (!filePath) return res.json({ ours: null, theirs: null, path: '', error: 'path is required' });
-  if (!isSafeRelativePath(filePath)) return res.json({ ours: null, theirs: null, path: filePath, error: 'invalid path' });
-
-  try {
-    const cwd = gitCwd(chat);
-    if (!cwd) return res.json({ ours: null, theirs: null, path: filePath, error: 'no cwd' });
-
-    // Binary by extension: mirror /api/git-cat-file (a conflicted .png is still a
-    // .png). Checked before any git call so we never transfer garbled bytes.
-    if (isBinaryFile(filePath)) {
-      return res.json({ ours: null, theirs: null, path: filePath, error: 'cannot read binary files' });
-    }
-
-    // Read each stage blob (:2: ours, :3: theirs) independently. A side whose
-    // `cat-file -s` fails is absent (modify/delete conflict, or DD both-deleted) →
-    // that side stays undefined (→ null) cleanly; the present side still renders.
-    // An oversize or binary side aborts the whole response with a clean error
-    // (mirroring cat-file: a truncation would mislead, and a conflict view needs
-    // both sides to be honest). `sides[stage]` may legitimately be '' (an empty
-    // file), so the absence → null mapping below uses `!== undefined`, NOT a
-    // truthiness test that would collapse '' to null.
-    const sides = {};
-    for (const stage of ['2', '3']) {
-      const sizeR = await runGit(chat, ['cat-file', '-s', `:${stage}:${filePath}`], cwd);
-      if (!sizeR.ok) continue; // stage blob absent → side stays undefined (→ null)
-      const size = parseInt(sizeR.stdout || '', 10);
-      if (Number.isNaN(size)) continue;
-      if (size > GIT_DIFF_MAX_BYTES) {
-        return res.json({ ours: null, theirs: null, path: filePath, error: 'file too large (max 1MB)' });
-      }
-      const r = await runGit(chat, ['show', `:${stage}:${filePath}`], cwd);
-      if (!r.ok) continue; // blob vanished between -s and show → treat as absent
-      const raw = r.stdout || '';
-      // Defense-in-depth: a non-binary extension whose stage content is binary
-      // (e.g. an extension-less blob) decodes to garbled UTF-8. NUL = binary.
-      if (isBinaryBlob(raw)) {
+  await withGitRepo(req, res, {
+    defaults: { ours: null, theirs: null, path: filePath },
+    // The unknown-id 404 carries this route's path-bearing contract (not the bare
+    // { error } most routes emit), so notFoundEmpty spreads `defaults` into the 404.
+    notFoundEmpty: true,
+    // Empty path → nothing to read; unsafe path → 'invalid path' (never 500),
+    // mirroring cat-file's guards exactly.
+    validate: () => {
+      if (!filePath) return { body: { ours: null, theirs: null, path: '', error: 'path is required' } };
+      if (!isSafeRelativePath(filePath)) return { body: { ours: null, theirs: null, path: filePath, error: 'invalid path' } };
+      return null;
+    },
+    handler: async ({ chat, cwd, res }) => {
+      // Binary by extension: mirror /api/git-cat-file (a conflicted .png is still a
+      // .png). Checked before any git call so we never transfer garbled bytes.
+      if (isBinaryFile(filePath)) {
         return res.json({ ours: null, theirs: null, path: filePath, error: 'cannot read binary files' });
       }
-      sides[stage] = raw;
-    }
-    const ours = sides['2'] !== undefined ? sides['2'] : null;
-    const theirs = sides['3'] !== undefined ? sides['3'] : null;
 
-    // Both sides absent: distinguish a non-git cwd (soft-fail → null error,
-    // mirroring cat-file's rev-parse probe) from a real repo where both stage
-    // blobs are genuinely absent (DD both-deleted, or the path isn't conflicted).
-    if (ours === null && theirs === null) {
-      const probe = await runGit(chat, ['rev-parse', '--is-inside-work-tree'], cwd);
-      const isRepo = probe.ok && (probe.stdout || '').trim() === 'true';
-      return res.json({ ours: null, theirs: null, path: filePath, error: isRepo ? 'no conflict content' : null });
-    }
+      // Read each stage blob (:2: ours, :3: theirs) independently. A side whose
+      // `cat-file -s` fails is absent (modify/delete conflict, or DD both-deleted) →
+      // that side stays undefined (→ null) cleanly; the present side still renders.
+      // An oversize or binary side aborts the whole response with a clean error
+      // (mirroring cat-file: a truncation would mislead, and a conflict view needs
+      // both sides to be honest). `sides[stage]` may legitimately be '' (an empty
+      // file), so the absence → null mapping below uses `!== undefined`, NOT a
+      // truthiness test that would collapse '' to null.
+      const sides = {};
+      for (const stage of ['2', '3']) {
+        const sizeR = await runGit(chat, ['cat-file', '-s', `:${stage}:${filePath}`], cwd);
+        if (!sizeR.ok) continue; // stage blob absent → side stays undefined (→ null)
+        const size = parseInt(sizeR.stdout || '', 10);
+        if (Number.isNaN(size)) continue;
+        if (size > GIT_DIFF_MAX_BYTES) {
+          return res.json({ ours: null, theirs: null, path: filePath, error: 'file too large (max 1MB)' });
+        }
+        const r = await runGit(chat, ['show', `:${stage}:${filePath}`], cwd);
+        if (!r.ok) continue; // blob vanished between -s and show → treat as absent
+        const raw = r.stdout || '';
+        // Defense-in-depth: a non-binary extension whose stage content is binary
+        // (e.g. an extension-less blob) decodes to garbled UTF-8. NUL = binary.
+        if (isBinaryBlob(raw)) {
+          return res.json({ ours: null, theirs: null, path: filePath, error: 'cannot read binary files' });
+        }
+        sides[stage] = raw;
+      }
+      const ours = sides['2'] !== undefined ? sides['2'] : null;
+      const theirs = sides['3'] !== undefined ? sides['3'] : null;
 
-    res.json({ ours, theirs, path: filePath, error: null });
-  } catch (e) {
-    res.json({ ours: null, theirs: null, path: filePath, error: e.message });
-  }
+      // Both sides absent: distinguish a non-git cwd (soft-fail → null error,
+      // mirroring cat-file's rev-parse probe) from a real repo where both stage
+      // blobs are genuinely absent (DD both-deleted, or the path isn't conflicted).
+      if (ours === null && theirs === null) {
+        const probe = await runGit(chat, ['rev-parse', '--is-inside-work-tree'], cwd);
+        const isRepo = probe.ok && (probe.stdout || '').trim() === 'true';
+        return res.json({ ours: null, theirs: null, path: filePath, error: isRepo ? 'no conflict content' : null });
+      }
+
+      res.json({ ours, theirs, path: filePath, error: null });
+    },
+  });
 });
 
 // Shelved work-in-progress detail (git stash list). Mirrors /api/git-log: local
@@ -3043,27 +3074,21 @@ app.get('/api/git-conflict', async (req, res) => {
 //
 //   GET /api/git-stash?id=<chatId>  → { stashes: [{ ref, subject, date }], error }
 app.get('/api/git-stash', async (req, res) => {
-  const chatId = String(req.query.id || '');
-  const { chat, error } = await resolve(chatId);
-  if (error) return res.status(404).json({ error });
+  await withGitRepo(req, res, {
+    defaults: { stashes: [] },
+    handler: async ({ chat, cwd, res }) => {
+      // reflog selector | subject | relative date  (subject may contain '|'). runGit
+      // passes --pretty as one argv element (no shell on LOCAL) so '|' isn't read as
+      // a pipe; the remote branch shellQuotes it (WARDEN-122). yatfa chats run this
+      // inside the container (WARDEN-235).
+      const pretty = '%gd|%s|%cr';
+      const r = await runGit(chat, ['stash', 'list', `--pretty=format:${pretty}`], cwd);
+      const raw = r.ok ? r.stdout.trim() : '';
 
-  try {
-    const cwd = gitCwd(chat);
-    if (!cwd) return res.json({ stashes: [], error: 'no cwd' });
-
-    // reflog selector | subject | relative date  (subject may contain '|'). runGit
-    // passes --pretty as one argv element (no shell on LOCAL) so '|' isn't read as
-    // a pipe; the remote branch shellQuotes it (WARDEN-122). yatfa chats run this
-    // inside the container (WARDEN-235).
-    const pretty = '%gd|%s|%cr';
-    const r = await runGit(chat, ['stash', 'list', `--pretty=format:${pretty}`], cwd);
-    const raw = r.ok ? r.stdout.trim() : '';
-
-    const stashes = raw ? parseStashList(raw) : [];
-    res.json({ stashes, error: null });
-  } catch (e) {
-    res.json({ stashes: [], error: e.message });
-  }
+      const stashes = raw ? parseStashList(raw) : [];
+      res.json({ stashes, error: null });
+    },
+  });
 });
 
 // Git reflog — an agent's operation history (WARDEN-460). The fourth read-only
@@ -3083,31 +3108,25 @@ app.get('/api/git-stash', async (req, res) => {
 //
 //   GET /api/git-reflog?id=<chatId>  → { entries: [{ hash, subject, date }], error }
 app.get('/api/git-reflog', async (req, res) => {
-  const chatId = String(req.query.id || '');
-  const { chat, error } = await resolve(chatId);
-  if (error) return res.status(404).json({ error });
+  await withGitRepo(req, res, {
+    defaults: { entries: [] },
+    handler: async ({ chat, cwd, res }) => {
+      // abbreviated hash | reflog subject (the OPERATION, e.g. "reset: moving to
+      // HEAD~1") | relative committer date. The subject may itself contain '|'. We
+      // reuse git-stash's `%gd|%s|%cr` pipe format so `parseReflog` peels the subject
+      // front/back exactly like `parseStashList`. runGit passes --pretty as one argv
+      // element (no shell on LOCAL) so '|' isn't read as a pipe; the remote branch
+      // shellQuotes it (WARDEN-122). yatfa chats run this inside the container
+      // (WARDEN-235). Capped at the last 50 entries — the recent operation window a
+      // human needs to answer "what did this agent just do to its repo?".
+      const pretty = '%h|%gs|%cr';
+      const r = await runGit(chat, ['reflog', '-n', '50', `--pretty=format:${pretty}`], cwd);
+      const raw = r.ok ? r.stdout.trim() : '';
 
-  try {
-    const cwd = gitCwd(chat);
-    if (!cwd) return res.json({ entries: [], error: 'no cwd' });
-
-    // abbreviated hash | reflog subject (the OPERATION, e.g. "reset: moving to
-    // HEAD~1") | relative committer date. The subject may itself contain '|'. We
-    // reuse git-stash's `%gd|%s|%cr` pipe format so `parseReflog` peels the subject
-    // front/back exactly like `parseStashList`. runGit passes --pretty as one argv
-    // element (no shell on LOCAL) so '|' isn't read as a pipe; the remote branch
-    // shellQuotes it (WARDEN-122). yatfa chats run this inside the container
-    // (WARDEN-235). Capped at the last 50 entries — the recent operation window a
-    // human needs to answer "what did this agent just do to its repo?".
-    const pretty = '%h|%gs|%cr';
-    const r = await runGit(chat, ['reflog', '-n', '50', `--pretty=format:${pretty}`], cwd);
-    const raw = r.ok ? r.stdout.trim() : '';
-
-    const entries = raw ? parseReflog(raw) : [];
-    res.json({ entries, error: null });
-  } catch (e) {
-    res.json({ entries: [], error: e.message });
-  }
+      const entries = raw ? parseReflog(raw) : [];
+      res.json({ entries, error: null });
+    },
+  });
 });
 
 // Local branches — an agent's branch topology (WARDEN-577). The last read-only
@@ -3126,52 +3145,46 @@ app.get('/api/git-reflog', async (req, res) => {
 //   GET /api/git-branch?id=<chatId>
 //     → { branches: [{ name, current, headSha, headDate, upstream, ahead, behind, gone, merged }], error }
 app.get('/api/git-branch', async (req, res) => {
-  const chatId = String(req.query.id || '');
-  const { chat, error } = await resolve(chatId);
-  if (error) return res.status(404).json({ error });
+  await withGitRepo(req, res, {
+    defaults: { branches: [] },
+    handler: async ({ chat, cwd, res }) => {
+      // name|sha|date|upstream|track. %(upstream:track) yields [ahead N]/[behind N]/
+      // [ahead N, behind M]/[gone] natively, so ahead/behind (+ gone) come for free
+      // (no separate rev-list). %(committerdate:iso-strict) gives strict ISO (the
+      // %cI headDate discipline — `2026-07-17T01:23:59Z`, reliably Date.parse-able).
+      // --format is one argv element (no shell on LOCAL); the remote branch
+      // shellQuotes it (WARDEN-122). yatfa chats run this inside the container
+      // (WARDEN-235).
+      const fmt = '%(refname:short)|%(objectname:short)|%(committerdate:iso-strict)|%(upstream:short)|%(upstream:track)';
+      const r = await runGit(chat, ['for-each-ref', `--format=${fmt}`, 'refs/heads/'], cwd);
+      const raw = r.ok ? r.stdout.trim() : '';
+      const branches = raw ? parseGitBranches(raw) : [];
 
-  try {
-    const cwd = gitCwd(chat);
-    if (!cwd) return res.json({ branches: [], error: 'no cwd' });
+      // Current branch: re-resolve HEAD so the matching branch is flagged current
+      // (the badge already names it; the list marks it). One cheap runGit; on a
+      // detached HEAD / non-git cwd symbolic-ref exits non-zero → '' → no branch
+      // flagged current (a detached repo still lists its branches).
+      const headR = await runGit(chat, ['symbolic-ref', '--short', 'HEAD'], cwd);
+      const currentName = headR.ok ? headR.stdout.trim() : '';
 
-    // name|sha|date|upstream|track. %(upstream:track) yields [ahead N]/[behind N]/
-    // [ahead N, behind M]/[gone] natively, so ahead/behind (+ gone) come for free
-    // (no separate rev-list). %(committerdate:iso-strict) gives strict ISO (the
-    // %cI headDate discipline — `2026-07-17T01:23:59Z`, reliably Date.parse-able).
-    // --format is one argv element (no shell on LOCAL); the remote branch
-    // shellQuotes it (WARDEN-122). yatfa chats run this inside the container
-    // (WARDEN-235).
-    const fmt = '%(refname:short)|%(objectname:short)|%(committerdate:iso-strict)|%(upstream:short)|%(upstream:track)';
-    const r = await runGit(chat, ['for-each-ref', `--format=${fmt}`, 'refs/heads/'], cwd);
-    const raw = r.ok ? r.stdout.trim() : '';
-    const branches = raw ? parseGitBranches(raw) : [];
+      // Merged-into-HEAD set: a second read-only `for-each-ref --merged HEAD` so a
+      // NON-merged branch (a tip not reachable from HEAD — potentially stranded
+      // work that never landed) is flaggable. A failure degrades to all-false
+      // (never 500). Same CRLF tolerance as the main parse; one name per line.
+      const mergedR = await runGit(chat, ['for-each-ref', '--merged', 'HEAD', '--format=%(refname:short)', 'refs/heads/'], cwd);
+      const mergedNames = mergedR.ok
+        ? mergedR.stdout.split('\n').map((l) => l.replace(/\r$/, '')).filter((l) => l.trim())
+        : [];
+      const mergedSet = new Set(mergedNames);
 
-    // Current branch: re-resolve HEAD so the matching branch is flagged current
-    // (the badge already names it; the list marks it). One cheap runGit; on a
-    // detached HEAD / non-git cwd symbolic-ref exits non-zero → '' → no branch
-    // flagged current (a detached repo still lists its branches).
-    const headR = await runGit(chat, ['symbolic-ref', '--short', 'HEAD'], cwd);
-    const currentName = headR.ok ? headR.stdout.trim() : '';
-
-    // Merged-into-HEAD set: a second read-only `for-each-ref --merged HEAD` so a
-    // NON-merged branch (a tip not reachable from HEAD — potentially stranded
-    // work that never landed) is flaggable. A failure degrades to all-false
-    // (never 500). Same CRLF tolerance as the main parse; one name per line.
-    const mergedR = await runGit(chat, ['for-each-ref', '--merged', 'HEAD', '--format=%(refname:short)', 'refs/heads/'], cwd);
-    const mergedNames = mergedR.ok
-      ? mergedR.stdout.split('\n').map((l) => l.replace(/\r$/, '')).filter((l) => l.trim())
-      : [];
-    const mergedSet = new Set(mergedNames);
-
-    const out = branches.map((b) => ({
-      ...b,
-      current: currentName !== '' && b.name === currentName,
-      merged: mergedSet.has(b.name),
-    }));
-    res.json({ branches: out, error: null });
-  } catch (e) {
-    res.json({ branches: [], error: e.message });
-  }
+      const out = branches.map((b) => ({
+        ...b,
+        current: currentName !== '' && b.name === currentName,
+        merged: mergedSet.has(b.name),
+      }));
+      res.json({ branches: out, error: null });
+    },
+  });
 });
 
 // Inspect a single stash's changes (the depth layer under /api/git-stash).
@@ -3191,57 +3204,49 @@ app.get('/api/git-branch', async (req, res) => {
 // containment. On malformed ref / bad path / non-git cwd / empty → empty result, never
 // a 500. See WARDEN-340.
 app.get('/api/git-stash-show', async (req, res) => {
-  const chatId = String(req.query.id || '');
   const ref = String(req.query.ref || '');
   const filePath = String(req.query.path || '').trim();
-  const { chat, error } = await resolve(chatId);
-  if (error) return res.status(404).json({ error });
+  await withGitRepo(req, res, {
+    defaults: { files: [], diff: null },
+    // ref clamp (WARDEN-122 injection discipline): parseStashList's `ref` is the %gd
+    // reflog selector = `stash@{0}`. Validate against that exact shape and reject
+    // anything else (e.g. "--version", "stash@{a}", "; rm -rf") BEFORE it reaches git
+    // or the remote shell — the stash equivalent of git-show's /([0-9a-f]{4,40})/i
+    // hex clamp. On malformed ref → empty, never a 500. Reject unsafe per-file paths
+    // (absolute / traversal). Bad path → empty, never 500.
+    validate: () => {
+      if (!/^stash@\{\d+\}$/.test(ref)) return { body: { files: [], diff: null, error: 'invalid ref' } };
+      if (filePath && !isSafeRelativePath(filePath)) return { body: { files: [], diff: null, error: 'invalid path' } };
+      return null;
+    },
+    handler: async ({ chat, cwd, res }) => {
+      // `git stash show` accepts the same --name-status/--pretty shape as `git show`,
+      // so parseGitShowNameStatus reuses cleanly for the files list. `ref` is already
+      // ^stash@{\d+}$-validated above and `path` is isSafeRelativePath-checked, so both
+      // are safe as argv after `git -C <cwd>` / the shellQuoted remote form (the
+      // WARDEN-122 discipline). `--` before the path stops option injection.
+      //
+      // NOTE on the per-file diff: `git stash show -p <ref> -- <path>` FAILS with
+      // "Too many revisions specified" (verified on git 2.47) — `git stash show` does
+      // not accept a pathspec. Instead `git diff <ref>^ <ref> -- <path>` is used: it is
+      // byte-identical to `git stash show -p <ref>` (the stash commit's tree diff vs its
+      // first parent, the commit the stash was created on) and stays consistent with the
+      // files list — both surface the tracked working-tree changes only (verified they
+      // agree for a `-u` stash too). `git diff` emits pure patch output with no commit
+      // header, so no --format= is needed. capDiff guards the 1MB ceiling (capDiff).
+      let files = [];
+      let diff = null;
+      if (filePath) {
+        const r = await runGit(chat, ['diff', `${ref}^`, ref, '--', filePath], cwd);
+        diff = capDiff(r.ok ? r.stdout : '');
+      } else {
+        const r = await runGit(chat, ['stash', 'show', '--name-status', '--pretty=format:', ref], cwd);
+        files = parseGitShowNameStatus(r.ok ? r.stdout : '');
+      }
 
-  // ref clamp (WARDEN-122 injection discipline): parseStashList's `ref` is the %gd
-  // reflog selector = `stash@{0}`. Validate against that exact shape and reject
-  // anything else (e.g. "--version", "stash@{a}", "; rm -rf") BEFORE it reaches git
-  // or the remote shell — the stash equivalent of git-show's /([0-9a-f]{4,40})/i
-  // hex clamp. On malformed ref → empty, never a 500.
-  if (!/^stash@\{\d+\}$/.test(ref)) {
-    return res.json({ files: [], diff: null, error: 'invalid ref' });
-  }
-  // Reject unsafe per-file paths (absolute / traversal). Bad path → empty, never 500.
-  if (filePath && !isSafeRelativePath(filePath)) {
-    return res.json({ files: [], diff: null, error: 'invalid path' });
-  }
-
-  try {
-    const cwd = gitCwd(chat);
-    if (!cwd) return res.json({ files: [], diff: null, error: 'no cwd' });
-
-    // `git stash show` accepts the same --name-status/--pretty shape as `git show`,
-    // so parseGitShowNameStatus reuses cleanly for the files list. `ref` is already
-    // ^stash@{\d+}$-validated above and `path` is isSafeRelativePath-checked, so both
-    // are safe as argv after `git -C <cwd>` / the shellQuoted remote form (the
-    // WARDEN-122 discipline). `--` before the path stops option injection.
-    //
-    // NOTE on the per-file diff: `git stash show -p <ref> -- <path>` FAILS with
-    // "Too many revisions specified" (verified on git 2.47) — `git stash show` does
-    // not accept a pathspec. Instead `git diff <ref>^ <ref> -- <path>` is used: it is
-    // byte-identical to `git stash show -p <ref>` (the stash commit's tree diff vs its
-    // first parent, the commit the stash was created on) and stays consistent with the
-    // files list — both surface the tracked working-tree changes only (verified they
-    // agree for a `-u` stash too). `git diff` emits pure patch output with no commit
-    // header, so no --format= is needed. capDiff guards the 1MB ceiling (capDiff).
-    let files = [];
-    let diff = null;
-    if (filePath) {
-      const r = await runGit(chat, ['diff', `${ref}^`, ref, '--', filePath], cwd);
-      diff = capDiff(r.ok ? r.stdout : '');
-    } else {
-      const r = await runGit(chat, ['stash', 'show', '--name-status', '--pretty=format:', ref], cwd);
-      files = parseGitShowNameStatus(r.ok ? r.stdout : '');
-    }
-
-    res.json({ files, diff, error: null });
-  } catch (e) {
-    res.json({ files: [], diff: null, error: e.message });
-  }
+      res.json({ files, diff, error: null });
+    },
+  });
 });
 
 // ---- Per-line git blame / annotate (WARDEN-206) -----------------------------
@@ -3259,42 +3264,39 @@ app.get('/api/git-stash-show', async (req, res) => {
 // capped via capDiff/GIT_DIFF_MAX_BYTES before parsing (blame on a large file can
 // be big) — a truncation that may drop the final partial record, never a 500.
 app.get('/api/git-blame', async (req, res) => {
-  const chatId = String(req.query.id || '');
   const filePath = String(req.query.path || '').trim();
-  const { chat, error } = await resolve(chatId);
-  if (error) return res.status(404).json({ error });
+  await withGitRepo(req, res, {
+    defaults: { lines: [] },
+    // Empty path → nothing to blame (not an error — a success-shaped { lines: [],
+    // error: null }). Unsafe path → empty + 'invalid path' (mirrors git-show: never
+    // a 500). Returning the FULL body lets the empty-path "success" reproduce verbatim.
+    validate: () => {
+      if (!filePath) return { body: { lines: [], error: null } };
+      if (!isSafeRelativePath(filePath)) return { body: { lines: [], error: 'invalid path' } };
+      return null;
+    },
+    handler: async ({ chat, cwd, res }) => {
+      let raw = '';
+      if (!chat.container && chat.host === LOCAL) {
+        // manual-LOCAL: runLocalGit (async, non-blocking) on the host fs.
+        // `--line-porcelain` for the stable, machine-parseable per-line header block
+        // the parser above consumes.
+        const r = await runLocalGit(['blame', '--line-porcelain', '--', filePath], cwd);
+        raw = capDiff(r.stdout || '');
+      } else {
+        // container (local+remote) or manual-remote: buildGitBlameScript delivered
+        // in-context via runInContext (docker-exec for yatfa, ssh for manual-remote)
+        // so the `cd <cwd>` + `git blame` run where the repo lives. The `2>/dev/null`
+        // in the script swallows git's "no such file" / "not a git repo" noise so a
+        // non-git cwd reads as empty, not an error. See WARDEN-235.
+        const rr = await runInContext(chat, buildGitBlameScript(cwd, filePath));
+        raw = capDiff(rr.ok ? (rr.stdout || '') : '');
+      }
 
-  // Empty path → nothing to blame (not an error). Unsafe path → empty + 'invalid path'
-  // (mirrors git-show: never a 500).
-  if (!filePath) return res.json({ lines: [], error: null });
-  if (!isSafeRelativePath(filePath)) return res.json({ lines: [], error: 'invalid path' });
-
-  try {
-    const cwd = gitCwd(chat);
-    if (!cwd) return res.json({ lines: [], error: 'no cwd' });
-
-    let raw = '';
-    if (!chat.container && chat.host === LOCAL) {
-      // manual-LOCAL: runLocalGit (async, non-blocking) on the host fs.
-      // `--line-porcelain` for the stable, machine-parseable per-line header block
-      // the parser above consumes.
-      const r = await runLocalGit(['blame', '--line-porcelain', '--', filePath], cwd);
-      raw = capDiff(r.stdout || '');
-    } else {
-      // container (local+remote) or manual-remote: buildGitBlameScript delivered
-      // in-context via runInContext (docker-exec for yatfa, ssh for manual-remote)
-      // so the `cd <cwd>` + `git blame` run where the repo lives. The `2>/dev/null`
-      // in the script swallows git's "no such file" / "not a git repo" noise so a
-      // non-git cwd reads as empty, not an error. See WARDEN-235.
-      const rr = await runInContext(chat, buildGitBlameScript(cwd, filePath));
-      raw = capDiff(rr.ok ? (rr.stdout || '') : '');
-    }
-
-    const lines = parseGitBlame(raw);
-    res.json({ lines, error: null });
-  } catch (e) {
-    res.json({ lines: [], error: e.message });
-  }
+      const lines = parseGitBlame(raw);
+      res.json({ lines, error: null });
+    },
+  });
 });
 
 // If cmd invokes bare `claude`, replace it with the full path found on the host —
@@ -4002,10 +4004,6 @@ export function parseGitLsEntries(raw, dir) {
 //
 // Strictly read-only (WARDEN-199 line): `git ls-files` mutates nothing.
 app.get('/api/git-ls', async (req, res) => {
-  const chatId = String(req.query.id || '');
-  const { chat, error } = await resolve(chatId);
-  if (error) return res.status(404).json({ error });
-
   // `dir` is relative to cwd (default '' = repo root). Containment guard: a
   // pathspec reaching `..` would let git list outside cwd, so it is validated
   // server-side here (not just client-side in the dialog). Reuses the SAME
@@ -4014,31 +4012,33 @@ app.get('/api/git-ls', async (req, res) => {
   // lets the empty root default through (isSafeRelativePath treats '' as invalid
   // because a git-show path is required, but root is the legitimate list-all).
   const dir = String(req.query.dir || '');
-  if (dir && !isSafeRelativePath(dir)) {
-    return res.status(400).json({ error: 'dir must be within working directory' });
-  }
-
-  try {
-    const cwd = gitCwd(chat);
-    if (!cwd) return res.json({ entries: [], cwd: '', dir, error: 'no cwd' });
-
-    // Pathspec the listing to `dir` so git reads only that subtree; with dir=''
-    // (root) no pathspec is passed → lists from cwd. --cached (--staged) gives
-    // tracked files, --others adds untracked work-in-progress, and
-    // --exclude-standard drops .gitignored entries (node_modules, build, .git).
-    const args = ['ls-files', '--cached', '--others', '--exclude-standard'];
-    if (dir) args.push('--', dir);
-    const r = await runGit(chat, args, cwd);
-    // Non-zero exit (not a git repo, or an unborn repo whose index is empty
-    // under a non-root dir) → empty list with an explicit error so the dialog
-    // can tell "empty directory" from "not a repo" (mirrors search-files's
-    // honest-error discipline rather than masking as "no results").
-    if (!r.ok) return res.json({ entries: [], cwd, dir, error: 'not a git repository' });
-    res.json({ entries: parseGitLsEntries(r.stdout, dir), cwd, dir, error: null });
-  } catch (e) {
-    // Generic — don't leak internals (a HostConnectionError embeds the hostname).
-    res.json({ entries: [], cwd: chat.cwd || '', dir, error: 'ls failed' });
-  }
+  await withGitRepo(req, res, {
+    // defaults carries `cwd: chat.cwd || ''`. The hand-written no-cwd body used the
+    // literal `cwd: ''` and the catch used `cwd: chat.cwd || ''`; identical on the
+    // no-cwd path (gitCwd returns '' only when chat.cwd is absent — see gitCwd).
+    defaults: (chat) => ({ entries: [], cwd: chat.cwd || '', dir }),
+    // The dir guard runs AFTER the 404 (hand-written order) and rejects with 400.
+    validate: () => (dir && !isSafeRelativePath(dir)
+      ? { status: 400, body: { error: 'dir must be within working directory' } }
+      : null),
+    // Generic catch — don't leak internals (a HostConnectionError embeds the hostname).
+    catchError: 'ls failed',
+    handler: async ({ chat, cwd, res }) => {
+      // Pathspec the listing to `dir` so git reads only that subtree; with dir=''
+      // (root) no pathspec is passed → lists from cwd. --cached (--staged) gives
+      // tracked files, --others adds untracked work-in-progress, and
+      // --exclude-standard drops .gitignored entries (node_modules, build, .git).
+      const args = ['ls-files', '--cached', '--others', '--exclude-standard'];
+      if (dir) args.push('--', dir);
+      const r = await runGit(chat, args, cwd);
+      // Non-zero exit (not a git repo, or an unborn repo whose index is empty
+      // under a non-root dir) → empty list with an explicit error so the dialog
+      // can tell "empty directory" from "not a repo" (mirrors search-files's
+      // honest-error discipline rather than masking as "no results").
+      if (!r.ok) return res.json({ entries: [], cwd, dir, error: 'not a git repository' });
+      res.json({ entries: parseGitLsEntries(r.stdout, dir), cwd, dir, error: null });
+    },
+  });
 });
 
 const server = http.createServer(app);
