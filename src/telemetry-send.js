@@ -26,6 +26,8 @@
 // ZERO real network calls and waits ZERO real milliseconds. fetchImpl defaults to
 // the global fetch (Node >= 18); sleepImpl defaults to a real setTimeout sleep.
 
+import { randomUUID } from 'node:crypto';
+
 const realSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Bounded retry cap — mirrors llm.js's `for (attempt < 3)`. A down receiver never
@@ -66,19 +68,36 @@ const noopLog = () => {};
 //                   sent as `Authorization: Bearer <token>` so a receiver that set
 //                   AUTH_TOKEN accepts the batch. Empty/missing → header omitted →
 //                   today's behavior (works against an AUTH_TOKEN-unset receiver).
+//   idempotencyKey — optional per-batch idempotency key (WARDEN-666). When a
+//                   non-empty string, sent as `idempotency-key` so a receiver that
+//                   dedups seen keys recognizes a retried batch (whose 2xx was
+//                   lost) and does NOT double-count it. Empty/missing → header
+//                   omitted. The key is a random UUID generated ONCE per batch in
+//                   send() and REUSED across every retry attempt of that batch
+//                   (it travels in `headers`, which send() reuses) — so every
+//                   retry POSTs the identical bytes AND the identical key, and the
+//                   receiver can tell "same batch, lost 2xx" from "two batches".
+//                   Non-identifying: a random UUID, carrying no user/event data,
+//                   and NOT derived from the event contents (two sends of the same
+//                   events get different keys). Header-based ⇒ the body
+//                   {schemaVersion, events} is unchanged, so this is NO schema-
+//                   version bump (no coordinated client+receiver change).
 //
 // Returns { headers, body }:
 //   headers — Content-Type + X-Telemetry-Schema (+ Authorization when a token is
-//             supplied). HTTP header names are case-insensitive on the wire; sent
-//             lowercase.
+//             supplied, + idempotency-key when a key is supplied). HTTP header
+//             names are case-insensitive on the wire; sent lowercase.
 //   body    — JSON string of { schemaVersion, events }.
-export function makePayload({ schemaVersion, events, authToken }) {
+export function makePayload({ schemaVersion, events, authToken, idempotencyKey } = {}) {
   const headers = {
     'content-type': 'application/json',
     'x-telemetry-schema': String(schemaVersion),
   };
   if (typeof authToken === 'string' && authToken.length > 0) {
     headers['authorization'] = `Bearer ${authToken}`;
+  }
+  if (typeof idempotencyKey === 'string' && idempotencyKey.length > 0) {
+    headers['idempotency-key'] = idempotencyKey;
   }
   const body = JSON.stringify({ schemaVersion, events });
   return { headers, body };
@@ -163,7 +182,18 @@ export async function send({
     return { ok: false, dropped: false, attempts: 0, status: null };
   }
 
-  const { headers, body } = makePayload({ schemaVersion, events, authToken });
+  // IDEMPOTENCY KEY (WARDEN-666) — a stable, non-identifying per-batch key
+  // generated ONCE before the retry loop. It travels in `headers` (built once by
+  // makePayload and REUSED verbatim across every retry attempt), so every retry of
+  // this batch POSTs the identical bytes AND the identical key. A receiver that
+  // dedups seen keys can then recognize a retried batch whose 2xx was lost and
+  // return 202 {accepted:0, deduped:true} WITHOUT re-persisting — closing the
+  // at-least-once double-count hole (a single crash retried ≤3× landing as 2–4
+  // identical rows). A random UUID is NON-IDENTIFYING (no user/event data) and NOT
+  // derived from the event contents, so it leaks nothing and never collides with
+  // another client's batch.
+  const idempotencyKey = randomUUID();
+  const { headers, body } = makePayload({ schemaVersion, events, authToken, idempotencyKey });
 
   let status = null;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {

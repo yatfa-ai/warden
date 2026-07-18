@@ -116,6 +116,90 @@ describe('makePayload — the pure wire-payload seam', () => {
     const { headers } = makePayload({ schemaVersion: SCHEMA, events: EVENTS });
     assert.ok(!('authorization' in headers), 'no auth header when authToken is not supplied');
   });
+
+  it('includes an idempotency-key header IFF a non-empty idempotencyKey is passed (WARDEN-666)', () => {
+    const key = '11111111-1111-4111-8111-111111111111';
+    const { headers } = makePayload({ schemaVersion: SCHEMA, events: EVENTS, idempotencyKey: key });
+    assert.strictEqual(headers['idempotency-key'], key, 'the per-batch key travels in the headers');
+    // The schema handshake + content-type headers are untouched alongside it.
+    assert.strictEqual(headers['content-type'], 'application/json');
+    assert.strictEqual(headers['x-telemetry-schema'], SCHEMA);
+  });
+
+  it('OMITS the idempotency-key header when idempotencyKey is empty/omitted (backward-compatible)', () => {
+    assert.ok(!('idempotency-key' in makePayload({ schemaVersion: SCHEMA, events: EVENTS, idempotencyKey: '' }).headers), 'empty key → no header');
+    assert.ok(!('idempotency-key' in makePayload({ schemaVersion: SCHEMA, events: EVENTS }).headers), 'omitted key → no header');
+  });
+
+  it('does NOT embed the idempotency key in the body (header-only — no schema-version bump)', () => {
+    const key = '22222222-2222-4222-8222-222222222222';
+    const { body } = makePayload({ schemaVersion: SCHEMA, events: EVENTS, idempotencyKey: key });
+    const parsed = JSON.parse(body);
+    // The body envelope stays exactly { schemaVersion, events } — the key is a
+    // HEADER, so the wire body is unchanged and no schema-version coordination
+    // with the receiver is required.
+    assert.deepStrictEqual(Object.keys(parsed).sort(), ['events', 'schemaVersion']);
+    assert.ok(!body.includes(key), 'the key must not leak into the JSON body');
+  });
+});
+
+describe('(WARDEN-666) per-batch idempotency-key: stable across retries, random per batch', () => {
+  // A retried batch POSTs the IDENTICAL bytes (send() builds `body` once and reuses
+  // it). WARDEN-666 adds a per-batch idempotency-key generated ONCE before the retry
+  // loop and reused on every attempt, so a receiver can tell a retry (same key) from
+  // a distinct batch (different key) and dedup a lost-2xx instead of double-counting.
+
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  it('send() puts a UUID-shaped idempotency-key header on the wire', async () => {
+    const fetchImpl = fetchSeq([{ ok: true, status: 200 }]);
+    await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl });
+    const key = fetchImpl.calls[0].opts.headers['idempotency-key'];
+    assert.ok(typeof key === 'string' && key.length > 0, 'a key header is present');
+    assert.match(key, UUID_RE, 'the key is UUID-shaped (the shape crypto.randomUUID produces)');
+  });
+
+  it('REUSES the same idempotency-key across retry attempts of one batch', async () => {
+    // A transient 503 then a 200 → two attempts of the SAME batch. The key must be
+    // IDENTICAL on both POSTs: it is generated once before the loop and travels in
+    // the reused `headers`. A per-attempt key would defeat receiver-side dedup.
+    const fetchImpl = fetchSeq([
+      { ok: false, status: 503 },
+      { ok: true, status: 200 },
+    ]);
+    const r = await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl, sleepImpl: sleepRec().fn });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(fetchImpl.count(), 2, 'two attempts (one retry)');
+    const key0 = fetchImpl.calls[0].opts.headers['idempotency-key'];
+    const key1 = fetchImpl.calls[1].opts.headers['idempotency-key'];
+    assert.ok(key0 && key1, 'both attempts carry a key');
+    assert.strictEqual(key0, key1, 'the SAME key is reused across retries of one batch');
+    assert.match(key0, UUID_RE, 'and it is UUID-shaped');
+
+    // ...across ALL attempts of an exhausted-transient run too (3 attempts).
+    const fetchImpl3 = fetchSeq([{ ok: false, status: 503 }]);
+    await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl: fetchImpl3, sleepImpl: sleepRec().fn });
+    const keys = fetchImpl3.calls.map((c) => c.opts.headers['idempotency-key']);
+    assert.strictEqual(keys.length, _INTERNALS.MAX_ATTEMPTS, 'ran to the cap');
+    assert.ok(keys.every((k) => k === keys[0]), 'every attempt of one batch carries the identical key');
+  });
+
+  it('the key is NON-IDENTIFYING: random per batch, NOT derived from the event contents', async () => {
+    // Two sends of the IDENTICAL events must yield DIFFERENT keys — proving the key
+    // is a fresh random UUID per batch, not a deterministic hash of the events (a
+    // content-derived key would leak event data and would collide for identical
+    // batches from different clients). 122 bits of entropy ⇒ collision-free in
+    // practice; this asserts the randomness property directly.
+    const k1 = fetchSeq([{ ok: true, status: 200 }]);
+    const k2 = fetchSeq([{ ok: true, status: 200 }]);
+    await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl: k1 });
+    await send({ events: EVENTS, consent: true, endpointUrl: ENDPOINT, schemaVersion: SCHEMA, fetchImpl: k2 });
+    const key1 = k1.calls[0].opts.headers['idempotency-key'];
+    const key2 = k2.calls[0].opts.headers['idempotency-key'];
+    assert.match(key1, UUID_RE);
+    assert.match(key2, UUID_RE);
+    assert.notStrictEqual(key1, key2, 'two batches get distinct keys — the key is not a function of the events');
+  });
 });
 
 describe('(a) empty endpointUrl → zero fetchImpl calls', () => {
