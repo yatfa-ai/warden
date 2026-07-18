@@ -864,6 +864,29 @@ test('stalled totals accumulate per project and across projects independently', 
   assert.equal(r.total.stalled, 3);
 });
 
+test('the stalled-popover slice, when sorted by the helper, DOES go oldest-first (the render-time contract)', () => {
+  // End-to-end: the summarizer keeps chats order, then the RENDER layer sorts the
+  // stalled slice via the helper (GitStateBadge's `sort: sortByHeadAgeDesc`,
+  // WARDEN-710). This simulates that two-step pipeline and asserts the popover a human
+  // sees is oldest-HEAD-first — the whole point of WARDEN-710: a 30-day-stalled agent
+  // surfaces ABOVE one 8 days stale, so rotting/abandoned work is triaged first (chats
+  // iteration order alone would bury the 30d repo under the 8d one, defeating the chip).
+  // NOW-pinned so the >7d-stalled membership AND the age rank are both deterministic.
+  const chats = [agent('a1', 'warden'), agent('a2', 'warden'), agent('a3', 'warden'), agent('a4', 'warden')];
+  const gitStatus = {
+    a1: status(true, 0, 0, { headDate: new Date(NOW - 9 * 86400_000).toISOString() }),  // 9d — stalled (middle)
+    a2: status(true, 0, 0, { headDate: new Date(NOW - 30 * 86400_000).toISOString() }), // 30d — stalled (OLDEST)
+    a3: status(false, 0, 0),                                                            // dirty only — NOT stalled
+    a4: status(true, 0, 0, { headDate: new Date(NOW - 8 * 86400_000).toISOString() }),  // 8d — stalled (newest stalled)
+  };
+  const r = sum(chats, gitStatus, NOW);
+  // Summarizer: chats order, all four agents (a3 is dirty so it appears).
+  assert.deepEqual(r.total.agents.map((a) => a.key), ['a1', 'a2', 'a3', 'a4']);
+  // Render: the stalled popover filters a.stalled (drops a3) then sorts oldest-first.
+  const stalled = r.total.agents.filter((a) => a.stalled);
+  assert.deepEqual(sortByHeadAgeDesc(stalled).map((a) => a.key), ['a2', 'a1', 'a4']);
+});
+
 console.log('\ndirty magnitude (WARDEN-670): the ±N popover carries each dirty agent\'s +N −M');
 test('a dirty agent carries diffstat from status.diffstat onto ProjectGitAgent', () => {
   const r = sum([agent('a1', 'warden')], { a1: status(false, 0, 0, { diffstat: { files: 3, insertions: 10, deletions: 2 } }) });
