@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { parseGitStatusPorcelain, parseAheadBehind, parseOutgoingFiles, parseStashCount, parseStashList, parseReflog, parseDiffStat, isConflictStatus, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, parseGitBranches, buildDockerGitArgv } from './gitStatus.js';
+import { parseGitStatusPorcelain, unescapeGitPath, parseAheadBehind, parseOutgoingFiles, parseStashCount, parseStashList, parseReflog, parseDiffStat, isConflictStatus, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, parseGitBranches, buildDockerGitArgv } from './gitStatus.js';
 
 describe('parseGitStatusPorcelain', () => {
   it('parses the most common case: unstaged modification as the FIRST file', () => {
@@ -249,6 +249,145 @@ describe('parseGitStatusPorcelain', () => {
       ]);
     });
   });
+
+  // ---- WARDEN-650: git C-quotes any path with a space, double-quote, backslash,
+  // control char, or non-ASCII byte (core.quotePath=true by default), wrapping it
+  // in double quotes with backslash/octal escapes. The parser must unescape so
+  // `.path` is a real filesystem path (file-open resolves, sidebar renders cleanly)
+  // AND so the join against parseOutgoingFiles is symmetric — porcelain quotes a
+  // space while `--name-only` does NOT, so without unquoting the cross-agent
+  // collision detector silently misses the most common colliding shape (WARDEN-601).
+  describe('C-quoted paths (space / special / non-ASCII)', () => {
+    it('unquotes a space path (the most common multi-word filename)', () => {
+      assert.deepEqual(parseGitStatusPorcelain('A  "file with space.js"\n'), [
+        { path: 'file with space.js', status: 'A', staged: 'A', worktree: ' ', conflict: false },
+      ]);
+    });
+
+    it('unquotes a non-ASCII path git emitted as octal UTF-8 bytes', () => {
+      // 'café.js' → git emits the é (UTF-8 0xC3 0xA9) as the two octal escapes
+      // \303\251. The parser must reassemble them into the single character.
+      assert.deepEqual(parseGitStatusPorcelain('A  "caf\\303\\251.js"\n'), [
+        { path: 'café.js', status: 'A', staged: 'A', worktree: ' ', conflict: false },
+      ]);
+    });
+
+    it('unquotes a backslash path', () => {
+      assert.deepEqual(parseGitStatusPorcelain('A  "back\\\\slash.js"\n'), [
+        { path: 'back\\slash.js', status: 'A', staged: 'A', worktree: ' ', conflict: false },
+      ]);
+    });
+
+    it('unquotes a path with an embedded double quote', () => {
+      assert.deepEqual(parseGitStatusPorcelain('A  "quote\\"in.js"\n'), [
+        { path: 'quote"in.js', status: 'A', staged: 'A', worktree: ' ', conflict: false },
+      ]);
+    });
+
+    it('unquotes a quoted rename on BOTH names independently (after the ` -> ` split)', () => {
+      // `R  "old name.js" -> "new name.js"` — git quotes each name INDEPENDENTLY.
+      // The ` -> ` arrow is literal and OUTSIDE the C-strings, so the split runs on
+      // the still-quoted string and THEN each side is unescaped separately. Unescaping
+      // the whole rawPath before the split would mangle a path that legitimately
+      // contains ` -> ` inside its quotes.
+      assert.deepEqual(parseGitStatusPorcelain('R  "old name.js" -> "new name.js"\n'), [
+        { path: 'new name.js', status: 'R', staged: 'R', worktree: ' ', conflict: false, renamedFrom: 'old name.js' },
+      ]);
+    });
+
+    it('unquotes a rename whose source carries non-ASCII', () => {
+      assert.deepEqual(parseGitStatusPorcelain('R  "caf\\303\\251 old.js" -> "new.js"\n'), [
+        { path: 'new.js', status: 'R', staged: 'R', worktree: ' ', conflict: false, renamedFrom: 'café old.js' },
+      ]);
+    });
+
+    it('does NOT introduce quotes on a plain-ASCII path (regression guard)', () => {
+      // A plain path is returned verbatim — unescapeGitPath is a no-op without a
+      // leading quote, so today's passing plain-path behavior is unchanged.
+      assert.deepEqual(parseGitStatusPorcelain(' M normal.js\n'), [
+        { path: 'normal.js', status: 'M', staged: ' ', worktree: 'M', conflict: false },
+      ]);
+    });
+
+    it('keeps the staged/worktree X/Y columns intact on a quoted row', () => {
+      // Unquoting must not disturb the column parsing.
+      const [f] = parseGitStatusPorcelain('AM "wip file.js"\n');
+      assert.equal(f.staged, 'A');
+      assert.equal(f.worktree, 'M');
+      assert.equal(f.path, 'wip file.js');
+    });
+
+    it('renders quoted + plain rows together in one batch', () => {
+      const out = ' M plain.js\nA  "with space.js"\nA  "caf\\303\\251.js"\n';
+      assert.deepEqual(parseGitStatusPorcelain(out), [
+        { path: 'plain.js', status: 'M', staged: ' ', worktree: 'M', conflict: false },
+        { path: 'with space.js', status: 'A', staged: 'A', worktree: ' ', conflict: false },
+        { path: 'café.js', status: 'A', staged: 'A', worktree: ' ', conflict: false },
+      ]);
+    });
+  });
+});
+
+describe('unescapeGitPath', () => {
+  // `git status --porcelain` / `git diff --name-only` C-quote any path with a
+  // space, double-quote, backslash, control char, or non-ASCII byte. These lock
+  // the C-string round-trip (WARDEN-650) independently of the porcelain parser.
+
+  it('returns a non-quoted path unchanged (the common ASCII no-op)', () => {
+    assert.equal(unescapeGitPath('plain.js'), 'plain.js');
+    assert.equal(unescapeGitPath('src/server.js'), 'src/server.js');
+  });
+
+  it('returns empty / nullish input as an empty string without throwing', () => {
+    assert.equal(unescapeGitPath(''), '');
+    assert.equal(unescapeGitPath(undefined), '');
+    assert.equal(unescapeGitPath(null), '');
+  });
+
+  it('strips the outer quotes from a quoted space path', () => {
+    assert.equal(unescapeGitPath('"file with space.js"'), 'file with space.js');
+  });
+
+  it('decodes a 2-byte UTF-8 sequence emitted as adjacent octal escapes', () => {
+    // 'é' = U+00E9 = UTF-8 0xC3 0xA9 = octal \303 \251. Git emits the two bytes as
+    // two 3-digit octal escapes; they must reassemble into the single character.
+    assert.equal(unescapeGitPath('"caf\\303\\251.js"'), 'café.js');
+    // Byte-level guard (independent of source-file encoding): the decoded path is
+    // exactly c(63) a(61) f(66) 0xC3 0xA9 .(2E) j(6A) s(73).
+    assert.deepEqual(
+      Buffer.from(unescapeGitPath('"caf\\303\\251.js"'), 'utf8'),
+      Buffer.from([0x63, 0x61, 0x66, 0xc3, 0xa9, 0x2e, 0x6a, 0x73]),
+    );
+  });
+
+  it('decodes a 3-byte UTF-8 sequence (the euro sign €)', () => {
+    // '€' = U+20AC = UTF-8 0xE2 0x82 0xAC = octal \342 \202 \254.
+    assert.equal(unescapeGitPath('"\\342\\202\\254"'), '€');
+  });
+
+  it('unescapes an embedded backslash', () => {
+    assert.equal(unescapeGitPath('"back\\\\slash.js"'), 'back\\slash.js');
+  });
+
+  it('unescapes an embedded double quote', () => {
+    assert.equal(unescapeGitPath('"quote\\"in.js"'), 'quote"in.js');
+  });
+
+  it('unescapes control-char escapes (\\t \\n \\r)', () => {
+    assert.equal(unescapeGitPath('"a\\tb"'), 'a\tb');
+    assert.equal(unescapeGitPath('"a\\nb"'), 'a\nb');
+    assert.equal(unescapeGitPath('"a\\rb"'), 'a\rb');
+  });
+
+  it('handles a path mixing a space with non-ASCII', () => {
+    assert.equal(unescapeGitPath('"caf\\303\\251 r\\303\\251.js"'), 'café ré.js');
+  });
+
+  it('leaves a literal interior ` -> ` untouched (the rename split owns the arrow)', () => {
+    // The helper runs AFTER parseGitStatusPorcelain splits on ` -> `, so a quoted
+    // path that legitimately contains the arrow must survive intact.
+    assert.equal(unescapeGitPath('"weird -> name.ts"'), 'weird -> name.ts');
+  });
 });
 
 describe('isConflictStatus', () => {
@@ -487,6 +626,52 @@ describe('parseOutgoingFiles', () => {
 
   it('preserves paths with spaces (the join key, not split on spaces)', () => {
     assert.deepEqual(parseOutgoingFiles('src/my file.js\n'), ['src/my file.js']);
+  });
+
+  // ---- WARDEN-650: `--name-only` does NOT quote a plain space (covered above)
+  // but DOES C-quote a backslash, double-quote, or non-ASCII byte — the SAME
+  // quoting spec as porcelain. Unquoting keeps the outgoing join key symmetric
+  // with the porcelain WIP path (WARDEN-601).
+  it('unquotes a backslash path (--name-only quotes backslash/quote/non-ASCII)', () => {
+    assert.deepEqual(parseOutgoingFiles('"back\\\\slash.js"\n'), ['back\\slash.js']);
+  });
+
+  it('unquotes a non-ASCII path git emitted as octal UTF-8 bytes', () => {
+    assert.deepEqual(parseOutgoingFiles('"caf\\303\\251.js"\n'), ['café.js']);
+  });
+
+  it('unquotes a path with an embedded double quote', () => {
+    assert.deepEqual(parseOutgoingFiles('"quote\\"in.js"\n'), ['quote"in.js']);
+  });
+
+  it('does NOT introduce quotes on a plain-ASCII outgoing path (regression guard)', () => {
+    assert.deepEqual(parseOutgoingFiles('src/plain.js\n'), ['src/plain.js']);
+  });
+});
+
+describe('porcelain ↔ outgoing join symmetry (WARDEN-601/650)', () => {
+  // The cross-agent collision detector joins porcelain WIP `.path` against
+  // parseOutgoingFiles paths via raw string set membership. `git status --porcelain`
+  // QUOTES a space while `git diff --name-only` does NOT — so before WARDEN-650 the
+  // porcelain `"file with space.js"` never string-equalled the outgoing
+  // `file with space.js` and the impending-conflict ⚠ badge was silently dead on
+  // the most common colliding shape. Both parsers must now emit the SAME bare path.
+  it('a space path string-equals across the porcelain and name-only sides', () => {
+    const porcelainFile = parseGitStatusPorcelain(' M "file with space.js"\n')[0];
+    const outgoingFile = parseOutgoingFiles('file with space.js\n')[0];
+    assert.equal(porcelainFile.path, 'file with space.js');
+    assert.equal(outgoingFile, 'file with space.js');
+    assert.equal(porcelainFile.path, outgoingFile);
+  });
+
+  it('a non-ASCII path string-equals across both sides', () => {
+    // --name-only quotes non-ASCII too, so both sides arrive quoted and must
+    // decode to the same real path.
+    const porcelainFile = parseGitStatusPorcelain('A  "caf\\303\\251.js"\n')[0];
+    const outgoingFile = parseOutgoingFiles('"caf\\303\\251.js"\n')[0];
+    assert.equal(porcelainFile.path, 'café.js');
+    assert.equal(outgoingFile, 'café.js');
+    assert.equal(porcelainFile.path, outgoingFile);
   });
 });
 
