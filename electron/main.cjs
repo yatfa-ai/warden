@@ -568,12 +568,14 @@ ipcMain.handle('telemetry:set-context', (_event, ctx) => {
 // The renderer (React UI) forwards errors the main-process source cannot see on
 // its own: a React render throw caught by ErrorBoundary (via the `wardenTelemetry`
 // bridge's reportError), and global window `error` / `unhandledrejection` events
-// (installed by preload.cjs). Both arrive on this one channel as a serializable
+// (installed by installRendererErrorCapture in the web bundle — NOT preload; see
+// the WARDEN-637 note in preload.cjs for the contextIsolation rationale).
+// Both arrive on this one channel as a serializable
 // { name, message, stack } (Error instances do not survive the contextBridge
 // clone). recordRendererError builds a renderer-runtime error event from those
 // fields (buildErrorEvent reads the serialized shape directly — refinement B) and
 // routes it through the SAME consent-gated record() pipeline as main-process
-// errors. It is a no-op while base consent is off (refinement D): preload
+// errors. It is a no-op while base consent is off (refinement D): the renderer
 // forwards unconditionally, main drops it here — nothing is built, recorded, or
 // sent until the user opts in. Paired with `ipcRenderer.send` (fire-and-forget,
 // no return value) — NOT `invoke`/`handle`, so the forward is safe to fire from
