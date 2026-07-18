@@ -53,8 +53,10 @@ import { FleetCommitSearch } from './sidebar/FleetCommitSearch';
 // WARDEN-635: GitStateBadges (the ±N/↑N/↓N fleet WIP badges, orphaned by the same
 // WARDEN-372 abolition) is re-homed alongside it here, now extended with a 4th ⚑N
 // at-risk-repo-state axis — mounting it lights up all four axes at once.
+// WARDEN-639: detectProjectOutgoingCollisions feeds a 3rd cross-agent collision
+// sibling (committed×committed, both unpushed) alongside the live ⚠ and impending ⏱.
 import { GitCollisionBadge, GitStateBadges } from './sidebar/GitBadges';
-import { detectProjectFileCollisions, detectProjectImpendingCollisions, summarizeProjectGitState } from '@/lib/gitStateSummary';
+import { detectProjectFileCollisions, detectProjectImpendingCollisions, detectProjectOutgoingCollisions, summarizeProjectGitState } from '@/lib/gitStateSummary';
 import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/SidebarBits';
 import { SourceControlPanel } from './sidebar/SourceControlPanel';
 import { SessionTagChips, SessionTagFilterRow } from './sidebar/SessionTags';
@@ -507,6 +509,21 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
       ? chats.filter((c) => c.host === view.host)
       : chats;
     return detectProjectImpendingCollisions(viewChats, gitStatus).total.paths;
+  }, [view, chats, gitStatus]);
+
+  // WARDEN-639: the OUTGOING×OUTGOING counterpart to fleetImpendingPaths — finds paths
+  // ≥2 agents EACH have in their unpushed commits (outgoingFiles) with clean working
+  // trees, the one matrix cell neither the live ⚠ nor the impending ⏱ covers (both
+  // agents committed, neither dirty → invisible to the WIP join AND the impending
+  // editor side → surfaces only at push/merge/CI). Same view population + cached
+  // gitStatus map as the other two memos (no new fetch — outgoingFiles rides the
+  // existing per-tab /api/git-status poll). Empty when no two clean committers share an
+  // outgoing path, in which case the ⇄ renders nothing (zero noise).
+  const fleetOutgoingPaths = useMemo(() => {
+    const viewChats = view.kind === 'host'
+      ? chats.filter((c) => c.host === view.host)
+      : chats;
+    return detectProjectOutgoingCollisions(viewChats, gitStatus).total.paths;
   }, [view, chats, gitStatus]);
 
   // WARDEN-635 (per WARDEN-565): the ±N/↑N/↓N/⚑N project git-state badges were
@@ -1047,6 +1064,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
           <GitCollisionBadge
             collisions={fleetCollisionPaths}
             impending={fleetImpendingPaths}
+            outgoing={fleetOutgoingPaths}
             chats={hostChats}
             gitStatus={gitStatus}
             onOpenChat={onOpenChat}
@@ -1281,6 +1299,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
         <GitCollisionBadge
           collisions={fleetCollisionPaths}
           impending={fleetImpendingPaths}
+          outgoing={fleetOutgoingPaths}
           chats={chats}
           gitStatus={gitStatus}
           onOpenChat={onOpenChat}

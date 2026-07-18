@@ -355,16 +355,54 @@ export function GitStateBadges({ dirty, unpushed, behind, atRisk, agents, chats,
 // No new fetch: the collisions come from the cached gitStatus map via
 // detectProjectFileCollisions (which reads the per-chat `files` already cached).
 // One trigger + popover + compare-dialog for a SINGLE collision class — `live`
-// (the working-tree×working-tree ⚠, WARDEN-288) or `impending` (the committed-
-// outgoing×working-tree ⏱, WARDEN-601). Extracted from GitCollisionBadge so the
-// badge renders the two classes as visually-distinct siblings (⚠ red vs ⏱ amber)
-// without duplicating the popover/dialog JSX. Each class has its own popover
+// (the working-tree×working-tree ⚠, WARDEN-288), `impending` (the committed-
+// outgoing×working-tree ⏱, WARDEN-601), or `outgoing` (the committed-outgoing×
+// committed-outgoing ⇄, WARDEN-639). Extracted from GitCollisionBadge so the
+// badge renders the three classes as visually-distinct siblings (⚠ red, ⏱ amber,
+// ⇄ violet) without duplicating the popover/dialog JSX. Each class has its own popover
 // `open` state and its own `compareTarget` so opening one never interferes with
-// the other. The agent rows tag each contributor's side for an impending collision
-// (committed vs editing) so a human sees who is the source of the impending
-// conflict; a live collision's rows carry no tag (both sides are "editing").
+// another. The agent rows tag each contributor's side — 'committed' for an outgoing
+// contributor (source 'outgoing', the committer side of an impending collision OR
+// every side of an outgoing collision) vs 'editing' for a working-tree contributor
+// (source 'wip', the live side) — so a human sees who is the source of the conflict;
+// a live collision's rows carry no tag (both sides are "editing").
+// Per-kind visual identity + copy for the collision popover. The rollup renders three
+// collision classes as visually-distinct siblings (⚠ red live, ⏱ amber impending, ⇄
+// violet outgoing), each silent when its list is empty. Colors stay in the same visual
+// system as the per-row GitBranchBadge; the violet outgoing glyph ⇄ reads as two-way
+// divergence — "both agents committed (unpushed), will collide on push." Each kind's
+// copy names the risk precisely so a human glancing at the chip knows which class
+// fired before opening the popover. Adding a fourth class would be a row here rather
+// than another branch in every ternary, mirroring GIT_STATE_KIND's table pattern.
+const COLLISION_KIND = {
+  live: {
+    glyph: '⚠',
+    text: 'text-red-400 hover:text-red-300',
+    header: 'text-red-400',
+    title: (n: number) => `${n} file${n === 1 ? '' : 's'} edited by 2+ agents — click to list`,
+    headerLabel: (n: number) => `same file · 2+ agents · ${n} path${n === 1 ? '' : 's'}`,
+    compareLabel: (path: string) => `compare each agent's uncommitted edits to ${path}`,
+  },
+  impending: {
+    glyph: '⏱︎',
+    text: 'text-amber-400 hover:text-amber-300',
+    header: 'text-amber-400',
+    title: (n: number) => `${n} file${n === 1 ? '' : 's'} about to collide — one agent committed (unpushed), another is editing — click to list`,
+    headerLabel: (n: number) => `impending · committed × editing · ${n} path${n === 1 ? '' : 's'}`,
+    compareLabel: (path: string) => `compare the committed vs in-progress edits to ${path}`,
+  },
+  outgoing: {
+    glyph: '⇄',
+    text: 'text-violet-400 hover:text-violet-300',
+    header: 'text-violet-400',
+    title: (n: number) => `${n} file${n === 1 ? '' : 's'} committed by 2+ agents, both unpushed — will collide on push — click to list`,
+    headerLabel: (n: number) => `outgoing · committed × committed · ${n} path${n === 1 ? '' : 's'}`,
+    compareLabel: (path: string) => `compare each agent's unpushed (committed) edits to ${path}`,
+  },
+} as const;
+
 function CollisionPopoverGroup({ kind, collisions, chats, gitStatus, onOpenChat, showProject }: {
-  kind: 'live' | 'impending';
+  kind: 'live' | 'impending' | 'outgoing';
   // Already scoped to this chip (a project's paths, or `total.paths` for the
   // "All Projects" chip). Empty ⇒ the group is not rendered at all.
   collisions: FileCollision[];
@@ -389,21 +427,18 @@ function CollisionPopoverGroup({ kind, collisions, chats, gitStatus, onOpenChat,
   const count = collisions.length;
   if (count <= 0) return null;
 
-  // Per-class visual identity. Live ⚠ (red) = two agents editing the same file
-  // RIGHT NOW. Impending ⏱ (amber) = one agent already committed (unpushed) while
-  // another is editing — the collision lands on the next push/pull, hence the
-  // forward-looking stopwatch glyph (text-presented via the VS15 selector so it
-  // reads as text, matching the ⚠/±/↑ vocabulary, not an emoji).
-  const isImpending = kind === 'impending';
-  const glyph = isImpending ? '⏱︎' : '⚠';
-  const accentText = isImpending ? 'text-amber-400 hover:text-amber-300' : 'text-red-400 hover:text-red-300';
-  const accentHeader = isImpending ? 'text-amber-400' : 'text-red-400';
-  const title = isImpending
-    ? `${count} file${count === 1 ? '' : 's'} about to collide — one agent committed (unpushed), another is editing — click to list`
-    : `${count} file${count === 1 ? '' : 's'} edited by 2+ agents — click to list`;
-  const headerLabel = isImpending
-    ? `impending · committed × editing · ${count} path${count === 1 ? '' : 's'}`
-    : `same file · 2+ agents · ${count} path${count === 1 ? '' : 's'}`;
+  // Per-class visual identity, looked up from the COLLISION_KIND table. Live ⚠ (red) =
+  // two agents editing the same file RIGHT NOW. Impending ⏱ (amber) = one agent already
+  // committed (unpushed) while another is editing. Outgoing ⇄ (violet) = two agents each
+  // committed the file, both unpushed — will collide on push. The stopwatch/⇄ glyphs are
+  // text-presented (⏱ via the VS15 selector) so they read as text, matching the ⚠/±/↑
+  // vocabulary, not emoji.
+  const cfg = COLLISION_KIND[kind];
+  const glyph = cfg.glyph;
+  const accentText = cfg.text;
+  const accentHeader = cfg.header;
+  const title = cfg.title(count);
+  const headerLabel = cfg.headerLabel(count);
 
   return (
     <>
@@ -449,9 +484,7 @@ function CollisionPopoverGroup({ kind, collisions, chats, gitStatus, onOpenChat,
               // The project the first contributor belongs to — disambiguates the
               // same path colliding in two different projects on the "All Projects" chip.
               const project = showProject ? findChat(chats, col.agents[0]?.key)?.project : undefined;
-              const compareLabel = isImpending
-                ? `compare the committed vs in-progress edits to ${col.path}`
-                : `compare each agent's uncommitted edits to ${col.path}`;
+              const compareLabel = cfg.compareLabel(col.path);
               return (
                 <div key={`${col.path}·${col.agents.map((a) => a.key).join(',')}`} className="rounded">
                   <div className="flex items-center gap-1 px-1 py-0.5" title={col.path}>
@@ -544,12 +577,15 @@ function CollisionPopoverGroup({ kind, collisions, chats, gitStatus, onOpenChat,
   );
 }
 
-export function GitCollisionBadge({ collisions, impending, chats, gitStatus, onOpenChat, showProject }: {
+export function GitCollisionBadge({ collisions, impending, outgoing, chats, gitStatus, onOpenChat, showProject }: {
   // Live working-tree×working-tree collisions (WARDEN-288). Empty ⇒ no ⚠.
   collisions: FileCollision[];
   // Impending committed-outgoing×working-tree collisions (WARDEN-601). Optional —
   // a caller with no impending signal omits it and the ⏱ never renders. Empty ⇒ no ⏱.
   impending?: FileCollision[];
+  // Outgoing committed-outgoing×committed-outgoing collisions (WARDEN-639). Optional —
+  // a caller with no outgoing signal omits it and the ⇄ never renders. Empty ⇒ no ⇄.
+  outgoing?: FileCollision[];
   chats: Chat[];
   // Minimal slice the popover rows read (just the branch label) — the full
   // gitStatus map ChatSidebar holds is structurally compatible.
@@ -561,14 +597,15 @@ export function GitCollisionBadge({ collisions, impending, chats, gitStatus, onO
   // stays display-field-free, exactly like ProjectGitAgent.
   showProject?: boolean;
 }) {
-  // Render the live ⚠ and the impending ⏱ as siblings in the same rollup. Each
-  // renders nothing when its list is empty (silent-when-clean), so a chip with no
-  // collisions of either class shows neither glyph. The live group stays exactly
-  // the pre-WARDEN-601 ⚠ behavior when `impending` is absent or empty.
+  // Render the live ⚠, impending ⏱, and outgoing ⇄ as siblings in the same rollup.
+  // Each renders nothing when its list is empty (silent-when-clean), so a chip with no
+  // collisions of any class shows no glyph. The live group stays exactly the
+  // pre-WARDEN-601 ⚠ behavior when `impending`/`outgoing` are absent or empty.
   return (
     <>
       <CollisionPopoverGroup kind="live" collisions={collisions} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} showProject={showProject} />
       <CollisionPopoverGroup kind="impending" collisions={impending ?? []} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} showProject={showProject} />
+      <CollisionPopoverGroup kind="outgoing" collisions={outgoing ?? []} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} showProject={showProject} />
     </>
   );
 }

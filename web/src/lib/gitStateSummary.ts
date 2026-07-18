@@ -213,19 +213,28 @@ export function summarizeProjectGitState(
 // the same new file path collide on `git add`/commit, so untracked `??` paths
 // count too).
 //
-// `kind` (WARDEN-601) discriminates the two collision classes the rollup surfaces:
+// `kind` discriminates the three collision classes the rollup surfaces:
 //   - omitted (≡ 'live') — WARDEN-288's working-tree×working-tree collision (both
 //     agents have the path dirty right now). Existing live collisions omit it so
 //     this shape stays deep-equal to pre-601 tests.
 //   - 'impending' — WARDEN-601's committed-outgoing × working-tree-WIP collision:
 //     one agent committed the path (clean tree) and another has it dirty; the
 //     collision lands on the next push/pull. Visually distinct in the rollup.
+//   - 'outgoing' — WARDEN-639's committed-outgoing × committed-outgoing collision:
+//     ≥2 agents each committed the path (both clean trees, both unpushed). The
+//     class the live AND impending detectors are BOTH blind to (neither agent has
+//     the path dirty, so neither contributes to the WIP join or the impending
+//     editor side); it surfaces only at push/merge/CI. Every agent sources
+//     'outgoing', so the compare dialog fetches each panel from its @{u}..HEAD range.
 export interface FileCollisionAgent {
   key: string;  // c.key || c.id — the same lookup the per-row GitBranchBadge uses
-  // source (WARDEN-601) marks WHICH side an agent brings to an 'impending' collision:
+  // source (WARDEN-601) marks WHICH side an agent brings to an 'impending' OR
+  // 'outgoing' collision:
   //   'outgoing' — this agent's change to the path lives in an unpushed COMMIT (its
   //     working tree is clean for this path), so the compare dialog must fetch the
   //     path's diff from the outgoing range (@{u}..HEAD), NOT the (empty) working tree.
+  //     Set for every agent in an 'outgoing' collision (both sides committed) and
+  //     for the committer side of an 'impending' collision.
   //   'wip'      — this agent has the path dirty in its working tree (the live side).
   // Omitted for the working-tree×working-tree 'live' collision — those always fetch
   // the working-tree diff, so the compare dialog treats a missing source as 'wip'.
@@ -235,7 +244,7 @@ export interface FileCollisionAgent {
 export interface FileCollision {
   path: string;
   agents: FileCollisionAgent[];  // ≥2 distinct agent keys, in chats iteration order
-  kind?: 'live' | 'impending';
+  kind?: 'live' | 'impending' | 'outgoing';
 }
 
 export interface FileCollisions {
@@ -435,6 +444,109 @@ export function detectProjectImpendingCollisions(
       }
     }
     // Sparse: only projects with at least one impending path get an entry.
+    if (colliding.length > 0) {
+      perProject[project] = { paths: colliding };
+      total.paths.push(...colliding);
+    }
+  }
+
+  return { perProject, total };
+}
+
+/**
+ * Detect cross-agent OUTGOING×OUTGOING file collisions (WARDEN-639): a changed-file
+ * path that ≥2 distinct active agents in the SAME project EACH have in their UNPUSHED
+ * commits (outgoingFiles) with CLEAN working trees for that path. The collision class
+ * BOTH other detectors are structurally blind to: agent A committed F (A's tree is
+ * clean → F ∉ A.files → A contributes nothing to the WIP join) AND agent C committed F
+ * (C's tree is clean → C is not an editor either). The live ⚠ needs two dirty agents;
+ * the impending ⏱ needs a committer AND an editor — neither fires when BOTH agents are
+ * clean committers. So today NO collision is flagged, yet the two divergent unpushed
+ * commits collide at push/merge/CI — the exact too-late failure WARDEN-601 was built to
+ * preempt, for its symmetric case. This surfaces it now, as a third sibling of the live
+ * ⚠ and impending ⏱.
+ *
+ * Population mirrors detectProjectImpendingCollisions exactly (active chats with a
+ * project, status by `key || id`). For each project, per path, it collects COMMITTERS
+ * only — agents with the path in outgoingFiles AND a clean tree for that path (REUSES
+ * the exact committer-clean rule from detectProjectImpendingCollisions, so a path
+ * already surfaced by the live ⚠ or the impending ⏱ is NOT re-surfaced here). A path
+ * with ≥2 DISTINCT committer agent keys is an outgoing×outgoing collision.
+ *
+ * Kept INDEPENDENT/ORTHOGONAL to its siblings BY DESIGN: if A and B are both clean
+ * committers and C is an editor, the path is BOTH an outgoing×outgoing collision
+ * (A+B) AND an impending collision (A+C / B+C) — two distinct risks, both correctly
+ * surfaced. There is no cross-class dedupe; each detector owns its own matrix cell.
+ *
+ * Returns the SAME sparse `{ perProject, total }` shape as the other two detectors so
+ * the rollup renders all three through one badge, each entry tagged `kind: 'outgoing'`
+ * with every agent tagged `source: 'outgoing'` (so the compare dialog fetches each
+ * panel from its @{u}..HEAD outgoing range, not an empty working-tree diff). Paths/
+ * agents emit in `chats` iteration order so tests assert deep equality — the convention
+ * the rest of this module follows.
+ */
+export function detectProjectOutgoingCollisions(
+  chats: GitStateChat[],
+  gitStatus: Record<string, GitStateStatus>,
+): FileCollisionSummary {
+  // project -> (path -> ordered distinct committer keys). Maps preserve insertion
+  // order, so iterating yields projects, paths, and agents all in first-seen
+  // (= chats iteration) order — the deterministic ordering tests rely on.
+  const byProject = new Map<string, Map<string, string[]>>();
+
+  for (const c of chats) {
+    if (!c.active || !c.project) continue;
+    const status = gitStatus[c.key || c.id];
+    if (!status) continue;
+    const key = c.key || c.id;
+
+    // The working-tree WIP path set — the committer-clean gate, REUSED VERBATIM from
+    // detectProjectImpendingCollisions so the two detectors agree on who counts as a
+    // clean committer. An agent with the path BOTH outgoing AND dirty is excluded here
+    // (its dirty copy already makes it a live-collision contributor alongside any other
+    // dirty agent, and an editor for the impending detector), so this detector adds no
+    // noise on top of its siblings.
+    const wipPaths = new Set<string>();
+    for (const f of status.files ?? []) {
+      const p = f?.path;
+      if (p) wipPaths.add(p);
+    }
+    const outgoing = status.outgoingFiles ?? [];
+
+    let paths = byProject.get(c.project);
+    if (!paths) { paths = new Map(); byProject.set(c.project, paths); }
+
+    // Committers: path in outgoing AND NOT in wip (clean tree for that path — the
+    // exact case both other detectors are blind to). Distinct keys only, deduped per
+    // path so one agent appearing twice (a path listed twice in its outgoingFiles)
+    // never self-collides — a collision needs ≥2 DISTINCT agent keys.
+    for (const p of outgoing) {
+      if (!p || wipPaths.has(p)) continue;
+      let committers = paths.get(p);
+      if (!committers) { committers = []; paths.set(p, committers); }
+      if (!committers.includes(key)) committers.push(key);
+    }
+  }
+
+  const perProject: Record<string, FileCollisions> = {};
+  const total: FileCollisions = { paths: [] };
+
+  for (const [project, paths] of byProject) {
+    const colliding: FileCollision[] = [];
+    for (const [path, committers] of paths) {
+      // An outgoing×outgoing collision needs ≥2 DISTINCT committer keys — a single
+      // agent with the path outgoing is just ordinary unpushed work (already shown by
+      // the ↑N badge), not a cross-agent risk. The committer-clean rule above
+      // guarantees each key is a different agent with a CLEAN tree for the path.
+      if (committers.length >= 2) {
+        colliding.push({
+          path,
+          kind: 'outgoing',
+          agents: committers.map((k) => ({ key: k, source: 'outgoing' as const })),
+        });
+      }
+    }
+    // Sparse: only projects with at least one outgoing×outgoing path get an entry.
     if (colliding.length > 0) {
       perProject[project] = { paths: colliding };
       total.paths.push(...colliding);
