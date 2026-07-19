@@ -70,13 +70,19 @@ import {
 } from '@/lib/gitStateSummary';
 import type { Chat } from '@/lib/types';
 
-export function FleetCommitSearch({ chats, onOpenChat }: {
+export function FleetCommitSearch({ chats, onOpenChat, onOpenFile }: {
   chats: Chat[];
   // Clicking a group header or a commit row jumps to the owning agent. Like the
   // GitStateBadge / GitCollisionBadge jump rows, this opens the agent's pane
   // (where its GitBranchBadge → the per-agent git panel lives); there is no
   // deeper deep-link API, so this mirrors the established jump-to-agent pattern.
   onOpenChat: (id: string) => void;
+  // WARDEN-801: deep-link a CODE-grep match (file:line) straight into the FileViewer
+  // scrolled to + highlighting that row, in place. Only the CODE axis carries a
+  // working-tree file:line, so only CODE result rows use this; commit/message/content
+  // rows keep jump-to-agent. Optional so the component stays reusable when mounted
+  // without the deep-link (falls back to jump → open-pane-only, the pre-WARDEN-801 UX).
+  onOpenFile?: (chatId: string, file: string, line?: number) => void;
 }) {
   const [open, setOpen] = useState(false);
   // message (WARDEN-534, default) ⇄ content/pickaxe (WARDEN-559). The aggregation layer
@@ -305,6 +311,17 @@ export function FleetCommitSearch({ chats, onOpenChat }: {
     onOpenChat(key);
   };
 
+  // WARDEN-801: open a CODE-grep match's file:line directly in the FileViewer (when
+  // onOpenFile is wired by the parent). Falls back to jump → open-pane-only when the
+  // parent did not wire onOpenFile (keeps the component reusable / non-breaking).
+  // Dismisses the popover either way so the FileViewer / pane takes focus — same UX
+  // as jump.
+  const openFile = (key: string, file: string, line?: number) => {
+    setOpen(false);
+    if (onOpenFile) onOpenFile(key, file, line);
+    else onOpenChat(key);
+  };
+
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
@@ -482,16 +499,19 @@ export function FleetCommitSearch({ chats, onOpenChat }: {
                       // A file:line:text row — mirrors WorkspaceSearchDialog's
                       // SearchResultRow (WARDEN-145) but in the fleet group-card layout:
                       // file:line (muted) over the matched text (foreground). click → open
-                      // the agent's pane so the human can drill in via its workspace search
-                      // / file viewer. role="button" div (sibling of the header, NOT nested).
+                      // the file directly in the FileViewer scrolled to + highlighting that
+                      // line (WARDEN-801), so a fleet-wide code hit is readable without
+                      // leaving the search or re-navigating the agent's workspace. Falls
+                      // back to jump-to-pane when the parent did not wire onOpenFile.
+                      // role="button" div (sibling of the header, NOT nested).
                       <li key={`${g.key}:${h.file}:${h.line}:${i}`}>
                         <div
                           role="button"
                           tabIndex={0}
                           aria-label={`open ${name} (${h.file}:${h.line})`}
-                          onClick={() => jump(g.key)}
-                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); jump(g.key); } }}
-                          title={`open ${name} — inspect in its workspace`}
+                          onClick={() => openFile(g.key, h.file, h.line)}
+                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openFile(g.key, h.file, h.line); } }}
+                          title={`open ${name} — inspect ${h.file}:${h.line}`}
                           className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
                         >
                           <span className="min-w-0 flex-1">
