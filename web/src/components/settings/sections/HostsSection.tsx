@@ -183,7 +183,24 @@ export function HostsSection({
           onChange={(e) =>
             setConfig({ ...config, connectTimeout: parseInt(e.target.value) || 10 })
           }
+          onBlur={() => {
+            // WARDEN-747: clamp the committed value into the [1, 60] bounds the
+            // input already advertises — mirrors the WARDEN-374 attention-
+            // threshold clamp and the backend PUT /api/config guard so the value
+            // that persists is the value displayed. connectTimeout is always a
+            // number (onChange coerces via `parseInt || 10`), so no null guard.
+            const clamped = Math.min(60, Math.max(1, config.connectTimeout));
+            if (clamped !== config.connectTimeout) {
+              setConfig({ ...config, connectTimeout: clamped });
+            }
+          }}
         />
+        {(config.connectTimeout < 1 || config.connectTimeout > 60) && (
+          <p className="text-xs text-destructive">
+            Must be between 1 and 60 seconds — capped to{' '}
+            {Math.min(60, Math.max(1, config.connectTimeout))} on blur.
+          </p>
+        )}
       </div>
     </SettingsSection>
   );

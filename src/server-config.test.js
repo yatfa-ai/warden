@@ -417,3 +417,134 @@ describe('/api/config watchPatterns — user-authored output-pattern alerts (WAR
     assert.strictEqual(after.watchPatterns[0].id, 'keep');
   });
 });
+
+describe('/api/config clamps advisory-bounds numeric inputs so they cannot lie (WARDEN-747)', () => {
+  // Mirrors the WARDEN-374 threshold-clamp block above: clamp-via-PUT,
+  // read-back-via-GET, persistence-to-disk. The Settings inputs advertise
+  // min/max bounds that, before this fix, were advisory only — a direct API
+  // call (or a typed out-of-range value) persisted silently with no feedback.
+  // The backend now range-clamps so the committed value matches what the UI's
+  // onBlur clamp displays. "the committed value matches what persists" is the
+  // exact property WARDEN-374's comment calls out.
+
+  it('GET /api/config exposes connectTimeout (default 10, within [1, 60])', async () => {
+    const body = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(body.connectTimeout, 10);
+  });
+
+  it('PUT connectTimeout: 999 clamps to 60 (read back via GET)', async () => {
+    const res = await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ connectTimeout: 999 }),
+    });
+    assert.strictEqual(res.status, 200);
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.connectTimeout, 60, 'over-max clamped down to 60');
+  });
+
+  it('PUT connectTimeout: 0 clamps to 1 (read back via GET)', async () => {
+    const res = await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ connectTimeout: 0 }),
+    });
+    assert.strictEqual(res.status, 200);
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.connectTimeout, 1, 'below-min clamped up to 1');
+  });
+
+  it('PUT connectTimeout: -5 clamps to 1 (negative treated like below-min)', async () => {
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ connectTimeout: -5 }),
+    });
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.connectTimeout, 1, 'negative clamped up to 1');
+  });
+
+  it('PUT connectTimeout: 30 (in range) is unchanged', async () => {
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ connectTimeout: 30 }),
+    });
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.connectTimeout, 30, 'in-range value not clamped');
+  });
+
+  it('the clamped connectTimeout persists to config.json (survives a restart)', async () => {
+    // Re-PUT (self-contained) then read disk — the round-trips-through-config.json bar.
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ connectTimeout: 9999 }),
+    });
+    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    assert.strictEqual(onDisk.connectTimeout, 60);
+  });
+
+  it('PUT tokenBudgetThresholdTokens: 0 clamps to 1 (read back via GET)', async () => {
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tokenBudgetThresholdTokens: 0 }),
+    });
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.tokenBudgetThresholdTokens, 1, '0 floored to 1, not dropped');
+  });
+
+  it('PUT tokenBudgetThresholdTokens: null clears to default (null-able, NOT clamped)', async () => {
+    // Null means "use the default" — the floor clamp must not turn null into 1.
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tokenBudgetThresholdTokens: null }),
+    });
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.tokenBudgetThresholdTokens, null, 'null preserved (use-default path untouched)');
+  });
+
+  it('PUT tokenBudgetWindowHours: 0 clamps to 1 (read back via GET)', async () => {
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tokenBudgetWindowHours: 0 }),
+    });
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.tokenBudgetWindowHours, 1, '0 floored to 1, not dropped');
+  });
+
+  it('PUT tokenBudgetWindowHours: -3 clamps to 1', async () => {
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tokenBudgetWindowHours: -3 }),
+    });
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.tokenBudgetWindowHours, 1, 'negative floored to 1');
+  });
+
+  it('PUT tokenBudgetPerSessionThresholdTokens: 0 clamps to 1 (read back via GET)', async () => {
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tokenBudgetPerSessionThresholdTokens: 0 }),
+    });
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.tokenBudgetPerSessionThresholdTokens, 1, '0 floored to 1, not dropped');
+  });
+
+  it('PUT tokenBudgetPerSessionThresholdTokens: null clears (disable path preserved)', async () => {
+    // Null is the per-session alarm's disable signal (resolveBudgetConfig → 0);
+    // the floor clamp must not turn null into 1 and silently re-enable it.
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tokenBudgetPerSessionThresholdTokens: null }),
+    });
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.tokenBudgetPerSessionThresholdTokens, null, 'null preserved (disable path untouched)');
+  });
+});

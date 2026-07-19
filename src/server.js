@@ -746,7 +746,13 @@ app.put('/api/config', (req, res) => {
   if (hosts && Array.isArray(hosts)) cfg.hosts = hosts;
   if (typeof pollIntervalMs === 'number') cfg.pollIntervalMs = pollIntervalMs;
   if (typeof tmuxSession === 'string') cfg.tmuxSession = tmuxSession;
-  if (typeof connectTimeout === 'number') cfg.connectTimeout = connectTimeout;
+  // WARDEN-747: clamp connectTimeout into the [1, 60] bounds the Settings input
+  // advertises — mirrors the WARDEN-374 threshold-clamp discipline so a direct
+  // API call (or a typed out-of-range value the UI's onBlur didn't catch) can't
+  // persist 0/999/negative. The committed value matches what the UI displays.
+  if (typeof connectTimeout === 'number') {
+    cfg.connectTimeout = Math.min(60, Math.max(1, connectTimeout));
+  }
   // Observer settings
   if (observerConfirmMode && ['always', 'auto-safe'].includes(observerConfirmMode)) cfg.observerConfirmMode = observerConfirmMode;
   if (typeof observerAutoStart === 'boolean') cfg.observerAutoStart = observerAutoStart;
@@ -801,22 +807,28 @@ app.put('/api/config', (req, res) => {
   }
   // Token-spend budget (WARDEN-415). The master switch is a boolean; the three
   // numeric knobs accept null (clears to default at read time) or a finite
-  // positive number. The per-session threshold is null-able too so it can be
-  // turned OFF independently (null → resolveBudgetConfig returns 0 → disabled).
+  // number. WARDEN-747: a finite number is FLOORED at 1 (the min the Settings
+  // inputs advertise) so a direct API call can't persist 0/negative — matching
+  // the frontend onBlur clamp and the WARDEN-374 "committed value matches what
+  // persists" discipline. The per-session threshold is null-able too so it can
+  // be turned OFF independently (null → resolveBudgetConfig returns 0 →
+  // disabled); null stays null, only finite numbers are floored.
   if (typeof tokenBudgetEnabled === 'boolean') cfg.tokenBudgetEnabled = tokenBudgetEnabled;
-  if (tokenBudgetThresholdTokens === null ||
-      (typeof tokenBudgetThresholdTokens === 'number' &&
-       Number.isFinite(tokenBudgetThresholdTokens) && tokenBudgetThresholdTokens > 0)) {
-    cfg.tokenBudgetThresholdTokens = tokenBudgetThresholdTokens;
+  if (tokenBudgetThresholdTokens === null) {
+    cfg.tokenBudgetThresholdTokens = null;
+  } else if (typeof tokenBudgetThresholdTokens === 'number' &&
+             Number.isFinite(tokenBudgetThresholdTokens)) {
+    cfg.tokenBudgetThresholdTokens = Math.max(1, tokenBudgetThresholdTokens);
   }
   if (typeof tokenBudgetWindowHours === 'number' &&
-      Number.isFinite(tokenBudgetWindowHours) && tokenBudgetWindowHours > 0) {
-    cfg.tokenBudgetWindowHours = tokenBudgetWindowHours;
+      Number.isFinite(tokenBudgetWindowHours)) {
+    cfg.tokenBudgetWindowHours = Math.max(1, tokenBudgetWindowHours);
   }
-  if (tokenBudgetPerSessionThresholdTokens === null ||
-      (typeof tokenBudgetPerSessionThresholdTokens === 'number' &&
-       Number.isFinite(tokenBudgetPerSessionThresholdTokens) && tokenBudgetPerSessionThresholdTokens > 0)) {
-    cfg.tokenBudgetPerSessionThresholdTokens = tokenBudgetPerSessionThresholdTokens;
+  if (tokenBudgetPerSessionThresholdTokens === null) {
+    cfg.tokenBudgetPerSessionThresholdTokens = null;
+  } else if (typeof tokenBudgetPerSessionThresholdTokens === 'number' &&
+             Number.isFinite(tokenBudgetPerSessionThresholdTokens)) {
+    cfg.tokenBudgetPerSessionThresholdTokens = Math.max(1, tokenBudgetPerSessionThresholdTokens);
   }
   // Companion transport toggle (WARDEN-439). Boolean master switch; everything
   // else (the remote-routing decision) is read from the env-var gate it drives.
