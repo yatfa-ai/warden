@@ -150,19 +150,30 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
   // based regardless. Defaults to rendered so opening a README shows docs.
 
   // Read the open file. Extracted (WARDEN-749) so the manual ↻ reload and the
-  // Follow interval re-run the SAME path as the initial open. A `background`
-  // flag separates the two call styles:
-  //   - foreground (initial open): sets `loading` so the body shows the spinner,
-  //     and surfaces fetch errors.
+  // Follow interval re-run the SAME path as the initial open. Two independent
+  // options separate the three call styles:
+  //   - foreground (initial open, default): sets `loading` so the body shows the
+  //     spinner, and surfaces fetch errors via `error` state (blanks the viewer
+  //     with the red error box — correct for the first read, where there is no
+  //     last-good content to keep).
   //   - background (↻ reload, Follow poll): updates content IN PLACE with no
-  //     loading flash, and leaves error state untouched on a transient failure
-  //     so a live follow never blanks out a file the user is reading.
+  //     loading flash.
+  // `surfaceErrors` only matters in background mode — it decouples the no-flash
+  // update from failure reporting:
+  //   - manual ↻ passes `surfaceErrors: true`: the user asked for a refresh, so a
+  //     deleted/renamed/unreadable file must NOT fail silently — a non-blocking
+  //     `toast.error` says the reload didn't land while the last-good content
+  //     stays on screen (the viewer is not blanked; only the initial-open path
+  //     owns the blank-with-error state).
+  //   - Follow poll leaves it false: a transient blip must not nag a reader
+  //     watching a live feed; the next poll recovers.
   // All calls during one open session share that session's AbortController, so
   // close/switch/unmount aborts the in-flight read and the `ac.signal.aborted`
   // guards prevent any post-close setState (the WARDEN-561 race the inline
   // fetch's `cancelled` flag guarded against — now generalized to 3 callers).
-  const loadContent = useCallback(async (opts?: { background?: boolean }) => {
+  const loadContent = useCallback(async (opts?: { background?: boolean; surfaceErrors?: boolean }) => {
     const background = opts?.background === true;
+    const surfaceErrors = opts?.surfaceErrors === true;
     const ac = abortRef.current;
     if (!ac) return; // dialog closed / no active session
     if (!background) setLoading(true);
@@ -176,9 +187,10 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
 
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
-        if (!ac.signal.aborted && !background) {
-          setError(data.error || `Failed to read file: ${response.statusText}`);
-        }
+        if (ac.signal.aborted) return;
+        const msg = data.error || `Failed to read file: ${response.statusText}`;
+        if (!background) setError(msg);
+        else if (surfaceErrors) toast.error(msg); // manual ↻: non-blocking, last-good content stays
         return;
       }
 
@@ -193,9 +205,12 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
       setError(null);
     } catch (e) {
       if (ac.signal.aborted) return; // close/switch abort — ignore, no setState
-      if (!background) setError(e instanceof Error ? e.message : 'Failed to read file');
-      // background: silent on transient error — keep the last-good content so a
-      // live follow stays readable across a network blip; the next poll recovers.
+      const msg = e instanceof Error ? e.message : 'Failed to read file';
+      if (!background) setError(msg);
+      else if (surfaceErrors) toast.error(msg); // manual ↻: tell the user the reload didn't land
+      // background + !surfaceErrors (Follow poll): silent on transient error —
+      // keep the last-good content so a live follow stays readable across a
+      // network blip; the next poll recovers.
     } finally {
       if (!ac.signal.aborted && !background) setLoading(false);
     }
@@ -443,10 +458,13 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
   // today no refresh exists at all, so a stale file forces a close/reopen. Runs
   // as a background-style load (no loading flash; content updates in place) and
   // toggles a brief button spinner via `manualReloading` for visible feedback.
+  // `surfaceErrors: true` so a deleted/renamed/unreadable file does NOT fail
+  // silently — the user asked for the current content, so a missed reload toasts
+  // (non-blocking; the last-good content stays on screen rather than blanking).
   const handleManualReload = useCallback(async () => {
     setManualReloading(true);
     try {
-      await loadContent({ background: true });
+      await loadContent({ background: true, surfaceErrors: true });
     } finally {
       setManualReloading(false);
     }
@@ -747,16 +765,16 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
 // the user is already near the tail, so a reader scrolled up is never yanked
 // down — the hook's synchronous followingRef is what makes the two coexist.
 //
-// Note on the always-on observers: useStickToBottom attaches its scroll/resize/
-// mutation observers once StickRegion mounts, and they call stickIfPinned on any
-// viewport content change — not only via the `active`-gated call below. That is
-// benign in practice because stickIfPinned no-ops unless the user is at the tail:
-// a view with no downward growth (annotate's blame gutters don't change row
-// count) sees no movement, and "stay at the bottom when you're already at the
-// bottom" is the intended tail behavior. This mirrors ObserverPanel's always-on
-// stickiness (the hook's other consumer).
+// `active` is also passed to useStickToBottom as its `enabled` flag, so the
+// scroll/resize/mutation observers attach ONLY while Follow is on. This closes
+// the niche short-file trap: with Follow OFF, a content change (toggling
+// Annotate/History) used to fire the always-on observers and — for a file short
+// enough that `followingRef` is true at mount — snap the view to the bottom
+// (e.g. opening History landed at the commit-list bottom, not the top). With
+// the observers gated on `active`, nothing auto-pins unless Follow is on.
+// ObserverPanel, the hook's other consumer, omits the arg and stays always-on.
 function StickRegion({ active, pinKey, children }: { active: boolean; pinKey: unknown; children: ReactNode }) {
-  const { rootRef, stickIfPinned } = useStickToBottom();
+  const { rootRef, stickIfPinned } = useStickToBottom(active);
   useLayoutEffect(() => {
     if (!active) return;
     stickIfPinned();
