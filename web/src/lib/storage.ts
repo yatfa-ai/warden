@@ -577,7 +577,8 @@ export interface UiState {
   // (WARDEN-237). Was a HealthDashboard-local useState that reset to 'health' on
   // every Warden restart; now App-owned + persisted so a cross-host human's Host
   // grouping survives reload. Defensive allow-list normalizer in loadUi below.
-  healthGroupBy?: 'health' | 'host';
+  // WARDEN-741 widened this to the 3rd 'project' mode — see the loadUi normalizer.
+  healthGroupBy?: 'health' | 'host' | 'project';
   // WARDEN-500: the per-host expand/collapse state INSIDE Host grouping (which
   // hosts are collapsed). Was a HealthDashboard-local useState that reset to {}
   // on every Warden restart — so the durable grouping choice (WARDEN-468) survived
@@ -1176,7 +1177,13 @@ export function loadUi(): UiState {
         agentSort: v.agentSort ?? 'manual',
         // WARDEN-468: defensive allow-list — a legacy/corrupt value never selects
         // a dead group mode (mirrors the agentFilter enum normalizer above).
-        healthGroupBy: v.healthGroupBy === 'host' ? 'host' : 'health',
+        // WARDEN-741: widened from a 2-way `=== 'host'` check to a 3-way
+        // `.includes()` membership check (the same idiom as agentFilter above)
+        // — the prior check collapsed ANY non-'host' value to 'health', so a
+        // persisted 'project' preference silently fell back to 'health' on every
+        // reload. The allow-list is the make-or-break serialization boundary for
+        // the Project mode surviving a Warden restart.
+        healthGroupBy: ['health', 'host', 'project'].includes(v.healthGroupBy) ? v.healthGroupBy : 'health',
         // WARDEN-500: defensive drop-bad-entries parse — a corrupt map never blanks
         // the whole collapse state. Mirrors parseCwdByHost/parseShellByHost: require
         // string keys + boolean values, drop anything else; a non-object → {}.

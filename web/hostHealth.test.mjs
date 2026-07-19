@@ -1,5 +1,6 @@
 // Tests for groupByHost + compareHostGroups — the pure host-bucketing behind the
-// Fleet Health Dashboard's "Group by: Host" view (WARDEN-237).
+// Fleet Health Dashboard's "Group by: Host" view (WARDEN-237) — and the parallel
+// groupByProject + compareProjectGroups for "Group by: Project" (WARDEN-741).
 //
 // No front-end test runner in this repo, so (like attentionRollup.test.mjs) this
 // loads the REAL src/lib/healthUtils.ts (transpiled TS -> ESM via Vite's OXC
@@ -29,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-hostHealth-test-'));
 const tmpFile = join(tmpDir, 'healthUtils.mjs');
 writeFileSync(tmpFile, code);
-const { groupByHost, compareHostGroups, summarizeHostLoad, resourceTone } = await import(tmpFile);
+const { groupByHost, compareHostGroups, groupByProject, compareProjectGroups, summarizeHostLoad, resourceTone } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -101,6 +102,70 @@ test('agent order within a host is insertion order', () => {
   assert.deepEqual(g.agents.map((a) => a.id), ['first', 'second']);
 });
 
+// --- groupByProject: project bucketing (WARDEN-741) ---
+// Mirrors the groupByHost block above on the project axis: bucket by project,
+// tally per-health-state via normalizeHealthState, preserve input order, never
+// throw on partial data. The project analog of groupByHost's '(local)' host
+// fallback is '(no project)'.
+
+console.log('\ngroupByProject: empty / single-project bucketing');
+test('no agents -> no groups', () => {
+  assert.deepEqual(groupByProject([]), []);
+});
+test('one project -> one group with a correct tally', () => {
+  const groups = groupByProject([
+    agent('a1', { project: 'warden', healthState: 'healthy' }),
+    agent('a2', { project: 'warden', healthState: 'critical' }),
+    agent('a3', { project: 'warden', healthState: 'healthy' }),
+  ]);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].project, 'warden');
+  assert.equal(groups[0].agents.length, 3);
+  // Full counts shape asserted explicitly (mirrors the groupByHost case above) so
+  // a future health-state addition never silently drops out of the expected shape.
+  assert.deepEqual(groups[0].counts, { healthy: 2, warning: 0, critical: 1, idle: 0, closed: 0, unknown: 0 });
+});
+
+console.log('\ngroupByProject: multi-project separation');
+test('agents split by project, each with its own tally', () => {
+  const groups = groupByProject([
+    agent('a1', { project: 'warden', healthState: 'healthy' }),
+    agent('a2', { project: 'warden', healthState: 'idle' }),
+    agent('a3', { project: 'warden-telemetry', healthState: 'critical' }),
+  ]);
+  assert.equal(groups.length, 2);
+  const warden = groups.find((g) => g.project === 'warden');
+  const telemetry = groups.find((g) => g.project === 'warden-telemetry');
+  assert.equal(warden.agents.length, 2);
+  assert.equal(warden.counts.healthy, 1);
+  assert.equal(warden.counts.idle, 1);
+  assert.equal(telemetry.counts.critical, 1);
+});
+
+console.log('\ngroupByProject: robust to missing / garbage health state');
+test('undefined healthState counts as unknown', () => {
+  const [g] = groupByProject([agent('a1', { project: 'warden' })]);
+  assert.equal(g.counts.unknown, 1);
+  assert.equal(g.counts.healthy, 0);
+});
+test('garbage healthState counts as unknown, not crash', () => {
+  const [g] = groupByProject([agent('a1', { project: 'warden', healthState: 'on-fire' })]);
+  assert.equal(g.counts.unknown, 1);
+});
+test('missing project falls back to (no project)', () => {
+  const [g] = groupByProject([{ id: 'a1', healthState: 'healthy' }]);
+  assert.equal(g.project, '(no project)');
+});
+
+console.log('\ngroupByProject: preserves input order within a project');
+test('agent order within a project is insertion order', () => {
+  const [g] = groupByProject([
+    agent('first', { project: 'warden', healthState: 'critical' }),
+    agent('second', { project: 'warden', healthState: 'healthy' }),
+  ]);
+  assert.deepEqual(g.agents.map((a) => a.id), ['first', 'second']);
+});
+
 // --- compareHostGroups: degraded-first ordering ---
 const none = () => undefined;                              // no connectivity record
 const offlineDown = (h) => (h === 'down' ? 'offline' : 'online');
@@ -159,6 +224,39 @@ test('offline host outranks unknown-connectivity host even when the unknown one 
   const offlineOnly = (h) => (h === 'down' ? 'offline' : undefined);
   const sorted = [unknownHost, offlineHost].sort((a, b) => compareHostGroups(a, b, offlineOnly));
   assert.deepEqual(sorted.map((g) => g.host), ['down', 'mystery']);
+});
+
+// --- compareProjectGroups: degraded-first ordering (WARDEN-741) ---
+// Same priority ladder as compareHostGroups MINUS the connectivity axis — a
+// project can span hosts, so there is no online/offline signal to prioritize on:
+// critical-heavy first, then agent count, then project name (stable tiebreak).
+
+console.log('\ncompareProjectGroups: critical-heavy projects first');
+test('more critical agents ranks above fewer', () => {
+  const light = groupByProject([agent('a1', { project: 'p1', healthState: 'healthy' })])[0];
+  const heavy = groupByProject([
+    agent('a2', { project: 'p2', healthState: 'critical' }),
+    agent('a3', { project: 'p2', healthState: 'critical' }),
+  ])[0];
+  const sorted = [light, heavy].sort(compareProjectGroups);
+  assert.deepEqual(sorted.map((g) => g.project), ['p2', 'p1']);
+});
+
+console.log('\ncompareProjectGroups: agent count, then project name (stable tiebreak)');
+test('bigger project ranks above smaller (no critical)', () => {
+  const big = groupByProject([
+    agent('a1', { project: 'big', healthState: 'healthy' }),
+    agent('a2', { project: 'big', healthState: 'healthy' }),
+  ])[0];
+  const small = groupByProject([agent('a3', { project: 'small', healthState: 'healthy' })])[0];
+  const sorted = [small, big].sort(compareProjectGroups);
+  assert.deepEqual(sorted.map((g) => g.project), ['big', 'small']);
+});
+test('identical priority falls back to project name (deterministic)', () => {
+  const z = groupByProject([agent('a1', { project: 'zebra', healthState: 'healthy' })])[0];
+  const a = groupByProject([agent('a2', { project: 'alpha', healthState: 'healthy' })])[0];
+  const sorted = [z, a].sort(compareProjectGroups);
+  assert.deepEqual(sorted.map((g) => g.project), ['alpha', 'zebra']);
 });
 
 // --- summarizeHostLoad: per-host CPU/mem roll-up (WARDEN-361) ---

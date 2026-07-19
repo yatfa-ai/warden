@@ -9,10 +9,13 @@ import {
   normalizeHealthState,
   groupByHost,
   compareHostGroups,
+  groupByProject,
+  compareProjectGroups,
   resourceTone,
   summarizeHostLoad,
   type HealthStateValue,
   type HostHealthGroup,
+  type ProjectHealthGroup,
 } from '@/lib/healthUtils';
 import { StatusDot, type StatusTone } from '@/components/StatusDot';
 import { Sparkline } from '@/components/Sparkline';
@@ -42,11 +45,12 @@ interface Props {
   // Timestamp format pref (WARDEN-213): routes the fleet last-activity + "Last
   // updated" times through the shared formatTimestamp helper. Pure client-side.
   timestampFormat: TimestampFormat;
-  // "Group agents by: Health | Host" mode (WARDEN-237). Lifted to App + persisted
-  // (WARDEN-468) so the toggle survives a Warden restart — App owns the single
-  // source of truth and this is read-only here except for the change handler.
-  // Health stays the default (DEFAULT_UI.healthGroupBy) so the dashboard is
-  // unchanged unless a human opts into the per-host view.
+  // "Group agents by: Health | Host | Project" mode (WARDEN-237; Project added in
+  // WARDEN-741). Lifted to App + persisted (WARDEN-468) so the toggle survives a
+  // Warden restart — App owns the single source of truth and this is read-only
+  // here except for the change handler. Health stays the default
+  // (DEFAULT_UI.healthGroupBy) so the dashboard is unchanged unless a human opts
+  // into the per-host or per-project view.
   groupBy: GroupMode;
   onGroupByChange: (mode: GroupMode) => void;
   // Per-host expand/collapse state inside Host grouping (WARDEN-237). Lifted to
@@ -90,7 +94,7 @@ const HEALTH_DIST_COLOR: Record<HealthStateValue, string> = {
 const CLOSED_COLLAPSED_LIMIT = 5;
 const CLOSED_EXPANDED_LIMIT = 20;
 
-export type GroupMode = 'health' | 'host';
+export type GroupMode = 'health' | 'host' | 'project';
 
 // Compact "used" portion of a docker-stats MemUsage string like
 // "310.2MiB / 2GiB" → "310.2MiB" (everything before the first ' / '). Returns ''
@@ -346,6 +350,25 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
     return groups;
   }, [healthData, hostStatuses]);
 
+  // Bucket agents by project, order projects degraded-first (critical-heavy →
+  // agent count → name), and order each project's agents healthy → critical
+  // (WARDEN-741). Mirrors hostGroups above MINUS the connectivity axis — a
+  // project can span hosts, so there is no online/offline signal to fuse. Pure
+  // inputs → cheap to memoize; recomputes only when the catalog changes (no
+  // hostStatuses dependency). The in-place `.sort()` is safe for the same reason
+  // as hostGroups: groupByProject returns fresh arrays it owns.
+  const projectGroups = useMemo<ProjectHealthGroup[]>(() => {
+    if (!healthData) return [];
+    const groups = groupByProject(healthData.agents);
+    groups.sort(compareProjectGroups);
+    for (const g of groups) {
+      g.agents.sort(
+        (a, b) => healthRank(normalizeHealthState(a.healthState)) - healthRank(normalizeHealthState(b.healthState)),
+      );
+    }
+    return groups;
+  }, [healthData]);
+
   // Per-agent 24h activity series for the row sparklines (WARDEN-299), joined by
   // `container`. Memoized on `activitySeries` ONLY — the 24h series refreshes on
   // its own ~60s cadence, so the 10s /api/health tick above never recomputes it
@@ -387,9 +410,14 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
       }
       return ids;
     }
+    if (groupBy === 'project') {
+      // Project mode has no per-section collapse/bounding — every group's agents
+      // render, so "All" targets exactly the rendered project-section agents.
+      return projectGroups.flatMap((g) => g.agents.map(agentIdOf));
+    }
     // Host mode: only non-collapsed hosts' agents are rendered.
     return hostGroups.flatMap((g) => (collapsedHosts[g.host] ? [] : g.agents.map(agentIdOf)));
-  }, [healthData, groupBy, closedExpanded, collapsedHosts, hostGroups]);
+  }, [healthData, groupBy, closedExpanded, collapsedHosts, hostGroups, projectGroups]);
 
   // The per-row sparkline, or null. Delegates the three cases (no container →
   // none; container + events → real series; container + no events → idle flat
@@ -577,11 +605,11 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
       <div className="flex items-center gap-2 px-3 py-2 border-b shrink-0">
         <span className="font-semibold tracking-wide text-sm">Fleet Health</span>
         <div className="ml-auto flex items-center gap-1.5">
-          {/* Group-by toggle (WARDEN-237): Health (default, no regression) / Host.
-              Two shadcn Buttons in a labelled group — the active option uses
-              variant="secondary" so the selection reads at a glance, and size="xs"
-              supplies the compact sizing (replacing the old magic-number
-              px-1.5 py-0.5 text-[10px]). */}
+          {/* Group-by toggle (WARDEN-237): Health (default, no regression) / Host /
+              Project (WARDEN-741). Three shadcn Buttons in a labelled group — the
+              active option uses variant="secondary" so the selection reads at a
+              glance, and size="xs" supplies the compact sizing (replacing the old
+              magic-number px-1.5 py-0.5 text-[10px]). */}
           <div
             className="flex items-center rounded-md border border-border overflow-hidden"
             role="group"
@@ -603,6 +631,20 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
               title="Group agents by host, with connectivity + health distribution"
               className="rounded-none"
             >Host</Button>
+            {/*
+              Project grouping (WARDEN-741): the 3rd group-by axis for a human
+              running multiple projects (warden + warden-telemetry + …). Mirrors
+              the Health/Host toggles exactly so the 3-way control reads as one
+              set. Selecting it buckets the fleet into per-project sections below.
+            */}
+            <Button
+              variant={groupBy === 'project' ? 'secondary' : 'ghost'}
+              size="xs"
+              aria-pressed={groupBy === 'project'}
+              onClick={() => setGroupBy('project')}
+              title="Group agents by project, with per-health-state distribution"
+              className="rounded-none"
+            >Project</Button>
           </div>
           <button className="text-xs text-muted-foreground hover:text-foreground active:scale-95 transition-all duration-150 ease-out" onClick={fetchHealth} disabled={loading}>
             {loading ? '…' : '↻'}
@@ -746,6 +788,70 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
                   </div>
                 );
               })
+            ) : groupBy === 'project' ? (
+              projectGroups.length === 0 ? (
+                <div className="p-4 text-center text-xs text-muted-foreground">No agents to group.</div>
+              ) : (
+                projectGroups.map(group => {
+                  const dist = HEALTH_SECTION_ORDER.filter(s => group.counts[s] > 0);
+                  // Select-all targets every agent in this project — no collapse
+                  // state in project mode, so all are rendered (matches the action
+                  // bar's "All" via renderedIds).
+                  const projectIds = group.agents.map(agentIdOf);
+                  return (
+                    <div key={group.project} className="flex flex-col gap-1 min-w-0">
+                      {/*
+                        Per-project header — TWO lines, mirroring the Host section
+                        above so a returning human reads the same shape. Line 1 =
+                        select-all checkbox + project name (truncates) + agent count;
+                        line 2 = the health distribution (the per-project copy of the
+                        fleet summary bar). Projects have NO connectivity signal (a
+                        project can span hosts), so the Host header's connectivity
+                        dot + latency are dropped. No collapse state (simpler than
+                        host): the header is a plain div, not a collapse Button.
+                        (WARDEN-741)
+                      */}
+                      <div className="flex items-center gap-1.5 px-1 py-1 min-w-0">
+                        <span className="flex items-center shrink-0 pl-1">
+                          <Checkbox
+                            checked={isSelectedAll(selectedIds, projectIds)}
+                            onCheckedChange={() => toggleGroup(projectIds)}
+                            disabled={projectIds.length === 0}
+                            aria-label={`select all agents in ${group.project}`}
+                          />
+                        </span>
+                        <span className="text-xs font-semibold truncate flex-1 min-w-0">
+                          {group.project}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground/50 shrink-0">·</span>
+                        <span className="text-[10px] text-muted-foreground shrink-0">
+                          {group.agents.length} agent{group.agents.length !== 1 ? 's' : ''}
+                        </span>
+                      </div>
+                      {/* Line 2: health distribution — only non-zero states, colored
+                          to match the summary bar (mirrors the Host section's dist
+                          line, WARDEN-237). pl-7 indents it under the project name,
+                          matching the Host header's line-2 indentation. */}
+                      {dist.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-1.5 min-w-0 pl-7">
+                          {dist.map(s => (
+                            <span key={s} className={`text-[10px] ${HEALTH_DIST_COLOR[s]}`}>
+                              {group.counts[s]} {formatHealthState(s).toLowerCase()}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Agents beneath, reusing the standard row (showHost=false —
+                          project, like host, is the section key; don't repeat it
+                          in-row). (WARDEN-741) */}
+                      <div className="flex flex-col gap-0.5">
+                        {group.agents.map(agent => renderAgent(agent, false))}
+                      </div>
+                    </div>
+                  );
+                })
+              )
             ) : (
               hostGroups.length === 0 ? (
                 <div className="p-4 text-center text-xs text-muted-foreground">No agents to group.</div>
