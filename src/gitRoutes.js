@@ -64,9 +64,10 @@ const LOCAL = '(local)';
 // clean:null — the exact non-deterministic failure QA observed under concurrency
 // (reproduced at ~60% mismatch firing ~40 runGit probes at once; 0% after this fix).
 // 'close' fires only AFTER the stdio streams fully drain, so stdout/stderr are always
-// complete when the promise resolves. (ssh.js's runLocalTmux uses 'close' for the
-// same reason; the remote run() keeps 'exit' as the established single-command
-// pattern per WARDEN-464 — this local helper serves the high-concurrency fan.)
+// complete when the promise resolves. ssh.js's runLocalTmux AND the remote run() both
+// resolve on 'close' for the same reason (run() was switched from 'exit' to 'close' in
+// the WARDEN-766 rework — the fleet fan hits the remote transport concurrently too, so
+// the same race that false-cleaned local reads would have false-cleaned remote ones).
 //
 // `spawn` is injectable (defaults to node's child_process.spawn) so the 'close'-not-
 // 'exit' discipline has a DETERMINISTIC unit test: a fake child that emits 'exit'

@@ -26,9 +26,11 @@ import { runLocalCapture, runGit } from './gitRoutes.js';
  * pins deterministically, and gate-2 reproduces against the real runGit→git path).
  *
  * 'close' fires only AFTER the stdio streams fully drain, so stdout/stderr are always
- * complete when the promise resolves. (ssh.js's runLocalTmux uses 'close' for the same
- * reason; the remote run() keeps 'exit' as the established single-command pattern per
- * WARDEN-464 — this LOCAL helper serves the high-concurrency fan.)
+ * complete when the promise resolves. ssh.js's runLocalTmux AND the remote run() both
+ * resolve on 'close' for the same reason (run() was switched from 'exit' to 'close' in
+ * the WARDEN-766 rework — the fleet fan exercises the remote transport identically, so
+ * the same race that false-cleaned local reads would have false-cleaned remote ones;
+ * see src/sshRun.test.js for run()'s own gate-1).
  *
  * The `spawn` option (defaults to node's) is the test seam: a fake child emitting the
  * adversarial order reproduces the race DETERMINISTICALLY on every machine, where a
