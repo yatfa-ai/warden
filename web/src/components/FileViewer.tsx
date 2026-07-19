@@ -21,6 +21,11 @@ import { DiffBlock } from './DiffBlock';
 // classifier (clean/empty vs dirty vs error vs loading) and the toolbar-toggle
 // exclusivity resolver. Pure so both have unit coverage (fileViewerChanges.test.mjs).
 import { classifyChangesView, resolveViewToggles } from '@/lib/fileViewerChanges';
+// Pure finder for the co-editors chip (WARDEN-810): same-project sibling agents
+// also touching the open file (± dirty / ⚑ conflict / ↑ unpushed). Pure + unit-
+// covered (fileCoEditors.test.mjs); the CoEditor type it returns is the self-
+// contained (label-carrying) shape this leaf component renders.
+import type { CoEditor } from '@/lib/fileCoEditors';
 import { MarkdownBody } from './MarkdownBody';
 import { tokenizeCode, languageFromPath, type Leaf } from '@/lib/highlight';
 import { Loader2Icon, FileIcon, FolderIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon, RotateCwIcon, CircleDotIcon, FilePenIcon } from 'lucide-react';
@@ -64,6 +69,23 @@ interface FileViewerProps {
   // Optional so a render site that only needs to display (never navigate)
   // degrades to the plain non-clickable path; all three current sites wire it.
   onNavigate?: (path: string) => void;
+  // Cross-agent co-editors of the open file (WARDEN-810): same-project sibling
+  // agents that ALSO have this path dirty (±) / in a merge conflict (⚑) / in an
+  // unpushed commit (↑). When non-empty, a "↗ N others" chip renders in the header
+  // toolbar whose popover names each sibling + its state — surfacing cross-agent
+  // file contention at the READING moment, without leaving the reader for the
+  // sidebar's fleet ⚠ badge (which is out of view inside this dialog). Transient,
+  // derived by the parent from its cached gitStatus map (no new fetch). Optional +
+  // absent (undefined / empty) at the PaneGrid + HealthDashboard mounts, which have
+  // no gitStatus in scope → no chip (graceful degradation). Self-contained (carries
+  // a display label) so this leaf needs neither the chats array nor a displayName
+  // import.
+  coEditors?: CoEditor[];
+  // Deep-link a co-editor row click to that sibling's version of the SAME file:
+  // the parent swaps the chatId it controls (mirroring onNavigate's path-swap
+  // shape). Optional so a mount without a chatId swap (PaneGrid / HealthDashboard)
+  // renders non-clickable rows. Mirrors onNavigate's optional-degrades-safely shape.
+  onOpenCoEditor?: (key: string) => void;
   // Follow live-update cadence (WARDEN-749): the already-resolved web-safe poll
   // interval. App owns + resolves cfg.pollIntervalMs via resolvePollIntervalMs at
   // the source (the same value the catalog poll uses), so Follow shares the
@@ -85,7 +107,7 @@ type BlameLine = { line: number; hash: string; author: string; date: string; sum
 // git-show accepts abbreviated hashes, so it resolves unambiguously on click.
 type HistoryCommit = { hash: string; subject: string; author: string; date: string };
 
-export function FileViewer({ chatId, filePath, open, line, timestampFormat, viewMode, onViewModeChange, onNavigate, pollIntervalMs, onOpenChange }: FileViewerProps) {
+export function FileViewer({ chatId, filePath, open, line, timestampFormat, viewMode, onViewModeChange, onNavigate, coEditors, onOpenCoEditor, pollIntervalMs, onOpenChange }: FileViewerProps) {
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -97,6 +119,12 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
   // null when none. Local to the viewer — the actual file swap is the parent's
   // job via onNavigate; this only owns the open/close of the pick list.
   const [openCrumb, setOpenCrumb] = useState<string | null>(null);
+
+  // Co-editors popover open state (WARDEN-810). Controlled so a row click can close
+  // the popover before deep-linking to the sibling's version of the file (mirrors
+  // GitBadges' setOpen(false) + jump discipline). Local — only the open/close lives
+  // here; the chatId swap is the parent's job via onOpenCoEditor.
+  const [coEditorOpen, setCoEditorOpen] = useState(false);
 
   // Annotate (git blame) state — separate from the file content fetch so toggling
   // annotate doesn't refetch the (already-shown) file. Blame is fetched ONCE when the
@@ -565,6 +593,11 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
   // Degrade to the plain non-clickable path when no navigation callback is wired
   // (all three render sites wire it, but the prop is optional for safety).
   const navigable = typeof onNavigate === 'function';
+  // Whether a co-editor row deep-links to that sibling's version of the file
+  // (WARDEN-810). The ChatSidebar mount wires onOpenCoEditor; mounts without a
+  // chatId swap (PaneGrid / HealthDashboard) leave it undefined, and their rows
+  // render non-clickable. Mirrors `navigable`'s optional-degrades-safely shape.
+  const canOpenCoEditor = typeof onOpenCoEditor === 'function';
 
   // Copy text to the clipboard through the shared Electron-safe helper, surfacing
   // the boolean result via toast — never bare navigator.clipboard, which rejects
@@ -636,6 +669,71 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
                   <span className="truncate">{filePath}</span>
                 )}
                 <div className="ml-auto flex items-center gap-2">
+                  {/* Co-editors chip (WARDEN-810): surface cross-agent file contention
+                      at the reading moment. When ≥1 same-project sibling also has this
+                      path dirty (±) / in a merge conflict (⚑) / in an unpushed commit
+                      (↑), a "↗ N others" chip lists each in a popover — the file-level
+                      complement to the sidebar's fleet ⚠ rollup, visible inside this
+                      dialog where the sidebar badge is out of view. Absent (undefined/
+                      empty) at mounts without gitStatus in scope (PaneGrid/HealthDash).
+                      Glyphs + colors reuse the GIT_STATE_KIND conventions (± yellow /
+                      ⚑ rose / ↑ amber) so the chip reads as one system with the fleet. */}
+                  {coEditors && coEditors.length > 0 && (
+                    <Popover open={coEditorOpen} onOpenChange={setCoEditorOpen}>
+                      <PopoverTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 shrink-0 gap-1.5 text-xs"
+                          aria-expanded={coEditorOpen}
+                          title={`${coEditors.length} other ${coEditors.length === 1 ? 'agent is' : 'agents are'} also touching this file`}
+                        >
+                          <span aria-hidden="true">↗</span>
+                          {coEditors.length} {coEditors.length === 1 ? 'other' : 'others'}
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent
+                        align="end"
+                        sideOffset={4}
+                        className="w-72 p-1 text-xs"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div className="px-1.5 py-1 text-[10px] text-muted-foreground">
+                          Also touching this file
+                        </div>
+                        <ul>
+                          {coEditors.map((ce) => (
+                            <li key={ce.key}>
+                              {/* role="button" div (not a <button>) so the row is
+                                  keyboard-operable without nesting interactive
+                                  elements inside the portaled popover content —
+                                  mirrors GitCollisionBadge's per-agent rows. Click →
+                                  deep-link to the sibling's version (parent swaps
+                                  chatId) + close the popover. Non-clickable when no
+                                  onOpenCoEditor is wired (degrades gracefully). */}
+                              <div
+                                role={canOpenCoEditor ? 'button' : undefined}
+                                tabIndex={canOpenCoEditor ? 0 : undefined}
+                                aria-label={canOpenCoEditor ? `open ${ce.label}'s version of this file` : undefined}
+                                onClick={canOpenCoEditor ? (e) => { e.stopPropagation(); setCoEditorOpen(false); onOpenCoEditor?.(ce.key); } : undefined}
+                                onKeyDown={canOpenCoEditor ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setCoEditorOpen(false); onOpenCoEditor?.(ce.key); } } : undefined}
+                                title={canOpenCoEditor ? `open ${ce.label}'s version of this file` : ce.label}
+                                className={`flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left${canOpenCoEditor ? ' hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary' : ''}`}
+                              >
+                                <span className="min-w-0 flex-1 truncate text-foreground" title={ce.label}>{ce.label}</span>
+                                <span className="flex shrink-0 items-center gap-1 text-[11px] leading-none">
+                                  {ce.dirty && <span className="text-yellow-400" title="uncommitted changes">±</span>}
+                                  {ce.conflict && <span className="text-rose-400" title="merge conflict">⚑</span>}
+                                  {ce.unpushed && <span className="text-amber-400" title="unpushed commit">↑</span>}
+                                </span>
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      </PopoverContent>
+                    </Popover>
+                  )}
                   {isMarkdown && (
                     <Button
                       type="button"
