@@ -46,7 +46,7 @@ const {
 const { createTelemetryPipeline } = require('./telemetry-pipeline.cjs');
 const { redact: redactTelemetry } = require('./telemetry-redact.cjs');
 const { resolveTelemetryTier, readTelemetryPrefs } = require('./telemetry-config.cjs');
-const { createTransmissionLog, readSnapshot } = require('./telemetry-transmission-log.cjs');
+const { createTransmissionLog, readSnapshot, parseTransmissionLog } = require('./telemetry-transmission-log.cjs');
 
 const PORT = parseInt(process.env.WARDEN_PORT || '7421', 10);
 const HOST = '127.0.0.1';
@@ -115,15 +115,59 @@ const telemetryPrefs = {
 };
 
 // The local transmission log of ACTUAL send outcomes (WARDEN-583) — verifiability's
-// third leg. Session-scoped, in-memory, bounded; records one metadata-only entry
-// per real send the pipeline initiates (outcome ok | dropped). It introduces NO
-// new data leaving the machine — it is a user-owned local audit of sends the
-// client already made. Surfacing it over IPC to the renderer verifiability panel
-// is a follow-on slice; THIS slice is the engine + pipeline instrumentation that
-// PRODUCES the data in production. The reference is held here so a future IPC
-// handler can read `telemetryTransmissionLog.entries()` without re-wiring the
-// pipeline.
-const telemetryTransmissionLog = createTransmissionLog();
+// third leg. Bounded, metadata-only; records one entry per real send the pipeline
+// initiates (outcome ok | dropped). It introduces NO new data leaving the machine —
+// it is a user-owned local audit of sends the client already made. WARDEN-782 makes
+// it DURABLE: the ring is seeded from the persisted file on startup (so a restart
+// no longer blanks the verifiability panel) and debounced-saved on each record(),
+// flushed on quit. The reference is held here so the IPC handler reads
+// `telemetryTransmissionLog.entries()` without re-wiring the pipeline.
+//
+// --- Persistence helpers (WARDEN-782) -----------------------------------------
+// Same userData dir + atomic-rewrite + debounce + skip-malformed discipline as
+// window-state.json (the in-repo template at lines ~262-339). The file is NDJSON
+// (one metadata-only entry per line); the ring is already capped in memory, so the
+// file is bounded over the app's lifetime (never append-only growth). METADATA ONLY
+// by construction — the ring never holds payload content / redacted fields / chat-or-
+// session identifiers, so the file cannot either.
+const TRANSMISSION_LOG_DEBOUNCE_MS = 500; // mirror CAPTURE_DEBOUNCE_MS
+
+function transmissionLogPath() {
+  return path.join(app.getPath('userData'), 'telemetry-transmission-log.json');
+}
+
+// Read + skip-malformed parse. Missing/unreadable file → [] (a fresh install or a
+// first run has no audit yet), never throws.
+function loadTransmissionLog() {
+  try {
+    return parseTransmissionLog(fs.readFileSync(transmissionLogPath(), 'utf8'));
+  } catch {
+    return [];
+  }
+}
+
+// Atomic rewrite (temp file + rename) so a partial write is never observable — the
+// reader sees either the previous complete file or the new one, never a torn write.
+// catch + warn (never throws): a persist failure must not break the send path.
+function saveTransmissionLog(filePath, entries) {
+  try {
+    const text = entries.map((e) => JSON.stringify(e)).join('\n') + '\n';
+    const tmp = `${filePath}.tmp`;
+    fs.writeFileSync(tmp, text, 'utf8');
+    fs.renameSync(tmp, filePath);
+  } catch (e) {
+    console.warn('[warden:telemetry-transmission-log] failed to persist', e);
+  }
+}
+
+const telemetryTransmissionLog = createTransmissionLog({
+  // Lazy path resolution (constraint A): the arrow runs only when save fires —
+  // always POST-ready, since record() fires only after baseConsent is read in
+  // app.whenReady(). So app.getPath('userData') is never touched at require() time
+  // (a top-level getPath would throw before whenReady → boot-loop).
+  save: (entries) => saveTransmissionLog(transmissionLogPath(), entries),
+  debounceMs: TRANSMISSION_LOG_DEBOUNCE_MS,
+});
 
 // The pipeline assembly (WARDEN-486). Constructed with the REAL injected
 // implementations: the CJS redact mirror (telemetry-redact.cjs), the source's
@@ -741,6 +785,13 @@ app.whenReady().then(async () => {
   // Kill any stale server from a previous run
   killStalePort();
 
+  // Restore the transmission-log ring from the persisted audit file BEFORE any send
+  // can fire (constraint A: the file is read post-ready; the ring is seeded before
+  // the transport is swapped + consent applied below, so no record() can race the
+  // seed). A routine Warden restart no longer blanks Settings → telemetry →
+  // "Recent send outcomes" — the pre-restart audit is restored. WARDEN-782.
+  telemetryTransmissionLog.seed(loadTransmissionLog());
+
   // Start the backend (ESM — can't require() it, so fork it). The explicit 4th
   // 'ipc' stdio slot documents + guarantees the fork's built-in IPC channel,
   // which the server child uses to forward telemetry pref changes here (where
@@ -847,5 +898,9 @@ app.on('before-quit', () => {
   // keying means a concurrent instance's marker is untouched. A hard kill never
   // reaches before-quit, so the marker stays for the next launch to detect.
   clearThisInstanceMarker();
+  // Transmission log (WARDEN-782): flush any pending debounced save so the last
+  // sends are durable if the app closes mid-debounce (mirrors the window-state
+  // flush-on-quit above). No-op when nothing is pending; never breaks the quit path.
+  try { telemetryTransmissionLog.flushSave(); } catch {}
   cleanup();
 });
