@@ -289,8 +289,16 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
   // this does NOT call onClose() itself: App's onOpenSession handler both sets
   // the (App-level) viewing session and closes this dialog, so the transcript
   // viewer — rendered at App level, not in here — survives the dialog closing.
+  //
+  // Arg-order contract (WARDEN-719 QA): onOpenSession is (id, host, label). The
+  // id MUST be the sessionId (a UUID-shape /\w-/ value) and host MUST be the host
+  // label (e.g. "(local)"), because SessionTranscriptViewer fetches
+  // /api/claude-session?id=&host= and the server's id guard (/^[\w-]+$/, server.js)
+  // rejects "(local)" (its parens are non-\w) with 400 "invalid session id". An
+  // earlier build swapped these two and every transcript body showed that error.
+  // session-view.test.js locks the id=(local) → 400 case so a re-swap can't pass.
   const handleSessionClick = (result: SessionSearchResult) => {
-    onOpenSession(result.host, result.sessionId, result.summary || result.cwd || 'session');
+    onOpenSession(result.sessionId, result.host, result.summary || result.cwd || 'session');
   };
 
   // Derived visibility for the session group. `showSessionGroup` hides the empty

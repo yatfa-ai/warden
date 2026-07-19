@@ -492,6 +492,21 @@ describe('/api/claude-session HTTP endpoint (real Express app from server.js)', 
     assert.strictEqual(res.status, 400);
   });
 
+  it('rejects a host label used as the session id — WARDEN-719 arg-swap regression', async () => {
+    // The GlobalSearchDialog "Past conversations" row calls onOpenSession with the
+    // contract (id, host, label). An earlier build swapped id/host and fed the host
+    // LABEL — "(local)" — as id; its parens are non-\w so the guard rejected it and
+    // every transcript body rendered "invalid session id" instead of messages. This
+    // pins the server half of that contract: a host label is NEVER a valid session
+    // id, so a frontend arg-swap surfaces as a 400 here rather than silently 200ing
+    // the wrong file. The matching correct call (id=<uuid>&host=(local) → 200 with
+    // messages) is covered by the "reads a past session transcript" test above.
+    const res = await fetch(`${baseUrl}/api/claude-session?id=${encodeURIComponent('(local)')}`);
+    assert.strictEqual(res.status, 400);
+    const body = await res.json();
+    assert.strictEqual(body.error, 'invalid session id');
+  });
+
   it('defaults host to (local) when omitted', async () => {
     const body = await (await fetch(`${baseUrl}/api/claude-session?id=sess-view-1`)).json();
     assert.strictEqual(body.host, '(local)');
