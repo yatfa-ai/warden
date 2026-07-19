@@ -27,8 +27,7 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Loader2 } from 'lucide-react';
-import { chatType, displayName, hostTagOf } from '@/lib/chatDisplay';
-import { useHostLabels } from '@/lib/hostLabels';
+import { TargetAgentList } from '@/components/TargetAgentList';
 import type { Chat } from '@/lib/types';
 import type { KillSummary } from '@/lib/kill';
 
@@ -45,7 +44,6 @@ interface Props {
 
 export function KillDialog({ open, onOpenChange, targets, onKill }: Props) {
   const [killing, setKilling] = useState(false);
-  const hostLabels = useHostLabels();
 
   // Reset on every open so a previous attempt's spinner can't linger.
   useEffect(() => {
@@ -85,23 +83,7 @@ export function KillDialog({ open, onOpenChange, targets, onKill }: Props) {
               large fleet selection doesn't grow the dialog past the viewport. */}
           <div className="flex flex-col gap-1">
             <span className="text-xs text-muted-foreground">Targets</span>
-            <div className="rounded-md border border-border max-h-44 overflow-auto">
-              <ul className="divide-y divide-border">
-                {targets.map((c) => {
-                  const name = displayName(c);
-                  const type = chatType(c);
-                  const host = hostTagOf(c.host || '', hostLabels);
-                  return (
-                    <li key={c.key || c.id} className="flex items-center gap-2 px-2 py-1 text-xs">
-                      <span className="truncate flex-1" title={name}>{name}</span>
-                      <span className="shrink-0 text-muted-foreground">{type}</span>
-                      <span className="shrink-0 text-muted-foreground">{host}</span>
-                      {c.role && <span className="shrink-0 text-muted-foreground/70">{c.role}</span>}
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
+            <TargetAgentList targets={targets} />
           </div>
 
           <div className="rounded-md border border-destructive/40 bg-destructive/10 px-2.5 py-2 text-xs text-destructive">

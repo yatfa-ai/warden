@@ -32,8 +32,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Loader2 } from 'lucide-react';
-import { chatType, displayName, hostTagOf } from '@/lib/chatDisplay';
-import { useHostLabels } from '@/lib/hostLabels';
+import { TargetAgentList } from '@/components/TargetAgentList';
 import type { Chat } from '@/lib/types';
 import type { BroadcastSummary } from '@/lib/broadcast';
 import type { Snippet } from '@/lib/storage';
@@ -56,7 +55,6 @@ interface Props {
 export function BroadcastDialog({ open, onOpenChange, targets, snippets, onSend }: Props) {
   const [msg, setMsg] = useState('');
   const [sending, setSending] = useState(false);
-  const hostLabels = useHostLabels();
   // The snippet picker's selected value. Insert-only: picking a snippet fills
   // `msg`; this state only drives the picker's trigger label (so the user sees
   // which snippet they inserted) and resets every open alongside `msg`.
@@ -106,23 +104,7 @@ export function BroadcastDialog({ open, onOpenChange, targets, snippets, onSend 
               doesn't grow the dialog past the viewport. */}
           <div className="flex flex-col gap-1">
             <span className="text-xs text-muted-foreground">Recipients</span>
-            <div className="rounded-md border border-border max-h-44 overflow-auto">
-              <ul className="divide-y divide-border">
-                {targets.map((c) => {
-                  const name = displayName(c);
-                  const type = chatType(c);
-                  const host = hostTagOf(c.host || '', hostLabels);
-                  return (
-                    <li key={c.key || c.id} className="flex items-center gap-2 px-2 py-1 text-xs">
-                      <span className="truncate flex-1" title={name}>{name}</span>
-                      <span className="shrink-0 text-muted-foreground">{type}</span>
-                      <span className="shrink-0 text-muted-foreground">{host}</span>
-                      {c.role && <span className="shrink-0 text-muted-foreground/70">{c.role}</span>}
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
+            <TargetAgentList targets={targets} />
           </div>
 
           {/* Saved-snippet picker (WARDEN-323). Insert-only: picking a snippet
