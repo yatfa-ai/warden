@@ -1,10 +1,10 @@
-// Pure helpers for git log / show / diff / blame parsing + the shell scripts that
-// drive those ops remotely. Extracted from the routes in server.js so the parsing
-// is unit-testable without booting the Express app (server.js runs `load()` at
-// module load, which reads ~/.yatfa-warden and starts the server) — mirrors
-// src/gitStatus.js (the zero-dependency porcelain parsers extracted for the same
-// reason). The log/show/diff/blame parsers were added later but dumped inline in
-// server.js; this finishes that extraction.
+// Pure helpers for git log / show / diff / blame / ls-files parsing + the shell
+// scripts that drive those ops remotely. Extracted from the routes in server.js
+// so the parsing is unit-testable without booting the Express app (server.js runs
+// `load()` at module load, which reads ~/.yatfa-warden and starts the server) —
+// mirrors src/gitStatus.js (the zero-dependency porcelain parsers extracted for
+// the same reason). The log/show/diff/blame/ls-files parsers were added later but
+// dumped inline in server.js; this finishes that extraction.
 //
 // Side-effect-free at module load: the only project import is `shellQuote` from
 // ./ssh.js, which has no top-level statements, so importing this module boots
@@ -322,4 +322,55 @@ export function parseGitBlame(output) {
 // Mirrors /api/git-show's remote command shape.
 export function buildGitBlameScript(cwd, filePath) {
   return `cd ${shellQuote(cwd)} && git blame --line-porcelain -- ${shellQuote(filePath)} 2>/dev/null`;
+}
+
+// ===== Git ls-files ========================================================
+
+// Derive ONE directory's immediate children (files + subdirs) from the flat,
+// recursive `git ls-files --cached --others --exclude-standard` output, the
+// backing query for /api/git-ls (WARDEN-573 — the structural file browser that
+// finds a file by POSITION, the twin of content-based /api/search-files). The
+// endpoint feeds `r.stdout` straight in (server.js) so it lights up identically
+// for local / SSH / yatfa-container. Exported for unit tests. Colocated with
+// parseGitLogLine / parseGitShowNameStatus / parseGitBlame so the four git-output
+// parsers are co-visible (WARDEN-731 finishes the WARDEN-606 extraction).
+export function parseGitLsEntries(raw, dir) {
+  const prefix = dir ? dir.replace(/\/+$/, '') + '/' : '';
+  const dirs = new Set();
+  const files = new Set();
+  for (const rawLine of String(raw || '').split('\n')) {
+    // git ls-files C-quotes any path with a backslash, double-quote, control
+    // char, or non-ASCII byte (core.quotePath=true default), quoting the ENTIRE
+    // path — dir prefix included — as one C-string. (It does NOT quote a plain
+    // space, so 'spa ce.js' arrives unquoted.) Unescape the whole line BEFORE
+    // the prefix startsWith/slice, because the prefix lives inside the quotes
+    // (e.g. "s\303\274b/caf\303\251.js" for süb/café.js). unescapeGitPath is a
+    // no-op on unquoted input, so plain-ASCII / plain-space paths are unchanged.
+    const line = unescapeGitPath(rawLine.replace(/\r$/, '').trim());
+    if (!line) continue;
+    // Strip the requested dir's prefix → path relative to it. A line not under
+    // the prefix (can't happen with a pathspec, but defensive) is skipped.
+    let rel = line;
+    if (prefix) {
+      if (!line.startsWith(prefix)) continue;
+      rel = line.slice(prefix.length);
+    }
+    if (!rel) continue;
+    const slash = rel.indexOf('/');
+    if (slash === -1) files.add(rel);
+    else dirs.add(rel.slice(0, slash));
+  }
+  // Sort case-insensitively (so README.md sits next to readme.md, the natural
+  // file-browser order) but deterministically via codePoint — NOT localeCompare,
+  // whose ordering shifts with the server's ICU/locale build. A case-sensitive
+  // tiebreaker keeps it stable for names differing only in case.
+  const cmp = (a, b) => {
+    const al = a.toLowerCase();
+    const bl = b.toLowerCase();
+    if (al < bl) return -1;
+    if (al > bl) return 1;
+    return a < b ? -1 : a > b ? 1 : 0;
+  };
+  const toEntries = (names, type) => [...names].sort(cmp).map((name) => ({ name, type }));
+  return [...toEntries(dirs, 'dir'), ...toEntries(files, 'file')];
 }
