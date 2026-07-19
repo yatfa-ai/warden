@@ -55,10 +55,26 @@ export function TelemetryTransmissionLog() {
       });
     };
     pull(); // initial pull on mount so a window opened after sends shows them
-    const id = setInterval(pull, REFRESH_MS);
+    // Poll every REFRESH_MS, gated on Page Visibility so a backgrounded Warden
+    // window never burns an IPC ring snapshot + hidden-panel re-render every 5s
+    // for a Settings panel no one is looking at — the same invariant every other
+    // poller in the app applies (useHostStatuses, useActivitySeries, useTokenBudget,
+    // HealthDashboard, the App.tsx catalog poll). On regaining focus we pull
+    // immediately because state may be stale while hidden. (WARDEN-736)
+    const tick = () => {
+      if (document.visibilityState === 'visible') pull();
+    };
+    const onVisibility = () => {
+      // On regaining focus, pull immediately — newly-landed sends surface the
+      // instant the human returns, preserving WARDEN-668's live-update intent.
+      if (document.visibilityState === 'visible') pull();
+    };
+    const id = setInterval(tick, REFRESH_MS);
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
       cancelled = true;
       clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   }, []);
 
