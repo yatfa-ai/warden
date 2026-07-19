@@ -266,7 +266,11 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // set by the per-agent git panel's "open file" affordance on a dirty/committed file
   // row. Mirrors diffTarget/conflictTarget: read-only fetch + render, no new backend
   // endpoint (FileViewer reads /api/read-file, /api/git-blame, /api/git-log internally).
-  const [fileTarget, setFileTarget] = useState<{ chatId: string; path: string } | null>(null);
+  // The optional `line` deep-links into the FileViewer scrolled to + highlighting that
+  // row (WARDEN-801: the fleet CODE-grep match). Per-agent open-file callers pass no
+  // line (open at top); onNavigate resets it on a path change so a stale highlight
+  // never survives a breadcrumb/dir-click navigation (mirrors PaneGrid WARDEN-334).
+  const [fileTarget, setFileTarget] = useState<{ chatId: string; path: string; line?: number } | null>(null);
   const { prefs } = useNotificationPrefs();
 
   // Multi-select broadcast (WARDEN-292): the set of selected agent ids, held at
@@ -1319,7 +1323,11 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
             one query finds where a change landed across the fleet. Root-header
             placement (alongside the filter/sort controls) per the ticket's
             placement note; the popover owns its own input + debounce + fan-out. */}
-        <FleetCommitSearch chats={chats} onOpenChat={onOpenChat} />
+        <FleetCommitSearch
+          chats={chats}
+          onOpenChat={onOpenChat}
+          onOpenFile={(chatId, file, line) => setFileTarget({ chatId, path: file, line })}
+        />
         {/* WARDEN-565: cross-agent file-collision ⚠ badge, re-homed into the root
             fleet header alongside FleetCommitSearch (the surface that replaced the
             abolished project-chip row, WARDEN-372). Computed over the whole chats
@@ -1530,11 +1538,12 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
       <FileViewer
         chatId={fileTarget?.chatId ?? ''}
         filePath={fileTarget?.path ?? ''}
+        line={fileTarget?.line}
         open={!!fileTarget}
         timestampFormat={timestampFormat}
         viewMode={fileViewerViewMode}
         onViewModeChange={onFileViewerViewModeChange}
-        onNavigate={(p) => setFileTarget((prev) => (prev ? { ...prev, path: p } : prev))}
+        onNavigate={(p) => setFileTarget((prev) => (prev ? { ...prev, path: p, line: undefined } : prev))}
         pollIntervalMs={pollIntervalMs}
         onOpenChange={(o) => { if (!o) setFileTarget(null); }}
       />
