@@ -1990,6 +1990,7 @@ function App() {
             timestampFormat={timestampFormat}
             fileViewerViewMode={fileViewerViewMode}
             onFileViewerViewModeChange={setFileViewerViewMode}
+            pollIntervalMs={pollIntervalMs}
             groupBy={healthGroupBy}
             onGroupByChange={setHealthGroupBy}
             collapsedHosts={healthCollapsedHosts}
