@@ -254,7 +254,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // trade-off for correctness. active===null (undiscovered/lazy) is NOT an exit.
   const wasEverActiveRef = useRef(false);   // has this pane's agent ever been active:true?
   const exitHandledRef = useRef(false);     // one-shot: the exit action fires once per live→exited transition
-  const [agentExited, setAgentExited] = useState(false);   // 'dim' overlay state
+  const [agentExited, setAgentExited] = useState(false);   // true after a live→exited transition: 'dim' shows the overlay, 'keep' shows an honest StatusDot only
   // WARDEN-365: this pane's resolved host key — the chat's host ('(local)' or an
   // SSH alias), falling back to the restore hint then '(local)'. Derived via
   // hostKeyOf (the shared, unit-tested seam) and read at send-time only — it and
@@ -618,10 +618,12 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       exitHandledRef.current = true;
       if (onExitBehavior === 'auto-close') {
         onClose();
-      } else if (onExitBehavior === 'dim') {
+      } else {
+        // 'dim' AND 'keep': the agent has genuinely exited. dim also dims the
+        // body (gated separately on `dimmed` below); keep stays full-brightness —
+        // only the StatusDot becomes honest (WARDEN-759).
         setAgentExited(true);
       }
-      // 'keep' → no-op (today's exact behavior; the regression-free baseline)
     }
     // onClose is intentionally omitted from deps: it is an inline callback whose
     // identity changes every render (matching the onClearNew effect above); the
@@ -794,15 +796,17 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
         title="drag to another workspace · double-click to maximize"
         onDoubleClick={(e) => { stop(e); onToggleMax(); }}
         className="flex items-center gap-1 px-2 py-1 compact:py-0.5 bg-muted text-xs shrink-0 select-none cursor-grab active:cursor-grabbing">
-        {/* WARDEN-248: when dimmed (agent exited), the dot must agree with the
-            body's "agent exited" state — a neutral, motionless gray "Exited"
-            dot, NOT the yellow-pulsing "Connecting" dot. The 'keep' baseline is
-            intentionally untouched: it keeps today's "Connecting" dot (a
-            pre-existing UX wrinkle, out of scope here). */}
+        {/* The dot is keyed on `agentExited` (set on any genuine live→exited
+            transition for BOTH 'dim' and 'keep'), so a dead pane never lies
+            about its state: a neutral, motionless gray "Exited" dot instead of
+            the yellow-pulsing "Connecting" / red "Unresponsive" dot the phase
+            state machine would otherwise paint. 'dim' additionally dims the body
+            (opacity-60 + "agent exited" overlay, gated on `dimmed`); 'keep' stays
+            full-brightness — only the dot becomes honest (WARDEN-759). */}
         <StatusDot
-          tone={dimmed ? 'gray' : phase === 'connected' ? 'green' : (phase === 'connecting') ? 'yellow' : 'red'}
-          variant={dimmed ? 'solid' : phase === 'connected' ? 'solid' : (phase === 'connecting' ? 'pulse' : 'square')}
-          label={dimmed ? 'Exited' : phase === 'connected' ? 'Connected' : phase === 'connecting' ? 'Connecting' : phase === 'session_dead' ? 'Session ended' : phase === 'host_unreachable' ? 'Unresponsive' : 'Error'}
+          tone={agentExited ? 'gray' : phase === 'connected' ? 'green' : (phase === 'connecting') ? 'yellow' : 'red'}
+          variant={agentExited ? 'solid' : phase === 'connected' ? 'solid' : (phase === 'connecting' ? 'pulse' : 'square')}
+          label={agentExited ? 'Exited' : phase === 'connected' ? 'Connected' : phase === 'connecting' ? 'Connecting' : phase === 'session_dead' ? 'Session ended' : phase === 'host_unreachable' ? 'Unresponsive' : 'Error'}
         />
         <span className="truncate flex-1 font-medium">
           {label || id}
