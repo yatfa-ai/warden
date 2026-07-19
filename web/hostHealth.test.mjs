@@ -30,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-hostHealth-test-'));
 const tmpFile = join(tmpDir, 'healthUtils.mjs');
 writeFileSync(tmpFile, code);
-const { groupByHost, compareHostGroups, groupByProject, compareProjectGroups, summarizeHostLoad, resourceTone } = await import(tmpFile);
+const { groupByHost, compareHostGroups, groupByProject, compareProjectGroups, summarizeProjectHosts, summarizeHostLoad, resourceTone } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -226,10 +226,15 @@ test('offline host outranks unknown-connectivity host even when the unknown one 
   assert.deepEqual(sorted.map((g) => g.host), ['down', 'mystery']);
 });
 
-// --- compareProjectGroups: degraded-first ordering (WARDEN-741) ---
-// Same priority ladder as compareHostGroups MINUS the connectivity axis — a
-// project can span hosts, so there is no online/offline signal to prioritize on:
-// critical-heavy first, then agent count, then project name (stable tiebreak).
+// --- compareProjectGroups: degraded-first ordering (WARDEN-741, extended WARDEN-780) ---
+// Same priority ladder as compareHostGroups, now INCLUDING the connectivity axis
+// (WARDEN-780): a project with ANY agent on an offline host sorts first (a
+// project spans hosts, so the signal is "any host offline" not a single status),
+// then critical-heavy, then agent count, then project name (stable). The
+// existing 2-arg cases below exercise the LOWER ladder via the default
+// connectivityOf (always undefined -> no project has an offline host -> the
+// offline axis is inert), so they keep asserting the pre-WARDEN-780 ordering
+// unchanged.
 
 console.log('\ncompareProjectGroups: critical-heavy projects first');
 test('more critical agents ranks above fewer', () => {
@@ -257,6 +262,181 @@ test('identical priority falls back to project name (deterministic)', () => {
   const a = groupByProject([agent('a2', { project: 'alpha', healthState: 'healthy' })])[0];
   const sorted = [z, a].sort(compareProjectGroups);
   assert.deepEqual(sorted.map((g) => g.project), ['alpha', 'zebra']);
+});
+
+// --- compareProjectGroups(a, b, connectivityOf): the offline-host axis (WARDEN-780) ---
+// The new TOP priority: a project with ANY agent on an offline host sorts above
+// an all-online project. connectivityOf returns a bare status string (the same
+// shape compareHostGroups takes); 'unknown'/undefined is neutral, NOT offline.
+
+console.log('\ncompareProjectGroups: a project with an agent on an offline host ranks first');
+test('offline-spanning project ranks above an all-online project even when the online one is critical-heavy', () => {
+  // The all-online project has TWO critical agents; the offline-spanning project
+  // has NONE and only one agent. The offline axis is the TOP priority, so the
+  // offline-spanning project must rank FIRST — a sort that put critical-heavy
+  // above the offline axis would flip this.
+  const allOnline = groupByProject([
+    agent('a1', { project: 'online-proj', host: 'up', healthState: 'critical' }),
+    agent('a2', { project: 'online-proj', host: 'up', healthState: 'critical' }),
+  ])[0];
+  const spansOffline = groupByProject([
+    agent('a3', { project: 'offline-proj', host: 'down', healthState: 'healthy' }),
+  ])[0];
+  const offlineOnly = (h) => (h === 'down' ? 'offline' : 'online');
+  const sorted = [allOnline, spansOffline].sort((a, b) => compareProjectGroups(a, b, offlineOnly));
+  assert.deepEqual(sorted.map((g) => g.project), ['offline-proj', 'online-proj']);
+});
+
+console.log('\ncompareProjectGroups: both offline -> existing ladder decides (critical, count, name)');
+test('both projects span an offline host -> falls through to critical-heavy', () => {
+  // Both span a down host, so the offline axis TIES (both priority 0) and the
+  // pre-existing ladder decides: more critical agents wins. Guards that the
+  // offline rule is a strict prefix, not a replacement, of the ladder.
+  const light = groupByProject([
+    agent('a1', { project: 'light', host: 'down', healthState: 'healthy' }),
+  ])[0];
+  const heavy = groupByProject([
+    agent('a2', { project: 'heavy', host: 'down', healthState: 'critical' }),
+    agent('a3', { project: 'heavy', host: 'down', healthState: 'critical' }),
+  ])[0];
+  const allDown = () => 'offline';
+  const sorted = [light, heavy].sort((a, b) => compareProjectGroups(a, b, allDown));
+  assert.deepEqual(sorted.map((g) => g.project), ['heavy', 'light']);
+});
+
+console.log('\ncompareProjectGroups: unknown connectivity is NOT prioritized as offline');
+test('offline outranks unknown even when the unknown project is critical-heavy', () => {
+  // The clean isolation of the unknown-vs-offline axis (the project analog of
+  // the compareHostGroups guard above). A project whose only host is OFFLINE
+  // must rank above a project whose only host is UNKNOWN, EVEN when the unknown
+  // one carries two critical agents and the offline one carries none. Two
+  // failure modes flip this assertion:
+  //   - if `undefined` were treated as offline, BOTH tie at priority 0 and the
+  //     critical-heavy unknown project wins -> ['mystery', 'down-proj'];
+  //   - if connectivity were ignored entirely, critical-heavy decides and the
+  //     unknown project wins -> ['mystery', 'down-proj'].
+  // Holds only when unknown is genuinely neutral AND the offline axis runs.
+  const offlineProj = groupByProject([
+    agent('a1', { project: 'down-proj', host: 'down', healthState: 'healthy' }),
+  ])[0];
+  const unknownHeavy = groupByProject([
+    agent('a2', { project: 'mystery', host: 'mystery', healthState: 'critical' }),
+    agent('a3', { project: 'mystery', host: 'mystery', healthState: 'critical' }),
+  ])[0];
+  const offlineOnly = (h) => (h === 'down' ? 'offline' : undefined);
+  const sorted = [unknownHeavy, offlineProj].sort((a, b) => compareProjectGroups(a, b, offlineOnly));
+  assert.deepEqual(sorted.map((g) => g.project), ['down-proj', 'mystery']);
+});
+
+console.log('\ncompareProjectGroups: backward-compat with no connectivity');
+test('connectivityOf always undefined -> matches the old (a, b) ladder (critical, count, name)', () => {
+  // With no connectivity info the offline axis is inert (no project has an
+  // offline host), so ordering is the pre-WARDEN-780 ladder. Verified across the
+  // critical rung, and that the 2-arg default call matches the explicit
+  // always-undefined call.
+  const light = groupByProject([agent('a1', { project: 'p1', healthState: 'healthy' })])[0];
+  const heavy = groupByProject([
+    agent('a2', { project: 'p2', healthState: 'critical' }),
+    agent('a3', { project: 'p2', healthState: 'critical' }),
+  ])[0];
+  const none = () => undefined;
+  assert.deepEqual([light, heavy].sort((a, b) => compareProjectGroups(a, b, none)).map((g) => g.project), ['p2', 'p1']);
+  // 2-arg call uses the default connectivityOf (() => undefined) -> identical order.
+  assert.deepEqual([light, heavy].sort(compareProjectGroups).map((g) => g.project), ['p2', 'p1']);
+});
+
+// --- summarizeProjectHosts: the SET of hosts a project's agents span (WARDEN-780) ---
+// One ProjectHostSpan per distinct host (with the agent.host || '(local)' fallback),
+// each carrying that host's connectivity + an agent count. Ordered offline-first,
+// then agentCount desc, then host name. connectivityOf returns the FULL
+// HostConnectivity ({ status, latency_ms }) — or undefined — so each span carries
+// latency for the render's dot title (mirrors summarizeHostLoad's "return a
+// complete summary" discipline).
+
+console.log('\nsummarizeProjectHosts: one host -> single entry, status + latency passthrough');
+test('one host -> single entry with correct agentCount + status/latency passthrough', () => {
+  const map = { up: { status: 'online', latency_ms: 12 } };
+  const spans = summarizeProjectHosts(
+    [
+      agent('a1', { host: 'up', healthState: 'healthy' }),
+      agent('a2', { host: 'up', healthState: 'critical' }),
+    ],
+    (h) => map[h],
+  );
+  assert.equal(spans.length, 1);
+  assert.equal(spans[0].host, 'up');
+  assert.equal(spans[0].status, 'online');
+  assert.equal(spans[0].latency_ms, 12);
+  assert.equal(spans[0].agentCount, 2);
+});
+
+console.log('\nsummarizeProjectHosts: multi-host span, offline host surfaces first');
+test('agents across 3 hosts -> 3 entries, offline host first even with fewer agents', () => {
+  // The decisive ordering guard: a DOWN host with only 1 agent must surface
+  // BEFORE online hosts holding 3 and 2 agents. Then online hosts order by
+  // agentCount desc (busy before idle). A sort that ordered by agentCount alone
+  // would bury the offline host at the bottom — exactly the miss WARDEN-780 fixes.
+  const map = {
+    busy: { status: 'online', latency_ms: 5 },
+    down: { status: 'offline', latency_ms: null },
+    idle: { status: 'online', latency_ms: 20 },
+  };
+  const spans = summarizeProjectHosts(
+    [
+      agent('a1', { host: 'busy' }),
+      agent('a2', { host: 'busy' }),
+      agent('a3', { host: 'busy' }),
+      agent('a4', { host: 'down' }),
+      agent('a5', { host: 'idle' }),
+      agent('a6', { host: 'idle' }),
+    ],
+    (h) => map[h],
+  );
+  assert.equal(spans.length, 3);
+  assert.deepEqual(spans.map((s) => s.host), ['down', 'busy', 'idle']);
+  assert.equal(spans[0].status, 'offline');
+  assert.equal(spans[0].agentCount, 1);
+  assert.equal(spans[1].agentCount, 3);
+  assert.equal(spans[2].agentCount, 2);
+  assert.equal(spans[0].latency_ms, null);
+});
+
+console.log('\nsummarizeProjectHosts: no connectivity record -> unknown (NOT offline)');
+test('host with no connectivity record -> status unknown (neutral, not offline)', () => {
+  const spans = summarizeProjectHosts([agent('a1', { host: 'mystery' })], () => undefined);
+  assert.equal(spans.length, 1);
+  assert.equal(spans[0].status, 'unknown');
+  assert.equal(spans[0].latency_ms, null);
+  assert.equal(spans[0].agentCount, 1);
+});
+
+console.log('\nsummarizeProjectHosts: missing agent.host -> bucketed as (local)');
+test('missing agent.host -> bucketed as (local)', () => {
+  // Exercises the `agent.host || '(local)'` fallback (the same fallback
+  // groupByHost uses) — a raw record with NO host field lands in the (local)
+  // bucket, not a hole. (Using a raw object, not the agent() builder, so the
+  // host field is genuinely absent rather than pre-set to '(local)'.)
+  const spans = summarizeProjectHosts([{ id: 'a1', healthState: 'healthy' }], () => undefined);
+  assert.equal(spans.length, 1);
+  assert.equal(spans[0].host, '(local)');
+  assert.equal(spans[0].agentCount, 1);
+});
+
+console.log('\nsummarizeProjectHosts: empty / robust to partial data');
+test('no agents -> empty span list', () => {
+  assert.deepEqual(summarizeProjectHosts([], () => undefined), []);
+});
+test('partial / garbage agent data does not throw (mirrors groupByHost robustness)', () => {
+  // summarizeProjectHosts reads only agent.host (falling back to '(local)'); it
+  // must not throw on records missing every other field, garbage shapes, or a
+  // mix. {} and {id:'x'} both lack host -> (local) bucket (2 agents); {host:'up'}
+  // -> up bucket (1 agent).
+  const spans = summarizeProjectHosts([{}, { host: 'up' }, { id: 'x' }], () => undefined);
+  assert.equal(spans.length, 2);
+  const local = spans.find((s) => s.host === '(local)');
+  const up = spans.find((s) => s.host === 'up');
+  assert.equal(local.agentCount, 2);
+  assert.equal(up.agentCount, 1);
 });
 
 // --- summarizeHostLoad: per-host CPU/mem roll-up (WARDEN-361) ---

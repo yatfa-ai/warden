@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, Fragment } from 'react';
 import { toast } from 'sonner';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import type { HealthData, Chat } from '@/lib/types';
@@ -11,6 +11,7 @@ import {
   compareHostGroups,
   groupByProject,
   compareProjectGroups,
+  summarizeProjectHosts,
   resourceTone,
   summarizeHostLoad,
   type HealthStateValue,
@@ -349,24 +350,28 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
     return groups;
   }, [healthData, hostStatuses]);
 
-  // Bucket agents by project, order projects degraded-first (critical-heavy →
-  // agent count → name), and order each project's agents healthy → critical
-  // (WARDEN-741). Mirrors hostGroups above MINUS the connectivity axis — a
-  // project can span hosts, so there is no online/offline signal to fuse. Pure
-  // inputs → cheap to memoize; recomputes only when the catalog changes (no
-  // hostStatuses dependency). The in-place `.sort()` is safe for the same reason
-  // as hostGroups: groupByProject returns fresh arrays it owns.
+  // Bucket agents by project, order projects degraded-first, and order each
+  // project's agents healthy → critical (WARDEN-741, extended WARDEN-780). The
+  // project ladder now fuses the connectivity axis: a project with ANY agent on
+  // an offline host sorts to the top (the #1 Host-mode signal), above
+  // critical-heavy — so a coordinator in Project mode spots a partly-down
+  // project without switching modes. Connectivity comes from the same
+  // hostStatuses poll Host mode uses (no new fetch), which is why hostStatuses
+  // is now a memo dep: the sort depends on it. Pure inputs → cheap to memoize;
+  // recomputes when the catalog OR connectivity changes. The in-place `.sort()`
+  // is safe for the same reason as hostGroups: groupByProject returns fresh
+  // arrays it owns.
   const projectGroups = useMemo<ProjectHealthGroup[]>(() => {
     if (!healthData) return [];
     const groups = groupByProject(healthData.agents);
-    groups.sort(compareProjectGroups);
+    groups.sort((a, b) => compareProjectGroups(a, b, (h) => hostStatuses[h]?.status));
     for (const g of groups) {
       g.agents.sort(
         (a, b) => healthRank(normalizeHealthState(a.healthState)) - healthRank(normalizeHealthState(b.healthState)),
       );
     }
     return groups;
-  }, [healthData]);
+  }, [healthData, hostStatuses]);
 
   // Per-agent 24h activity series for the row sparklines (WARDEN-299), joined by
   // `container`. Memoized on `activitySeries` ONLY — the 24h series refreshes on
@@ -847,6 +852,57 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
                           ))}
                         </div>
                       )}
+                      {/*
+                        Line 3: host span (WARDEN-780) — the SET of hosts this
+                        project's agents run on, each with its connectivity dot +
+                        an agent count, so a coordinator in Project mode can see
+                        whether the project's agents are co-located or scattered
+                        (and spot one sitting on a DOWN host) without switching to
+                        Host mode. Offline hosts surface first (offline-first
+                        ordering inside summarizeProjectHosts) and carry a visible
+                        red `offline` flag; latency stays in the dot's `title`
+                        only (the line is multi-host and must stay scannable, so
+                        latency is never added to the visible text). Indented
+                        (pl-7) under the project name, matching the dist line;
+                        `flex-wrap` so a project spanning many hosts wraps rather
+                        than clips (same pattern as the dist line and the Host
+                        section's dist line). Connectivity comes from the same
+                        hostStatuses poll Host mode uses — no new fetch. The dot's
+                        tone/variant mirror the Host header's connectivity dot
+                        (online→green solid / offline→red square / else gray ring).
+                        (WARDEN-780)
+                      */}
+                      <div className="flex flex-wrap items-center gap-1.5 min-w-0 pl-7">
+                        {summarizeProjectHosts(group.agents, (h) => hostStatuses[h]).map((span, i) => {
+                          const spanLabel = hostLabelFor(span.host, hostLabels) || (span.host === '(local)' ? 'local' : span.host);
+                          return (
+                            <Fragment key={span.host}>
+                              {i > 0 && <span className="text-[10px] text-muted-foreground/40">·</span>}
+                              <span className="flex items-center gap-1 min-w-0">
+                                <StatusDot
+                                  tone={span.status === 'online' ? 'green' : span.status === 'offline' ? 'red' : 'gray'}
+                                  variant={span.status === 'online' ? 'solid' : span.status === 'offline' ? 'square' : 'ring'}
+                                  label={
+                                    span.status === 'online'
+                                      ? `Online${span.latency_ms != null ? ` (${span.latency_ms}ms)` : ''}`
+                                      : span.status === 'offline' ? 'Offline' : 'Unknown connectivity'
+                                  }
+                                  title={
+                                    span.status === 'online' && span.latency_ms != null
+                                      ? `${span.status} (${span.latency_ms}ms)`
+                                      : span.status || 'unknown'
+                                  }
+                                />
+                                <span className="text-[10px] text-muted-foreground truncate">{spanLabel}</span>
+                                <span className="text-[10px] text-muted-foreground/60">({span.agentCount})</span>
+                                {span.status === 'offline' && (
+                                  <span className="text-[10px] text-red-500">offline</span>
+                                )}
+                              </span>
+                            </Fragment>
+                          );
+                        })}
+                      </div>
 
                       {/* Agents beneath, reusing the standard row (showHost=false —
                           project, like host, is the section key; don't repeat it

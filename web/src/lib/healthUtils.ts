@@ -271,22 +271,127 @@ export function groupByProject(agents: Chat[]): ProjectHealthGroup[] {
 }
 
 /**
- * Degraded-first ordering for project sections (WARDEN-741): a human running
- * multiple projects needs the worst project on top. Same priority ladder as
- * `compareHostGroups` (WARDEN-237) MINUS the connectivity axis — a project has
- * no single host/online status (it can span hosts), so connectivity is dropped:
- *   1. Critical-heavy projects first (more critical agents = worse).
- *   2. Then by total agent count (bigger project = bigger blast radius).
- *   3. Then by project name (stable, deterministic tiebreak).
+ * Degraded-first ordering for project sections (WARDEN-741, extended WARDEN-780):
+ * a human running multiple projects needs the worst project on top. Same priority
+ * ladder as `compareHostGroups` (WARDEN-237), now INCLUDING the connectivity axis:
+ *   1. Projects with ANY agent on an offline host first — the #1 Host-mode
+ *      signal, surfaced in Project mode too (WARDEN-780). A project spans hosts,
+ *      so the signal is "does any of its hosts read offline" rather than a single
+ *      host status: a project counts as "has offline host" if ANY of its agents
+ *      sits on a host whose connectivity is `'offline'`.
+ *   2. Then critical-heavy projects (more critical agents = worse).
+ *   3. Then by total agent count (bigger project = bigger blast radius).
+ *   4. Then by project name (stable, deterministic tiebreak).
  *
- * Pure and unit-tested alongside `compareHostGroups`.
+ * `connectivityOf(host)` maps a host name to its online/offline/unknown status
+ * from the /api/hosts/status poll; a host with no record is treated as 'unknown'
+ * (neutral — NOT prioritized as offline), exactly as `compareHostGroups`
+ * documents. It defaults to "no connectivity info" (`() => undefined`), so the
+ * pre-WARDEN-780 call shape `compareProjectGroups(a, b)` — and the lower ladder
+ * it exercised — still works unchanged. Pure and unit-tested alongside
+ * `compareHostGroups`.
  */
-export function compareProjectGroups(a: ProjectHealthGroup, b: ProjectHealthGroup): number {
+export function compareProjectGroups(
+  a: ProjectHealthGroup,
+  b: ProjectHealthGroup,
+  connectivityOf: (host: string) => HostConnectivityStatus | undefined = () => undefined,
+): number {
+  const aHasOffline = projectHasOfflineHost(a, connectivityOf) ? 0 : 1;
+  const bHasOffline = projectHasOfflineHost(b, connectivityOf) ? 0 : 1;
+  if (aHasOffline !== bHasOffline) return aHasOffline - bHasOffline;                         // offline-host project first (WARDEN-780)
   if (a.counts.critical !== b.counts.critical) return b.counts.critical - a.counts.critical; // critical-heavy next
-  if (a.agents.length !== b.agents.length) return b.agents.length - a.agents.length;         // bigger groups next
-  if (a.project < b.project) return -1;                                                     // stable name tiebreak
+  if (a.agents.length !== b.agents.length) return b.agents.length - a.agents.length;         // bigger projects next
+  if (a.project < b.project) return -1;                                                      // stable name tiebreak
   if (a.project > b.project) return 1;
   return 0;
+}
+
+/**
+ * Does any of this project's agents sit on a host whose connectivity is offline?
+ * (WARDEN-780.) Reuses `groupByHost`'s `agent.host || '(local)'` fallback so a
+ * record missing its host is checked against its effective host. Module-private:
+ * only `compareProjectGroups` needs this verdict.
+ */
+function projectHasOfflineHost(
+  group: ProjectHealthGroup,
+  connectivityOf: (host: string) => HostConnectivityStatus | undefined,
+): boolean {
+  for (const agent of group.agents) {
+    const host = agent.host || '(local)';
+    if (connectivityOf(host) === 'offline') return true;
+  }
+  return false;
+}
+
+// ---- Per-project host span (Fleet Health "Group by: Project" — WARDEN-780) ----
+
+/**
+ * One host a project's agents span, with that host's connectivity + a count of
+ * how many of the project's agents sit on it (WARDEN-780). The per-project
+ * analog of the Host section's single connectivity dot — but a project can span
+ * MANY hosts, so the "host span" is a LIST: one entry per distinct host, each
+ * with its own online/offline dot and an agent count, so a coordinator in
+ * Project mode can see whether a project's agents are co-located or scattered
+ * (and spot one sitting partly on a DOWN host) without switching to Host mode.
+ */
+export interface ProjectHostSpan {
+  host: string;
+  status: HostConnectivityStatus;
+  latency_ms: number | null;
+  agentCount: number;
+}
+
+/**
+ * Summarize the SET of hosts a project's agents span (WARDEN-780): one
+ * `ProjectHostSpan` per distinct host the project's agents run on (reusing
+ * `groupByHost`'s `agent.host || '(local)'` fallback so a record missing its
+ * host never falls through the cracks), each carrying that host's connectivity
+ * and a count of how many of the project's agents sit on it.
+ *
+ * Ordered offline-first (a down host in the project surfaces first — the #1
+ * signal from Host mode), then by agent count desc (a host holding more of the
+ * project's agents is the more representative one), then by host name (stable) —
+ * mirroring `compareHostGroups`' degraded-first rationale. A host with no
+ * `hostStatuses` record resolves to `'unknown'` (neutral — NOT treated as
+ * offline), exactly as `compareHostGroups` documents.
+ *
+ * `connectivityOf(host)` returns the full `HostConnectivity` (status + latency)
+ * from the /api/hosts/status poll, or `undefined` when there is no record — the
+ * helper needs the full object (not just status) so each span carries the
+ * latency that the render folds into the dot's `title`. Pure (no React, no
+ * fetch), unit-tested alongside `groupByProject` / `compareProjectGroups`.
+ * Mirrors `summarizeHostLoad`'s purity discipline (return a complete summary
+ * object the caller renders verbatim).
+ */
+export function summarizeProjectHosts(
+  agents: Chat[],
+  connectivityOf: (host: string) => HostConnectivity | undefined,
+): ProjectHostSpan[] {
+  const counts = new Map<string, number>();
+  for (const agent of agents) {
+    const host = agent.host || '(local)';
+    counts.set(host, (counts.get(host) ?? 0) + 1);
+  }
+  const spans: ProjectHostSpan[] = [];
+  for (const [host, agentCount] of counts) {
+    const conn = connectivityOf(host);
+    spans.push({
+      host,
+      status: conn?.status ?? 'unknown',
+      latency_ms: conn?.latency_ms ?? null,
+      agentCount,
+    });
+  }
+  spans.sort((a, b) => {
+    const aOffline = a.status === 'offline' ? 0 : 1;
+    const bOffline = b.status === 'offline' ? 0 : 1;
+    if (aOffline !== bOffline) return aOffline - bOffline;                  // offline host first
+    if (a.agentCount !== b.agentCount) return b.agentCount - a.agentCount;  // more agents next
+    if (a.host < b.host) return -1;                                         // stable name tiebreak
+    if (a.host > b.host) return 1;
+    return 0;
+  });
+  return spans;
 }
 
 // ---- Per-host resource load roll-up (WARDEN-361) ----
