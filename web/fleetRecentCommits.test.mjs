@@ -30,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-fleet-recent-test-'));
 const tmpFile = join(tmpDir, 'gitStateSummary.mjs');
 writeFileSync(tmpFile, code);
-const { mergeFleetCommitsByEpoch, buildFleetRecentCommitsUrl } = await import(tmpFile);
+const { mergeFleetCommitsByEpoch, buildFleetRecentCommitsUrl, bindFleetRowOpenFile } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -252,6 +252,54 @@ test('the URL has no range= so the component can append &range=outgoing for the 
   const url = buildFleetRecentCommitsUrl('a1', 25);
   assert.ok(!url.includes('range='), 'recent view base must leave no range= (component appends it)');
   assert.equal(`${url}&range=outgoing`, '/api/git-log?id=a1&limit=25&range=outgoing');
+});
+
+console.log('\nbindFleetRowOpenFile — re-bind the parent onOpenFile for one fleet row (WARDEN-757)');
+// The fleet feed is multi-agent: HealthDashboard hands ONE onOpenFile(chatId, path)
+// for the whole list; each CommitFile must call it with ITS OWN agent key so opening a
+// file reads from the CORRECT agent's repo. This is the seam the React layer calls at
+// the CommitFile binding site (onOpenFile={bindFleetRowOpenFile(onOpenFile, row.key)}),
+// so these tests exercise the REAL write path, not a parallel one.
+test('given an onOpenFile, the per-row callback fires onOpenFile(rowKey, path) — agent key threaded first', () => {
+  // The contract: the row's chatId is bound as the FIRST arg, the file path as the
+  // second. If the args were swapped, a click would open the path AS the chatId and
+  // the agent key as the file — silently reading from the wrong repo (or 404'ing).
+  const calls = [];
+  const cb = bindFleetRowOpenFile((chatId, path) => calls.push({ chatId, path }), 'a1');
+  assert.equal(typeof cb, 'function', 'must return a callable when onOpenFile is supplied');
+  cb('src/auth.ts');
+  cb('src/util.ts');
+  assert.deepEqual(calls, [
+    { chatId: 'a1', path: 'src/auth.ts' },
+    { chatId: 'a1', path: 'src/util.ts' },
+  ]);
+});
+test('each row\'s callback captures ITS OWN key (two rows never cross-bind)', () => {
+  // The per-row closure must capture the key passed at bind time, not some shared/
+  // stale value — otherwise every row in the feed would open files against whichever
+  // key was bound last. Bind two, invoke both, confirm each routes to its own key.
+  const calls = [];
+  const cbA = bindFleetRowOpenFile((chatId, path) => calls.push([chatId, path]), 'a1');
+  const cbB = bindFleetRowOpenFile((chatId, path) => calls.push([chatId, path]), 'b2');
+  cbA('p.ts');
+  cbB('q.ts');
+  assert.deepEqual(calls, [['a1', 'p.ts'], ['b2', 'q.ts']]);
+});
+test('when onOpenFile is ABSENT, the per-row callback is undefined — no affordance renders', () => {
+  // The load-bearing guard: returning undefined (not a wrapper) means CommitFile's
+  // `{onOpenFile && <OpenFileAffordance/>}` renders NO 📄 affordance when the host
+  // didn't opt in — preserving today's inline-diff-only fleet behavior. An always-
+  // wrap form would render the affordance where it shouldn't AND throw on click.
+  assert.equal(bindFleetRowOpenFile(undefined, 'a1'), undefined);
+});
+test('the bound key is opaque (a container/host key with a colon rides through unsplit)', () => {
+  // row.key is c.key || c.id — frequently a host:container key. The binding must not
+  // parse or split it; it reaches /api/read-file as ONE id (the WARDEN-122 argv
+  // discipline). Mirrors buildFleetRecentCommitsUrl's encodeURIComponent contract.
+  const calls = [];
+  const cb = bindFleetRowOpenFile((chatId, path) => calls.push({ chatId, path }), 'host:container');
+  cb('x.ts');
+  assert.deepEqual(calls, [{ chatId: 'host:container', path: 'x.ts' }]);
 });
 
 console.log(`\n✓ FLEET RECENT COMMITS TESTS PASS (${passed})`);

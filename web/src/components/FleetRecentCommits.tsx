@@ -8,6 +8,7 @@ import {
   fleetCommitSearchEligible,
   mergeFleetCommitsByEpoch,
   buildFleetRecentCommitsUrl,
+  bindFleetRowOpenFile,
   type FleetRecentCommitsResult,
 } from '@/lib/gitStateSummary';
 import { CommitFile, CommitMessage } from './sidebar/GitBadges';
@@ -55,6 +56,16 @@ import type { GitFile } from './sidebar/types';
 interface Props {
   /** The fleet agents (healthData.agents) — the population the feed fans out over. */
   agents: readonly Chat[];
+  // Open a committed file in the FileViewer (WARDEN-757). Multi-agent analog of
+  // GitBadges' per-popover onOpenFile: because this feed rolls every agent's
+  // commits into one list, the callback carries the chatId (the row's agent key)
+  // so HealthDashboard's single FileViewer knows WHICH agent's repo to read from
+  // — exactly the identifier already passed as chatId={row.key} to each CommitFile
+  // below. Mirrors how ChatSidebar binds c.key per ChatRow closure, lifted one
+  // level since the .map lives here. Optional: when absent, CommitFile renders
+  // WITHOUT the 📄 open-file affordance, preserving today's inline-diff-only
+  // fleet behavior (the asymmetry this closes only when the host opts in).
+  onOpenFile?: (chatId: string, path: string) => void;
 }
 
 // Per-agent fetch limit AND the display slice bound. The fan-out asks each active
@@ -71,7 +82,7 @@ const FLEET_RECENT_LIMIT = 25;
 // agent assumption.
 type ShowCache = Record<string, { files?: GitFile[]; message?: string; error?: string | null }>;
 
-export function FleetRecentCommits({ agents }: Props) {
+export function FleetRecentCommits({ agents, onOpenFile }: Props) {
   // LOCAL collapse state — never serialized to /api/config (avoids the dead-pref
   // trap). Defaults open so the fleet's recent shipments are glanceable on entry.
   const [open, setOpen] = useState(true);
@@ -369,7 +380,7 @@ export function FleetRecentCommits({ agents }: Props) {
                         ) : files.length > 0 ? (
                           <div className="flex flex-col gap-0.5">
                             {files.map((f) => (
-                              <CommitFile key={`${cacheKey}:${f.path}`} chatId={row.key} hash={row.commit.hash} file={f} />
+                              <CommitFile key={`${cacheKey}:${f.path}`} chatId={row.key} hash={row.commit.hash} file={f} onOpenFile={bindFleetRowOpenFile(onOpenFile, row.key)} />
                             ))}
                           </div>
                         ) : (

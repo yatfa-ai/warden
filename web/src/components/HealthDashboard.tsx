@@ -21,6 +21,7 @@ import { StatusDot, type StatusTone } from '@/components/StatusDot';
 import { Sparkline } from '@/components/Sparkline';
 import { FleetActivityHeatmap } from '@/components/FleetActivityHeatmap';
 import { FleetRecentCommits } from '@/components/FleetRecentCommits';
+import { FileViewer } from '@/components/FileViewer';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -46,6 +47,13 @@ interface Props {
   // Timestamp format pref (WARDEN-213): routes the fleet last-activity + "Last
   // updated" times through the shared formatTimestamp helper. Pure client-side.
   timestampFormat: TimestampFormat;
+  // FileViewer rendered/source view mode (WARDEN-757): App owns this as a
+  // persisted pref (the SAME one ChatSidebar's FileViewer honors, WARDEN-480) so
+  // the choice is shared across both surfaces and survives opens/reloads.
+  // Read-only here except for the change handler — no new App state, just
+  // threading the existing setter.
+  fileViewerViewMode: 'rendered' | 'source';
+  onFileViewerViewModeChange: (mode: 'rendered' | 'source') => void;
   // "Group agents by: Health | Host | Project" mode (WARDEN-237; Project added in
   // WARDEN-741). Lifted to App + persisted (WARDEN-468) so the toggle survives a
   // Warden restart — App owns the single source of truth and this is read-only
@@ -249,7 +257,7 @@ function TokenChip({ agent }: { agent: Chat }) {
   );
 }
 
-export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy, onGroupByChange: setGroupBy, collapsedHosts, onCollapsedHostsChange: setCollapsedHosts }: Props) {
+export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, groupBy, onGroupByChange: setGroupBy, collapsedHosts, onCollapsedHostsChange: setCollapsedHosts }: Props) {
   const [healthData, setHealthData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -274,6 +282,12 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [killOpen, setKillOpen] = useState(false);
   const [interruptOpen, setInterruptOpen] = useState(false);
+  // Fleet-recent-commits FileViewer target (WARDEN-757). Set by the feed's
+  // onOpenFile callback; drives the single FileViewer mounted below. Transient
+  // dialog state — NOT persisted / serialized to /api/config — mirroring
+  // ChatSidebar's fileTarget (also a local useState, never in the persisted UI
+  // state). Null = the viewer is closed.
+  const [fileTarget, setFileTarget] = useState<{ chatId: string; path: string } | null>(null);
   // Result-toast gating reuses the sidebar's notifyChatOps pref so a kill from
   // Fleet Health has the SAME UX contract (toast on success / partial failure) as
   // a kill from the sidebar (WARDEN-328).
@@ -695,8 +709,15 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
               then the actual shipments, before drilling into rows. Clicking a row
               opens that commit's diff via /api/git-show. Pure additive — no new
               endpoint/poll/SSH; fetch-on-mount + manual refresh (introduces its own
-              N-fetch fan-out, so it does NOT ride the 60s series poll like the heatmap). */}
-            <FleetRecentCommits agents={healthData.agents} />
+              N-fetch fan-out, so it does NOT ride the 60s series poll like the heatmap).
+              WARDEN-757: onOpenFile threads the feed's open-file affordance into the
+              dashboard's FileViewer so a coordinator can READ any just-shipped file
+              (read/blame/history/at-commit snapshot) without leaving the fleet view —
+              closing the asymmetry where the per-agent GitBadges popover could open a
+              committed file but the fleet feed (built to roll those lists into one)
+              could only inline-diff it. The callback carries the row's chatId so the
+              single FileViewer reads from the CORRECT agent's repo. */}
+            <FleetRecentCommits agents={healthData.agents} onOpenFile={(chatId, path) => setFileTarget({ chatId, path })} />
             {groupBy === 'health' ? (
               HEALTH_SECTION_ORDER.filter(section => {
                 const agents = healthData.groups[section];
@@ -1034,6 +1055,28 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
         onOpenChange={setInterruptOpen}
         targets={selectedChats}
         onSend={handleInterruptSelected}
+      />
+
+      {/* Fleet-recent-commits FileViewer (WARDEN-757). Mounted as a sibling of the
+          dialogs above and driven by the local fileTarget state set by the feed's
+          onOpenFile callback. Mirrors ChatSidebar's mount verbatim (ChatSidebar's
+          fileTarget is the established pattern): reuses /api/read-file, /api/git-blame,
+          and /api/git-log — the SAME routes ChatSidebar's FileViewer already exercises,
+          so NO backend change. The chatId comes from the feed row's agent key
+          (threaded through onOpenFile), so read/blame/history/at-commit-snapshot all
+          resolve against the CORRECT agent's repo — not the focused pane. viewMode +
+          onViewModeChange are the App-owned rendered/source pref shared with
+          ChatSidebar's FileViewer; onNavigate is wired so breadcrumb / sibling
+          navigation works identically to the sidebar viewer. */}
+      <FileViewer
+        chatId={fileTarget?.chatId ?? ''}
+        filePath={fileTarget?.path ?? ''}
+        open={!!fileTarget}
+        timestampFormat={timestampFormat}
+        viewMode={fileViewerViewMode}
+        onViewModeChange={onFileViewerViewModeChange}
+        onNavigate={(p) => setFileTarget((prev) => (prev ? { ...prev, path: p } : prev))}
+        onOpenChange={(o) => { if (!o) setFileTarget(null); }}
       />
 
       {/* Timestamp */}

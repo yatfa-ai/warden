@@ -1473,6 +1473,32 @@ export function buildFleetRecentCommitsUrl(key: string, limit: number): string {
   return `/api/git-log?id=${encodeURIComponent(key)}&limit=${limit}`;
 }
 
+// Re-bind the parent's open-file callback for ONE fleet row (WARDEN-757). The feed
+// is multi-agent, so HealthDashboard hands a SINGLE onOpenFile(chatId, path) for the
+// whole list; each CommitFile must call it with ITS OWN agent key (the row's key —
+// c.key || c.id, the same identifier /api/git-show / /api/read-file already resolve
+// these rows against) so opening a file reads from the CORRECT agent's repo, not the
+// focused pane. This is the fleet-level analog of ChatSidebar binding c.key per
+// ChatRow closure, lifted one level because the .map lives in FleetRecentCommits.
+//
+// Returns UNDEFINED when the parent supplied no onOpenFile — load-bearing: CommitFile
+// renders its 📄 OpenFileAffordance only when onOpenFile is truthy, so returning
+// undefined here means the affordance does NOT render in contexts that didn't opt in
+// (preserving today's inline-diff-only fleet behavior). Always wrapping —
+// `(path) => onOpenFile(chatId, path)` with no guard — would BOTH render the
+// affordance where it shouldn't AND throw on click (calling undefined(...)). The guard
+// is the contract.
+//
+// Extracted PURE (no React) so the binding is unit-testable without a front-end test
+// runner (see fleetRecentCommits.test.mjs) — the React layer calls this verbatim at the
+// CommitFile binding site, so the test exercises the real write path, not a parallel one.
+export function bindFleetRowOpenFile(
+  onOpenFile: ((chatId: string, path: string) => void) | undefined,
+  chatId: string,
+): ((path: string) => void) | undefined {
+  return onOpenFile ? (path: string) => onOpenFile(chatId, path) : undefined;
+}
+
 // ---- Fleet-wide working-tree CODE search aggregation (WARDEN-589) ------------
 //
 // The cross-agent WORKING-TREE layer — the fleet-wide counterpart to the per-agent

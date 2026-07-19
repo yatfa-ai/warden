@@ -1925,6 +1925,8 @@ function App() {
             onOpenChat={openChat}
             onClose={() => setHealthCollapsed(true)}
             timestampFormat={timestampFormat}
+            fileViewerViewMode={fileViewerViewMode}
+            onFileViewerViewModeChange={setFileViewerViewMode}
             groupBy={healthGroupBy}
             onGroupByChange={setHealthGroupBy}
             collapsedHosts={healthCollapsedHosts}
