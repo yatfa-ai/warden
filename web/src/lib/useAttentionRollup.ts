@@ -45,6 +45,7 @@ import {
 import { diffWatchAlerts, indexByWatchKey, applyWatchCooldown, type WatchLastFiredMap, type WatchReason } from '@/lib/chatWatch';
 import { recordWatchMiss, shouldRecordMiss } from '@/lib/watchCatchup';
 import { activeSnoozedKeys, type SnoozeMap } from '@/lib/snooze';
+import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { loadStateEnteredAt, saveStateEnteredAt, computeEnteredAt } from '@/lib/stateDuration';
 import type { HealthData, ActivityStats, AgentStateRow, AgentStatesData } from '@/lib/types';
 
@@ -700,80 +701,47 @@ export function useAttentionRollup(
     setFleetSweepLoaded(true);
   }, []);
 
-  // Health + stats on the 10s cadence (unchanged from WARDEN-228).
-  useEffect(() => {
-    void fetchHealthStats();
-    // Visibility-gated: a backgrounded tab never burns requests (matches the catalog
-    // auto-refresh in App.tsx). On regaining focus we poll immediately because state
-    // may be stale while hidden.
-    //
-    // EXCEPT when desktop alerts are opted in (WARDEN-259): then the poll MUST keep
-    // running while hidden, otherwise the rollup would never update while the human
-    // is away and the "fire on increase-while-hidden" alert would have no trigger.
-    const tick = () => {
-      if (attentionDesktopAlerts || document.visibilityState === 'visible') void fetchHealthStats();
-    };
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') void fetchHealthStats();
-    };
-    const intervalId = window.setInterval(tick, HEALTH_POLL_MS);
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => {
-      window.clearInterval(intervalId);
-      document.removeEventListener('visibilitychange', onVisibility);
-    };
-  }, [fetchHealthStats, attentionDesktopAlerts]);
+  // Health + stats on the 10s cadence (unchanged from WARDEN-228). Visibility-
+  // gated: a backgrounded tab never burns requests; on regaining focus we poll
+  // immediately because state may be stale while hidden. EXCEPT when desktop
+  // alerts are opted in (WARDEN-259): the poll MUST keep running while hidden
+  // (runWhileHidden), otherwise the rollup would never update while the human is
+  // away and the "fire on increase-while-hidden" alert would have no trigger.
+  // (Consolidated WARDEN-753.)
+  useVisiblePoller(fetchHealthStats, HEALTH_POLL_MS, [fetchHealthStats, attentionDesktopAlerts], {
+    runWhileHidden: () => attentionDesktopAlerts,
+  });
 
   // Pane states on the dedicated ~30s cadence (WARDEN-344). Classifies the OPEN
   // panes ∪ the watched-chats set (WARDEN-378 — a watched chat is classified even
   // when its pane isn't open); an empty union is a cheap no-op. Re-fires immediately
   // when the open-panes OR watched set changes so a freshly-watched / freshly-opened
-  // pane surfaces within a poll, not after 30s. Visibility relaxation fires while
-  // hidden when the fleet alert is opted in OR any chat is watched (step-away case).
-  useEffect(() => {
-    void fetchAgentStates();
-    const tick = () => {
-      // WARDEN-378: a watched chat must keep being classified while Warden is hidden
-      // (the human stepped away — the watch's whole premise), so the visibility
-      // relaxation extends to "any watched chat", not just the fleet alert opt-in.
-      if (attentionDesktopAlerts || watchedChats.length > 0 || document.visibilityState === 'visible') void fetchAgentStates();
-    };
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') void fetchAgentStates();
-    };
-    const intervalId = window.setInterval(tick, AGENT_STATE_POLL_MS);
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => {
-      window.clearInterval(intervalId);
-      document.removeEventListener('visibilitychange', onVisibility);
-    };
-  }, [fetchAgentStates, attentionDesktopAlerts, openPanes, watchedChats]);
+  // pane surfaces within a poll, not after 30s — that immediate re-fire is exactly
+  // why openPanes/watchedChats are in the deps (the hook tears down + rebuilds, re-
+  // mount-polling on the change). Visibility relaxation fires while hidden when the
+  // fleet alert is opted in OR any chat is watched (step-away case): WARDEN-378, a
+  // watched chat must keep being classified while Warden is hidden (the human
+  // stepped away — the watch's whole premise). (Consolidated WARDEN-753.)
+  useVisiblePoller(
+    fetchAgentStates,
+    AGENT_STATE_POLL_MS,
+    [fetchAgentStates, attentionDesktopAlerts, openPanes, watchedChats],
+    { runWhileHidden: () => attentionDesktopAlerts || watchedChats.length > 0 },
+  );
 
   // Fleet sweep on a DEDICATED slow cadence (~90s — distinct from the 30s open∪watched
   // poll above) so a HIDDEN agent needing attention surfaces within one sweep cycle
   // (WARDEN-571). The sweep is companion-backed (no SSH sweep — one batched companion RPC
   // per hidden host per sweep; the 30s subscription TTL evicts between sweeps). It runs
   // whenever its results would be ACTED on — Warden visible (the badge shows them) OR the
-  // fleet alert opted in (an away alert fires) — mirroring the 30s poll's visibility
-  // relaxation. The exclude set is read LIVE via refs (openPanesRef/watchedChatsRef), so
+  // fleet alert opted in (an away alert fires, runWhileHidden) — mirroring the 30s poll's
+  // visibility relaxation. The exclude set is read LIVE via refs (openPanesRef/watchedChatsRef), so
   // opening/watching a pane (which SHRINKS the sweep set) never rebuilds this slow
   // cadence — responsiveness for those panes is the 30s poll's job; this is the
-  // background sweep for everything else.
-  useEffect(() => {
-    void fetchFleetStates();
-    const tick = () => {
-      if (attentionDesktopAlerts || document.visibilityState === 'visible') void fetchFleetStates();
-    };
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') void fetchFleetStates();
-    };
-    const intervalId = window.setInterval(tick, FLEET_SWEEP_POLL_MS);
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => {
-      window.clearInterval(intervalId);
-      document.removeEventListener('visibilitychange', onVisibility);
-    };
-  }, [fetchFleetStates, attentionDesktopAlerts]);
+  // background sweep for everything else. (Consolidated WARDEN-753.)
+  useVisiblePoller(fetchFleetStates, FLEET_SWEEP_POLL_MS, [fetchFleetStates, attentionDesktopAlerts], {
+    runWhileHidden: () => attentionDesktopAlerts,
+  });
 
   // Derive the rollup from the three signals + the per-state toggle. useMemo so a
   // toggle change re-aggregates without a refetch, and so the badge only re-renders

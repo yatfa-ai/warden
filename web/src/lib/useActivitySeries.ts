@@ -9,8 +9,9 @@
 // Only HealthDashboard consumes this today; when the sidebar ChatRow / a per-host
 // rollup adopt the Sparkline (future work, explicitly out of scope here), a
 // ref-counted singleton like useHostStatuses is the natural next step.
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import type { ActivitySeries } from '@/lib/types';
+import { useVisiblePoller } from '@/lib/useVisiblePoller';
 
 // Slow cadence: a 24h hourly aggregate doesn't move in seconds. ~60s keeps the
 // sparkline fresh without contention with the 10s /api/health poll. Visibility-
@@ -31,39 +32,28 @@ export function useActivitySeries(): ActivitySeriesState {
   const [series, setSeries] = useState<ActivitySeries | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      const after = new Date(Date.now() - WINDOW_MS).toISOString();
-      try {
-        const res = await fetch(`/api/activity/series?after=${encodeURIComponent(after)}`);
-        if (!res.ok) return;
-        const data = (await res.json()) as ActivitySeries;
-        if (!cancelled) setSeries(data);
-      } catch {
-        // Transient network blip — keep the last known series rather than blanking
-        // the sparklines to "no data" on every flake.
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    };
+  const load = async () => {
+    const after = new Date(Date.now() - WINDOW_MS).toISOString();
+    try {
+      const res = await fetch(`/api/activity/series?after=${encodeURIComponent(after)}`);
+      if (!res.ok) return;
+      const data = (await res.json()) as ActivitySeries;
+      setSeries(data);
+    } catch {
+      // Transient network blip — keep the last known series rather than blanking
+      // the sparklines to "no data" on every flake.
+    } finally {
+      setLoading(false);
+    }
+  };
 
-    void load();
-    const tick = () => {
-      if (document.visibilityState === 'visible') void load();
-    };
-    const onVisibility = () => {
-      // On regaining focus, poll immediately — state may be stale while hidden.
-      if (document.visibilityState === 'visible') void load();
-    };
-    const intervalId = window.setInterval(tick, POLL_MS);
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-      document.removeEventListener('visibilitychange', onVisibility);
-    };
-  }, []);
+  // Visibility-gated slow cadence: mount-poll once, then a POLL_MS tick that only
+  // fires while the tab is visible, plus an immediate refresh on regaining focus
+  // — a backgrounded tab never burns requests (WARDEN-753). The `cancelled` guard
+  // the inline effect carried is intentionally dropped: React 19 treats a
+  // setState after unmount as a silent no-op, so an in-flight fetch that resolves
+  // post-unmount behaves identically (no crash, no warning, no state update).
+  useVisiblePoller(load, POLL_MS, []);
 
   return { series, loading };
 }

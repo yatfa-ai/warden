@@ -18,7 +18,7 @@
 // this session yet"; (c) bridge absent (browser/dev/smoke) → the same empty
 // state, never a crash (the accessor degrades to []). A refresh interval keeps
 // the list current as sends land while Settings is open; cleared on unmount.
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Check, HelpCircle, X } from 'lucide-react';
 import { formatAbsoluteFull, formatRelative } from '@/lib/formatTimestamp';
@@ -30,6 +30,7 @@ import {
   describeTransmissionEntry,
   summarizeTransmission,
 } from '@/lib/telemetry/transmission-display';
+import { useVisiblePoller } from '@/lib/useVisiblePoller';
 
 // Re-pull cadence while the panel is open — newly-landed sends appear without
 // reopening Settings. Cheap: the ring is bounded (cap 200) and the handler
@@ -45,38 +46,20 @@ export function TelemetryTransmissionLog() {
   // resolves — a flicker that reads as "data vanished".
   const [entries, setEntries] = useState<TransmissionLogEntry[] | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    const pull = () => {
-      // Never rejects: degrades to [] when the bridge is absent or throws, so a
-      // non-Electron host (browser/dev/smoke) shows the honest empty state.
-      getTelemetryTransmissionLog().then((next) => {
-        if (!cancelled) setEntries(next);
-      });
-    };
-    pull(); // initial pull on mount so a window opened after sends shows them
-    // Poll every REFRESH_MS, gated on Page Visibility so a backgrounded Warden
-    // window never burns an IPC ring snapshot + hidden-panel re-render every 5s
-    // for a Settings panel no one is looking at — the same invariant every other
-    // poller in the app applies (useHostStatuses, useActivitySeries, useTokenBudget,
-    // HealthDashboard, the App.tsx catalog poll). On regaining focus we pull
-    // immediately because state may be stale while hidden. (WARDEN-736)
-    const tick = () => {
-      if (document.visibilityState === 'visible') pull();
-    };
-    const onVisibility = () => {
-      // On regaining focus, pull immediately — newly-landed sends surface the
-      // instant the human returns, preserving WARDEN-668's live-update intent.
-      if (document.visibilityState === 'visible') pull();
-    };
-    const id = setInterval(tick, REFRESH_MS);
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-      document.removeEventListener('visibilitychange', onVisibility);
-    };
-  }, []);
+  const pull = () => {
+    // Never rejects: degrades to [] when the bridge is absent or throws, so a
+    // non-Electron host (browser/dev/smoke) shows the honest empty state.
+    getTelemetryTransmissionLog().then((next) => setEntries(next));
+  };
+  // Poll every REFRESH_MS, gated on Page Visibility so a backgrounded Warden
+  // window never burns an IPC ring snapshot + hidden-panel re-render every 5s for
+  // a Settings panel no one is looking at — the same invariant every other poller
+  // in the app applies. On regaining focus we pull immediately because state may
+  // be stale while hidden; the initial mount-pull seeds a window opened after
+  // sends landed. (WARDEN-736 / WARDEN-668; consolidated WARDEN-753.) The
+  // cancelled guard the inline effect carried is dropped — React 19 treats a
+  // setState after unmount as a silent no-op (equivalent semantics).
+  useVisiblePoller(pull, REFRESH_MS, []);
 
   const loading = entries === null;
   // Newest-first — the most recent send outcome is the most useful at the top.

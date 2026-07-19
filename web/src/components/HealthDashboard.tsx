@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { toast } from 'sonner';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import type { HealthData, Chat } from '@/lib/types';
@@ -33,6 +33,7 @@ import { isSelectedAll, toggleGroupSelection } from '@/lib/selection';
 import { useHostStatuses } from '@/lib/useHostStatuses';
 import { useActivitySeries } from '@/lib/useActivitySeries';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
+import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { buildAgentActivity, selectAgentSparkline } from '@/lib/agentSparkline';
 import { displayName, hostLabelFor } from '@/lib/chatDisplay';
 import { formatTokens } from '@/lib/formatTokens';
@@ -307,27 +308,11 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
     }
   };
 
-  useEffect(() => {
-    fetchHealth();
-    // Poll every 10 seconds for updates, gated on Page Visibility so a
-    // backgrounded tab never burns a fetch + render churn every tick — the same
-    // invariant every other poller in the app applies (useHostStatuses,
-    // useActivitySeries, useTokenBudget, the App.tsx catalog poll). On regaining
-    // focus we poll immediately because state may be stale while hidden. (WARDEN-661)
-    const tick = () => {
-      if (document.visibilityState === 'visible') void fetchHealth();
-    };
-    const onVisibility = () => {
-      // On regaining focus, poll immediately — state may be stale while hidden.
-      if (document.visibilityState === 'visible') void fetchHealth();
-    };
-    const interval = setInterval(tick, 10000);
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => {
-      clearInterval(interval);
-      document.removeEventListener('visibilitychange', onVisibility);
-    };
-  }, []);
+  // Poll every 10 seconds for updates, gated on Page Visibility so a backgrounded
+  // tab never burns a fetch + render churn every tick — the same invariant every
+  // other poller in the app applies. On regaining focus we poll immediately
+  // because state may be stale while hidden. (WARDEN-661; consolidated WARDEN-753.)
+  useVisiblePoller(fetchHealth, 10000, []);
 
   // Bucket agents by host, order hosts degraded-first (offline → critical-heavy
   // → agent count), and order each host's agents healthy → critical. Pure inputs

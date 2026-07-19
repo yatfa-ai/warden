@@ -17,6 +17,7 @@ import { type AttentionSeverityPrefs } from '@/lib/desktopAlerts';
 import { useTokenBudget } from '@/lib/useTokenBudget';
 import { useAttentionRollup } from '@/lib/useAttentionRollup';
 import { useHostStatuses } from '@/lib/useHostStatuses';
+import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { snoozeExpiry, pruneExpired, withoutSnoozeKey, snoozeManyKeys, type AlertMuteMode, type SnoozeDuration } from '@/lib/snooze';
 import { rankAttention, hasReturnContent, attentionReason, type AttentionItem } from '@/lib/attentionRollup';
 import { cn } from '@/lib/utils';
@@ -879,25 +880,17 @@ function App() {
   // already engaged with — that is what advances dots/timestamps and surfaces external spawns.
   // Ticks are gated on Page Visibility so a backgrounded tab never burns SSH; on regaining
   // focus we refresh immediately because state may be stale while hidden.
-  useEffect(() => {
-    const REFRESH_MS = pollIntervalMs;
-    const poll = async () => {
-      if (document.visibilityState !== 'visible') return;
-      await applyCatalog(true);
-      void refreshDiscoveredHosts();
-    };
-    const onVisibilityChange = async () => {
-      if (document.visibilityState !== 'visible') return;
-      await applyCatalog(true);
-      void refreshDiscoveredHosts();
-    };
-    const intervalId = window.setInterval(poll, REFRESH_MS);
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    return () => {
-      window.clearInterval(intervalId);
-      document.removeEventListener('visibilitychange', onVisibilityChange);
-    };
-  }, [applyCatalog, refreshDiscoveredHosts, pollIntervalMs]);
+  const poll = async () => {
+    await applyCatalog(true);
+    void refreshDiscoveredHosts();
+  };
+  // mountPoll:false preserves this poll's historical behavior exactly: it had NO
+  // unconditional mount-poll (it self-gated via an early return and was interval-
+  // only). The hook now owns the visibility gate + the focus-refresh, so poll no
+  // longer self-gates. (WARDEN-753 Finding #2.)
+  useVisiblePoller(poll, pollIntervalMs, [applyCatalog, refreshDiscoveredHosts, pollIntervalMs], {
+    mountPoll: false,
+  });
 
   // Discover this machine's own agents once on mount. Local discovery is cheap (no SSH) and is
   // the common case, so local agents show live immediately and the auto-refresh above keeps
