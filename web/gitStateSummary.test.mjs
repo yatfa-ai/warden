@@ -36,7 +36,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-gitstate-test-'));
 const tmpFile = join(tmpDir, 'gitStateSummary.mjs');
 writeFileSync(tmpFile, code);
-const { summarizeProjectGitState, sortByHeadAgeDesc, sortByStashCountDesc, detectProjectFileCollisions, detectProjectImpendingCollisions, detectProjectOutgoingCollisions, sortGitAgentsByMagnitudeDesc, sortGitAgentsByConflictFirst } = await import(tmpFile);
+const { summarizeProjectGitState, sortByHeadAgeDesc, sortByStashCountDesc, detectProjectFileCollisions, detectProjectImpendingCollisions, detectProjectOutgoingCollisions, sortGitAgentsByMagnitudeDesc, sortGitAgentsByConflictFirst, rankGitTriage, pickGitTriageTop, gitTriageReason } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -1258,6 +1258,201 @@ test('sortGitAgentsByConflictFirst returns a NEW array and does NOT mutate its i
 
 test('all-non-conflict input is a stable no-op order (no conflict → all tied at 0)', () => {
   assert.deepEqual(sortGitAgentsByConflictFirst([ag('x', false, 0, 0, true, 'op'), ag('y', false, 0, 0, true, 'detached')]).map((a) => a.key), ['x', 'y']);
+});
+
+console.log('\ngit triage composition (WARDEN-745): rankGitTriage composes the 6 axes into one triage-first list');
+test('rankGitTriage: an at-risk agent ranks above a merely-dirty one (tier precedence dominates severity)', () => {
+  // The whole point of composition: a heaviest-possible dirty agent still defers to
+  // ANY at-risk one, because at-risk is a higher tier than dirty. A human triaging
+  // by the chips alone would have to rank 6 axes × N agents to arrive at this.
+  const dirty = ag('dirty', true, 0, 0, false, null, false, 0, null, { files: 1, insertions: 9999, deletions: 9999 }); // mag 19998
+  const atRisk = ag('atRisk', false, 0, 0, true, 'detached');
+  assert.deepEqual(rankGitTriage([dirty, atRisk]).ranked.map((i) => i.key), ['atRisk', 'dirty']);
+  assert.equal(rankGitTriage([dirty, atRisk]).top.key, 'atRisk');
+});
+
+test('rankGitTriage: tier precedence order is atRisk > stalled > unpushed > behind > dirty > stash', () => {
+  // One agent per tier, passed in REVERSE precedence order so only the sort (not
+  // input order) can produce the precedence sequence. Asserts the full chain the
+  // ticket specifies, locking the lexicographic tier assignment.
+  const stash = ag('stash', false, 0, 0, false, null, true, 12);
+  const dirty = ag('dirty', true, 0);
+  const behind = ag('behind', false, 0, 8);
+  const unpushed = ag('unpushed', false, 3, 0, false, null, false, 0, 60_000);
+  const stalled = ag('stalled', false, 0, 0, false, null, false, 0, 9 * 86400_000, null, true);
+  const atRisk = ag('atRisk', false, 0, 0, true, 'detached');
+  const r = rankGitTriage([stash, dirty, behind, unpushed, stalled, atRisk]);
+  assert.deepEqual(r.ranked.map((i) => i.key), ['atRisk', 'stalled', 'unpushed', 'behind', 'dirty', 'stash']);
+  assert.deepEqual(r.ranked.map((i) => i.tier), ['atRisk', 'stalled', 'unpushed', 'behind', 'dirty', 'stash']);
+  assert.equal(r.top.key, 'atRisk');
+});
+
+test('rankGitTriage: each agent is tagged with its HIGHEST-precedence present signal (lexicographic, not duplicated)', () => {
+  // An agent dirty AND unpushed AND behind is tagged 'unpushed' (higher than
+  // dirty/behind) — it appears ONCE under its single highest tier, not three times.
+  const r = rankGitTriage([ag('multi', true, 3, 5)]);
+  assert.equal(r.ranked.length, 1);
+  assert.equal(r.ranked[0].tier, 'unpushed');
+  assert.equal(r.ranked[0].key, 'multi');
+});
+
+test('rankGitTriage: within-tier tie-break is stable (equal tier + severity preserves input order)', () => {
+  // Array.prototype.sort is stable on Node ≥12 / V8; two unpushed agents with the
+  // SAME headAgeMs keep their input (chats) order — no comparator tiebreak scrambles them.
+  const a = ag('a', true, 2, 0, false, null, false, 0, 60_000);
+  const b = ag('b', true, 2, 0, false, null, false, 0, 60_000);
+  assert.deepEqual(rankGitTriage([a, b]).ranked.map((i) => i.key), ['a', 'b']);
+});
+
+test('rankGitTriage: a clean agent (no signal) is excluded from ranked', () => {
+  // Mirrors summarizeProjectGitState's skip-clean behavior (clean agents never reach
+  // the list), but rankGitTriage defends independently: a clean agent handed to it
+  // directly is still dropped — never triaged — never noise.
+  const clean = ag('clean', false, 0, 0);
+  const dirty = ag('dirty', true, 0);
+  const r = rankGitTriage([clean, dirty]);
+  assert.deepEqual(r.ranked.map((i) => i.key), ['dirty']);
+  assert.ok(!r.ranked.some((i) => i.key === 'clean'));
+});
+
+test('rankGitTriage: empty input → top null, ranked []', () => {
+  const r = rankGitTriage([]);
+  assert.equal(r.top, null);
+  assert.deepEqual(r.ranked, []);
+});
+
+test('rankGitTriage: a single triageable agent is still top — the >=2 callout gate is the component\'s concern, not the fn', () => {
+  // Mirrors rankAttention: the fn returns its top/ranked whatever the count; the
+  // React layer's `ranked.length >= 2` gate decides whether to show the callout.
+  // With 1 agent the callout stays hidden (no ranking decision to promote), but top
+  // is still computed so a future ungated surface could use it.
+  const r = rankGitTriage([ag('solo', true, 0)]);
+  assert.equal(r.top.key, 'solo');
+  assert.equal(r.ranked.length, 1);
+});
+
+test('rankGitTriage: within the unpushed tier, oldest HEAD first (most rot-prone on top)', () => {
+  const fresh = ag('fresh', false, 1, 0, false, null, false, 0, 60_000);         // 1m old
+  const stale = ag('stale', false, 1, 0, false, null, false, 0, 10 * 86400_000); // 10d old
+  assert.deepEqual(rankGitTriage([fresh, stale]).ranked.map((i) => i.key), ['stale', 'fresh']);
+});
+
+test('rankGitTriage: within the behind tier, most-behind first', () => {
+  const little = ag('little', false, 0, 2);
+  const lots = ag('lots', false, 0, 9);
+  assert.deepEqual(rankGitTriage([little, lots]).ranked.map((i) => i.key), ['lots', 'little']);
+});
+
+test('rankGitTriage: within the dirty tier, heaviest magnitude first', () => {
+  const light = ag('light', true, 0, 0, false, null, false, 0, null, { files: 1, insertions: 2, deletions: 0 });    // mag 2
+  const heavy = ag('heavy', true, 0, 0, false, null, false, 0, null, { files: 1, insertions: 500, deletions: 500 }); // mag 1000
+  assert.deepEqual(rankGitTriage([light, heavy]).ranked.map((i) => i.key), ['heavy', 'light']);
+});
+
+test('rankGitTriage: within the stash tier, heaviest-parker first', () => {
+  const one = ag('one', false, 0, 0, false, null, true, 1);
+  const twelve = ag('twelve', false, 0, 0, false, null, true, 12);
+  assert.deepEqual(rankGitTriage([one, twelve]).ranked.map((i) => i.key), ['twelve', 'one']);
+});
+
+test('rankGitTriage: within the atRisk tier, conflict (blocked merge) ranks above op/detached', () => {
+  // A blocked merge cannot self-resolve, so it leads the atRisk tier — generalizes
+  // the per-axis sortGitAgentsByConflictFirst rationale across all 4 reason classes.
+  const detached = ag('detached', false, 0, 0, true, 'detached');
+  const op = ag('op', false, 0, 0, true, 'op');
+  const conflict = ag('conflict', false, 0, 0, true, 'conflict', false, 0, null, null, false, 3);
+  assert.deepEqual(rankGitTriage([detached, op, conflict]).ranked.map((i) => i.key), ['conflict', 'op', 'detached']);
+});
+
+test('rankGitTriage: among two conflicts, the one with MORE unmerged paths ranks first', () => {
+  const c1 = ag('c1', false, 0, 0, true, 'conflict', false, 0, null, null, false, 1);
+  const c5 = ag('c5', false, 0, 0, true, 'conflict', false, 0, null, null, false, 5);
+  assert.deepEqual(rankGitTriage([c1, c5]).ranked.map((i) => i.key), ['c5', 'c1']);
+});
+
+console.log('\npickGitTriageTop (WARDEN-745): focus-excluded top — the WARDEN-482 guard');
+test('pickGitTriageTop: the focused pane is skipped and the next-worst agent is promoted', () => {
+  // The product-killer guard: the callout must never promote the pane the human is
+  // staring at. Focused on the composite-worst (atRisk) → promotes the NEXT worst.
+  const atRisk = ag('atRisk', false, 0, 0, true, 'detached');
+  const dirty = ag('dirty', true, 0);
+  const ranked = rankGitTriage([atRisk, dirty]).ranked;
+  assert.equal(ranked[0].key, 'atRisk', 'sanity: atRisk is the ungated top');
+  assert.equal(pickGitTriageTop(ranked, 'atRisk').key, 'dirty');
+});
+
+test('pickGitTriageTop: focused == null (or omitted) behaves as ranked[0] — the ungated top', () => {
+  const atRisk = ag('atRisk', false, 0, 0, true, 'detached');
+  const dirty = ag('dirty', true, 0);
+  const ranked = rankGitTriage([atRisk, dirty]).ranked;
+  assert.equal(pickGitTriageTop(ranked, null).key, 'atRisk');
+  assert.equal(pickGitTriageTop(ranked).key, 'atRisk'); // omitted ⇒ undefined ⇒ same as null
+});
+
+test('pickGitTriageTop: empty ranked → null', () => {
+  assert.equal(pickGitTriageTop([], null), null);
+  assert.equal(pickGitTriageTop([], 'x'), null);
+});
+
+test('pickGitTriageTop: the only ranked item IS the focused pane → null (focus exclusion leaves nothing)', () => {
+  const ranked = rankGitTriage([ag('solo', true, 0)]).ranked;
+  assert.equal(pickGitTriageTop(ranked, 'solo'), null);
+});
+
+console.log('\ngitTriageReason (WARDEN-745): the "because X" line per tier');
+test('gitTriageReason: atRisk conflict → "merge-conflict blocked · N unmerged"', () => {
+  const item = rankGitTriage([ag('c', false, 0, 0, true, 'conflict', false, 0, null, null, false, 4)]).top;
+  assert.equal(gitTriageReason(item), 'merge-conflict blocked · 4 unmerged');
+});
+
+test('gitTriageReason: atRisk op → "merge/rebase in progress"', () => {
+  const item = rankGitTriage([ag('c', false, 0, 0, true, 'op')]).top;
+  assert.equal(gitTriageReason(item), 'merge/rebase in progress');
+});
+
+test('gitTriageReason: atRisk noUpstream → "local-only branch (no upstream)"', () => {
+  const item = rankGitTriage([ag('c', false, 0, 0, true, 'noUpstream')]).top;
+  assert.equal(gitTriageReason(item), 'local-only branch (no upstream)');
+});
+
+test('gitTriageReason: atRisk detached → "detached HEAD"', () => {
+  const item = rankGitTriage([ag('c', false, 0, 0, true, 'detached')]).top;
+  assert.equal(gitTriageReason(item), 'detached HEAD');
+});
+
+test('gitTriageReason: stalled → "stalled Nd", and the multi-signal stalled+unpushed case phrases both', () => {
+  // The multi-signal case the ticket calls out: a stalled agent that is ALSO unpushed
+  // is doubly at risk (rotting AND unbacked), so the reason surfaces BOTH signals.
+  const stalledOnly = rankGitTriage([ag('s', false, 0, 0, false, null, false, 0, 9 * 86400_000, null, true)]).top;
+  assert.equal(stalledOnly.tier, 'stalled');
+  assert.equal(gitTriageReason(stalledOnly), 'stalled 9d');
+  // ahead:12 + stalled → tier is 'stalled' (stalled > unpushed in precedence), and
+  // the reason appends the unpushed signal: "stalled 30d + ↑12 unpushed".
+  const stalledUnpushed = rankGitTriage([ag('su', false, 12, 0, false, null, false, 0, 30 * 86400_000, null, true)]).top;
+  assert.equal(stalledUnpushed.tier, 'stalled');
+  assert.equal(gitTriageReason(stalledUnpushed), 'stalled 30d + ↑12 unpushed');
+});
+
+test('gitTriageReason: unpushed → "↑N unpushed"', () => {
+  const item = rankGitTriage([ag('u', false, 7, 0)]).top;
+  assert.equal(gitTriageReason(item), '↑7 unpushed');
+});
+
+test('gitTriageReason: behind → "↓N behind upstream"', () => {
+  const item = rankGitTriage([ag('b', false, 0, 8)]).top;
+  assert.equal(gitTriageReason(item), '↓8 behind upstream');
+});
+
+test('gitTriageReason: dirty → "+N −M uncommitted"', () => {
+  const item = rankGitTriage([ag('d', true, 0, 0, false, null, false, 0, null, { files: 3, insertions: 12, deletions: 3 })]).top;
+  assert.equal(gitTriageReason(item), '+12 −3 uncommitted');
+});
+
+test('gitTriageReason: stash → "🗄N parked stash" (singular for 1, plural otherwise)', () => {
+  const one = rankGitTriage([ag('s1', false, 0, 0, false, null, true, 1)]).top;
+  assert.equal(gitTriageReason(one), '🗄1 parked stash');
+  const four = rankGitTriage([ag('s4', false, 0, 0, false, null, true, 4)]).top;
+  assert.equal(gitTriageReason(four), '🗄4 parked stashes');
 });
 
 console.log(`\n✓ GIT STATE SUMMARY TESTS PASS (${passed})`);
