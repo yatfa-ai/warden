@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react';
 import { toast } from 'sonner';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import type { HealthData, Chat } from '@/lib/types';
+import type { FleetGitStatusSlice } from '@/lib/gitStateSummary';
 import {
   HealthState,
   getHealthIcon,
@@ -28,11 +29,13 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { KillDialog } from './KillDialog';
 import { KeySendDialog } from './KeySendDialog';
 import { SelectionActionBar } from './sidebar/SidebarBits';
+import { DiffStatChip } from './sidebar/DiffStatChip';
 import { formatKillToast, runKillFanout } from '@/lib/kill';
 import { formatKeySendToast, runKeySendFanout } from '@/lib/keysend';
 import { isSelectedAll, toggleGroupSelection } from '@/lib/selection';
 import { useHostStatuses } from '@/lib/useHostStatuses';
 import { useActivitySeries } from '@/lib/useActivitySeries';
+import { useFleetGitStatus } from '@/lib/useFleetGitStatus';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { buildAgentActivity, selectAgentSparkline } from '@/lib/agentSparkline';
@@ -54,6 +57,15 @@ interface Props {
   // threading the existing setter.
   fileViewerViewMode: 'rendered' | 'source';
   onFileViewerViewModeChange: (mode: 'rendered' | 'source') => void;
+  // Follow live-update cadence for the fleet FileViewer (WARDEN-749). The SAME
+  // already-resolved web-safe interval App owns for ChatSidebar's FileViewer
+  // (resolvePollIntervalMs at the source) so Follow shares the dashboard's
+  // cadence rather than hardcoding its own. WARDEN-757 mounted the fleet
+  // FileViewer "mirroring ChatSidebar's mount verbatim" but OMITTED this prop
+  // (FileViewerProps.pollIntervalMs is required since WARDEN-749) — surfaced as a
+  // tsc error when this branch rebased past WARDEN-749/757; threaded here to keep
+  // the build green and complete the mirror the WARDEN-757 commit intended.
+  pollIntervalMs: number;
   // "Group agents by: Health | Host | Project" mode (WARDEN-237; Project added in
   // WARDEN-741). Lifted to App + persisted (WARDEN-468) so the toggle survives a
   // Warden restart — App owns the single source of truth and this is read-only
@@ -257,7 +269,44 @@ function TokenChip({ agent }: { agent: Chat }) {
   );
 }
 
-export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, groupBy, onGroupByChange: setGroupBy, collapsedHosts, onCollapsedHostsChange: setCollapsedHosts }: Props) {
+/**
+ * Per-agent uncommitted-WIP chip (WARDEN-766): the fanned /api/git-status dirty
+ * signal + ±N magnitude for THIS agent, surfaced in the row so a coordinator sees
+ * which agents hold uncommitted work WITHOUT leaving Fleet Health for the sidebar.
+ *
+ * Renders the +N −M chip ONLY when the fanned status reports `clean === false`. The
+ * magnitude comes from the SAME `diffstat` field /api/git-status serves and the
+ * sidebar's per-row DiffStatChip renders, so this REUSES DiffStatChip verbatim (no
+ * new glyph/color vocabulary — WARDEN-68). DiffStatChip itself returns null for a
+ * null/+0−0 diffstat; a dirty agent with an all-untracked WIP (no tracked edits) thus
+ * shows nothing here — never a misleading +0 −0 — while the summary bar's dirtyCount
+ * still counts it (clean === false), so the agent is surfaced at the fleet level
+ * even when its row carries no magnitude. The `hasMagnitude` pre-check mirrors that
+ * guard so the titled wrapper renders ONLY when there is a chip to hover (no empty
+ * titled span for an all-untracked dirty agent).
+ *
+ * `status` absent (still loading / not eligible / unreachable) → renders nothing,
+ * the same graceful-N/A contract ResourceChip / TokenChip follow.
+ */
+function WipChip({ status }: { status?: FleetGitStatusSlice | null }) {
+  if (!status || status.clean !== false) return null;
+  const ins = status.diffstat?.insertions ?? 0;
+  const del = status.diffstat?.deletions ?? 0;
+  // Mirror DiffStatChip's own +0−0/null guard so the titled wrapper exists ONLY when
+  // the chip renders — a dirty-but-all-untracked agent shows nothing (the summary-bar
+  // count still carries it).
+  if (ins === 0 && del === 0) return null;
+  return (
+    <span
+      className="shrink-0 tabular-nums"
+      title={`uncommitted working-tree WIP — +${ins} −${del} (insertions/deletions vs HEAD)`}
+    >
+      <DiffStatChip diffstat={status.diffstat} />
+    </span>
+  );
+}
+
+export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, groupBy, onGroupByChange: setGroupBy, collapsedHosts, onCollapsedHostsChange: setCollapsedHosts }: Props) {
   const [healthData, setHealthData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -273,6 +322,13 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
   // its own slow ~60s cadence inside the hook — explicitly NOT part of the 10s
   // /api/health poll below, so adding the sparklines is a no-op on the hot path.
   const { series: activitySeries } = useActivitySeries();
+  // Per-agent uncommitted-WIP fan (WARDEN-766): fans /api/git-status across the
+  // eligible fleet (active project agents) and lifts { statusByKey, dirtyCount,
+  // errorCount, refresh, loading } so BOTH the per-row WipChip in renderAgent AND the
+  // summary-bar "N dirty" count read off the ONE fan-out. Fetch-on-mount + manual ↻
+  // only (no auto-poll) — see useFleetGitStatus. `healthData?.agents ?? []` no-ops
+  // cleanly before the first /api/health response (empty eligible → empty result).
+  const fleetGit = useFleetGitStatus(healthData?.agents ?? []);
 
   // Multi-select batch-kill (WARDEN-371): the set of selected agent ids, held at
   // the dashboard level so it can span every health/host section. Mirrors the
@@ -521,6 +577,13 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
           nothing when the chat doesn't join a budget session (budget off / no
           usage / no cwd+host match). */}
       <TokenChip agent={agent} />
+
+      {/* Per-agent uncommitted WIP (WARDEN-766): the fanned /api/git-status dirty
+          signal + ±N magnitude for THIS agent. Renders the +N −M chip only when the
+          fanned status says clean === false; absent (loading / not eligible /
+          unreachable) or clean → nothing, identical graceful-N/A to the chips above.
+          See WipChip. */}
+      <WipChip status={fleetGit.statusByKey[id]} />
     </div>
     );
   };
@@ -645,8 +708,24 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
               className="rounded-none"
             >Project</Button>
           </div>
-          <button className="text-xs text-muted-foreground hover:text-foreground active:scale-95 transition-all duration-150 ease-out" onClick={fetchHealth} disabled={loading}>
-            {loading ? '…' : '↻'}
+          {/* Header ↻ (WARDEN-766): composed to refresh BOTH health AND the per-agent
+              git-status fan. The git fan has no dedicated panel header of its own (it
+              is distributed — a per-row WipChip + the summary-bar count), so the fleet
+              ↻ is the natural place to re-pull it; a coordinator pressing ↻ expects
+              "refresh the fleet view," which now includes repository state. This does
+              NOT add an auto-poll: the 10s /api/health interval below calls fetchHealth
+              directly (not this handler), so the N-fetch git fan still fires ONLY on
+              mount / membership change / this manual ↻ — useFleetGitStatus's no-auto-
+              poll contract is preserved. FleetRecentCommits / FleetActivityHeatmap
+              keep their OWN per-panel ↻ (each is a discrete collapsible panel with a
+              header); the git fan is not, so it rides this one. */}
+          <button
+            className="text-xs text-muted-foreground hover:text-foreground active:scale-95 transition-all duration-150 ease-out"
+            onClick={() => { void fetchHealth(); fleetGit.refresh(); }}
+            disabled={loading || fleetGit.loading}
+            title="refresh fleet health + per-agent git status"
+          >
+            {loading || fleetGit.loading ? '…' : '↻'}
           </button>
           <button className="text-xs text-muted-foreground hover:text-foreground active:scale-95 transition-all duration-150 ease-out" onClick={onClose}>
             ×
@@ -665,6 +744,36 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
             <span className="text-red-500">{healthData.summary.critical} critical</span>
             <span className="text-gray-500">{healthData.summary.idle} idle</span>
             <span className="text-gray-500">{healthData.summary.closed} closed</span>
+            {/* Fleet-wide uncommitted-WIP count (WARDEN-766): the # of fanned agents
+                whose /api/git-status reported clean === false — the missing
+                repository-state axis in the summary bar. Reuses the sidebar's amber/
+                yellow dirty vocabulary (the ±N chip family) so "dirty" reads in the
+                same color everywhere. Only rendered when > 0 so a clean fleet stays
+                quiet. dirtyCount excludes error/loading agents (counted below), so a
+                transiently-unreachable agent is never misread as clean OR dirty. */}
+            {fleetGit.dirtyCount > 0 && (
+              <>
+                <span className="text-muted-foreground">·</span>
+                <span
+                  className="text-yellow-500"
+                  title={`${fleetGit.dirtyCount} agent${fleetGit.dirtyCount === 1 ? '' : 's'} with uncommitted working-tree WIP (fanned /api/git-status across active project agents)`}
+                >
+                  {fleetGit.dirtyCount} dirty
+                </span>
+              </>
+            )}
+            {/* Honest partial-failure note (WARDEN-89): a per-agent git-status fetch
+                that failed (host unreachable / non-ok HTTP / an HTTP-200 `error` body)
+                is surfaced here rather than read as a false clean/empty — mirrors
+                FleetRecentCommits' "N unreachable" note. Only rendered when > 0. */}
+            {fleetGit.errorCount > 0 && (
+              <span
+                className="text-muted-foreground/70"
+                title={`${fleetGit.errorCount} agent${fleetGit.errorCount === 1 ? '' : 's'} whose /api/git-status fan-out failed (counted, not read as clean)`}
+              >
+                · {fleetGit.errorCount} unreachable
+              </span>
+            )}
           </div>
         </div>
       )}
@@ -1075,6 +1184,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
         timestampFormat={timestampFormat}
         viewMode={fileViewerViewMode}
         onViewModeChange={onFileViewerViewModeChange}
+        pollIntervalMs={pollIntervalMs}
         onNavigate={(p) => setFileTarget((prev) => (prev ? { ...prev, path: p } : prev))}
         onOpenChange={(o) => { if (!o) setFileTarget(null); }}
       />

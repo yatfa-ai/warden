@@ -334,7 +334,32 @@ export async function validateHost(host, cfg) {
 // ---------------- SSH transport (remote hosts) ----------------
 
 // Run a remote command, capture stdout/stderr. Returns {ok, code, stdout, stderr}.
+//
+// Resolves on the child 'close' event (NOT 'exit') — the WARDEN-464/766
+// stdout-completeness discipline. 'exit' fires when the process ends but BEFORE
+// the buffered stdio pipe finishes draining; the final 'data' chunks arrive
+// AFTER 'exit'. Under the fleet-wide /api/git-status fan (N remote agents × ~8
+// runGit probes each, all in flight at once via Promise.allSettled — WARDEN-766),
+// the saturated event loop can process a given child's 'exit' callback before
+// its final stdout 'data' callback, so resolving on 'exit' captured EMPTY stdout
+// for a probe that exited 0 — `git status --porcelain` read as '' for a genuinely
+// dirty remote repo → clean:true (false clean), the exact failure WARDEN-766's
+// LOCAL twin (runLocalCapture) was fixed for. The mechanism is child-binary-
+// independent (it's libuv pipe-drainage scheduling under a saturated loop, not
+// anything about ssh vs git), so the remote transport races under the fan the
+// same way the local one did pre-fix. 'close' fires only AFTER the stdio streams
+// fully drain, so stdout/stderr are always complete when the promise resolves —
+// the same discipline runLocalCapture and runLocalTmux already ship.
+//
+// `spawn` is injectable via opts.spawn (defaults to node's child_process.spawn)
+// so the 'close'-not-'exit' guard has a DETERMINISTIC unit test: a fake child
+// emitting 'exit' BEFORE its final stdout 'data' (the adversarial order the
+// saturated loop produces) must still resolve with COMPLETE stdout — a real ssh
+// subprocess can't reproduce that order reliably on every machine (and ssh isn't
+// available in every sandbox). Mirrors runLocalCapture's `spawn` seam; runWithPool
+// uses the same idea via its `deps` param.
 export function run(host, cmd, opts = {}, cfg = {}) {
+  const spawnFn = opts.spawn ?? spawn;
   const timeout = opts.timeout ?? 30000;
   const connectTimeout = Math.min(20, Math.max(3, Math.ceil(timeout / 1000)));
   const remote = `bash -lc ${shellQuote(cmd)}`;
@@ -351,7 +376,7 @@ export function run(host, cmd, opts = {}, cfg = {}) {
   args.push(host, remote);
 
   return new Promise((resolve) => {
-    const child = spawn(SSH_BIN, args, { windowsHide: true });
+    const child = spawnFn(SSH_BIN, args, { windowsHide: true });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => child.kill('SIGKILL'), timeout);
@@ -361,7 +386,13 @@ export function run(host, cmd, opts = {}, cfg = {}) {
       clearTimeout(timer);
       resolve({ ok: false, code: -1, stdout, stderr: stderr + String(err) });
     });
-    child.on('exit', (code) => {
+    // 'close' (NOT 'exit') — see the function header: 'close' fires only after the
+    // stdio streams drain, so stdout/stderr are complete. 'exit' can fire first and,
+    // under the fleet-wide concurrency, capture empty stdout (false-clean git-status)
+    // (WARDEN-464/766). 'close' passes the same `code`, so the {ok, code, stdout, stderr}
+    // contract is unchanged — it only makes stdout complete, which helps (not hazards)
+    // isTransportFailure's classifier: it sees real stdout instead of an emptied one.
+    child.on('close', (code) => {
       clearTimeout(timer);
       resolve({ ok: code === 0, code: code ?? -1, stdout, stderr });
     });

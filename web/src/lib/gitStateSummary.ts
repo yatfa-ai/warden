@@ -1499,6 +1499,131 @@ export function bindFleetRowOpenFile(
   return onOpenFile ? (path: string) => onOpenFile(chatId, path) : undefined;
 }
 
+// ---- Fleet-wide git-STATUS fan-out aggregation (WARDEN-766) -------------------
+//
+// The cross-fleet WORKING-TREE-STATE layer — the missing repository-state axis in
+// Fleet Health (HealthDashboard.tsx). Where FleetRecentCommits (WARDEN-597) fans
+// /api/git-log across the fleet for the COMMIT-HISTORY axis and
+// summarizeProjectGitState (above) rolls the per-pane CACHED status for the sidebar's
+// project chips, this fans /api/git-status across every active project agent so Fleet
+// Health can surface — per agent — whether it has uncommitted WIP and its magnitude
+// (±N), plus a fleet-wide "N dirty" count in the summary bar. A coordinator scanning
+// the fleet no longer has to leave Fleet Health for the sidebar to see which agents
+// hold the uncommitted work most at risk if an agent crashes or the coordinator
+// interrupts it.
+//
+// The closest sibling is FleetRecentCommits: this is the STATUS analog of that
+// commit-history fan. WARDEN-766's directive is to mirror FleetRecentCommits'
+// fetch discipline VERBATIM (eligible gate, eligibleKey membership signature,
+// Promise.allSettled, the WARDEN-89 false-empty guard, fetch-on-mount + manual ↻,
+// no auto-poll) — the only divergence is the route (/api/git-status, a single-shot
+// per-chat probe, vs /api/git-log) and that the result is a per-agent MAP + a count
+// rather than a merged list. Mirroring applies to the React hook (useFleetGitStatus);
+// this pure layer mirrors buildFleetRecentCommitsUrl (URL builder) +
+// mergeFleetCommitsByEpoch (aggregation).
+//
+// Pure (no React import, no fetch) so it is unit-testable directly via node,
+// mirroring mergeFleetCommitsByEpoch / buildFleetRecentCommitsUrl. The population
+// gate is REUSED (fleetCommitSearchEligible — active + project, keyed by key || id,
+// deduped, the same population the sibling fleet fans use); the actual fetches + the
+// WARDEN-89 false-empty guard live in the useFleetGitStatus React hook. Outcomes are
+// processed in caller (chats) iteration order so the statusByKey map + the counts
+// are deterministic and tests assert deep equality — the convention the rest of this
+// module follows.
+
+// The minimal /api/git-status slice the Fleet Health UI reads: `clean` (the dirty
+// signal; clean === false ⇒ uncommitted WIP) + `diffstat` (the ±N magnitude). Both
+// are top-level fields /api/git-status ALREADY serves (clean parsed from
+// `git status --porcelain` at gitRoutes.js; diffstat parsed from
+// `git diff HEAD --shortstat`), so this is a pure pass-through of two fields — no new
+// fetch, no backend change. clean is null for a non-git / no-branch cwd (the server
+// gates `clean: branch ? clean : null`); diffstat is null there too AND for a clean
+// tree / an all-untracked WIP. Defined INLINE (the SAME shape /api/git-status serves)
+// — deliberately NOT imported from the React-layer GitStateStatus type — so this pure
+// module stays decoupled and is unit-testable with plain objects, the same
+// decoupling GitStateChat / GitStateStatus / FleetSearchChat rely on.
+export interface FleetGitStatusSlice {
+  clean: boolean | null;
+  diffstat: { files: number; insertions: number; deletions: number } | null;
+}
+
+// One agent's fan-out outcome. `ok: false` = that agent's /api/git-status fetch
+// failed (host unreachable / non-ok HTTP / network / an HTTP-200 `error` body the
+// hook's WARDEN-89 guard maps to a failure) — counted as an error but never dropped
+// silently, and never blanking the other agents' statuses (the Promise.allSettled
+// fleet contract). `ok: true` carries that agent's { clean, diffstat } slice.
+// Mirrors FleetRecentOutcome's ok/error discriminator (the recent-commits fan's
+// per-agent outcome), including the WARDEN-89 contract that an error is COUNTED,
+// never read as a false clean/empty status.
+export type FleetGitStatusOutcome =
+  | { ok: true; key: string; status: FleetGitStatusSlice }
+  | { ok: false; key: string };
+
+export interface FleetGitStatusResult {
+  // Per-agent { clean, diffstat }, keyed by `key || id` (the same key the fan-out
+  // fetches /api/git-status?id= with — fleetCommitSearchEligible's resolved key).
+  // ONLY ok agents get an entry — an error / loading / not-yet-fetched agent is
+  // absent, so statusByKey[id] being undefined is the graceful N/A (render nothing),
+  // identical to HealthDashboard's ResourceChip / TokenChip. A clean ok agent DOES
+  // get an entry (clean: true) so the React layer could one day distinguish "fetched
+  // + clean" from "still loading"; today both render no per-row chip (the chip gates
+  // on clean === false), so including clean agents is honest, not noise.
+  statusByKey: Record<string, FleetGitStatusSlice>;
+  // # of fanned agents with status.clean === false — the fleet-wide "N dirty" count
+  // surfaced in the Fleet Health summary bar. An error / loading agent is NOT dirty
+  // (it's counted in errorCount / simply absent from the map), so the count is honest
+  // and never inflated by an unknown-state agent.
+  dirtyCount: number;
+  // # of fanned agents whose fetch failed — surfaced honestly as a "· N unreachable"
+  // note (WARDEN-89 — never let a per-agent failure masquerade as a clean/empty
+  // status). errorCount ≤ eligible.length always (one outcome per fanned agent).
+  errorCount: number;
+}
+
+/**
+ * Turn N per-agent /api/git-status outcomes into the Fleet Health view: a per-agent
+ * { clean, diffstat } map + a fleet-wide dirty count + an honest error count. Every
+ * ok agent gets a map entry (clean OR dirty — the React layer gates the per-row chip
+ * on clean === false, so a clean entry is harmless + keeps the "fetched vs loading"
+ * distinction available); ok:false agents are counted into errorCount WITHOUT
+ * blanking the ok agents' entries (the Promise.allSettled fleet contract). dirtyCount
+ * counts ONLY ok agents whose clean === false — an error agent is never dirty.
+ *
+ * Outcomes are processed in caller (chats) order, so the map + counts are
+ * deterministic and tests assert deep equality — the convention the rest of this
+ * module follows. Pure + dependency-free (FleetGitStatusSlice / FleetGitStatusOutcome
+ * are defined in this same file, so there is not even an `import type`), so
+ * fleetGitStatus.test.mjs exercises it standalone alongside the URL builder.
+ */
+export function buildFleetGitStatus(outcomes: FleetGitStatusOutcome[]): FleetGitStatusResult {
+  const statusByKey: Record<string, FleetGitStatusSlice> = {};
+  let dirtyCount = 0;
+  let errorCount = 0;
+  for (const o of outcomes) {
+    if (!o.ok) {
+      errorCount += 1;
+      continue;
+    }
+    statusByKey[o.key] = o.status;
+    if (o.status.clean === false) dirtyCount += 1;
+  }
+  return { statusByKey, dirtyCount, errorCount };
+}
+
+/**
+ * Build the per-agent fetch URL for the Fleet Health git-status fan (WARDEN-766):
+ * `/api/git-status?id=<key>`. The status analog of buildFleetRecentCommitsUrl, but
+ * for /api/git-status (the working-tree-state route) instead of /api/git-log. No
+ * query, no limit — /api/git-status is a single-shot per-chat probe. Pure (no fetch)
+ * so it is unit-testable without a React runner, mirroring buildFleetRecentCommitsUrl
+ * — the URL is the only route-dependent line in the fan-out, and isolating it lets
+ * the WARDEN-122 key-encoding discipline be asserted (a container/host key reaches
+ * git as ONE argument, never split across params).
+ */
+export function buildFleetGitStatusUrl(key: string): string {
+  return `/api/git-status?id=${encodeURIComponent(key)}`;
+}
+
 // ---- Fleet-wide working-tree CODE search aggregation (WARDEN-589) ------------
 //
 // The cross-agent WORKING-TREE layer — the fleet-wide counterpart to the per-agent
