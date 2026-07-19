@@ -8,12 +8,21 @@
 // behavior that a render-only check can't catch is pinned at the pure layer:
 //
 //   1. classifyChangesView — turns a /api/git-diff response into the render
-//      decision (loading / error / clean / dirty). A clean tracked file returns
-//      `diff: null`; `git diff HEAD -- <file>` can ALSO yield an empty string for
-//      a clean file — BOTH mean "no uncommitted changes" and must render the
-//      empty-state, never a misleading blank diff. A non-null `error` is surfaced,
-//      never masked as clean (the endpoint returns 200 with a populated `error`
-//      for every soft failure — see ConflictView.tsx:85 / DiffViewer.tsx:96).
+//      decision (loading / error / untracked / clean / dirty). An untracked file
+//      is a CHANGE this view exists to surface (agents create new files
+//      constantly), so the backend returns { diff: null, untracked: true } for one
+//      — `git diff HEAD -- <untracked>` is empty, so the route disambiguates with
+//      `git ls-files --error-unmatch` and returns { diff: null, untracked: true }
+//      (src/gitRoutes.js getLocalGitDiff + the delivered /api/git-diff path).
+//      untracked MUST render its own state, NEVER "no uncommitted changes": the
+//      route's `untracked` flag exists exactly to let the UI say "untracked"
+//      instead of "no changes". Only diff null OR '' with untracked=false reaches
+//      `clean` (the route returns null for a clean tracked file; `git diff HEAD`
+//      can ALSO yield '' — both mean "no uncommitted changes"). A non-null `error`
+//      is surfaced, never masked as clean (the endpoint returns 200 with a
+//      populated `error` for every soft failure — see ConflictView.tsx:85 /
+//      DiffViewer.tsx:96). Ordering mirrors DiffViewer.tsx's
+//      loading/error/untracked/empty/dirty branch sequence.
 //
 //   2. resolveViewToggles — the mutual-exclusivity contract for the toolbar's
 //      button-driven alternate views (annotate / history / changes). Turning one
@@ -37,30 +46,45 @@ export interface ChangesDiffResponse {
 
 // The render decision for the Changes view. `loading` is owned by the component
 // (it gates the fetch) but pre-empts the response classification so a stale
-// non-null diff from a prior file never flashes before the spinner.
+// non-null diff from a prior file never flashes before the spinner. `untracked`
+// is a distinct state checked BEFORE `clean`: an untracked file is a real change
+// (agents create new files constantly), and the endpoint always pairs untracked
+// with diff:null (git diff HEAD -- <untracked> is empty), so it must never read
+// as the "no uncommitted changes" empty-state.
 export type ChangesViewState =
   | { kind: 'loading' }
   | { kind: 'error'; message: string }
+  | { kind: 'untracked' }
   | { kind: 'clean' }
   | { kind: 'dirty'; diff: string; untracked: boolean };
 
 // Classify a working-tree-vs-HEAD diff response into the Changes view's render
-// decision. Pure so the clean vs dirty vs error branches are unit-testable.
+// decision. Pure so the untracked / clean / dirty / error branches are unit-testable.
 //
-// Precedence (mirrors DiffViewer.tsx's empty/error/dirty ordering, applied to the
-// single-file working-tree case):
-//   - loading → spinner (pre-empts everything; a prior file's diff must not show).
-//   - error non-null → surface it (never mask as a clean empty-state).
-//   - diff is a non-empty string → dirty: render via DiffBlock. `untracked` rides
-//     along so the component can badge a brand-new file; DiffBlock handles
-//     whatever non-null diff string the endpoint returns (for an untracked file
-//     the whole file shows as added).
-//   - diff null OR '' → clean: empty-state. Both shapes occur — the route returns
-//     null for a clean tracked file, and `git diff HEAD` can yield '' — both mean
-//     no uncommitted changes (per WARDEN-786's contract + collisionCompare fixtures).
+// Precedence (mirrors DiffViewer.tsx's loading/error/untracked/empty/dirty branch
+// order — untracked is checked BEFORE clean):
+//   - loading -> spinner (pre-empts everything; a prior file's diff must not show).
+//   - error non-null -> surface it (never mask as a clean empty-state).
+//   - untracked with no non-empty diff -> untracked: render its own state. This is
+//     the real production input for a brand-new file — the endpoint returns
+//     { diff: null, untracked: true } (git diff HEAD -- <untracked> is empty, so
+//     the route disambiguates with `git ls-files --error-unmatch`). A new file is
+//     100% a change this view exists to surface, so it must NOT read as "no
+//     uncommitted changes" — the `untracked` flag exists exactly so the UI can say
+//     "untracked" instead of "no changes" (src/gitRoutes.js getLocalGitDiff).
+//   - diff is a non-empty string -> dirty: render via DiffBlock. `untracked` rides
+//     along defensively (in practice the endpoint never pairs a non-empty diff
+//     with untracked=true — untracked always yields an empty diff — but the field
+//     is carried honestly so the type can't lie if that ever changes).
+//   - diff null OR '' with untracked=false -> clean: empty-state. Both shapes
+//     occur — the route returns null for a clean tracked file, and `git diff HEAD`
+//     can yield '' — both mean no uncommitted changes.
 export function classifyChangesView(resp: ChangesDiffResponse, loading: boolean): ChangesViewState {
   if (loading) return { kind: 'loading' };
   if (resp.error) return { kind: 'error', message: resp.error };
+  if (resp.untracked && !(typeof resp.diff === 'string' && resp.diff.length > 0)) {
+    return { kind: 'untracked' };
+  }
   if (typeof resp.diff === 'string' && resp.diff.length > 0) {
     return { kind: 'dirty', diff: resp.diff, untracked: !!resp.untracked };
   }

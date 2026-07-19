@@ -1211,11 +1211,12 @@ function HistoryContent({ commits, historyLoading, historyError, chatId, filePat
 // state, Changes = what's uncommitted in *this* file). The fetch + loading/error
 // state live in FileViewer (passed in here), mirroring AnnotatedContent /
 // HistoryContent's presentational shape. classifyChangesView turns the response
-// into the render decision (loading spinner / surfaced error / clean empty-state /
-// DiffBlock), so the honest-error discipline (WARDEN-89 / WARDEN-68) is enforced
-// at the pure, unit-tested layer — a non-null `error` is never masked as a
-// misleading "No uncommitted changes", and a clean file (null OR empty-string
-// diff) never renders a blank diff box.
+// into the render decision (loading spinner / surfaced error / untracked new-file
+// notice / clean empty-state / DiffBlock), so the honest-state discipline
+// (WARDEN-89 / WARDEN-68) is enforced at the pure, unit-tested layer — a non-null
+// `error` is never masked as a misleading "No uncommitted changes", a brand-new
+// untracked file is surfaced as a change (never the clean empty-state), and a
+// clean tracked file (null OR empty-string diff) never renders a blank diff box.
 function ChangesContent({ diff, untracked, loading, error }: {
   diff: string | null;
   untracked: boolean;
@@ -1237,24 +1238,30 @@ function ChangesContent({ diff, untracked, loading, error }: {
           <span>{view.message}</span>
         </div>
       )}
+      {view.kind === 'untracked' && (
+        // A brand-new file not yet in git is 100% a change this view exists to
+        // surface (agents create new files constantly). The endpoint returns
+        // { diff: null, untracked: true } for one — git diff HEAD -- <untracked>
+        // is empty, so there is no diff to render; surface it as its own state so
+        // it is never mistaken for the "no uncommitted changes" clean empty-state
+        // (the route's `untracked` flag exists exactly to let the UI say
+        // "untracked" instead of "no changes" — src/gitRoutes.js getLocalGitDiff).
+        <div className="flex items-center gap-2 py-8 text-muted-foreground">
+          <FilePenIcon className="w-4 h-4 shrink-0" />
+          <span>New file — not yet tracked (no committed history to diff against)</span>
+        </div>
+      )}
       {view.kind === 'clean' && (
         <div className="flex items-center justify-center py-8 text-muted-foreground">
           No uncommitted changes to this file
         </div>
       )}
       {view.kind === 'dirty' && (
-        <>
-          {/* A brand-new (untracked) file shows the whole file as added; badge it
-              so an all-green diff isn't mistaken for an additive edit to an
-              existing file. DiffBlock handles whatever non-null diff the endpoint
-              returns (for an untracked file that's the entire file as additions). */}
-          {view.untracked && (
-            <div className="mb-1.5 text-[11px] text-muted-foreground/70">
-              New file — not yet tracked (entire file shown as an addition)
-            </div>
-          )}
-          <DiffBlock diff={view.diff} />
-        </>
+        // DiffBlock handles whatever non-null diff string the endpoint returns.
+        // (Untracked files never reach here in production — they pair with
+        // diff:null and render the `untracked` branch above — but `view.untracked`
+        // is carried defensively in case the contract ever changes.)
+        <DiffBlock diff={view.diff} />
       )}
     </div>
   );

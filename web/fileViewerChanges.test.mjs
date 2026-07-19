@@ -7,13 +7,19 @@
 // the REAL src/lib/fileViewerChanges.ts (transpiled TS -> ESM via Vite's OXC
 // transform) and drives the two pure seams the component's behavior hinges on:
 //
-//   - classifyChangesView: the clean/empty vs dirty vs error vs loading render
-//     decision. This is where a wrong branch silently misleads a coordinator:
-//     masking an `error` as "No uncommitted changes" hides a real failure
-//     (WARDEN-89 / WARDEN-68 honest-error discipline), and treating an empty-
-//     string diff as dirty would show a blank diff box for a clean file. Both
-//     null AND '' must read as clean — the route returns null for a clean tracked
-//     file, and `git diff HEAD` can yield ''.
+//   - classifyChangesView: the untracked vs clean/empty vs dirty vs error vs
+//     loading render decision. This is where a wrong branch silently misleads a
+//     coordinator: masking an `error` as "No uncommitted changes" hides a real
+//     failure (WARDEN-89 / WARDEN-68 honest-state discipline); treating an empty-
+//     string diff as dirty would show a blank diff box for a clean file; and —
+//     the bug this suite guards against — folding an untracked (brand-new) file
+//     into the clean empty-state hides exactly the kind of change this view
+//     exists to surface (agents create new files constantly). The endpoint
+//     returns { diff: null, untracked: true } for an untracked file (git diff
+//     HEAD -- <untracked> is empty, so the route disambiguates with
+//     `git ls-files --error-unmatch`), so the REAL production input for "new
+//     file" is diff:null + untracked:true, which MUST classify as `untracked`,
+//     never `clean`. Only diff null OR '' with untracked=false reads as clean.
 //
 //   - resolveViewToggles: the mutual-exclusivity contract for the toolbar's
 //     alternate views (annotate / history / changes). Forgetting to clear
@@ -78,11 +84,31 @@ test('a non-empty diff is dirty and carries the diff string verbatim', () => {
   assert.deepEqual(classifyChangesView(resp(diff), false), { kind: 'dirty', diff, untracked: false });
 });
 
-test('an untracked file with a diff is dirty with untracked surfaced (whole file shows as added)', () => {
-  // untracked rides along so the component can badge a brand-new file; DiffBlock
-  // handles whatever non-null diff string the endpoint returns.
-  const diff = '+brand new contents\n';
-  assert.deepEqual(classifyChangesView(resp(diff, true), false), { kind: 'dirty', diff, untracked: true });
+console.log('\nclassifyChangesView — untracked new file (success criterion 2, the case the view exists to surface)');
+
+test('a brand-new (untracked) file classifies as untracked, NOT clean — the real production input', () => {
+  // This is the input the endpoint ACTUALLY delivers for a new file: git diff
+  // HEAD -- <untracked> is empty, so the route disambiguates with
+  // `git ls-files --error-unmatch` and returns { diff: null, untracked: true }.
+  // A new file is 100% a change, so it must render its own `untracked` state —
+  // never the "No uncommitted changes" clean empty-state. (On the pre-fix
+  // main-tip this assertion goes RED: untracked was folded into `clean`.)
+  assert.deepEqual(classifyChangesView(resp(null, true), false), { kind: 'untracked' });
+});
+
+test('an empty-string diff with untracked=true is also untracked (git diff HEAD yields "" for a new file)', () => {
+  // Same disambiguation as above if the empty branch happened to return '' rather
+  // than null — untracked wins over the empty/clean reading.
+  assert.deepEqual(classifyChangesView(resp('', true), false), { kind: 'untracked' });
+});
+
+test('untracked is checked BEFORE clean — diff:null + untracked:true is never clean', () => {
+  // The dangerous misclassification the original code shipped: an untracked file
+  // fell through to `clean`. Pin the precedence explicitly so a reordering can't
+  // silently resurrect the bug.
+  const result = classifyChangesView(resp(null, true), false);
+  assert.notEqual(result.kind, 'clean');
+  assert.equal(result.kind, 'untracked');
 });
 
 console.log('\nclassifyChangesView — error surfacing (success criterion 4)');
