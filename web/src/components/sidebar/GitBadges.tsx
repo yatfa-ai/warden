@@ -23,6 +23,9 @@ import {
   sortGitAgentsByMagnitudeDesc,
   sortByStashCountDesc,
   sortGitAgentsByConflictFirst,
+  rankGitTriage,
+  pickGitTriageTop,
+  gitTriageReason,
 } from '@/lib/gitStateSummary';
 import { formatWhatsNewLine, type WhatsNewSummary } from '@/lib/whatsNew';
 import { formatRelative, formatAbsoluteFull } from '@/lib/formatTimestamp';
@@ -497,6 +500,62 @@ export function GitStateBadges({ dirty, unpushed, behind, atRisk, stashed, stall
       <GitStateBadge kind="stash" count={stashed} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
       <GitStateBadge kind="stalled" count={stalled} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
     </>
+  );
+}
+
+/**
+ * Directed triage callout for the fleet git-state chips (WARDEN-745) — the
+ * compositional capstone of the 6-axis git-state chip vein, rendered in the fleet
+ * header alongside <GitStateBadges>. Where the 6 chips (±N/↑N/↓N/⚑N/🗄N/💤N) are a
+ * flat count a human must rank by hand across N agents, this promotes the ONE
+ * composite-worst agent as "triage THIS first, because X" — a verbatim mirror of
+ * WARDEN-384's AttentionBadge callout (rankGitTriage + pickGitTriageTop +
+ * gitTriageReason in gitStateSummary.ts), applied to git state.
+ *
+ * Renders nothing when fewer than 2 agents carry a git signal (the `>= 2` gate,
+ * mirroring AttentionBadge's `ranked.length >= 2`: with 0 or 1 triageable agents
+ * there is no ranking decision to promote), OR when focus exclusion leaves no
+ * eligible target (WARDEN-482: never promote the pane the human is staring at — the
+ * "trains them to ignore it" product-killer). Clicking deep-links into the agent's
+ * pane via onOpenChat — no new routing.
+ *
+ * The glyph + tone reuse the GIT_STATE_KIND table entry for the promoted item's tier
+ * (the tier strings ARE the kind keys), so the callout's glyph matches the chip whose
+ * axis it is promoting — one visual system, no second mapping table. Styled as a
+ * distinct bordered pill (mirroring the AttentionBadge Callout's `border bg-muted/40`
+ * fill) so it reads as the directed answer, not another chip.
+ */
+export function GitTriageCallout({ agents, chats, focused, onOpenChat }: {
+  agents: ProjectGitAgent[];
+  chats: Chat[];
+  focused?: string | null;
+  onOpenChat: (id: string) => void;
+}) {
+  const { ranked } = useMemo(() => rankGitTriage(agents), [agents]);
+  const top = useMemo(() => pickGitTriageTop(ranked, focused), [ranked, focused]);
+  // Gate mirrors AttentionBadge: a promoted callout only when there are ≥2 triageable
+  // agents AND focus exclusion leaves an eligible target. <2 → silent (the lone chip
+  // already IS the answer); all-eligible-is-focused → silent (no one to promote).
+  if (!top || ranked.length < 2) return null;
+  const cfg = GIT_STATE_KIND[top.tier];
+  const name = displayName(findChat(chats, top.key));
+  const reason = gitTriageReason(top);
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      onClick={() => onOpenChat(top.key)}
+      title={`Triage ${name} first — ${reason}`}
+      aria-label={`Triage ${name} first: ${reason}`}
+      className="h-7 max-w-[18rem] gap-1 rounded-md border border-border bg-muted/40 px-2 text-muted-foreground hover:bg-accent hover:text-foreground"
+    >
+      <span className={cn('text-xs shrink-0', cfg.color)} aria-hidden>{cfg.glyph}</span>
+      <span className="min-w-0 flex-1 flex items-baseline gap-1 overflow-hidden">
+        <span className="text-[10px] shrink-0">triage first:</span>
+        <span className="min-w-0 shrink truncate text-xs font-medium text-foreground">{name}</span>
+        <span className="min-w-0 shrink truncate text-[10px]">· {reason}</span>
+      </span>
+    </Button>
   );
 }
 

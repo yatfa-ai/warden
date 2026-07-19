@@ -512,6 +512,277 @@ export function sortGitAgentsByConflictFirst(agents: ProjectGitAgent[]): Project
   return [...agents].sort((a, b) => rank(b) - rank(a));  // conflict (1) above the rest (0)
 }
 
+// ─── Directed triage composition (WARDEN-745) ────────────────────────────────
+//
+// The COMPOSITIONAL capstone of the 6-axis git-state chip vein. The 6 per-axis
+// fleet chips (±N dirty / ↑N unpushed / ↓N behind / ⚑N atRisk / 🗄N stashed / 💤N
+// stalled) are each a flat count; with N agents carrying signals the human must
+// mentally rank 6 axes × N agents to decide what to triage FIRST. rankGitTriage
+// composes them into ONE directed answer ("triage THIS first, because X") — a
+// verbatim mirror of WARDEN-384's rankAttention + pickCalloutTop + attentionReason
+// pattern (attentionRollup.ts), applied to git state.
+//
+// This is pure COMPOSITION, not a 7th axis (the vein is COMPLETE — the cross-cycle
+// guidance is explicit: compose, don't extend). It assigns each agent its HIGHEST-
+// precedence present signal (lexicographic tier assignment) then orders within-tier
+// by that axis's already-shipped severity. Every severity field is ALREADY on
+// ProjectGitAgent — headAgeMs/stalled (WARDEN-669/682), diffstat (WARDEN-670),
+// stashCount (WARDEN-689), conflictCount/atRiskReason (WARDEN-701) — so this fn
+// takes `agents` ALONE: no gitStatus map join, no `now`, no new fetch. That makes
+// it a cleaner mirror of rankAttention(rollup) than the proposal's two-arg "Path B"
+// seam, which was recommended ONLY because (at proposal time) those fields had not
+// yet reached ProjectGitAgent. They have now, so the join the proposal wanted to do
+// inside rankGitTriage is already done by summarizeProjectGitState — and
+// ProjectGitAgent stays UNCHANGED, so the existing summarizer deep-equality tests
+// stay green untouched (the proposal's Path B "no mutation" goal, met trivially).
+//
+// Note on "stalled (>7d)": the proposal called for a new STALLED_MS constant + a
+// `Date.now() - headMs` derivation here. Neither is needed — WARDEN-682 already
+// shipped `STALE_HEAD_AGE_MS` (7d) AND the derived `stalled` boolean on every
+// ProjectGitAgent (computed by the summarizer against its own `now`). This fn just
+// reads `agent.stalled`. No new threshold, no clock read — the module stays pure.
+//
+// Pure + dependency-free (ProjectGitAgent is defined in this same file, so there is
+// not even an `import type`), so gitStateSummary.test.mjs exercises it standalone
+// alongside the summarizer + sort cases.
+
+/**
+ * The 6 triage tiers, in PRECEDENCE order. An agent is assigned its highest-
+ * precedence PRESENT signal; the tier strings are intentionally IDENTICAL to the
+ * GIT_STATE_KIND keys in GitBadges.tsx (dirty/unpushed/behind/atRisk/stash/stalled)
+ * so the callout can reuse that table's glyph + color for the promoted tier with no
+ * second mapping table. Each tier is anchored in a SHIPPED per-axis rationale:
+ *
+ *  1. atRisk   — WARDEN-635/701: the repo state that cannot self-resolve (a blocked
+ *                merge / mid op / detached / no-upstream). Needs a human RIGHT NOW.
+ *  2. stalled  — WARDEN-682/710: rotting/abandoned work at risk of loss (>7d).
+ *  3. unpushed — WARDEN-669: the most rot-prone unpushed work.
+ *  4. behind   — most merge debt.
+ *  5. dirty    — WARDEN-670: most integration effort.
+ *  6. stash    — WARDEN-689: deliberately parked OFF the tree — the LEAST urgent.
+ */
+export type GitTriageTier = 'atRisk' | 'stalled' | 'unpushed' | 'behind' | 'dirty' | 'stash';
+
+// Tier → precedence weight (lower sorts earlier = triaged first). Local const
+// mirroring ATTENTION_RANK in attentionRollup.ts.
+const GIT_TRIAGE_TIER_ORDER: Record<GitTriageTier, number> = {
+  atRisk: 0,
+  stalled: 1,
+  unpushed: 2,
+  behind: 3,
+  dirty: 4,
+  stash: 5,
+};
+
+/**
+ * One ranked triage item: the agent key (the deep-link target), the precedence
+ * `tier` it was assigned, and the source `agent` (carrying every field the reason
+ * line + the React render join read). The agent reference is carried verbatim (not
+ * flattened) because the reason line needs DIFFERENT fields per tier (conflictCount
+ * for atRisk, headAgeMs for stalled/unpushed, diffstat for dirty, stashCount for
+ * stash) — flattening all of them onto every item would waste each one; the agent
+ * is pure data, so carrying it keeps the item self-contained without extra coupling.
+ * Mirrors AttentionItem's role (the minimal shape the directed callout needs),
+ * adapted to git state's multi-field-per-tier reason.
+ */
+export interface GitTriageItem {
+  key: string;
+  tier: GitTriageTier;
+  agent: ProjectGitAgent;
+}
+
+/**
+ * Assign an agent its highest-precedence PRESENT signal, or `null` when it carries
+ * NO git signal at all (clean tree, pushed, in-sync, routine state, stash-free,
+ * fresh HEAD). The lexicographic tier assignment the ticket specifies — first match
+ * wins. Internal to rankGitTriage (not exported); a pure step over one agent.
+ */
+function triageTierFor(a: ProjectGitAgent): GitTriageTier | null {
+  if (a.atRisk) return 'atRisk';
+  if (a.stalled) return 'stalled';
+  if (a.ahead > 0) return 'unpushed';
+  if (a.behind > 0) return 'behind';
+  if (a.dirty) return 'dirty';
+  if (a.stashed) return 'stash';
+  return null;
+}
+
+/**
+ * atRiskReason → within-tier precedence (higher = triaged earlier within the atRisk
+ * tier). A blocked merge (conflict) is the ONE repo state that cannot self-resolve
+ * and needs a human RIGHT NOW, so it leads; a clean auto-completing rebase (op)
+ * follows; local-only unbacked work (noUpstream) and a detached HEAD round it out.
+ * Mirrors the per-axis sortGitAgentsByConflictFirst rationale (WARDEN-701),
+ * generalized across all four reason classes.
+ */
+function atRiskReasonRank(reason: ProjectGitAgent['atRiskReason']): number {
+  switch (reason) {
+    case 'conflict': return 3;
+    case 'op': return 2;
+    case 'noUpstream': return 1;
+    case 'detached': return 0;
+    default: return 0;
+  }
+}
+
+/**
+ * Within-tier severity: a NUMBER per agent for its assigned tier, where LARGER =
+ * triaged earlier within the tier. Each branch reuses the SAME severity the
+ * corresponding per-axis sort fn ranks by (headAgeMs for stalled/unpushed, behind
+ * for behind, diffstat magnitude for dirty, stashCount for stash) — composed into
+ * one comparator so the within-tier order is never free-form taste. -1 (sorts last)
+ * guards a null/missing severity the tier should not have produced (defensive — a
+ * stalled/unpushed agent always carries a finite headAgeMs by construction).
+ */
+function tierSeverity(a: ProjectGitAgent, tier: GitTriageTier): number {
+  switch (tier) {
+    case 'atRisk':
+      // conflict (most unmerged) > op > noUpstream > detached. The * 1e6 offset
+      // makes reason-rank dominate, with conflictCount as the within-conflict
+      // tiebreak (a 5-unmerged blocked merge ranks above a 1-unmerged one).
+      return atRiskReasonRank(a.atRiskReason) * 1_000_000 + a.conflictCount;
+    case 'stalled':
+      return a.headAgeMs ?? -1;  // oldest HEAD first (longest-stalled on top)
+    case 'unpushed':
+      return a.headAgeMs ?? -1;  // oldest HEAD first (most rot-prone on top)
+    case 'behind':
+      return a.behind;           // most-behind first
+    case 'dirty':
+      return (a.diffstat?.insertions ?? 0) + (a.diffstat?.deletions ?? 0);  // heaviest first
+    case 'stash':
+      return a.stashCount;       // heaviest-parker first
+  }
+}
+
+/**
+ * Compose the 6 git-state chip axes into ONE urgency-ordered triage list + promoted
+ * top — the compositional capstone of the git-state chip vein (WARDEN-745).
+ *
+ * Returns `{ top, ranked }`:
+ *  - `top`    — the single composite-worst triageable agent (the callout target),
+ *               or `null` when no agent carries any git signal.
+ *  - `ranked` — every triageable agent, worst-first, for a fallback rundown.
+ *
+ * Tier assignment is lexicographic (`triageTierFor`): each agent is tagged with its
+ * highest-precedence present signal. The list is then stable-sorted by tier
+ * precedence asc, then within-tier severity desc (`tierSeverity`). Items are pushed
+ * in input (chats) order, so equal-tier equal-severity ties preserve that order
+ * (Array.prototype.sort is stable on Node ≥12 / V8) — the same determinism
+ * convention the rest of this module follows, so tests assert deep equality.
+ *
+ * `top` is computed regardless of list length (a lone triageable agent is still
+ * `top`); the React layer's `>= 2` gate decides whether to show the callout, NOT
+ * this fn — mirroring rankAttention, which returns its top/ranked whatever the
+ * count and lets AttentionBadge gate the callout to `ranked.length >= 2`.
+ *
+ * Pure + dependency-free (reads only the ProjectGitAgent entries summarizeProjectGitState
+ * already enriched), so gitStateSummary.test.mjs exercises it standalone.
+ */
+export function rankGitTriage(agents: ProjectGitAgent[]): {
+  top: GitTriageItem | null;
+  ranked: GitTriageItem[];
+} {
+  const items: GitTriageItem[] = [];
+  for (const a of agents) {
+    const tier = triageTierFor(a);
+    if (tier === null) continue;  // no signal → not triageable (also drops a clean agent a caller passed by mistake)
+    items.push({ key: a.key, tier, agent: a });
+  }
+  items.sort((x, y) => {
+    const byTier = GIT_TRIAGE_TIER_ORDER[x.tier] - GIT_TRIAGE_TIER_ORDER[y.tier];
+    if (byTier !== 0) return byTier;
+    return tierSeverity(y.agent, y.tier) - tierSeverity(x.agent, x.tier);  // severity desc
+  });
+  return { top: items.length > 0 ? items[0] : null, ranked: items };
+}
+
+/**
+ * Pure: pick the triage-callout target from a `rankGitTriage` result, EXCLUDING the
+ * pane the human is already focused on (WARDEN-482). The "triage THIS first" callout
+ * must never PROMOTE the pane the human is staring at — the roadmap's named
+ * product-killer ("it trains the human to ignore it"). The ranked rundown (`ranked`,
+ * rendered unchanged) still lists every triageable agent including the focused pane,
+ * so this loses NO information — it only chooses what the promoted callout names.
+ *
+ * Verbatim mirror of `pickCalloutTop` (attentionRollup.ts): the first ranked item
+ * whose `key` is not the focused pane, or `null` when focus exclusion (or an empty
+ * list) leaves no eligible item. Kept a SIBLING, NOT folded into rankGitTriage, for
+ * the SAME reason pickCalloutTop is a sibling of rankAttention: rankGitTriage's
+ * `top` is the ungated composite-worst (useful for any future surface that must NOT
+ * focus-exclude), while THIS fn applies the focus gate locally so the two concerns
+ * stay separable + independently testable.
+ *
+ * `focused == null` (no focus context) → behaves as `ranked[0] ?? null`, i.e. bit-
+ * for-bit the ungated `top`. Pure + dependency-free so it is unit-tested directly.
+ */
+export function pickGitTriageTop(
+  ranked: GitTriageItem[],
+  focused?: string | null,
+): GitTriageItem | null {
+  return ranked.find((r) => r.key !== focused) ?? null;
+}
+
+// Tier → "because X" reason when the agent's own fields do not yield a more specific
+// phrase (defensive — e.g. a dirty agent whose diffstat is null). The preferred path
+// is the concrete per-tier phrase built from the agent's severity fields in
+// gitTriageReason, mirroring attentionReason's concrete-signal-first shape.
+const GIT_TRIAGE_REASON_FALLBACK: Record<GitTriageTier, string> = {
+  atRisk: 'non-routine repo state',
+  stalled: 'stalled',
+  unpushed: 'unpushed commits',
+  behind: 'behind upstream',
+  dirty: 'uncommitted changes',
+  stash: 'parked stashes',
+};
+
+/**
+ * The "because X" reason line for a ranked triage item: a concrete phrase built from
+ * the agent's severity fields, mirroring attentionReason's concrete-then-fallback
+ * shape. Each tier phrases its specific signal so the callout reads as a complete,
+ * actionable reason:
+ *   - atRisk  → "merge-conflict blocked · N unmerged" / "merge/rebase in progress" /
+ *               "local-only branch (no upstream)" / "detached HEAD"
+ *   - stalled → "stalled Nd" (+ " + ↑N unpushed" when the stalled agent is ALSO
+ *               unpushed — the multi-signal case, doubly at risk: rotting AND unbacked)
+ *   - unpushed→ "↑N unpushed"
+ *   - behind  → "↓N behind upstream"
+ *   - dirty   → "+N −M uncommitted"
+ *   - stash   → "🗄N parked stash(es)"
+ *
+ * Pure + dependency-free (reads only the carried agent fields), so it is unit-tested
+ * directly alongside rankGitTriage / pickGitTriageTop.
+ */
+export function gitTriageReason(item: GitTriageItem): string {
+  const a = item.agent;
+  switch (item.tier) {
+    case 'atRisk': {
+      if (a.atRiskReason === 'conflict') return `merge-conflict blocked · ${a.conflictCount} unmerged`;
+      if (a.atRiskReason === 'op') return 'merge/rebase in progress';
+      if (a.atRiskReason === 'noUpstream') return 'local-only branch (no upstream)';
+      if (a.atRiskReason === 'detached') return 'detached HEAD';
+      return GIT_TRIAGE_REASON_FALLBACK.atRisk;
+    }
+    case 'stalled': {
+      const days = a.headAgeMs != null ? Math.max(1, Math.round(a.headAgeMs / 86_400_000)) : 0;
+      const stalledLabel = days > 0 ? `stalled ${days}d` : GIT_TRIAGE_REASON_FALLBACK.stalled;
+      // Multi-signal: a stalled agent that is ALSO unpushed is doubly at risk (rotting
+      // AND unbacked) — surface both so the human sees the compounding risk.
+      return a.ahead > 0 ? `${stalledLabel} + ↑${a.ahead} unpushed` : stalledLabel;
+    }
+    case 'unpushed':
+      return `↑${a.ahead} unpushed`;
+    case 'behind':
+      return `↓${a.behind} behind upstream`;
+    case 'dirty': {
+      const ins = a.diffstat?.insertions ?? 0;
+      const del = a.diffstat?.deletions ?? 0;
+      return `+${ins} −${del} uncommitted`;
+    }
+    case 'stash':
+      return `🗄${a.stashCount} parked stash${a.stashCount === 1 ? '' : 'es'}`;
+  }
+}
+
 // A changed-file path that ≥2 distinct active agents in the SAME project both
 // have in their uncommitted working tree — a cross-agent file-edit collision
 // (WARDEN-288). The proactive complement to WARDEN-185, which surfaces a

@@ -55,7 +55,7 @@ import { FleetCommitSearch } from './sidebar/FleetCommitSearch';
 // at-risk-repo-state axis — mounting it lights up all four axes at once.
 // WARDEN-639: detectProjectOutgoingCollisions feeds a 3rd cross-agent collision
 // sibling (committed×committed, both unpushed) alongside the live ⚠ and impending ⏱.
-import { GitCollisionBadge, GitStateBadges } from './sidebar/GitBadges';
+import { GitCollisionBadge, GitStateBadges, GitTriageCallout } from './sidebar/GitBadges';
 import { detectProjectFileCollisions, detectProjectImpendingCollisions, detectProjectOutgoingCollisions, summarizeProjectGitState } from '@/lib/gitStateSummary';
 import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/SidebarBits';
 import { SourceControlPanel } from './sidebar/SourceControlPanel';
@@ -1352,6 +1352,23 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
           agents={fleetGitState.agents}
           chats={chats}
           gitStatus={gitStatus}
+          onOpenChat={onOpenChat}
+        />
+        {/* WARDEN-745: the compositional capstone of the 6 git-state chips above.
+            Where those chips are a flat count a human must rank by hand across N
+            agents, this promotes the ONE composite-worst agent as "triage THIS
+            first, because X" — a verbatim mirror of WARDEN-384's AttentionBadge
+            callout (rankGitTriage + focus-excluded pickGitTriageTop + gitTriageReason
+            in gitStateSummary.ts). Pure composition: it assigns each agent its
+            highest-precedence present signal (atRisk > stalled > unpushed > behind >
+            dirty > stash) and orders within-tier by that axis's already-shipped
+            severity. The focused pane is NEVER promoted (WARDEN-482 guard via
+            pickGitTriageTop). Renders nothing when <2 agents carry a git signal, or
+            the whole fleet is clean/pushed/in-sync. Click → onOpenChat(top.key). */}
+        <GitTriageCallout
+          agents={fleetGitState.agents}
+          chats={chats}
+          focused={focused}
           onOpenChat={onOpenChat}
         />
         <Badge variant="secondary" className="text-xs @max-[18rem]:hidden">{filteredPanes.length}</Badge>
