@@ -760,10 +760,9 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
 
   const handleCreateCollection = () => { setCreateDialogOpen(true); fetchCollections(); };
 
-  const handleCollectionCreated = (_collection: Collection) => {
+  const handleCollectionCreated = (collection: Collection) => {
     fetchCollections();
-    // Optionally enter the newly created collection
-    // enterCollection(_collection);
+    enterCollection(collection);
   };
 
   // WARDEN-396: sync ChatSidebar's derived collection state when a card is
