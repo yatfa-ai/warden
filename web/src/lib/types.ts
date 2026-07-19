@@ -156,10 +156,17 @@ export interface ActivityStats {
  * `directives.md` block (written by observer.js logDirective, read back by the
  * GET /api/directives endpoint). `text` is the FULL directive body (possibly
  * multi-line); `container@host` (+ `role`) is the target.
+ *
+ * `container` is null for legacy pre-WARDEN-642 local/tmux directives, whose
+ * headers were written `## <ts> → null@<host> (<role>)` (the old writer
+ * stringified a local chat's `container: null`). readDirectives normalizes that
+ * literal "null" token back to null (WARDEN-733), so consumers must degrade to
+ * host-only when container is absent — the same genuinely-nullable shape the
+ * WARDEN-505 ObserverPanel fix established for local chats.
  */
 export interface Directive {
   timestamp: string;
-  container: string;
+  container: string | null;
   host: string;
   role: string;
   text: string;

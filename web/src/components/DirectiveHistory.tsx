@@ -264,6 +264,12 @@ function DirectiveEntry({
   setHostFilter: (v: string) => void;
 }) {
   const hostLabels = useHostLabels();
+  // `container` is null for legacy pre-WARDEN-642 local directives (WARDEN-733).
+  // Hoist to a const so its truthiness narrows through the onSelect closures
+  // below — a `directive.container` property access would widen back to
+  // `string | null` inside them (TS does not carry property narrowing into
+  // callbacks, since the property could be mutated between check and invocation).
+  const container = directive.container;
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -272,7 +278,7 @@ function DirectiveEntry({
             <span className="text-xs font-semibold uppercase text-emerald-500">sent</span>
             <span className="text-xs text-muted-foreground">{formatTimestamp(directive.timestamp, timestampFormat)}</span>
             <span className="text-xs font-mono text-muted-foreground bg-muted px-1 rounded">
-              {directive.container}@{hostLabelFor(directive.host, hostLabels) || directive.host}
+              {container ? `${container}@` : ''}{hostLabelFor(directive.host, hostLabels) || directive.host}
             </span>
             <span className="text-xs font-medium">{directive.role || 'agent'}</span>
           </div>
@@ -293,7 +299,7 @@ function DirectiveEntry({
         </ContextMenuItem>
         <ContextMenuItem
           onSelect={async () => {
-            await copyText(`${directive.container}@${directive.host}`);
+            await copyText(container ? `${container}@${directive.host}` : directive.host);
             toast.success('Copied');
           }}
         >
@@ -309,12 +315,12 @@ function DirectiveEntry({
         </ContextMenuItem>
         {/* Filter group only when the row carries a filterable identity — never
             render an empty Filter label (the roadmap bans half-empty menus). */}
-        {(directive.container || directive.host) && (
+        {(container || directive.host) && (
           <>
             <ContextMenuSeparator />
             <ContextMenuLabel>Filter</ContextMenuLabel>
-            {directive.container && (
-              <ContextMenuItem onSelect={() => setAgentFilter(directive.container)}>
+            {container && (
+              <ContextMenuItem onSelect={() => setAgentFilter(container)}>
                 Filter to this agent
               </ContextMenuItem>
             )}

@@ -168,7 +168,17 @@ export function readDirectives({ agent, host, limit } = {}) {
       console.warn(`[directives] Malformed block skipped (bad timestamp): ${d.timestamp}`);
       continue;
     }
-    out.push({ timestamp: d.timestamp, container: d.container, host: d.host, role: d.role, text });
+    // Normalize the legacy WARDEN-642 writer artifact: pre-fix, logDirective
+    // rendered a local/tmux chat's `container: null` via the bare
+    // `${chat.container}@${chat.host}`, stringifying null to the literal "null"
+    // and permanently recording `## <ts> → null@<host> (<role>)` blocks.
+    // directives.md is append-only history, so those legacy headers never age
+    // out — coerce the token back to null once here so the read path (and the
+    // `agent` filter below) never surfaces "null" to the frontend's agent-filter
+    // dropdown, target badge, or copy payload. The canonical agentTarget() never
+    // emits "null" (it falls back to session/key/'local'), so the token is
+    // unambiguous; this matches the existing graceful-malformed-input handling.
+    out.push({ timestamp: d.timestamp, container: d.container === 'null' ? null : d.container, host: d.host, role: d.role, text });
   }
 
   out.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
