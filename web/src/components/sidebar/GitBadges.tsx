@@ -323,7 +323,25 @@ const GIT_STATE_KIND = {
     // this popover's filtered slice is reordered at render time.
     sort: sortByStashCountDesc,
   },
-  stalled:  { glyph: '💤', color: 'text-sky-400 hover:text-sky-300',     label: 'stalled (>7d)',       match: (a: ProjectGitAgent) => a.stalled,    suffix: (a: ProjectGitAgent) => (a.stalled && a.headAgeMs != null ? ` · 💤 ${formatRelative(Date.now() - a.headAgeMs)}` : '') },
+  stalled:  {
+    glyph: '💤',
+    color: 'text-sky-400 hover:text-sky-300',
+    label: 'stalled (>7d)',
+    match: (a: ProjectGitAgent) => a.stalled,
+    suffix: (a: ProjectGitAgent) => (a.stalled && a.headAgeMs != null ? ` · 💤 ${formatRelative(Date.now() - a.headAgeMs)}` : ''),
+    // WARDEN-710: rank the 💤 popover oldest-HEAD-first (largest headAgeMs on top) so a
+    // human triaging the fleet's rotting/abandoned work surfaces the longest-stalled agent
+    // FIRST — a 30-day-stalled agent no longer gets buried under one 8 days stale (which
+    // chats iteration order alone would do, defeating the chip's whole point: find rotting
+    // work first). Reuses the SAME sortByHeadAgeDesc the unpushed popover (WARDEN-669) ranks
+    // oldest-first off the SAME kind-agnostic headAgeMs field — no new helper, no new fetch;
+    // headAgeMs is already on ProjectGitAgent (gitStateSummary.ts) and already rendered per-
+    // row by this suffix. `'sort' in cfg` in GitStateBadge scopes this to the stalled popover
+    // the SAME way dirty/atRisk/stash's `sort` is scoped — a pure, NEW-array sort (does not
+    // mutate): summarizeProjectGitState's agents array stays in chats order; only this
+    // popover's filtered slice is reordered at render time.
+    sort: sortByHeadAgeDesc,
+  },
 } as const;
 
 function GitStateBadge({ kind, count, agents, chats, gitStatus, onOpenChat }: {
@@ -341,21 +359,23 @@ function GitStateBadge({ kind, count, agents, chats, gitStatus, onOpenChat }: {
   const [open, setOpen] = useState(false);
   if (count <= 0) return null;
   const cfg = GIT_STATE_KIND[kind];
-  // WARDEN-669 + WARDEN-670 + WARDEN-689 + WARDEN-701: per-kind render-time sort of
+  // WARDEN-669 + WARDEN-670 + WARDEN-689 + WARDEN-701 + WARDEN-710: per-kind render-time sort of
   // THIS popover's filtered slice only. The summarizer's own `agents` array is NEVER
   // reordered here -- its deterministic chats-iteration-order invariant is asserted
-  // throughout gitStateSummary.test.mjs and shared by the behind/stalled popovers,
-  // which stay unsorted. The unpushed popover ranks oldest-HEAD-first (WARDEN-669:
-  // surface the most rot-prone commits on top so a human integrates them first); the
-  // dirty popover ranks heaviest-WIP-first (WARDEN-670: largest insertions+deletions
-  // magnitude on top); the stash popover ranks heaviest-parker-first (WARDEN-689: most
-  // parked WIP on top); the atRisk popover ranks conflict-first (WARDEN-701: a merge-
-  // conflict-BLOCKED agent on top of every clean auto-completing rebase) — each via the
-  // table's `sort`. `'sort' in cfg` narrows to the dirty + atRisk + stash entries (the
-  // kinds carrying a `sort`), so this never reorders behind/stalled. All sort helpers
-  // return NEW arrays (no mutation of `agents`). `now` is captured once so the
-  // reconstructed HEAD epoch (now - headAgeMs) is consistent between a row's
-  // relative label and its absolute title (WARDEN-669).
+  // throughout gitStateSummary.test.mjs and shared by the behind popover, which stays
+  // unsorted. The unpushed popover ranks oldest-HEAD-first (WARDEN-669: surface the most
+  // rot-prone commits on top so a human integrates them first); the dirty popover ranks
+  // heaviest-WIP-first (WARDEN-670: largest insertions+deletions magnitude on top); the
+  // stash popover ranks heaviest-parker-first (WARDEN-689: most parked WIP on top); the
+  // atRisk popover ranks conflict-first (WARDEN-701: a merge-conflict-BLOCKED agent on top
+  // of every clean auto-completing rebase); the stalled popover ranks oldest-HEAD-first
+  // (WARDEN-710: the longest-stalled agent on top so rotting/abandoned work surfaces first
+  // — a 30-day-stalled repo is no longer buried under one 8 days stale) — each via the
+  // table's `sort`. `'sort' in cfg` narrows to the dirty + stalled + atRisk + stash entries
+  // (the kinds carrying a `sort`), so this never reorders behind. All sort helpers return
+  // NEW arrays (no mutation of `agents`). `now` is captured once so the reconstructed HEAD
+  // epoch (now - headAgeMs) is consistent between a row's relative label and its absolute
+  // title (WARDEN-669).
   const matched = agents.filter(cfg.match);
   const shown =
     kind === 'unpushed' ? sortByHeadAgeDesc(matched)
