@@ -42,19 +42,19 @@ import { ResetSection } from '@/components/settings/sections/ResetSection';
 // absent here: it is always visible at the bottom of the content pane, outside
 // the activeSection gating.)
 const SETTINGS_SECTIONS = [
-  { id: 'hosts', label: 'Hosts & Connection' },
-  { id: 'observer', label: 'Observer Preferences' },
-  { id: 'safety', label: 'Safety' },
-  { id: 'attention', label: 'Attention thresholds' },
-  { id: 'tokenbudget', label: 'Token budget' },
-  { id: 'performance', label: 'Performance' },
-  { id: 'telemetry', label: 'Telemetry' },
-  { id: 'display', label: 'Display' },
-  { id: 'appearance', label: 'Appearance' },
-  { id: 'newchats', label: 'New Chats' },
-  { id: 'snippets', label: 'Instruction snippets' },
-  { id: 'patterns', label: 'Watch patterns' },
-  { id: 'notifications', label: 'Notifications' },
+  { id: 'hosts', label: 'Hosts & Connection', description: 'Manage SSH hosts and connection settings for Warden.' },
+  { id: 'observer', label: 'Observer Preferences', description: 'Control the observer meta-chat: directive confirmation, auto-start, idle auto-stop, and its model.' },
+  { id: 'safety', label: 'Safety', description: 'Choose whether Warden confirms before destructive actions like force-killing a chat.' },
+  { id: 'attention', label: 'Attention thresholds', description: 'Set how long an agent waits before Warden flags it as needing attention.' },
+  { id: 'tokenbudget', label: 'Token budget', description: 'Configure token-budget alerts that notify you — they never auto-kill or pause agents.' },
+  { id: 'performance', label: 'Performance', description: 'Route remote tmux operations through a persistent SSH channel (experimental).' },
+  { id: 'telemetry', label: 'Telemetry', description: 'Opt-in usage telemetry — off by default. Nothing leaves your machine until you turn it on.' },
+  { id: 'display', label: 'Display', description: 'Choose which badges and indicators Warden shows for hosts and chats.' },
+  { id: 'appearance', label: 'Appearance', description: 'Theme, terminal font, and color preferences — applied instantly.' },
+  { id: 'newchats', label: 'New Chats', description: 'Set the defaults for new chats: agent type, host, shell, and working directory.' },
+  { id: 'snippets', label: 'Instruction snippets', description: 'Manage reusable instruction snippets for broadcasts and pane sends.' },
+  { id: 'patterns', label: 'Watch patterns', description: 'Define watch patterns that flag matching agent output, matched server-side.' },
+  { id: 'notifications', label: 'Notifications', description: 'Control toast, desktop, and webhook notifications for agent events.' },
 ] as const;
 type SectionId = (typeof SETTINGS_SECTIONS)[number]['id'];
 
@@ -122,7 +122,7 @@ export function SettingsPage({
         </IconTooltip>
         <h1 className="text-sm font-semibold tracking-wide">Settings</h1>
         <span className="text-xs text-muted-foreground">
-          Manage SSH hosts and connection settings for Warden.
+          {SETTINGS_SECTIONS.find((s) => s.id === activeSection)?.description}
         </span>
       </header>
 
