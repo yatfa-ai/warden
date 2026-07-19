@@ -1,8 +1,12 @@
-// Notifications section — MIXED persistence: the toast toggles + the webhook
-// "push" channel are backend /api/config, while the OS desktop-alert toggles are
-// pure client localStorage (a different channel AND a different persistence path
-// — the live footgun this decomposition makes structural). Extracted verbatim
-// from SettingsPage (WARDEN-664); behavior is unchanged.
+// Notifications section — THREE delivery channels with TWO persistence paths,
+// now visually delimited so the split is visible (WARDEN-784): the in-app toast
+// toggles + the webhook "push" channel are backend /api/config (drafted, then
+// committed by Save), while the OS desktop-alert toggles are pure client
+// localStorage (applied instantly). Each channel below is wrapped in a titled
+// bordered container that states whether it takes effect on Save or instantly,
+// mirroring the titled-container pattern the Webhook block already shipped.
+// Extracted from SettingsPage (WARDEN-664); behavior is unchanged — this only
+// surfaces the existing persistence split that decomposition made structural.
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
@@ -43,168 +47,193 @@ export function NotificationsSection(props: NotificationsSectionProps) {
 
   return (
     <SettingsSection title="Notifications" className={hidden ? 'hidden' : undefined}>
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-2">
-          <Switch
-            id="notifyChatOps"
-            checked={config.notifyChatOps}
-            onCheckedChange={(v) => setConfig({ ...config, notifyChatOps: v })}
-          />
-          <Label htmlFor="notifyChatOps" className="cursor-pointer">
-            Chat operations
-          </Label>
+      {/* Channel 1 of 3 — In-app toasts. Backend /api/config: drafted into
+          `config` here, committed only when the human presses Save in the
+          footer (NOT instant). The titled bordered container mirrors the
+          Webhook block below (WARDEN-784). */}
+      <div className="flex flex-col gap-3 rounded-md border border-border/60 p-3 mt-2">
+        <div className="flex flex-col gap-1">
+          <span className="text-sm font-medium">In-app toasts</span>
+          <span className="text-xs text-muted-foreground">
+            Toast notifications inside Warden. Saved when you press Save.
+          </span>
         </div>
-        <p className="text-xs text-muted-foreground">
-          Session kill, chat kill, resume, and rename notifications
-        </p>
-      </div>
 
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-2">
-          <Switch
-            id="notifyErrors"
-            checked={config.notifyErrors}
-            onCheckedChange={(v) => setConfig({ ...config, notifyErrors: v })}
-          />
-          <Label htmlFor="notifyErrors" className="cursor-pointer">
-            Errors
-          </Label>
-        </div>
-        <p className="text-xs text-muted-foreground">Error toast notifications</p>
-      </div>
-
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-2">
-          <Switch
-            id="notifySuccess"
-            checked={config.notifySuccess}
-            onCheckedChange={(v) => setConfig({ ...config, notifySuccess: v })}
-          />
-          <Label htmlFor="notifySuccess" className="cursor-pointer">
-            Success messages
-          </Label>
-        </div>
-        <p className="text-xs text-muted-foreground">Success toast notifications</p>
-      </div>
-
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-2">
-          <Switch
-            id="notifyObserver"
-            checked={config.notifyObserver}
-            onCheckedChange={(v) => setConfig({ ...config, notifyObserver: v })}
-          />
-          <Label htmlFor="notifyObserver" className="cursor-pointer">
-            Observer events
-          </Label>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Observer connection timeout and gate prompt notifications
-        </p>
-      </div>
-
-      {/* Desktop alerts (WARDEN-259) — a DIFFERENT channel + persistence
-          path than the toast toggles above. Those gate in-app toasts via
-          the server-side `config` / PUT /api/config; this is a pure
-          client-side localStorage pref that fires an OS notification when
-          an agent newly needs attention while Warden is UNFOCUSED (the
-          always-on badge already covers the in-app case). On enable we
-          request OS permission fire-and-forget; if denied the toggle still
-          flips on but alerts simply no-op until granted. */}
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-2">
-          <Switch
-            id="attentionDesktopAlerts"
-            checked={attentionDesktopAlerts}
-            onCheckedChange={(v) => {
-              setAttentionDesktopAlerts(v);
-              if (v) void requestAlertPermission();
-            }}
-          />
-          <Label htmlFor="attentionDesktopAlerts" className="cursor-pointer">
-            Desktop alerts when agents need attention (while Warden is unfocused)
-          </Label>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Show an OS notification when an agent needs attention — critical/warning, a newly stuck/erroring/waiting/blocked pane, or a new directive/error — while you’re in another app. Clicking it focuses Warden. Your OS will ask for permission when you turn this on.
-        </p>
-      </div>
-
-      {/* Per-state toggle (WARDEN-344): which pane states raise the
-          Attention badge + desktop alert. Each defaults ON; a human can
-          silence a noisy "waiting" without losing "erroring". Same
-          client-side channel/persistence as the master toggle above. */}
-      <div className="flex flex-col gap-2">
-        <div className="flex flex-wrap gap-x-4 gap-y-2">
-          {([
-            { k: 'erroring', label: 'Erroring', hint: 'errors / stack traces' },
-            { k: 'stuck', label: 'Stuck', hint: 'repeating-output loops' },
-            { k: 'waiting', label: 'Waiting on you', hint: 'human-input prompts' },
-            { k: 'blocked', label: 'Blocked', hint: 'coordination / dependency' },
-            // WARDEN-575: the POSITIVE "finished" state — a recently-working
-            // agent going idle. Surfaces the green Finished section + a done
-            // desktop ping. Distinct from the problem states (it is a review
-            // cue, not an alarm) but gated the same way.
-            { k: 'done', label: 'Finished', hint: 'agent completed a task' },
-          ] as const).map(({ k, label, hint }) => (
-            <div key={k} className="flex items-center gap-2">
-              <Switch
-                id={`attention-state-${k}`}
-                checked={attentionStates[k] !== false}
-                onCheckedChange={(v) => setAttentionStates({ ...attentionStates, [k]: v })}
-              />
-              <Label htmlFor={`attention-state-${k}`} className="cursor-pointer leading-tight">
-                {label}
-                <span className="block text-[10px] text-muted-foreground font-normal">{hint}</span>
-              </Label>
-            </div>
-          ))}
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Which agent pane states raise the Attention badge (and desktop alert). Turn a noisy one off without losing the others.
-        </p>
-
-        {/* WARDEN-364 — per-severity routing, nested under the master
-            toggle. Greyed + inert while the master is off: the whole
-            channel is off then, so routing is moot. Defaults are all
-            ON (behavior-preserving); the human opts buckets OUT. */}
-        <div className={cn('pl-4 ml-1 flex flex-col gap-2 border-l border-border/60', !attentionDesktopAlerts && 'pointer-events-none opacity-50')}>
+        <div className="flex flex-col gap-2">
           <div className="flex items-center gap-2">
-            <Switch id="alertCritical" checked={alertCritical} disabled={!attentionDesktopAlerts} onCheckedChange={setAlertCritical} />
-            <Label htmlFor="alertCritical" className="cursor-pointer">Critical agents</Label>
-          </div>
-          <div className="flex items-center gap-2">
-            <Switch id="alertWarning" checked={alertWarning} disabled={!attentionDesktopAlerts} onCheckedChange={setAlertWarning} />
-            <Label htmlFor="alertWarning" className="cursor-pointer">Warning agents</Label>
-          </div>
-          <div className="flex items-center gap-2">
-            <Switch id="alertDirective" checked={alertDirective} disabled={!attentionDesktopAlerts} onCheckedChange={setAlertDirective} />
-            <Label htmlFor="alertDirective" className="cursor-pointer">Pending directives</Label>
-          </div>
-          <div className="flex items-center gap-2">
-            <Switch id="alertError" checked={alertError} disabled={!attentionDesktopAlerts} onCheckedChange={setAlertError} />
-            <Label htmlFor="alertError" className="cursor-pointer">Recent errors</Label>
+            <Switch
+              id="notifyChatOps"
+              checked={config.notifyChatOps}
+              onCheckedChange={(v) => setConfig({ ...config, notifyChatOps: v })}
+            />
+            <Label htmlFor="notifyChatOps" className="cursor-pointer">
+              Chat operations
+            </Label>
           </div>
           <p className="text-xs text-muted-foreground">
-            Choose which signals escalate to the desktop. To mute a specific agent, use the bell on its row in the attention menu (health signals only — directives and errors aren’t per-agent).
+            Session kill, chat kill, resume, and rename notifications
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <Switch
+              id="notifyErrors"
+              checked={config.notifyErrors}
+              onCheckedChange={(v) => setConfig({ ...config, notifyErrors: v })}
+            />
+            <Label htmlFor="notifyErrors" className="cursor-pointer">
+              Errors
+            </Label>
+          </div>
+          <p className="text-xs text-muted-foreground">Error toast notifications</p>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <Switch
+              id="notifySuccess"
+              checked={config.notifySuccess}
+              onCheckedChange={(v) => setConfig({ ...config, notifySuccess: v })}
+            />
+            <Label htmlFor="notifySuccess" className="cursor-pointer">
+              Success messages
+            </Label>
+          </div>
+          <p className="text-xs text-muted-foreground">Success toast notifications</p>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <Switch
+              id="notifyObserver"
+              checked={config.notifyObserver}
+              onCheckedChange={(v) => setConfig({ ...config, notifyObserver: v })}
+            />
+            <Label htmlFor="notifyObserver" className="cursor-pointer">
+              Observer events
+            </Label>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Observer connection timeout and gate prompt notifications
           </p>
         </div>
       </div>
 
-      {/* Webhook "push" delivery channel (WARDEN-555) — a THIRD channel
-          alongside the in-app toast + OS desktop alert: it POSTs the
-          alert to the user's OWN webhook URL (ntfy/Discord/Slack/
-          Telegram/Home Assistant) so a human AWAY from the machine still
-          gets pinged, even with the Warden window closed to tray. Off by
-          default; sends nothing until a URL is set + enabled. Payload
-          goes only to the user's URL (no yatfa SaaS) — same stance as
-          the LLM API + telemetry endpoints. Persisted server-side via
-          /api/config (NOT client localStorage) so it survives a restart. */}
+      {/* Channel 2 of 3 — Desktop alerts (WARDEN-259). A DIFFERENT channel +
+          persistence path than the toast toggles above. Those gate in-app
+          toasts via the server-side `config` / PUT /api/config; this is a pure
+          client-side localStorage pref that fires an OS notification when an
+          agent newly needs attention while Warden is UNFOCUSED (the always-on
+          badge already covers the in-app case). Applied INSTANTLY — no Save
+          needed. On enable we request OS permission fire-and-forget; if denied
+          the toggle still flips on but alerts simply no-op until granted. The
+          titled bordered container mirrors the Webhook block below (WARDEN-784). */}
+      <div className="flex flex-col gap-3 rounded-md border border-border/60 p-3 mt-2">
+        <div className="flex flex-col gap-1">
+          <span className="text-sm font-medium">Desktop alerts</span>
+          <span className="text-xs text-muted-foreground">
+            Applied instantly and remembered locally on this device.
+          </span>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <Switch
+              id="attentionDesktopAlerts"
+              checked={attentionDesktopAlerts}
+              onCheckedChange={(v) => {
+                setAttentionDesktopAlerts(v);
+                if (v) void requestAlertPermission();
+              }}
+            />
+            <Label htmlFor="attentionDesktopAlerts" className="cursor-pointer">
+              Desktop alerts when agents need attention (while Warden is unfocused)
+            </Label>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Show an OS notification when an agent needs attention — critical/warning, a newly stuck/erroring/waiting/blocked pane, or a new directive/error — while you’re in another app. Clicking it focuses Warden. Your OS will ask for permission when you turn this on.
+          </p>
+        </div>
+
+        {/* Per-state toggle (WARDEN-344): which pane states raise the
+            Attention badge + desktop alert. Each defaults ON; a human can
+            silence a noisy "waiting" without losing "erroring". Same
+            client-side channel/persistence as the master toggle above. */}
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-wrap gap-x-4 gap-y-2">
+            {([
+              { k: 'erroring', label: 'Erroring', hint: 'errors / stack traces' },
+              { k: 'stuck', label: 'Stuck', hint: 'repeating-output loops' },
+              { k: 'waiting', label: 'Waiting on you', hint: 'human-input prompts' },
+              { k: 'blocked', label: 'Blocked', hint: 'coordination / dependency' },
+              // WARDEN-575: the POSITIVE "finished" state — a recently-working
+              // agent going idle. Surfaces the green Finished section + a done
+              // desktop ping. Distinct from the problem states (it is a review
+              // cue, not an alarm) but gated the same way.
+              { k: 'done', label: 'Finished', hint: 'agent completed a task' },
+            ] as const).map(({ k, label, hint }) => (
+              <div key={k} className="flex items-center gap-2">
+                <Switch
+                  id={`attention-state-${k}`}
+                  checked={attentionStates[k] !== false}
+                  onCheckedChange={(v) => setAttentionStates({ ...attentionStates, [k]: v })}
+                />
+                <Label htmlFor={`attention-state-${k}`} className="cursor-pointer leading-tight">
+                  {label}
+                  <span className="block text-[10px] text-muted-foreground font-normal">{hint}</span>
+                </Label>
+              </div>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Which agent pane states raise the Attention badge (and desktop alert). Turn a noisy one off without losing the others.
+          </p>
+
+          {/* WARDEN-364 — per-severity routing, nested under the master
+              toggle. Greyed + inert while the master is off: the whole
+              channel is off then, so routing is moot. Defaults are all
+              ON (behavior-preserving); the human opts buckets OUT. */}
+          <div className={cn('pl-4 ml-1 flex flex-col gap-2 border-l border-border/60', !attentionDesktopAlerts && 'pointer-events-none opacity-50')}>
+            <div className="flex items-center gap-2">
+              <Switch id="alertCritical" checked={alertCritical} disabled={!attentionDesktopAlerts} onCheckedChange={setAlertCritical} />
+              <Label htmlFor="alertCritical" className="cursor-pointer">Critical agents</Label>
+            </div>
+            <div className="flex items-center gap-2">
+              <Switch id="alertWarning" checked={alertWarning} disabled={!attentionDesktopAlerts} onCheckedChange={setAlertWarning} />
+              <Label htmlFor="alertWarning" className="cursor-pointer">Warning agents</Label>
+            </div>
+            <div className="flex items-center gap-2">
+              <Switch id="alertDirective" checked={alertDirective} disabled={!attentionDesktopAlerts} onCheckedChange={setAlertDirective} />
+              <Label htmlFor="alertDirective" className="cursor-pointer">Pending directives</Label>
+            </div>
+            <div className="flex items-center gap-2">
+              <Switch id="alertError" checked={alertError} disabled={!attentionDesktopAlerts} onCheckedChange={setAlertError} />
+              <Label htmlFor="alertError" className="cursor-pointer">Recent errors</Label>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Choose which signals escalate to the desktop. To mute a specific agent, use the bell on its row in the attention menu (health signals only — directives and errors aren’t per-agent).
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Channel 3 of 3 — Webhook "push" delivery channel (WARDEN-555). A THIRD
+          channel alongside the in-app toast + OS desktop alert: it POSTs the
+          alert to the user's OWN webhook URL (ntfy/Discord/Slack/Telegram/
+          Home Assistant) so a human AWAY from the machine still gets pinged,
+          even with the Warden window closed to tray. Off by default; sends
+          nothing until a URL is set + enabled. Payload goes only to the user's
+          URL (no yatfa SaaS) — same stance as the LLM API + telemetry
+          endpoints. Persisted server-side via /api/config (NOT client
+          localStorage) so it survives a restart — committed by Save, like the
+          toast toggles above. This titled bordered container is the pattern
+          channels 1 and 2 now mirror (WARDEN-784). */}
       <div className="flex flex-col gap-3 rounded-md border border-border/60 p-3 mt-2">
         <div className="flex flex-col gap-1">
           <span className="text-sm font-medium">Webhook push alerts</span>
           <span className="text-xs text-muted-foreground">
-            Deliver critical alerts to your own webhook URL (ntfy, Discord, Slack, Telegram, Home Assistant) so you’re pinged on your phone even when Warden is closed to tray. Off by default.
+            Deliver critical alerts to your own webhook URL (ntfy, Discord, Slack, Telegram, Home Assistant) so you’re pinged on your phone even when Warden is closed to tray. Off by default. Saved when you press Save.
           </span>
         </div>
 
