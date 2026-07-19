@@ -43,9 +43,11 @@ const test = (name, fn) => {
 // Tiny builders so each case reads as "which agents shipped what". `commit` mirrors
 // the FleetCommitLike shape (a /api/git-log row: hash + subject + epoch, etc.).
 const commit = (hash, epoch, subject = `fix ${hash}`) => ({ hash, subject, author: 'ann', date: '2 days ago', epoch });
-// A fulfilled per-agent outcome: that agent's recent commits (recent-only — NO
-// outgoing join, per WARDEN-597 decision #2).
-const okAgent = (key, project, commits) => ({ ok: true, key, project, commits });
+// A fulfilled per-agent outcome: that agent's recent commits + the set of hashes its
+// outgoing (@{u}..HEAD) fetch returned — the join key for ↑unpushed (WARDEN-723,
+// mirroring fleetCommitSearch.test.mjs' okAgent). An empty outgoing set = the agent
+// pushed everything (or its outgoing fetch failed gracefully → no false ↑ marks).
+const okAgent = (key, project, commits, outgoing = []) => ({ ok: true, key, project, commits, outgoingHashes: new Set(outgoing) });
 // A rejected/unreachable per-agent outcome.
 const badAgent = (key, project) => ({ ok: false, key, project });
 // Pull just the (key, hash) sequence out of a merged result — the cross-fleet order
@@ -96,14 +98,16 @@ test('a failed agent does NOT blank the successful agents (partial-failure toler
   assert.equal(r.errorCount, 1);
   assert.deepEqual(order(r), ['a3:h2', 'a1:h1']);
 });
-test('rows carry key + project so the React layer can resolve the agent name without a lookup', () => {
+test('rows carry key + project + unpushed so the React layer can resolve the agent name + ↑ mark without a lookup', () => {
   const r = mergeFleetCommitsByEpoch([okAgent('a1', 'warden', [commit('h1', 1000)])]);
-  assert.deepEqual(r.rows.map((row) => ({ key: row.key, project: row.project })), [{ key: 'a1', project: 'warden' }]);
+  assert.deepEqual(r.rows.map((row) => ({ key: row.key, project: row.project, unpushed: row.unpushed })), [{ key: 'a1', project: 'warden', unpushed: false }]);
 });
 test('the full FleetCommitLike rides on each row (hash/subject/author/date/epoch)', () => {
   const c = commit('h1', 1000, 'fix login');
   const r = mergeFleetCommitsByEpoch([okAgent('a1', 'warden', [c])]);
   assert.deepEqual(r.rows[0].commit, c);
+  // The row also carries the ↑unpushed mark (false here — h1 is not in the outgoing set).
+  assert.equal(r.rows[0].unpushed, false);
 });
 test('empty input is safe', () => {
   assert.deepEqual(mergeFleetCommitsByEpoch([]), { rows: [], errorCount: 0 });
@@ -162,6 +166,52 @@ test('outcomes are flattened in chats order before sorting (agent order drives t
   assert.deepEqual(order(r), ['b1:h3', 'a1:h1']);
 });
 
+console.log('\n↑unpushed join — a commit in BOTH the recent list and the outgoing set is unpushed');
+test('a commit whose hash is in outgoingHashes is marked ↑unpushed', () => {
+  // h1 is in both the recent list AND the outgoing (@{u}..HEAD) set → unpushed.
+  const r = mergeFleetCommitsByEpoch([okAgent('a1', 'warden', [commit('h1', 1000)], ['h1'])]);
+  assert.equal(r.rows[0].unpushed, true);
+});
+test('a commit whose hash is NOT in outgoingHashes is pushed (unpushed:false)', () => {
+  // h1 is recent but absent from outgoing → already pushed.
+  const r = mergeFleetCommitsByEpoch([okAgent('a1', 'warden', [commit('h1', 1000)], ['h9'])]);
+  assert.equal(r.rows[0].unpushed, false);
+});
+test('within one agent, only the commits also in outgoing are unpushed (precise per-hash join)', () => {
+  // The join must be per-HASH, not per-agent: h1+h3 are unpushed, h2 is pushed,
+  // even though the agent has SOME unpushed work. A coarse aheadCount>0 signal
+  // would mark ALL three — this asserts the precise join does not. Mirrors
+  // fleetCommitSearch.test.mjs' per-commit join case.
+  const r = mergeFleetCommitsByEpoch([
+    okAgent('a1', 'warden', [commit('h1', 3000), commit('h2', 2000), commit('h3', 1000)], ['h1', 'h3']),
+  ]);
+  assert.deepEqual(r.rows.map((row) => [row.commit.hash, row.unpushed]), [
+    ['h1', true],
+    ['h2', false],
+    ['h3', true],
+  ]);
+});
+test('a failed/empty outgoing set marks NOTHING unpushed (graceful degradation — no false ↑)', () => {
+  // The critical correctness point (WARDEN-723): an ok agent whose outgoing fetch
+  // failed (empty outgoingHashes) must NEVER wrongly mark a commit unpushed — every
+  // row reads unpushed:false. The no-false-positive contract ported verbatim from
+  // FleetCommitSearch: a missing outgoing set yields no marks, not all-marks.
+  const r = mergeFleetCommitsByEpoch([okAgent('a1', 'warden', [commit('h1', 1000), commit('h2', 2000)], [])]);
+  assert.deepEqual(r.rows.map((row) => row.unpushed), [false, false]);
+});
+test('two agents: each is joined against its OWN outgoing set, never the other agent\'s', () => {
+  // h1 is unpushed for a1 but pushed for a2 (its outgoing set differs). The join
+  // must not leak one agent's outgoing hashes into another's recent commits.
+  const r = mergeFleetCommitsByEpoch([
+    okAgent('a1', 'warden', [commit('h1', 1000)], ['h1']),
+    okAgent('a2', 'warden', [commit('h1', 2000)], []),
+  ]);
+  // epoch desc → a2:h1 (2000) first, a1:h1 (1000) second.
+  assert.deepEqual(order(r), ['a2:h1', 'a1:h1']);
+  assert.equal(r.rows[0].unpushed, false);  // a2's outgoing is empty → pushed
+  assert.equal(r.rows[1].unpushed, true);   // a1's outgoing has h1 → unpushed
+});
+
 console.log('\nfull fleet shape — the flat, time-sorted feed the panel renders');
 test('a mixed fleet flattens to one epoch-desc list with errors counted honestly', () => {
   const r = mergeFleetCommitsByEpoch([
@@ -192,11 +242,16 @@ test('id is URL-encoded (a key with special chars stays one param value)', () =>
   // argument. A container/host key with a colon must be encoded so it can't split.
   assert.equal(buildFleetRecentCommitsUrl('host:container', 25), '/api/git-log?id=host%3Acontainer&limit=25');
 });
-test('the URL has no range= (recent-only — no outgoing join for the MVP)', () => {
-  // Decision #2: the recent feed fires ONE fetch per agent (N), NOT the second
-  // &range=outgoing fetch the query-driven search appends for its ↑unpushed join.
+test('the URL has no range= so the component can append &range=outgoing for the ↑unpushed join', () => {
+  // The ↑unpushed join (WARDEN-723) fires a SECOND fetch with &range=outgoing
+  // appended to this base IN THE COMPONENT — mirroring how FleetCommitSearch
+  // appends it to the range-free buildFleetSearchBaseUrl. Asserting range= is
+  // absent here proves the pure URL builder stays single-purpose and the
+  // component's `${base}&range=outgoing` concatenation yields a clean URL, not a
+  // double range=.
   const url = buildFleetRecentCommitsUrl('a1', 25);
-  assert.ok(!url.includes('range='), 'recent view must leave no range= (no outgoing join)');
+  assert.ok(!url.includes('range='), 'recent view base must leave no range= (component appends it)');
+  assert.equal(`${url}&range=outgoing`, '/api/git-log?id=a1&limit=25&range=outgoing');
 });
 
 console.log(`\n✓ FLEET RECENT COMMITS TESTS PASS (${passed})`);

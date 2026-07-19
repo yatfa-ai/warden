@@ -1066,11 +1066,14 @@ export function buildFleetCommitGroups(outcomes: FleetCommitOutcome[]): FleetCom
 //     shipped it. That cross-agent time-merge is a different aggregation → a new
 //     pure fn (mergeFleetCommitsByEpoch).
 //
-//  2. NO query, NO ↑unpushed join (decision #2 — recent-only MVP). Each agent fires
-//     ONE fetch (N, not the 2N the query-driven search pays for its outgoing
-//     ↑unpushed join). The ↑unpushed mark is a deferred follow-up that would reuse
-//     the existing outgoing fan-out; this slice ships recent-only to keep the
-//     fan-out cheap.
+//  2. NO query, but ↑unpushed IS joined (WARDEN-723 lifted the original recent-only
+//     MVP cap). Decision #2 originally bundled "no query AND no outgoing join" to
+//     keep the MVP fan-out at N; the no-query half still holds (this is the
+//     unfiltered recent view — no grep=/pickaxe=), but each agent now fires its
+//     recent + outgoing (range=outgoing, @{u}..HEAD) fetches concurrently (2N, the
+//     same 2N the query-driven search pays) so each row can carry the precise
+//     per-hash ↑unpushed mark. Decision #1 still bounds the cost: fetch-on-mount +
+//     manual ↻ only — never a steady 2N cadence.
 //
 //  3. `epoch` is the merge key. /api/git-log returns commits carrying `epoch`
 //     (committer time, UNIX seconds from %ct). Sorting by epoch desc is the whole
@@ -1085,27 +1088,37 @@ export function buildFleetCommitGroups(outcomes: FleetCommitOutcome[]): FleetCom
 // sort, so equal-epoch ties break by input order — deterministic, so tests assert
 // deep equality, the convention the rest of this module follows.
 
-// One agent's recent-commits fan-out outcome (recent-only — NO outgoing join, per
-// WARDEN-597 decision #2). `ok: false` = that agent's /api/git-log fetch failed
-// (host unreachable / non-ok HTTP / network) — counted as an error but never
-// dropped silently, and never blanking the other agents' commits (the
-// Promise.allSettled contract). `ok: true` carries the agent's recent commits in
-// the order /api/git-log returned them (newest first). key + project ride along so
-// the merged rows can join key → displayName / project without a second lookup,
-// mirroring FleetCommitGroup.
+// One agent's recent-commits fan-out outcome. `ok: false` = that agent's /api/git-log
+// fetch failed (host unreachable / non-ok HTTP / network) — counted as an error but
+// never dropped silently, and never blanking the other agents' commits (the
+// Promise.allSettled contract). `ok: true` carries the agent's recent commits in the
+// order /api/git-log returned them (newest first) PLUS the SET of hashes its outgoing
+// (range=outgoing, @{u}..HEAD) fetch returned — the join key for ↑unpushed. Mirrors
+// FleetCommitOutcome (the query-driven search's per-agent outcome), including the
+// graceful-degradation contract: a failed outgoing fetch yields an EMPTY
+// outgoingHashes (never throws, never false-positives a commit as unpushed). key +
+// project ride along so the merged rows can join key → displayName / project without
+// a second lookup, mirroring FleetCommitGroup. (WARDEN-723 ported the ↑unpushed join
+// from buildFleetCommitGroups; the recent feed now fires 2 fetches per agent — recent
+// + outgoing — but decision #1 still bounds the cost: fetch-on-mount + manual ↻ only.)
 export type FleetRecentOutcome =
-  | { ok: true; key: string; project: string; commits: FleetCommitLike[] }
+  | { ok: true; key: string; project: string; commits: FleetCommitLike[]; outgoingHashes: Set<string> }
   | { ok: false; key: string; project: string };
 
-// One merged commit row: the commit + which agent/project shipped it. Carried FLAT
-// (not grouped under an agent header) so the feed is a single time-sorted list —
-// the cross-fleet "who just shipped" picture the independent per-agent lists can't
-// compose into on their own. `commit` is the full FleetCommitLike so the React
-// layer has hash/subject/author/date/epoch for the row without a second lookup.
+// One merged commit row: the commit + which agent/project shipped it + whether it is
+// still ↑unpushed. Carried FLAT (not grouped under an agent header) so the feed is a
+// single time-sorted list — the cross-fleet "who just shipped" picture the independent
+// per-agent lists can't compose into on their own. `commit` is the full FleetCommitLike
+// so the React layer has hash/subject/author/date/epoch for the row without a second
+// lookup. `unpushed` is the precise per-hash join against the agent's outgoing
+// (@{u}..HEAD) set — mirrors FleetCommitHit.unpushed (WARDEN-723 — ported from
+// buildFleetCommitGroups' line-1039 join `o.outgoingHashes.has(m.hash)`); it is NEVER
+// coarse per-agent (a commit is unpushed iff ITS hash is in that agent's outgoing set).
 export interface FleetRecentCommitRow {
   key: string;
   project: string;
   commit: FleetCommitLike;
+  unpushed: boolean;
 }
 
 export interface FleetRecentCommitsResult {
@@ -1125,10 +1138,17 @@ export interface FleetRecentCommitsResult {
  * committer `epoch` desc, so the newest commit anywhere in the fleet is on top
  * regardless of which agent shipped it.
  *
- * Recent-only (decision #2): NO outgoing join — each outcome carries just the
- * agent's recent commits, so this is N outcomes for N fetches (not the 2N the
- * query-driven search pays for its ↑unpushed mark). The ↑unpushed mark is a
- * deferred follow-up that would reuse the existing outgoing fan-out.
+ * ↑unpushed join (ported from buildFleetCommitGroups, WARDEN-723): each ok outcome
+ * now carries its outgoing (@{u}..HEAD) hash set as well as its recent commits, and
+ * each row is marked `unpushed: outgoingHashes.has(c.hash)` — the exact per-hash join
+ * buildFleetCommitGroups does at its line 1039, preferred over a coarse aheadCount>0
+ * signal because it works for agents whose git status isn't cached (every agent in
+ * the fleet, not just open panes). The feed is still NO-QUERY (decision #2's
+ * "unfiltered recent view" half is intact — no grep=/pickaxe=), but it now pays the
+ * 2N the query-driven search pays (recent + outgoing per agent); decision #1 still
+ * bounds that cost — fetch-on-mount + manual ↻ only, never an auto-poll cadence. A
+ * failed outgoing fetch yields an EMPTY outgoingHashes (graceful degradation — a
+ * commit is never WRONGLY marked unpushed by a missing outgoing set).
  *
  * `epoch == null` (a degraded GIT_LOG_PRETTY line — see parseGitLogLine's null
  * path, src/server.js:2294) is placed LAST, stably: two null-epoch rows keep their
@@ -1149,7 +1169,7 @@ export function mergeFleetCommitsByEpoch(outcomes: FleetRecentOutcome[]): FleetR
       errorCount += 1;
       continue;
     }
-    for (const c of o.commits) rows.push({ key: o.key, project: o.project, commit: c });
+    for (const c of o.commits) rows.push({ key: o.key, project: o.project, commit: c, unpushed: o.outgoingHashes.has(c.hash) });
   }
   // Stable sort (Array.prototype.sort is stable on Node ≥12 / V8): epoch desc, with
   // null-epoch rows placed last and preserving input order among themselves. The
