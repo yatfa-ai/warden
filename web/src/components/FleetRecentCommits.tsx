@@ -45,9 +45,11 @@ import type { GitFile } from './sidebar/types';
  * view's data is NOT already in scope (unlike the heatmap, which rides the 60s
  * useActivitySeries poll), and it introduces its own N-fetch fan-out — so it does NOT
  * silently poll at 60s across N agents (a steady N requests every minute). The
- * human pulls a fresh "what just shipped" on demand. Recent-only (decision #2): one
- * fetch per agent (N, not the 2N the query-driven search pays for its ↑unpushed
- * join); the ↑unpushed mark is a deferred follow-up.
+ * human pulls a fresh "what just shipped" on demand. ↑unpushed join (WARDEN-723):
+ * each agent fires its recent + outgoing (range=outgoing, @{u}..HEAD) fetches
+ * concurrently (2N) so each row can carry the precise per-hash ↑ mark — ported from
+ * FleetCommitSearch. Decision #1 still bounds the 2N: it fires only on mount /
+ * membership change / manual ↻, never on a steady auto-poll cadence.
  */
 
 interface Props {
@@ -143,18 +145,34 @@ export function FleetRecentCommits({ agents }: Props) {
       // handleKillSelected + FleetCommitSearch): one unreachable / non-git agent never
       // rejects the whole; a per-agent failure is counted and surfaced as an honest
       // "(N unreachable)" note (WARDEN-89 — never let a failure masquerade as a barren
-      // history). Recent-only (decision #2): ONE fetch per agent (N, not 2N — no
-      // outgoing ↑unpushed join).
+      // history). Each agent fires TWO concurrent fetches — recent + outgoing
+      // (range=outgoing, @{u}..HEAD) — so each row can carry the precise per-hash
+      // ↑unpushed mark (WARDEN-723, ported from FleetCommitSearch). 2N, but decision
+      // #1 bounds it to mount / membership change / manual ↻ (no auto-poll).
       const settled = await Promise.allSettled(
         cur.map(async ({ key, project }) => {
-          const r = await fetch(buildFleetRecentCommitsUrl(key, FLEET_RECENT_LIMIT));
-          // WARDEN-89: fetch() resolves (does NOT reject) on a 4xx/5xx — gate on r.ok
-          // so an unreachable agent (404) throws and is counted as that agent's error
-          // instead of reading undefined `commits` as an empty list (false-empty disease).
-          if (!r.ok) throw new Error(`git-log HTTP ${r.status}`);
-          const j = await r.json();
+          // buildFleetRecentCommitsUrl stays range-free; &range=outgoing is appended
+          // HERE (mirroring how FleetCommitSearch appends it to the range-free
+          // buildFleetSearchBaseUrl) so the pure URL builder stays single-purpose.
+          const base = buildFleetRecentCommitsUrl(key, FLEET_RECENT_LIMIT);
+          const [recentR, outgoingR] = await Promise.all([fetch(base), fetch(`${base}&range=outgoing`)]);
+          // WARDEN-89: fetch() resolves (does NOT reject) on a 4xx/5xx — gate on
+          // recentR.ok so an unreachable agent (404) throws and is counted as that
+          // agent's error instead of reading undefined `commits` as an empty list
+          // (false-empty disease). The recent fetch is the reachability probe.
+          if (!recentR.ok) throw new Error(`git-log HTTP ${recentR.status}`);
+          const j = await recentR.json();
           const commits = Array.isArray(j.commits) ? j.commits : [];
-          return { ok: true as const, key, project, commits };
+          // The outgoing fetch may 404 / non-ok too, but if `recent` resolved the agent
+          // is reachable; a failed outgoing fetch just yields no unpushed marks — a
+          // commit is never WRONGLY marked unpushed by a missing outgoing set (the
+          // graceful-degradation contract, ported verbatim from FleetCommitSearch).
+          const outgoingHashes = new Set<string>();
+          if (outgoingR.ok) {
+            const oj = await outgoingR.json();
+            if (Array.isArray(oj.commits)) for (const c of oj.commits) outgoingHashes.add(c.hash);
+          }
+          return { ok: true as const, key, project, commits, outgoingHashes };
         }),
       );
       if (cancelled) return;
@@ -326,9 +344,13 @@ export function FleetRecentCommits({ agents }: Props) {
                           <span className="truncate text-[10px] font-medium text-foreground" title={name}>{name}</span>
                           <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{row.commit.date}</span>
                         </span>
-                        {/* hash (cyan mono, mirrors GitBadges) · subject (truncated). */}
+                        {/* hash (cyan mono, mirrors GitBadges) · amber ↑ when the commit is
+                            still unpushed (local-only — HEAD has it, @{u} doesn't; the
+                            outgoing (@{u}..HEAD) hash-join WARDEN-723 ported from
+                            FleetCommitSearch) · subject (truncated). */}
                         <span className="flex items-center gap-1">
                           <span className="shrink-0 font-mono text-[10px] text-cyan-400/80">{row.commit.hash}</span>
+                          {row.unpushed && <span className="shrink-0 text-[10px] text-amber-400" title="unpushed (local, not yet pushed)">↑</span>}
                           <span className="min-w-0 truncate text-[10px] text-foreground" title={row.commit.subject}>{row.commit.subject}</span>
                         </span>
                       </span>
