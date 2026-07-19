@@ -110,6 +110,10 @@ interface Props {
   // Read-only here (App owns/persists it); forwarded straight to the FileViewer.
   fileViewerViewMode: 'rendered' | 'source';
   onFileViewerViewModeChange: (mode: 'rendered' | 'source') => void;
+  // Follow poll cadence (WARDEN-749): forwarded straight to the FileViewer, the
+  // same resolved value PaneGrid's FileViewer receives, so Follow honors the
+  // dashboard cadence regardless of which surface opened the file.
+  pollIntervalMs: number;
   // Saved instruction snippets (WARDEN-323): threaded straight through to the
   // BroadcastDialog as an insert-only picker. Pure client-side localStorage pref;
   // owned by App (persisted by its saveUi effect), so this is a read-only prop
@@ -201,7 +205,7 @@ function useGitLogFetcher({ setCommits, setLoading, errorLabel, buildParams }: {
   }, [setCommits, setLoading, errorLabel, buildParams]);
 }
 
-export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focused, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, snippets, watchedChats, watchedStates, onToggleWatch, onSnoozeMany, onToggleWatchMany, agentFilter, agentSort, onFilterChange, onSortChange, sourceControlCollapsed, onSourceControlCollapsedChange }: Props) {
+export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focused, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, snippets, watchedChats, watchedStates, onToggleWatch, onSnoozeMany, onToggleWatchMany, agentFilter, agentSort, onFilterChange, onSortChange, sourceControlCollapsed, onSourceControlCollapsedChange }: Props) {
   const [view, setView] = useState<{ kind: 'root' } | { kind: 'host'; host: string } | { kind: 'collection'; collection: Collection }>({ kind: 'root' });
   const [offlineExpanded, setOfflineExpanded] = useState(false);
   const hostLabels = useHostLabels();
@@ -1532,6 +1536,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
         viewMode={fileViewerViewMode}
         onViewModeChange={onFileViewerViewModeChange}
         onNavigate={(p) => setFileTarget((prev) => (prev ? { ...prev, path: p } : prev))}
+        pollIntervalMs={pollIntervalMs}
         onOpenChange={(o) => { if (!o) setFileTarget(null); }}
       />
       <BroadcastDialog

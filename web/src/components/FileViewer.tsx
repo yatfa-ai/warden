@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useMemo, useRef } from 'react';
+import { Fragment, useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect, type ReactNode } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -19,7 +19,7 @@ import {
 import { DiffBlock } from './DiffBlock';
 import { MarkdownBody } from './MarkdownBody';
 import { tokenizeCode, languageFromPath, type Leaf } from '@/lib/highlight';
-import { Loader2Icon, FileIcon, FolderIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon } from 'lucide-react';
+import { Loader2Icon, FileIcon, FolderIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon, RotateCwIcon, CircleDotIcon } from 'lucide-react';
 import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
 import { copyText } from '@/lib/clipboard';
 import { basename } from '@/lib/chatDisplay';
@@ -31,6 +31,8 @@ import { splitPathSegments, ancestorDir } from '@/lib/pathBreadcrumbs';
 // sibling path is built identically to the browse dialog's selection.
 import { joinPath, type Entry } from '@/lib/fileBrowserTree';
 import { toast } from 'sonner';
+import { useStickToBottom } from '@/lib/useStickToBottom';
+import { WEB_POLL_DEFAULT_MS } from '@/lib/pollInterval';
 
 interface FileViewerProps {
   chatId: string;
@@ -58,6 +60,12 @@ interface FileViewerProps {
   // Optional so a render site that only needs to display (never navigate)
   // degrades to the plain non-clickable path; all three current sites wire it.
   onNavigate?: (path: string) => void;
+  // Follow live-update cadence (WARDEN-749): the already-resolved web-safe poll
+  // interval. App owns + resolves cfg.pollIntervalMs via resolvePollIntervalMs at
+  // the source (the same value the catalog poll uses), so Follow shares the
+  // dashboard's cadence rather than hardcoding its own. Drives ONLY the Follow
+  // toggle's visibility-gated poller; the rest of the viewer ignores it.
+  pollIntervalMs: number;
   onOpenChange: (open: boolean) => void;
 }
 
@@ -73,7 +81,7 @@ type BlameLine = { line: number; hash: string; author: string; date: string; sum
 // git-show accepts abbreviated hashes, so it resolves unambiguously on click.
 type HistoryCommit = { hash: string; subject: string; author: string; date: string };
 
-export function FileViewer({ chatId, filePath, open, line, timestampFormat, viewMode, onViewModeChange, onNavigate, onOpenChange }: FileViewerProps) {
+export function FileViewer({ chatId, filePath, open, line, timestampFormat, viewMode, onViewModeChange, onNavigate, pollIntervalMs, onOpenChange }: FileViewerProps) {
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -118,12 +126,85 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
   const [blobError, setBlobError] = useState<string | null>(null);
   const blobCache = useRef<Map<string, { content: string | null; error: string | null }>>(new Map());
 
+  // Follow live-update (WARDEN-749): when ON, re-read the file on the poll
+  // cadence so an open file refreshes as an agent writes to it — the workspace
+  // analogue of `tail -f`, scoped to the file already on screen. Ephemeral UI
+  // state: reset on close (not persisted across opens), exactly as annotate/
+  // history reset per open. A human supervising a (often remote) yatfa agent
+  // can pin its output file and watch progress accumulate.
+  const [follow, setFollow] = useState(false);
+  // Brief in-flight flag for the manual ↻ reload button's spinner. The Follow
+  // interval never sets this — its polls are silent background refreshes.
+  const [manualReloading, setManualReloading] = useState(false);
+  // One AbortController per open session; close/switch/unmount aborts the
+  // in-flight read so a stale fetch never setContent/setError after the dialog
+  // is gone. Replaces the inline fetch's per-effect `cancelled` flag (WARDEN-561)
+  // now that the same fetch is shared by the initial open, the ↻ button, and the
+  // Follow interval.
+  const abortRef = useRef<AbortController | null>(null);
+
   // Rendered ⇄ Source view mode for markdown files (WARDEN-266). Now App-owned
   // and persisted (WARDEN-480): `viewMode` is the controlled prop (see Props);
   // the toggle handler calls `onViewModeChange`. Only the plain view branch
   // (!annotate && !hasLine) honors it; line-jump and blame views stay source-
   // based regardless. Defaults to rendered so opening a README shows docs.
 
+  // Read the open file. Extracted (WARDEN-749) so the manual ↻ reload and the
+  // Follow interval re-run the SAME path as the initial open. A `background`
+  // flag separates the two call styles:
+  //   - foreground (initial open): sets `loading` so the body shows the spinner,
+  //     and surfaces fetch errors.
+  //   - background (↻ reload, Follow poll): updates content IN PLACE with no
+  //     loading flash, and leaves error state untouched on a transient failure
+  //     so a live follow never blanks out a file the user is reading.
+  // All calls during one open session share that session's AbortController, so
+  // close/switch/unmount aborts the in-flight read and the `ac.signal.aborted`
+  // guards prevent any post-close setState (the WARDEN-561 race the inline
+  // fetch's `cancelled` flag guarded against — now generalized to 3 callers).
+  const loadContent = useCallback(async (opts?: { background?: boolean }) => {
+    const background = opts?.background === true;
+    const ac = abortRef.current;
+    if (!ac) return; // dialog closed / no active session
+    if (!background) setLoading(true);
+    try {
+      const response = await fetch('/api/read-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: chatId, path: filePath }),
+        signal: ac.signal,
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        if (!ac.signal.aborted && !background) {
+          setError(data.error || `Failed to read file: ${response.statusText}`);
+        }
+        return;
+      }
+
+      const data = await response.json();
+      if (ac.signal.aborted) return;
+      // Change detection (WARDEN-749): skip the state write when content is
+      // unchanged so a static file doesn't re-render / re-tokenize on every poll
+      // (and a reader's scroll is preserved). Returning the PREVIOUS value from
+      // the updater makes React bail out of the re-render entirely (Object.is).
+      // `data.content` is a fresh string each fetch, so `===` is a value compare.
+      setContent((prev) => (prev === data.content ? prev : data.content));
+      setError(null);
+    } catch (e) {
+      if (ac.signal.aborted) return; // close/switch abort — ignore, no setState
+      if (!background) setError(e instanceof Error ? e.message : 'Failed to read file');
+      // background: silent on transient error — keep the last-good content so a
+      // live follow stays readable across a network blip; the next poll recovers.
+    } finally {
+      if (!ac.signal.aborted && !background) setLoading(false);
+    }
+  }, [chatId, filePath]);
+
+  // Initial / on-file-change fetch. Resets per-open ephemeral state (including
+  // Follow) so a stale mode never carries into a fresh open, arms the session
+  // AbortController, then kicks the foreground load. The cleanup aborts so a
+  // fast close/switch can't flash a just-closed file's content (WARDEN-561).
   useEffect(() => {
     if (!open) {
       setContent(null);
@@ -142,47 +223,38 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
       setBlobError(null);
       setBlobLoading(false);
       blobCache.current.clear();
+      setFollow(false); // Follow is ephemeral (WARDEN-749): reset on close, not persisted
+      setManualReloading(false);
+      abortRef.current = null;
       return;
     }
 
-    // Guard every post-await setState with a `cancelled` flag, exactly like the
-    // sibling blame/history/blob effects in this file (and DiffViewer's content
-    // fetch). On rapid open/close/open — or a fast chat/file switch — the stale
-    // in-flight fetch would otherwise setContent/setError/setLoading AFTER the
-    // dialog closed (or the component unmounted), flashing a just-closed file's
-    // content/error and tripping a React "set state on unmounted component"
-    // warning. The early-return close branch above needs no guard: it has no
-    // fetch to cancel (WARDEN-561).
-    let cancelled = false;
-    const fetchFile = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const response = await fetch('/api/read-file', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: chatId, path: filePath }),
-        });
+    const ac = new AbortController();
+    abortRef.current = ac;
+    loadContent();
+    return () => { ac.abort(); abortRef.current = null; };
+  }, [chatId, filePath, open, loadContent]);
 
-        if (!response.ok) {
-          const data = await response.json();
-          if (!cancelled) setError(data.error || `Failed to read file: ${response.statusText}`);
-          return;
-        }
-
-        const data = await response.json();
-        if (cancelled) return;
-        setContent(data.content);
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to read file');
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
+  // Follow poller (WARDEN-749): while the dialog is open AND Follow is ON, re-read
+  // the file on the resolved poll cadence so an agent's writes appear without a
+  // close/reopen. Visibility-gated — a backgrounded tab must not burn polls — with
+  // an immediate refresh on focus regain (state may be stale while hidden). This
+  // is the codebase-wide poller invariant (WARDEN-678), mirrored from
+  // useLiveTimeline: BOTH the tick gate AND the visibilitychange immediate-refresh
+  // listener are present, and cleanup removes both. Tearing down on follow/open/
+  // cadence/file change clears the interval + listener (no leaked timers).
+  useEffect(() => {
+    if (!open || !follow) return;
+    const intervalMs = pollIntervalMs ?? WEB_POLL_DEFAULT_MS;
+    const tick = () => { if (document.visibilityState === 'visible') void loadContent({ background: true }); };
+    const onVisibility = () => { if (document.visibilityState === 'visible') void loadContent({ background: true }); };
+    const intervalId = window.setInterval(tick, intervalMs);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
-
-    fetchFile();
-    return () => { cancelled = true; };
-  }, [chatId, filePath, open]);
+  }, [open, follow, pollIntervalMs, loadContent]);
 
   // Fetch blame only while annotating. Gates the success path on response.ok so a
   // 4xx/5xx (e.g. an unknown chat → 404) is surfaced as an error, not silent success
@@ -304,6 +376,12 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
 
   const hasLine = typeof line === 'number' && line > 0;
 
+  // Whether the stick-to-bottom region should auto-pin: Follow ON and the plain
+  // view only. Line-jump / annotate / history / commit-snapshot views own their
+  // own scroll semantics and must not be auto-scrolled on a poll. Computed here
+  // and handed to <StickRegion> (which owns the useStickToBottom hook).
+  const stickActive = follow && !hasLine && !annotate && !history && !viewAtCommit;
+
   // Markdown files render as formatted docs in the plain view branch (WARDEN-266).
   // Case-insensitive so .MD / .Markdown match too. Line-jump and Annotate views
   // stay source-based regardless.
@@ -360,6 +438,19 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
     if (ok) toast.success('Copied');
     else toast.error('Copy failed');
   };
+
+  // Manual ↻ reload (WARDEN-749): a one-shot refresh independent of Follow —
+  // today no refresh exists at all, so a stale file forces a close/reopen. Runs
+  // as a background-style load (no loading flash; content updates in place) and
+  // toggles a brief button spinner via `manualReloading` for visible feedback.
+  const handleManualReload = useCallback(async () => {
+    setManualReloading(true);
+    try {
+      await loadContent({ background: true });
+    } finally {
+      setManualReloading(false);
+    }
+  }, [loadContent]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -461,10 +552,51 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
                     <GitCommitHorizontalIcon className="w-3.5 h-3.5" />
                     Annotate
                   </Button>
+                  {/* Manual reload (WARDEN-749): a one-shot refresh. Independently
+                      useful — before this no refresh existed, so a stale file
+                      forced a close/reopen. Spinner swaps in while in-flight. */}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 w-7 shrink-0 p-0 text-xs"
+                    onClick={handleManualReload}
+                    disabled={manualReloading}
+                    title="Reload file"
+                    aria-label="Reload file"
+                  >
+                    {manualReloading ? (
+                      <Loader2Icon className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <RotateCwIcon className="h-3.5 w-3.5" />
+                    )}
+                  </Button>
+                  {/* Follow toggle (WARDEN-749): live-update the open file on the
+                      poll cadence as an agent writes to it (tail -f). Ephemeral —
+                      resets on close. Pauses while the tab is hidden. */}
+                  <Button
+                    type="button"
+                    variant={follow ? 'default' : 'outline'}
+                    size="sm"
+                    className="h-7 shrink-0 gap-1.5 text-xs"
+                    onClick={() => setFollow((f) => !f)}
+                    title={follow ? 'Stop following — pause live updates' : 'Follow — live-update this file as it changes (tail -f)'}
+                    aria-pressed={follow}
+                  >
+                    <CircleDotIcon className="h-3.5 w-3.5" />
+                    Follow
+                  </Button>
                 </div>
               </DialogTitle>
             </DialogHeader>
 
+            {/* StickRegion wraps the ScrollArea so the useStickToBottom hook
+                mounts WITH the dialog content (Radix only mounts DialogContent
+                when open; the hook resolves the viewport once on its OWN mount).
+                Re-pins to the tail on a Follow content update when `stickActive`
+                — tail -f behavior that respects a reader scrolled up. See
+                StickRegion below. (WARDEN-749) */}
+            <StickRegion active={stickActive} pinKey={content}>
             <ScrollArea className="h-[60vh] w-full rounded-md border bg-muted/50">
               <div className="p-4">
                 {viewAtCommit ? (
@@ -562,6 +694,7 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
                 )}
               </div>
             </ScrollArea>
+            </StickRegion>
 
             <DialogClose asChild>
               <Button variant="outline" className="w-full sm:w-auto">Close</Button>
@@ -591,6 +724,44 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
       </ContextMenu>
     </Dialog>
   );
+}
+
+// The Follow stick-to-bottom region (WARDEN-749). Wraps the FileViewer's
+// ScrollArea so the shared useStickToBottom hook mounts WITH the dialog content.
+//
+// Why a sub-component and not a hook called directly in FileViewer: Radix
+// <Dialog> only mounts its <DialogContent> (and everything inside it) while
+// `open` is true, but FileViewer itself is always mounted (the ChatSidebar path
+// renders it with open=false before the first open). useStickToBottom resolves
+// the Radix scroll viewport ONCE, in a useLayoutEffect that runs on its owner's
+// mount — so if the owner is FileViewer, the viewport is absent at mount (the
+// dialog is closed) and the hook returns early, never re-running: stick-to-
+// bottom would silently never engage. StickRegion is rendered INSIDE
+// DialogContent, so it mounts exactly when the scroll DOM appears, and the hook
+// resolves the viewport at the right time. (ObserverPanel doesn't hit this
+// because its scroll region is always mounted.)
+//
+// `active` = Follow ON and the plain view (line-jump / annotate / history /
+// commit-snapshot own their scroll semantics). `pinKey` = the file content, so
+// the re-pin fires once per Follow content update. stickIfPinned no-ops unless
+// the user is already near the tail, so a reader scrolled up is never yanked
+// down — the hook's synchronous followingRef is what makes the two coexist.
+//
+// Note on the always-on observers: useStickToBottom attaches its scroll/resize/
+// mutation observers once StickRegion mounts, and they call stickIfPinned on any
+// viewport content change — not only via the `active`-gated call below. That is
+// benign in practice because stickIfPinned no-ops unless the user is at the tail:
+// a view with no downward growth (annotate's blame gutters don't change row
+// count) sees no movement, and "stay at the bottom when you're already at the
+// bottom" is the intended tail behavior. This mirrors ObserverPanel's always-on
+// stickiness (the hook's other consumer).
+function StickRegion({ active, pinKey, children }: { active: boolean; pinKey: unknown; children: ReactNode }) {
+  const { rootRef, stickIfPinned } = useStickToBottom();
+  useLayoutEffect(() => {
+    if (!active) return;
+    stickIfPinned();
+  }, [active, pinKey, stickIfPinned]);
+  return <div ref={rootRef}>{children}</div>;
 }
 
 // Render one source line's colored leaves, or a single space for an empty line so

@@ -1860,6 +1860,7 @@ function App() {
               timestampFormat={timestampFormat}
               fileViewerViewMode={fileViewerViewMode}
               onFileViewerViewModeChange={setFileViewerViewMode}
+              pollIntervalMs={pollIntervalMs}
               snippets={snippets}
               watchedChats={watchedChatSet}
               watchedStates={watchedStateByKey}
@@ -1911,6 +1912,7 @@ function App() {
             timestampFormat={timestampFormat}
             fileViewerViewMode={fileViewerViewMode}
             onFileViewerViewModeChange={setFileViewerViewMode}
+            pollIntervalMs={pollIntervalMs}
           />
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"
