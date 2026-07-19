@@ -160,6 +160,13 @@ interface Props {
 
 const LABEL: Record<string, string> = { '(local)': 'this machine' };
 
+// WARDEN-742: preview row count for the per-host past-session resume list. The
+// backend caps the per-host payload at SESSION_SEARCH_PER_HOST (20), so this is
+// strictly a preview ceiling — "show more" reveals the rest of what was fetched
+// (at most 8 more rows). Kept separate from RECENTLY_CLOSED_PREVIEW so the two
+// lists can evolve independently.
+const SESSION_PREVIEW = 12;
+
 // Query-string builders (module-level so the fetchers' useCallback deps stay stable).
 // incoming/outgoing ignore the limit arg — their limit is hardcoded at 50.
 const buildGitLogParams = (limit: number) => `limit=${limit}`;
@@ -201,6 +208,11 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // WARDEN-372: "show more" affordance for the per-workspace recently-closed list
   // (5 previewed → up to the 20-entry cap).
   const [showAllClosed, setShowAllClosed] = useState(false);
+  // WARDEN-742: "show more" affordance for the per-host past-session resume list.
+  // A top-level boolean is fine — the host drill-in shows one host's sessions at a
+  // time, and navigating away resets `view`, unmounting the list (no stale
+  // cross-host expansion state). Same shape as showAllClosed.
+  const [showAllSessions, setShowAllSessions] = useState(false);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [tabSearchQuery, setTabSearchQuery] = useState('');
@@ -473,6 +485,14 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
     if (view.kind !== 'host') return [];
     return filterSessionsByTags(hostSessions[view.host]?.sessions || [], sessionTags, activeTagFilters);
   }, [view, hostSessions, sessionTags, activeTagFilters]);
+  // WARDEN-742: the per-host past-session resume list shows SESSION_PREVIEW rows,
+  // with a "show more" that reveals the rest of the already-fetched (and tag-filtered)
+  // set. The backend caps the payload at SESSION_SEARCH_PER_HOST (20), so this is a
+  // client-side reveal only — no pagination/hasMore plumbing. Defined in the main
+  // body (not inside renderHost) so the memo-derived visibleSessions stays the single
+  // source of truth the closure reads.
+  const sessionPreview = showAllSessions ? visibleSessions : visibleSessions.slice(0, SESSION_PREVIEW);
+  const hasMoreSessions = visibleSessions.length > SESSION_PREVIEW;
 
   // WARDEN-565: cross-agent file-edit collision ⚠ badge for the fleet view headers.
   // Re-homes the orphaned WARDEN-288 detection (detectProjectFileCollisions) into the
@@ -1129,7 +1149,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
               )}
             </div>
             <SessionTagFilterRow tagsInUse={tagsInUse} active={activeTagFilters} onToggle={toggleTagFilter} onClear={() => setActiveTagFilters(new Set())} />
-            {visibleSessions.slice(0, 12).map((s) => {
+            {sessionPreview.map((s) => {
               const running = hostChats.some((c) => c.key === `resume-${s.id.slice(0, 8)}`);
               const isLoading = resumingSessionId === s.id;
               const sTags = sessionTags[s.id] || [];
@@ -1192,6 +1212,11 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
                 </ContextMenu>
               );
             })}
+            {hasMoreSessions && (
+              <Button variant="ghost" size="xs" onClick={() => setShowAllSessions((v) => !v)} className="mx-2 mt-0.5 self-start text-xs text-muted-foreground hover:text-foreground">
+                {showAllSessions ? 'show less' : `show ${visibleSessions.length - SESSION_PREVIEW} more`}
+              </Button>
+            )}
             {visibleSessions.length === 0 && activeTagFilters.size > 0 && (
               <div className="mx-1 my-1 px-2 py-1.5 text-[11px] text-muted-foreground">
                 no sessions match the selected tag{activeTagFilters.size > 1 ? 's' : ''} — <button className="underline hover:text-foreground" onClick={() => setActiveTagFilters(new Set())}>clear filter</button>
