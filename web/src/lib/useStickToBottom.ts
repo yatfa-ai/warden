@@ -18,7 +18,14 @@ const BOTTOM_THRESHOLD = 24;
 //   const { rootRef, atBottom, scrollToBottom, stickIfPinned } = useStickToBottom();
 //   <ScrollArea ref={rootRef}>...</ScrollArea>
 //   useLayoutEffect(() => { stickIfPinned(); }, [items]);   // pin on new content
-export function useStickToBottom() {
+//
+// `enabled` (default true): when false, the scroll/resize/mutation observers are
+// NOT attached, so the hook never auto-pins on content changes. Used by consumers
+// that want stick-to-bottom only conditionally (e.g. FileViewer's Follow toggle —
+// attach observers ONLY while Follow is on, so a content change with Follow OFF,
+// such as toggling Annotate/History on a short file, doesn't snap to the bottom).
+// Always-on consumers (ObserverPanel) omit the arg and get the default `true`.
+export function useStickToBottom(enabled: boolean = true) {
   // Ref on the <ScrollArea/> Root element.
   const rootRef = useRef<HTMLDivElement | null>(null);
   // The Radix viewport we actually scroll — resolved from the Root after mount.
@@ -96,6 +103,7 @@ export function useStickToBottom() {
   // fills the pane), so we also observe its content wrapper — the element that
   // actually grows as messages stream in.
   useLayoutEffect(() => {
+    if (!enabled) return;
     const root = rootRef.current;
     if (!root) return;
     const vp = root.querySelector<HTMLElement>('[data-slot="scroll-area-viewport"]');
@@ -120,7 +128,7 @@ export function useStickToBottom() {
       }
       viewportRef.current = null;
     };
-  }, [measure, onGrow]);
+  }, [measure, onGrow, enabled]);
 
   return { rootRef, atBottom, scrollToBottom, stickIfPinned };
 }

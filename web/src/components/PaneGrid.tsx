@@ -154,9 +154,13 @@ interface Props {
   // remembered choice) so toggling Rendered⇄Source once sticks across opens.
   fileViewerViewMode: 'rendered' | 'source';
   onFileViewerViewModeChange: (mode: 'rendered' | 'source') => void;
+  // Follow poll cadence (WARDEN-749): pure pass-through to PaneTile and to this
+  // grid's own FileViewer — App owns the resolved value (the same one the catalog
+  // poll uses), so Follow shares the dashboard cadence instead of hardcoding one.
+  pollIntervalMs: number;
 }
 
-export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, paneColRatios, paneRowRatios, onPaneColRatiosChange, onPaneRowRatiosChange, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, snippets, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange }: Props) {
+export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHost, onFocus, onClose, onToggleMax, onClearNew, onForceKill, onSplitShell, onSpawned, externalSearchQuery, onToggleSidebar, onToggleObserver, fontSize, onFontSizeChange, scrollback, fontFamily, paneLayout, paneColRatios, paneRowRatios, onPaneColRatiosChange, onPaneRowRatiosChange, terminalThemeId, terminalCursorStyle, copyOnSelect, onExitBehavior, showHostTags, snippets, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs }: Props) {
   const [fileOpen, setFileOpen] = useState(false);
   const [filePath, setFilePath] = useState('');
   // WARDEN-334: the 1-based line a grep result selected, fed to FileViewer's
@@ -740,6 +744,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
                     timestampFormat={timestampFormat}
                     fileViewerViewMode={fileViewerViewMode}
                     onFileViewerViewModeChange={onFileViewerViewModeChange}
+                    pollIntervalMs={pollIntervalMs}
                   />
                 </div>
               );
@@ -824,6 +829,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
           viewMode={fileViewerViewMode}
           onViewModeChange={onFileViewerViewModeChange}
           onNavigate={(p) => { setFilePath(p); setFileLine(undefined); }}
+          pollIntervalMs={pollIntervalMs}
           onOpenChange={(open) => {
             setFileOpen(open);
             if (!open) {
