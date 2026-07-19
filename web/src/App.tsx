@@ -11,8 +11,9 @@ import { type TimestampFormat } from '@/lib/formatTimestamp';
 import { type AgentFilter, type AgentSort } from '@/lib/agentFilter';
 import { stampLastSeen } from '@/lib/whatsNew';
 import { useWatchCatchup } from '@/lib/useWatchCatchup';
-import { indexByWatchKey, toggleWatchManyKeys } from '@/lib/chatWatch';
-import { requestAlertPermission, type AttentionSeverityPrefs } from '@/lib/desktopAlerts';
+import { useWatchState } from '@/lib/useWatchState';
+import { indexByWatchKey } from '@/lib/chatWatch';
+import { type AttentionSeverityPrefs } from '@/lib/desktopAlerts';
 import { useTokenBudget } from '@/lib/useTokenBudget';
 import { useAttentionRollup } from '@/lib/useAttentionRollup';
 import { useHostStatuses } from '@/lib/useHostStatuses';
@@ -323,14 +324,12 @@ function App() {
     const id = window.setInterval(prune, 60_000);
     return () => window.clearInterval(id);
   }, []);
-  // Per-chat "watch" opt-in (WARDEN-378): pane keys the human marked "watch this
-  // chat" for a targeted, reason-specific desktop ping when that chat newly needs
-  // them. Global (not per-workspace). Pure client-side pref (like
-  // attentionDesktopAlerts/attentionStates): persisted by the saveUi effect below,
-  // forwarded to the AttentionBadge's useAttentionRollup (which unions watched ∪
-  // open into the ?panes= poll and runs the per-chat transition detector). Never
-  // sent to the backend.
-  const [watchedChats, setWatchedChats] = useState<string[]>(() => uiState.watchedChats ?? []);
+  // Per-chat watch state + single/bulk toggles + the derived O(1) lookup Set live
+  // in useWatchState (WARDEN-696 slice 2). watchedChats is still persisted by the
+  // saveUi effect below and wired into the attention rollup (composition root).
+  const { watchedChats, watchedChatSet, toggleWatch, toggleWatchMany, clearWatchedChats } = useWatchState({
+    initialWatched: uiState.watchedChats ?? [],
+  });
   const [terminalScrollback, setTerminalScrollback] = useState(() => uiState.terminalScrollback ?? 10000);
   // Terminal font family: the CSS font-family value every agent pane renders.
   // '' / absent / blank → DEFAULT_TERMINAL_FONT_FAMILY (today's exact stack) so
@@ -846,8 +845,8 @@ function App() {
     // WARDEN-551: clear any active snoozes too, so a reset leaves no stale
     // temporary suppression behind (mirrors clearing the permanent mute set).
     setSnoozedAlertKeys({});
-    setWatchedChats([]);
-  }, []);
+    clearWatchedChats();
+  }, [clearWatchedChats]);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
   // its entries in the chats list so dots update to green/red.
@@ -1061,19 +1060,6 @@ function App() {
   }, [returnWindowActive, bannerShownOnce, activityTotalSinceClose, attentionTop]);
   const showReturnBanner = bannerShownOnce && !bannerDismissed;
 
-  // WARDEN-378: toggle a chat's per-chat "watch" — marks it for a targeted,
-  // reason-specific desktop ping when it newly needs the human. Turning watch ON
-  // also requests OS notification permission (if not already granted) so the ping
-  // can actually fire — the same requestAlertPermission the fleet-alert toggle uses.
-  // Pure client-side state (persisted via the saveUi effect); no backend call. The
-  // permission request is hoisted out of the updater (updaters must stay pure, and
-  // StrictMode double-invokes them in dev); requestAlertPermission is idempotent.
-  const toggleWatch = useCallback((key: string) => {
-    const turningOn = !watchedChats.includes(key);
-    setWatchedChats((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
-    if (turningOn) void requestAlertPermission();
-  }, [watchedChats]);
-
   // WARDEN-581 — bulk siblings of setAlertMute / toggleWatch for the sidebar's
   // multi-select action bar. Both write the WHOLE selected-key set in a single
   // state update (one persist, one re-render) via the pure bulk setters in
@@ -1091,15 +1077,6 @@ function App() {
     const keySet = new Set(keys);
     setMutedAlertKeys((prev) => prev.some((k) => keySet.has(k)) ? prev.filter((k) => !keySet.has(k)) : prev);
     setSnoozedAlertKeys((prev) => snoozeManyKeys(prev, keys, mode, now));
-  }, []);
-  // toggleWatchMany: add (on=true) or remove (on=false) every selected key. The OS
-  // notification permission request fires ONCE for a bulk watch-ON (not per key —
-  // requestAlertPermission is idempotent but a per-key spam is still wrong), hoisted
-  // out of the updater (updaters stay pure; StrictMode double-invokes them in dev).
-  const toggleWatchMany = useCallback((keys: string[], on: boolean) => {
-    if (keys.length === 0) return;
-    setWatchedChats((prev) => toggleWatchManyKeys(prev, keys, on));
-    if (on) void requestAlertPermission();
   }, []);
 
   // Seamless cross-host resume: when an observer session bound to an agent is
@@ -1497,9 +1474,6 @@ function App() {
   const cancelCloseWorkspace = useCallback(() => setWorkspaceCloseTarget(null), []);
 
   const openPaneSet = new Set(openPanes);
-  // WARDEN-378: O(1) "is this chat watched?" lookup for the sidebar rows (the watch
-  // toggle's active state). A Set mirroring watchedChats, recomputed each render.
-  const watchedChatSet = new Set(watchedChats);
   // WARDEN-514: per-key CURRENT-state lookup for the watched rows — so a watched chat
   // that needs the human right now (waiting/erroring/stuck/blocked) shows a persistent,
   // state-aware indicator on its own row even when its pane is closed (the header
