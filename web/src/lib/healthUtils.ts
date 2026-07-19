@@ -226,6 +226,69 @@ export function compareHostGroups(
   return 0;
 }
 
+// ---- Project grouping (Fleet Health Dashboard "Group by: Project" — WARDEN-741) ----
+
+/**
+ * One project's bucket: its agents plus a per-health-state tally. Mirrors
+ * `HostHealthGroup` exactly (same counts shape) so the Host section's render
+ * treatment transfers verbatim — only the bucket key (`project` vs `host`)
+ * differs. Reuses `HostHealthCounts` (the shared health-tally shape, host-named
+ * only by history) rather than introducing a duplicate identical interface.
+ */
+export interface ProjectHealthGroup {
+  project: string;
+  agents: Chat[];
+  counts: HostHealthCounts;
+}
+
+/**
+ * Bucket agents by project and tally each health state per project (WARDEN-741).
+ *
+ * The Project grouping mode answers "which of my projects is healthy vs. stuck
+ * right now?" without mentally slicing the flat/host list by the per-row project
+ * badge. Mirrors `groupByHost` end-to-end (WARDEN-237): buckets by a per-agent
+ * key, tallies per-health-state via `normalizeHealthState`, reuses `EMPTY_COUNTS`,
+ * and preserves input order within a project (the caller re-sorts if it wants
+ * health-dot ordering). Agents with a missing project fall back to '(no project)'
+ * — the project analog of `groupByHost`'s '(local)' host fallback — so a record
+ * missing its project badge never falls through the cracks.
+ *
+ * Pure (no React, no fetch) so it loads standalone under the OXC test harness.
+ */
+export function groupByProject(agents: Chat[]): ProjectHealthGroup[] {
+  const map = new Map<string, ProjectHealthGroup>();
+  for (const agent of agents) {
+    const project = agent.project || '(no project)';
+    let group = map.get(project);
+    if (!group) {
+      group = { project, agents: [], counts: { ...EMPTY_COUNTS } };
+      map.set(project, group);
+    }
+    group.agents.push(agent);
+    group.counts[normalizeHealthState(agent.healthState)] += 1;
+  }
+  return [...map.values()];
+}
+
+/**
+ * Degraded-first ordering for project sections (WARDEN-741): a human running
+ * multiple projects needs the worst project on top. Same priority ladder as
+ * `compareHostGroups` (WARDEN-237) MINUS the connectivity axis — a project has
+ * no single host/online status (it can span hosts), so connectivity is dropped:
+ *   1. Critical-heavy projects first (more critical agents = worse).
+ *   2. Then by total agent count (bigger project = bigger blast radius).
+ *   3. Then by project name (stable, deterministic tiebreak).
+ *
+ * Pure and unit-tested alongside `compareHostGroups`.
+ */
+export function compareProjectGroups(a: ProjectHealthGroup, b: ProjectHealthGroup): number {
+  if (a.counts.critical !== b.counts.critical) return b.counts.critical - a.counts.critical; // critical-heavy next
+  if (a.agents.length !== b.agents.length) return b.agents.length - a.agents.length;         // bigger groups next
+  if (a.project < b.project) return -1;                                                     // stable name tiebreak
+  if (a.project > b.project) return 1;
+  return 0;
+}
+
 // ---- Per-host resource load roll-up (WARDEN-361) ----
 
 /**
