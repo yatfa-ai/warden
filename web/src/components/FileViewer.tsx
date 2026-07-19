@@ -783,6 +783,7 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
                     error={blobError}
                     viewMode={viewMode}
                     isMarkdown={isMarkdown}
+                    onOpenPath={navigable ? (p) => onNavigate?.(p) : undefined}
                     onBack={() => setViewAtCommit(null)}
                   />
                 ) : changes ? (
@@ -811,7 +812,12 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
                 {!loading && !error && content !== null && !annotate && !history && !hasLine && (
                   isMarkdown && viewMode === 'rendered' ? (
                     <div className="flex flex-col gap-2 text-sm leading-relaxed">
-                      <MarkdownBody>{content}</MarkdownBody>
+                      <MarkdownBody
+                        baseFilePath={filePath}
+                        onOpenPath={navigable ? (p) => onNavigate?.(p) : undefined}
+                      >
+                        {content}
+                      </MarkdownBody>
                     </div>
                   ) : (
                     <pre className="text-sm font-mono whitespace-pre-wrap break-words">
@@ -1278,7 +1284,7 @@ function ChangesContent({ diff, untracked, loading, error }: {
 // the working tree, with a back control to return to the commit list.
 // Presentational: the fetch + per-hash cache (instant re-open, mirroring
 // BlameHash's `fetched` flag) live in FileViewer and are passed in here.
-function CommitBlobView({ commit, filePath, content, loading, error, viewMode, isMarkdown, onBack }: {
+function CommitBlobView({ commit, filePath, content, loading, error, viewMode, isMarkdown, onOpenPath, onBack }: {
   commit: HistoryCommit;
   filePath: string;
   content: string | null;
@@ -1286,6 +1292,11 @@ function CommitBlobView({ commit, filePath, content, loading, error, viewMode, i
   error: string | null;
   viewMode: 'rendered' | 'source';
   isMarkdown: boolean;
+  // Forwarded to MarkdownBody so a relative link in a historical doc snapshot
+  // also swaps the viewer (WARDEN-805). Undefined when no onNavigate is wired;
+  // undefined after this snapshot's click navigates to the LIVE file and exits
+  // the history view — consistent with how the breadcrumb already behaves here.
+  onOpenPath?: (resolvedPath: string) => void;
   onBack: () => void;
 }) {
   const shortHash = commit.hash.slice(0, 8);
@@ -1334,7 +1345,9 @@ function CommitBlobView({ commit, filePath, content, loading, error, viewMode, i
       {!loading && !error && content !== null && (
         isMarkdown && viewMode === 'rendered' ? (
           <div className="flex flex-col gap-2 text-sm leading-relaxed">
-            <MarkdownBody>{content}</MarkdownBody>
+            <MarkdownBody baseFilePath={filePath} onOpenPath={onOpenPath}>
+              {content}
+            </MarkdownBody>
           </div>
         ) : (
           <pre className="text-sm font-mono whitespace-pre-wrap break-words">

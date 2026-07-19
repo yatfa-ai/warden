@@ -3,6 +3,7 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Button } from '@/components/ui/button';
 import { CheckIcon, CopyIcon } from 'lucide-react';
+import { resolveDocRelative } from '@/lib/docLinks';
 
 // A fenced code block with a language label + copy button. The raw text and
 // language are pulled from the `<code>` child react-markdown renders inside the
@@ -45,7 +46,26 @@ function CodeBlock({ language, children }: { language?: string; children: string
 // message text (ObserverMarkdown) and file-viewer rendered docs (FileViewer,
 // WARDEN-266) provably read as one system. Each caller wraps this in its own
 // container; this component only owns the element styling.
-export function MarkdownBody({ children }: { children: string }) {
+//
+// In-doc relative file links (WARDEN-805): when BOTH `baseFilePath` (the doc's
+// repo-relative path) and `onOpenPath` are passed, a relative href like
+// `[setup](./INSTALL.md)` or `[utils](../lib/utils.ts)` is resolved against the
+// doc's directory and rendered as an in-app link that swaps the viewer in place
+// via `onOpenPath(resolved)`. A real `href` (the resolved repo-relative path) is
+// kept so the browser's context-menu (copy link / open in new tab) still works.
+// When neither prop is passed — or the resolver returns null for a non-relative
+// href (http(s), mailto, anchors, …) — links render exactly as before:
+// `target="_blank" rel="noreferrer noopener"`. ObserverMarkdown and
+// DirectiveHistory pass neither prop, so they are byte-for-byte unchanged.
+export function MarkdownBody({
+  children,
+  baseFilePath,
+  onOpenPath,
+}: {
+  children: string;
+  baseFilePath?: string;
+  onOpenPath?: (resolvedPath: string) => void;
+}) {
   return (
     <Markdown
       remarkPlugins={[remarkGfm]}
@@ -57,11 +77,35 @@ export function MarkdownBody({ children }: { children: string }) {
         h5: ({ children }) => <h5 className="text-xs font-semibold">{children}</h5>,
         h6: ({ children }) => <h6 className="text-xs font-semibold text-muted-foreground">{children}</h6>,
         p: ({ children }) => <p className="m-0">{children}</p>,
-        a: ({ children, href }) => (
-          <a href={href} target="_blank" rel="noreferrer noopener" className="text-primary underline underline-offset-2">
-            {children}
-          </a>
-        ),
+        a: ({ children, href }) => {
+          // Resolve relative file refs (./x, ../y, dir/z.md) against the doc's
+          // dir ONLY when both opt-in props are present; null otherwise (every
+          // non-relative href, or no-resolver contexts like ObserverMarkdown).
+          const resolved =
+            href && onOpenPath && baseFilePath ? resolveDocRelative(baseFilePath, href) : null;
+          if (resolved !== null && onOpenPath) {
+            // In-app nav: swap the viewer in place. preventDefault so the real
+            // href (the resolved repo-relative path, kept for copy-link/open-in-
+            // new-tab) does not also navigate the browser.
+            return (
+              <a
+                href={resolved}
+                onClick={(e) => {
+                  e.preventDefault();
+                  onOpenPath(resolved);
+                }}
+                className="text-primary underline underline-offset-2"
+              >
+                {children}
+              </a>
+            );
+          }
+          return (
+            <a href={href} target="_blank" rel="noreferrer noopener" className="text-primary underline underline-offset-2">
+              {children}
+            </a>
+          );
+        },
         strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
         em: ({ children }) => <em className="italic">{children}</em>,
         ul: ({ children }) => <ul className="m-0 list-disc space-y-1 pl-5">{children}</ul>,
