@@ -1545,6 +1545,17 @@ export function bindFleetRowOpenFile(
 export interface FleetGitStatusSlice {
   clean: boolean | null;
   diffstat: { files: number; insertions: number; deletions: number } | null;
+  // # of unmerged PATHS for THIS agent (WARDEN-796) — the per-row conflict axis
+  // the dirty signal cannot speak to: an agent BLOCKED mid-merge/rebase/cherry-pick
+  // (porcelain unmerged DD/AU/UD/UA/DU/AA/UU). /api/git-status ALREADY serves the
+  // porcelain `files[]` with each row tagged `conflict: boolean` (gitStatus.js's
+  // parseGitStatusPorcelain → `conflict: isConflictStatus(statusCode)`); this is the
+  // count of those rows, derived at the fetch seam (useFleetGitStatus) — no new fetch,
+  // no backend change. 0 for a clean / non-git / no-conflict cwd (the server serves
+  // files:null there → the Array.isArray guard at the seam keeps it 0). NOTE this is a
+  // PER-AGENT PATH count, NOT the fleet-wide count of conflict-blocked AGENTS (that is
+  // FleetGitStatusResult.conflictCount below — the mirror of dirtyCount).
+  conflictCount: number;
 }
 
 // One agent's fan-out outcome. `ok: false` = that agent's /api/git-status fetch
@@ -1578,16 +1589,28 @@ export interface FleetGitStatusResult {
   // note (WARDEN-89 — never let a per-agent failure masquerade as a clean/empty
   // status). errorCount ≤ eligible.length always (one outcome per fanned agent).
   errorCount: number;
+  // # of fanned agents with at least one unmerged path (status.conflictCount > 0) —
+  // the fleet-wide "N conflict" count surfaced in the Fleet Health summary bar
+  // (WARDEN-796). This counts conflict-blocked AGENTS, NOT total unmerged files — the
+  // direct mirror of dirtyCount (which counts agents with clean === false, not total
+  // dirty files). An error / loading agent is NOT a conflict (counted in errorCount /
+  // absent), so a transiently-unreachable agent is never misread as blocked. The
+  // PER-AGENT path count lives on FleetGitStatusSlice.conflictCount above (drives the
+  // per-row ⚑'s "N unmerged" magnitude); this fleet count drives the summary tally.
+  conflictCount: number;
 }
 
 /**
  * Turn N per-agent /api/git-status outcomes into the Fleet Health view: a per-agent
- * { clean, diffstat } map + a fleet-wide dirty count + an honest error count. Every
- * ok agent gets a map entry (clean OR dirty — the React layer gates the per-row chip
- * on clean === false, so a clean entry is harmless + keeps the "fetched vs loading"
- * distinction available); ok:false agents are counted into errorCount WITHOUT
- * blanking the ok agents' entries (the Promise.allSettled fleet contract). dirtyCount
- * counts ONLY ok agents whose clean === false — an error agent is never dirty.
+ * { clean, diffstat, conflictCount } map + a fleet-wide dirty count + a fleet-wide
+ * conflict count + an honest error count. Every ok agent gets a map entry (clean OR
+ * dirty — the React layer gates the per-row chip on clean === false, so a clean entry
+ * is harmless + keeps the "fetched vs loading" distinction available); ok:false agents
+ * are counted into errorCount WITHOUT blanking the ok agents' entries (the
+ * Promise.allSettled fleet contract). dirtyCount counts ONLY ok agents whose
+ * clean === false; conflictCount counts ONLY ok agents with conflictCount > 0 (the
+ * agent-level mirror of dirtyCount — blocked AGENTS, not unmerged files). An error
+ * agent is never dirty AND never a conflict.
  *
  * Outcomes are processed in caller (chats) order, so the map + counts are
  * deterministic and tests assert deep equality — the convention the rest of this
@@ -1599,6 +1622,7 @@ export function buildFleetGitStatus(outcomes: FleetGitStatusOutcome[]): FleetGit
   const statusByKey: Record<string, FleetGitStatusSlice> = {};
   let dirtyCount = 0;
   let errorCount = 0;
+  let conflictCount = 0;
   for (const o of outcomes) {
     if (!o.ok) {
       errorCount += 1;
@@ -1606,8 +1630,14 @@ export function buildFleetGitStatus(outcomes: FleetGitStatusOutcome[]): FleetGit
     }
     statusByKey[o.key] = o.status;
     if (o.status.clean === false) dirtyCount += 1;
+    // Mirror the dirtyCount line: count conflict-blocked AGENTS (those with at least
+    // one unmerged path), NOT total unmerged files — the agent-level fleet tally the
+    // summary bar renders as "N conflict". An agent both dirty AND conflict-blocked
+    // increments BOTH (a mid-merge repo is dirty by definition); the two axes are
+    // orthogonal counts over the same ok fleet.
+    if (o.status.conflictCount > 0) conflictCount += 1;
   }
-  return { statusByKey, dirtyCount, errorCount };
+  return { statusByKey, dirtyCount, errorCount, conflictCount };
 }
 
 /**
