@@ -139,6 +139,28 @@ export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, o
     }
   }, []);
 
+  // Close = delete: removing an observer tab (× or idle-timeout) must also remove
+  // the session from disk via the existing DELETE /api/sessions/:id endpoint —
+  // otherwise the {id}.json/{id}.md transcripts linger forever, with no UI to see
+  // or remove them. Fire-and-forget so the UI closes instantly; the local-state
+  // removal is already correct and there is no server list to re-fetch, so we
+  // only need the files gone (unlike CollectionsSection, which re-lists on delete).
+  // Toast on failure only when error notifications are on (mirrors refresh/createNew).
+  // Both close paths — closeTab below and the idle-close tick above — call this.
+  const deleteSessionServer = useCallback((id: string) => {
+    fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      .then((r) => {
+        if (!r.ok && prefsRef.current.notifyErrors) {
+          toast.error(`Failed to delete session: HTTP ${r.status}`);
+        }
+      })
+      .catch((err) => {
+        if (prefsRef.current.notifyErrors) {
+          toast.error(`Failed to delete session: ${err instanceof Error ? err.message : 'Unknown error'}`);
+        }
+      });
+  }, []);
+
   // boot: load sessions, restore tabs, ensure at least one session exists & is open
   useEffect(() => {
     (async () => {
@@ -242,14 +264,19 @@ export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, o
       const idle = selectIdleTabs(openIdsRef.current, lastActivityRef.current, sessionTimeoutRef.current, Date.now());
       if (idle.length === 0) return;
       const idleSet = new Set(idle);
+      // Fire the server-side delete for each idle id (close=delete). The tick still
+      // does its OWN batched openIds/activeId repair inline per the comment above —
+      // this just additionally removes the transcripts from disk so they don't leak.
+      idle.forEach((id) => deleteSessionServer(id));
       setOpenIds((p) => p.filter((x) => !idleSet.has(x)));
       setActiveId((a) => (a && idleSet.has(a) ? (openIdsRef.current.find((x) => !idleSet.has(x)) || null) : a));
     };
     const handle = setInterval(tick, IDLE_TICK_MS);
     return () => clearInterval(handle);
-  }, [booted]);
+  }, [booted, deleteSessionServer]);
 
   const closeTab = (id: string) => {
+    deleteSessionServer(id);
     setOpenIds((p) => p.filter((x) => x !== id));
     setActiveId((a) => (a === id ? (openIds.find((x) => x !== id) || null) : a));
   };
