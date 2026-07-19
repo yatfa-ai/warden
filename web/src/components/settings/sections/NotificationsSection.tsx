@@ -303,7 +303,7 @@ export function NotificationsSection(props: NotificationsSectionProps) {
             {testingWebhook ? 'Sending…' : 'Send test alert'}
           </Button>
           <span className="text-xs text-muted-foreground">
-            Save first, then verify your topic receives it. Fires only when enabled with a URL set.
+            Verify your topic receives it. Fires only when enabled with a URL set.
           </span>
         </div>
       </div>

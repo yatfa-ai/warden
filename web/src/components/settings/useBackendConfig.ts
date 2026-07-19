@@ -278,20 +278,30 @@ export function useBackendConfig({ onSaved }: { onSaved: () => void }) {
   };
 
   // "Send test alert" (WARDEN-555): POST a test payload so the user can verify
-  // their ntfy/Discord/Slack/Telegram topic end-to-end. The endpoint honors the
-  // on-the-wire gate (enabled + URL), so the button is disabled until both are
-  // set; the response tells us sent / dropped / not-configured. This MUST be
-  // called after a Save when the user just typed a new URL/secret/enable — the
-  // backend reads the PERSISTED config, not the in-memory draft.
+  // their ntfy/Discord/Slack/Telegram topic end-to-end. The draft URL is sent in
+  // the BODY so the user can test a typo'd URL BEFORE saving — parity with
+  // "Test connection" (sendTestConnection) below. A draft secret is sent only
+  // when the human typed a new one; an empty field is omitted so the backend
+  // reuses the persisted secret (no-clobber). The button is disabled until both
+  // enabled + a URL are set; the response tells us sent / dropped / not-configured.
   const sendTestAlert = async () => {
     setTestingWebhook(true);
     try {
-      const res = await fetch('/api/webhook-test', { method: 'POST' });
+      const draftUrl = config.webhookUrl.trim();
+      const draftSecret = webhookSecretInput.trim();
+      const res = await fetch('/api/webhook-test', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          webhookUrl: draftUrl,
+          ...(draftSecret ? { webhookSecret: draftSecret } : {}),
+        }),
+      });
       const body = await res.json();
       if (body.ok) {
         toast.success('Test alert sent — check your webhook destination.');
       } else if (body.attempts === 0) {
-        toast.error('Enable the webhook and set a URL first, then Save.');
+        toast.error('Enable the webhook and set a URL first.');
       } else if (body.dropped) {
         toast.error(`Could not deliver (last status ${body.status ?? 'n/a'}). Check the URL and try again.`);
       } else {

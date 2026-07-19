@@ -702,19 +702,41 @@ function forwardTelemetryConfig(cfg) {
 
 // POST /api/webhook-test — send a test alert so the user can verify their
 // ntfy/Discord/Slack/Telegram topic end-to-end from Settings (WARDEN-555). This
-// is an EXPLICIT human action, but it still honors the on-the-wire gate: it
-// dispatches via dispatchWebhook, which no-ops (fetch never called) unless the
-// channel is enabled AND a URL is configured. So the off-by-default invariant
-// ("enabled off → zero outbound requests, from any path") holds absolutely.
+// is an EXPLICIT human action. The draft { webhookUrl, webhookSecret? } comes
+// from the BODY (not persisted config) so a user fixing a typo in their URL can
+// verify the NEW destination before committing it via Save — parity with
+// /api/telemetry-test right below. Any field not supplied in the body falls back
+// to the persisted cfg (write-only-secret parity: a draft secret is sent only
+// when the human typed a new one; an untouched field reuses the saved secret).
+//
+// The off-by-default invariant ("enabled off → zero outbound requests") still
+// holds for every AUTOMATIC dispatch path — the budget/attention/finished hooks
+// all dispatch via persisted cfg directly and are untouched here. This route is
+// the ONE sanctioned explicit-send path that bypasses the enable gate: the
+// button itself is the human's opt-in to send, exactly like /api/telemetry-test
+// (which has no enable gate at all), so the merged testCfg forces webhookEnabled:
+// true and only no-ops when the resolved URL (draft or persisted) is empty.
 // Returns the transport result so the UI can report sent/failed/no-config.
-app.post('/api/webhook-test', async (_req, res) => {
+app.post('/api/webhook-test', async (req, res) => {
   try {
+    // Merge the draft over persisted cfg. A non-empty draft URL/secret overrides;
+    // an absent or empty field falls back to the persisted value (no-clobber).
+    const testCfg = {
+      ...cfg,
+      webhookEnabled: true,
+      ...(typeof req.body?.webhookUrl === 'string' && req.body.webhookUrl.trim()
+        ? { webhookUrl: req.body.webhookUrl.trim() }
+        : {}),
+      ...(typeof req.body?.webhookSecret === 'string' && req.body.webhookSecret
+        ? { webhookSecret: req.body.webhookSecret }
+        : {}),
+    };
     const result = await notify.dispatchWebhook({
       event: 'test',
       severity: 'info',
       agent: 'Warden',
       reason: 'Test alert from Warden — your webhook is configured correctly.',
-      cfg,
+      cfg: testCfg,
       now: Date.now(),
     });
     res.json(result);
