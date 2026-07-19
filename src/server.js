@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { load, save, loadCatalog, saveCatalog, allSshHosts, sameCatalogEntry } from './config.js';
+import { buildGetResponse, applyConfigPut, afterSave } from './config-schema.js';
 import { applyCompanionToggle } from './companion.js';
 import * as collections from './collections.js';
 import { capturePanes, resolveChatWithRefresh, catalogChats, discoverHost, discoverAll } from './chats.js';
@@ -30,7 +31,7 @@ import { appendEvent, rotateEvents, readEvents, getStatsSince, getSeriesSince } 
 import { computeBudgetState, shouldFireBudgetAlert, resolveBudgetConfig, BUDGET_INTERVAL_MS } from './budget.js';
 import { buildSnapshot, diffLifecycles } from './lifecycle.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
-import { classifyPane, stripAnsi, matchWatchPatterns, sanitizeWatchPatterns } from './agentState.js';
+import { classifyPane, stripAnsi, matchWatchPatterns } from './agentState.js';
 import * as notify from './notify.js';
 import { checkHost } from './hostStatus.js';
 import {
@@ -642,297 +643,62 @@ app.get('/api/collections/:id/agents', async (req, res) => {
   }
 });
 
-// GET /api/config — return current configuration (safe subset)
-app.get('/api/config', (_req, res) => res.json({
-  hosts: cfg.hosts,
-  pollIntervalMs: cfg.pollIntervalMs,
-  tmuxSession: cfg.tmuxSession,
-  connectTimeout: cfg.connectTimeout,
-  // Observer settings
-  observerConfirmMode: cfg.observerConfirmMode,
-  observerAutoStart: cfg.observerAutoStart,
-  observerSessionTimeout: cfg.observerSessionTimeout,
-  // Observer model/provider (WARDEN-350). Mask the auth token — NEVER return the
-  // cleartext secret to the renderer. authTokenSet + authTokenTail are the only
-  // token signals the UI gets; the password field is write-only (no cleartext is
-  // seeded into it on load).
-  llm: {
-    model: cfg.llm?.model ?? '',
-    baseUrl: cfg.llm?.baseUrl ?? '',
-    maxTokens: typeof cfg.llm?.maxTokens === 'number' ? cfg.llm.maxTokens : null,
-    authTokenSet: Boolean(cfg.llm?.authToken),
-    authTokenTail: cfg.llm?.authToken ? String(cfg.llm.authToken).slice(-4) : null,
-  },
-  // Fleet health attention thresholds (minutes of inactivity)
-  healthWarningThresholdMin: cfg.healthWarningThresholdMin,
-  healthCriticalThresholdMin: cfg.healthCriticalThresholdMin,
-  // Token-spend budget (WARDEN-415). Surfaced so the Settings page can edit the
-  // persisted config; the live computed snapshot comes from /api/budget.
-  tokenBudgetEnabled: cfg.tokenBudgetEnabled,
-  tokenBudgetThresholdTokens: cfg.tokenBudgetThresholdTokens,
-  tokenBudgetWindowHours: cfg.tokenBudgetWindowHours,
-  tokenBudgetPerSessionThresholdTokens: cfg.tokenBudgetPerSessionThresholdTokens,
-  // Companion transport (WARDEN-439). companionTransportOverridden is true when
-  // WARDEN_COMPANION_TRANSPORT was operator-set at boot — in that case the env
-  // var wins and the UI toggle is inert, so the page shows an "overridden" note
-  // instead of letting the toggle look broken.
-  companionTransportEnabled: cfg.companionTransportEnabled,
-  companionTransportOverridden: companionEnvOverridden,
-  // Telemetry receiver endpoint (WARDEN-461). Surfaced so Settings can edit it;
-  // empty by default (unconfigured → transport sends nothing). This is a plain
-  // string URL — no secret, no masking needed.
-  telemetryEndpoint: cfg.telemetryEndpoint ?? '',
-  // Telemetry receiver shared-secret (WARDEN-569). Same write-only secret
-  // treatment as the LLM auth token + webhook secret — NEVER return cleartext;
-  // the UI gets telemetryAuthTokenSet + a tail only, so the password field is
-  // write-only (no cleartext is seeded into it on load). The cleartext stays in
-  // server-side cfg so the transport can read it; it is just never returned to
-  // the renderer.
-  telemetryAuthTokenSet: Boolean(cfg.telemetryAuthToken),
-  telemetryAuthTokenTail: cfg.telemetryAuthToken ? String(cfg.telemetryAuthToken).slice(-4) : null,
-  // Webhook push channel (WARDEN-555). Same write-only secret treatment as the
-  // LLM auth token (lines above) — NEVER return cleartext; the UI gets
-  // webhookSecretSet + a tail only, so the password field is write-only (no
-  // cleartext is seeded into it on load). The category toggles use `!== false`
-  // so a stale/missing field resolves to the DEFAULT (true), mirroring the
-  // desktop-alert severity defaults.
-  webhookUrl: cfg.webhookUrl ?? '',
-  webhookEnabled: cfg.webhookEnabled === true,
-  webhookSecretSet: Boolean(cfg.webhookSecret),
-  webhookSecretTail: cfg.webhookSecret ? String(cfg.webhookSecret).slice(-4) : null,
-  webhookAlertAttention: cfg.webhookAlertAttention !== false,
-  webhookAlertBudget: cfg.webhookAlertBudget !== false,
-  // WARDEN-575: the positive "agent finished" routing. Same `!== false` default-true
-  // resolution as the problem-side toggles above so the missing positive half is on
-  // by default once the channel is enabled.
-  webhookAlertDone: cfg.webhookAlertDone !== false,
-  confirmDestructiveActions: cfg.confirmDestructiveActions,
-  notifyChatOps: cfg.notifyChatOps,
-  notifyErrors: cfg.notifyErrors,
-  notifySuccess: cfg.notifySuccess,
-  notifyObserver: cfg.notifyObserver,
-  // Display customization
-  showHostTags: cfg.showHostTags,
-  showTypeBadges: cfg.showTypeBadges,
-  showStatusIndicators: cfg.showStatusIndicators,
-  showProjectBadges: cfg.showProjectBadges,
-  hideOfflineHosts: cfg.hideOfflineHosts,
-  // User-authored output-pattern alerts (WARDEN-540). Surfaced so Settings can edit
-  // the persisted list; the matcher reads cfg.watchPatterns live in pollAgentStates.
-  // Always an array (DEFAULTS supplies []); sanitizeWatchPatterns guards the PUT.
-  watchPatterns: Array.isArray(cfg.watchPatterns) ? cfg.watchPatterns : [],
-  // Telemetry consent (WARDEN-457). Both off by default; persisted here (not
-  // client localStorage) so consent survives a restart. See config.js DEFAULTS.
-  telemetryBaseEnabled: cfg.telemetryBaseEnabled,
-  telemetryExtendedEnabled: cfg.telemetryExtendedEnabled,
-}));
+// GET /api/config — return the safe-subset response, derived from the single
+// CONFIG_FIELDS registry (WARDEN-773). buildGetResponse iterates the registry:
+// public fields emit by their resolve rule, secret fields auto-emit {key}Set +
+// {key}Tail only (cleartext never on the wire), and the derived
+// companionTransportOverridden emits from the boot env snapshot. The key order
+// is byte-pinned to the pre-refactor response (server-config-registry.test.js).
+app.get('/api/config', (_req, res) => res.json(
+  buildGetResponse(cfg, { companionEnvOverridden }),
+));
 
-// PUT /api/config — update configuration and persist
+// PUT /api/config — update configuration and persist. Derived from the single
+// CONFIG_FIELDS registry (WARDEN-773): applyConfigPut iterates the registry's
+// per-field guards (type checks, the [1,60] connectTimeout clamp, oneOf, the
+// tokenBudget null-asymmetry + Math.max(1) floor, sanitizeWatchPatterns, secret
+// no-clobber, and the nested llm sub-fields), then runs the two cross-field
+// invariants (health warning<=critical ordering + telemetry extended-requires-
+// base). The four post-save side-effects run through afterSave (Correction 2):
+// the IPC telemetry forward incl. cleartext authToken (WARDEN-524/569), the live
+// companion toggle (WARDEN-439), and the budget/attention poll restarts
+// (WARDEN-415/555) — declared as a pipeline so a refactor can't silently drop
+// them the way the source proposal's hooks would have.
 app.put('/api/config', (req, res) => {
-  const { hosts, pollIntervalMs, tmuxSession, connectTimeout,
-          observerConfirmMode, observerAutoStart, observerSessionTimeout,
-          healthWarningThresholdMin, healthCriticalThresholdMin,
-          tokenBudgetEnabled, tokenBudgetThresholdTokens,
-          tokenBudgetWindowHours, tokenBudgetPerSessionThresholdTokens,
-          companionTransportEnabled,
-          telemetryEndpoint, telemetryAuthToken,
-          webhookUrl, webhookEnabled, webhookSecret,
-          webhookAlertAttention, webhookAlertBudget, webhookAlertDone,
-          confirmDestructiveActions,
-          notifyChatOps, notifyErrors, notifySuccess, notifyObserver,
-          showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges,
-          hideOfflineHosts, telemetryBaseEnabled, telemetryExtendedEnabled,
-          watchPatterns, llm } = req.body;
-  if (hosts && Array.isArray(hosts)) cfg.hosts = hosts;
-  if (typeof pollIntervalMs === 'number') cfg.pollIntervalMs = pollIntervalMs;
-  if (typeof tmuxSession === 'string') cfg.tmuxSession = tmuxSession;
-  // WARDEN-747: clamp connectTimeout into the [1, 60] bounds the Settings input
-  // advertises — mirrors the WARDEN-374 threshold-clamp discipline so a direct
-  // API call (or a typed out-of-range value the UI's onBlur didn't catch) can't
-  // persist 0/999/negative. The committed value matches what the UI displays.
-  if (typeof connectTimeout === 'number') {
-    cfg.connectTimeout = Math.min(60, Math.max(1, connectTimeout));
-  }
-  // Observer settings
-  if (observerConfirmMode && ['always', 'auto-safe'].includes(observerConfirmMode)) cfg.observerConfirmMode = observerConfirmMode;
-  if (typeof observerAutoStart === 'boolean') cfg.observerAutoStart = observerAutoStart;
-  if (observerSessionTimeout === null ||
-      (typeof observerSessionTimeout === 'number' &&
-       Number.isFinite(observerSessionTimeout) &&
-       observerSessionTimeout > 0)) cfg.observerSessionTimeout = observerSessionTimeout;
-  // Observer model/provider (WARDEN-350). model/baseUrl/maxTokens persist
-  // directly; the auth token is NO-CLOBBER: only overwrite the stored secret when
-  // the incoming value is a non-empty string. The UI never seeds the password
-  // field (GET masks the token), so an untouched field sends no authToken and
-  // the stored secret must survive such a save.
-  if (llm && typeof llm === 'object' && !Array.isArray(llm)) {
-    if (!cfg.llm || typeof cfg.llm !== 'object' || Array.isArray(cfg.llm)) cfg.llm = {};
-    if (typeof llm.model === 'string') cfg.llm.model = llm.model;
-    if (typeof llm.baseUrl === 'string') cfg.llm.baseUrl = llm.baseUrl;
-    // null clears to "use the llm.js default (2048)"; a finite positive int sets it.
-    if (llm.maxTokens === null ||
-        (typeof llm.maxTokens === 'number' && Number.isFinite(llm.maxTokens) && llm.maxTokens > 0)) {
-      cfg.llm.maxTokens = llm.maxTokens;
-    }
-    if (typeof llm.authToken === 'string' && llm.authToken.length > 0) {
-      cfg.llm.authToken = llm.authToken;
-    }
-  }
-  // Fleet health attention thresholds — null-able OR a finite positive number of
-  // minutes (mirrors the observerSessionTimeout guard). A field not destructured
-  // here is silently stripped, so both must be present for the pref to persist.
-  if (healthWarningThresholdMin === null ||
-      (typeof healthWarningThresholdMin === 'number' &&
-       Number.isFinite(healthWarningThresholdMin) &&
-       healthWarningThresholdMin > 0)) cfg.healthWarningThresholdMin = healthWarningThresholdMin;
-  if (healthCriticalThresholdMin === null ||
-      (typeof healthCriticalThresholdMin === 'number' &&
-       Number.isFinite(healthCriticalThresholdMin) &&
-       healthCriticalThresholdMin > 0)) cfg.healthCriticalThresholdMin = healthCriticalThresholdMin;
-  // Cross-field ordering guard (WARDEN-374): once both thresholds are accepted,
-  // keep the pair well-ordered (warning <= critical) so a persisted inverted
-  // config (warning > critical) can't later make a silently-failing agent read
-  // HEALTHY. Clamp the warning to at most the critical, resolving null to its
-  // DEFAULT first (null means "use the default" — same resolution getHealthState
-  // applies). When the clamp fires we persist the numeric critical value so the
-  // saved pair is well-ordered and the UI round-trip stays consistent. The
-  // classifier's effectiveHealthyMs clamp is the real safety net; this guard
-  // keeps the persisted config clean.
-  const DEFAULT_WARNING_MIN = 5;   // mirrors config.js DEFAULTS.healthWarningThresholdMin
-  const DEFAULT_CRITICAL_MIN = 30; // mirrors config.js DEFAULTS.healthCriticalThresholdMin
-  const warningMin = cfg.healthWarningThresholdMin ?? DEFAULT_WARNING_MIN;
-  const criticalMin = cfg.healthCriticalThresholdMin ?? DEFAULT_CRITICAL_MIN;
-  if (warningMin > criticalMin) {
-    cfg.healthWarningThresholdMin = criticalMin;
-  }
-  // Token-spend budget (WARDEN-415). The master switch is a boolean; the three
-  // numeric knobs accept null (clears to default at read time) or a finite
-  // number. WARDEN-747: a finite number is FLOORED at 1 (the min the Settings
-  // inputs advertise) so a direct API call can't persist 0/negative — matching
-  // the frontend onBlur clamp and the WARDEN-374 "committed value matches what
-  // persists" discipline. The per-session threshold is null-able too so it can
-  // be turned OFF independently (null → resolveBudgetConfig returns 0 →
-  // disabled); null stays null, only finite numbers are floored.
-  if (typeof tokenBudgetEnabled === 'boolean') cfg.tokenBudgetEnabled = tokenBudgetEnabled;
-  if (tokenBudgetThresholdTokens === null) {
-    cfg.tokenBudgetThresholdTokens = null;
-  } else if (typeof tokenBudgetThresholdTokens === 'number' &&
-             Number.isFinite(tokenBudgetThresholdTokens)) {
-    cfg.tokenBudgetThresholdTokens = Math.max(1, tokenBudgetThresholdTokens);
-  }
-  if (typeof tokenBudgetWindowHours === 'number' &&
-      Number.isFinite(tokenBudgetWindowHours)) {
-    cfg.tokenBudgetWindowHours = Math.max(1, tokenBudgetWindowHours);
-  }
-  if (tokenBudgetPerSessionThresholdTokens === null) {
-    cfg.tokenBudgetPerSessionThresholdTokens = null;
-  } else if (typeof tokenBudgetPerSessionThresholdTokens === 'number' &&
-             Number.isFinite(tokenBudgetPerSessionThresholdTokens)) {
-    cfg.tokenBudgetPerSessionThresholdTokens = Math.max(1, tokenBudgetPerSessionThresholdTokens);
-  }
-  // Companion transport toggle (WARDEN-439). Boolean master switch; everything
-  // else (the remote-routing decision) is read from the env-var gate it drives.
-  if (typeof companionTransportEnabled === 'boolean') cfg.companionTransportEnabled = companionTransportEnabled;
-  // Telemetry receiver endpoint (WARDEN-461). Type-guarded string only — a
-  // malformed body can't corrupt the pref. An empty string is a valid value
-  // (clears the endpoint → transport sends nothing), so accept any string.
-  if (typeof telemetryEndpoint === 'string') cfg.telemetryEndpoint = telemetryEndpoint;
-  // Telemetry auth token (WARDEN-569). NO-CLOBBER (mirrors llm.authToken /
-  // webhookSecret) — only overwrite the stored secret when a non-empty string
-  // arrives, so an untouched password field survives a save (GET never seeds
-  // cleartext into it). There is intentionally NO "clear the token" path via
-  // empty string here: the UI sends the field only when non-empty, and clearing
-  // the token is done by the receiver unsetting AUTH_TOKEN, not by blanking the
-  // client pref (an empty client token simply sends no Authorization header).
-  if (typeof telemetryAuthToken === 'string' && telemetryAuthToken.length > 0) {
-    cfg.telemetryAuthToken = telemetryAuthToken;
-  }
-  // Webhook push channel (WARDEN-555). URL accepts any string (empty clears it
-  // → sends nothing); enabled + category toggles are booleans; the secret is
-  // NO-CLOBBER (mirrors llm.authToken at lines 608-609) — only overwrite the
-  // stored secret when a non-empty string arrives, so an untouched password
-  // field survives a save (GET never seeds cleartext into it).
-  if (typeof webhookUrl === 'string') cfg.webhookUrl = webhookUrl;
-  if (typeof webhookEnabled === 'boolean') cfg.webhookEnabled = webhookEnabled;
-  if (typeof webhookSecret === 'string' && webhookSecret.length > 0) cfg.webhookSecret = webhookSecret;
-  if (typeof webhookAlertAttention === 'boolean') cfg.webhookAlertAttention = webhookAlertAttention;
-  if (typeof webhookAlertBudget === 'boolean') cfg.webhookAlertBudget = webhookAlertBudget;
-  // WARDEN-575: the positive "agent finished" routing — same boolean type-guard as
-  // the problem-side toggles so a malformed body can't corrupt the pref.
-  if (typeof webhookAlertDone === 'boolean') cfg.webhookAlertDone = webhookAlertDone;
-  // Safety preference: confirm before destructive actions (force-kill, kill chat)
-  if (typeof confirmDestructiveActions === 'boolean') cfg.confirmDestructiveActions = confirmDestructiveActions;
-  // Notification preferences (toast categories). Only accept booleans so a
-  // malformed body can't blank out a preference.
-  if (typeof notifyChatOps === 'boolean') cfg.notifyChatOps = notifyChatOps;
-  if (typeof notifyErrors === 'boolean') cfg.notifyErrors = notifyErrors;
-  if (typeof notifySuccess === 'boolean') cfg.notifySuccess = notifySuccess;
-  if (typeof notifyObserver === 'boolean') cfg.notifyObserver = notifyObserver;
-  // Display customization
-  if (typeof showHostTags === 'boolean') cfg.showHostTags = showHostTags;
-  if (typeof showTypeBadges === 'boolean') cfg.showTypeBadges = showTypeBadges;
-  if (typeof showStatusIndicators === 'boolean') cfg.showStatusIndicators = showStatusIndicators;
-  if (typeof showProjectBadges === 'boolean') cfg.showProjectBadges = showProjectBadges;
-  if (typeof hideOfflineHosts === 'boolean') cfg.hideOfflineHosts = hideOfflineHosts;
-  // User-authored output-pattern alerts (WARDEN-540). Type-guard the array via
-  // sanitizeWatchPatterns (sibling of parseSnippets's drop-bad-entries discipline):
-  // it returns null for a non-array (→ field treated as absent, no mutation — a PUT
-  // that omits watchPatterns leaves the stored list intact) and a sanitized array
-  // (capped, deduped by id, bad entries dropped) otherwise. A malformed entry can
-  // never blank the list or crash the matcher; an empty array is a valid value
-  // (clears all patterns). Mirrors the per-key type-guards above.
-  {
-    const cleanedPatterns = sanitizeWatchPatterns(watchPatterns);
-    if (cleanedPatterns) cfg.watchPatterns = cleanedPatterns;
-  }
-  // Telemetry consent (WARDEN-457). Both are booleans. The SERVER enforces
-  // extended-requires-base (not just the UI) so a hand-crafted PUT cannot enable
-  // extended without base. The unconditional clamp at the end — mirroring the
-  // health-threshold ordering guard above — guarantees the persisted pair is
-  // always well-formed regardless of which fields were in the body: revoking
-  // base latches extended off, and a corrupt disk state (extended on, base off)
-  // self-heals on the next PUT. Consent persists to config.json, so revoking
-  // base revokes the subordinate tier on disk with it.
-  if (typeof telemetryBaseEnabled === 'boolean') cfg.telemetryBaseEnabled = telemetryBaseEnabled;
-  if (typeof telemetryExtendedEnabled === 'boolean') cfg.telemetryExtendedEnabled = telemetryExtendedEnabled;
-  cfg.telemetryExtendedEnabled = cfg.telemetryExtendedEnabled && cfg.telemetryBaseEnabled;
+  applyConfigPut(cfg, req.body);
   save(cfg); // persist to ~/.yatfa-warden/config.json
-  // Forward the (now-clamped) telemetry prefs to the Electron main process over
-  // the fork's IPC channel so a consent/endpoint flip takes effect on the next
-  // signal without an app restart — the source + pipeline live in MAIN, but the
-  // PUT is serviced here in the server child. Guarded: process.send exists only
-  // when the server is forked by electron/main.cjs (standalone `node src/server`
-  // has no parent). WARDEN-524.
-  if (typeof process.send === 'function') {
-    process.send({
-      type: 'telemetry-config',
-      base: cfg.telemetryBaseEnabled === true,
-      extended: cfg.telemetryExtendedEnabled === true,
-      endpoint: typeof cfg.telemetryEndpoint === 'string' ? cfg.telemetryEndpoint : '',
-      // Forward the cleartext auth token. This is the parent↔child IPC channel
-      // (main process ↔ server child, both in-app on the same host) — NOT the
-      // renderer. The main-process transport needs the cleartext to send it on
-      // the wire; GET /api/config masks it from the renderer, but this internal
-      // forward is the one path the token reaches the sender through. WARDEN-569.
-      authToken: typeof cfg.telemetryAuthToken === 'string' ? cfg.telemetryAuthToken : '',
-    });
-  }
-  // WARDEN-439: apply the companion toggle LIVE so a flip takes effect on the
-  // next op, not after a restart. No-op when the env var is an operator override
-  // (companionEnvOverridden) — then the env var already wins and the toggle is
-  // inert by design.
-  applyCompanionToggle(cfg.companionTransportEnabled, { override: companionEnvOverridden });
-  // Pick up the new budget config immediately rather than waiting up to 120s:
-  // enabling starts the poll (and seeds the cache); disabling stops it; a
-  // threshold/window change re-computes now so the next /api/budget read is fresh.
-  restartBudgetPoll();
-  // Pick up the webhook config immediately: enabling the channel (or routing
-  // attention alerts on) starts the server-side attention sweep; disabling stops
-  // it. Like restartBudgetPoll, this makes a Settings flip take effect on the
-  // next sweep, not after a restart. (WARDEN-555)
-  restartAttentionPoll();
+  afterSave(cfg, {
+    companionOverridden: companionEnvOverridden,
+    forwardTelemetryConfig,
+    applyCompanionToggle,
+    restartBudgetPoll,
+    restartAttentionPoll,
+  });
   res.json({ ok: true });
 });
+
+// Forward the (now-clamped) telemetry prefs to the Electron main process over
+// the fork's IPC channel so a consent/endpoint flip takes effect on the next
+// signal without an app restart — the source + pipeline live in MAIN, but the
+// PUT is serviced here in the server child. Guarded: process.send exists only
+// when the server is forked by electron/main.cjs (standalone `node src/server`
+// has no parent). WARDEN-524. Pulled out of the PUT handler so afterSave can
+// name it as an injected dep, keeping config-schema.js dependency-free.
+function forwardTelemetryConfig(cfg) {
+  if (typeof process.send !== 'function') return;
+  process.send({
+    type: 'telemetry-config',
+    base: cfg.telemetryBaseEnabled === true,
+    extended: cfg.telemetryExtendedEnabled === true,
+    endpoint: typeof cfg.telemetryEndpoint === 'string' ? cfg.telemetryEndpoint : '',
+    // Forward the cleartext auth token. This is the parent↔child IPC channel
+    // (main process ↔ server child, both in-app on the same host) — NOT the
+    // renderer. The main-process transport needs the cleartext to send it on
+    // the wire; GET /api/config masks it from the renderer, but this internal
+    // forward is the one path the token reaches the sender through. WARDEN-569.
+    authToken: typeof cfg.telemetryAuthToken === 'string' ? cfg.telemetryAuthToken : '',
+  });
+}
 
 // POST /api/webhook-test — send a test alert so the user can verify their
 // ntfy/Discord/Slack/Telegram topic end-to-end from Settings (WARDEN-555). This
