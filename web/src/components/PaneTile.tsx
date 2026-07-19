@@ -973,6 +973,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
           timestampFormat={timestampFormat}
           viewMode={fileViewerViewMode}
           onViewModeChange={onFileViewerViewModeChange}
+          onNavigate={(p) => { setViewerPath(p); setViewerLine(undefined); }}
           onOpenChange={(o) => { setViewerOpen(o); if (!o) { setViewerPath(''); setViewerLine(undefined); } }}
         />
       )}

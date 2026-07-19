@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { Fragment, useState, useEffect, useMemo, useRef } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -19,10 +19,17 @@ import {
 import { DiffBlock } from './DiffBlock';
 import { MarkdownBody } from './MarkdownBody';
 import { tokenizeCode, languageFromPath, type Leaf } from '@/lib/highlight';
-import { Loader2Icon, FileIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon } from 'lucide-react';
+import { Loader2Icon, FileIcon, FolderIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon } from 'lucide-react';
 import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
 import { copyText } from '@/lib/clipboard';
 import { basename } from '@/lib/chatDisplay';
+// Pure breadcrumb geometry (splitPathSegments / ancestorDir) for the clickable
+// path-segment crumbs (WARDEN-740) — kept UI-free in src/lib so it is unit-
+// tested directly (see web/breadcrumbs.test.mjs).
+import { splitPathSegments, ancestorDir } from '@/lib/pathBreadcrumbs';
+// joinPath + the Entry shape are shared with FileBrowserDialog so a navigated
+// sibling path is built identically to the browse dialog's selection.
+import { joinPath, type Entry } from '@/lib/fileBrowserTree';
 import { toast } from 'sonner';
 
 interface FileViewerProps {
@@ -42,6 +49,15 @@ interface FileViewerProps {
   // App layer; the CommitBlobView historical snapshot honors the same value.
   viewMode: 'rendered' | 'source';
   onViewModeChange: (mode: 'rendered' | 'source') => void;
+  // In-place file navigation (WARDEN-740): a breadcrumb ancestor crumb or a
+  // sibling picked from its /api/git-ls listing calls this with the new cwd-
+  // relative path. The parent owns `filePath` (controlled), so it updates its
+  // own state and the new path flows back down — every effect (content, blame,
+  // history, at-commit blob) re-fetches on `filePath` change for free, so this
+  // needs ZERO new fetch logic. Mirrors the App-owned `onViewModeChange` shape.
+  // Optional so a render site that only needs to display (never navigate)
+  // degrades to the plain non-clickable path; all three current sites wire it.
+  onNavigate?: (path: string) => void;
   onOpenChange: (open: boolean) => void;
 }
 
@@ -57,12 +73,18 @@ type BlameLine = { line: number; hash: string; author: string; date: string; sum
 // git-show accepts abbreviated hashes, so it resolves unambiguously on click.
 type HistoryCommit = { hash: string; subject: string; author: string; date: string };
 
-export function FileViewer({ chatId, filePath, open, line, timestampFormat, viewMode, onViewModeChange, onOpenChange }: FileViewerProps) {
+export function FileViewer({ chatId, filePath, open, line, timestampFormat, viewMode, onViewModeChange, onNavigate, onOpenChange }: FileViewerProps) {
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   // Ref on the highlighted line row so we can scroll it into view once content renders.
   const highlightRef = useRef<HTMLDivElement>(null);
+
+  // Which ancestor crumb's directory-listing Popover is open (WARDEN-740). Holds
+  // the crumb's dir ('' = repo root) so at most one popover is open at a time;
+  // null when none. Local to the viewer — the actual file swap is the parent's
+  // job via onNavigate; this only owns the open/close of the pick list.
+  const [openCrumb, setOpenCrumb] = useState<string | null>(null);
 
   // Annotate (git blame) state — separate from the file content fetch so toggling
   // annotate doesn't refetch the (already-shown) file. Blame is fetched ONCE when the
@@ -309,6 +331,27 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
   // same as a silent copy of "").
   const displayedContent = viewAtCommit ? blobContent : content;
 
+  // Breadcrumb geometry (WARDEN-740). `segments` is the normalized split of the
+  // cwd-relative path; `crumbs` are the clickable PROPER ancestors (a root crumb
+  // that lists the repo root, then one per directory segment that lists its own
+  // dir) — empty for a root-level file, which has no ancestors. The final segment
+  // is the open file (not clickable). Each crumb carries the dir /api/git-ls
+  // lists when clicked (ancestorDir = slice(0, i), exactly the ticket's contract).
+  const segments = useMemo(() => splitPathSegments(filePath), [filePath]);
+  const crumbs = useMemo<{ label: string; dir: string; isRoot: boolean }[]>(() => {
+    // A root-level file has a single segment and no proper ancestors — render no
+    // crumbs (the file name stands alone), matching the WARDEN-740 segmentation pin.
+    if (segments.length <= 1) return [];
+    return [
+      { label: '', dir: '', isRoot: true }, // repo root → lists dir=''
+      ...segments.slice(0, -1).map((seg, i) => ({ label: seg, dir: ancestorDir(segments, i + 1), isRoot: false })),
+    ];
+  }, [segments]);
+  const fileName = segments[segments.length - 1] ?? filePath;
+  // Degrade to the plain non-clickable path when no navigation callback is wired
+  // (all three render sites wire it, but the prop is optional for safety).
+  const navigable = typeof onNavigate === 'function';
+
   // Copy text to the clipboard through the shared Electron-safe helper, surfacing
   // the boolean result via toast — never bare navigator.clipboard, which rejects
   // silently in Electron (WARDEN-285). Matches CollectionsSection / WorkspaceTabs.
@@ -326,7 +369,42 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2 pr-8">
                 <FileIcon className="w-4 h-4 shrink-0" />
-                <span className="truncate">{filePath}</span>
+                {navigable && crumbs.length > 0 ? (
+                  <nav aria-label="File path" className="flex min-w-0 items-center gap-0.5">
+                    {crumbs.map((c) => (
+                      <Fragment key={c.dir || '__root'}>
+                        <Popover open={openCrumb === c.dir} onOpenChange={(o) => setOpenCrumb(o ? c.dir : null)}>
+                          <PopoverTrigger asChild>
+                            <button
+                              type="button"
+                              className="shrink-0 rounded px-1 py-0.5 text-sm text-muted-foreground hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                              title={c.isRoot ? 'Browse repository root' : `Browse ${c.dir}`}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              {c.isRoot ? <FolderIcon className="h-3.5 w-3.5" /> : c.label}
+                            </button>
+                          </PopoverTrigger>
+                          <PopoverContent
+                            align="start"
+                            sideOffset={4}
+                            className="w-64 p-1 text-xs"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <DirListing
+                              chatId={chatId}
+                              dir={c.dir}
+                              onPick={(p) => { setOpenCrumb(null); onNavigate?.(p); }}
+                            />
+                          </PopoverContent>
+                        </Popover>
+                        <span className="shrink-0 text-muted-foreground/50" aria-hidden="true">/</span>
+                      </Fragment>
+                    ))}
+                    <span className="min-w-0 truncate text-foreground" title={filePath}>{fileName}</span>
+                  </nav>
+                ) : (
+                  <span className="truncate">{filePath}</span>
+                )}
                 <div className="ml-auto flex items-center gap-2">
                   {isMarkdown && (
                     <Button
@@ -859,6 +937,101 @@ function CommitBlobView({ commit, filePath, content, loading, error, viewMode, i
         <div className="flex items-center justify-center py-8 text-muted-foreground">
           No content at this commit
         </div>
+      )}
+    </div>
+  );
+}
+
+// The directory listing shown inside a breadcrumb crumb's Popover (WARDEN-740).
+// Fetches GET /api/git-ls?dir=<curDir> and renders one native <button> row per
+// entry — a FILE row picks it (→ onPick → onNavigate → the file swaps in place,
+// same bound chatId), a DIR row drills one level deeper (re-lists that subdir
+// within the same popover, so a human can descend into a child directory without
+// reopening). Mirrors FileBrowserDialog's fetch + honest-error contract: a
+// transport error, a not-a-git-repo, or an unsafe dir surfaces its `error` field
+// verbatim — never masked as "empty" (WARDEN-68 / AC5). Owns its loading/error/
+// empty state exactly like AnnotatedContent / HistoryContent.
+//
+// Only mounted while its crumb's Popover is open (Radix unmounts PopoverContent
+// when closed), so the fetch fires on open — not N times for N crumbs at viewer
+// open. `curDir` starts at the anchor dir and follows drills; a sync effect keeps
+// it tracking the `dir` prop should the crumb change identity while mounted.
+function DirListing({ chatId, dir, onPick }: {
+  chatId: string;
+  dir: string;
+  onPick: (path: string) => void;
+}) {
+  const [curDir, setCurDir] = useState(dir);
+  const [entries, setEntries] = useState<Entry[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  // Keep curDir in step with the anchor dir if the crumb's identity changes
+  // while this listing happens to stay mounted (defensive — Radix normally
+  // unmounts on close).
+  useEffect(() => { setCurDir(dir); }, [dir]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    fetch(`/api/git-ls?id=${encodeURIComponent(chatId)}&dir=${encodeURIComponent(curDir)}`)
+      .then(async (r) => {
+        const data = await r.json().catch(() => ({}));
+        if (cancelled) return;
+        // /api/git-ls returns transport errors at HTTP 200 with an `error` field
+        // (no-cwd / not-a-git-repo) and a 400 for an unsafe dir — check BOTH
+        // res.ok and data.error, or a real error renders as "empty directory"
+        // (same honest-error discipline as FileBrowserDialog / the grep dialog).
+        if (!r.ok || data.error) { setError(data.error || 'ls failed'); setEntries([]); }
+        else setEntries(Array.isArray(data.entries) ? data.entries : []);
+      })
+      .catch(() => { if (!cancelled) { setError('ls failed'); setEntries([]); } })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [chatId, curDir]);
+
+  return (
+    <div className="flex flex-col">
+      {loading && (
+        <div className="flex items-center gap-1.5 px-1.5 py-1 text-xs text-muted-foreground">
+          <Loader2Icon className="h-3 w-3 animate-spin" />
+          Loading…
+        </div>
+      )}
+      {!loading && error && (
+        <div className="flex items-center gap-1.5 px-1.5 py-1 text-xs text-red-400">
+          <AlertCircleIcon className="h-3 w-3 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
+      {!loading && !error && entries && entries.length === 0 && (
+        <div className="px-1.5 py-1 text-xs italic text-muted-foreground">empty directory</div>
+      )}
+      {!loading && !error && entries && entries.length > 0 && (
+        <ScrollArea className="max-h-60">
+          {entries.map((e) => {
+            const childPath = joinPath(curDir, e.name);
+            return (
+              <button
+                key={childPath}
+                type="button"
+                title={e.type === 'dir' ? `Browse into ${childPath}` : `Open ${childPath}`}
+                onClick={(e2) => {
+                  e2.stopPropagation();
+                  if (e.type === 'dir') setCurDir(childPath); // drill into the subdir (re-list)
+                  else onPick(childPath); // pick the sibling file → navigate in place
+                }}
+                className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs hover:bg-accent"
+              >
+                {e.type === 'dir'
+                  ? <FolderIcon className="h-3 w-3 shrink-0 text-muted-foreground" />
+                  : <FileIcon className="h-3 w-3 shrink-0 text-muted-foreground" />}
+                <span className="truncate">{e.name}</span>
+              </button>
+            );
+          })}
+        </ScrollArea>
       )}
     </div>
   );
