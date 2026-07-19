@@ -52,9 +52,30 @@ const LOCAL = '(local)';
 // to mask a large diff as a non-zero exit; the async read completes with status 0
 // and lets capDiff truncate cleanly). Exported because server.js's non-git search
 // path (runLocalSearch) reuses it — it is the single async spawn+capture primitive.
-export function runLocalCapture(bin, args, { cwd, timeout } = {}) {
+//
+// Resolves on 'close', NOT 'exit' (WARDEN-464 'Good Pattern'). 'exit' fires when the
+// child process ends but BEFORE the buffered stdio pipe data has finished draining;
+// the final 'data' chunks arrive AFTER 'exit'. Under the fleet-wide git-status fan
+// (WARDEN-766) — N agents × ~8 runGit probes each, all in flight at once — the
+// saturated event loop can process a given child's 'exit' callback BEFORE its final
+// 'data' callback, so resolving on 'exit' captures EMPTY/partial stdout even though
+// the probe exited 0. That made `git status --porcelain` read as '' for a genuinely
+// dirty repo → clean:true (false clean), and symmetrically `rev-parse` read as '' →
+// clean:null — the exact non-deterministic failure QA observed under concurrency
+// (reproduced at ~60% mismatch firing ~40 runGit probes at once; 0% after this fix).
+// 'close' fires only AFTER the stdio streams fully drain, so stdout/stderr are always
+// complete when the promise resolves. (ssh.js's runLocalTmux uses 'close' for the
+// same reason; the remote run() keeps 'exit' as the established single-command
+// pattern per WARDEN-464 — this local helper serves the high-concurrency fan.)
+//
+// `spawn` is injectable (defaults to node's child_process.spawn) so the 'close'-not-
+// 'exit' discipline has a DETERMINISTIC unit test: a fake child that emits 'exit'
+// BEFORE its final stdout 'data' (the adversarial order the saturated loop produces)
+// must still resolve with COMPLETE stdout — a real subprocess can't reproduce that
+// order reliably on every machine. Mirrors runWithPool's `deps` injection pattern.
+export function runLocalCapture(bin, args, { cwd, timeout, spawn: spawnFn = spawn } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(bin, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawnFn(bin, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let stdout = '';
     let stderr = '';
     const timer = timeout ? setTimeout(() => { try { child.kill('SIGTERM'); } catch { /* noop */ } }, timeout) : null;
@@ -66,7 +87,10 @@ export function runLocalCapture(bin, args, { cwd, timeout } = {}) {
       if (timer) clearTimeout(timer);
       resolve({ ok: false, code: -1, stdout, stderr, error: err });
     });
-    child.on('exit', (code) => {
+    // 'close' (NOT 'exit') — see the function header: 'close' fires only after stdio
+    // drains, so stdout/stderr are complete. 'exit' can fire first and, under the
+    // fleet-wide concurrency, capture empty stdout (false-clean git-status) (WARDEN-464/766).
+    child.on('close', (code) => {
       if (timer) clearTimeout(timer);
       resolve({ ok: code === 0, code: code ?? -1, stdout, stderr });
     });
