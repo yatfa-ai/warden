@@ -112,6 +112,38 @@ describe('readDirectives — parses directives.md back into structured records',
     assert.strictEqual(out[0].timestamp, tNew);
   });
 
+  // WARDEN-733: pre-WARDEN-642, logDirective wrote the bare `${chat.container}@
+  // ${chat.host}` for a local/tmux chat whose container is null — stringifying
+  // null to the literal "null" and permanently recording `## <ts> → null@<host>
+  // (<role>)` blocks. directives.md is append-only history, so those legacy
+  // headers never age out. readDirectives must coerce that "null" token back to
+  // null at the source so the read path never surfaces it to DirectiveHistory
+  // (which would otherwise render/copy `null@(local)` and offer "null" as an
+  // agent-filter option). The WARDEN-642 writer test at L197 only covers the
+  // post-fix writer; this fills the read-side gap for the legacy on-disk bytes.
+  it('normalizes a legacy "null@host" header to container: null (WARDEN-733)', () => {
+    const ts = ISO(-10 * 60 * 1000); // 10m ago
+    appendDirective(logPath, false, { ts, container: 'null', host: '(local)', role: 'agent', text: 'show git status' });
+
+    const out = readDirectives();
+    const legacy = out.find((d) => d.host === '(local)');
+    assert.ok(legacy, 'legacy null@(local) block parsed');
+    assert.strictEqual(legacy.container, null, 'literal "null" token coerced back to null');
+    assert.notStrictEqual(legacy.container, 'null', 'never the string "null"');
+    assert.strictEqual(legacy.timestamp, ts);
+
+    // DirectiveHistory L108 builds the agent-filter dropdown from
+    // directives.map(d => d.container).filter(Boolean) — null is falsy, so a
+    // normalized legacy entry is excluded and "null" never becomes a filter.
+    const allAgents = Array.from(new Set(out.map((d) => d.container).filter(Boolean)));
+    assert.ok(!allAgents.includes('null'), '"null" excluded from agent-filter options');
+
+    // The agent filter (observer.js L177) compares against the normalized
+    // container, so readDirectives({ agent: 'null' }) no longer matches the
+    // legacy block (it is now container: null, not the string "null").
+    assert.strictEqual(readDirectives({ agent: 'null' }).length, 0, 'agent:"null" matches nothing post-normalize');
+  });
+
   it('returns [] for an empty file (graceful-empty)', () => {
     fs.writeFileSync(logPath, '');
     assert.deepStrictEqual(readDirectives(), []);
