@@ -50,13 +50,15 @@ export interface FleetGitStatusState extends FleetGitStatusResult {
   dirtyCount: number;
   /** # of fanned agents whose fetch failed (surfaced honestly, WARDEN-89). */
   errorCount: number;
+  /** # of fanned agents blocked mid-merge/rebase with unmerged paths (the fleet "N conflict" count, WARDEN-796). */
+  conflictCount: number;
   /** Pull a fresh view past mount (no auto-poll). */
   refresh: () => void;
   /** True only during a fetch whose result has not yet arrived (mount or manual ↻). */
   loading: boolean;
 }
 
-const EMPTY_RESULT: FleetGitStatusResult = { statusByKey: {}, dirtyCount: 0, errorCount: 0 };
+const EMPTY_RESULT: FleetGitStatusResult = { statusByKey: {}, dirtyCount: 0, errorCount: 0, conflictCount: 0 };
 
 /**
  * Fan /api/git-status across the eligible fleet and lift the result for
@@ -134,15 +136,30 @@ export function useFleetGitStatus(agents: readonly Chat[]): FleetGitStatusState 
           if (!r.ok) throw new Error(`git-status HTTP ${r.status}`);
           const j = await r.json();
           if (j.error) throw new Error(`git-status error: ${j.error}`);
-          // Carry the two-field slice the UI reads. clean is boolean | null (null for
-          // a non-git / no-branch cwd — the server gates `clean: branch ? clean :
-          // null`); the `typeof === 'boolean'` coerce keeps null as null (typeof null
-          // === 'object'), so an unknown-state agent is neither dirty nor clean.
-          // diffstat is { files, insertions, deletions } | null (null for clean /
-          // non-git / all-untracked); `?? null` coerces an absent field to null.
+          // Carry the slice the UI reads. clean is boolean | null (null for a non-git
+          // / no-branch cwd — the server gates `clean: branch ? clean : null`); the
+          // `typeof === 'boolean'` coerce keeps null as null (typeof null === 'object'),
+          // so an unknown-state agent is neither dirty nor clean. diffstat is
+          // { files, insertions, deletions } | null (null for clean / non-git /
+          // all-untracked); `?? null` coerces an absent field to null. conflictCount
+          // (WARDEN-796) is the # of unmerged PATHS, derived from the SAME response's
+          // porcelain `files[]` (each row already tagged `conflict: boolean` by
+          // gitStatus.js's parseGitStatusPorcelain) — the data ALREADY flows on this
+          // fetch; this stops discarding it. `j.files` is null for a clean / non-git
+          // cwd (the server default, gitRoutes.js:517), so the Array.isArray guard
+          // keeps the count 0 there. This is the PER-AGENT path count (drives the
+          // per-row ⚑'s "N unmerged"); the fleet-wide count of blocked AGENTS is
+          // derived in buildFleetGitStatus from `conflictCount > 0`.
           const status: FleetGitStatusSlice = {
             clean: typeof j.clean === 'boolean' ? j.clean : null,
             diffstat: j.diffstat ?? null,
+            conflictCount: (Array.isArray(j.files) ? j.files : []).filter(
+              // Each porcelain row is tagged `conflict: boolean` by gitStatus.js
+              // (isConflictStatus on the unmerged DD/AU/UD/UA/DU/AA/UU codes). `=== true`
+              // (not truthy) defends against a malformed body; a present-but-falsy field
+              // is not a conflict.
+              (f: { conflict?: boolean } | null) => f?.conflict === true,
+            ).length,
           };
           return { ok: true as const, key, status };
         }),

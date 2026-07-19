@@ -307,6 +307,41 @@ function WipChip({ status }: { status?: FleetGitStatusSlice | null }) {
   );
 }
 
+/**
+ * Per-agent merge-conflict chip (WARDEN-796) — the sibling of WipChip for the conflict
+ * axis, the highest-severity git state: an agent BLOCKED mid-merge/rebase/cherry-pick
+ * with unmerged paths (porcelain DD/AU/UD/UA/DU/AA/UU). WARDEN-766 shipped the dirty
+ * axis (WipChip); this is the natural next axis — "which agent is stuck and needs
+ * attention NOW," the one state dirty alone cannot speak to.
+ *
+ * Renders the sidebar's rose ⚑ + "N unmerged" vocabulary VERBATIM (no new glyph/color
+ * system — WARDEN-68): the atRisk ⚑ treatment established by WARDEN-701
+ * (GitBadges.tsx:282-283 → glyph '⚑', `text-rose-400 hover:text-rose-300`) + the
+ * conflict suffix's "N unmerged" magnitude (GitBadges.tsx:294 →
+ * ` · merge conflict · ${conflictCount} unmerged`). The "merge conflict" label is
+ * replicated as a literal here (AT_RISK_REASON_LABEL is a non-exported sidebar-internal
+ * const typed against ProjectGitAgent; coupling Fleet Health to it for one string is
+ * worse than citing the source) — same decoupling call WARDEN-766 made reusing the
+ * DiffStatChip component rather than a label.
+ *
+ * Renders ONLY when status.conflictCount > 0 — absent (loading / not eligible /
+ * unreachable) or a clean/no-conflict agent → nothing, the same graceful-N/A contract
+ * WipChip / ResourceChip / TokenChip follow. `tabular-nums` mirrors WipChip so the two
+ * chips' digit widths align when both render (a mid-merge repo is dirty too).
+ */
+function ConflictChip({ status }: { status?: FleetGitStatusSlice | null }) {
+  if (!status || status.conflictCount <= 0) return null;
+  const n = status.conflictCount;
+  return (
+    <span
+      className="shrink-0 tabular-nums text-rose-400 hover:text-rose-300"
+      title={`merge conflict — ${n} unmerged path${n === 1 ? '' : 's'} (blocked mid-merge/rebase/cherry-pick; needs resolution)`}
+    >
+      ⚑ {n} unmerged
+    </span>
+  );
+}
+
 export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, groupBy, onGroupByChange: setGroupBy, collapsedHosts, onCollapsedHostsChange: setCollapsedHosts }: Props) {
   const [healthData, setHealthData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -589,6 +624,14 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
           unreachable) or clean → nothing, identical graceful-N/A to the chips above.
           See WipChip. */}
       <WipChip status={fleetGit.statusByKey[id]} />
+
+      {/* Per-agent merge-conflict block (WARDEN-796): the rose ⚑ + "N unmerged"
+          magnitude for THIS agent — the conflict axis WipChip cannot speak to. Renders
+          the ⚑ only when the fanned status reports conflictCount > 0 (an unmerged
+          path); absent / no-conflict → nothing, identical graceful-N/A. See
+          ConflictChip. Sibling to WipChip because a mid-merge repo is dirty too: BOTH
+          may render (the +N −M magnitude AND the ⚑). */}
+      <ConflictChip status={fleetGit.statusByKey[id]} />
     </div>
     );
   };
@@ -764,6 +807,28 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
                   title={`${fleetGit.dirtyCount} agent${fleetGit.dirtyCount === 1 ? '' : 's'} with uncommitted working-tree WIP (fanned /api/git-status across active project agents)`}
                 >
                   {fleetGit.dirtyCount} dirty
+                </span>
+              </>
+            )}
+            {/* Fleet-wide merge-conflict count (WARDEN-796): the # of fanned agents
+                BLOCKED mid-merge/rebase/cherry-pick (conflictCount > 0) — the conflict
+                axis alongside the dirty count, the one git state that means "stuck and
+                needs attention." Reuses the sidebar's rose ⚑ vocabulary (the atRisk
+                chip family) so "conflict" reads in the same color everywhere; placed
+                adjacent to the dirty count (severity-descending: dirty → conflict →
+                muted unreachable). Only rendered when > 0 so a healthy fleet stays
+                quiet. conflictCount counts BLOCKED AGENTS (the mirror of dirtyCount),
+                not total unmerged files, and excludes error/loading agents (counted in
+                errorCount), so a transiently-unreachable agent is never misread as
+                blocked. */}
+            {fleetGit.conflictCount > 0 && (
+              <>
+                <span className="text-muted-foreground">·</span>
+                <span
+                  className="text-rose-500"
+                  title={`${fleetGit.conflictCount} agent${fleetGit.conflictCount === 1 ? '' : 's'} blocked mid-merge/rebase/cherry-pick with unmerged paths (fanned /api/git-status across active project agents)`}
+                >
+                  {fleetGit.conflictCount} conflict
                 </span>
               </>
             )}
