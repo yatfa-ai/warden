@@ -122,6 +122,43 @@ function defaultRedact(payload) {
 // inject a small cap; main.cjs may override) — mirrors transmissionLog's cap seam.
 const DEFAULT_REPLAY_BUFFER_CAP = 64;
 
+// WARDEN-808 — sustained delivery-failure detector. A PURE read of the
+// transmission-log ring: are the most recent `threshold` recorded outcomes ALL
+// 'dropped'? This is the non-415 twin of the WARDEN-631 schema-drift signal.
+// Today the runtime delivery surface arms a status ONLY on a 415 (drifted);
+// every OTHER sustained failure (receiver down, persistent 5xx, broken network
+// — all recorded as outcome:'dropped') is invisible at the always-visible status
+// layer. This closes that one-sided trust bar.
+//
+// GUARDRAILS (do not flap, do not false-alarm):
+//   • SUSTAINED only — arms when the most recent `threshold` outcomes are ALL
+//     'dropped'. A single transient drop (threshold unreachable) does not arm,
+//     so a momentary blip never shows a failure banner.
+//   • Self-heals the instant any 'ok' enters the window (an ok breaks the
+//     all-drops run) — unlike 415, which needs a manual Test-connection because
+//     a 415 cannot self-heal.
+//   • Fewer than `threshold` entries (incl. an EMPTY ring) → NOT armed, so a
+//     freshly-started receiver with no traffic never false-alarms.
+//   • A non-'dropped' outcome (an 'ok', or a malformed/null seeded entry) breaks
+//     the run — conservative: never arm on garbage.
+//
+// CRITICAL DISTINCTION from the 415 breaker: this is PURE OBSERVABILITY. It must
+// NEVER gate / pause sending. 415 is permanent (the receiver cannot accept this
+// schema), so `drifted` correctly stops sending. A delivery failure is POTENTIALLY
+// TRANSIENT (receiver restarting, wifi blip), so the client KEEPS sending — the
+// next attempt may succeed and self-heal the status. This function decides only
+// what the status banner SHOWS; dispatch() never reads it. (Grep guardrail: the
+// new status introduces NO send-gating `return` in dispatch.)
+function isDeliveryFailing(entries, threshold) {
+  if (!Array.isArray(entries) || entries.length < threshold) return false;
+  // entries() returns oldest → newest; inspect only the most recent `threshold`.
+  const start = entries.length - threshold;
+  for (let i = start; i < entries.length; i++) {
+    if (!entries[i] || entries[i].outcome !== 'dropped') return false;
+  }
+  return true;
+}
+
 // The pipeline factory. All collaborators are injected; every injection has a
 // safe default so an unconfigured pipeline sends nothing. Returns:
 //   .record(event)    — the assembled entry point: consent gate (layer 1) →
@@ -194,6 +231,15 @@ function createTelemetryPipeline(opts) {
       : DEFAULT_REPLAY_BUFFER_CAP;
   const pendingRing = [];
 
+  // WARDEN-808 — sustained delivery-failure detection window. The delivery-failing
+  // status arms only when the most recent N recorded outcomes are ALL 'dropped'
+  // (N ≥ 3 by default), so a single transient drop never flaps the banner. Tunable
+  // per-pipeline so tests can inject a small window; main.cjs uses the default.
+  const deliveryFailingThreshold =
+    Number.isInteger(o.deliveryFailingThreshold) && o.deliveryFailingThreshold > 0
+      ? o.deliveryFailingThreshold
+      : 3;
+
   // WARDEN-631 — per-endpoint schema-drift circuit-breaker. Session-scoped,
   // in-memory, NEVER persisted (mirrors the transmission log's discipline): once
   // the current endpoint has returned a 415 (x-telemetry-schema mismatch) the
@@ -209,13 +255,20 @@ function createTelemetryPipeline(opts) {
   let drifted = false;
   const onRuntimeStatus = typeof o.onRuntimeStatus === 'function' ? o.onRuntimeStatus : () => {};
 
-  // Push the current drift state to the runtime-status tap. Called ONLY on a real
-  // state change (every call site guards `if (drifted !== prev)`), so the bridge
-  // never sees a no-op transition and never spams the renderer. Wrapped so a
-  // throwing tap (a main-process wiring bug) can never crash a send path.
+  // Push the current runtime status to the main→renderer tap. Called ONLY on a
+  // real composite state change (every call site guards `if (drifted !== prev ||
+  // delivery !== prev)`), so the bridge never sees a no-op transition and never
+  // spams the renderer. `deliveryFailing` is derived FRESH from the ring here (a
+  // pure read — it is never stored as independent state), so the payload always
+  // reflects the live ring, including history seeded from disk on restart
+  // (WARDEN-782). Wrapped so a throwing tap (a main-process wiring bug) can never
+  // crash a send path.
   function emitRuntimeStatus() {
     try {
-      onRuntimeStatus({ drifted });
+      onRuntimeStatus({
+        drifted,
+        deliveryFailing: isDeliveryFailing(transmissionLog.entries(), deliveryFailingThreshold),
+      });
     } catch {
       /* a status tap must never break telemetry */
     }
@@ -332,15 +385,26 @@ function createTelemetryPipeline(opts) {
         isConsentActive: () => effectiveTier() !== TIERS.OFF,
       });
       // Route the transport outcome into the transmission log instead of
-      // swallowing it (WARDEN-583 — verifiability's third leg), AND arm/clear the
-      // drift circuit-breaker from the SAME outcome (WARDEN-631). The transport
-      // never throws here (this try wraps a synchronous call site) and the REAL
-      // transport never rejects (it resolves with dropped:true on failure), so
-      // every real attempt reaches settle. A rejection records/breaks nothing:
-      // the real transport does not produce one, and the absence of an entry for
-      // a contract-violating failure is acceptable (the absence is itself a
-      // signal, never a crash).
+      // swallowing it (WARDEN-583 — verifiability's third leg), arm/clear the
+      // drift circuit-breaker from the SAME outcome (WARDEN-631), AND re-derive the
+      // sustained delivery-failing status from the ring (WARDEN-808). All three are
+      // pure consumers of the SAME `res` + the ring; a single composite emit fires
+      // when the runtime status actually changed. The transport never throws here
+      // (this try wraps a synchronous call site) and the REAL transport never
+      // rejects (it resolves with dropped:true on failure), so every real attempt
+      // reaches settle. A rejection records/breaks nothing: the real transport does
+      // not produce one, and the absence of an entry for a contract-violating
+      // failure is acceptable (the absence is itself a signal, never a crash).
       const settle = (res) => {
+        // WARDEN-808 — snapshot the delivery-failing derivation BEFORE the new
+        // outcome is recorded, so the composite emit-on-change check below detects
+        // a real transition — including from a ring seeded from disk on restart
+        // (WARDEN-782): prev reflects the seeded state, so the first fresh 'ok'
+        // after a restart-into-a-broken-receiver correctly emits a clear. Pure read.
+        const prevDeliveryFailing = isDeliveryFailing(
+          transmissionLog.entries(),
+          deliveryFailingThreshold,
+        );
         recordOutcome(res, events.length);
         // WARDEN-671 — retain the payload on a TRANSIENT-EXHAUSTED drop (the
         // transport flags these replayable:true) for replay on the next dispatch
@@ -358,26 +422,31 @@ function createTelemetryPipeline(opts) {
           pendingRing.push(payload);
           if (pendingRing.length > replayBufferCap) pendingRing.shift(); // drop-oldest
         }
-        // WARDEN-631 — a 415 arms the per-endpoint breaker (stop futile sends); a
-        // 2xx success clears it (the endpoint is confirmed schema-matched again).
-        // Only a real, recognized outcome flips the flag — the gate no-op, an
-        // ambiguous/absent result, and a non-drift drop all leave it untouched, so
-        // a transient/validator drop never wedges a reachable receiver.
-        if (!res || typeof res !== 'object') return;
-        // Stale-result guard: skip the drift update if the endpoint changed since
-        // dispatch — a late outcome for the OLD endpoint must not arm/clear drift
-        // for the NEW one (which would wedge a schema-matched receiver).
-        if (endpointUrl !== targetEndpoint) return;
-        if (res.drifted === true) {
-          if (!drifted) {
-            drifted = true;
-            emitRuntimeStatus();
-          }
-        } else if (res.ok === true) {
-          if (drifted) {
-            drifted = false;
-            emitRuntimeStatus();
-          }
+        // WARDEN-808 — re-derive delivery-failing AFTER the new outcome landed in
+        // the ring. deliveryFailing is NEVER stored as state between outcomes — it
+        // is a pure function of the ring — so this is the authoritative post-outcome
+        // value (and the same value emitRuntimeStatus() pushes, derived fresh).
+        const nextDeliveryFailing = isDeliveryFailing(
+          transmissionLog.entries(),
+          deliveryFailingThreshold,
+        );
+        // WARDEN-631 — drift update. A 415 arms the per-endpoint breaker (stop
+        // futile sends); a 2xx success clears it (the endpoint is confirmed schema-
+        // matched again). Only a real, recognized, FRESH outcome flips the flag —
+        // the gate no-op, an ambiguous/absent result, a non-drift drop, and a
+        // stale-endpoint result (the endpoint changed mid-flight) all leave it
+        // untouched, so a transient/validator drop or a re-pointed receiver never
+        // wedges a reachable receiver. Semantics UNCHANGED from WARDEN-631; only
+        // the emit is now composite (one push when EITHER drifted OR deliveryFailing
+        // changed — never one per flag, never a no-op re-emit).
+        let nextDrifted = drifted;
+        if (res && typeof res === 'object' && endpointUrl === targetEndpoint) {
+          if (res.drifted === true) nextDrifted = true;
+          else if (res.ok === true) nextDrifted = false;
+        }
+        if (nextDrifted !== drifted || nextDeliveryFailing !== prevDeliveryFailing) {
+          drifted = nextDrifted;
+          emitRuntimeStatus(); // pushes { drifted, deliveryFailing } — delivery derived fresh
         }
       };
       if (result && typeof result.then === 'function') {
@@ -467,11 +536,19 @@ function createTelemetryPipeline(opts) {
         emitRuntimeStatus();
       }
     },
-    // WARDEN-631 — the runtime drift state, for the main→renderer bridge (Part 3)
-    // to pull on Settings mount (a push fires on every change, but the renderer
-    // that opens AFTER drift armed needs the current value too). Read-only.
+    // WARDEN-631 / WARDEN-808 — the runtime status, for the main→renderer bridge
+    // (Part 3) to pull on Settings mount (a push fires on every change, but the
+    // renderer that opens AFTER a status armed needs the current value too).
+    // Read-only. `deliveryFailing` is derived FRESH from the ring here — so the
+    // pull path reflects history seeded from disk on restart (WARDEN-782) even
+    // before any push has fired (a restart into a still-broken receiver shows the
+    // armed status immediately; the next 'ok' self-heals it). It is never stored
+    // as state — parity with the "derive, don't store" discipline.
     getRuntimeStatus() {
-      return { drifted };
+      return {
+        drifted,
+        deliveryFailing: isDeliveryFailing(transmissionLog.entries(), deliveryFailingThreshold),
+      };
     },
     // WARDEN-631 — user-driven drift clear. Invoked when a "Test connection" probe
     // confirms the receiver is schema-matched again (the optional reset from the
@@ -494,4 +571,5 @@ module.exports = {
   BASE_EVENT_TYPES,
   resolveTier,
   createTelemetryPipeline,
+  isDeliveryFailing,
 };

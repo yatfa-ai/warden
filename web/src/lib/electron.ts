@@ -145,9 +145,18 @@ export async function setCloseToTray(on: boolean): Promise<boolean> {
 // degrade to "not drifted" and the subscription is a no-op unsubscribe, so the
 // Settings telemetry section renders cleanly in every host without branching.
 
-/** The runtime drift status pushed/pulled over the bridge. Metadata only. */
+/**
+ * The runtime status pushed/pulled over the bridge. Metadata only.
+ * - drifted (WARDEN-631): the current endpoint rejected the current schema (415);
+ *   the per-endpoint breaker is armed and sending is PAUSED.
+ * - deliveryFailing (WARDEN-808): the most recent N send outcomes were ALL dropped
+ *   (receiver down, persistent 5xx, broken network) — the non-415 twin of `drifted`.
+ *   Pure observability: sending is NOT paused (the client keeps retrying; the next
+ *   'ok' self-heals it), unlike `drifted` which gates dispatch.
+ */
 export interface TelemetryRuntimeStatus {
   drifted: boolean;
+  deliveryFailing: boolean;
 }
 
 // WARDEN-668 — one metadata-only entry in the local transmission log of ACTUAL
@@ -196,23 +205,27 @@ function telemetryBridge(): WardenTelemetryBridge | undefined {
   return (window as WindowWithWardenTelemetry).wardenTelemetry;
 }
 
-// Pull the current runtime drift status from main. Called when the Settings
-// telemetry section mounts so a window opened AFTER drift armed shows the correct
-// state (the push below handles live updates while Settings is open). Resolves to
-// `{ drifted: false }` when the bridge is absent (browser/dev/smoke) — a
-// non-Electron host has no main-process drift to report. Never rejects.
+// Pull the current runtime status from main. Called when the Settings telemetry
+// section mounts so a window opened AFTER a status armed shows the correct state
+// (the push below handles live updates while Settings is open). Resolves to
+// `{ drifted: false, deliveryFailing: false }` when the bridge is absent
+// (browser/dev/smoke) — a non-Electron host has no main-process status to report.
+// Never rejects.
 export async function getTelemetryRuntimeStatus(): Promise<TelemetryRuntimeStatus> {
   const b = telemetryBridge();
-  if (!b) return { drifted: false };
+  if (!b) return { drifted: false, deliveryFailing: false };
   try {
     const status = await b.getRuntimeStatus();
-    if (status && typeof status === 'object' && typeof status.drifted === 'boolean') {
-      return { drifted: status.drifted };
+    if (status && typeof status === 'object') {
+      return {
+        drifted: status.drifted === true,
+        deliveryFailing: status.deliveryFailing === true,
+      };
     }
-    return { drifted: false };
+    return { drifted: false, deliveryFailing: false };
   } catch (e) {
     console.warn('[warden:electron] getTelemetryRuntimeStatus failed', e);
-    return { drifted: false };
+    return { drifted: false, deliveryFailing: false };
   }
 }
 
@@ -236,20 +249,24 @@ export function onTelemetryRuntimeStatus(
 // Tell main to clear the runtime drift breaker — called when a "Test connection"
 // probe confirms the receiver is schema-matched again (WARDEN-631). A receiver
 // fixed at the SAME url cannot otherwise clear the breaker in-session, so this is
-// the user-driven recovery path. Resolves to the post-clear status; a clean
-// no-op ({ drifted: false }) when the bridge is absent. Never rejects.
+// the user-driven recovery path. Resolves to the post-clear status; a clean no-op
+// ({ drifted: false, deliveryFailing: <current> }) when the bridge is absent.
+// Never rejects.
 export async function clearTelemetryRuntimeDrift(): Promise<TelemetryRuntimeStatus> {
   const b = telemetryBridge();
-  if (!b) return { drifted: false };
+  if (!b) return { drifted: false, deliveryFailing: false };
   try {
     const status = await b.clearRuntimeDrift();
-    if (status && typeof status === 'object' && typeof status.drifted === 'boolean') {
-      return { drifted: status.drifted };
+    if (status && typeof status === 'object') {
+      return {
+        drifted: status.drifted === true,
+        deliveryFailing: status.deliveryFailing === true,
+      };
     }
-    return { drifted: false };
+    return { drifted: false, deliveryFailing: false };
   } catch (e) {
     console.warn('[warden:electron] clearTelemetryRuntimeDrift failed', e);
-    return { drifted: false };
+    return { drifted: false, deliveryFailing: false };
   }
 }
 

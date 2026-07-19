@@ -106,3 +106,46 @@ export function TelemetryRuntimeDriftStatus({ destination }: { destination: stri
     </div>
   );
 }
+
+/**
+ * WARDEN-808 — the SUSTAINED non-415 delivery-failure warning. The non-415 twin of
+ * TelemetryRuntimeDriftStatus: the receiver has not accepted the last several sends
+ * (receiver down, persistent 5xx, broken network — all recorded as 'dropped'), so
+ * events are NOT landing even though the config-time status says "configured".
+ *
+ * CRITICAL DIFFERENCE from the schema-drift banner: this does NOT pause sending.
+ * Schema-drift (415) is permanent — the receiver cannot accept this schema — so the
+ * breaker correctly stops sending. A delivery failure is potentially TRANSIENT
+ * (receiver restarting, wifi blip), so the client KEEPS sending; the banner is pure
+ * observability. The status is self-healing: it clears the instant the next send
+ * lands (an 'ok' outcome), with no Test-connection step required.
+ *
+ * Renders ONLY when main reports `deliveryFailing === true` AND `drifted` is not
+ * (deriveTelemetryRuntimeStatus gives schema-drift precedence — a 415 is also a run
+ * of all-drops). When active it takes the place of the green "configured" status,
+ * because "events will go to X" is misleading while X is refusing every send.
+ */
+export function TelemetryRuntimeDeliveryFailingStatus({ destination }: { destination: string }) {
+  return (
+    // role="status" (an aria-live=polite region), mirroring the schema-drift banner:
+    // the status appears the moment a sustained drop run arms (the bridge pushes on
+    // arm/clear) and disappears the moment the next send lands, without reopening
+    // Settings. Polite (not alert): the warning persists until delivery recovers, and
+    // an assertive alert would re-announce on every re-render.
+    <div
+      role="status"
+      data-telemetry-runtime-status="delivery-failing"
+      className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs"
+    >
+      <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+      <p className="text-amber-800 dark:text-amber-200">
+        <span className="font-medium">Events are not being delivered.</span>{' '}
+        Telemetry is on, but{destination ? <> your receiver at{' '}
+        <span className="font-medium">{destination}</span></> : ' your receiver'} has not
+        accepted the last several sends. Warden keeps retrying — delivery resumes
+        automatically the moment the receiver accepts an event again. Check that the
+        receiver is running and reachable.
+      </p>
+    </div>
+  );
+}

@@ -48,6 +48,7 @@ const {
   BASE_EVENT_TYPES,
   resolveTier,
   createTelemetryPipeline,
+  isDeliveryFailing,
 } = require('../electron/telemetry-pipeline.cjs');
 const { validateBaseEvent, buildErrorEvent } = require('../electron/telemetry-source.cjs');
 const { createTransmissionLog } = require('../electron/telemetry-transmission-log.cjs');
@@ -895,7 +896,7 @@ const DRIFT_EVENT = validEventWithCredential;
 
 test('getRuntimeStatus defaults to { drifted: false } (no drift out of the box)', () => {
   const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send: fakeSend() });
-  assert.deepEqual(pipeline.getRuntimeStatus(), { drifted: false });
+  assert.deepEqual(pipeline.getRuntimeStatus(), { drifted: false, deliveryFailing: false });
 });
 
 test('a drifted (415) transport outcome arms the breaker → further dispatches send NOTHING', () => {
@@ -982,12 +983,12 @@ test('setEndpoint with the SAME url does NOT clear the breaker (change-guard aga
     onRuntimeStatus: spy,
   });
   pipeline.record(DRIFT_EVENT()); // arm
-  assert.deepEqual(spy.calls, [{ drifted: true }]);
+  assert.deepEqual(spy.calls, [{ drifted: true, deliveryFailing: false }]);
   pipeline.setEndpoint(ENDPOINT); // same url → no-op
-  assert.deepEqual(spy.calls, [{ drifted: true }], 'same endpoint fires no clear');
+  assert.deepEqual(spy.calls, [{ drifted: true, deliveryFailing: false }], 'same endpoint fires no clear');
   assert.equal(pipeline.getRuntimeStatus().drifted, true, 'breaker stays armed on a same-url re-apply');
   pipeline.setEndpoint('https://other.example/ingest'); // different → clears
-  assert.deepEqual(spy.calls, [{ drifted: true }, { drifted: false }]);
+  assert.deepEqual(spy.calls, [{ drifted: true, deliveryFailing: false }, { drifted: false, deliveryFailing: false }]);
 });
 
 test('setSchemaVersion change clears an armed breaker (the client re-versioned)', () => {
@@ -1027,11 +1028,11 @@ test('onRuntimeStatus fires ONLY on a real arm/clear transition — never on a n
   const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send, onRuntimeStatus: spy });
   assert.deepEqual(spy.calls, [], 'no status pushed at construction');
   pipeline.record(DRIFT_EVENT()); // arm → fire
-  assert.deepEqual(spy.calls, [{ drifted: true }]);
+  assert.deepEqual(spy.calls, [{ drifted: true, deliveryFailing: false }]);
   pipeline.record(DRIFT_EVENT()); // short-circuit → NO outcome → NO fire
-  assert.deepEqual(spy.calls, [{ drifted: true }], 'a short-circuit does not re-fire');
+  assert.deepEqual(spy.calls, [{ drifted: true, deliveryFailing: false }], 'a short-circuit does not re-fire');
   pipeline.setEndpoint('https://other.example/ingest'); // clear → fire
-  assert.deepEqual(spy.calls, [{ drifted: true }, { drifted: false }]);
+  assert.deepEqual(spy.calls, [{ drifted: true, deliveryFailing: false }, { drifted: false, deliveryFailing: false }]);
   // A successful send while NOT drifted fires nothing (no transition).
   const ok = sendReturning({ ok: true, dropped: false, attempts: 1, status: 200 });
   const spy2 = statusSpy();
@@ -1100,10 +1101,10 @@ test('clearRuntimeDrift clears an armed breaker and emits the transition (Test-c
   const pipeline = createTelemetryPipeline({ consent: consentReturning(TIERS.BASE), redact, send, onRuntimeStatus: spy });
   pipeline.record(DRIFT_EVENT()); // arm
   assert.equal(pipeline.getRuntimeStatus().drifted, true);
-  assert.deepEqual(spy.calls, [{ drifted: true }]);
+  assert.deepEqual(spy.calls, [{ drifted: true, deliveryFailing: false }]);
   pipeline.clearRuntimeDrift(); // user-driven clear (a 'connected' Test connection)
   assert.equal(pipeline.getRuntimeStatus().drifted, false, 'breaker cleared');
-  assert.deepEqual(spy.calls, [{ drifted: true }, { drifted: false }], 'the clear was pushed');
+  assert.deepEqual(spy.calls, [{ drifted: true, deliveryFailing: false }, { drifted: false, deliveryFailing: false }], 'the clear was pushed');
   pipeline.record(DRIFT_EVENT()); // sends resume
   assert.equal(send.calls.length, 2, 'a send now goes through after the clear');
 });
@@ -1329,6 +1330,296 @@ test('the replay buffer is IN-MEMORY only — the pipeline exposes no disk/persi
   assert.ok(
     !publicSurface.some((k) => /persist|disk|fs|path|file|store|queue/i.test(k)),
     'no persistence/disk surface — the replay buffer is in-memory only',
+  );
+});
+
+// ==========================================================================
+// WARDEN-808 — sustained delivery-failure runtime status (non-415 twin)
+// ==========================================================================
+// The runtime delivery surface armed a status ONLY on a 415 (drifted). Every
+// OTHER sustained failure (receiver down, persistent 5xx, broken network — all
+// recorded as outcome:'dropped') was invisible at the always-visible status layer.
+// Now the pipeline derives `deliveryFailing` from the transmission-log ring: it
+// arms when the most recent N outcomes are ALL 'dropped' and clears the instant an
+// 'ok' lands (self-heal). It is PURE OBSERVABILITY — unlike `drifted` it NEVER
+// gates dispatch (a delivery failure is potentially transient, so the client keeps
+// sending). The ring→deliveryFailing derivation lives in the pure `isDeliveryFailing`
+// helper; the pipeline wires it into settle + getRuntimeStatus + the bridge emit.
+
+// A dropped outcome that is NOT replayable (no replayable:true), so the pipeline
+// does NOT retain it in the WARDEN-671 replay buffer — each record() produces
+// EXACTLY one ring entry, letting these tests assert the deliveryFailing THRESHOLD
+// precisely (one outcome per send). The deliveryFailing derivation reads only
+// outcome:'dropped'; it is indifferent to replayability, so a non-replayable drop
+// exercises the exact same recordOutcome→ring→isDeliveryFailing path. (A real
+// persistently-down receiver returns replayable drops, which also arm the status —
+// faster, since each replayed drop is recorded too; that path is covered by the
+// WARDEN-671 replay tests, which run with this derivation active.)
+const DOWN_DROP = { ok: false, dropped: true, attempts: 1, status: 503 };
+// A 415 is ALSO a drop (dropped:true) — so a run of 415s would arm deliveryFailing
+// too, except drifted takes precedence at the renderer. Used to prove the bridge
+// carries BOTH flags when both hold.
+const DRIFTED_DROP_RESULT = { ok: false, dropped: true, drifted: true, attempts: 1, status: 415 };
+
+// --- isDeliveryFailing: the pure ring→boolean derivation ----------------------
+
+test('isDeliveryFailing: an empty ring → false (no false alarm on a fresh receiver with no traffic)', () => {
+  assert.equal(isDeliveryFailing([], 3), false);
+});
+
+test('isDeliveryFailing: fewer than N outcomes → false (cannot arm on insufficient history)', () => {
+  const d = { outcome: 'dropped' };
+  assert.equal(isDeliveryFailing([d], 3), false);
+  assert.equal(isDeliveryFailing([d, d], 3), false);
+});
+
+test('isDeliveryFailing: the most recent N all dropped → true (only the recent window matters)', () => {
+  const d = { outcome: 'dropped' };
+  const ok = { outcome: 'ok' };
+  assert.equal(isDeliveryFailing([d, d, d], 3), true);
+  // An ok BEFORE the window does not save it — only the most recent N count.
+  assert.equal(isDeliveryFailing([ok, d, d, d], 3), true);
+});
+
+test('isDeliveryFailing: any ok (or non-drop) in the recent window → false (self-heal / conservative)', () => {
+  const d = { outcome: 'dropped' };
+  const ok = { outcome: 'ok' };
+  assert.equal(isDeliveryFailing([d, d, ok], 3), false, 'an ok in the window breaks the run');
+  assert.equal(isDeliveryFailing([d, d, d, ok], 3), false, 'the most recent 3 are d,d,ok');
+  assert.equal(isDeliveryFailing([ok, d, d], 3), false, 'an ok in the window breaks the run');
+  // A malformed/null outcome (a corrupt seeded entry) also breaks the run — never
+  // arm on garbage.
+  assert.equal(isDeliveryFailing([d, d, { outcome: null }], 3), false);
+});
+
+// --- pipeline integration: arm / self-heal / no-flap / no-gate ----------------
+
+test('a sustained run of N drops arms deliveryFailing — and does NOT pause sending (no circuit breaker)', () => {
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendSeq([DOWN_DROP, DOWN_DROP, DOWN_DROP, DOWN_DROP]);
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(eventAt(1)); // drop 1
+  pipeline.record(eventAt(2)); // drop 2
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, false, '2 drops < threshold 3 → not armed (no flap)');
+  pipeline.record(eventAt(3)); // drop 3 → sustained run
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, true, '3 consecutive drops → armed');
+  pipeline.record(eventAt(4)); // drop 4 — STILL armed, and CRUCIALLY still sending
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, true, 'still armed on a 4th drop');
+  assert.equal(send.calls.length, 4, 'CRITICAL: sending is NOT paused — the client keeps retrying while armed');
+});
+
+test('deliveryFailing self-heals the instant the next send lands (an ok clears it — no Test-connection needed)', () => {
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendSeq([DOWN_DROP, DOWN_DROP, DOWN_DROP, OK_RESULT]);
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(eventAt(1));
+  pipeline.record(eventAt(2));
+  pipeline.record(eventAt(3)); // → armed
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, true);
+  pipeline.record(eventAt(4)); // → ok
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, false, 'a single ok cleared the sustained-run status');
+});
+
+test('a single transient drop followed by an ok does NOT arm deliveryFailing (no flap)', () => {
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendSeq([DOWN_DROP, OK_RESULT]);
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(eventAt(1)); // a momentary blip
+  pipeline.record(eventAt(2)); // recovered
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, false, 'a single drop never arms — sustained runs only');
+});
+
+test('the threshold is configurable (a smaller window arms sooner)', () => {
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendSeq([DOWN_DROP, DOWN_DROP]);
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+    deliveryFailingThreshold: 2,
+  });
+  pipeline.record(eventAt(1));
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, false, '1 drop < threshold 2');
+  pipeline.record(eventAt(2));
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, true, '2 drops meet the lowered threshold');
+});
+
+// --- emit discipline: the bridge sees a transition only when the composite changes
+
+test('deliveryFailing emits on change ONLY — never a push per send (no spam)', () => {
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendSeq([DOWN_DROP, DOWN_DROP, DOWN_DROP, DOWN_DROP, OK_RESULT]);
+  const spy = statusSpy();
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+    onRuntimeStatus: spy,
+  });
+  assert.deepEqual(spy.calls, [], 'nothing pushed at construction');
+  pipeline.record(eventAt(1)); // drop 1 — no transition (still false)
+  pipeline.record(eventAt(2)); // drop 2 — no transition (still false)
+  assert.deepEqual(spy.calls, [], 'no push while below threshold');
+  pipeline.record(eventAt(3)); // drop 3 — false→true → ONE push
+  assert.deepEqual(spy.calls, [{ drifted: false, deliveryFailing: true }], 'armed once');
+  pipeline.record(eventAt(4)); // drop 4 — true→true → NO push
+  assert.deepEqual(spy.calls, [{ drifted: false, deliveryFailing: true }], 'no spam on a no-op transition');
+  pipeline.record(eventAt(5)); // ok — true→false → ONE push
+  assert.deepEqual(
+    spy.calls,
+    [{ drifted: false, deliveryFailing: true }, { drifted: false, deliveryFailing: false }],
+    'the clear was pushed once',
+  );
+});
+
+test('when BOTH drifted and deliveryFailing flip on one outcome, settle emits the final composite (not a per-flag spam)', () => {
+  // Three 415s: each is a drop (so after 3 the sustained-run arms) AND each arms
+  // drift on the first. The bridge must end at {drifted:true, deliveryFailing:true}.
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendSeq([DRIFTED_DROP_RESULT, DRIFTED_DROP_RESULT, DRIFTED_DROP_RESULT]);
+  const spy = statusSpy();
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+    onRuntimeStatus: spy,
+  });
+  pipeline.record(eventAt(1)); // 415 → drift arms (1 drop)
+  pipeline.record(eventAt(2)); // drifted → dispatch short-circuits BEFORE transport;
+  //   drift stays armed, no new outcome recorded (still 1 drop). No transition.
+  assert.deepEqual(
+    spy.calls,
+    [{ drifted: true, deliveryFailing: false }],
+    'drift armed on the first 415; deliveryFailing still false (only 1 recorded drop)',
+  );
+  // The short-circuit means only ONE drop is ever recorded, so deliveryFailing can
+  // never arm here — drift gates the very sends that would fill the ring. This is
+  // the precedence made mechanical: schema-drift owns the slot because it prevents
+  // the drop run from ever forming.
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, false);
+  assert.equal(pipeline.getRuntimeStatus().drifted, true);
+});
+
+test('schema-drift and delivery-failing can BOTH be true when drift clears mid-run (drift wins the renderer slot)', () => {
+  // Arm deliveryFailing with 3 non-415 drops (drifted stays false), THEN a 415
+  // arms drift too. The bridge payload carries BOTH true — the renderer's
+  // deriveTelemetryRuntimeStatus gives schema-drift precedence (verified in
+  // telemetry-runtime-status.test.mjs).
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendSeq([DOWN_DROP, DOWN_DROP, DOWN_DROP, DRIFTED_DROP_RESULT]);
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(eventAt(1));
+  pipeline.record(eventAt(2));
+  pipeline.record(eventAt(3)); // → deliveryFailing arms (drifted false)
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, true);
+  assert.equal(pipeline.getRuntimeStatus().drifted, false);
+  pipeline.record(eventAt(4)); // → a 415 arms drift too
+  assert.equal(pipeline.getRuntimeStatus().drifted, true, 'the 415 armed drift');
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, true, 'deliveryFailing still armed — both flags hold');
+});
+
+// --- persistence asymmetry: getRuntimeStatus derives from the LIVE ring (incl. seeded history)
+
+test('getRuntimeStatus derives deliveryFailing from the ring INCLUDING seeded history (restart into a broken receiver)', () => {
+  // WARDEN-782 seeds the ring from the persisted audit file on restart. deliveryFailing
+  // is derived fresh on read (never stored), so a restart into a still-broken receiver
+  // shows the armed status BEFORE any fresh outcome — and the very next ok self-heals it.
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  log.seed([
+    { outcome: 'dropped', endpointHost: 'telemetry.example.invalid', schemaVersion: 1, eventCount: 1, attempts: 3, status: 503 },
+    { outcome: 'dropped', endpointHost: 'telemetry.example.invalid', schemaVersion: 1, eventCount: 1, attempts: 3, status: 503 },
+    { outcome: 'dropped', endpointHost: 'telemetry.example.invalid', schemaVersion: 1, eventCount: 1, attempts: 3, status: 503 },
+  ]);
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send: sendSeq([OK_RESULT]),
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  // NO record() yet — the pull path alone reflects the seeded ring.
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, true, 'armed from seeded history with no fresh send');
+  // A single successful send self-heals it (an ok enters the window).
+  const spy = statusSpy();
+  pipeline.setSend(sendSeq([OK_RESULT]));
+  // Re-create with a spy to observe the clear transition from the seeded state.
+  const pipeline2 = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send: sendSeq([OK_RESULT]),
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+    onRuntimeStatus: spy,
+  });
+  assert.equal(pipeline2.getRuntimeStatus().deliveryFailing, true, 'still armed pre-send');
+  pipeline2.record(eventAt(1)); // ok → the seeded armed state clears
+  assert.equal(pipeline2.getRuntimeStatus().deliveryFailing, false, 'the first ok after restart self-healed the seeded status');
+  assert.deepEqual(spy.calls, [{ drifted: false, deliveryFailing: false }], 'the clear (from the seeded armed state) was pushed');
+});
+
+test('an unconfigured pipeline (noop transmission log) never arms deliveryFailing', () => {
+  // The default noopTransmissionLog returns entries()=[], so isDeliveryFailing is
+  // always false — an unconfigured pipeline behaves EXACTLY as before this slice.
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    send: sendSeq([DOWN_DROP, DOWN_DROP, DOWN_DROP]),
+  });
+  pipeline.record(eventAt(1));
+  pipeline.record(eventAt(2));
+  pipeline.record(eventAt(3));
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, false, 'no real log ⇒ never armed');
+});
+
+test('deliveryFailing introduces NO send-gating return in dispatch (grep guardrail)', () => {
+  // The critical distinction from the 415 breaker: deliveryFailing must NEVER gate
+  // dispatch. The 415 breaker is `if (drifted) return;` (permanent — stop futile
+  // sends). A delivery failure is transient, so the client KEEPS sending. This
+  // asserts the guardrail mechanically: in the PRE-TRANSPORT region of dispatch
+  // (the tier/drift/redact/validate gates that decide whether to send at all),
+  // deliveryFailing is not consulted. (It IS derived later, inside `settle` — the
+  // post-send outcome handler — which is observability, not a gate.)
+  const src = readFileSync(resolve(__dirname, '../electron/telemetry-pipeline.cjs'), 'utf8');
+  const dispatchStart = src.indexOf('function dispatch(payload)');
+  const transportCall = src.indexOf('const result = transportSend({', dispatchStart);
+  assert.ok(dispatchStart > -1 && transportCall > dispatchStart, 'dispatch + its transportSend call located');
+  const preTransport = src.slice(dispatchStart, transportCall);
+  // The two legitimate send-gating returns that live in this pre-transport region.
+  assert.ok(/if \(tier === TIERS\.OFF\) return;/.test(preTransport), 'the consent-off guard is present');
+  assert.ok(/if \(drifted\) return;/.test(preTransport), 'the WARDEN-631 drifted guard is present');
+  assert.ok(
+    !/deliveryFailing/.test(preTransport),
+    'CRITICAL: deliveryFailing is NOT consulted before transportSend — it never gates sending',
   );
 });
 

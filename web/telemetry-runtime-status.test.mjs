@@ -69,4 +69,55 @@ test('the mapping is pure — same input always yields the same output', () => {
   }
 });
 
+// ==========================================================================
+// WARDEN-808 — the delivery-failing status (sustained non-415 delivery failure)
+// ==========================================================================
+// deriveTelemetryRuntimeStatus now maps a third payload field `deliveryFailing`
+// into a third descriptor kind. These pin the new branch + the precedence rule
+// (schema-drift wins over delivery-failing wins over ok). The ring→deliveryFailing
+// DERIVATION (how the main process computes the boolean) is exercised end-to-end
+// in telemetry-pipeline.test.mjs; here we pin only the renderer's pure mapping
+// from the already-computed payload.
+
+test('a deliveryFailing payload (drifted false) derives to the delivery-failing descriptor', () => {
+  assert.deepEqual(
+    deriveTelemetryRuntimeStatus({ drifted: false, deliveryFailing: true }),
+    { kind: 'delivery-failing' },
+  );
+});
+
+test('schema-drift takes precedence over delivery-failing when both hold (a 415 is also all-drops)', () => {
+  // A 415 produces a run of drops too, so both flags can be true at once. The
+  // schema mismatch is the more actionable, permanent condition, so it wins.
+  assert.deepEqual(
+    deriveTelemetryRuntimeStatus({ drifted: true, deliveryFailing: true }),
+    { kind: 'schema-drift' },
+  );
+});
+
+test('a payload with both flags false derives to ok', () => {
+  assert.deepEqual(
+    deriveTelemetryRuntimeStatus({ drifted: false, deliveryFailing: false }),
+    { kind: 'ok' },
+  );
+});
+
+test('a non-boolean deliveryFailing derives to ok (defensive — never a false alarm)', () => {
+  // Only an UNAMBIGUOUS deliveryFailing:true surfaces the banner. A truthy but
+  // non-boolean value, or a payload that omits the field, maps to ok.
+  assert.deepEqual(deriveTelemetryRuntimeStatus({ drifted: false }), { kind: 'ok' });
+  assert.deepEqual(
+    deriveTelemetryRuntimeStatus({ drifted: false, deliveryFailing: 'true' }),
+    { kind: 'ok' },
+  );
+  assert.deepEqual(
+    deriveTelemetryRuntimeStatus({ drifted: false, deliveryFailing: 1 }),
+    { kind: 'ok' },
+  );
+  assert.deepEqual(
+    deriveTelemetryRuntimeStatus({ drifted: false, deliveryFailing: null }),
+    { kind: 'ok' },
+  );
+});
+
 console.log(`\n✓ TELEMETRY RUNTIME-STATUS TESTS PASS (${passed})`);

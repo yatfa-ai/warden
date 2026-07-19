@@ -275,40 +275,71 @@ console.log('\ngetTelemetryRuntimeStatus — the read-only drift window (WARDEN-
 // ---------------------------------------------------------------------------
 await testAsync('returns {drifted:false} when the bridge is absent (no main-process drift to report)', async () => {
   noBridge();
-  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false });
+  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false, deliveryFailing: false });
 });
 await testAsync('returns {drifted:true} when the bridge reports drift', async () => {
   telemetryBridge({ getRuntimeStatus: async () => ({ drifted: true }) });
-  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: true });
+  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: true, deliveryFailing: false });
 });
 await testAsync('returns {drifted:false} when the bridge reports no drift', async () => {
   telemetryBridge({ getRuntimeStatus: async () => ({ drifted: false }) });
-  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false });
+  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false, deliveryFailing: false });
 });
 await testAsync('coerces a non-boolean `drifted` to {drifted:false} (never a false drift alarm)', async () => {
   // Only an UNAMBIGUOUS boolean drifted:true surfaces the warning. A truthy but
   // non-boolean value (the string 'true', the number 1, explicit null) must NOT.
   telemetryBridge({ getRuntimeStatus: async () => ({ drifted: 'true' }) });
-  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false });
+  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false, deliveryFailing: false });
   telemetryBridge({ getRuntimeStatus: async () => ({ drifted: 1 }) });
-  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false });
+  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false, deliveryFailing: false });
   telemetryBridge({ getRuntimeStatus: async () => ({ drifted: null }) });
-  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false });
+  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false, deliveryFailing: false });
 });
 await testAsync('coerces a malformed payload (null / missing field / non-object) to {drifted:false}', async () => {
   telemetryBridge({ getRuntimeStatus: async () => null });
-  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false });
+  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false, deliveryFailing: false });
   telemetryBridge({ getRuntimeStatus: async () => ({}) });
-  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false });
+  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false, deliveryFailing: false });
   telemetryBridge({ getRuntimeStatus: async () => 'drifted?' });
-  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false });
+  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false, deliveryFailing: false });
   telemetryBridge({ getRuntimeStatus: async () => 42 });
-  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false });
+  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false, deliveryFailing: false });
 });
 await testAsync('returns {drifted:false} when the bridge rejects (never rejects)', async () => {
   silenceWarn();
   telemetryBridge({ getRuntimeStatus: async () => { throw new Error('IPC dead'); } });
-  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false });
+  assert.deepEqual(await getTelemetryRuntimeStatus(), { drifted: false, deliveryFailing: false });
+});
+
+await testAsync('passes a sustained delivery-failure signal through (WARDEN-808)', async () => {
+  // deliveryFailing is the non-415 twin of drifted. An unambiguous deliveryFailing:true
+  // from main must reach the renderer so the Telemetry section can surface it.
+  telemetryBridge({ getRuntimeStatus: async () => ({ drifted: false, deliveryFailing: true }) });
+  assert.deepEqual(
+    await getTelemetryRuntimeStatus(),
+    { drifted: false, deliveryFailing: true },
+    'a sustained-drop signal flows through unchanged',
+  );
+  // Both flags can hold at once (a 415 is also a run of drops); both must pass through.
+  telemetryBridge({ getRuntimeStatus: async () => ({ drifted: true, deliveryFailing: true }) });
+  assert.deepEqual(
+    await getTelemetryRuntimeStatus(),
+    { drifted: true, deliveryFailing: true },
+    'both flags pass through — the renderer decides precedence',
+  );
+});
+
+await testAsync('coerces a non-boolean deliveryFailing to false (never a false alarm)', async () => {
+  // Only an UNAMBIGUOUS deliveryFailing:true surfaces the banner — parity with drifted.
+  for (const malformed of ['true', 1, null]) {
+    telemetryBridge({ getRuntimeStatus: async () => ({ drifted: false, deliveryFailing: malformed }) });
+    // eslint-disable-next-line no-await-in-loop
+    assert.deepEqual(
+      await getTelemetryRuntimeStatus(),
+      { drifted: false, deliveryFailing: false },
+      `${JSON.stringify(malformed)} deliveryFailing ⇒ false`,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -316,26 +347,26 @@ console.log('\nclearTelemetryRuntimeDrift — the user-driven drift recovery pat
 // ---------------------------------------------------------------------------
 await testAsync('returns {drifted:false} when the bridge is absent (clean no-op)', async () => {
   noBridge();
-  assert.deepEqual(await clearTelemetryRuntimeDrift(), { drifted: false });
+  assert.deepEqual(await clearTelemetryRuntimeDrift(), { drifted: false, deliveryFailing: false });
 });
 await testAsync('returns the post-clear status when main confirms drift cleared', async () => {
   telemetryBridge({ clearRuntimeDrift: async () => ({ drifted: false }) });
-  assert.deepEqual(await clearTelemetryRuntimeDrift(), { drifted: false });
+  assert.deepEqual(await clearTelemetryRuntimeDrift(), { drifted: false, deliveryFailing: false });
 });
 await testAsync('still reports drift when main could not clear it (resolves to the real post-clear status)', async () => {
   telemetryBridge({ clearRuntimeDrift: async () => ({ drifted: true }) });
-  assert.deepEqual(await clearTelemetryRuntimeDrift(), { drifted: true });
+  assert.deepEqual(await clearTelemetryRuntimeDrift(), { drifted: true, deliveryFailing: false });
 });
 await testAsync('coerces a malformed post-clear payload to {drifted:false} (never a false drift alarm)', async () => {
   telemetryBridge({ clearRuntimeDrift: async () => ({ drifted: 'nope' }) });
-  assert.deepEqual(await clearTelemetryRuntimeDrift(), { drifted: false });
+  assert.deepEqual(await clearTelemetryRuntimeDrift(), { drifted: false, deliveryFailing: false });
   telemetryBridge({ clearRuntimeDrift: async () => null });
-  assert.deepEqual(await clearTelemetryRuntimeDrift(), { drifted: false });
+  assert.deepEqual(await clearTelemetryRuntimeDrift(), { drifted: false, deliveryFailing: false });
 });
 await testAsync('returns {drifted:false} when the bridge rejects (never rejects)', async () => {
   silenceWarn();
   telemetryBridge({ clearRuntimeDrift: async () => { throw new Error('clear failed'); } });
-  assert.deepEqual(await clearTelemetryRuntimeDrift(), { drifted: false });
+  assert.deepEqual(await clearTelemetryRuntimeDrift(), { drifted: false, deliveryFailing: false });
 });
 
 // ---------------------------------------------------------------------------

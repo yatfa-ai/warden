@@ -14,6 +14,7 @@ import { type TelemetryRuntimeStatus } from '@/lib/electron';
 import {
   TelemetrySendingStatus,
   TelemetryRuntimeDriftStatus,
+  TelemetryRuntimeDeliveryFailingStatus,
 } from '../rows/TelemetryStatus';
 import { SettingsSection } from '../SettingsSection';
 import { type ConfigData, type SetConfig } from '../types';
@@ -50,6 +51,11 @@ export function TelemetrySection({
   telemetryRuntimeStatus,
   hidden,
 }: TelemetrySectionProps) {
+  // WARDEN-631/808 — derive the runtime delivery status ONCE. Precedence:
+  // schema-drift (415, sending paused) wins over delivery-failing (sustained drops,
+  // still retrying) wins over the default sending status. Gated on baseEnabled in
+  // the JSX below so NEITHER runtime banner shows when telemetry is off.
+  const runtimeKind = deriveTelemetryRuntimeStatus(telemetryRuntimeStatus).kind;
   return (
     <SettingsSection title="Telemetry" className={hidden ? 'hidden' : undefined}>
       <p className="text-xs text-muted-foreground">
@@ -111,19 +117,24 @@ export function TelemetrySection({
 
       {/* WARDEN-557 — honest sending status. A pure derived view of
           config.telemetryBaseEnabled × config.telemetryEndpoint
-          (see TelemetrySendingStatus above). Placed here, directly
-          above the endpoint field, so the cause (blank endpoint)
-          and the consequence (nothing sent) read together. Reads the
-          same `config` the toggles/field mutate via setConfig, so it
-          updates live with no stale-closure / shadow state.
-          WARDEN-631 — when telemetry is ON and the RUNTIME breaker is
-          armed (the receiver rejected the schema), the drift warning
-          takes this slot instead: "events will go to X" is false while
-          X rejects them. Gated on baseEnabled so a stale drift flag
-          never shows when telemetry is off (drift is moot then). */}
-      {config.telemetryBaseEnabled
-      && deriveTelemetryRuntimeStatus(telemetryRuntimeStatus).kind === 'schema-drift' ? (
+          (see TelemetrySendingStatus). Placed here, directly above the
+          endpoint field, so the cause (blank endpoint) and the consequence
+          (nothing sent) read together. Reads the same `config` the toggles/
+          field mutate via setConfig, so it updates live with no stale-closure
+          / shadow state.
+          WARDEN-631/808 — when telemetry is ON, a RUNTIME delivery issue takes
+          this slot instead, because "events will go to X" is misleading while X
+          is rejecting or refusing every send. schema-drift (a 415, sending paused)
+          takes precedence over delivery-failing (sustained non-415 drops, still
+          retrying) — a 415 is also a run of all-drops, so it must win the slot.
+          Gated on baseEnabled so neither runtime banner shows when telemetry is
+          off (both are moot then). */}
+      {config.telemetryBaseEnabled && runtimeKind === 'schema-drift' ? (
         <TelemetryRuntimeDriftStatus
+          destination={telemetryDestinationLabel(config.telemetryEndpoint)}
+        />
+      ) : config.telemetryBaseEnabled && runtimeKind === 'delivery-failing' ? (
+        <TelemetryRuntimeDeliveryFailingStatus
           destination={telemetryDestinationLabel(config.telemetryEndpoint)}
         />
       ) : (
