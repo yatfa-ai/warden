@@ -14,7 +14,9 @@
 // Each done-criterion letter in the ticket maps to a section below:
 //   (d) metadata-only — entries never carry payload/redacted/identifier fields.
 //   (e) bounded ring  — oldest entries drop past the cap; memory cannot grow.
-// Plus the pure-mechanics coverage (clock injection, host derivation, no-op default).
+// Plus the pure-mechanics coverage (clock injection, host derivation, no-op default),
+// and the WARDEN-782 persistence seam (injected save, debounced coalescing, flushSave,
+// seed() load path, parseTransmissionLog skip-malformed, and a record→seed round-trip).
 //
 // Run: node telemetry-transmission-log.test.mjs   (from web/)
 import { createRequire } from 'node:module';
@@ -26,6 +28,7 @@ const {
   hostOf,
   noopTransmissionLog,
   readSnapshot,
+  parseTransmissionLog,
   DEFAULT_CAP,
 } = require('../electron/telemetry-transmission-log.cjs');
 
@@ -283,6 +286,260 @@ test('readSnapshot degrades to [] for a non-log argument (null / undefined / wro
     assert.deepEqual(readSnapshot(bad), [], `${JSON.stringify(bad)} → [] (no throw)`);
   }
   assert.doesNotThrow(() => readSnapshot(undefined));
+});
+
+// ==========================================================================
+// (WARDEN-782) Persistence seam — injected save, debounced coalescing, flushSave
+// ==========================================================================
+
+test('record() invokes the injected save with the current snapshot (immediate when debounceMs is unset)', () => {
+  const saved = [];
+  const log = createTransmissionLog({ clock: () => 1, save: (e) => saved.push(e) });
+  log.record({ outcome: 'ok', attempts: 1, status: 200 });
+  log.record({ outcome: 'dropped', attempts: 2, status: 503 });
+  // No debounce → one save per record, each carrying a snapshot of the ring AT THAT
+  // record (the first save saw one entry, the second saw two).
+  assert.equal(saved.length, 2, 'immediate mode saves once per record');
+  assert.equal(saved[0].length, 1, 'first save snapshot has the first entry');
+  assert.equal(saved[1].length, 2, 'second save snapshot has both entries');
+  assert.equal(saved[1][1].outcome, 'dropped', 'the snapshot carries the normalized entry');
+});
+
+test('without an injected save, record() persists nothing and does not throw', () => {
+  const log = createTransmissionLog({ clock: () => 1 });
+  assert.doesNotThrow(() => log.record({ outcome: 'ok', attempts: 1, status: 200 }));
+  assert.equal(log.size(), 1, 'the ring still records in-memory with no save injected');
+});
+
+test('a throwing save never crashes record() (durability is best-effort, never load-bearing)', () => {
+  const log = createTransmissionLog({
+    clock: () => 1,
+    save: () => { throw new Error('disk full'); },
+  });
+  assert.doesNotThrow(() => log.record({ outcome: 'ok', attempts: 1, status: 200 }));
+  assert.equal(log.size(), 1, 'the entry was recorded even though save threw');
+});
+
+test('a debounced save coalesces a burst of record() calls into ONE write', () => {
+  let calls = 0;
+  let lastSaved = null;
+  const log = createTransmissionLog({
+    clock: () => 1,
+    debounceMs: 50,
+    save: (e) => { calls += 1; lastSaved = e; },
+  });
+  // A burst of three records — all within the debounce window.
+  log.record({ outcome: 'ok', attempts: 1, status: 200 });
+  log.record({ outcome: 'ok', attempts: 1, status: 200 });
+  log.record({ outcome: 'dropped', attempts: 3, status: 503 });
+  assert.equal(calls, 0, 'no write fired yet — the save is debounced');
+  assert.equal(log.size(), 3, 'the ring still holds all three in-memory');
+  // Flush (the quit path) materializes the pending debounced write synchronously.
+  const fired = log.flushSave();
+  assert.equal(fired, true, 'flushSave reports a pending write was flushed');
+  assert.equal(calls, 1, 'the burst coalesced into exactly one write');
+  assert.equal(lastSaved.length, 3, 'the flushed snapshot has all three entries');
+});
+
+test('flushSave is a no-op (returns false) when nothing is pending', () => {
+  let calls = 0;
+  const log = createTransmissionLog({ clock: () => 1, debounceMs: 50, save: () => { calls += 1; } });
+  assert.equal(log.flushSave(), false, 'nothing was pending');
+  assert.equal(calls, 0, 'no save fired');
+});
+
+test('flushSave clears the pending timer — a second flush is a no-op (no late save leaks)', () => {
+  let calls = 0;
+  const log = createTransmissionLog({ clock: () => 1, debounceMs: 50, save: () => { calls += 1; } });
+  log.record({ outcome: 'ok', attempts: 1, status: 200 });
+  log.flushSave();
+  assert.equal(log.flushSave(), false, 'the first flush cleared the pending timer');
+  assert.equal(calls, 1, 'still exactly one write after the second flush');
+});
+
+test('noopTransmissionLog exposes the persistence seam as no-ops (uniform interface)', () => {
+  assert.equal(noopTransmissionLog.flushSave(), false, 'noop flushSave reports nothing flushed');
+  assert.doesNotThrow(() => noopTransmissionLog.seed([{ outcome: 'ok' }]));
+  assert.equal(noopTransmissionLog.size(), 0, 'noop seed retained nothing');
+});
+
+// ==========================================================================
+// (WARDEN-782) seed() — the restart-restore (load) path
+// ==========================================================================
+
+test('seed() loads a parsed array into the ring (oldest → newest preserved, timestamps kept)', () => {
+  const log = createTransmissionLog({ clock: () => 999 });
+  log.seed([
+    { timestamp: 100, outcome: 'ok', attempts: 1, status: 200, endpointHost: 'a.example' },
+    { timestamp: 200, outcome: 'dropped', attempts: 2, status: 503, endpointHost: 'b.example' },
+  ]);
+  const [a, b] = log.entries();
+  assert.equal(a.timestamp, 100, 'loaded timestamps preserved (not re-stamped by the clock)');
+  assert.equal(a.endpointHost, 'a.example');
+  assert.equal(b.outcome, 'dropped');
+  assert.equal(log.size(), 2);
+});
+
+test('seed() enforces the cap on the loaded set (drops the OLDEST past it)', () => {
+  const log = createTransmissionLog({ clock: () => 1, cap: 3 });
+  const loaded = [];
+  for (let i = 0; i < 5; i++) loaded.push({ timestamp: i, outcome: 'ok', attempts: 1, status: 200 });
+  log.seed(loaded);
+  assert.equal(log.size(), 3, 'a loaded set past the cap is bounded on load');
+  assert.deepEqual(
+    log.entries().map((e) => e.timestamp),
+    [2, 3, 4],
+    'the oldest loaded entries dropped, newest retained',
+  );
+});
+
+test('seed() does NOT trigger a save (the load path is not a write)', () => {
+  let calls = 0;
+  const log = createTransmissionLog({ clock: () => 1, save: () => { calls += 1; } });
+  log.seed([{ timestamp: 1, outcome: 'ok', attempts: 1, status: 200 }]);
+  assert.equal(calls, 0, 'loading the persisted set does not rewrite it');
+  assert.equal(log.size(), 1);
+});
+
+test('seed() REPLACES the ring (re-seeding resets, it does not append)', () => {
+  const log = createTransmissionLog({ clock: () => 1 });
+  log.seed([{ timestamp: 1, outcome: 'ok', attempts: 1, status: 200 }]);
+  log.seed([
+    { timestamp: 2, outcome: 'dropped', attempts: 1, status: 503 },
+    { timestamp: 3, outcome: 'ok', attempts: 1, status: 200 },
+  ]);
+  assert.equal(log.size(), 2, 'the second seed replaced the first');
+  assert.deepEqual(log.entries().map((e) => e.timestamp), [2, 3]);
+});
+
+test('seed() tolerates a non-array without throwing (ring stays empty)', () => {
+  const log = createTransmissionLog({ clock: () => 1 });
+  for (const bad of [null, undefined, {}, 'string', 42]) {
+    assert.doesNotThrow(() => log.seed(bad), `${JSON.stringify(bad)} did not throw`);
+  }
+  assert.equal(log.size(), 0, 'a non-array seed leaves the ring empty');
+});
+
+test('seed() normalizes loaded entries — a smuggled field on disk cannot survive into the ring', () => {
+  // The load-path metadata-only invariant (extends the record() 7-field test): a
+  // corrupt/smuggled entry read from disk is re-normalized, so payload/identifiers
+  // are stripped before the entry reaches the live ring — durability persists a
+  // metadata-only audit, never anything richer.
+  const log = createTransmissionLog({ clock: () => 1 });
+  log.seed([
+    {
+      timestamp: 1,
+      outcome: 'ok',
+      attempts: 1,
+      status: 200,
+      // none of the following may survive normalization:
+      message: 'auth failed for token ghp_SECRET',
+      events: [{ type: 'error', message: 'leaked' }],
+      chatName: 'Refactor auth module',
+      sessionName: 'claude-7b3a2f1',
+      endpointUrl: 'https://telemetry.example.invalid/v1/events?token=leak',
+    },
+  ]);
+  const entry = log.entries()[0];
+  assert.deepEqual(
+    Object.keys(entry).sort(),
+    ['attempts', 'endpointHost', 'eventCount', 'outcome', 'schemaVersion', 'status', 'timestamp'],
+    'a loaded entry is normalized to exactly the seven metadata fields',
+  );
+  assert.equal(entry.message, undefined, 'no smuggled payload message');
+  assert.equal(entry.sessionName, undefined, 'no smuggled session identifier');
+  assert.equal(entry.endpointUrl, undefined, 'no smuggled full URL');
+  assert.doesNotMatch(JSON.stringify(log.entries()), /ghp_|sessionName|endpointUrl/);
+});
+
+// ==========================================================================
+// (WARDEN-782) parseTransmissionLog — skip-malformed NDJSON load
+// ==========================================================================
+
+test('parseTransmissionLog parses NDJSON entries (one JSON object per line)', () => {
+  const text = JSON.stringify({ timestamp: 1, outcome: 'ok' }) + '\n' +
+    JSON.stringify({ timestamp: 2, outcome: 'dropped' });
+  const parsed = parseTransmissionLog(text);
+  assert.equal(parsed.length, 2, 'two valid lines → two entries');
+  assert.deepEqual(parsed.map((e) => e.outcome), ['ok', 'dropped']);
+});
+
+test('parseTransmissionLog skips a corrupt line — valid entries on either side survive', () => {
+  // The skip-malformed success measure: one bad line degrades to the pre+post-
+  // corruption entries, NOT a blank panel and NOT a crash.
+  const text = JSON.stringify({ timestamp: 1, outcome: 'ok' }) + '\n' +
+    '{ this line is not valid json +++\n' +
+    JSON.stringify({ timestamp: 3, outcome: 'dropped' });
+  const parsed = parseTransmissionLog(text);
+  assert.equal(parsed.length, 2, 'the corrupt line was skipped, the good ones survived');
+  assert.deepEqual(parsed.map((e) => e.timestamp), [1, 3]);
+});
+
+test('parseTransmissionLog ignores blank lines between entries', () => {
+  const text = JSON.stringify({ timestamp: 1, outcome: 'ok' }) + '\n\n' +
+    JSON.stringify({ timestamp: 2, outcome: 'ok' }) + '\n';
+  const parsed = parseTransmissionLog(text);
+  assert.equal(parsed.length, 2, 'blank lines (incl. trailing) are ignored');
+});
+
+test('parseTransmissionLog skips a non-object line (a bare number/string is not an entry)', () => {
+  const text = JSON.stringify({ timestamp: 1, outcome: 'ok' }) + '\n' +
+    JSON.stringify(42) + '\n' +
+    JSON.stringify('a bare string') + '\n' +
+    JSON.stringify({ timestamp: 4, outcome: 'dropped' });
+  const parsed = parseTransmissionLog(text);
+  assert.equal(parsed.length, 2, 'only object entries are retained');
+  assert.deepEqual(parsed.map((e) => e.timestamp), [1, 4]);
+});
+
+test('parseTransmissionLog returns [] for missing/empty/non-string text (never throws)', () => {
+  for (const bad of ['', '   ', '\n\n', null, undefined, 42, {}]) {
+    assert.doesNotThrow(() => {
+      assert.deepEqual(parseTransmissionLog(bad), [], `${JSON.stringify(bad)} → []`);
+    });
+  }
+});
+
+// ==========================================================================
+// (WARDEN-782) Round-trip — record → serialize → parse → seed (a restart)
+// ==========================================================================
+
+test('a record → serialize → parse → seed round-trip is lossless (delivered/dropped badges intact)', () => {
+  const clock = sequencedClock(5000, 100);
+  const recorded = createTransmissionLog({ clock });
+  recorded.record({ outcome: 'ok', endpointHost: 'telemetry.example.invalid', schemaVersion: 1, eventCount: 3, attempts: 1, status: 200 });
+  recorded.record({ outcome: 'dropped', endpointHost: 'telemetry.example.invalid', schemaVersion: 1, eventCount: 1, attempts: 3, status: 503 });
+  // main.cjs serializes via `entries.map(JSON.stringify).join('\n')`; mirror it here.
+  const text = recorded.entries().map((e) => JSON.stringify(e)).join('\n') + '\n';
+  // A fresh log (a restarted app) loads + seeds from the parsed file.
+  const restarted = createTransmissionLog({ clock: () => 0 });
+  restarted.seed(parseTransmissionLog(text));
+  assert.deepEqual(restarted.entries(), recorded.entries(), 'the round-trip is lossless');
+  assert.deepEqual(
+    restarted.entries().map((e) => e.outcome),
+    ['ok', 'dropped'],
+    'delivered/dropped badges intact after a restart',
+  );
+});
+
+test('a partially-corrupted persisted file degrades to the surviving entries (skip-malformed round-trip)', () => {
+  // Simulate a real corruption: a valid audit file with one line damaged on disk.
+  // The restarted app must load the SURVIVING entries, not blank, not crash.
+  const recorded = createTransmissionLog({ clock: () => 1000 });
+  recorded.record({ outcome: 'ok', attempts: 1, status: 200 });
+  recorded.record({ outcome: 'dropped', attempts: 2, status: 503 });
+  recorded.record({ outcome: 'ok', attempts: 1, status: 201 });
+  const lines = recorded.entries().map((e) => JSON.stringify(e));
+  lines[1] = '{ CORRUPTED LINE ON DISK +++'; // damage the middle entry
+  const text = lines.join('\n') + '\n';
+  const restarted = createTransmissionLog({ clock: () => 0 });
+  restarted.seed(parseTransmissionLog(text));
+  assert.equal(restarted.size(), 2, 'the corrupted entry was skipped; the two good ones survived');
+  assert.deepEqual(
+    restarted.entries().map((e) => e.status),
+    [200, 201],
+    'the pre- and post-corruption entries loaded (no blank panel)',
+  );
 });
 
 console.log(`\n✓ TELEMETRY TRANSMISSION-LOG TESTS PASS (${passed})`);
