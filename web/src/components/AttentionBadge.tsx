@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from 'react';
-import { TriangleAlert, Bell, BellOff, Clock, CheckCircle2 } from 'lucide-react';
+import { TriangleAlert, Bell, BellOff, Clock, CheckCircle2, Reply } from 'lucide-react';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { Button } from '@/components/ui/button';
 import {
@@ -12,7 +12,11 @@ import {
 import { activeSnoozedKeys, formatSnoozeRemaining, SNOOZE_DURATION_OPTIONS, type AlertMuteMode, type SnoozeMap } from '@/lib/snooze';
 import { formatStateDuration, formatStateDurationVerbose, languishingTone, sortOldestEnteredAtFirst, type StateDurationTone } from '@/lib/stateDuration';
 import type { AttentionAgent } from '@/lib/types';
+import type { Snippet } from '@/lib/storage';
 import { cn } from '@/lib/utils';
+// WARDEN-770 — the inline reply affordance shared by every attention surface. Rendered
+// (conditionally, only for replyable rows) inside AgentRow below.
+import { QuickReply } from '@/components/QuickReply';
 
 // WARDEN-587: the duration suffix's supplementary color escalates the longer an agent
 // has been in its state — muted (fresh) → amber → red — so a glance picks out the
@@ -66,6 +70,13 @@ interface Props {
    * loss, it just isn't the promoted answer. Optional + trailing so existing callers
    * that don't pass it get the old behavior (callout promotes ranked[0]). */
   focusedPaneKey?: string | null;
+  /** WARDEN-770 — saved instruction snippets threaded in so the inline reply control
+   *  can offer the top of the SAME library BroadcastDialog uses as one-click fills (no
+   *  new snippet source). Read-only here; App owns the persisted list. */
+  snippets?: Snippet[];
+  /** WARDEN-770 — surface the reply send outcome so App can toast it under its own
+   *  prefs.notifyChatOps gate (matching kill/rename/resume). */
+  onReplyResult?: (ok: boolean, error?: string) => void;
 }
 
 /**
@@ -94,6 +105,8 @@ export function AttentionBadge({
   snoozedAlertKeys,
   onSetAlertMute,
   focusedPaneKey,
+  snippets,
+  onReplyResult,
 }: Props) {
   const [open, setOpen] = useState(false);
 
@@ -264,14 +277,41 @@ export function AttentionBadge({
             {waiting.length > 0 && (
               <Section title="Waiting on you" count={waiting.length} tone="text-yellow-500">
                 {sortOldestEnteredAtFirst(waiting).map((a) => (
-                  <AgentRow key={a.key || a.id} agent={a} dot="bg-yellow-500" detail={a.signal} enteredAt={a.enteredAt} durationStateLabel="waiting" onClick={() => openChat(a.key || a.id)} />
+                  <AgentRow
+                    key={a.key || a.id}
+                    agent={a}
+                    dot="bg-yellow-500"
+                    detail={a.signal}
+                    enteredAt={a.enteredAt}
+                    durationStateLabel="waiting"
+                    onClick={() => openChat(a.key || a.id)}
+                    // WARDEN-770: the two states that resolve with a one-line human
+                    // input earn the inline reply affordance. waiting (parked at a
+                    // "press enter"/"needs input" prompt) is the headline case.
+                    replyable
+                    snippets={snippets}
+                    onReplyResult={onReplyResult}
+                  />
                 ))}
               </Section>
             )}
             {blocked.length > 0 && (
               <Section title="Blocked" count={blocked.length} tone="text-yellow-500">
                 {sortOldestEnteredAtFirst(blocked).map((a) => (
-                  <AgentRow key={a.key || a.id} agent={a} dot="bg-yellow-500" detail={a.signal} enteredAt={a.enteredAt} durationStateLabel="blocked" onClick={() => openChat(a.key || a.id)} />
+                  <AgentRow
+                    key={a.key || a.id}
+                    agent={a}
+                    dot="bg-yellow-500"
+                    detail={a.signal}
+                    enteredAt={a.enteredAt}
+                    durationStateLabel="blocked"
+                    onClick={() => openChat(a.key || a.id)}
+                    // WARDEN-770: blocked (waiting on approval/dependency) is the
+                    // second replyable state — the human can unblock inline.
+                    replyable
+                    snippets={snippets}
+                    onReplyResult={onReplyResult}
+                  />
                 ))}
               </Section>
             )}
@@ -364,6 +404,9 @@ function AgentRow({
   enteredAt,
   durationStateLabel,
   durationTense = 'ongoing',
+  replyable = false,
+  snippets,
+  onReplyResult,
 }: {
   agent: AttentionAgent;
   dot: string;
@@ -390,10 +433,23 @@ function AgentRow({
   /** WARDEN-587: 'ago' reads the duration as elapsed SINCE a completion (the green
    * "Finished" section: "3m ago"); 'ongoing' (default) reads it as a held state. */
   durationTense?: 'ongoing' | 'ago';
+  /** WARDEN-770 — show the inline reply affordance. Passed ONLY from the waiting +
+   * blocked sections (the two states that resolve with a one-line human input);
+   * every other section omits it so critical/stuck/erroring/warning/custom/done rows
+   * are untouched (preserves the existing deep-link + severity ordering). */
+  replyable?: boolean;
+  /** WARDEN-770 — the snippet library for the reply control's one-click fills. */
+  snippets?: Snippet[];
+  /** WARDEN-770 — surface the reply send outcome so App can toast it. */
+  onReplyResult?: (ok: boolean, error?: string) => void;
 }) {
   const label = agent.name || agent.key || agent.id;
   const muteKey = agent.key || agent.id;
   const [muteMenuOpen, setMuteMenuOpen] = useState(false);
+  // WARDEN-770: the inline reply panel's expand/collapse state. Off by default so the
+  // row stays compact; the Reply toggle reveals the QuickReply control below the row.
+  // Collapses automatically on a successful send (QuickReply.onDismiss).
+  const [replyOpen, setReplyOpen] = useState(false);
   // Read the clock once per render; the badge re-renders on the rollup cadence
   // and when App's prune effect clears an expired snooze, so this stays current.
   const now = Date.now();
@@ -425,7 +481,8 @@ function AgentRow({
   // the suppression the OS channel applies (WARDEN-551: a snoozed agent shows muted).
   const suppressed = muted || isSnoozed;
   return (
-    <div className="flex items-stretch gap-0.5 pr-1">
+    <div className="flex flex-col">
+      <div className="flex items-stretch gap-0.5 pr-1">
       <Button variant="ghost" onClick={onClick} className={cn('flex-1 min-w-0 justify-start gap-2 h-auto px-2 py-1.5 font-normal text-xs text-foreground', suppressed && 'opacity-60')}>
         <span className={cn('size-2 rounded-full shrink-0 mt-0.5', dot)} aria-hidden />
         <span className="min-w-0 flex-1">
@@ -455,6 +512,31 @@ function AgentRow({
           </span>
         ) : null}
       </Button>
+      {/*
+        WARDEN-770 — the inline reply toggle (waiting/blocked rows only). A distinct
+        affordance from the row's onClick deep-link (which still opens the pane): this
+        reveals the QuickReply control below the row so the human can answer a "press
+        enter"/"needs approval" agent WITHOUT leaving the popover. stopPropagation on
+        the trigger so tapping it never also opens the chat pane (mirrors the mute bell
+        below). Uses the library <Button> (variant=ghost size=icon-xs) — WARDEN-68
+        Rule 1: no raw <button>. aria-expanded reflects the panel state for screen
+        readers.
+      */}
+      {replyable && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          onClick={(e) => { e.stopPropagation(); setReplyOpen((v) => !v); }}
+          aria-haspopup="dialog"
+          aria-expanded={replyOpen}
+          aria-label={replyOpen ? `Hide reply to ${label}` : `Reply to ${label} without opening the pane`}
+          title={replyOpen ? 'Hide reply' : 'Reply without opening the pane'}
+          className="shrink-0 self-center text-muted-foreground hover:text-foreground"
+        >
+          <Reply className="size-3.5" />
+        </Button>
+      )}
       {/*
         WARDEN-364 + WARDEN-551 — per-agent mute/snooze on the desktop-alert
         channel (health buckets only). The bell now opens a small menu of
@@ -524,6 +606,25 @@ function AgentRow({
             )}
           </PopoverContent>
         </Popover>
+      )}
+      </div>
+      {/*
+        WARDEN-770 — the expanded inline reply control (waiting/blocked rows only).
+        Rendered below the row when the Reply toggle is open, so the human can type a
+        reply / pick a snippet / press Enter and send straight to this agent's tmux
+        session via /api/send + /api/key — zero pane switches. The control owns its
+        textarea + the confirm gate; on a successful send it collapses itself via
+        onDismiss. The target id is the row's pane identity (agent.key || agent.id),
+        the SAME key openChat would deep-link — so the reply lands in the correct pane.
+      */}
+      {replyable && replyOpen && (
+        <QuickReply
+          targetId={muteKey}
+          targetLabel={label}
+          snippets={snippets ?? []}
+          onReplyResult={onReplyResult}
+          onDismiss={() => setReplyOpen(false)}
+        />
       )}
     </div>
   );

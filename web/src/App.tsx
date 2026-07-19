@@ -34,6 +34,9 @@ import { GlobalSearchDialog } from '@/components/GlobalSearchDialog';
 import { SessionTranscriptViewer } from '@/components/SessionTranscriptViewer';
 import { HealthDashboard, type GroupMode } from '@/components/HealthDashboard';
 import { AttentionBadge, dotForState } from '@/components/AttentionBadge';
+import { QuickReply } from '@/components/QuickReply';
+import { canReply } from '@/lib/quickReply';
+import { Reply } from 'lucide-react';
 import { WatchCatchup } from '@/components/WatchCatchup';
 import { StatusDot } from '@/components/StatusDot';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
@@ -1036,6 +1039,14 @@ function App() {
   // at-return-instant snapshot.
   const [returnWindowActive, setReturnWindowActive] = useState(false);
   const [bannerShownOnce, setBannerShownOnce] = useState(false);
+  // WARDEN-770 — the return-banner callout's inline reply panel expand/collapse.
+  // The banner surfaces the SAME ranked waiting/blocked agent the popover does; when
+  // it does, the human can reply inline (zero pane switches) instead of clicking
+  // through. Resets whenever the promoted callout target changes (a different agent
+  // shouldn't inherit the previous one's open panel) — driven by attentionTop.id in
+  // the effect dependency below.
+  const [bannerReplyOpen, setBannerReplyOpen] = useState(false);
+  useEffect(() => { setBannerReplyOpen(false); }, [attentionTop?.id]);
   useEffect(() => {
     if (!returnedAfterAbsence) return;
     // Open the return window once the return is detected.
@@ -1372,6 +1383,18 @@ function App() {
     }
   }, [refresh, prefs.notifyChatOps]);
 
+  // WARDEN-770 — surface an inline quick-reply send outcome under the SAME
+  // prefs.notifyChatOps gate as kill/rename/resume above. The QuickReply control
+  // owns the postJson send + its own inline error/retry cue; this callback is the
+  // parent's toast channel. Success reads as a confirmation that the reply reached
+  // the agent's tmux session without a pane switch; failure surfaces the server /
+  // network reason (the control's inline error already points at the row that failed).
+  const handleReplyResult = useCallback((ok: boolean, error?: string) => {
+    if (!prefs.notifyChatOps) return;
+    if (ok) toast.success('Reply sent');
+    else toast.error(error || 'Reply failed');
+  }, [prefs.notifyChatOps]);
+
   const openActivityTab = useCallback(() => {
     setObserverCollapsed(false);
     setExternalViewMode('activity');
@@ -1666,18 +1689,56 @@ function App() {
           */}
           <div className="flex items-center gap-3 text-sm min-w-0">
             {attentionTop && (
-              <Button
-                variant="ghost"
-                onClick={() => openChat(attentionTop.id)}
-                aria-label={`You're needed in ${attentionTop.name ?? attentionTop.id}. Open it.`}
-                className="shrink min-w-0 gap-2 h-auto py-1 px-2.5 rounded-md bg-white/80 dark:bg-blue-900/50 hover:bg-white dark:hover:bg-blue-900/70 text-blue-900 dark:text-blue-50 font-normal"
-              >
-                <span className={cn('size-2 rounded-full shrink-0', dotForState(attentionTop.state))} aria-hidden />
-                <span className="text-sm whitespace-nowrap shrink-0">You&rsquo;re needed in</span>
-                <span className="text-sm font-semibold max-w-40 truncate">{attentionTop.name ?? attentionTop.id}</span>
-                <span className="text-xs text-blue-700/90 dark:text-blue-200/80 max-w-sm truncate">{attentionReason(attentionTop)}</span>
-                <span className="text-xs text-blue-600 dark:text-blue-300 shrink-0 whitespace-nowrap">open →</span>
-              </Button>
+              // WARDEN-770: when the promoted callout is a replyable state (waiting /
+              // blocked), wrap it so a Reply toggle + an expandable inline QuickReply
+              // panel hang off the SAME ranked agent the callout names — the human can
+              // answer it from the banner without a pane switch. Width is mutually
+              // exclusive: open → min-w-[20rem] so the textarea has a comfortable floor;
+              // closed → min-w-0 + shrink so the callout truncates exactly as before
+              // (never specify BOTH min-w-0 and min-w-[20rem] — two min-width utilities
+              // on one element resolve to Tailwind's CSS source order, not the class
+              // string, so the open panel's floor would be non-deterministic).
+              <div className={cn('flex flex-col gap-1', bannerReplyOpen ? 'min-w-[20rem]' : 'min-w-0 shrink')}>
+                <div className="flex items-center gap-1 min-w-0">
+                  <Button
+                    variant="ghost"
+                    onClick={() => openChat(attentionTop.id)}
+                    aria-label={`You're needed in ${attentionTop.name ?? attentionTop.id}. Open it.`}
+                    className="shrink min-w-0 gap-2 h-auto py-1 px-2.5 rounded-md bg-white/80 dark:bg-blue-900/50 hover:bg-white dark:hover:bg-blue-900/70 text-blue-900 dark:text-blue-50 font-normal"
+                  >
+                    <span className={cn('size-2 rounded-full shrink-0', dotForState(attentionTop.state))} aria-hidden />
+                    <span className="text-sm whitespace-nowrap shrink-0">You&rsquo;re needed in</span>
+                    <span className="text-sm font-semibold max-w-40 truncate">{attentionTop.name ?? attentionTop.id}</span>
+                    <span className="text-xs text-blue-700/90 dark:text-blue-200/80 max-w-sm truncate">{attentionReason(attentionTop)}</span>
+                    <span className="text-xs text-blue-600 dark:text-blue-300 shrink-0 whitespace-nowrap">open →</span>
+                  </Button>
+                  {canReply(attentionTop.state) && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      onClick={() => setBannerReplyOpen((v) => !v)}
+                      aria-haspopup="dialog"
+                      aria-expanded={bannerReplyOpen}
+                      aria-label={bannerReplyOpen ? `Hide reply to ${attentionTop.name ?? attentionTop.id}` : `Reply to ${attentionTop.name ?? attentionTop.id} without opening the pane`}
+                      title={bannerReplyOpen ? 'Hide reply' : 'Reply without opening the pane'}
+                      className="shrink-0 h-auto py-1 px-2 rounded-md bg-white/80 dark:bg-blue-900/50 hover:bg-white dark:hover:bg-blue-900/70 text-blue-900 dark:text-blue-50 text-xs"
+                    >
+                      <Reply className="size-3.5" />
+                      Reply
+                    </Button>
+                  )}
+                </div>
+                {canReply(attentionTop.state) && bannerReplyOpen && (
+                  <QuickReply
+                    targetId={attentionTop.id}
+                    targetLabel={attentionTop.name ?? attentionTop.id}
+                    snippets={snippets}
+                    onReplyResult={handleReplyResult}
+                    onDismiss={() => setBannerReplyOpen(false)}
+                    autoFocus={false}
+                  />
+                )}
+              </div>
             )}
             {activitySinceClose && (
               <span className="text-blue-700 dark:text-blue-300 min-w-0">
@@ -1720,6 +1781,8 @@ function App() {
         misses={watchCatchup.misses}
         onOpenMiss={watchCatchup.openMiss}
         onDismiss={watchCatchup.dismiss}
+        snippets={snippets}
+        onReplyResult={handleReplyResult}
       />
       {settingsOpen ? (
         <SettingsPage
@@ -1811,7 +1874,7 @@ function App() {
             label={streamConn ? 'Connected' : 'Disconnected'}
             className="transition-colors duration-300 ease-in-out"
           />
-          <AttentionBadge rollup={attentionRollup} onOpenChat={openChat} onOpenActivity={openActivityTab} attentionDesktopAlerts={attentionDesktopAlerts} mutedAlertKeys={mutedAlertKeys} snoozedAlertKeys={snoozedAlertKeys} onSetAlertMute={setAlertMute} focusedPaneKey={focusedPaneKey} />
+          <AttentionBadge rollup={attentionRollup} onOpenChat={openChat} onOpenActivity={openActivityTab} attentionDesktopAlerts={attentionDesktopAlerts} mutedAlertKeys={mutedAlertKeys} snoozedAlertKeys={snoozedAlertKeys} onSetAlertMute={setAlertMute} focusedPaneKey={focusedPaneKey} snippets={snippets} onReplyResult={handleReplyResult} />
           <IconTooltip label="global search (Ctrl+Shift+F)" side="bottom"><button onClick={() => setShowGlobalSearch(true)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">⌕</button></IconTooltip>
           <IconTooltip label="toggle health panel" side="bottom"><button onClick={() => setHealthCollapsed(!healthCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{healthCollapsed ? '◂' : '▸'} Health</button></IconTooltip>
           <IconTooltip label="toggle observer" side="bottom"><button onClick={() => setObserverCollapsed(!observerCollapsed)} className="text-muted-foreground hover:text-foreground transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded px-1.5 py-0.5 hover:bg-accent/50">{observerCollapsed ? '◂' : '▸'}</button></IconTooltip>
