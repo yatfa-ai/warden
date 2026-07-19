@@ -1489,6 +1489,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
         timestampFormat={timestampFormat}
         viewMode={fileViewerViewMode}
         onViewModeChange={onFileViewerViewModeChange}
+        onNavigate={(p) => setFileTarget((prev) => (prev ? { ...prev, path: p } : prev))}
         onOpenChange={(o) => { if (!o) setFileTarget(null); }}
       />
       <BroadcastDialog

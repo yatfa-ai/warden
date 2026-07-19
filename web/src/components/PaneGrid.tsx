@@ -823,6 +823,7 @@ export function PaneGrid({ tiles, focused, maximized, newActivity, chats, paneHo
           timestampFormat={timestampFormat}
           viewMode={fileViewerViewMode}
           onViewModeChange={onFileViewerViewModeChange}
+          onNavigate={(p) => { setFilePath(p); setFileLine(undefined); }}
           onOpenChange={(open) => {
             setFileOpen(open);
             if (!open) {
