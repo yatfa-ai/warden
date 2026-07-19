@@ -17,9 +17,13 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { DiffBlock } from './DiffBlock';
+// Pure view-state helpers for the Changes view (WARDEN-786): the diff-response
+// classifier (clean/empty vs dirty vs error vs loading) and the toolbar-toggle
+// exclusivity resolver. Pure so both have unit coverage (fileViewerChanges.test.mjs).
+import { classifyChangesView, resolveViewToggles } from '@/lib/fileViewerChanges';
 import { MarkdownBody } from './MarkdownBody';
 import { tokenizeCode, languageFromPath, type Leaf } from '@/lib/highlight';
-import { Loader2Icon, FileIcon, FolderIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon, RotateCwIcon, CircleDotIcon } from 'lucide-react';
+import { Loader2Icon, FileIcon, FolderIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon, RotateCwIcon, CircleDotIcon, FilePenIcon } from 'lucide-react';
 import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
 import { copyText } from '@/lib/clipboard';
 import { basename } from '@/lib/chatDisplay';
@@ -136,6 +140,28 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
   // Brief in-flight flag for the manual ↻ reload button's spinner. The Follow
   // interval never sets this — its polls are silent background refreshes.
   const [manualReloading, setManualReloading] = useState(false);
+
+  // Changes view (WARDEN-786): the open file's uncommitted working-tree diff vs
+  // HEAD — the missing fourth file-understanding surface (History = what committed
+  // it, Annotate = who wrote each line, Follow = live state, Changes = what's
+  // uncommitted in *this* file). Ephemeral, resets on close, and mutually
+  // exclusive with annotate/history/at-commit (joining that exclusivity set via
+  // resolveViewToggles). The diff fetch owns its own loading/error/diff state,
+  // mirroring blame/history's per-view separation. `untracked` rides along so a
+  // brand-new file can be badged (the whole file shows as added in the diff).
+  const [changes, setChanges] = useState(false);
+  const [changesDiff, setChangesDiff] = useState<string | null>(null);
+  const [changesUntracked, setChangesUntracked] = useState(false);
+  const [changesError, setChangesError] = useState<string | null>(null);
+  // Which (chatId:filePath) the held diff is for. While Changes is active but the
+  // diff is for a DIFFERENT file (navigation) or has never been fetched, a
+  // foreground fetch is in-flight → show the spinner. The derived loading flag
+  // (changesViewLoading, computed at render) reads this so a toggle/navigation
+  // can't flash a stale or null diff as 'clean' before the fetch effect (which
+  // runs after paint) catches up — the same class of race WARDEN-561 guards for
+  // the content fetch. loadChangesDiff records the live key once a response lands;
+  // the Changes toggle clears it so each toggle-on shows a clean spinner.
+  const [changesFetchedKey, setChangesFetchedKey] = useState<string | null>(null);
   // One AbortController per open session; close/switch/unmount aborts the
   // in-flight read so a stale fetch never setContent/setError after the dialog
   // is gone. Replaces the inline fetch's per-effect `cancelled` flag (WARDEN-561)
@@ -216,6 +242,63 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
     }
   }, [chatId, filePath]);
 
+  // Fetch the open file's uncommitted working-tree diff vs HEAD (WARDEN-786).
+  // Extracted (mirroring loadContent) so the foreground fetch (Changes toggle on
+  // / file change) and the Follow-poll background refresh re-run the SAME path.
+  // GET /api/git-diff?id=&path= with NO staged/range params is exactly the
+  // worktree-vs-HEAD unified diff for one file (the contract the route defaults
+  // to). Shares the session AbortController so close/switch/unmount aborts an
+  // in-flight diff and the aborted guards prevent any post-close setState — the
+  // same WARDEN-561 discipline loadContent follows.
+  //
+  // `background` (Follow poll) decouples the no-flash refresh from failure
+  // reporting, exactly as loadContent does: a transient blip on a live follow
+  // must NOT blank the diff with a red error — the last-good diff stays so a
+  // coordinator watching an agent edit keeps reading across a network hiccup;
+  // the next poll recovers.
+  const loadChangesDiff = useCallback(async (opts?: { background?: boolean }) => {
+    const background = opts?.background === true;
+    const ac = abortRef.current;
+    if (!ac) return; // dialog closed / no active session
+    // The key for THIS fetch — recorded when a response lands so the derived
+    // loading flag (`${chatId}:${filePath}` !== changesFetchedKey) clears.
+    const key = `${chatId}:${filePath}`;
+    try {
+      const response = await fetch(`/api/git-diff?id=${encodeURIComponent(chatId)}&path=${encodeURIComponent(filePath)}`, {
+        signal: ac.signal,
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        if (ac.signal.aborted) return;
+        const msg = data.error || `Failed to load changes (${response.status})`;
+        if (!background) {
+          setChangesError(msg);
+          setChangesDiff(null);
+          setChangesFetchedKey(key); // foreground error is a terminal result → clear loading
+        }
+        // background: keep last-good diff + error, don't flash on a blip.
+        return;
+      }
+      const data = await response.json();
+      if (ac.signal.aborted) return;
+      // The endpoint's in-body `error` (soft failure: not-a-git-repo / oversize /
+      // binary) MUST surface (ConflictView.tsx:85 precedent) — never mask as clean.
+      setChangesDiff(typeof data.diff === 'string' ? data.diff : null);
+      setChangesUntracked(!!data.untracked);
+      setChangesError(data.error || null);
+      setChangesFetchedKey(key); // success → record the key (clears derived loading)
+    } catch (e) {
+      if (ac.signal.aborted) return; // close/switch abort — ignore, no setState
+      const msg = e instanceof Error ? e.message : 'Failed to load changes';
+      if (!background) {
+        setChangesError(msg);
+        setChangesFetchedKey(key); // foreground transport error → terminal result
+      }
+      // background + Follow poll: silent on transient error — keep the last-good
+      // diff readable; the next poll recovers.
+    }
+  }, [chatId, filePath]);
+
   // Initial / on-file-change fetch. Resets per-open ephemeral state (including
   // Follow) so a stale mode never carries into a fresh open, arms the session
   // AbortController, then kicks the foreground load. The cleanup aborts so a
@@ -240,6 +323,11 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
       blobCache.current.clear();
       setFollow(false); // Follow is ephemeral (WARDEN-749): reset on close, not persisted
       setManualReloading(false);
+      setChanges(false); // Changes is ephemeral (WARDEN-786): reset on close, not persisted
+      setChangesDiff(null);
+      setChangesUntracked(false);
+      setChangesError(null);
+      setChangesFetchedKey(null);
       abortRef.current = null;
       return;
     }
@@ -261,15 +349,39 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
   useEffect(() => {
     if (!open || !follow) return;
     const intervalMs = pollIntervalMs ?? WEB_POLL_DEFAULT_MS;
-    const tick = () => { if (document.visibilityState === 'visible') void loadContent({ background: true }); };
-    const onVisibility = () => { if (document.visibilityState === 'visible') void loadContent({ background: true }); };
+    const tick = () => {
+      if (document.visibilityState !== 'visible') return;
+      void loadContent({ background: true });
+      // Optional Changes enhancement (WARDEN-786): while the diff view is ALSO
+      // on, re-fetch it on Follow's existing cadence so a coordinator watching
+      // an agent edit sees the uncommitted delta accumulate live — the tail -f
+      // analogue for "what has the agent changed here since HEAD?". No NEW poll
+      // loop: this rides Follow's interval, gated on `changes` so it only fires
+      // when the diff view is the active content.
+      if (changes) void loadChangesDiff({ background: true });
+    };
+    const onVisibility = () => {
+      if (document.visibilityState !== 'visible') return;
+      void loadContent({ background: true });
+      if (changes) void loadChangesDiff({ background: true });
+    };
     const intervalId = window.setInterval(tick, intervalMs);
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
       clearInterval(intervalId);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [open, follow, pollIntervalMs, loadContent]);
+  }, [open, follow, pollIntervalMs, loadContent, changes, loadChangesDiff]);
+
+  // Fetch the working-tree-vs-HEAD diff only while the Changes view is active
+  // (WARDEN-786). Mirrors the blame/history gated-fetch effects: foreground load
+  // (sets the spinner) when the toggle turns on or the file/chat changes. Re-runs
+  // on `changes` so toggling off→on re-fetches, and on chatId/filePath so a
+  // navigated file (breadcrumb / sibling pick) refreshes the diff for the new path.
+  useEffect(() => {
+    if (!open || !changes) return;
+    loadChangesDiff();
+  }, [open, changes, chatId, filePath, loadChangesDiff]);
 
   // Fetch blame only while annotating. Gates the success path on response.ok so a
   // 4xx/5xx (e.g. an unknown chat → 404) is surfaced as an error, not silent success
@@ -395,7 +507,16 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
   // view only. Line-jump / annotate / history / commit-snapshot views own their
   // own scroll semantics and must not be auto-scrolled on a poll. Computed here
   // and handed to <StickRegion> (which owns the useStickToBottom hook).
-  const stickActive = follow && !hasLine && !annotate && !history && !viewAtCommit;
+  const stickActive = follow && !hasLine && !annotate && !history && !viewAtCommit && !changes;
+
+  // Synchronous loading derive for the Changes view (WARDEN-786): true while a
+  // foreground fetch is in-flight for the current file. Read at render from the
+  // live (chatId:filePath) vs the held result's key (changesFetchedKey) — no
+  // effect-timing window, so toggling Changes or navigating files can't flash a
+  // stale/null diff as 'clean' before the fetch lands. Follow's background polls
+  // reuse loadChangesDiff WITHOUT clearing the key, so a live tail updates the
+  // diff in place (no spinner flashing on every poll).
+  const changesViewLoading = `${chatId}:${filePath}` !== changesFetchedKey;
 
   // Markdown files render as formatted docs in the plain view branch (WARDEN-266).
   // Case-insensitive so .MD / .Markdown match too. Line-jump and Annotate views
@@ -539,12 +660,16 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
                     size="sm"
                     className="h-7 shrink-0 gap-1.5 text-xs"
                     onClick={() => {
-                      setHistory((h) => {
-                        const next = !h;
-                        if (next) setAnnotate(false); // history + annotate are exclusive view modes
-                        else setViewAtCommit(null); // leaving history → drop any at-commit snapshot
-                        return next;
-                      });
+                      // resolveViewToggles (WARDEN-786) centralizes the toolbar's
+                      // mutual-exclusivity contract now that Changes joins the set:
+                      // turning history on clears annotate + changes. viewAtCommit
+                      // (a snapshot reached from the history list) is cleared when
+                      // leaving history — its own history-specific asymmetry.
+                      const t = resolveViewToggles({ annotate, history, changes }, 'history', !history);
+                      setAnnotate(t.annotate);
+                      setHistory(t.history);
+                      setChanges(t.changes);
+                      if (!t.history) setViewAtCommit(null); // leaving history → drop any at-commit snapshot
                     }}
                     title={history ? 'Hide file commit history' : 'Show commit history for this file (every commit that touched it, across renames)'}
                     aria-pressed={history}
@@ -558,17 +683,49 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
                     size="sm"
                     className="h-7 shrink-0 gap-1.5 text-xs"
                     onClick={() => {
-                      setAnnotate((a) => {
-                        const next = !a;
-                        if (next) { setHistory(false); setViewAtCommit(null); } // annotate forces history off → drop any snapshot
-                        return next;
-                      });
+                      // Turning annotate on clears history + changes (resolveViewToggles)
+                      // and drops any at-commit snapshot (annotate replaces the content).
+                      const t = resolveViewToggles({ annotate, history, changes }, 'annotate', !annotate);
+                      setAnnotate(t.annotate);
+                      setHistory(t.history);
+                      setChanges(t.changes);
+                      if (t.annotate) setViewAtCommit(null); // annotate forces history off → drop any snapshot
                     }}
                     title={annotate ? 'Hide per-line git blame' : 'Show per-line git blame (which commit last touched each line)'}
                     aria-pressed={annotate}
                   >
                     <GitCommitHorizontalIcon className="w-3.5 h-3.5" />
                     Annotate
+                  </Button>
+                  {/* Changes view (WARDEN-786): the missing fourth file-understanding
+                      surface — this file's uncommitted working-tree diff vs HEAD, so a
+                      coordinator can answer "what has the agent changed here since HEAD?"
+                      without leaving FileViewer for GitBadges' dirty popover. Fetches
+                      /api/git-diff?id=&path= (worktree-vs-HEAD) and renders via DiffBlock.
+                      Mutually exclusive with Annotate/History/at-commit (resolveViewToggles). */}
+                  <Button
+                    type="button"
+                    variant={changes ? 'default' : 'outline'}
+                    size="sm"
+                    className="h-7 shrink-0 gap-1.5 text-xs"
+                    onClick={() => {
+                      const t = resolveViewToggles({ annotate, history, changes }, 'changes', !changes);
+                      setAnnotate(t.annotate);
+                      setHistory(t.history);
+                      setChanges(t.changes);
+                      if (t.changes) {
+                        setViewAtCommit(null); // changes replaces the content → drop any snapshot
+                        // Clear the held result so the derive shows a spinner until the
+                        // fresh fetch lands — never a stale/null 'clean' flash on a dirty file.
+                        setChangesFetchedKey(null);
+                        setChangesError(null);
+                      }
+                    }}
+                    title={changes ? 'Hide uncommitted changes' : "Show this file's uncommitted changes vs HEAD (what the agent has changed since the last commit)"}
+                    aria-pressed={changes}
+                  >
+                    <FilePenIcon className="w-3.5 h-3.5" />
+                    Changes
                   </Button>
                   {/* Manual reload (WARDEN-749): a one-shot refresh. Independently
                       useful — before this no refresh existed, so a stale file
@@ -627,6 +784,13 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
                     viewMode={viewMode}
                     isMarkdown={isMarkdown}
                     onBack={() => setViewAtCommit(null)}
+                  />
+                ) : changes ? (
+                  <ChangesContent
+                    diff={changesDiff}
+                    untracked={changesUntracked}
+                    loading={changesViewLoading}
+                    error={changesError}
                   />
                 ) : (
                   <>
@@ -1036,6 +1200,68 @@ function HistoryContent({ commits, historyLoading, historyError, chatId, filePat
             </div>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+// The Changes view (WARDEN-786): the open file's uncommitted working-tree diff vs
+// HEAD, rendered via DiffBlock — the missing fourth file-understanding surface
+// (History = what committed it, Annotate = who wrote each line, Follow = live
+// state, Changes = what's uncommitted in *this* file). The fetch + loading/error
+// state live in FileViewer (passed in here), mirroring AnnotatedContent /
+// HistoryContent's presentational shape. classifyChangesView turns the response
+// into the render decision (loading spinner / surfaced error / untracked new-file
+// notice / clean empty-state / DiffBlock), so the honest-state discipline
+// (WARDEN-89 / WARDEN-68) is enforced at the pure, unit-tested layer — a non-null
+// `error` is never masked as a misleading "No uncommitted changes", a brand-new
+// untracked file is surfaced as a change (never the clean empty-state), and a
+// clean tracked file (null OR empty-string diff) never renders a blank diff box.
+function ChangesContent({ diff, untracked, loading, error }: {
+  diff: string | null;
+  untracked: boolean;
+  loading: boolean;
+  error: string | null;
+}) {
+  const view = classifyChangesView({ diff, untracked, error }, loading);
+  return (
+    <div className="text-sm">
+      {view.kind === 'loading' && (
+        <div className="flex items-center gap-1.5 py-8 text-muted-foreground">
+          <Loader2Icon className="w-4 h-4 animate-spin" />
+          <span>Loading changes…</span>
+        </div>
+      )}
+      {view.kind === 'error' && (
+        <div className="flex items-center gap-2 py-8 text-red-400">
+          <AlertCircleIcon className="w-4 h-4" />
+          <span>{view.message}</span>
+        </div>
+      )}
+      {view.kind === 'untracked' && (
+        // A brand-new file not yet in git is 100% a change this view exists to
+        // surface (agents create new files constantly). The endpoint returns
+        // { diff: null, untracked: true } for one — git diff HEAD -- <untracked>
+        // is empty, so there is no diff to render; surface it as its own state so
+        // it is never mistaken for the "no uncommitted changes" clean empty-state
+        // (the route's `untracked` flag exists exactly to let the UI say
+        // "untracked" instead of "no changes" — src/gitRoutes.js getLocalGitDiff).
+        <div className="flex items-center gap-2 py-8 text-muted-foreground">
+          <FilePenIcon className="w-4 h-4 shrink-0" />
+          <span>New file — not yet tracked (no committed history to diff against)</span>
+        </div>
+      )}
+      {view.kind === 'clean' && (
+        <div className="flex items-center justify-center py-8 text-muted-foreground">
+          No uncommitted changes to this file
+        </div>
+      )}
+      {view.kind === 'dirty' && (
+        // DiffBlock handles whatever non-null diff string the endpoint returns.
+        // (Untracked files never reach here in production — they pair with
+        // diff:null and render the `untracked` branch above — but `view.untracked`
+        // is carried defensively in case the contract ever changes.)
+        <DiffBlock diff={view.diff} />
       )}
     </div>
   );
