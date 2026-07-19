@@ -428,8 +428,8 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, groupBy,
       role="button"
       tabIndex={0}
       aria-label={`open chat ${agent.name || agent.key || agent.id}`}
-      onClick={() => onOpenChat(agent.id)}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenChat(agent.id); } }}
+      onClick={() => onOpenChat(agent.key || agent.id)}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenChat(agent.key || agent.id); } }}
       className="group flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs hover:bg-accent active:bg-accent/80 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background"
     >
       {/* Selection checkbox (WARDEN-371). Mirrors ChatRow: sits leftmost, click +
