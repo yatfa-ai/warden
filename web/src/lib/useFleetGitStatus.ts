@@ -56,13 +56,15 @@ export interface FleetGitStatusState extends FleetGitStatusResult {
   behindCount: number;
   /** # of fanned agents with committed-but-unpushed work (the fleet "N unpushed" count, WARDEN-822). */
   aheadCount: number;
+  /** # of fanned agents whose HEAD commit is >7d old (the fleet "N stalled" count, WARDEN-847). */
+  stalledCount: number;
   /** Pull a fresh view past mount (no auto-poll). */
   refresh: () => void;
   /** True only during a fetch whose result has not yet arrived (mount or manual ↻). */
   loading: boolean;
 }
 
-const EMPTY_RESULT: FleetGitStatusResult = { statusByKey: {}, dirtyCount: 0, errorCount: 0, conflictCount: 0, behindCount: 0, aheadCount: 0 };
+const EMPTY_RESULT: FleetGitStatusResult = { statusByKey: {}, dirtyCount: 0, errorCount: 0, conflictCount: 0, behindCount: 0, aheadCount: 0, stalledCount: 0 };
 
 /**
  * Fan /api/git-status across the eligible fleet and lift the result for
@@ -181,6 +183,24 @@ export function useFleetGitStatus(agents: readonly Chat[]): FleetGitStatusState 
             // — the same null-is-quiet discipline `clean` follows. The fleet-wide count
             // of stale AGENTS is derived in buildFleetGitStatus from `behind > 0`.
             behind: typeof j.behind === 'number' ? j.behind : null,
+            // headDate (WARDEN-847): the strict ISO-8601 last-commit time /api/git-status
+            // ALREADY serves top-level (gitRoutes.js:664 `headDate: branch ? headDate :
+            // null`, parsed from git `%cI` at gitStatus.js:200) — the sole RECENCY axis
+            // (dirty/conflict/behind/ahead are all state axes). A pure pass-through of one
+            // field — no new fetch, no backend change. The `typeof === 'string'` coerce
+            // keeps null as null (typeof null === 'object') so a non-git / no-branch cwd /
+            // a repo with no commits reads null — the same null-is-quiet discipline `clean`
+            // follows. headAgeMs + stalled are NOT derived here: they need a clock, and the
+            // pure module's discipline is to thread `now` into buildFleetGitStatus rather
+            // than read Date.now() inside it, so they are set to PROVISIONAL null/false
+            // here and enriched by buildFleetGitStatus(now) before the slice reaches
+            // statusByKey (the per-row 💤 chip reads the enriched statusByKey[id].stalled,
+            // never this provisional value). NOTE headDate is the PER-AGENT last-commit
+            // time (a future 💤 popover could rank oldest-first off the enriched headAgeMs);
+            // the fleet-wide count of stalled AGENTS is stalledCount below.
+            headDate: typeof j.headDate === 'string' ? j.headDate : null,
+            headAgeMs: null,  // provisional — enriched by buildFleetGitStatus(now)
+            stalled: false,   // provisional — enriched by buildFleetGitStatus(now)
           };
           return { ok: true as const, key, status };
         }),
@@ -198,7 +218,13 @@ export function useFleetGitStatus(agents: readonly Chat[]): FleetGitStatusState 
       for (const s of settled) {
         if (s.status === 'rejected') console.warn('[fleet git-status] agent fetch failed:', s.reason);
       }
-      setResult(buildFleetGitStatus(outcomes));
+      // WARDEN-847: thread `now` into the pure aggregator so it derives each agent's
+      // headAgeMs + stalled against ONE clock (the verbatim mirror of
+      // summarizeProjectGitState(now)). Captured ONCE here at fan-out resolution time so
+      // every agent in this fan shares the same staleness reference (a per-agent Date.now()
+      // would drift by ms across the settled fetches — irrelevant at a 7d threshold, but a
+      // single clock is cleaner and matches the pure fn's single-now discipline).
+      setResult(buildFleetGitStatus(outcomes, Date.now()));
       setLoading(false);
     })();
     return () => {

@@ -416,6 +416,51 @@ function UnpushedChip({ status }: { status?: FleetGitStatusSlice | null }) {
   );
 }
 
+/**
+ * Per-agent stalled-HEAD chip (WARDEN-847) — the sibling of WipChip / ConflictChip /
+ * BehindChip / UnpushedChip for the sole RECENCY axis: an agent whose last commit is
+ * >7d old. dirty/conflict/behind/unpushed are all STATE axes ("what IS the repo right
+ * now"); stalled answers "WHEN did this agent last commit?" — the signal for a silently
+ * stalled / abandoned / rotting agent. This is the canonical blind spot the chip exists
+ * for: an agent that is clean (no WIP), conflict-free, in sync with upstream, AND fully
+ * pushed reads ZERO across every existing Fleet Health axis, so WITHOUT this chip it is
+ * indistinguishable from a healthy agent — yet its HEAD has gone quiet for >7d and the
+ * work may be stalled or forgotten. This closes Fleet Health's parity gap with the
+ * sidebar's git-state system (5 of the sidebar's 6 axes now surfaced per-row).
+ *
+ * Renders the sidebar's sky 💤 vocabulary VERBATIM (no new glyph/color system —
+ * WARDEN-68): the stalled treatment established by WARDEN-682
+ * (GitBadges.tsx:329-331 → glyph '💤', `text-sky-400 hover:text-sky-300`, label
+ * 'stalled (>7d)') — the SAME fleet/row agreement 766/796/815/822 establish (Fleet
+ * Health and the sidebar speak one vocabulary). The 💤 glyph + sky hue are EACH distinct
+ * from every existing Fleet Health chip (± yellow / ⚑ rose / ↓ blue / ↑ amber) — no
+ * collision on hue OR glyph. The per-agent stalled boolean (status.stalled, derived in
+ * buildFleetGitStatus from headDate + the threaded now against the shared
+ * STALE_HEAD_AGE_MS 7d threshold — the SAME threshold summarizeProjectGitState uses, so
+ * fleet and sidebar agree on exactly who is stalled) drives the chip; the fleet-wide
+ * count of stalled AGENTS (fleetGit.stalledCount, the mirror of dirtyCount/conflictCount/
+ * behindCount/aheadCount) drives the summary tally.
+ *
+ * Renders ONLY when status.stalled === true — absent (loading / not eligible /
+ * unreachable), an ok agent whose headDate is missing/invalid/empty (a repo with no
+ * commits / non-git cwd — Date.parse → NaN → headAgeMs null → not stalled), or a fresh
+ * agent (HEAD ≤7d old) → nothing, the same null-is-quiet + graceful-N/A contract the
+ * sibling chips / ResourceChip / TokenChip follow. The fleet/row agreement (WARDEN-682)
+ * rides on this shared 7d threshold — the row and the chip agree on exactly who is
+ * stalled, never differing by a day.
+ */
+function StalledChip({ status }: { status?: FleetGitStatusSlice | null }) {
+  if (!status || status.stalled !== true) return null;
+  return (
+    <span
+      className="shrink-0 tabular-nums text-sky-400 hover:text-sky-300"
+      title="stalled (>7d) — last commit is >7d old (the agent may be silently stalled, abandoned, or rotting; fanned /api/git-status)"
+    >
+      💤
+    </span>
+  );
+}
+
 export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, groupBy, onGroupByChange: setGroupBy, collapsedHosts, onCollapsedHostsChange: setCollapsedHosts }: Props) {
   const [healthData, setHealthData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -722,6 +767,15 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
           Sibling to WipChip AND ConflictChip because an unpushed agent is often dirty
           too: the three axes are orthogonal, so ALL THREE may render at once. */}
       <UnpushedChip status={fleetGit.statusByKey[id]} />
+
+      {/* Per-agent stalled-HEAD block (WARDEN-847): the sky 💤 for THIS agent — the sole
+          RECENCY axis the state axes (dirty/conflict/behind/unpushed) cannot speak to.
+          Renders the 💤 only when the fanned status reports stalled === true (HEAD commit
+          >7d old); absent / fresh / no-commits / non-git → nothing, identical graceful-
+          N/A. See StalledChip. This is the canonical blind-spot case: an agent that is
+          clean, conflict-free, in sync, AND fully pushed reads ZERO across every axis
+          above, so the 💤 may render ALONE where every other chip is absent. */}
+      <StalledChip status={fleetGit.statusByKey[id]} />
     </div>
     );
   };
@@ -969,6 +1023,32 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
                   title={`${fleetGit.aheadCount} agent${fleetGit.aheadCount === 1 ? '' : 's'} with committed-but-unpushed work (fanned /api/git-status across active project agents; stranded locally — pulling/re-syncing elsewhere won't see this work yet)`}
                 >
                   {fleetGit.aheadCount} unpushed
+                </span>
+              </>
+            )}
+            {/* Fleet-wide stalled-HEAD count (WARDEN-847): the # of fanned agents whose
+                HEAD commit is >7d old (stalled) — the sole RECENCY axis alongside the
+                dirty/conflict/behind/unpushed STATE axes, surfacing the canonical blind
+                spot: such an agent is clean, conflict-free, in sync, AND fully pushed, so
+                WITHOUT this axis it is indistinguishable from a healthy agent — yet its
+                HEAD has gone quiet for >7d and the work may be stalled or forgotten.
+                Reuses the sidebar's sky 💤 vocabulary (the stalled chip family,
+                GitBadges.tsx) so "stalled" reads in the same color everywhere; placed
+                after the unpushed count (severity-descending: dirty → conflict → behind →
+                unpushed → stalled → muted unreachable). Only rendered when > 0 so a fresh
+                fleet stays quiet. stalledCount counts stalled AGENTS (the mirror of
+                dirtyCount/conflictCount/behindCount/aheadCount), not a sum, and excludes
+                error/loading agents (counted in errorCount) + null-headDate non-git /
+                no-commits cwds (Date.parse → NaN → not stalled), so a transiently-
+                unreachable or non-git agent is never misread as stalled. */}
+            {fleetGit.stalledCount > 0 && (
+              <>
+                <span className="text-muted-foreground">·</span>
+                <span
+                  className="text-sky-500"
+                  title={`${fleetGit.stalledCount} agent${fleetGit.stalledCount === 1 ? '' : 's'} whose HEAD commit is >7d old (fanned /api/git-status across active project agents; may be silently stalled, abandoned, or rotting)`}
+                >
+                  {fleetGit.stalledCount} stalled
                 </span>
               </>
             )}
