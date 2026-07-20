@@ -57,6 +57,10 @@ import { FleetCommitSearch } from './sidebar/FleetCommitSearch';
 // sibling (committed×committed, both unpushed) alongside the live ⚠ and impending ⏱.
 import { GitCollisionBadge, GitStateBadges, GitTriageCallout } from './sidebar/GitBadges';
 import { detectProjectFileCollisions, detectProjectImpendingCollisions, detectProjectOutgoingCollisions, summarizeProjectGitState } from '@/lib/gitStateSummary';
+// Pure finder for the FileViewer co-editors chip (WARDEN-810): same-project sibling
+// agents also touching the open file (± dirty / ⚑ conflict / ↑ unpushed). Reuses the
+// cached gitStatus map the fleet collision memos below read — no new fetch.
+import { findFileCoEditors } from '@/lib/fileCoEditors';
 import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/SidebarBits';
 import { SourceControlPanel } from './sidebar/SourceControlPanel';
 import { SessionTagChips, SessionTagFilterRow } from './sidebar/SessionTags';
@@ -571,6 +575,34 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
       : chats;
     return summarizeProjectGitState(viewChats, gitStatus).total;
   }, [view, chats, gitStatus]);
+
+  // WARDEN-810: the file-level complement to the fleet collision rollups above.
+  // When a file is open in FileViewer (fileTarget set), find every OTHER same-project
+  // agent whose cached gitStatus shows that path dirty (±) / in conflict (⚑) / in an
+  // unpushed commit (↑), so the FileViewer header chip can surface cross-agent file
+  // contention at the reading moment — inside the dialog, where the sidebar's fleet ⚠
+  // badge below is out of view. Reuses the SAME cached gitStatus map the fleet memos
+  // read (no new fetch, no backend route). Narrowed to the reader's OWN project first
+  // (a same-project collision is what's actionable for THIS reader); the finder then
+  // applies the active gate + self-exclusion + status-known gate internally.
+  // labelFor joins key → displayName(findChat(chats, key)) — the same React-layer
+  // join GitBadges' popover rows perform, kept out of the pure finder so it stays
+  // import-free for its OXC test harness. undefined when no file is open or the
+  // reader has no resolvable project → FileViewer renders no chip (graceful).
+  const fileCoEditors = useMemo(() => {
+    if (!fileTarget) return undefined;
+    const selfChat = findChat(chats, fileTarget.chatId);
+    const project = selfChat?.project;
+    if (!project) return undefined;
+    const projectChats = chats.filter((c) => c.project === project);
+    return findFileCoEditors({
+      filePath: fileTarget.path,
+      selfKey: fileTarget.chatId,
+      projectChats,
+      gitStatus,
+      labelFor: (key) => displayName(findChat(chats, key)),
+    });
+  }, [fileTarget, chats, gitStatus]);
 
   // Fan the message out to every selected agent via the existing per-target
   // /api/send path (server.js:182 → sendPane → tmux send-keys), then summarize.
@@ -1544,6 +1576,8 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
         viewMode={fileViewerViewMode}
         onViewModeChange={onFileViewerViewModeChange}
         onNavigate={(p) => setFileTarget((prev) => (prev ? { ...prev, path: p, line: undefined } : prev))}
+        coEditors={fileCoEditors}
+        onOpenCoEditor={(key) => setFileTarget((prev) => (prev ? { ...prev, chatId: key } : prev))}
         pollIntervalMs={pollIntervalMs}
         onOpenChange={(o) => { if (!o) setFileTarget(null); }}
       />
