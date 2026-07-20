@@ -19,7 +19,7 @@
 // Run: node --test src/agentState.test.js   (or auto-discovered by `npm test`)
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyPane, stripAnsi, SUMM_ERROR_RE, SUMM_WAITING_RE, SUMM_BLOCKED_RE, matchWatchPatterns, sanitizeWatchPatterns } from './agentState.js';
+import { classifyPane, stripAnsi, SUMM_ERROR_RE, SUMM_WAITING_RE, SUMM_BLOCKED_RE, matchWatchPatterns, sanitizeWatchPatterns, inferGoal } from './agentState.js';
 
 // A chat with active:true so the 'active' state guard can fire.
 const chat = { active: true, role: 'worker', project: 'acme' };
@@ -197,6 +197,203 @@ describe('classifyPane — goal inference still works (unchanged from observer.j
   });
   it('falls back to role on project when no ticket/action phrase is present', () => {
     assert.equal(classify('just output', { active: true, role: 'reviewer', project: 'acme' }).goal, 'reviewer on acme');
+  });
+});
+
+// ─── inferGoal (direct unit tests) ────────────────────────────────────────────
+//
+// inferGoal(clean, c) (src/agentState.js:132) is the PURE goal-inference function
+// behind every agent's displayed `goal` field — its one caller is classifyPane at
+// src/agentState.js:99 (`goal: inferGoal(clean, c)`). It is a 5-branch priority
+// cascade — ticket → action phrase → role+project → role → null — with non-obvious
+// regex + string-slicing edges (the "complex business logic" the tests variant
+// targets, categorically NOT a getter/delegation).
+//
+// The classifyPane block above only asserts 2 shallow outcomes THROUGH classifyPane
+// (a ticket beats an action verb; the role+project fallback). Because the ticket
+// always WON there, branch 2's phrase EXTRACTION was never actually exercised, and
+// branches 4/5 plus every regex/slicing edge were left unpinned. These tests pin
+// each branch and edge directly against the public inferGoal surface, independent
+// of classifyPane. (Tested through inferGoal rather than the un-exported
+// SUMM_TICKET_RE so the assertions reflect the real displayed `goal` contract.)
+describe('inferGoal — branch 1: an explicit ticket reference wins', () => {
+  it('returns the UPPER CASE PROJECT-N ticket (the canonical form, e.g. WARDEN-344)', () => {
+    assert.equal(inferGoal('working on WARDEN-344\nrunning'), 'WARDEN-344');
+  });
+  it('extracts a ticket embedded in surrounding pane text (\\b boundaries)', () => {
+    assert.equal(inferGoal('pre WARDEN-3 post'), 'WARDEN-3');
+  });
+  it('returns the FIRST (leftmost) ticket when several appear', () => {
+    // clean.match() is leftmost, so the first ticket reference wins — not the last.
+    assert.equal(inferGoal('ticket WARDEN-1 and WARDEN-2'), 'WARDEN-1');
+  });
+  it('accepts a 2+ char upper-case/digit prefix (AB-1, TINK-13, X1-99)', () => {
+    // [A-Z][A-Z0-9]{1,} = first upper-case letter + ≥1 more upper/digit (2+ total).
+    assert.equal(inferGoal('see AB-1 here'), 'AB-1');
+    assert.equal(inferGoal('see TINK-13 here'), 'TINK-13');
+    assert.equal(inferGoal('see X1-99 here'), 'X1-99');
+  });
+  it('returns only the ticket capture group, not the whole match', () => {
+    // SUMM_TICKET_RE wraps the id in a capture group; branch 1 returns ticket[1].
+    assert.equal(inferGoal('see WARDEN-344 now'), 'WARDEN-344');
+  });
+});
+
+describe('inferGoal — ticket-regex boundaries: what does NOT register as a ticket', () => {
+  it('a single-letter prefix (A-1) does NOT match — the prefix needs 2+ chars', () => {
+    // 'A' alone is only the first [A-Z]; {1,} needs one more upper/digit. Falls
+    // through to the role+project fallback rather than reading 'A-1' as a ticket.
+    assert.equal(inferGoal('A-1 fix here', { role: 'worker', project: 'p' }), 'worker on p');
+  });
+  it('a digit-led id (12-3) does NOT match — the prefix must start with [A-Z]', () => {
+    assert.equal(inferGoal('12-3 fix', { role: 'worker', project: 'p' }), 'worker on p');
+  });
+  it('a lower-case project id does NOT match — the prefix is upper-case only', () => {
+    assert.equal(inferGoal('warden-344'), null, 'no ticket, no verb, no chat → null');
+  });
+  it('a space-prefixed "#42" does NOT preempt the action phrase (\\b needs a word char before #)', () => {
+    // The #\d{2,} alternative is anchored by a leading \b; space→'#' is non-word→
+    // non-word, so no boundary. In normal prose ('issue #42') the #NN form does not
+    // register as a ticket and branch 2's action phrase wins instead. Pinning the
+    // current boundary so a future regex change is caught intentionally.
+    assert.equal(inferGoal('reviewing issue #42 details'), 'reviewing issue #42 details');
+  });
+});
+
+describe('inferGoal — branch 2: an action-verb phrase is extracted', () => {
+  it('extracts the trailing phrase after each of the 7 action verbs', () => {
+    // The full verb set: working on | implementing | fixing | building |
+    // refactoring | reviewing | investigating.
+    const cases = [
+      ['working on the feature', 'working on the feature'],
+      ['implementing the new module', 'implementing the new module'],
+      ['fixing the bug', 'fixing the bug'],
+      ['building the UI', 'building the UI'],
+      ['refactoring the parser', 'refactoring the parser'],
+      ['reviewing the PR', 'reviewing the PR'],
+      ['investigating the flaky test', 'investigating the flaky test'],
+    ];
+    for (const [input, expected] of cases) {
+      assert.equal(inferGoal(input), expected, `verb phrase not extracted for "${input}"`);
+    }
+  });
+  it('extracts the FULL trailing phrase, not just the verb keyword', () => {
+    // The gap the classifyPane block left open: there a ticket always won, so this
+    // branch's EXTRACTION was never exercised. No ticket here → branch 2 fires.
+    assert.equal(inferGoal('investigating a flaky CI timeout in the runner'),
+      'investigating a flaky CI timeout in the runner');
+  });
+  it('matches case-insensitively but preserves the original casing', () => {
+    assert.equal(inferGoal('IMPLEMENTING the thing'), 'IMPLEMENTING the thing');
+    assert.equal(inferGoal('Working On the feature'), 'Working On the feature');
+  });
+  it('returns just the verb when nothing trails it on the line', () => {
+    assert.equal(inferGoal('fixing'), 'fixing');
+  });
+  it('trims leading and trailing whitespace from the captured phrase', () => {
+    // Leading spaces before the verb are outside the match (the regex anchors at the
+    // verb via \b); trailing whitespace captured by [^\n]{0,80} is removed by .trim().
+    assert.equal(inferGoal('   fixing    the    bug'), 'fixing    the    bug');
+    assert.equal(inferGoal('fixing the bug   '), 'fixing the bug');
+  });
+});
+
+describe('inferGoal — branch 2 verb set: look-alikes NOT in the set fall through', () => {
+  // The 7-verb set is exact. Active-looking words that aren't members must NOT
+  // extract a phrase — otherwise "running tests" would masquerade as a goal. Each
+  // falls through to the role+project fallback, proving branch 2 was skipped.
+  const chat = { role: 'worker', project: 'acme' };
+  it('"running" / "coding" / "testing" are NOT in the set', () => {
+    assert.equal(inferGoal('running the test suite', chat), 'worker on acme');
+    assert.equal(inferGoal('coding the new module', chat), 'worker on acme');
+    assert.equal(inferGoal('testing the changes here', chat), 'worker on acme');
+  });
+  it('"working" without "on" does NOT match (the verb is the literal "working on")', () => {
+    assert.equal(inferGoal('working the task alone', chat), 'worker on acme');
+  });
+});
+
+describe('inferGoal — branch 2 caps: trailing [^\\n]{0,80} (binder) + slice(0,120) (net)', () => {
+  it('clips the trailing phrase to 80 chars (the [^\\n]{0,80} bound is what binds)', () => {
+    // After "investigating" the regex greedily grabs up to 80 non-newline chars:
+    // the leading space + 79 of the 200 z's. (slice(0,120) is a secondary net that
+    // never binds here — longest verb 13 + 80 = 93 < 120.)
+    const result = inferGoal('investigating ' + 'z'.repeat(200));
+    assert.equal(result, 'investigating ' + 'z'.repeat(79));
+    assert.ok(result.length <= 120, `goal exceeded 120 chars (${result.length})`);
+  });
+  it('never returns an action-phrase goal longer than 120 chars (the slice(0,120) ceiling)', () => {
+    // Invariant across every verb: verb (≤13) + 80-char trailing ≤ 93 < 120, so the
+    // slice is a true ceiling on the action-phrase branch even though the 80-char
+    // trailing bound is what usually binds.
+    for (const verb of ['working on', 'implementing', 'fixing', 'building', 'refactoring', 'reviewing', 'investigating']) {
+      const result = inferGoal(`${verb} ${'x'.repeat(300)}`);
+      assert.ok(result.length <= 120, `"${verb}" goal exceeded 120 chars (${result.length})`);
+      assert.equal(result.slice(0, verb.length), verb, `verb prefix lost for "${verb}"`);
+    }
+  });
+  it('stops the phrase at a newline — [^\\n] does not cross lines', () => {
+    assert.equal(inferGoal('investigating aa\nbb'), 'investigating aa');
+  });
+});
+
+describe('inferGoal — branch 3: role + project fallback ("<role> on <project>")', () => {
+  it('composes "<role> on <project>" when no ticket or action phrase is present', () => {
+    assert.equal(inferGoal('plain output', { role: 'reviewer', project: 'acme' }), 'reviewer on acme');
+  });
+  it('composes for each role', () => {
+    for (const role of ['planner', 'worker', 'reviewer', 'researcher']) {
+      assert.equal(inferGoal('plain output', { role, project: 'p' }), `${role} on p`,
+        `role+project not composed for "${role}"`);
+    }
+  });
+});
+
+describe('inferGoal — branch 4: role-only fallback (project absent or falsy)', () => {
+  it('returns just the role when project is absent', () => {
+    assert.equal(inferGoal('plain output', { role: 'reviewer' }), 'reviewer');
+  });
+  it('falls to role-only when project is falsy (empty string / null / 0)', () => {
+    // The guard is `c && c.role && c.project` — any falsy project drops to branch 4.
+    assert.equal(inferGoal('plain output', { role: 'worker', project: '' }), 'worker');
+    assert.equal(inferGoal('plain output', { role: 'worker', project: null }), 'worker');
+    assert.equal(inferGoal('plain output', { role: 'worker', project: 0 }), 'worker');
+  });
+});
+
+describe('inferGoal — branch 5: null when nothing can be inferred', () => {
+  it('returns null when there is no ticket, no action verb, and no chat', () => {
+    assert.equal(inferGoal('plain output'), null);
+  });
+  it('returns null for an empty chat object', () => {
+    assert.equal(inferGoal('plain output', {}), null);
+  });
+  it('returns null when chat is explicitly null', () => {
+    assert.equal(inferGoal('plain output', null), null);
+  });
+  it('returns null for empty / whitespace-only pane text', () => {
+    assert.equal(inferGoal(''), null);
+    assert.equal(inferGoal('\n\n'), null);
+  });
+  it('returns null for active-looking output that is NOT an action verb and has no chat', () => {
+    // "running tests" reads active but "running" is not in the 7-verb set.
+    assert.equal(inferGoal('running the test suite'), null);
+  });
+});
+
+describe('inferGoal — precedence cascade: ticket > action phrase > role+project > role > null', () => {
+  const chat = { role: 'worker', project: 'acme' };
+  it('a ticket beats an action phrase when both are present', () => {
+    assert.equal(inferGoal('working on WARDEN-344', chat), 'WARDEN-344');
+  });
+  it('an action phrase beats the role+project fallback', () => {
+    assert.equal(inferGoal('fixing the bug', chat), 'fixing the bug');
+  });
+  it('role+project beats role-only (project present → "<role> on <project>")', () => {
+    assert.equal(inferGoal('nothing here', chat), 'worker on acme');
+  });
+  it('role-only beats null (project absent → just the role)', () => {
+    assert.equal(inferGoal('nothing here', { role: 'worker' }), 'worker');
   });
 });
 
