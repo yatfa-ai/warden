@@ -26,6 +26,7 @@ import {
 } from '@assistant-ui/react';
 import type { ChatContextMeta, ObserveMsg } from '@/lib/types';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
+import { copyText as clipboardCopy } from '@/lib/clipboard';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -781,7 +782,7 @@ function UserRow({ text, ts, timestampFormat, notifySuccess }: { text: string; t
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <ContextMenuItem onSelect={() => copyText(text, notifySuccess)}>
+        <ContextMenuItem onSelect={() => copyAndNotify(text, notifySuccess)}>
           <CopyIcon /> Copy
         </ContextMenuItem>
       </ContextMenuContent>
@@ -827,7 +828,7 @@ function ObserverEntry({
             </div>
           </ContextMenuTrigger>
           <ContextMenuContent>
-            <ContextMenuItem onSelect={() => copyText(item.text, notifySuccess)}>
+            <ContextMenuItem onSelect={() => copyAndNotify(item.text, notifySuccess)}>
               <CopyIcon /> Copy
             </ContextMenuItem>
             {canRegenerate && (
@@ -854,19 +855,14 @@ function ObserverEntry({
   );
 }
 
-// Per-message copy control with a copied checkmark — same pattern as the code
-// block in ObserverMarkdown (clipboard may be unavailable in non-secure
-// contexts; fail silently there).
+// Per-message copy control with a copied checkmark — uses the shared clipboard
+// helper so it still works via the textarea fallback in non-secure contexts.
 function MessageCopyButton({ getText }: { getText: () => string }) {
   const [copied, setCopied] = useState(false);
   const onClick = async () => {
-    try {
-      await navigator.clipboard.writeText(getText());
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // Clipboard unavailable; fail silently.
-    }
+    await clipboardCopy(getText());
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
   };
   return (
     <Button variant="ghost" size="icon-xs" onClick={onClick} aria-label="Copy message" title="Copy message">
@@ -898,11 +894,11 @@ function ToolChip({ name, arg, notifySuccess }: { name: string; arg?: string; no
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <ContextMenuItem onSelect={() => copyText(name, notifySuccess)}>
+        <ContextMenuItem onSelect={() => copyAndNotify(name, notifySuccess)}>
           <CopyIcon /> Copy tool name
         </ContextMenuItem>
         {arg && (
-          <ContextMenuItem onSelect={() => copyText(arg, notifySuccess)}>
+          <ContextMenuItem onSelect={() => copyAndNotify(arg, notifySuccess)}>
             <CopyIcon /> Copy argument
           </ContextMenuItem>
         )}
@@ -981,10 +977,10 @@ function DirectiveCard({
           </div>
         </ContextMenuTrigger>
         <ContextMenuContent>
-          <ContextMenuItem onSelect={() => copyText(card.directive, notifySuccess)}>
+          <ContextMenuItem onSelect={() => copyAndNotify(card.directive, notifySuccess)}>
             <CopyIcon /> Copy directive
           </ContextMenuItem>
-          <ContextMenuItem onSelect={() => copyText(`${card.container ?? ''}${card.role ? ` · ${card.role}` : ''}`, notifySuccess)}>
+          <ContextMenuItem onSelect={() => copyAndNotify(`${card.container ?? ''}${card.role ? ` · ${card.role}` : ''}`, notifySuccess)}>
             <CopyIcon /> Copy agent
           </ContextMenuItem>
         </ContextMenuContent>
@@ -995,14 +991,10 @@ function DirectiveCard({
 
 /* -------------------------------- helpers -------------------------------- */
 
-async function copyText(text: string, notifySuccess: boolean) {
-  try {
-    await navigator.clipboard.writeText(text);
-    // WARDEN-400: clipboard-confirmation is a success toast; gate behind pref.
-    if (notifySuccess) toast.success('Copied');
-  } catch {
-    // Clipboard unavailable; fail silently.
-  }
+async function copyAndNotify(text: string, notifySuccess: boolean) {
+  await clipboardCopy(text);
+  // WARDEN-400: clipboard-confirmation is a success toast; gate behind pref.
+  if (notifySuccess) toast.success('Copied');
 }
 
 const TOOL_LABELS: Record<string, string> = {
