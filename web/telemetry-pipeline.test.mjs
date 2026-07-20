@@ -51,7 +51,7 @@ const {
   isDeliveryFailing,
 } = require('../electron/telemetry-pipeline.cjs');
 const { validateBaseEvent, buildErrorEvent } = require('../electron/telemetry-source.cjs');
-const { createTransmissionLog } = require('../electron/telemetry-transmission-log.cjs');
+const { createTransmissionLog, parseTransmissionLog } = require('../electron/telemetry-transmission-log.cjs');
 
 let passed = 0;
 const test = (name, fn) => {
@@ -103,6 +103,25 @@ function validEventWithNames() {
     frames: [],
     chatName: 'Refactor auth module',
     sessionName: 'claude-7b3a2f1',
+  };
+}
+
+// A structurally-valid base-tier error event whose free-text MESSAGE carries a
+// filesystem PATH. With the REAL redactor wired, the path is scrubbed and the
+// event validates + sends. With an IDENTITY redactor (p => p — standing in for
+// ANY cause of a pre-send validate rejection, NOT a drift simulation), the path
+// reaches validateBaseEvent unchanged → its identifier-leak proof
+// (containsIdentifier on the message) rejects it pre-send. This is the generic
+// validate-rejection trigger the WARDEN-817 success criterion specifies.
+function validEventWithPathIdentifier() {
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    type: 'error',
+    runtime: 'main',
+    timestamp: 1719500000123,
+    name: 'Error',
+    message: 'failed to read /home/alice/secret/config',
+    frames: [],
   };
 }
 
@@ -847,6 +866,141 @@ test('entries respect the injected log cap (bounded — oldest dropped)', () => 
   });
   for (let i = 0; i < 5; i++) pipeline.record(validEventWithCredential());
   assert.equal(log.size(), 2, 'the pipeline-driven log respects its cap');
+});
+
+// ==========================================================================
+// WARDEN-817 — pre-send validate rejections record a 'rejected' outcome (the
+// missing third outcome alongside Delivered/Dropped). Previously the pre-send
+// drop site (validate threw OR returned false) vanished the event with NO log
+// line, NO transmission-log entry, and NO runtime-status arm. Now an opt-in user
+// sees client-side rejections in the verifiability panel. Purely additive: the
+// drop still happens, no gate is relaxed.
+// ==========================================================================
+
+test('a pre-send validate rejection records an outcome:rejected entry (WARDEN-817)', () => {
+  // Identity redactor (p => p) + the REAL validateBaseEvent + a message carrying
+  // a path → the validator's identifier-leak proof rejects it pre-send. This is
+  // the generic validate-rejection trigger (any cause), NOT a drift simulation.
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = fakeSend();
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact: (p) => p,
+    send, // default validate is the REAL validateBaseEvent
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(validEventWithPathIdentifier());
+  assert.equal(send.calls.length, 0, 'the rejected event never reaches transport');
+  assert.equal(log.size(), 1, 'exactly one entry — the rejection is no longer silent');
+  const e = log.entries()[0];
+  assert.equal(e.outcome, 'rejected', 'the missing third outcome is recorded');
+  assert.equal(e.endpointHost, 'telemetry.example.invalid', 'the configured destination host (diagnostic, metadata-only)');
+  assert.equal(e.schemaVersion, SCHEMA_VERSION, 'the canonical schema version is threaded');
+  assert.equal(e.eventCount, 1, 'the single redacted event that failed validation');
+  assert.equal(e.attempts, 0, 'never went to the wire');
+  assert.equal(e.status, null, 'never went to the wire');
+  assert.equal(e.timestamp, 1719500000123, "stamped by the log's injected clock");
+});
+
+test('a rejected entry is METADATA ONLY — the caught path/identifier never reaches the log', () => {
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact: (p) => p,
+    send: fakeSend(),
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(validEventWithPathIdentifier()); // message carries /home/alice/secret/config
+  const e = log.entries()[0];
+  assert.deepEqual(
+    Object.keys(e).sort(),
+    ['attempts', 'endpointHost', 'eventCount', 'outcome', 'schemaVersion', 'status', 'timestamp'],
+    'the entry is exactly the seven metadata fields',
+  );
+  const blob = JSON.stringify(log.entries());
+  assert.doesNotMatch(blob, /home|alice|secret|config/, 'the leaked path that tripped the validator is NOT retained');
+});
+
+test('a rejected entry SURVIVES a record → serialize → parse → seed reload round-trip', () => {
+  // Guards the LOAD-BEARING allow-list (telemetry-transmission-log.cjs:99): without
+  // 'rejected' admitted there, normalizeEntry strips it to outcome:null on BOTH
+  // record() AND seed() — the entry would render as 'Unknown' after a restart.
+  const recorded = createTransmissionLog({ clock: TLOG_CLOCK });
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact: (p) => p,
+    send: fakeSend(),
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: recorded,
+  });
+  pipeline.record(validEventWithPathIdentifier());
+  assert.equal(recorded.entries()[0].outcome, 'rejected', 'written as rejected');
+  // main.cjs serializes via `entries.map(JSON.stringify).join('\n')`; mirror it here.
+  const text = recorded.entries().map((e) => JSON.stringify(e)).join('\n') + '\n';
+  // A fresh log (a restarted app) loads + seeds from the parsed file.
+  const restarted = createTransmissionLog({ clock: () => 0 });
+  restarted.seed(parseTransmissionLog(text));
+  assert.equal(
+    restarted.entries()[0].outcome,
+    'rejected',
+    'the outcome survives normalizeEntry on the reload path — NOT stripped to null',
+  );
+  assert.deepEqual(restarted.entries(), recorded.entries(), 'the round-trip is lossless');
+});
+
+test('a THROWING validator also records a rejected entry (the merged drop site covers both paths)', () => {
+  // The pre-send drop site records 'rejected' for BOTH a false return AND a
+  // throwing validator — the two analogous silent-drop paths now share one record.
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact,
+    validate: () => { throw new Error('validator blew up'); },
+    send: fakeSend(),
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  assert.doesNotThrow(() => pipeline.record(validEventWithCredential()));
+  assert.equal(log.size(), 1, 'a throwing validator is recorded as rejected (no longer silent)');
+  assert.equal(log.entries()[0].outcome, 'rejected');
+});
+
+test('consent OFF records NO rejected entry (the rejection site is past the consent guard)', () => {
+  // Trust posture: a 'rejected' entry is written ONLY when consent is ON. When off,
+  // the dispatch consent guard returns BEFORE validate, so an event that WOULD be
+  // rejected never reaches the rejection site — it surfaces as the usual absence.
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.OFF),
+    redact: (p) => p,
+    send: fakeSend(),
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(validEventWithPathIdentifier());
+  assert.equal(log.size(), 0, 'no rejected entry when consent is off (the guard precedes the drop site)');
+});
+
+test('a drifted endpoint records NO rejected entry (the drift guard precedes the drop site too)', () => {
+  // The drift guard (WARDEN-631) returns BEFORE validate, so a drifted endpoint
+  // short-circuits before the rejection site — parity with the consent-off case.
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendReturning({ ok: false, dropped: true, drifted: true, attempts: 1, status: 415 });
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(TIERS.BASE),
+    redact: (p) => p,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(validEventWithCredential()); // arms the breaker (drifted send → dropped)
+  assert.equal(log.entries()[0].outcome, 'dropped', 'the drifted send itself is a transport drop');
+  // A subsequent event that WOULD be rejected hits the drift guard first → no reject entry.
+  pipeline.record(validEventWithPathIdentifier());
+  const outcomes = log.entries().map((e) => e.outcome);
+  assert.deepEqual(outcomes, ['dropped'], 'the drifted dispatch records no rejected entry (guard precedes the drop site)');
 });
 
 // ==========================================================================

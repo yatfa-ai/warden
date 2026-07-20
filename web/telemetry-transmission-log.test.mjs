@@ -542,4 +542,42 @@ test('a partially-corrupted persisted file degrades to the surviving entries (sk
   );
 });
 
+// ==========================================================================
+// (WARDEN-817) 'rejected' outcome allow-list — guards the LOAD-BEARING edit at
+// normalizeEntry (:99). record() and seed() BOTH run normalizeEntry, so each is
+// a direct exercise of the allow-list. Without 'rejected' admitted there, the
+// entry is stripped to outcome:null on write AND on reload (a no-op that renders
+// as 'Unknown'). These pin the outcome's survival at both call sites in ISOLATION
+// from the pipeline (the pipeline test guards the full composition).
+// ==========================================================================
+
+test('record() preserves outcome:rejected through normalizeEntry (write path — WARDEN-817)', () => {
+  const log = createTransmissionLog({ clock: () => 1 });
+  log.record({
+    outcome: 'rejected',
+    endpointHost: 'telemetry.example.invalid',
+    schemaVersion: 1,
+    eventCount: 1,
+    attempts: 0,
+    status: null,
+  });
+  assert.equal(log.entries()[0].outcome, 'rejected', 'the allow-list admits rejected on the write path');
+});
+
+test('seed() preserves outcome:rejected through normalizeEntry (reload path — WARDEN-817)', () => {
+  const log = createTransmissionLog({ clock: () => 1 });
+  log.seed([{ timestamp: 7, outcome: 'rejected', attempts: 0, status: null, endpointHost: 'h.example' }]);
+  assert.equal(log.entries()[0].outcome, 'rejected', 'the allow-list admits rejected on the reload path (NOT null)');
+});
+
+test('a rejected entry round-trips losslessly through record → serialize → parse → seed', () => {
+  const recorded = createTransmissionLog({ clock: () => 100 });
+  recorded.record({ outcome: 'rejected', endpointHost: 'telemetry.example.invalid', schemaVersion: 1, eventCount: 1, attempts: 0, status: null });
+  const text = recorded.entries().map((e) => JSON.stringify(e)).join('\n') + '\n';
+  const restarted = createTransmissionLog({ clock: () => 0 });
+  restarted.seed(parseTransmissionLog(text));
+  assert.equal(restarted.entries()[0].outcome, 'rejected', 'rejected survives a restart, not stripped to null');
+  assert.deepEqual(restarted.entries(), recorded.entries(), 'lossless');
+});
+
 console.log(`\n✓ TELEMETRY TRANSMISSION-LOG TESTS PASS (${passed})`);

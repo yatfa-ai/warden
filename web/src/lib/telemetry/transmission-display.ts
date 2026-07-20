@@ -18,7 +18,7 @@
 import type { TransmissionLogEntry } from '@/lib/electron';
 
 /** The display tone for a single outcome — drives icon + color in the row. */
-export type TransmissionOutcomeTone = 'ok' | 'dropped' | 'unknown';
+export type TransmissionOutcomeTone = 'ok' | 'dropped' | 'rejected' | 'unknown';
 
 /** A single ring entry mapped to the values a row renders. All strings are
  *  display-safe: null/missing source fields become a placeholder, never a crash. */
@@ -65,6 +65,14 @@ export function describeTransmissionEntry(
   } else if (e.outcome === 'dropped') {
     outcomeLabel = 'Dropped';
     outcomeTone = 'dropped';
+  } else if (e.outcome === 'rejected') {
+    // WARDEN-817 — a pre-send validate rejection (the validator threw OR returned
+    // false, so the payload never reached the wire). Distinct from 'dropped'
+    // (which IS a transport outcome — it went to the wire and failed there) and
+    // from 'unknown' (a malformed/null outcome). The label says "pre-send" so a
+    // user can tell it apart from a network drop at a glance.
+    outcomeLabel = 'Rejected (pre-send)';
+    outcomeTone = 'rejected';
   } else {
     outcomeLabel = 'Unknown';
     outcomeTone = 'unknown';
@@ -82,27 +90,34 @@ export function describeTransmissionEntry(
   };
 }
 
-/** Aggregate counts for the section header (e.g. "3 delivered · 1 dropped").
+/** Aggregate counts for the section header (e.g. "3 delivered · 1 dropped · 2 rejected").
  *  Null/unknown outcomes count toward neither bucket but ARE included in total. */
 export interface TransmissionSummary {
   total: number;
   delivered: number;
   dropped: number;
+  rejected: number;
 }
 
 /**
- * Tally the delivered/dropped/total counts for the section header. Iterates the
- * snapshot once; null outcomes (a malformed entry) count only toward `total`.
+ * Tally the delivered/dropped/rejected/total counts for the section header.
+ * Iterates the snapshot once; null/unknown outcomes (a malformed entry) count
+ * only toward `total`. 'rejected' (a pre-send validate rejection — WARDEN-817)
+ * gets its own bucket so the header surfaces client-side rejections distinctly
+ * from transport drops, keeping the tally honest (every recognized outcome is
+ * accounted for; only null/unknown falls through to total-only).
  */
 export function summarizeTransmission(
   entries: ReadonlyArray<TransmissionLogEntry | null | undefined>,
 ): TransmissionSummary {
   let delivered = 0;
   let dropped = 0;
+  let rejected = 0;
   for (const entry of entries) {
     const o = entry?.outcome;
     if (o === 'ok') delivered += 1;
     else if (o === 'dropped') dropped += 1;
+    else if (o === 'rejected') rejected += 1;
   }
-  return { total: entries.length, delivered, dropped };
+  return { total: entries.length, delivered, dropped, rejected };
 }

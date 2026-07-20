@@ -170,7 +170,7 @@ export interface TransmissionLogEntry {
   endpointHost: string | null;
   schemaVersion: number | null;
   eventCount: number;
-  outcome: 'ok' | 'dropped' | null;
+  outcome: 'ok' | 'dropped' | 'rejected' | null;
   attempts: number;
   status: number | null;
 }
