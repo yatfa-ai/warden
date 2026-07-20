@@ -22,6 +22,7 @@ import {
 import { StatusDot, type StatusTone } from '@/components/StatusDot';
 import { Sparkline } from '@/components/Sparkline';
 import { FleetActivityHeatmap } from '@/components/FleetActivityHeatmap';
+import { FleetStateTimeline } from '@/components/FleetStateTimeline';
 import { FleetRecentCommits } from '@/components/FleetRecentCommits';
 import { FileViewer } from '@/components/FileViewer';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
@@ -1014,6 +1015,23 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
               scrolls with the list (not pinned) so expanding it never eats the
               viewport. Pure additive — no new fetch/hook/state lifted here. */}
             <FleetActivityHeatmap
+              series={activitySeries}
+              agents={healthData.agents}
+              timestampFormat={timestampFormat}
+            />
+            {/*
+              Fleet-wide 24h per-agent STATE timeline (WARDEN-788). The orthogonal
+              complement of the heatmap above: where that plots event VOLUME, this
+              plots each agent's classified STATE per hourly bucket (colored +
+              glyphed segments). An agent oscillating stuck→active→stuck shows
+              visibly distinct repeating segments here — a pattern the volume
+              heatmap and the point-in-time snapshot cannot reveal. Pure additive:
+              consumes the SAME in-scope activitySeries the heatmap does (its
+              stateSeries field, delivered by the existing 60s useActivitySeries
+              poll — no new fetch/poll/SSH) + the same fleet agents list. Sits
+              directly under the heatmap so the two fleet-wide overviews share an
+              axis and a scan order (behavior volume, then behavior pattern). */}
+            <FleetStateTimeline
               series={activitySeries}
               agents={healthData.agents}
               timestampFormat={timestampFormat}
