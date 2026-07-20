@@ -1589,6 +1589,41 @@ export interface FleetGitStatusSlice {
   // "N" magnitude); the fleet-wide count of stale-blocked AGENTS is
   // FleetGitStatusResult.behindCount below (the mirror of dirtyCount/conflictCount).
   behind: number | null;
+  // The strict ISO-8601 last-commit time for THIS agent (WARDEN-847) — the raw
+  // pass-through of /api/git-status's top-level `headDate` (parsed from git `%cI` at
+  // gitStatus.js:200, served at gitRoutes.js:664 as `headDate: branch ? headDate :
+  // null`), the sole RECENCY axis. dirty/conflict/behind/ahead are all STATE axes
+  // ("what IS the repo"); headDate answers "when did this agent last commit?" — the
+  // signal for a silently stalled / abandoned / rotting agent (clean tree, in sync,
+  // all pushed, but HEAD >7d old). null for a non-git / no-branch cwd (the server
+  // gates on `branch`, the SAME null-is-quiet discipline `clean` follows) and for a
+  // repo with no commits. This is the RAW input field — clock-dependent derivation
+  // (headAgeMs + stalled below) happens in buildFleetGitStatus(now), the verbatim
+  // mirror of summarizeProjectGitState:356-363, so the pure module owns the clock and
+  // tests pass a fixed `now`; the hook seam sets this from `j.headDate` and sets
+  // headAgeMs/stalled to provisional null/false (enriched before the chip reads them).
+  headDate: string | null;
+  // headAgeMs is THIS agent's HEAD-commit AGE in ms (WARDEN-847) — `now - headMs`
+  // where headMs = Date.parse(headDate). Derived in buildFleetGitStatus against the
+  // threaded `now` (NOT Date.now()) so the module stays pure/deterministic — the
+  // verbatim mirror of summarizeProjectGitState's headAgeMs at :357. null when headDate
+  // is missing/invalid/empty (a repo with no commits / non-git cwd — Date.parse → NaN),
+  // the same null-is-quiet discipline `clean` follows: a null-age agent is NOT stalled.
+  // Provisional null at the fetch-seam literal; buildFleetGitStatus(now) enriches it
+  // before the slice reaches statusByKey. NOTE this is the per-agent age (a future
+  // 💤 popover could rank oldest-first off it, mirroring the sidebar's WARDEN-710); the
+  // fleet-wide count of stalled AGENTS is FleetGitStatusResult.stalledCount below.
+  headAgeMs: number | null;
+  // stalled is THIS agent's "HEAD >7d old" boolean (WARDEN-847) — true iff headAgeMs is
+  // a finite age older than STALE_HEAD_AGE_MS (7d, the shared constant at :257). Derived
+  // in buildFleetGitStatus(now) — the verbatim mirror of summarizeProjectGitState's
+  // stalled test at :363 — so fleet/row agree on EXACTLY who is stalled (fleet/row
+  // agreement rides on this shared 7d threshold, established WARDEN-682). The canonical
+  // case: a clean, pushed, in-sync, routine-state, stash-free agent whose HEAD is >7d
+  // old reads ZERO across every existing Fleet Health axis and was invisible; this 5th
+  // per-row chip surfaces it. Provisional false at the fetch-seam literal;
+  // buildFleetGitStatus(now) enriches it before the per-row 💤 chip reads it.
+  stalled: boolean;
 }
 
 // One agent's fan-out outcome. `ok: false` = that agent's /api/git-status fetch
@@ -1656,27 +1691,57 @@ export interface FleetGitStatusResult {
   // as stranded. The PER-AGENT commit count lives on FleetGitStatusSlice.ahead above
   // (drives the per-row ↑N magnitude); this fleet count drives the summary tally.
   aheadCount: number;
+  // # of fanned agents whose HEAD commit is >7d old (status.stalled) — the fleet-wide
+  // "N stalled" count surfaced in the Fleet Health summary bar (WARDEN-847). This is the
+  // sole RECENCY axis: dirty/conflict/behind/ahead are all STATE axes ("what IS the
+  // repo"), but stalled answers "when did this agent last commit?" — surfacing the
+  // silently stalled / abandoned / rotting agent that reads ZERO across every existing
+  // axis (clean tree, no conflict, in sync, all pushed, but HEAD >7d old). This counts
+  // stalled AGENTS (the direct mirror of dirtyCount/conflictCount/behindCount/
+  // aheadCount — agent tallies, never a sum) and reuses the SAME STALE_HEAD_AGE_MS (7d)
+  // threshold the sidebar's summarizeProjectGitState uses (:257), so Fleet Health and
+  // the sidebar agree on EXACTLY who is stalled (fleet/row agreement, WARDEN-682). An
+  // error / loading agent is NOT stalled (counted in errorCount / absent), and an ok
+  // agent whose headDate is missing/invalid/empty (a repo with no commits / non-git cwd
+  // — Date.parse → NaN → headAgeMs null) is NOT stalled — the same null-is-quiet
+  // discipline `clean` follows. The PER-AGENT stalled boolean lives on
+  // FleetGitStatusSlice.stalled above (drives the per-row 💤 chip); this fleet count
+  // drives the summary tally.
+  stalledCount: number;
 }
 
 /**
  * Turn N per-agent /api/git-status outcomes into the Fleet Health view: a per-agent
- * { clean, diffstat, conflictCount, behind, ahead } map + a fleet-wide dirty count + a
- * fleet-wide conflict count + a fleet-wide behind count + a fleet-wide unpushed count +
- * an honest error count. Every ok agent gets a map entry (clean OR dirty — the React
- * layer gates the per-row chip on clean === false, so a clean entry is harmless + keeps
- * the "fetched vs loading" distinction available); ok:false agents are counted into
- * errorCount WITHOUT blanking the ok agents' entries (the Promise.allSettled fleet
- * contract). dirtyCount counts ONLY ok agents whose clean === false; conflictCount
- * counts ONLY ok agents with conflictCount > 0 (the agent-level mirror of dirtyCount —
- * blocked AGENTS, not unmerged files); behindCount counts ONLY ok agents with behind > 0
- * (the agent-level mirror of dirtyCount — stale AGENTS, not total behind-commits);
- * aheadCount counts ONLY ok agents with ahead > 0 (the agent-level mirror of dirtyCount
- * — stranded-work AGENTS, not total unpushed commits). The counts are ORTHOGONAL: an
- * unpushed-and-dirty agent increments BOTH dirtyCount and aheadCount (a clean === false
- * tree says nothing about whether the committed work is pushed), a behind agent is
- * often clean too (clean upstream-synced work is still stale), and a mid-merge repo is
- * dirty by definition so it increments dirtyCount and conflictCount. An error agent is
- * never dirty, never a conflict, never behind, AND never unpushed.
+ * { clean, diffstat, conflictCount, behind, ahead, headDate, headAgeMs, stalled } map +
+ * a fleet-wide dirty count + a fleet-wide conflict count + a fleet-wide behind count +
+ * a fleet-wide unpushed count + a fleet-wide stalled count + an honest error count.
+ * Every ok agent gets a map entry (clean OR dirty — the React layer gates the per-row
+ * chip on clean === false, so a clean entry is harmless + keeps the "fetched vs loading"
+ * distinction available); ok:false agents are counted into errorCount WITHOUT blanking
+ * the ok agents' entries (the Promise.allSettled fleet contract). dirtyCount counts ONLY
+ * ok agents whose clean === false; conflictCount counts ONLY ok agents with conflictCount
+ * > 0 (the agent-level mirror of dirtyCount — blocked AGENTS, not unmerged files);
+ * behindCount counts ONLY ok agents with behind > 0 (the agent-level mirror of dirtyCount
+ * — stale AGENTS, not total behind-commits); aheadCount counts ONLY ok agents with ahead
+ * > 0 (the agent-level mirror of dirtyCount — stranded-work AGENTS, not total unpushed
+ * commits); stalledCount counts ONLY ok agents whose HEAD is >7d old (the agent-level
+ * mirror of dirtyCount — stalled AGENTS, the sole recency axis). The counts are
+ * ORTHOGONAL: an unpushed-and-dirty agent increments BOTH dirtyCount and aheadCount (a
+ * clean === false tree says nothing about whether the committed work is pushed), a behind
+ * agent is often clean too (clean upstream-synced work is still stale), a mid-merge repo
+ * is dirty by definition so it increments dirtyCount and conflictCount, and a stalled
+ * agent is VERY often otherwise clean (the canonical case this axis exists for: clean
+ * tree, in sync, all pushed, but HEAD >7d old) so stalledCount fires where every other
+ * axis reads zero. An error agent is never dirty, never a conflict, never behind, never
+ * unpushed, AND never stalled.
+ *
+ * `now` (defaulting to `Date.now()`) is the staleness reference: an ok agent is `stalled`
+ * when its `headDate` parses to a finite ms older than `now - STALE_HEAD_AGE_MS`, derived
+ * HERE (the verbatim mirror of summarizeProjectGitState:356-363) so the pure module owns
+ * the clock and tests pass a fixed `now`. The hook seam passes `Date.now()` at fan-out
+ * time; the slice it builds carries the raw `headDate` + provisional headAgeMs/stalled,
+ * which THIS fn enriches before storing into statusByKey (so the per-row chip always
+ * reads the real derived values, never the seam's provisional placeholders).
  *
  * Outcomes are processed in caller (chats) order, so the map + counts are
  * deterministic and tests assert deep equality — the convention the rest of this
@@ -1684,19 +1749,35 @@ export interface FleetGitStatusResult {
  * are defined in this same file, so there is not even an `import type`), so
  * fleetGitStatus.test.mjs exercises it standalone alongside the URL builder.
  */
-export function buildFleetGitStatus(outcomes: FleetGitStatusOutcome[]): FleetGitStatusResult {
+export function buildFleetGitStatus(outcomes: FleetGitStatusOutcome[], now: number = Date.now()): FleetGitStatusResult {
   const statusByKey: Record<string, FleetGitStatusSlice> = {};
   let dirtyCount = 0;
   let errorCount = 0;
   let conflictCount = 0;
   let behindCount = 0;
   let aheadCount = 0;
+  let stalledCount = 0;
   for (const o of outcomes) {
     if (!o.ok) {
       errorCount += 1;
       continue;
     }
-    statusByKey[o.key] = o.status;
+    // WARDEN-847: derive THIS agent's HEAD-commit age + stalled flag against the threaded
+    // `now` — the verbatim mirror of summarizeProjectGitState:356-363 (Date.parse(headDate)
+    // → now - headMs; stalled ⇔ headAgeMs > STALE_HEAD_AGE_MS). Done HERE (not at the fetch
+    // seam) so the pure module owns the clock: the hook seam passes the raw headDate +
+    // provisional headAgeMs/stalled, and THIS fn enriches the slice before storing it, so
+    // the per-row chip always reads the real derived values. Date.parse → NaN for a
+    // missing/invalid/empty headDate (a repo with no commits / non-git cwd — the server
+    // serves headDate:null there) ⇒ headAgeMs null ⇒ NOT stalled, the same null-is-quiet
+    // discipline `clean` follows. STALE_HEAD_AGE_MS (7d, :257) is the SAME threshold the
+    // sidebar's summarizeProjectGitState uses, so Fleet Health and the sidebar agree on
+    // EXACTLY who is stalled (fleet/row agreement, WARDEN-682).
+    const headMs = typeof o.status.headDate === 'string' && o.status.headDate ? Date.parse(o.status.headDate) : NaN;
+    const headAgeMs = Number.isFinite(headMs) ? now - headMs : null;
+    const stalled = headAgeMs != null && headAgeMs > STALE_HEAD_AGE_MS;
+    const status: FleetGitStatusSlice = { ...o.status, headAgeMs, stalled };
+    statusByKey[o.key] = status;
     if (o.status.clean === false) dirtyCount += 1;
     // Mirror the dirtyCount line: count conflict-blocked AGENTS (those with at least
     // one unmerged path), NOT total unmerged files — the agent-level fleet tally the
@@ -1723,8 +1804,18 @@ export function buildFleetGitStatus(outcomes: FleetGitStatusOutcome[]): FleetGit
     // the committed work is pushed — the four axes dirty/conflict/behind/ahead are
     // orthogonal counts over the same ok fleet).
     if (o.status.ahead && o.status.ahead > 0) aheadCount += 1;
+    // Mirror the dirtyCount/conflictCount/behindCount/aheadCount lines: count stalled
+    // AGENTS (those whose HEAD is >7d old — `stalled`, derived above), NOT a sum — the
+    // agent-level fleet tally the summary bar renders as "N stalled" (WARDEN-847). The
+    // canonical case: a clean, pushed, in-sync, routine-state, stash-free agent whose
+    // HEAD is >7d old reads ZERO across every existing axis, so WITHOUT this line it is
+    // invisible at the fleet level — stalledCount is the sole axis that surfaces it. An
+    // agent stalled AND dirty/conflict/behind/unpushed increments ALL applicable axes
+    // (the five axes are orthogonal counts over the same ok fleet), but a stalled agent
+    // is VERY often otherwise clean, so `stalled` fires alone where every other axis is 0.
+    if (stalled) stalledCount += 1;
   }
-  return { statusByKey, dirtyCount, errorCount, conflictCount, behindCount, aheadCount };
+  return { statusByKey, dirtyCount, errorCount, conflictCount, behindCount, aheadCount, stalledCount };
 }
 
 /**
