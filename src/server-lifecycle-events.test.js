@@ -96,7 +96,8 @@ describe('human lifecycle actions recorded in the activity timeline — WARDEN-4
 
   // Read events of a single type since the last clearEvents(). Each endpoint
   // under test appends exactly one event of its type; nothing else writes here.
-  const eventsOfType = (type) => readEvents().filter((e) => e.type === type);
+  // readEvents is async (WARDEN-828 — non-blocking JSONL read), so this awaits.
+  const eventsOfType = async (type) => (await readEvents()).filter((e) => e.type === type);
 
   it('/api/spawn records one "spawned" event with id/host/container/name', async () => {
     clearEvents();
@@ -107,7 +108,7 @@ describe('human lifecycle actions recorded in the activity timeline — WARDEN-4
     assert.strictEqual(res.status, 200, `spawn should succeed via the sleeping cmd, got ${res.status}`);
     try {
       const body = await res.json();
-      const of = eventsOfType('spawned');
+      const of = await eventsOfType('spawned');
       assert.strictEqual(of.length, 1, 'exactly one spawned event');
       assert.strictEqual(of[0].id, body.chat.id, 'id matches the returned chat id');
       assert.strictEqual(of[0].host, '(local)');
@@ -124,7 +125,7 @@ describe('human lifecycle actions recorded in the activity timeline — WARDEN-4
     const res = await fetch(`${baseUrl}/api/resume`, json({ id: RESUME_SID, host: '(local)', cwd: '/tmp', name: 'my-resume' }));
     assert.strictEqual(res.status, 200, `resume should succeed via the shim, got ${res.status}`);
     try {
-      const of = eventsOfType('resumed');
+      const of = await eventsOfType('resumed');
       assert.strictEqual(of.length, 1, 'exactly one resumed event');
       assert.strictEqual(of[0].id, `(local):${RESUME_SESSION}`);
       assert.strictEqual(of[0].host, '(local)');
@@ -145,7 +146,7 @@ describe('human lifecycle actions recorded in the activity timeline — WARDEN-4
     const res = await fetch(`${baseUrl}/api/kill`, json({ id: `(local):${KILL_SESSION}` }));
     assert.strictEqual(res.status, 200);
     try {
-      const of = eventsOfType('killed');
+      const of = await eventsOfType('killed');
       assert.strictEqual(of.length, 1, 'exactly one killed event');
       assert.strictEqual(of[0].id, `(local):${KILL_SESSION}`);
       assert.strictEqual(of[0].host, '(local)');

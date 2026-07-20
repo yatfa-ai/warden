@@ -70,8 +70,8 @@ describe('readDirectives — parses directives.md back into structured records',
     try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best-effort */ }
   });
 
-  it('returns every directive, newest-first, with full text + target + role', () => {
-    const out = readDirectives();
+  it('returns every directive, newest-first, with full text + target + role', async () => {
+    const out = await readDirectives();
     assert.strictEqual(out.length, 3, 'all three directives parsed');
     assert.deepStrictEqual(out.map((d) => d.timestamp), [tNew, tMid, tOld], 'newest-first');
 
@@ -82,8 +82,8 @@ describe('readDirectives — parses directives.md back into structured records',
     assert.strictEqual(newest.text, 'show git status');
   });
 
-  it('preserves a multi-line body that contains a `## ` markdown line (no false split)', () => {
-    const reviewer = readDirectives().find((d) => d.container === 'proj-reviewer');
+  it('preserves a multi-line body that contains a `## ` markdown line (no false split)', async () => {
+    const reviewer = (await readDirectives()).find((d) => d.container === 'proj-reviewer');
     assert.ok(reviewer, 'reviewer directive parsed');
     // The whole body — including the embedded heading — survives as one record.
     assert.strictEqual(
@@ -92,22 +92,22 @@ describe('readDirectives — parses directives.md back into structured records',
     );
   });
 
-  it('filters by agent (container)', () => {
-    const out = readDirectives({ agent: 'proj-worker' });
+  it('filters by agent (container)', async () => {
+    const out = await readDirectives({ agent: 'proj-worker' });
     assert.strictEqual(out.length, 2);
     assert.ok(out.every((d) => d.container === 'proj-worker'));
     // Still newest-first within the filtered set.
     assert.deepStrictEqual(out.map((d) => d.timestamp), [tNew, tOld]);
   });
 
-  it('filters by host', () => {
-    const out = readDirectives({ host: 'hostB' });
+  it('filters by host', async () => {
+    const out = await readDirectives({ host: 'hostB' });
     assert.strictEqual(out.length, 1);
     assert.strictEqual(out[0].container, 'proj-reviewer');
   });
 
-  it('honours a limit (applied after sort, so it keeps the newest)', () => {
-    const out = readDirectives({ limit: 1 });
+  it('honours a limit (applied after sort, so it keeps the newest)', async () => {
+    const out = await readDirectives({ limit: 1 });
     assert.strictEqual(out.length, 1);
     assert.strictEqual(out[0].timestamp, tNew);
   });
@@ -121,11 +121,11 @@ describe('readDirectives — parses directives.md back into structured records',
   // (which would otherwise render/copy `null@(local)` and offer "null" as an
   // agent-filter option). The WARDEN-642 writer test at L197 only covers the
   // post-fix writer; this fills the read-side gap for the legacy on-disk bytes.
-  it('normalizes a legacy "null@host" header to container: null (WARDEN-733)', () => {
+  it('normalizes a legacy "null@host" header to container: null (WARDEN-733)', async () => {
     const ts = ISO(-10 * 60 * 1000); // 10m ago
     appendDirective(logPath, false, { ts, container: 'null', host: '(local)', role: 'agent', text: 'show git status' });
 
-    const out = readDirectives();
+    const out = await readDirectives();
     const legacy = out.find((d) => d.host === '(local)');
     assert.ok(legacy, 'legacy null@(local) block parsed');
     assert.strictEqual(legacy.container, null, 'literal "null" token coerced back to null');
@@ -141,19 +141,19 @@ describe('readDirectives — parses directives.md back into structured records',
     // The agent filter (observer.js L177) compares against the normalized
     // container, so readDirectives({ agent: 'null' }) no longer matches the
     // legacy block (it is now container: null, not the string "null").
-    assert.strictEqual(readDirectives({ agent: 'null' }).length, 0, 'agent:"null" matches nothing post-normalize');
+    assert.strictEqual((await readDirectives({ agent: 'null' })).length, 0, 'agent:"null" matches nothing post-normalize');
   });
 
-  it('returns [] for an empty file (graceful-empty)', () => {
+  it('returns [] for an empty file (graceful-empty)', async () => {
     fs.writeFileSync(logPath, '');
-    assert.deepStrictEqual(readDirectives(), []);
+    assert.deepStrictEqual(await readDirectives(), []);
   });
 
-  it('returns [] for a missing file (never throws)', () => {
+  it('returns [] for a missing file (never throws)', async () => {
     // Last test: deletes the seeded file. readDirectives must degrade to [],
     // matching activity.js readEvents' missing-file contract (never a 500).
     fs.unlinkSync(logPath);
-    assert.deepStrictEqual(readDirectives(), []);
+    assert.deepStrictEqual(await readDirectives(), []);
   });
 });
 
@@ -226,7 +226,7 @@ describe('agentTarget + logDirective — never null@host for local/tmux chats (W
     assert.strictEqual(agentTarget({ container: null, key: null, session: null, host: 'h' }), 'local@h');
   });
 
-  it('logDirective: writes <session>@<host> for a local chat and round-trips through readDirectives', () => {
+  it('logDirective: writes <session>@<host> for a local chat and round-trips through readDirectives', async () => {
     // A local/tmux chat exactly as server.js:3340 constructs it (container: null).
     const localChat = {
       id: '(local):myproject', key: 'myproject', kind: 'tmux', host: '(local)',
@@ -241,14 +241,14 @@ describe('agentTarget + logDirective — never null@host for local/tmux chats (W
 
     // DirectiveHistory reads via readDirectives — the parsed container must be
     // the session key, not the literal string "null" the old writer produced.
-    const out = readDirectives();
+    const out = await readDirectives();
     assert.strictEqual(out.length, 1, 'one directive parsed');
     assert.strictEqual(out[0].container, 'myproject');
     assert.strictEqual(out[0].host, '(local)');
     assert.notStrictEqual(out[0].container, 'null');
   });
 
-  it('logDirective: docker/yatfa chat header unchanged (container@host)', () => {
+  it('logDirective: docker/yatfa chat header unchanged (container@host)', async () => {
     const dockerChat = {
       id: 'hostA:agent', key: 'agent', kind: 'yatfa', host: 'hostA',
       container: 'proj-worker', session: 'agent', project: 'proj', role: 'worker',
@@ -261,7 +261,7 @@ describe('agentTarget + logDirective — never null@host for local/tmux chats (W
 
     // Two directives now (local above + this docker one); the docker record
     // parses back with its true container.
-    const docker = readDirectives().find((d) => d.container === 'proj-worker');
+    const docker = (await readDirectives()).find((d) => d.container === 'proj-worker');
     assert.ok(docker, 'docker directive parsed');
     assert.strictEqual(docker.host, 'hostA');
   });

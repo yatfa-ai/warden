@@ -67,11 +67,11 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
   // Run a callback with console.warn silenced (the malformed-line paths in
   // readEvents intentionally console.warn per skipped line; we expect those
   // warnings here and don't want them polluting test output).
-  const withNoWarn = (fn) => () => {
+  const withNoWarn = (fn) => async () => {
     const orig = console.warn;
     const captured = [];
     console.warn = (...args) => captured.push(args.join(' '));
-    try { fn(captured); } finally { console.warn = orig; }
+    try { await fn(captured); } finally { console.warn = orig; }
   };
 
   // ------------------------------------------------- appendEvent ----------
@@ -140,14 +140,14 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
 
   // ------------------------------------------------- readEvents -----------
   describe('readEvents', () => {
-    it('returns events newest-first (descending by timestamp)', () => {
+    it('returns events newest-first (descending by timestamp)', async () => {
       const now = Date.now();
       seed([
         line('attached', now - 50_000),
         line('attached', now - 10_000),
         line('attached', now - 30_000),
       ]);
-      const ev = readEvents();
+      const ev = await readEvents();
       assert.deepStrictEqual(
         ev.map((e) => e.timestamp),
         [
@@ -158,7 +158,7 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
       );
     });
 
-    it('keeps events at exactly ts === after and ts === before (inclusive range)', () => {
+    it('keeps events at exactly ts === after and ts === before (inclusive range)', async () => {
       const now = Date.now();
       seed([
         line('attached', now - 10_000), // below the window → excluded
@@ -166,7 +166,7 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
         line('attached', now + 10_000),  // === before → kept
         line('attached', now + 20_000),  // above the window → excluded
       ]);
-      const ev = readEvents({ after: now, before: now + 10_000 });
+      const ev = await readEvents({ after: now, before: now + 10_000 });
       assert.strictEqual(ev.length, 2);
       assert.deepStrictEqual(
         ev.map((e) => new Date(e.timestamp).getTime()).sort((a, b) => a - b),
@@ -174,10 +174,10 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
       );
     });
 
-    it('returns only the newest N when limit is set (sort is desc, then slice)', () => {
+    it('returns only the newest N when limit is set (sort is desc, then slice)', async () => {
       const now = Date.now();
       seed([10_000, 20_000, 30_000, 40_000, 50_000].map((d) => line('attached', now - d)));
-      const ev = readEvents({ limit: 2 });
+      const ev = await readEvents({ limit: 2 });
       assert.strictEqual(ev.length, 2);
       // newest two are the smallest offsets (now-10k, now-20k), returned descending
       assert.deepStrictEqual(
@@ -186,7 +186,7 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
       );
     });
 
-    it('skips malformed JSON lines without throwing and returns the valid ones', withNoWarn((warned) => {
+    it('skips malformed JSON lines without throwing and returns the valid ones', withNoWarn(async (warned) => {
       const now = Date.now();
       seed([
         line('attached', now),
@@ -194,20 +194,20 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
         line('error', now - 1_000, { error: 'boom' }),
         'another broken line }}}',
       ]);
-      const ev = readEvents();
+      const ev = await readEvents();
       assert.strictEqual(ev.length, 2, 'two valid lines parsed; two malformed skipped');
       assert.deepStrictEqual(ev.map((e) => e.type).sort(), ['attached', 'error']);
       assert.ok(warned.length >= 2, 'each malformed line is reported via console.warn');
     }));
 
-    it('returns [] for an empty file (the content.trim() guard)', () => {
+    it('returns [] for an empty file (the content.trim() guard)', async () => {
       seed([]);
-      assert.deepStrictEqual(readEvents(), []);
+      assert.deepStrictEqual(await readEvents(), []);
     });
 
-    it('returns [] without throwing when the file is absent (the existsSync guard)', () => {
+    it('returns [] without throwing when the file is absent (the existsSync guard)', async () => {
       fs.rmSync(activityPath, { force: true });
-      assert.deepStrictEqual(readEvents(), []);
+      assert.deepStrictEqual(await readEvents(), []);
     });
   });
 
@@ -222,7 +222,7 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
     // "just inside" row landing at now - 7d + buffer > cutoff.
     const BUFFER = 5 * 60 * 1000; // 5 min
 
-    it('removes events older than 7d, keeps the rest, and returns the removed count', () => {
+    it('removes events older than 7d, keeps the rest, and returns the removed count', async () => {
       const now = Date.now();
       seed([
         line('attached', now - 6 * DAY),           // kept (well within 7d)
@@ -232,7 +232,7 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
       ]);
       const removed = rotateEvents();
       assert.strictEqual(removed, 2);
-      const remaining = readEvents();
+      const remaining = await readEvents();
       assert.strictEqual(remaining.length, 2);
       assert.deepStrictEqual(
         remaining.map((e) => new Date(e.timestamp).getTime()).sort((a, b) => a - b),
@@ -240,7 +240,7 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
       );
     });
 
-    it('KEEPS malformed lines (never silently drops un-parseable rows)', withNoWarn(() => {
+    it('KEEPS malformed lines (never silently drops un-parseable rows)', withNoWarn(async () => {
       const now = Date.now();
       seed([
         line('attached', now - DAY),       // valid + recent → kept
@@ -254,22 +254,22 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
         content.includes('{ malformed-but-recent'),
         'the malformed line survives rotation in the rewritten file',
       );
-      assert.strictEqual(readEvents().length, 1, 'the one valid recent event reads back');
+      assert.strictEqual((await readEvents()).length, 1, 'the one valid recent event reads back');
     }));
 
-    it('rewrites the file so a subsequent readEvents() returns only kept events', () => {
+    it('rewrites the file so a subsequent readEvents() returns only kept events', async () => {
       const now = Date.now();
       seed([
         line('attached', now - DAY),
         line('attached', now - 30 * DAY),
       ]);
       rotateEvents();
-      const ev = readEvents();
+      const ev = await readEvents();
       assert.strictEqual(ev.length, 1);
       assert.strictEqual(new Date(ev[0].timestamp).getTime(), now - DAY);
     });
 
-    it('is idempotent — a second call removes nothing', () => {
+    it('is idempotent — a second call removes nothing', async () => {
       const now = Date.now();
       seed([
         line('attached', now - DAY),
@@ -277,7 +277,7 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
       ]);
       assert.strictEqual(rotateEvents(), 1);
       assert.strictEqual(rotateEvents(), 0);
-      assert.strictEqual(readEvents().length, 1);
+      assert.strictEqual((await readEvents()).length, 1);
     });
 
     it('returns 0 and does not throw for an empty file', () => {
@@ -293,7 +293,7 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
 
   // ------------------------------------------------- getStatsSince --------
   describe('getStatsSince', () => {
-    it('counts exactly the 6 known types and returns the full 7-key tally', () => {
+    it('counts exactly the 6 known types and returns the full 7-key tally', async () => {
       const now = Date.now();
       seed([
         line('directive_proposed', now),
@@ -303,7 +303,7 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
         line('ended', now),
         line('error', now),
       ]);
-      assert.deepStrictEqual(getStatsSince(0), {
+      assert.deepStrictEqual(await getStatsSince(0), {
         total: 6,
         directive_proposed: 1,
         directive_sent: 1,
@@ -314,7 +314,7 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
       });
     });
 
-    it('counts an unknown type toward total but NOT toward any typed counter', () => {
+    it('counts an unknown type toward total but NOT toward any typed counter', async () => {
       // `total` is `events.length`; typed counters only advance when
       // `stats.hasOwnProperty(type)` is true. An unknown type widens the gap
       // between total and sum-of-typed — the bug magnet for a wrong rollup.
@@ -324,7 +324,7 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
         line('host_ok', now),            // likewise unknown
         line('attached', now),           // known
       ]);
-      const stats = getStatsSince(0);
+      const stats = await getStatsSince(0);
       assert.strictEqual(stats.total, 3, 'every event counts toward total');
       assert.strictEqual(stats.attached, 1);
       const typedSum = stats.directive_proposed + stats.directive_sent +
@@ -333,22 +333,22 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
       assert.ok(typedSum < stats.total, 'total exceeds sum-of-typed when unknown types are present');
     });
 
-    it('respects the `after` filter (an event before `after` is excluded from total AND its counter)', () => {
+    it('respects the `after` filter (an event before `after` is excluded from total AND its counter)', async () => {
       const now = Date.now();
       seed([
         line('attached', now - 10_000), // before the window
         line('attached', now),           // === after → included
         line('error', now - 5_000),     // before the window
       ]);
-      const stats = getStatsSince(now);
+      const stats = await getStatsSince(now);
       assert.strictEqual(stats.total, 1);
       assert.strictEqual(stats.attached, 1);
       assert.strictEqual(stats.error, 0);
     });
 
-    it('returns the correct 7-key, all-zero shape for an empty window', () => {
+    it('returns the correct 7-key, all-zero shape for an empty window', async () => {
       seed([]);
-      const stats = getStatsSince(0);
+      const stats = await getStatsSince(0);
       assert.deepStrictEqual(Object.keys(stats).sort(), [
         'attached', 'directive_proposed', 'directive_rejected',
         'directive_sent', 'ended', 'error', 'total',

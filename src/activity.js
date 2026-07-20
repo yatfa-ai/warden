@@ -4,6 +4,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
+// fs.promises alias — the read path (readEvents → getStatsSince → getSeriesSince)
+// is async (WARDEN-828) so serving GET /api/activity* yields the event loop during
+// the JSONL read instead of blocking /api/config behind a synchronous readFileSync.
+// The write path (appendEvent/rotateEvents/clearEvents) stays sync — those are
+// tiny line appends / a one-shot startup rotation, not the hot GET-blocking reads.
+const fsp = fs.promises;
+
 const DIR = path.join(os.homedir(), '.yatfa-warden');
 const FILE = path.join(DIR, 'activity.jsonl');
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
@@ -26,12 +33,15 @@ export function appendEvent(event) {
   fs.appendFileSync(FILE, line, 'utf8');
 }
 
-// Read all events from the log, optionally filtered by timestamp range
-export function readEvents({ after, before, limit } = {}) {
+// Read all events from the log, optionally filtered by timestamp range.
+//
+// Async (WARDEN-828): the JSONL read uses fs.promises so a GET /api/activity*
+// request yields the event loop during the read (a missing/unreadable file
+// resolves to '' via the catch, preserving the prior existsSync + empty → []
+// contract) instead of blocking /api/config behind a synchronous readFileSync.
+export async function readEvents({ after, before, limit } = {}) {
   ensure();
-  if (!fs.existsSync(FILE)) return [];
-
-  const content = fs.readFileSync(FILE, 'utf8');
+  const content = await fsp.readFile(FILE, 'utf8').catch(() => '');
   if (!content.trim()) return [];
 
   const lines = content.trim().split('\n');
@@ -104,8 +114,8 @@ export function clearEvents() {
 }
 
 // Get activity statistics since a given timestamp
-export function getStatsSince(after) {
-  const events = readEvents({ after });
+export async function getStatsSince(after) {
+  const events = await readEvents({ after });
   const stats = {
     total: events.length,
     directive_proposed: 0,
@@ -169,8 +179,8 @@ const ERROR_TYPES = new Set(['error', 'agent_session_down', 'host_error']);
  *   series entry's `total`/`error` arrays are parallel to `buckets` (same length,
  *   index i ↔ buckets[i]); `error` counts events whose type is in ERROR_TYPES.
  */
-export function getSeriesSince(after, { bucketMs = 3_600_000, by = 'container' } = {}) {
-  const events = readEvents({ after });
+export async function getSeriesSince(after, { bucketMs = 3_600_000, by = 'container' } = {}) {
+  const events = await readEvents({ after });
   const now = Date.now();
 
   // Epoch-aligned bucket range spanning the whole window. Filling every bucket

@@ -21,6 +21,11 @@ import { classifyPane, stripAnsi } from './agentState.js';
 // logDirective (below) is the single point every confirmed send flows through.
 import { appendEvent } from './activity.js';
 
+// fs.promises alias — readDirectives is async (WARDEN-828) so serving GET
+// /api/directives does not block the single-threaded event loop on a synchronous
+// readFileSync of the append-only directives.md log.
+const fsp = fs.promises;
+
 const LOCAL = '(local)';
 
 const DIRECTIVES_LOG = path.join(os.homedir(), '.yatfa-warden', 'directives.md');
@@ -134,9 +139,19 @@ export function logDirective(chat, text) {
 //
 // `agent`/`host` filter by container/host (the ActivityTimeline agent/host
 // filters use the same fields); `limit` caps the count.
-export function readDirectives({ agent, host, limit } = {}) {
-  if (!fs.existsSync(DIRECTIVES_LOG)) return [];
-  const content = fs.readFileSync(DIRECTIVES_LOG, 'utf8');
+//
+// Async (WARDEN-828): the log read uses fs.promises so serving GET /api/directives
+// yields the event loop during disk I/O (a missing file rejects with ENOENT → [],
+// matching the prior existsSync guard; anything else rethrows) instead of blocking
+// /api/config behind a synchronous readFileSync of the append-only log.
+export async function readDirectives({ agent, host, limit } = {}) {
+  let content;
+  try {
+    content = await fsp.readFile(DIRECTIVES_LOG, 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT') return []; // missing file → empty (matches existsSync guard)
+    throw e;
+  }
   if (!content.trim()) return [];
 
   // Header authored by logDirective: `## <ISO ts> → <container>@<host> (<role>)`.
