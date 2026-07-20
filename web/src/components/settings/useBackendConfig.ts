@@ -15,9 +15,9 @@
 //
 // The logic is relocated verbatim from SettingsPage; no useState/effect/rule is
 // altered, only moved.
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { toast } from 'sonner';
-import { putJson } from '@/lib/api';
+import { putJson, fetchJson } from '@/lib/api';
 import { type TelemetryTestVerdict } from '@/lib/telemetry/testConnection';
 import {
   getTelemetryRuntimeStatus,
@@ -83,6 +83,16 @@ export function useBackendConfig({ onSaved }: { onSaved: () => void }) {
   const [availableHosts, setAvailableHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  // WARDEN-828 — a bounded error state for the GET /api/config load. The prior
+  // load path coupled config + hosts in a bare Promise.all with no timeout, so a
+  // transiently-slow backend spun `loading` forever. Now config is fetched with a
+  // bounded timeout + retry (fetchJson); if it still fails, `loading` clears and
+  // `loadError` is set, so the page shows a Retry button instead of an infinite
+  // spinner. `loadToken` re-fires the effect via `reload()` (Retry) without
+  // unmounting. A hosts failure does NOT set this — see the load effect.
+  const [loadError, setLoadError] = useState<{ message: string } | null>(null);
+  const [loadToken, setLoadToken] = useState(0);
+  const reload = useCallback(() => setLoadToken((t) => t + 1), []);
 
   // Observer auth token — write-only (WARDEN-350). GET /api/config returns only
   // a masked indicator (authTokenSet + optional last-4); there is no cleartext
@@ -150,97 +160,120 @@ export function useBackendConfig({ onSaved }: { onSaved: () => void }) {
     };
   }, []);
 
-  // Load current config and available hosts when the page mounts.
+  // Load current config and available hosts when the page mounts (and on Retry).
+  //
+  // WARDEN-828: config and hosts are DECOUPLED. /api/config gates the whole
+  // render (every section reads it), so it is fetched with a bounded timeout +
+  // retry (fetchJson) and a failure surfaces a clear Retry state rather than
+  // spinning forever. /api/ssh-hosts only feeds the host picker, so it is fetched
+  // independently — a stall or failure there degrades to "no discovered hosts"
+  // plus a toast and MUST NOT block config from rendering. The two promises run
+  // concurrently but settle independently; config never waits on hosts.
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    Promise.all([
-      fetch('/api/config').then((r) => r.json()),
-      fetch('/api/ssh-hosts').then((r) => r.json()),
-    ])
-      .then(([configData, hostsData]) => {
-        if (cancelled) return;
-        setConfig({
-          hosts: configData.hosts || [],
-          pollIntervalMs: configData.pollIntervalMs || 1500,
-          tmuxSession: configData.tmuxSession || 'agent',
-          connectTimeout: configData.connectTimeout || 10,
-          observerConfirmMode: ['always', 'auto-safe'].includes(configData.observerConfirmMode)
-            ? configData.observerConfirmMode
-            : 'always',
-          observerAutoStart: configData.observerAutoStart || false,
-          observerSessionTimeout: configData.observerSessionTimeout ?? 30,
-          llm: {
-            model: configData.llm?.model ?? '',
-            baseUrl: configData.llm?.baseUrl ?? '',
-            maxTokens: typeof configData.llm?.maxTokens === 'number' ? configData.llm.maxTokens : null,
-          },
-          healthWarningThresholdMin: configData.healthWarningThresholdMin ?? 5,
-          healthCriticalThresholdMin: configData.healthCriticalThresholdMin ?? 30,
-          tokenBudgetEnabled: configData.tokenBudgetEnabled ?? false,
-          tokenBudgetThresholdTokens:
-            typeof configData.tokenBudgetThresholdTokens === 'number'
-              ? configData.tokenBudgetThresholdTokens
-              : 2_000_000,
-          tokenBudgetWindowHours:
-            typeof configData.tokenBudgetWindowHours === 'number'
-              ? configData.tokenBudgetWindowHours
-              : 24,
-          tokenBudgetPerSessionThresholdTokens:
-            typeof configData.tokenBudgetPerSessionThresholdTokens === 'number'
-              ? configData.tokenBudgetPerSessionThresholdTokens
-              : 1_000_000,
-          companionTransportEnabled: configData.companionTransportEnabled ?? false,
-          companionTransportOverridden: configData.companionTransportOverridden ?? false,
-          confirmDestructiveActions: configData.confirmDestructiveActions ?? true,
-          notifyChatOps: configData.notifyChatOps ?? true,
-          notifyErrors: configData.notifyErrors ?? true,
-          notifySuccess: configData.notifySuccess ?? true,
-          notifyObserver: configData.notifyObserver ?? true,
-          // Display customization
-          showHostTags: configData.showHostTags ?? true,
-          showTypeBadges: configData.showTypeBadges ?? true,
-          showStatusIndicators: configData.showStatusIndicators ?? true,
-          showProjectBadges: configData.showProjectBadges ?? false,
-          hideOfflineHosts: configData.hideOfflineHosts ?? false,
-          // Telemetry consent (WARDEN-457) — defensive ?? false so an older
-          // backend that does not return the fields stays safely OFF.
-          telemetryBaseEnabled: configData.telemetryBaseEnabled ?? false,
-          telemetryExtendedEnabled: configData.telemetryExtendedEnabled ?? false,
-          // Defensive ?? '' so an older backend that does not return the field
-          // stays safely unconfigured (empty = sends nothing).
-          telemetryEndpoint: configData.telemetryEndpoint ?? '',
-          // Webhook push channel (WARDEN-555). Defensive fallbacks so an older
-          // backend without these fields stays safely OFF / unconfigured.
-          webhookUrl: configData.webhookUrl ?? '',
-          webhookEnabled: configData.webhookEnabled ?? false,
-          webhookAlertAttention: configData.webhookAlertAttention ?? true,
-          webhookAlertBudget: configData.webhookAlertBudget ?? true,
-          webhookAlertDone: configData.webhookAlertDone ?? true,
-          // WARDEN-540: patterns are sanitized on the PUT boundary, so the GET
-          // response is already well-formed. Defensive ?? [] keeps an older backend
-          // (no watchPatterns field) safely empty → no alerts.
-          watchPatterns: Array.isArray(configData.watchPatterns) ? configData.watchPatterns : [],
+    setLoadError(null);
+
+    // Primary — gates the render. Bounded timeout + retry → ok, or a retry state.
+    // Typed as `any` to mirror the prior `fetch().then(r => r.json())` semantics:
+    // the response is a loosely-shaped config blob defensively normalized below.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    fetchJson<any>('/api/config').then((result) => {
+      if (cancelled) return;
+      if (!result.ok) {
+        setLoadError({
+          message: result.error || 'Failed to load configuration. The backend may be busy or unreachable.',
         });
-        setAvailableHosts(hostsData.hosts || []);
-        setObserverAuthTokenSet(Boolean(configData.llm?.authTokenSet));
-        setObserverAuthTokenTail(configData.llm?.authTokenTail ?? null);
-        setWebhookSecretSet(Boolean(configData.webhookSecretSet));
-        setWebhookSecretTail(configData.webhookSecretTail ?? null);
-        setTelemetryAuthTokenSet(Boolean(configData.telemetryAuthTokenSet));
-        setTelemetryAuthTokenTail(configData.telemetryAuthTokenTail ?? null);
-      })
-      .catch((err) => {
-        console.error('Failed to load config:', err);
-        toast.error('Failed to load configuration');
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
+        setLoading(false);
+        return;
+      }
+      const configData = result.data ?? {};
+      setConfig({
+        hosts: configData.hosts || [],
+        pollIntervalMs: configData.pollIntervalMs || 1500,
+        tmuxSession: configData.tmuxSession || 'agent',
+        connectTimeout: configData.connectTimeout || 10,
+        observerConfirmMode: ['always', 'auto-safe'].includes(configData.observerConfirmMode)
+          ? configData.observerConfirmMode
+          : 'always',
+        observerAutoStart: configData.observerAutoStart || false,
+        observerSessionTimeout: configData.observerSessionTimeout ?? 30,
+        llm: {
+          model: configData.llm?.model ?? '',
+          baseUrl: configData.llm?.baseUrl ?? '',
+          maxTokens: typeof configData.llm?.maxTokens === 'number' ? configData.llm.maxTokens : null,
+        },
+        healthWarningThresholdMin: configData.healthWarningThresholdMin ?? 5,
+        healthCriticalThresholdMin: configData.healthCriticalThresholdMin ?? 30,
+        tokenBudgetEnabled: configData.tokenBudgetEnabled ?? false,
+        tokenBudgetThresholdTokens:
+          typeof configData.tokenBudgetThresholdTokens === 'number'
+            ? configData.tokenBudgetThresholdTokens
+            : 2_000_000,
+        tokenBudgetWindowHours:
+          typeof configData.tokenBudgetWindowHours === 'number'
+            ? configData.tokenBudgetWindowHours
+            : 24,
+        tokenBudgetPerSessionThresholdTokens:
+          typeof configData.tokenBudgetPerSessionThresholdTokens === 'number'
+            ? configData.tokenBudgetPerSessionThresholdTokens
+            : 1_000_000,
+        companionTransportEnabled: configData.companionTransportEnabled ?? false,
+        companionTransportOverridden: configData.companionTransportOverridden ?? false,
+        confirmDestructiveActions: configData.confirmDestructiveActions ?? true,
+        notifyChatOps: configData.notifyChatOps ?? true,
+        notifyErrors: configData.notifyErrors ?? true,
+        notifySuccess: configData.notifySuccess ?? true,
+        notifyObserver: configData.notifyObserver ?? true,
+        // Display customization
+        showHostTags: configData.showHostTags ?? true,
+        showTypeBadges: configData.showTypeBadges ?? true,
+        showStatusIndicators: configData.showStatusIndicators ?? true,
+        showProjectBadges: configData.showProjectBadges ?? false,
+        hideOfflineHosts: configData.hideOfflineHosts ?? false,
+        // Telemetry consent (WARDEN-457) — defensive ?? false so an older
+        // backend that does not return the fields stays safely OFF.
+        telemetryBaseEnabled: configData.telemetryBaseEnabled ?? false,
+        telemetryExtendedEnabled: configData.telemetryExtendedEnabled ?? false,
+        // Defensive ?? '' so an older backend that does not return the field
+        // stays safely unconfigured (empty = sends nothing).
+        telemetryEndpoint: configData.telemetryEndpoint ?? '',
+        // Webhook push channel (WARDEN-555). Defensive fallbacks so an older
+        // backend without these fields stays safely OFF / unconfigured.
+        webhookUrl: configData.webhookUrl ?? '',
+        webhookEnabled: configData.webhookEnabled ?? false,
+        webhookAlertAttention: configData.webhookAlertAttention ?? true,
+        webhookAlertBudget: configData.webhookAlertBudget ?? true,
+        webhookAlertDone: configData.webhookAlertDone ?? true,
+        // WARDEN-540: patterns are sanitized on the PUT boundary, so the GET
+        // response is already well-formed. Defensive ?? [] keeps an older backend
+        // (no watchPatterns field) safely empty → no alerts.
+        watchPatterns: Array.isArray(configData.watchPatterns) ? configData.watchPatterns : [],
       });
+      setObserverAuthTokenSet(Boolean(configData.llm?.authTokenSet));
+      setObserverAuthTokenTail(configData.llm?.authTokenTail ?? null);
+      setWebhookSecretSet(Boolean(configData.webhookSecretSet));
+      setWebhookSecretTail(configData.webhookSecretTail ?? null);
+      setTelemetryAuthTokenSet(Boolean(configData.telemetryAuthTokenSet));
+      setTelemetryAuthTokenTail(configData.telemetryAuthTokenTail ?? null);
+      setLoading(false);
+    });
+
+    // Secondary — host picker only. Failure degrades to no discovered hosts + a
+    // toast; it never sets loadError and never blocks the config render above.
+    fetchJson<{ hosts?: string[] }>('/api/ssh-hosts').then((result) => {
+      if (cancelled) return;
+      if (result.ok) {
+        setAvailableHosts(result.data?.hosts || []);
+      } else {
+        toast.error('Could not load discovered SSH hosts — host picker will show only configured hosts.');
+      }
+    });
+
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [loadToken]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -378,6 +411,8 @@ export function useBackendConfig({ onSaved }: { onSaved: () => void }) {
     setConfig,
     availableHosts,
     loading,
+    loadError,
+    reload,
     saving,
     handleSave,
     // Observer write-only auth token.

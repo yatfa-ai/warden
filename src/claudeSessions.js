@@ -25,6 +25,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { run } from './ssh.js';
 
+// fs.promises alias — the local session enumeration/transcript reads are async
+// (WARDEN-828) so the single-threaded server answers /api/config mid-sweep
+// instead of blocking behind synchronous full-transcript readFileSync calls.
+const fsp = fs.promises;
+
 // ---- Claude Code session list (for the per-host "resume" list) ----
 // Exported (not just module-local) because server.js's session-search helpers
 // (which stay there — see NOTE above) reuse it to derive cwd/summary.
@@ -122,17 +127,21 @@ export function snippetFromLine(line, needleLower, maxLen = 180) {
 // Enumerate ~/.claude/projects/*/*.jsonl, most-recent-first. Shared by the
 // top-40 list (localClaudeSessions) and full-content search so they walk the
 // same archive layout. Returns [] if the projects dir is absent.
-function collectLocalSessionFiles() {
+//
+// Async (WARDEN-828): the directory walk uses fs.promises so the readdir/stat
+// syscalls yield the event loop instead of blocking it. This is the lighter
+// half of the work — the heavy I/O is the transcript reads in localClaudeSessions.
+async function collectLocalSessionFiles() {
   const dir = path.join(os.homedir(), '.claude', 'projects');
   const files = [];
   try {
-    for (const proj of fs.readdirSync(dir)) {
+    for (const proj of await fsp.readdir(dir)) {
       const pdir = path.join(dir, proj);
-      try { if (!fs.statSync(pdir).isDirectory()) continue; } catch { continue; }
-      for (const f of fs.readdirSync(pdir)) {
+      try { if (!(await fsp.stat(pdir)).isDirectory()) continue; } catch { continue; }
+      for (const f of await fsp.readdir(pdir)) {
         if (!f.endsWith('.jsonl')) continue;
         const fp = path.join(pdir, f);
-        try { files.push({ id: f.slice(0, -6), file: fp, mtime: fs.statSync(fp).mtimeMs }); } catch { /* noop */ }
+        try { files.push({ id: f.slice(0, -6), file: fp, mtime: (await fsp.stat(fp)).mtimeMs }); } catch { /* noop */ }
       }
     }
   } catch { return []; }
@@ -143,24 +152,36 @@ function collectLocalSessionFiles() {
 // `limit` bounds the returned list (most-recent first). Defaults to 40 to keep
 // `/api/claude-sessions` (the single-host resume list) unchanged; the unified
 // "All Sessions" endpoint passes a larger window for pagination (WARDEN-176).
-export function localClaudeSessions(limit = 40) {
-  return collectLocalSessionFiles().slice(0, limit).map((f) => {
+//
+// Async (WARDEN-828): transcripts are read SEQUENTIALLY with fs.promises.readFile
+// rather than readFileSync. A synchronous full-file read of up to `limit`
+// transcripts (the budget sweep passes a large window) blocks the single-threaded
+// server's event loop for the whole duration — queueing /api/config and every
+// other HTTP response behind it, which surfaced as the Settings forever-spinner.
+// Each `await readFile` yields the event loop, so other requests are answered in
+// the I/O gaps. Reads stay sequential (not Promise.all) deliberately: peak memory
+// remains bounded by the LARGEST single transcript — one body in memory at a time
+// — matching the prior profile, rather than spiking to N concurrent bodies for the
+// 1000-file pagination/budget window.
+export async function localClaudeSessions(limit = 40) {
+  const files = (await collectLocalSessionFiles()).slice(0, limit);
+  const out = [];
+  for (const f of files) {
     let cwd = '';
     let summary = '';
     let tokenUsage = null;
     try {
       // Full-file read: token usage lives on EVERY assistant turn across the
       // whole transcript, so the 8KB head window that sufficed for cwd/summary
-      // can't see it. Reads are sequential (one file in memory at a time), so
-      // peak memory stays bounded by the largest single transcript — not the
-      // whole archive. cwd/summary + tokens are derived from the SAME body so
+      // can't see it. cwd/summary + tokens are derived from the SAME body so
       // the file is read once. (WARDEN-367.)
-      const body = fs.readFileSync(f.file, 'utf8');
+      const body = await fsp.readFile(f.file, 'utf8');
       ({ cwd, summary } = parseJsonlHead(body));
       tokenUsage = parseJsonlTokenUsage(body);
     } catch { /* noop */ }
-    return { id: f.id, cwd, summary, mtime: f.mtime, tokenUsage };
-  }).filter((s) => s.cwd);
+    out.push({ id: f.id, cwd, summary, mtime: f.mtime, tokenUsage });
+  }
+  return out.filter((s) => s.cwd);
 }
 // `limit` bounds the returned list (most-recent first). Defaults to 40 so
 // `/api/claude-sessions` is unchanged; the "All Sessions" endpoint passes a

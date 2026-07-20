@@ -80,16 +80,16 @@ describe('getSeriesSince — per-agent activity series aggregation', () => {
     return result.buckets.indexOf(b);
   };
 
-  it('returns { bucketMs, buckets, series } with the requested bucket size', () => {
-    const result = getSeriesSince(now - 5 * BUCKET, { bucketMs: BUCKET });
+  it('returns { bucketMs, buckets, series } with the requested bucket size', async () => {
+    const result = await getSeriesSince(now - 5 * BUCKET, { bucketMs: BUCKET });
     assert.strictEqual(result.bucketMs, BUCKET);
     assert.ok(Array.isArray(result.buckets));
     assert.ok(result.series && typeof result.series === 'object', 'series must be an object');
   });
 
-  it('produces an ascending, epoch-aligned bucket grid spanning the whole window', () => {
+  it('produces an ascending, epoch-aligned bucket grid spanning the whole window', async () => {
     const after = now - 5 * BUCKET;
-    const result = getSeriesSince(after, { bucketMs: BUCKET });
+    const result = await getSeriesSince(after, { bucketMs: BUCKET });
     const { buckets } = result;
     // Every bucket is epoch-aligned to the bucket size.
     assert.ok(buckets.every((b) => b % BUCKET === 0), 'buckets must be epoch-aligned');
@@ -103,8 +103,8 @@ describe('getSeriesSince — per-agent activity series aggregation', () => {
     assert.strictEqual(buckets.length, (buckets[buckets.length - 1] - first) / BUCKET + 1);
   });
 
-  it('groups events by container and sums per-bucket totals', () => {
-    const result = getSeriesSince(now - 5 * BUCKET, { bucketMs: BUCKET });
+  it('groups events by container and sums per-bucket totals', async () => {
+    const result = await getSeriesSince(now - 5 * BUCKET, { bucketMs: BUCKET });
     const c1 = result.series.c1;
     assert.ok(c1, 'c1 must have a series entry');
     assert.strictEqual(c1.total.length, result.buckets.length, 'total must parallel buckets');
@@ -116,8 +116,8 @@ describe('getSeriesSince — per-agent activity series aggregation', () => {
     assert.strictEqual(sum, 5, 'c1 total across the window (6h-ago event excluded)');
   });
 
-  it('counts error + agent_session_down toward error, but NOT agent_ended', () => {
-    const result = getSeriesSince(now - 5 * BUCKET, { bucketMs: BUCKET });
+  it('counts error + agent_session_down toward error, but NOT agent_ended', async () => {
+    const result = await getSeriesSince(now - 5 * BUCKET, { bucketMs: BUCKET });
     const c1 = result.series.c1;
     const i30 = idxFor(result, now - 30 * 60 * 1000);
     const i90 = idxFor(result, now - 90 * 60 * 1000);
@@ -127,15 +127,15 @@ describe('getSeriesSince — per-agent activity series aggregation', () => {
     assert.strictEqual(c1.error.reduce((a, b) => a + b, 0), 2, 'only the two failure types count');
   });
 
-  it('drops host-level / manual events that have no container (graceful sparsity)', () => {
-    const result = getSeriesSince(now - 5 * BUCKET, { bucketMs: BUCKET });
+  it('drops host-level / manual events that have no container (graceful sparsity)', async () => {
+    const result = await getSeriesSince(now - 5 * BUCKET, { bucketMs: BUCKET });
     const keys = Object.keys(result.series);
     assert.deepStrictEqual(keys.sort(), ['c1', 'c2'], 'only container-bearing chats get a series');
     assert.ok(!('' in result.series) && !('null' in result.series) && !('undefined' in result.series));
   });
 
-  it('keeps each container entry aligned to buckets (parallel arrays)', () => {
-    const result = getSeriesSince(now - 5 * BUCKET, { bucketMs: BUCKET });
+  it('keeps each container entry aligned to buckets (parallel arrays)', async () => {
+    const result = await getSeriesSince(now - 5 * BUCKET, { bucketMs: BUCKET });
     const c2 = result.series.c2;
     assert.ok(c2);
     assert.strictEqual(c2.total.length, result.buckets.length);
@@ -143,10 +143,10 @@ describe('getSeriesSince — per-agent activity series aggregation', () => {
     assert.strictEqual(c2.total.reduce((a, b) => a + b, 0), 1);
   });
 
-  it('honours a custom bucket size', () => {
+  it('honours a custom bucket size', async () => {
     // 30-min buckets → the 30-min-ago and 90-min-ago events land in different buckets.
     const half = 30 * 60 * 1000;
-    const result = getSeriesSince(now - 5 * BUCKET, { bucketMs: half });
+    const result = await getSeriesSince(now - 5 * BUCKET, { bucketMs: half });
     assert.strictEqual(result.bucketMs, half);
     assert.ok(result.buckets.every((b) => b % half === 0));
     const c1 = result.series.c1;
@@ -154,11 +154,11 @@ describe('getSeriesSince — per-agent activity series aggregation', () => {
     assert.strictEqual(c1.total.reduce((a, b) => a + b, 0), 5);
   });
 
-  it('renders an idle grid (all-zero buckets) when the window has no events', () => {
+  it('renders an idle grid (all-zero buckets) when the window has no events', async () => {
     // Fresh log: no events at all in the window. buckets still spans the window;
     // series is empty (a zero-event key is never created).
     fs.writeFileSync(activityPath, '');
-    const result = getSeriesSince(now - 3 * BUCKET, { bucketMs: BUCKET });
+    const result = await getSeriesSince(now - 3 * BUCKET, { bucketMs: BUCKET });
     assert.ok(result.buckets.length > 0, 'buckets still span the window');
     assert.deepStrictEqual(Object.keys(result.series), [], 'no events → no series entries');
   });

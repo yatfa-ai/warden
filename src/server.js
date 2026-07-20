@@ -499,17 +499,17 @@ app.patch('/api/sessions/:id', (req, res) => {
 app.delete('/api/sessions/:id', (req, res) => { deleteSession(String(req.params.id)); res.json({ ok: true }); });
 
 // Activity timeline endpoints
-app.get('/api/activity', (req, res) => {
+app.get('/api/activity', async (req, res) => {
   const after = req.query.after ? new Date(req.query.after).getTime() : undefined;
   const before = req.query.before ? new Date(req.query.before).getTime() : undefined;
   const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : undefined;
-  const events = readEvents({ after, before, limit });
+  const events = await readEvents({ after, before, limit });
   res.json({ events });
 });
 
-app.get('/api/activity/stats', (req, res) => {
+app.get('/api/activity/stats', async (req, res) => {
   const after = req.query.after ? new Date(req.query.after).getTime() : Date.now() - (24 * 60 * 60 * 1000); // Default: last 24 hours
-  const stats = getStatsSince(after);
+  const stats = await getStatsSince(after);
   res.json(stats);
 });
 
@@ -517,11 +517,11 @@ app.get('/api/activity/stats', (req, res) => {
 // the stats endpoint's default window (last 24h) and adds an hourly bucket grid a
 // sparkline can join by `container`. Deliberately a separate endpoint — the
 // dashboard fetches it on a slow ~60s cadence, never on the 10s /api/health poll.
-app.get('/api/activity/series', (req, res) => {
+app.get('/api/activity/series', async (req, res) => {
   const after = req.query.after ? new Date(req.query.after).getTime() : Date.now() - (24 * 60 * 60 * 1000); // Default: last 24 hours
   const rawBucket = req.query.bucket ? parseInt(String(req.query.bucket), 10) : 3_600_000; // default 1h
   const bucket = Number.isFinite(rawBucket) && rawBucket > 0 ? rawBucket : 3_600_000;
-  res.json(getSeriesSince(after, { bucketMs: bucket }));
+  res.json(await getSeriesSince(after, { bucketMs: bucket }));
 });
 
 app.get('/api/ssh-hosts', (_req, res) => res.json({ hosts: allSshHosts(), configured: cfg.hosts }));
@@ -531,11 +531,11 @@ app.get('/api/ssh-hosts', (_req, res) => res.json({ hosts: allSshHosts(), config
 // graceful-empty contract: a missing/empty file yields { directives: [] } and
 // never a 500. `agent`/`limit` are optional filters (agent = container, the
 // same field ActivityTimeline's agent filter uses). Newest-first.
-app.get('/api/directives', (req, res) => {
+app.get('/api/directives', async (req, res) => {
   try {
     const agent = req.query.agent ? String(req.query.agent) : undefined;
     const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : undefined;
-    const directives = readDirectives({ agent, limit });
+    const directives = await readDirectives({ agent, limit });
     res.json({ directives });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1033,7 +1033,7 @@ async function remoteSearchClaudeSessions(host, q) {
 
 app.get('/api/claude-sessions', async (req, res) => {
   const host = String(req.query.host || LOCAL);
-  const sessions = host === LOCAL ? localClaudeSessions() : await remoteClaudeSessions(host);
+  const sessions = host === LOCAL ? await localClaudeSessions() : await remoteClaudeSessions(host);
   const claudeAvailable = !!(await detectClaude(host));
   res.json({ sessions, claudeAvailable });
 });
@@ -1058,7 +1058,7 @@ app.get('/api/claude-sessions-all', async (req, res) => {
   const perHost = Math.min(ALL_SESSIONS_MAX_PER_HOST, offset + limit + 1);
   const hosts = [LOCAL, ...cfg.hosts];
   const results = await Promise.allSettled(hosts.map(async (host) => {
-    const sessions = host === LOCAL ? localClaudeSessions(perHost) : await remoteClaudeSessions(host, perHost);
+    const sessions = host === LOCAL ? await localClaudeSessions(perHost) : await remoteClaudeSessions(host, perHost);
     return { host, sessions };
   }));
   const buckets = results
@@ -2286,7 +2286,7 @@ async function tickBudget(deps = {}) {
     // identity, so the same rows feed computeBudgetState directly.
     const results = await Promise.allSettled(hosts.map(async (host) => {
       const sessions = host === LOCAL
-        ? localClaudeSessions(BUDGET_PER_HOST_LIMIT)
+        ? await localClaudeSessions(BUDGET_PER_HOST_LIMIT)
         : await remoteClaudeSessions(host, BUDGET_PER_HOST_LIMIT);
       return sessions.map((s) => ({ ...s, host }));
     }));

@@ -8,7 +8,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { type HostLabels } from '@/lib/chatDisplay';
 
@@ -100,7 +100,7 @@ export function SettingsPage({
   // write-only secrets, the live test/runtime status. onSaved fires after a
   // successful PUT (App's config refresh + close) — matching the prior behavior.
   const {
-    config, setConfig, availableHosts, loading, saving, handleSave,
+    config, setConfig, availableHosts, loading, loadError, reload, saving, handleSave,
     observerAuthTokenSet, observerAuthTokenTail, observerAuthTokenInput, setObserverAuthTokenInput,
     webhookSecretSet, webhookSecretTail, webhookSecretInput, setWebhookSecretInput, testingWebhook, sendTestAlert,
     telemetryAuthTokenSet, telemetryAuthTokenTail, telemetryAuthTokenInput, setTelemetryAuthTokenInput,
@@ -171,7 +171,18 @@ export function SettingsPage({
               local draft state survives a section switch. */}
           <div className="flex-1 min-h-0 overflow-y-auto">
             <div className="flex max-w-4xl flex-col gap-6 px-4 py-6 md:px-6">
-              {loading ? (
+              {loadError ? (
+                // WARDEN-828 — bounded load failure. The config GET exhausted its
+                // timeout + retry, so we surface a clear Retry instead of an
+                // infinite spinner. Save stays disabled (see footer) so a stale
+                // default config can never clobber the real one on a failed load.
+                <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
+                  <p className="max-w-sm text-sm text-muted-foreground">{loadError.message}</p>
+                  <Button variant="outline" onClick={reload} disabled={loading}>
+                    <RefreshCw className="h-4 w-4" /> Try again
+                  </Button>
+                </div>
+              ) : loading ? (
                 <div className="py-8 text-center text-sm text-muted-foreground">Loading configuration…</div>
               ) : (
                 <>
@@ -239,7 +250,7 @@ export function SettingsPage({
         <Button variant="outline" onClick={onClose} disabled={saving}>
           Cancel
         </Button>
-        <Button onClick={handleSave} disabled={saving || loading}>
+        <Button onClick={handleSave} disabled={saving || loading || !!loadError}>
           {saving ? 'Saving…' : 'Save'}
         </Button>
       </footer>
