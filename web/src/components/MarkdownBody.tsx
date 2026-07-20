@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { Button } from '@/components/ui/button';
 import { CheckIcon, CopyIcon } from 'lucide-react';
 import { resolveDocRelative } from '@/lib/docLinks';
+import { copyText } from '@/lib/clipboard';
 
 // A fenced code block with a language label + copy button. The raw text and
 // language are pulled from the `<code>` child react-markdown renders inside the
@@ -11,13 +12,9 @@ import { resolveDocRelative } from '@/lib/docLinks';
 function CodeBlock({ language, children }: { language?: string; children: string }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(children);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // Clipboard can be unavailable (non-secure context); fail silently.
-    }
+    await copyText(children);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
   };
   return (
     <div className="overflow-hidden rounded-lg border bg-muted/40">

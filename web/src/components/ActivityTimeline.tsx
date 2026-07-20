@@ -7,13 +7,13 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useLiveTimeline } from '@/lib/useLiveTimeline';
 import { formatUpdatedAgo } from '@/lib/timelinePacing';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
+import { copyText } from '@/lib/clipboard';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger, ContextMenuLabel } from '@/components/ui/context-menu';
 import { toast } from 'sonner';
 
 // Build a readable one-line summary of an activity event from its populated
 // fields. Always non-empty — timestamp + type are always present — so "Copy
-// details" always writes something to the clipboard. Kept local to this surface
-// (no shared util extraction) per the WARDEN-392 scope guard.
+// details" always writes something to the clipboard.
 function buildEventSummary(event: ActivityEvent): string {
   const parts: string[] = [`[${event.timestamp}] ${event.type.replace(/_/g, ' ')}`];
   if (event.role) parts.push(`role=${event.role}`);
@@ -28,25 +28,11 @@ function buildEventSummary(event: ActivityEvent): string {
   return parts.join(' | ');
 }
 
-// Copy text to the clipboard with an Electron-safe fallback. navigator.clipboard
-// can fail silently in Electron (PaneTile.tsx:50-65), so on failure we drop to
-// the document.execCommand('copy') textarea routine — the same path the xterm
-// copy handlers use. Local to this surface on purpose: ObserverPanel and PaneTile
-// each keep their own copy routine, and extracting a shared util is out of scope
-// for this slice (WARDEN-392 / WARDEN-52).
+// Copy text to the clipboard, then always toast success. The shared
+// `copyText` helper supplies the Electron-safe textarea + execCommand fallback
+// (navigator.clipboard can fail silently in a non-secure context).
 async function copyToClipboard(text: string) {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    try { document.execCommand('copy'); } catch {}
-    document.body.removeChild(ta);
-  }
+  await copyText(text);
   toast.success('Copied');
 }
 
