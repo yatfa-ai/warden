@@ -52,13 +52,15 @@ export interface FleetGitStatusState extends FleetGitStatusResult {
   errorCount: number;
   /** # of fanned agents blocked mid-merge/rebase with unmerged paths (the fleet "N conflict" count, WARDEN-796). */
   conflictCount: number;
+  /** # of fanned agents running on stale, behind-upstream code (the fleet "N behind" count, WARDEN-815). */
+  behindCount: number;
   /** Pull a fresh view past mount (no auto-poll). */
   refresh: () => void;
   /** True only during a fetch whose result has not yet arrived (mount or manual ↻). */
   loading: boolean;
 }
 
-const EMPTY_RESULT: FleetGitStatusResult = { statusByKey: {}, dirtyCount: 0, errorCount: 0, conflictCount: 0 };
+const EMPTY_RESULT: FleetGitStatusResult = { statusByKey: {}, dirtyCount: 0, errorCount: 0, conflictCount: 0, behindCount: 0 };
 
 /**
  * Fan /api/git-status across the eligible fleet and lift the result for
@@ -160,6 +162,14 @@ export function useFleetGitStatus(agents: readonly Chat[]): FleetGitStatusState 
               // is not a conflict.
               (f: { conflict?: boolean } | null) => f?.conflict === true,
             ).length,
+            // behind (WARDEN-815): the # of commits this agent's HEAD is behind its
+            // upstream — the staleness axis. A direct pass-through of /api/git-status's
+            // top-level `behind` (parseAheadBehind → gitRoutes.js:646), NOT derived like
+            // conflictCount. The `typeof === 'number'` coerce keeps null as null (typeof
+            // null === 'object') so a non-git / no-branch / no-upstream cwd reads null
+            // — the same null-is-quiet discipline `clean` follows. The fleet-wide count
+            // of stale AGENTS is derived in buildFleetGitStatus from `behind > 0`.
+            behind: typeof j.behind === 'number' ? j.behind : null,
           };
           return { ok: true as const, key, status };
         }),

@@ -1532,16 +1532,21 @@ export function bindFleetRowOpenFile(
 // module follows.
 
 // The minimal /api/git-status slice the Fleet Health UI reads: `clean` (the dirty
-// signal; clean === false ⇒ uncommitted WIP) + `diffstat` (the ±N magnitude). Both
-// are top-level fields /api/git-status ALREADY serves (clean parsed from
-// `git status --porcelain` at gitRoutes.js; diffstat parsed from
-// `git diff HEAD --shortstat`), so this is a pure pass-through of two fields — no new
-// fetch, no backend change. clean is null for a non-git / no-branch cwd (the server
-// gates `clean: branch ? clean : null`); diffstat is null there too AND for a clean
-// tree / an all-untracked WIP. Defined INLINE (the SAME shape /api/git-status serves)
-// — deliberately NOT imported from the React-layer GitStateStatus type — so this pure
-// module stays decoupled and is unit-testable with plain objects, the same
-// decoupling GitStateChat / GitStateStatus / FleetSearchChat rely on.
+// signal; clean === false ⇒ uncommitted WIP) + `diffstat` (the ±N magnitude) +
+// `behind` (the ↓N staleness magnitude, WARDEN-815). All three are top-level fields
+// /api/git-status ALREADY serves (clean parsed from `git status --porcelain` at
+// gitRoutes.js; diffstat parsed from `git diff HEAD --shortstat`; behind parsed from
+// `git rev-list --left-right --count @{u}...HEAD` by parseAheadBehind, returned at
+// gitRoutes.js:646 as `behind: branch ? behind : null`), so this is a pure
+// pass-through — no new fetch, no backend change. clean is null for a non-git /
+// no-branch cwd (the server gates `clean: branch ? clean : null`); diffstat is null
+// there too AND for a clean tree / an all-untracked WIP; behind is null there too AND
+// for a no-upstream cwd (parseAheadBehind returns `{ behind: null }`). Defined INLINE
+// (the SAME shape /api/git-status serves) — deliberately NOT imported from the
+// React-layer GitStateStatus type — so this pure module stays decoupled and is
+// unit-testable with plain objects, the same decoupling GitStateChat / GitStateStatus
+// / FleetSearchChat rely on. (conflictCount below is the lone DERIVED field — counted
+// at the fetch seam from the porcelain `files[]`, not a direct pass-through.)
 export interface FleetGitStatusSlice {
   clean: boolean | null;
   diffstat: { files: number; insertions: number; deletions: number } | null;
@@ -1556,6 +1561,19 @@ export interface FleetGitStatusSlice {
   // PER-AGENT PATH count, NOT the fleet-wide count of conflict-blocked AGENTS (that is
   // FleetGitStatusResult.conflictCount below — the mirror of dirtyCount).
   conflictCount: number;
+  // # of commits THIS agent is behind its upstream (WARDEN-815) — the per-row
+  // staleness axis the dirty/conflict axes cannot speak to: an agent whose HEAD is
+  // OUT-OF-DATE relative to its upstream (a sibling pushed and this agent hasn't
+  // pulled). /api/git-status ALREADY serves `behind` (parseAheadBehind at
+  // gitStatus.js:403, shipped WARDEN-153, returned at gitRoutes.js:646 as
+  // `behind: branch ? behind : null`); this is the pure pass-through of that field —
+  // no new fetch, no backend change. null for a non-git / no-branch / no-upstream cwd
+  // (the server gates `behind: branch ? behind : null`, and parseAheadBehind returns
+  // `{ behind: null }` for no-upstream / malformed) — the SAME null-is-quiet discipline
+  // `clean` follows. NOTE this is the PER-AGENT behind count (drives the per-row ↓'s
+  // "N" magnitude); the fleet-wide count of stale-blocked AGENTS is
+  // FleetGitStatusResult.behindCount below (the mirror of dirtyCount/conflictCount).
+  behind: number | null;
 }
 
 // One agent's fan-out outcome. `ok: false` = that agent's /api/git-status fetch
@@ -1598,19 +1616,32 @@ export interface FleetGitStatusResult {
   // PER-AGENT path count lives on FleetGitStatusSlice.conflictCount above (drives the
   // per-row ⚑'s "N unmerged" magnitude); this fleet count drives the summary tally.
   conflictCount: number;
+  // # of fanned agents running on stale, behind-upstream code (status.behind > 0) —
+  // the fleet-wide "N behind" count surfaced in the Fleet Health summary bar
+  // (WARDEN-815). This counts stale AGENTS, NOT total behind-commits — the direct
+  // mirror of dirtyCount (agents with clean === false) and conflictCount (agents with
+  // conflictCount > 0): all three are agent-level tallies, never file/commit sums. An
+  // error / loading agent is NOT behind (counted in errorCount / absent), and a null
+  // behind (non-git / no-branch / no-upstream cwd) is neither, so a transiently-
+  // unreachable or non-git agent is never misread as stale. The PER-AGENT behind count
+  // lives on FleetGitStatusSlice.behind above (drives the per-row ↓'s "N" magnitude);
+  // this fleet count drives the summary tally.
+  behindCount: number;
 }
 
 /**
  * Turn N per-agent /api/git-status outcomes into the Fleet Health view: a per-agent
- * { clean, diffstat, conflictCount } map + a fleet-wide dirty count + a fleet-wide
- * conflict count + an honest error count. Every ok agent gets a map entry (clean OR
- * dirty — the React layer gates the per-row chip on clean === false, so a clean entry
- * is harmless + keeps the "fetched vs loading" distinction available); ok:false agents
- * are counted into errorCount WITHOUT blanking the ok agents' entries (the
- * Promise.allSettled fleet contract). dirtyCount counts ONLY ok agents whose
- * clean === false; conflictCount counts ONLY ok agents with conflictCount > 0 (the
- * agent-level mirror of dirtyCount — blocked AGENTS, not unmerged files). An error
- * agent is never dirty AND never a conflict.
+ * { clean, diffstat, conflictCount, behind } map + a fleet-wide dirty count + a
+ * fleet-wide conflict count + a fleet-wide behind count + an honest error count.
+ * Every ok agent gets a map entry (clean OR dirty — the React layer gates the per-row
+ * chip on clean === false, so a clean entry is harmless + keeps the "fetched vs
+ * loading" distinction available); ok:false agents are counted into errorCount
+ * WITHOUT blanking the ok agents' entries (the Promise.allSettled fleet contract).
+ * dirtyCount counts ONLY ok agents whose clean === false; conflictCount counts ONLY
+ * ok agents with conflictCount > 0 (the agent-level mirror of dirtyCount — blocked
+ * AGENTS, not unmerged files); behindCount counts ONLY ok agents with behind > 0 (the
+ * agent-level mirror of dirtyCount — stale AGENTS, not total behind-commits). An error
+ * agent is never dirty, never a conflict, AND never behind.
  *
  * Outcomes are processed in caller (chats) order, so the map + counts are
  * deterministic and tests assert deep equality — the convention the rest of this
@@ -1623,6 +1654,7 @@ export function buildFleetGitStatus(outcomes: FleetGitStatusOutcome[]): FleetGit
   let dirtyCount = 0;
   let errorCount = 0;
   let conflictCount = 0;
+  let behindCount = 0;
   for (const o of outcomes) {
     if (!o.ok) {
       errorCount += 1;
@@ -1636,8 +1668,17 @@ export function buildFleetGitStatus(outcomes: FleetGitStatusOutcome[]): FleetGit
     // increments BOTH (a mid-merge repo is dirty by definition); the two axes are
     // orthogonal counts over the same ok fleet.
     if (o.status.conflictCount > 0) conflictCount += 1;
+    // Mirror the conflictCount line: count stale AGENTS (those behind upstream), NOT
+    // total behind-commits — the agent-level fleet tally the summary bar renders as
+    // "N behind". `o.status.behind` is null for a non-git / no-branch / no-upstream
+    // cwd (the same null-is-quiet discipline `clean` follows), and the truthy guard
+    // keeps null/0 out so a fresh or non-git agent is never misread as stale. An agent
+    // both stale AND dirty/conflict increments ALL applicable axes (a behind agent is
+    // often clean too — clean upstream-synced work is still stale); the axes are
+    // orthogonal counts over the same ok fleet.
+    if (o.status.behind && o.status.behind > 0) behindCount += 1;
   }
-  return { statusByKey, dirtyCount, errorCount, conflictCount };
+  return { statusByKey, dirtyCount, errorCount, conflictCount, behindCount };
 }
 
 /**
