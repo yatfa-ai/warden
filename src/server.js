@@ -27,7 +27,7 @@ import { classifyProbe } from './sessionRecovery.js';
 import { Observer, readDirectives } from './observer.js';
 import { hasCredentials, resolveModel } from './llm.js';
 import { listSessions, createSession, renameSession, deleteSession } from './sessions.js';
-import { appendEvent, rotateEvents, readEvents, getStatsSince, getSeriesSince } from './activity.js';
+import { appendEvent, rotateEvents, readEvents, getStatsSince, getSeriesSince, getStateSeriesSince, NON_ACTIVITY_TYPES } from './activity.js';
 import { computeBudgetState, shouldFireBudgetAlert, resolveBudgetConfig, BUDGET_INTERVAL_MS } from './budget.js';
 import { buildSnapshot, diffLifecycles } from './lifecycle.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
@@ -322,6 +322,87 @@ app.get('/api/agent-states/fleet', async (req, res) => {
   }
 });
 
+// WARDEN-788 — Fleet state timeline: per-agent state-transition logging.
+//
+// Warden surfaces every agent's state as a POINT IN TIME (the /api/agent-states
+// snapshot + time-in-state stamp), never a SEQUENCE over time — so a human cannot
+// tell a one-off stall from a looping agent. pollAgentStates (below) now also
+// persists a `state_changed` event on every genuine transition into the SAME
+// rotated JSONL store the heatmap reads (no new persistence subsystem), and
+// getStateSeriesSince (src/activity.js) forward-fills those into the per-bucket
+// state series the Fleet state timeline renders.
+//
+// `lastLoggedState` is the module-level transition-diff baseline — keyed by agent
+// `key` (NOT per-poller), because an agent can shift between the 30s open∪watched
+// poll, the 90s hidden-fleet sweep, and the 60s webhook sweep via excludeKeys, and
+// a transition observed by one caller must NOT re-log when a sibling sees the same
+// state next tick. In-memory only (rides the existing store; no new persistence).
+let lastLoggedState = new Map(); // key → state (the transition-diff baseline)
+
+// A failed state-changed write must NEVER break the poll (a disk hiccough shouldn't
+// 500 /api/agent-states or sink the attention rollup). Mirrors appendLifecycleEvent's
+// try/catch discipline. Exported so a test can drive the real appendEvent write path.
+export function appendStateEvent(event) {
+  try { appendEvent(event); } catch { /* ignore single-event write failures */ }
+}
+
+/**
+ * Log a `state_changed` event when an agent's classified state genuinely
+ * transitions (`prev !== state`), updating the diff baseline. Returns true iff an
+ * event was appended. Mirrors the proven prev!==state dedup at
+ * useAttentionRollup.ts:550, INCLUDING the first-observation baseline: when `prev`
+ * is undefined (the agent's first classification this process — or the first poll
+ * after a warden restart), it logs `from: null` so a steady agent renders a FULL
+ * timeline row from its first observation, not a blank. (Restart re-baselines once
+ * per agent — honest data marking when observation began; the store is rotated.)
+ *
+ * Pure aside from `map` mutation + `appendFn` (both injected) so the dedup is
+ * unit-testable WITHOUT SSH / capture / the activity store: a test passes its own
+ * Map + recording appendFn and asserts exactly which transitions survive.
+ *
+ * @param {Map<string, string>} map   The diff-baseline map (module-level lastLoggedState in prod).
+ * @param {string} key               The agent key (stable across pollers).
+ * @param {string} state             The newly-classified state.
+ * @param {object} meta              Identity carried onto the event (id/host/container/role/…).
+ * @param {(e: object) => void} appendFn  The store writer (appendStateEvent in prod).
+ * @returns {boolean}
+ */
+export function logStateTransition(map, key, state, meta, appendFn) {
+  const prev = map.get(key);
+  if (prev === state) return false; // unchanged tick → NO event (the dedup)
+  map.set(key, state);
+  appendFn({
+    type: 'state_changed',
+    from: prev ?? null, // null marks the first-observation baseline segment start
+    to: state,
+    ...meta,
+  });
+  return true;
+}
+
+// Thin wrapper pollAgentStates calls per classified chat: skips manual/tmux chats
+// (no container — their high-churn flapping would write events the container-keyed
+// reader drops, mirroring the heatmap's case-1 scope) and threads the module map +
+// the try/catch-guarded writer onto logStateTransition. Exported for the test reset.
+function logAgentState(c, state) {
+  if (!c.container) return; // manual/tmux chats carry no timeline row (heatmap case 1)
+  logStateTransition(lastLoggedState, c.key, state, {
+    id: c.container || c.session,
+    host: c.host,
+    container: c.container ?? null,
+    role: c.role,
+    project: c.project,
+    name: c.name || c.key || (c.container || c.session),
+  }, appendStateEvent);
+}
+
+// Test seam: reset the module-level diff baseline so a test's poller-A-then-poller-B
+// assertions start from a clean map. node --test runs each file in its own process,
+// so this never leaks across files; within a file it isolates each case.
+export function __resetLastLoggedStateForTest() {
+  lastLoggedState = new Map();
+}
+
 // pollAgentStates is the /api/agent-states poll core: it reconciles the companion
 // pane-push subscriptions for the polled hosts, captures their pane content, and
 // classifies each. Exported (and deps-injected) so the WARDEN-413 success gate is
@@ -336,9 +417,27 @@ app.get('/api/agent-states/fleet', async (req, res) => {
 // first poll after a host enters the set still polls once (the push hasn't arrived
 // yet) — the graceful bootstrap. LOCAL + flag-off hosts are unchanged.
 // `deps` is a test seam (defaults to {} in production). (WARDEN-413)
+//
+// WARDEN-788: pollAgentStates is ONE of two call sites that persist `state_changed`
+// transitions into the activity log (via logStateTransition below) — the data
+// source for the Fleet state timeline. pollFleetStates delegates the companion-
+// eligible classification to THIS function (`pollAgentStates(...)` below), so the
+// 30s open∪watched poll AND the 90s hidden-fleet sweep both log here. tickAttention
+// (the 60s server-side webhook sweep) runs its OWN inline capture+classify (it
+// deliberately skips reconcilePaneSubscriptions so it can't fight the dashboard's
+// subscription), so it mirrors these two `logAgentState` calls at its inline site —
+// giving whole-fleet coverage from one shared dedup map + writer. The dedup map is
+// keyed by agent `key` (NOT per-poller) so a transition observed by one caller does
+// not re-log when a sibling caller sees the same state on its next tick.
 export async function pollAgentStates(chats, cfg = {}, deps = {}) {
   await reconcilePaneSubscriptions(chats, cfg, {}, deps);
-  const panes = await capturePanes(chats, cfg, deps);
+  // `deps.capturePanes` is a test seam (defaults to the real capturePanes) so the
+  // WARDEN-788 transition-logging is drivable end-to-end with canned pane content
+  // and ZERO SSH — mirroring the existing deps philosophy. Production callers pass
+  // nothing → the real capturePanes (unchanged behavior, the WARDEN-413 gate still
+  // earns its zero-RPC steady state because the real fn is what the gate tests).
+  const capture = deps.capturePanes ?? capturePanes;
+  const panes = await capture(chats, cfg, deps);
   return chats.map((c) => {
     const base = {
       id: c.container || c.session,
@@ -352,6 +451,11 @@ export async function pollAgentStates(chats, cfg = {}, deps = {}) {
     // failed → `if (!res.ok) return;` per host). Surface it as capture_failed so
     // the badge can still name the agent instead of omitting it (WARDEN-89).
     if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
+      // WARDEN-788: capture_failed is a genuine state change (reachable →
+      // unreachable) with historical value ("when was this host down?"), logged
+      // for container-bearing yatfa agents so the timeline can render an
+      // "unreachable" segment. The dedup map prevents flapping from spamming.
+      logAgentState(c, 'capture_failed');
       return { ...base, state: 'capture_failed', captureError: true, signal: null };
     }
     const clean = stripAnsi(panes[c.key] || '');
@@ -365,6 +469,11 @@ export async function pollAgentStates(chats, cfg = {}, deps = {}) {
     // transition; the attention rollup surfaces it as its own row. Null/absent when no
     // pattern matches → identical to today.
     const customMatch = matchWatchPatterns(clean, cfg.watchPatterns);
+    // WARDEN-788: persist the transition (no-op on an unchanged tick). capture_failed
+    // above and the classifyPane states here are the only states this site produces —
+    // sweep_skipped lives in pollFleetStates (never reaches here), so it correctly
+    // produces no state_changed event, consistent with the heatmap/attention.
+    logAgentState(c, state);
     return { ...base, state, signal, captureError: false, ...(customMatch ? { customMatch } : {}) };
   });
 }
@@ -503,7 +612,16 @@ app.get('/api/activity', async (req, res) => {
   const after = req.query.after ? new Date(req.query.after).getTime() : undefined;
   const before = req.query.before ? new Date(req.query.before).getTime() : undefined;
   const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : undefined;
-  const events = await readEvents({ after, before, limit });
+  // Exclude non-activity events (state_changed — internal transition marker for
+  // the state timeline, WARDEN-788) so the raw feed stays discrete
+  // lifecycle/directive/error activity, matching getSeriesSince/getStatsSince.
+  // Without this, a state_changed row renders in the Activity Timeline as a
+  // header-only "STATE CHANGED" entry with an empty detail line (no icon/color/
+  // case in ActivityTimeline.tsx), and the from:null baseline fires for every
+  // agent on every warden restart — fleet-wide noise. The transition still flows
+  // to /api/activity/series's stateSeries (its dedicated surface).
+  const events = (await readEvents({ after, before, limit }))
+    .filter((e) => !NON_ACTIVITY_TYPES.has(e.type));
   res.json({ events });
 });
 
@@ -517,11 +635,27 @@ app.get('/api/activity/stats', async (req, res) => {
 // the stats endpoint's default window (last 24h) and adds an hourly bucket grid a
 // sparkline can join by `container`. Deliberately a separate endpoint — the
 // dashboard fetches it on a slow ~60s cadence, never on the 10s /api/health poll.
+//
+// WARDEN-788: the SAME response now also carries `stateSeries` — the per-bucket
+// forward-filled agent-state timeline (sibling to `series`'s volume counts). It
+// rides the existing 60s useActivitySeries poll (no new fetch/poll/SSH) so the
+// Fleet state timeline panel consumes exactly what the heatmap already fetches.
+// `series` (volume) stays activity-only — `state_changed` events are excluded
+// from getSeriesSince (and getStatsSince's total) so the heatmap reverts to its
+// pre-feature volume-of-activity meaning; stateSeries is an additive sibling
+// field computed by getStateSeriesSince, the one reader of those transitions.
 app.get('/api/activity/series', async (req, res) => {
   const after = req.query.after ? new Date(req.query.after).getTime() : Date.now() - (24 * 60 * 60 * 1000); // Default: last 24 hours
   const rawBucket = req.query.bucket ? parseInt(String(req.query.bucket), 10) : 3_600_000; // default 1h
   const bucket = Number.isFinite(rawBucket) && rawBucket > 0 ? rawBucket : 3_600_000;
-  res.json(await getSeriesSince(after, { bucketMs: bucket }));
+  // Both series share one axis: derive the bucket grid from a SINGLE `now` so the
+  // heatmap's volume columns and the timeline's state columns can never desync by a
+  // bucket (the two functions would otherwise each call Date.now() and could straddle
+  // a bucket boundary). Spread volume then add the additive stateSeries sibling field.
+  const now = Date.now();
+  const volume = await getSeriesSince(after, { bucketMs: bucket, now });
+  const state = await getStateSeriesSince(after, { bucketMs: bucket, now });
+  res.json({ ...volume, stateSeries: state.series });
 });
 
 app.get('/api/ssh-hosts', (_req, res) => res.json({ hosts: allSshHosts(), configured: cfg.hosts }));
@@ -2429,9 +2563,27 @@ async function tickAttention(deps = {}) {
     // fight over the subscription set. capturePanes alone is fine (it falls back
     // to the per-host SSH capture when a companion push subscription isn't live).
     // Mirrors pollAgentStates' capture+classify, minus the reconcile. Tests inject
-    // deps.pollAgentStates to short-circuit the whole classify step.
+    // deps.pollAgentStates to short-circuit the whole classify step (and when they
+    // inject the REAL pollAgentStates, that path logs transitions itself).
+    //
+    // WARDEN-788: the inline classify ALSO calls logAgentState — mirroring
+    // pollAgentStates' two calls — so the 60s server-side sweep persists genuine
+    // state_changed transitions into the same store. THIS IS THE LOAD-BEARING
+    // logging path for the timeline's headline use case: the dashboard polls
+    // (/api/agent-states) and the frontend's 90s sweep are CLIENT-driven and STOP
+    // when the window is closed to tray; tickAttention is the ONLY classifier that
+    // keeps running server-side (webhooks on), so without these two calls the
+    // "what oscillated while I was away" history the 24h timeline exists to surface
+    // would never be recorded. Shares the same key-keyed lastLoggedState dedup map
+    // as pollAgentStates, so a transition one path logs is not re-logged by the
+    // other (prevAttentionStates below is a SEPARATE baseline used only for the
+    // webhook fire diff — unrelated to transition persistence).
     const classify = deps.pollAgentStates || (async (chatList) => {
-      const panes = await capturePanes(chatList, cfg);
+      // `deps.capturePanes` is a test seam mirroring pollAgentStates' own — lets a
+      // test drive THIS inline branch (the production path, since tickAttention() is
+      // called bare with no deps.pollAgentStates) with canned panes + ZERO SSH.
+      const capture = deps.capturePanes ?? capturePanes;
+      const panes = await capture(chatList, cfg);
       return chatList.map((c) => {
         const base = {
           id: c.container || c.session,
@@ -2442,9 +2594,11 @@ async function tickAttention(deps = {}) {
           name: c.name || c.key || (c.container || c.session),
         };
         if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
+          logAgentState(c, 'capture_failed');
           return { ...base, state: 'capture_failed', signal: null };
         }
         const { state, signal } = classifyPane(stripAnsi(panes[c.key] || ''), c);
+        logAgentState(c, state);
         return { ...base, state, signal };
       });
     });

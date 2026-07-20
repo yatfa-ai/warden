@@ -154,6 +154,30 @@ describe('getSeriesSince — per-agent activity series aggregation', () => {
     assert.strictEqual(c1.total.reduce((a, b) => a + b, 0), 5);
   });
 
+  it('excludes state_changed (the state-timeline marker) from the volume totals (WARDEN-788)', async () => {
+    // Regression for the WARDEN-788 fail_qa: a state_changed-only container must
+    // render NO volume row (case-3 zero-fill), identical to before the feature —
+    // state_changed is an internal transition marker for the state timeline
+    // (getStateSeriesSince), not an activity event. Without the NON_ACTIVITY_TYPES
+    // exclusion this container would get a non-zero total and a spurious heatmap
+    // row, and the from:null baseline (logged fleet-wide on every restart) would
+    // inject volume noise into the heatmap. Re-seed (getSeriesSince reads the file
+    // fresh each call, so the shared before-seed is safely overwritten; the idle
+    // test below re-seeds again).
+    now = Date.now();
+    const lines = [
+      EVENT('directive_proposed', 'vol', now - 30 * 60 * 1000),
+      JSON.stringify({ type: 'state_changed', container: 'stonly', host: 'hostA', from: null, to: 'active', timestamp: new Date(now - 90 * 60 * 1000).toISOString() }),
+      JSON.stringify({ type: 'state_changed', container: 'stonly', host: 'hostA', from: 'active', to: 'stuck', timestamp: new Date(now - 60 * 60 * 1000).toISOString() }),
+    ];
+    fs.writeFileSync(activityPath, lines.join('\n') + '\n');
+    const result = await getSeriesSince(now - 5 * BUCKET, { bucketMs: BUCKET });
+    // The volume container gets a row; the state_changed-only container does NOT.
+    assert.deepStrictEqual(Object.keys(result.series).sort(), ['vol'], 'state_changed-only container renders no volume row');
+    assert.ok(!('stonly' in result.series), 'stonly (state_changed-only) is absent from the volume series');
+    assert.strictEqual(result.series.vol.total.reduce((a, b) => a + b, 0), 1, 'the volume container still counts its one activity event');
+  });
+
   it('renders an idle grid (all-zero buckets) when the window has no events', async () => {
     // Fresh log: no events at all in the window. buckets still spans the window;
     // series is empty (a zero-event key is never created).

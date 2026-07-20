@@ -346,6 +346,27 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
       assert.strictEqual(stats.error, 0);
     });
 
+    it('excludes state_changed (the state-timeline marker) from total (WARDEN-788)', async () => {
+      // Regression for the WARDEN-788 fail_qa: state_changed is an internal
+      // transition marker for the Fleet state timeline, not activity — it must
+      // NOT inflate /api/activity/stats's `total` (which feeds the attention
+      // rollup). Without the NON_ACTIVITY_TYPES filter the two state_changed
+      // events below would make total = 4; in production the from:null baseline
+      // fires for every agent on every warden restart, so the whole fleet would
+      // get a spurious volume blip at each restart.
+      const now = Date.now();
+      seed([
+        line('attached', now),
+        line('error', now, { error: 'boom' }),
+        line('state_changed', now, { container: 'c1', from: null, to: 'active' }),
+        line('state_changed', now, { container: 'c1', from: 'active', to: 'stuck' }),
+      ]);
+      const stats = await getStatsSince(0);
+      assert.strictEqual(stats.total, 2, 'only the two activity events count; state_changed excluded');
+      assert.strictEqual(stats.attached, 1);
+      assert.strictEqual(stats.error, 1);
+    });
+
     it('returns the correct 7-key, all-zero shape for an empty window', async () => {
       seed([]);
       const stats = await getStatsSince(0);

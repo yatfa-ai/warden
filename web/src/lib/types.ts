@@ -180,11 +180,21 @@ export interface Directive {
  * window (ascending) — idle periods are zero buckets, not gaps. Each series
  * entry's `total`/`error` arrays are parallel to `buckets` (same length, index
  * i ↔ buckets[i]); `error` counts "something went wrong" event types.
+ *
+ * WARDEN-788: `stateSeries` is the orthogonal complement — the per-bucket
+ * forward-filled agent STATE (last-known-state-per-bucket, carried across held
+ * states so a steady agent reads as a continuous segment). Same `buckets` axis as
+ * `series`; each entry's `states` array is parallel to `buckets` (index i ↔
+ * buckets[i]), with `null` for buckets before the agent was first observed. A
+ * container absent from the map was never observed → no timeline row (mirrors the
+ * heatmap's case-1 container scope). Optional → absent when the server predates
+ * WARDEN-788 or no `state_changed` events exist (a quiet fleet).
  */
 export interface ActivitySeries {
   bucketMs: number;
   buckets: number[];
   series: Record<string, { total: number[]; error: number[] }>;
+  stateSeries?: Record<string, { states: (string | null)[] }>;
 }
 
 /**
