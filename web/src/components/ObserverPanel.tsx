@@ -1002,6 +1002,9 @@ const TOOL_LABELS: Record<string, string> = {
   read_chat: 'read chat',
   read_chats: 'read chats',
   send_directive: 'compose directive',
+  // write_file is a real observer tool (src/observer.js) — list it explicitly so
+  // the chip renders a stable label instead of relying on the _→space fallback.
+  write_file: 'write file',
 };
 
 function toolLabel(name: string): string {

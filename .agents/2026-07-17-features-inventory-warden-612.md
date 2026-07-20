@@ -5,6 +5,8 @@
 **Deliverable:** a complete catalog of every user-facing feature/surface in the warden desktop app, organized by area, with the real UX entry path for each, so a human can walk the app slice-by-slice and mark what's OK vs broken.
 **Repo state at capture:** `warden` @ `b7e2200` (main, 0.1.18-line).
 
+> **🔁 RECONCILED 2026-07-20 (WARDEN-843) against `origin/main` @ `b542fd2` (stale-count 0).** A wave of fixes shipped after the 2026-07-17 capture, so the Consolidated list and several Area "rough edges" no longer matched the code. This pass re-verified every claim against the live tree and stamped each with a current verdict — **`[RECONCILED — FIXED ⌐ file:line]`**, **`[RECONCILED — BY-DESIGN]`**, **`[RECONCILED — INTENTIONAL]`**, or **`[RECONCILED — STILL-TRUE]`**. The next walk-pass starts from these tags, not from the original `☐ UNVERIFIED`-era assertions. Two sure, behavior-neutral code fixes were applied in the same motion (the `write_file` chip label and a stale `observerLifecycle.ts` comment — see Consolidated #13 and #21). Entries #2 and #3 were already reconciled green in a prior pass (WARDEN-759) and remain current. Note: some original line-number citations drifted as the file grew; every reconciled tag carries a CURRENT file:line.
+
 ---
 
 ## ⚠️ How this was assembled — read this first (verification status)
@@ -197,13 +199,13 @@ _Sources: `ChatSidebar.tsx`, `NewChatForm.tsx`, `sidebar/ChatRows.tsx`, `sidebar
 - **Claude-not-found warning** — Entry: yellow banner when `claudeAvailable===false`. Does: warns claude isn't installed there. ☐
 - **☁ sessions history header + host token total** — Entry: "☁ sessions (history — click to resume)" header. Does: labels resume list; shows summed token total (loaded window) + tooltip. ☐
 - **Session tag filter row + per-session tag chips** — Entry: chip row above sessions; chips on each resume row. Does: tag filters (union); per-session "+ tag" add / × remove. API: `GET/PUT /api/session-tags`. ☐
-- **Past-session resume row** — Entry: ☁ sessions → click a row. Does: `handleResume` → returns to root. Shows summary, mtime · cwd · token total; "● live" if running. API: `POST /api/resume`. Notes: **hard-capped at 12 rows** (`.slice(0,12)`) — sessions past the 12th are silently invisible, no "show more". ☐
+- **Past-session resume row** — Entry: ☁ sessions → click a row. Does: `handleResume` → returns to root. Shows summary, mtime · cwd · token total; "● live" if running. API: `POST /api/resume`. Notes: **[RECONCILED 2026-07-20 — FIXED]** now has a "show N more / show less" affordance (WARDEN-742; `ChatSidebar.tsx:223`/`:1256`) — was hard-capped at 12 (`SESSION_PREVIEW`). See Consolidated #15. ☐
 - **Empty states** — Entry: no live+sessions → "nothing-here"; tag-filter excludes all → "no sessions match the selected tag(s) — clear filter". ☐
 - **Host-view multi-select action bar** — Entry: foot bar when ≥1 selected. (See "Multi-select action bar" below.) ☐
 
 ### Collection view (drill-in)
 - **Back (‹) / color dot + name / Broadcast-all / description** — Entry: collection-view header. Does: back→root; identity dot+name; "Broadcast N" one-click selects all matching + opens BroadcastDialog (disabled when none match); description under header. ☐
-- **Matching agents / idle lists** — Entry: "● matching agents" / "idle" sections. Does: ChatRows matching criteria. Notes: **⚠ these rows get NO git context** (no branch badge, dirty files, ✦ marker, diff/conflict/open-file) — see Consolidated. Watch still works. ☐
+- **Matching agents / idle lists** — Entry: "● matching agents" / "idle" sections. Does: ChatRows matching criteria. Notes: **[RECONCILED 2026-07-20 — FIXED]** these rows now get FULL git context (branch badge, dirty files, ✦ marker, diff/conflict/open-file) — identical to host-view rows (`ChatSidebar.tsx:1022`/`:1026`). See Consolidated #1. Watch still works. ☐
 - **No-match empty / collection-view multi-select action bar** — Entry: "no agents match this collection" EmptyState; action bar when ≥1 selected. ☐
 
 ### Chat row (fleet — host & collection views)
@@ -231,12 +233,12 @@ _Sources: `ChatSidebar.tsx`, `NewChatForm.tsx`, `sidebar/ChatRows.tsx`, `sidebar
 - **"Kill N…"** — Entry: destructive button. Does: opens KillDialog; confirm fans `POST /api/kill` + reconciles. ☐
 
 ### Rough edges in this area
-- **⚠ Collection view strips ALL per-agent git context** — `ChatSidebar.tsx:916/920` call `ChatRow` without `gitInfo`/`gitCommits`/`onFetchGitLog`/incoming/outgoing/`onOpenDiff`/`onOpenConflict`/`onOpenFile`, while host-view rows (`:1034/:1038`) pass all of them. Same agent shows full git context in host view, none in collection view. **Confirmed by grep.** Highest-impact gap here.
-- **Newly-created collections don't auto-open** — `handleCollectionCreated` has the navigation commented out (`// enterCollection(_collection);`); you're left on root and must click the new card.
+- **[RECONCILED 2026-07-20 — FIXED] ~~⚠ Collection view strips ALL per-agent git context.~~** `ChatSidebar.tsx:1022` (active) / `:1026` (idle) now pass the FULL git prop set to the collection drill-in's `ChatRow`s, identical to host-view rows (`:1163`/`:1167`). See Consolidated #1.
+- **[RECONCILED 2026-07-20 — FIXED] ~~Newly-created collections don't auto-open.~~** `handleCollectionCreated` now calls `enterCollection(collection)` (`ChatSidebar.tsx:801`) — the navigation is live, not commented out. The new collection opens immediately.
 - **ChatRow has no right-click context menu** — asymmetric with OpenPaneRow/host-row/collection-card (intentional, but noted for completeness).
 - **Fleet-row kill (×) is manual-chats only** — yatfa rows have no kill button (by design; orchestrator-managed).
-- **Past-session resume list hard-capped at 12** — no "show more" (unlike recently-closed).
-- **`GitStateBadges`/`GIT_STATE_KIND` orphaned** — exported from `GitBadges.tsx`, no longer rendered after the project-chip row was abolished (WARDEN-372). **Confirmed: zero consumers.** See Consolidated.
+- **[RECONCILED 2026-07-20 — FIXED] ~~Past-session resume list hard-capped at 12.~~** Now has a "show N more / show less" affordance (WARDEN-742). See Consolidated #15.
+- **[RECONCILED 2026-07-20 — FIXED/REVIVED] ~~`GitStateBadges`/`GIT_STATE_KIND` orphaned.~~** Now rendered in both fleet headers (`ChatSidebar.tsx:1142`/`:1388`, WARDEN-635). See Consolidated #6.
 
 ---
 
@@ -294,7 +296,7 @@ _Sources: `sidebar/GitBadges.tsx`, `sidebar/FleetCommitSearch.tsx`, `sidebar/Dif
 - **DiffViewer range modal** — Entry: branch-badge "full diff" (worktree/unpushed/incoming). `/api/git-range-diff` / `/api/git-diff`. ☐
 
 ### Rough edges in this area
-- **`GitStateBadges` / `GitStateBadge` / `GIT_STATE_KIND` — ORPHANED.** Exported but zero consumers (the project-chip row was abolished in WARDEN-372; collision badges were re-homed but these weren't). **Confirmed by grep.** Internally complete dead code.
+- **[RECONCILED 2026-07-20 — FIXED/REVIVED] ~~`GitStateBadges` / `GitStateBadge` / `GIT_STATE_KIND` — ORPHANED.~~** No longer dead code — now imported and rendered (`ChatSidebar.tsx:58`/`:1142`/`:1388`, WARDEN-635). See Consolidated #6.
 - Otherwise everything here reads as wired.
 
 ## Area 3 — Panes & pane chrome
@@ -306,7 +308,7 @@ _Sources: `PaneGrid.tsx`, `PaneTile.tsx`._
 - **Empty grid state** — Entry: grid body with zero tiles. Does: `click a chat to open a live pane`. ☐
 - **Layout mode `auto`/`stacked`/`side-by-side`** — Entry: driven by `paneLayout` pref. Does: auto = `ceil(sqrt(n))` cols; stacked = 1 col; side-by-side = 1 row (overflow-x-auto). ☐
 - **Maximize → 1×1** — Entry: any maximize trigger. Does: tile fills grid; stale-maximized guard falls back to all tiles if the maximized id is gone. ☐
-- **Pane-to-pane manual resize — ABSENT.** No drag-resize gutter anywhere; sizing is CSS-grid only (`minmax(9rem,1fr)` cols). The only resize is xterm reacting to its container (pushed to the PTY as a `resize` WS msg). ☐
+- **[RECONCILED 2026-07-20 — FIXED] ~~Pane-to-pane manual resize — ABSENT.~~** WARDEN-660 added draggable resize gutters (`col-resize`/`row-resize` strips + crossing pads at intersections + double-click-to-reset, driven by `paneColRatios`/`paneRowRatios` props); CSS-grid `minmax(9rem,1fr)` cols are the fallback only. The xterm PTY `resize` WS msg on container resize is unchanged. See Consolidated #10. ☐
 
 ### Keyboard shortcuts (global window listener; PaneGrid.tsx:190-255)
 - **Alt+S** — toggle sidebar. ☐
@@ -380,8 +382,8 @@ _Sources: `PaneGrid.tsx`, `PaneTile.tsx`._
 - **error** — writes `[error: …]` to terminal + RecoveryPanel "Couldn't attach" with [Retry]/[Close]. ☐
 
 ### Rough edges in this area
-- **Retired grid-toolbar is an empty shell** — PaneGrid header renders just a label; right side empty (🔍/📄 relocated to per-pane context menu). Bare label, no controls.
-- **No pane-to-pane manual resize; no within-grid drag reorder** (both absent).
+- **[RECONCILED — BY-DESIGN] ~~Retired grid-toolbar is an empty shell.~~** Normal one-line header; 🔍/📄 were deliberately retired into each pane's context menu (WARDEN-563). See Consolidated #9.
+- **[RECONCILED 2026-07-20 — PARTIAL] ~~No pane-to-pane manual resize; no within-grid drag reorder.~~** Resize now EXISTS (WARDEN-660 gutters); within-grid drag reorder is still absent (by-design). See Consolidated #10.
 - **Send-text input / key-send / broadcast are NOT in-pane** — they live in `BroadcastDialog`/`KeySendDialog`, surfaced from sidebar/health/App, not the pane tile. Only single-target Snippets→`/api/send` is in-pane.
 - **`/api/key`, `/api/search-pane`, `/api/read-file`, `/api/pane`, `/api/this-session` unused in PaneTile/PaneGrid** (used by dialogs/FileViewer/GlobalSearch elsewhere).
 - **`keep` on-exit previously left a misleading "Connecting" dot** — FIXED (WARDEN-759): the StatusDot is now keyed on `agentExited`, so `keep` shows an honest gray "Exited" dot (dot-only; body stays full-brightness, no overlay).
@@ -521,7 +523,7 @@ _Sources: `ObserverTabs.tsx`, `ObserverPanel.tsx`, `ObserverMarkdown.tsx`, `Dire
 - **Resize handle** — Entry: 1px drag handle on the LEFT edge. Does: changes `observerWidth`; clamped vs viewport/sidebar/health. ☐
 - **Sessions / Activity / Directives tab switcher** — Entry: top of ObserverTabs → three pills. Does: switches body between observer-chat sessions, ActivityTimeline, DirectiveHistory; selection persists. `externalViewMode='activity'` can deep-link to Activity (App.tsx:1370); **no external deep-link to Directives.** ☐
 - **New observer session — 👁 "observe <focused chat>" / ＋ blank** — Entry: Sessions tab header → 👁 (disabled when no chat focused) / ＋. Does: 👁 POSTs a session bound to the focused chat; ＋ an unbound session. New session prepended, auto-opened. API: `POST /api/sessions`. ☐
-- **Session tab strip (switch / close)** — Entry: Sessions tab → pill per open session. Does: click activates (only active visible; inactive CSS-hidden, WS kept alive); × closes the tab client-side. Notes: **closing a tab does NOT `DELETE /api/sessions/:id`** — server-side session persists (and the delete endpoint is orphaned by this UI; confirmed). ☐
+- **Session tab strip (switch / close)** — Entry: Sessions tab → pill per open session. Does: click activates (only active visible; inactive CSS-hidden, WS kept alive); × closes the tab client-side. Notes: **[RECONCILED 2026-07-20 — FIXED]** closing a tab now `DELETE`s the server-side session (`ObserverTabs.tsx:151`) — was client-only. See Consolidated #8. ☐
 
 ### Observer chat stream (per-panel, one WS per tab)
 - **Status / context bar** — Entry: top of each ObserverPanel. Does: StatusDot (green Connected / red error) + bound-chat context (eye + container/chatKey @ host) or "drafts directives you approve"; yellow "taking longer than expected…" at the 10s loading timeout. Notes: **NO model display anywhere in the observer UI** — the model is resolved entirely server-side and never echoed. ☐
@@ -556,12 +558,11 @@ _Sources: `ObserverTabs.tsx`, `ObserverPanel.tsx`, `ObserverMarkdown.tsx`, `Dire
 - **Auto-start Observer toggle / Session Auto-stop (min) / Directive Confirmation mode** — (see Area 7.) ☐
 
 ### Rough edges in this area
-- **No model display** in the observer UI (resolved server-side, never echoed).
-- **Tool results not rendered** (intentional); **`write_file` tool unlabelled** (missed affordance).
-- **Closing an observer tab does NOT delete the server-side session** → `DELETE /api/sessions/:id` exists (`server.js:491`) but is never called from `ObserverTabs.closeTab`. **Confirmed.** Closed sessions linger server-side (one is re-promoted to active on next boot if the open list is empty).
+- **[RECONCILED 2026-07-20 — write_file FIXED] Tool results not rendered** (intentional); ~~**`write_file` tool unlabelled** (missed affordance)~~ — `write_file` is now in `TOOL_LABELS` (`ObserverPanel.tsx:1000`). See Consolidated #13.
+- **[RECONCILED 2026-07-20 — FIXED] ~~Closing an observer tab does NOT delete the server-side session.~~** Now calls `DELETE /api/sessions/:id` (`ObserverTabs.tsx:151`). See Consolidated #8.
 - **Session-transcript viewer is only reachable from the chat-history browser**, not the observer panel.
 - **No external trigger for the Directives tab** (Activity has one via `externalViewMode`; Directives doesn't).
-- **Stale "ZERO behavioral consumers" comment** in `observerLifecycle.ts` (Auto-start/Auto-stop are now fully wired post-WARDEN-332).
+- **[RECONCILED 2026-07-20 — FIXED] ~~Stale "ZERO behavioral consumers" comment in `observerLifecycle.ts`.~~** Comment corrected (past-tense timeline). See Consolidated #21.
 
 ## Area 7 — Settings
 
@@ -577,7 +578,7 @@ _Source: `SettingsPage.tsx` (3,222 lines). Full-screen overlay from header ⚙. 
 - **Add Host** — Entry: Select of `availableHostsToAdd` (SSH hosts minus configured); only rendered when a candidate exists. Does: appends to `config.hosts`. ☐
 - **Display label per host** — Entry: one Input per host (incl. "this machine (local)"). Does: writes `hostLabels` **client-only — never sent to backend** (explicit comment). Blank = raw host name. ☐
 - **Dashboard Refresh Interval (ms)** — Entry: number input `min=10000 max=120000 step=5000`. Does: `setConfig({pollIntervalMs})`. Notes: **the displayed value AND the runtime cadence are both resolved, not raw** — the field renders `resolvePollIntervalMs(config.pollIntervalMs)` (`SettingsPage.tsx:1510`) and the App feeds the same resolver into both refresh `setInterval`s (`App.tsx:670` → `:834`/`:881`). The resolver (`web/src/lib/pollInterval.ts`, WARDEN-394, unit-tested in `web/pollInterval.test.mjs`) maps absent/sub-floor/`1500` → `60000`, passes `10000–120000` through, clamps `>120000` to `120000`; the UI's `min=10000` prevents entering 1500. So **the value shown IS the cadence you get** (helper text at `SettingsPage.tsx:1516` says so explicitly). The only raw-`1500` scraps are the `config.js`/CLI default (the CLI's own watch mode reads it raw at 1500ms) and the Settings state-seed/`onChange` fallback — neither is what the field displays. Reads as well-behaved + documented, not a gap. ☐
-- **Tmux Session Name / Connect Timeout (s)** — Entry: text / number (`min=1 max=60`, default 10). Server config. Notes: no range clamp on either side — `onChange` is a bare `parseInt(...) || 10` and the backend PUT (`server.js:742`) only type-checks (`typeof number`), so an out-of-range value like 999 types and persists. ☐
+- **Tmux Session Name / Connect Timeout (s)** — Entry: text / number (`min=1 max=60`, default 10). Server config. Notes: **[RECONCILED 2026-07-20 — PARTIAL]** `connectTimeout` is now backend-clamped `[1,60]` (WARDEN-747, `config-schema.js:86`) — the `onChange` is still a bare `parseInt`, so the clamp is backend-side (999 persists as 60). See Consolidated #17. ☐
 
 ### Observer Preferences (`observer`)
 - **Directive Confirmation** — Entry: Select `[always (default) | auto-safe]`. Does: `auto-safe` auto-sends read-only directives. ☐
@@ -631,7 +632,7 @@ _Source: `SettingsPage.tsx` (3,222 lines). Full-screen overlay from header ⚙. 
 - **Desktop alerts when agents need attention (master)** — Entry: Switch (client pref). Does: on enable → `requestAlertPermission()` (OS prompt); denied → toggle still flips but alerts no-op until granted. Fires OS notification when an agent newly needs attention while Warden unfocused. ☐
 - **Per-pane-state attention toggles** — Entry: 5 Switches (client pref, default on): Erroring / Stuck / Waiting on you / Blocked / Finished. ☐
 - **Per-severity desktop routing** — Entry: 4 Switches (Critical / Warning / Pending directives / Recent errors), greyed when master off. Notes: per-agent muting uses the bell on the attention row (health signals only; directives/errors aren't per-agent). ☐
-- **Webhook push sub-panel (Enable / URL / Shared secret write-only / Which-alerts 3 Switches / Send test alert)** — Entry: bordered sub-panel. Does: secret sent as `Authorization: Bearer` + `X-Webhook-Secret`; 3 alert Switches (Attention/Budget/Finished, default on). Notes: **"Send test alert" requires Save first** — `/api/webhook-test` reads **persisted** config, not the draft (unlike Telemetry's Test connection which tests the draft). ☐
+- **Webhook push sub-panel (Enable / URL / Shared secret write-only / Which-alerts 3 Switches / Send test alert)** — Entry: bordered sub-panel. Does: secret sent as `Authorization: Bearer` + `X-Webhook-Secret`; 3 alert Switches (Attention/Budget/Finished, default on). Notes: **[RECONCILED 2026-07-20 — FIXED]** "Send test alert" now works BEFORE Save — sends the DRAFT `webhookUrl` + secret (`useBackendConfig.ts:320`–`:332`), same as Telemetry's Test connection. See Consolidated #20. ☐
 
 ### Reset section (danger zone)
 - **Reset preferences to defaults** — Entry: **Reset** section (rendered outside the nav rail — always visible at the bottom of every section). Does: destructive button → ConfirmDialog → `resetUiPrefsToDefaults()` (snaps every **client UI pref** to default; **not** server config; preserves open tabs/panes/focus/layout); always confirm-gated regardless of Safety pref. ☐
@@ -641,15 +642,15 @@ _Source: `SettingsPage.tsx` (3,222 lines). Full-screen overlay from header ⚙. 
 - **Save** — primary button → `PUT /api/config` (merges write-only secrets when non-empty) → `onConfigChange()` → close. Only persists server config. ☐
 
 ### Rough edges in this area
-- **Reset section orphaned from the nav rail** — not in `SETTINGS_SECTIONS`; rendered without a `hidden` guard so it's always visible at the bottom of every section. No way to navigate to "just Reset".
-- **Numeric inputs are not range-clamped on either side** — `onChange` is a bare `parseInt(... || default)` and the backend PUT (`server.js:740-806`) doesn't clamp the range either (it type-checks `typeof number`, positivity-validates `>0`/null for some, and ordering-clamps warning≤critical for thresholds). So the HTML `min`/`max` is advisory and an out-of-range-above value (e.g. connectTimeout 999) types and persists; the attention warning threshold is the one input with a client-side blur clamp (WARDEN-374).
+- **[RECONCILED — INTENTIONAL] ~~Reset section orphaned from the nav rail.~~** By design — always-visible-at-bottom is intended (`SettingsPage.tsx:41`–`:43`). See Consolidated #16.
+- **[RECONCILED 2026-07-20 — PARTIAL] ~~Numeric inputs are not range-clamped on either side.~~** `connectTimeout` is now backend-clamped `[1,60]` (`config-schema.js:86`, WARDEN-747) and `tokenBudget*` floored at 1 (WARDEN-773); but `observerSessionTimeout`/`tokenBudget*`/`health*` still accept oversized values (no universal upper clamp). See Consolidated #17.
 - **Save/Cancel only affect server config** — most user-facing prefs are client-side (instant, persisted by App); Cancel doesn't roll them back, Save doesn't commit them — a split not surfaced in the UI.
-- **Notifications section mixes two persistence channels** with no divider (4 `notify*` = server config; desktop-alerts block = client localStorage).
+- **[RECONCILED 2026-07-20 — FIXED] ~~Notifications section mixes two persistence channels with no divider.~~** Now THREE titled bordered channel containers, each documenting its persistence path (WARDEN-784). See Consolidated #19.
 - **3 desktop Switches inert outside Electron** (window bounds / launch-at-login / close-to-tray).
 - **Companion transport inert under env override.**
 - **Host labels never sent to backend** (client-only).
 - **Auth fields are write-only** — no "remove secret" control (blank on Save no-clobbers).
-- **Webhook "Send test alert" gated behind Save** (vs Telemetry "Test connection" which tests the draft).
+- **[RECONCILED 2026-07-20 — FIXED] ~~Webhook "Send test alert" gated behind Save.~~** Now sends the DRAFT (`useBackendConfig.ts:320`–`:332`); testable before Save, same as Telemetry's Test connection. See Consolidated #20.
 
 ---
 
@@ -734,36 +735,36 @@ _Sources: `GlobalSearchDialog.tsx`, `BroadcastDialog.tsx`, `KeySendDialog.tsx`, 
 These are the highest-signal items for the human review — surfaces that, from the code, look like they won't behave as a user expects. Each was flagged by an area pass; the four marked **✅ confirmed** were independently re-verified by grep/boot. None have been driven live, so each is a hypothesis to confirm in the browser walk — but they are the most likely "feels broken" findings this exercise exists to surface.
 
 ### Highest-impact (likely user-visible gaps)
-1. **✅ CONFIRMED — Collection view shows NO git context per agent.** `ChatSidebar.tsx:916` & `:920` render the collection drill-in's `ChatRow`s without `gitInfo`/`gitCommits`/`onFetchGitLog`/incoming/outgoing/`onOpenDiff`/`onOpenConflict`/`onOpenFile`, while host-view rows (`:1034`/`:1038`) pass all of them. The same agent shows full git badges + dirty-file diffs in the host view, but none inside a collection. An agent you grouped to watch its work shows no branch/dirty/✦/diff there. This is asymmetric and reads as an oversight (watch state IS threaded, so it's not a blanket "minimal row" decision).
+1. **[RECONCILED 2026-07-20 — FIXED] ~~Collection view shows NO git context per agent.~~** The asymmetry is gone. The collection drill-in's `ChatRow`s now receive the FULL git prop set: `ChatSidebar.tsx:1022` (active) and `:1026` (idle) pass `gitInfo`/`gitCommits`/`gitLogLoading`/`onFetchGitLog`/`incomingCommits`/`incomingLoading`/`onFetchIncoming`/`outgoingCommits`/`outgoingLoading`/`onFetchOutgoing`/`onOpenDiff`/`onOpenConflict`/`onOpenFile` — identically to the host-view rows at `:1163`/`:1167`. Only the open handler differs (`openFromCollection` vs `openFromHost`). The same agent now shows full git badges + dirty-file diffs in both views. (Original cites `:916`/`:920`/`:1034`/`:1038` drifted as the file grew.)
 2. **✅ Checked — NOT a gap (corrected during the review pass). Dashboard Refresh Interval is well-behaved.** An earlier draft inferred a displayed-vs-runtime mismatch from the raw `1500` config/CLI default + the `onChange` `|| 1500` fallback. That was wrong: the field displays `resolvePollIntervalMs(config.pollIntervalMs)` (`SettingsPage.tsx:1510`) and the App runs the SAME resolver into both refresh `setInterval`s (`App.tsx:670`), so the value shown IS the cadence you get, and the UI's `min=10000` blocks entering 1500. The resolver (`web/src/lib/pollInterval.ts`, WARDEN-394, unit-tested in `web/pollInterval.test.mjs`) maps `1500`/sub-floor → `60000`. Verified live in the reviewer sandbox (field showed 60000 with floor-documented helper text). Kept here, not deleted, so the slice-by-slice pass doesn't re-chase a bug that isn't there.
 3. **FIXED (WARDEN-759) — `keep` on-exit previously left a misleading "Connecting" dot.** The StatusDot is now keyed on `agentExited` (set on a genuine live→exited transition for BOTH `dim` and `keep`), so a `keep` pane whose agent has exited shows a neutral gray "Exited" dot instead of the yellow pulsing "Connecting" dot. Dot-only override: the body stays full-brightness (no opacity-60, no "agent exited" overlay) — those remain `dim`-only. (PaneTile.tsx StatusDot render + exit effect.)
-4. **No manual ping / health-probe trigger.** The health panel's only user-triggered refresh is ↻ (re-fetches `/api/health`); per-host connectivity is auto-polled only. There is no "ping this host now" button anywhere. (May be by design — flag for the human.)
-5. **Two "you're needed in X" callouts behave differently.** The attention-badge callout is focus-excluded (never the pane you're reading); the return-banner callout is NOT (uses the raw ranked top) and can promote the focused pane. Deliberate, but easy to read as a bug.
+4. **[RECONCILED — BY-DESIGN] No manual ping / health-probe trigger.** The health panel's only user-triggered refresh is ↻ (re-fetches `/api/health`); per-host connectivity is auto-polled only (shared 30s `/api/hosts/status` singleton). There is no "ping this host now" button anywhere — by design (auto-poll is the intended model). Not a gap.
+5. **[RECONCILED — BY-DESIGN] Two "you're needed in X" callouts behave differently.** The attention-badge callout is focus-excluded (never the pane you're reading); the return-banner callout is NOT (uses the raw ranked top) and can promote the focused pane. Deliberate divergence — not a bug.
 
 ### Orphaned / dead code (renders nothing harmful, but unused)
-6. **✅ CONFIRMED — `GitStateBadges` / `GitStateBadge` / `GIT_STATE_KIND`** (`sidebar/GitBadges.tsx`) — zero consumers outside the file; the project-chip mount was abolished (WARDEN-372) and these weren't re-homed (unlike `GitCollisionBadge`).
-7. **✅ CONFIRMED — `HealthBadge.tsx`** — zero importers anywhere in `web/src`; the dashboard uses `HealthDot` (a StatusDot glyph variant) instead.
-8. **✅ CONFIRMED — `DELETE /api/sessions/:id` is never called from the UI.** Closing an observer tab is client-only; server-side sessions linger (and one is re-promoted to active on next boot if the open list is empty). The endpoint exists (`server.js:491`) but is orphaned by this UI.
-9. **Retired grid-toolbar is an empty shell.** PaneGrid header renders just a focused-name label; the right side is empty (🔍/📄 relocated to the per-pane context menu). Bare label, no controls.
+6. **[RECONCILED 2026-07-20 — FIXED / REVIVED] ~~`GitStateBadges` / `GitStateBadge` / `GIT_STATE_KIND` — ORPHANED.~~** No longer dead code. `GitStateBadges` is imported (`ChatSidebar.tsx:58`) and actively rendered in BOTH fleet views — the host-view header at `:1142` and the collection-view header at `:1388` (WARDEN-635 re-homed the fleet WIP ±N/↑N/↓N badges here after the project-chip row was abolished). `GIT_STATE_KIND` glyph/color conventions are also reused by `FileViewer.tsx:679`. Has live consumers now.
+7. **[RECONCILED 2026-07-20 — STILL-TRUE / OK as dead code] `HealthBadge.tsx`** — re-verified: zero importers anywhere in `web/src`; the dashboard uses `HealthDot` (a StatusDot glyph variant) instead. Confirmed orphan, harmless dead code (unlike `GitStateBadges`, which was revived — see #6).
+8. **[RECONCILED 2026-07-20 — FIXED] ~~`DELETE /api/sessions/:id` is never called from the UI.~~** Closing an observer tab now deletes server-side. `ObserverTabs.tsx:151` calls `fetch(`/api/sessions/${id}`, { method: 'DELETE' })` from a shared `deleteSession` helper, and BOTH close paths — `closeTab` (`ObserverTabs.tsx:278`) and the idle-close tick — route through it (comments at `:143`/`:149`). The endpoint is no longer orphaned; closed sessions no longer linger.
+9. **[RECONCILED — BY-DESIGN] ~~Retired grid-toolbar is an empty shell.~~** This is a normal one-line header, not a half-finished surface. `PaneGrid.tsx:708`–`:716` renders a focused-name label + flex spacer; WARDEN-563 deliberately retired the 🔍/📄 toolbar buttons into each pane's own context menu (where they act on the right-clicked pane, not the focused one) — documented in the comment at `:711`–`:716`. By design.
 
 ### Missing affordances a user might expect (absent, not broken)
-10. **No pane-to-pane manual resize** (sizing is CSS-grid only) and **no within-grid drag reorder** (drag is consumed only by workspace tabs).
-11. **FileViewer is leaner than expected — absent:** breadcrumbs (path is a non-clickable span), open-in-pane, follow/tail, font control, prev/next diff-hunk navigation.
-12. **No model display in the observer UI** (resolved server-side, never echoed — the only place the model is visible is Settings → Observer → model sub-panel).
-13. **Observer tool results are not rendered** (you see the observer's summary, not raw `read_chat` output); `write_file` tool is unlabelled in the chip map.
-14. **KeySendDialog (UI) key set is narrower than the backend** — only C-c + Escape; no arrow keys/Enter/other (the CLI `warden key` advertises the broader set).
-15. **Past-session resume list hard-capped at 12 rows** with no "show more" (unlike recently-closed which has one).
+10. **[RECONCILED 2026-07-20 — PARTIAL]** The **no pane-to-pane manual resize** clause is **FIXED**: `PaneGrid.tsx` renders WARDEN-660 draggable resize gutters — `col-resize`/`row-resize` strips + crossing pads at intersections + double-click-to-reset, driven by `paneColRatios`/`paneRowRatios` props. The **no within-grid drag reorder** clause is **STILL-TRUE / by-design**: pane drag (`PANE_DRAG_MIME`) is consumed ONLY by workspace-tab drop targets (`WorkspaceTabs.tsx:67`/`:74`/`:82`/`:85`/`:93`/`:128`/`:194`); dropping a pane in the grid does nothing. Split verdict: resize=FIXED, reorder=absent-by-design.
+11. **[RECONCILED — BY-DESIGN / not-implemented] FileViewer is leaner than expected — absent:** breadcrumbs (path is a non-clickable span), open-in-pane, follow/tail, font control, prev/next diff-hunk navigation. Never implemented (not orphaned); a known not-implemented affordance, not a bug.
+12. **[RECONCILED — BY-DESIGN] No model display in the observer UI** (resolved server-side, never echoed — the only place the model is visible is Settings → Observer → model sub-panel). By design.
+13. **[RECONCILED 2026-07-20 — PARTIAL]** The **`write_file` tool unlabelled** clause is **FIXED**: `write_file` is now listed in `TOOL_LABELS` (`ObserverPanel.tsx:1000`) — it's a real first-class observer tool (`src/observer.js:104`; system prompt at `:45`) and was the one real tool missing from the chip map. (The `_→space` fallback already rendered "write file"; the explicit map entry matches the pattern of the other file-op tools.) The **Observer tool results are not rendered** clause is **BY-DESIGN**: the backend UI-history reconstruction intentionally drops `tool_result` blocks; you see the observer's summary, not raw `read_chat` output.
+14. **[RECONCILED — BY-DESIGN] KeySendDialog (UI) key set is narrower than the backend** — only C-c + Escape; no arrow keys/Enter/other (the CLI `warden key` advertises the broader set). Deliberate FE guard (control vocabulary only).
+15. **[RECONCILED 2026-07-20 — FIXED] ~~Past-session resume list hard-capped at 12 rows.~~** Now has a "show more" affordance (WARDEN-742). `ChatSidebar.tsx:223` holds `showAllSessions` state; `sessionPreview` slices to `SESSION_PREVIEW` (12) only when collapsed (`:506`–`:507`); the "show N more / show less" toggle renders at `:1256`. Same shape as the recently-closed list.
 
 ### Settings-specific inconsistencies
-16. **Reset section is orphaned from the nav rail** — always visible at the bottom of every section; no way to navigate to "just Reset".
-17. **Numeric inputs are not range-clamped on either side** — connectTimeout / session-timeout / token-budget / health thresholds use a bare `parseInt(... || default)` onChange AND the backend PUT (`server.js:740-806`) doesn't clamp the range either (it type-checks `typeof number`, positivity-validates `>0`/null for some, and ordering-clamps warning≤critical). So out-of-range-above typing (e.g. connectTimeout 999) types and persists; `min`/`max` is advisory everywhere. (An earlier draft said these "rely on backend clamping" — corrected: the backend does not range-clamp.) The attention warning threshold is the one input with a client-side blur clamp (WARDEN-374).
-18. **Save/Cancel only affect server config** — most prefs are client-side (instant, persisted by App); Cancel doesn't roll them back, Save doesn't commit them. Not surfaced in the UI.
-19. **Notifications section mixes two persistence channels** (4 `notify*` = server config; desktop-alerts block = client localStorage) with no divider.
-20. **3 desktop Switches inert outside Electron** (window bounds / launch-at-login / close-to-tray); **companion transport inert under env override**; **host labels never sent to backend**; **auth fields write-only with no "remove secret"**; **webhook "Send test alert" gated behind Save** (vs Telemetry "Test connection" which tests the draft).
+16. **[RECONCILED — INTENTIONAL] ~~Reset section is orphaned from the nav rail.~~** By design. `SettingsPage.tsx:41`–`:43` code comment: "Reset is intentionally absent here: it is always visible at the bottom of the content pane, outside the activeSection gating." Always-visible-at-the-bottom is the intended UX, not a nav bug.
+17. **[RECONCILED 2026-07-20 — PARTIAL]** The flagship example is **FIXED**: the backend PUT was refactored into a per-field `CONFIG_FIELDS` guard registry (`src/config-schema.js`, WARDEN-773), and `connectTimeout` is now clamped to `[1,60]` (`config-schema.js:86`, WARDEN-747) — so `connectTimeout: 999` persists as 60, not 999 (test at `config-schema.test.js:159`). The `tokenBudgetThresholdTokens`/`windowHours`/`perSession` fields are `flooredNumber` → `Math.max(1)` (`config-schema.js:689`), and the health thresholds keep the WARDEN-374 client blur clamp + cross-field warning≤critical ordering. **But the general "no universal upper-bound clamp" is STILL-TRUE for several fields:** `observerSessionTimeout` (`config-schema.js:159`, type `nullablePositiveNumber`) and the `tokenBudget*`/`health*` fields accept arbitrarily large positive values — so an oversized `observerSessionTimeout=999` still types and persists, and HTML `min`/`max` remains advisory there. Smaller real gap remains; do not re-chase connectTimeout.
+18. **[RECONCILED — BY-DESIGN] Save/Cancel only affect server config** — most prefs are client-side (instant, persisted by App); Cancel doesn't roll them back, Save doesn't commit them. The two persistence channels are now surfaced in the Notifications section UI (#19); the Settings footer split itself is by-design (not surfaced in the footer).
+19. **[RECONCILED 2026-07-20 — FIXED] ~~Notifications section mixes two persistence channels with no divider.~~** The split is now visibly surfaced. `NotificationsSection.tsx` renders THREE titled bordered channel containers — "Channel 1 of 3 — In-app toasts", "Channel 2 of 3 — Desktop alerts", "Channel 3 of 3 — Webhook" — each with a description documenting its persistence path (server `/api/config` committed on Save vs client localStorage applied instantly). The two-channel persistence difference is now explicit (WARDEN-784 mirroring).
+20. **[RECONCILED 2026-07-20 — PARTIAL]** The **webhook "Send test alert" gated behind Save** clause is **FIXED**: `useBackendConfig.ts:320`–`:332` `sendTestAlert` now POSTs the DRAFT `webhookUrl` + draft `webhookSecret` to `/api/webhook-test` (testable BEFORE Save; comment at `:314`–`:316`). The remaining clauses are **STILL-TRUE / by-design**: 3 desktop Switches inert outside Electron (window bounds / launch-at-login / close-to-tray); companion transport inert under env override; host labels never sent to backend (client-only); auth fields write-only with no "remove secret".
 
 ### Stale commentary (code correct, comments wrong)
-21. **`observerLifecycle.ts`** still says Auto-start/Auto-stop "had ZERO behavioral consumers" (they're fully wired post-WARDEN-332).
-22. **`SettingsPage.tsx` subtitle** is hardcoded "Manage SSH hosts…" and shows on every section.
+21. **[RECONCILED 2026-07-20 — FIXED] ~~`observerLifecycle.ts` stale "ZERO behavioral consumers" comment.~~** Comment-only fix applied. The opening "ship dead in Settings" (present tense) was stale — the two prefs are fully wired post-WARDEN-332 via THIS module. The comment now reads "shipped dead in Settings (pre-WARDEN-332)" / "until this module, had ZERO behavioral consumers" / "This file is the extraction that wired them" (`observerLifecycle.ts:3`–`:11`), making the timeline unambiguous. No code-behavior change.
+22. **[RECONCILED 2026-07-20 — FIXED] ~~`SettingsPage.tsx` subtitle hardcoded "Manage SSH hosts…".~~** Every section now has its own subtitle. `SETTINGS_SECTIONS` (`SettingsPage.tsx:44`–`:58`) carries a per-section `description` on every entry, rendered at `:125`. The "Manage SSH hosts…" string lives ONLY on the hosts entry (`:45`).
 
 ---
 
@@ -774,11 +775,11 @@ This inventory was assembled from code (the worker sandbox blocks Chromium). To 
 1. **Boot & shell.** `warden ui` (or `PORT=8431 node src/server.js` on a free port — 7421 may be squatted by a stale sidecar; verify the served JS hash matches a fresh `npm run build`). Confirm the header, 4-column layout, and that the WS status dot goes green.
 2. **Sidebar (Area 1).** Open a chat → pane. Try +New spawn (local shell + claude). Right-click rows (open-pane menu, host menu, collection card menu). Create a collection → **drill into it and check whether git badges/dirty-file lists appear** (Consolidated #1). Filter & sort. Multi-select → each action-bar action.
 3. **Git surfaces (Area 2).** On a chat with a real repo: click the branch badge → popover → expand a commit → expand a file → diff. Dirty file → diff → FileViewer open-file icon. Fleet commit search (Messages/Content/Code).
-4. **Panes (Area 3).** All keyboard shortcuts. Right-click pane → Browse files / Search workspace / Open file from directory / Split shell here / Snippets. Force-kill vs close. Drag a pane onto a workspace tab. Check the `keep`-on-exit dot (#3). Confirm there is **no pane resize gutter / no grid reorder** (#10).
+4. **Panes (Area 3).** All keyboard shortcuts. Right-click pane → Browse files / Search workspace / Open file from directory / Split shell here / Snippets. Force-kill vs close. Drag a pane onto a workspace tab. Check the `keep`-on-exit dot (#3). Confirm the **pane resize gutters now work** (drag a col/row gutter + double-click-to-reset, WARDEN-660); within-grid drag reorder is still absent (#10).
 5. **File Viewer (Area 4).** The 3 entry paths: terminal Ctrl/Cmd-click a `path:line`; pane right-click → search/browse/type; sidebar git open-file icon. Annotate (blame) + History + view-at-commit. Confirm **no breadcrumbs/follow/open-in-pane** (#11).
 6. **Health/attention/activity (Area 5).** Toggle health panel; group-by Health vs Host; expand a host; select agents → Interrupt/Kill. Trigger an attention state on a real agent → badge popover → ranked callout → mute/snooze bell. Return banner (close+reopen the app after >60s). Watch a chat, background the app, trigger a ping → watch catch-up.
-7. **Observer (Area 6).** Toggle observer; 👁 observe focused chat; ask it something; when it proposes a directive → Approve / Edit / Decline. Directives tab. Activity tab. Confirm **no model shown** (#12). Close an observer tab and check the server-side session lingers (#8).
-8. **Settings (Area 7).** Walk all 13 sections. Toggle theme/density/font live. Refresh Interval field: confirm it shows the resolved cadence (60000 for the 1500 CLI default) and `min=10000` is enforced — this is NOT a gap (#2, already corrected + verified live). Notifications toggles. Webhook/Telemetry "Test" buttons (note webhook needs Save first). Reset section visibility (#16).
+7. **Observer (Area 6).** Toggle observer; 👁 observe focused chat; ask it something; when it proposes a directive → Approve / Edit / Decline. Directives tab. Activity tab. Confirm **no model shown** (#12). Close an observer tab and confirm the server-side session is now DELETED (#8, FIXED — was lingering).
+8. **Settings (Area 7).** Walk all 13 sections. Toggle theme/density/font live. Refresh Interval field: confirm it shows the resolved cadence (60000 for the 1500 CLI default) and `min=10000` is enforced — this is NOT a gap (#2, already corrected + verified live). Notifications toggles. Webhook/Telemetry "Test" buttons — both now test the DRAFT before Save (#20, FIXED — webhook used to need Save first). Reset section visibility (#16).
 9. **Dialogs & open-chat browser (Area 8).** Ctrl+Shift+F global search. Broadcast / Interrupt / Snooze / Kill from multi-select. Open-chat browser → resume a history session → view its transcript → usage sort → budget offender marker.
 
 As you walk, overwrite each `☐` with the verdict. **CANT-FIND** on a documented entry path is the most valuable signal — it means the entry path traced from code doesn't actually reach the feature in the live app, which is exactly the discoverability gap this inventory exists to surface.

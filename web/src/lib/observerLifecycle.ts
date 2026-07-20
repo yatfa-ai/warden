@@ -1,14 +1,15 @@
 // WARDEN-332 — pure lifecycle decisions for the observer tab manager.
 //
-// Two preference-driven behaviors ship dead in Settings: "Auto-start Observer"
-// (spawn+open a bound observer session for the focused chat) and "Session
-// Auto-stop" (close an observer tab idle past N minutes). Both were persisted
-// correctly (server.js get/set + config.js DEFAULTS) but had ZERO behavioral
-// consumers — the entire task is on the apply-side (renderer). The decision
-// cores are pure functions of (sessions/state, time); only the side effects
-// (createNew / closeTab) live in ObserverTabs. Extracting them here makes them
-// unit-testable under `node --test` (transpiled TS -> ESM via Vite's OXC
-// transform — same harness as observerTurns.test.mjs, WARDEN-130).
+// Two preference-driven behaviors shipped dead in Settings (pre-WARDEN-332):
+// "Auto-start Observer" (spawn+open a bound observer session for the focused
+// chat) and "Session Auto-stop" (close an observer tab idle past N minutes).
+// Both were persisted correctly (server.js get/set + config.js DEFAULTS) but,
+// until this module, had ZERO behavioral consumers — the entire task was on the
+// apply-side (renderer). This file is the extraction that wired them: the
+// decision cores are pure functions of (sessions/state, time); only the side
+// effects (createNew / closeTab) live in ObserverTabs. Extracting them here
+// makes them unit-testable under `node --test` (transpiled TS -> ESM via Vite's
+// OXC transform — same harness as observerTurns.test.mjs, WARDEN-130).
 //
 // Activity model (documented): a session counts as "active" while it receives
 // incoming observer WS events (token streams, tool calls, gate prompts, …).
