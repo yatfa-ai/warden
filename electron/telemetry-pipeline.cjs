@@ -352,12 +352,47 @@ function createTelemetryPipeline(opts) {
       return; // a throwing redactor degrades to a dropped event, not a crash
     }
     let ok;
+    let validateThrew = false;
     try {
       ok = validate(redacted);
     } catch {
-      return; // a throwing validator degrades to a dropped event, not a crash
+      // A throwing validator degrades to a dropped event, not a crash. Flagged so
+      // the single rejected-entry site below records it identically to a false
+      // return — both are "the client rejected this payload before it ever reached
+      // the wire".
+      validateThrew = true;
     }
-    if (!ok) return; // schema-invalid → drop pre-send (never send an invalid payload)
+    if (validateThrew || !ok) {
+      // WARDEN-817 — record a 'rejected' outcome BEFORE the pre-send drop. This site
+      // (the validator threw OR returned false) was the LAST outcome-less failure
+      // point in the client pipeline: the event vanished with NO log line, NO
+      // transmission-log entry, and NO runtime-status arm. Every other failure mode
+      // already had a surface (415 → the WARDEN-631 drifted breaker; transport drops
+      // → outcome:'dropped' via recordOutcome + the WARDEN-808 banner). Now an opt-in
+      // user inspecting the verifiability panel sees client-side rejections alongside
+      // 'Delivered'/'Dropped' rows instead of events silently disappearing inside the
+      // client. Purely ADDITIVE observability — the drop still happens (never send an
+      // invalid payload); no gate is relaxed, nothing new is dropped.
+      //
+      // METADATA ONLY, identical to recordOutcome's entries: no payload, no reason
+      // text, and NO caught identifier (whatever leaked into `redacted.message` and
+      // tripped the validator never reaches the log). Consensual: the consent guard
+      // above (:336) and the drift guard (:346) both return BEFORE this point, so a
+      // 'rejected' entry is written ONLY when consent is ON and the endpoint is not
+      // drifted. eventCount:1 (the single redacted event that failed validation);
+      // attempts:0 / status:null — it never went to the wire. endpointHost is the
+      // configured destination host (null when no endpoint is set), strictly more
+      // diagnostic than null and trust-equivalent to the host recordOutcome records.
+      transmissionLog.record({
+        outcome: 'rejected',
+        endpointHost: hostOf(endpointUrl),
+        schemaVersion,
+        eventCount: 1,
+        attempts: 0,
+        status: null,
+      });
+      return; // schema-invalid / validator-threw → drop pre-send (never send an invalid payload)
+    }
 
     try {
       const events = [redacted];

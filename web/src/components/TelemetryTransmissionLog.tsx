@@ -20,7 +20,7 @@
 // the list current as sends land while Settings is open; cleared on unmount.
 import { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
-import { Check, HelpCircle, X } from 'lucide-react';
+import { AlertTriangle, Check, HelpCircle, X } from 'lucide-react';
 import { formatAbsoluteFull, formatRelative } from '@/lib/formatTimestamp';
 import {
   getTelemetryTransmissionLog,
@@ -88,6 +88,15 @@ export function TelemetryTransmissionLog() {
                 {summary.dropped} dropped
               </Badge>
             )}
+            {summary.rejected > 0 && (
+              <Badge
+                variant="outline"
+                className="gap-1 border-amber-500/40 text-amber-600 dark:text-amber-400"
+              >
+                <AlertTriangle className="size-3" aria-hidden />
+                {summary.rejected} rejected
+              </Badge>
+            )}
           </div>
         )}
       </div>
@@ -119,8 +128,10 @@ export function TelemetryTransmissionLog() {
                   of truth (set in describeTransmissionEntry), so a label change
                   is one edit and the descriptor's outcomeLabel tests genuinely
                   cover the user-visible string. outcomeTone only drives the
-                  icon + color (green Check / red X / muted HelpCircle) — three
-                  distinct render paths, not a duplicated label mapping.
+                  icon + color (green Check / red X / amber AlertTriangle / muted
+                  HelpCircle) — four distinct render paths, not a duplicated label
+                  mapping. The amber AlertTriangle is the pre-send 'rejected'
+                  outcome (WARDEN-817), visually distinct from a transport 'dropped'.
                 */}
                 {d.outcomeTone === 'ok' ? (
                   <span className="inline-flex items-center gap-1 font-medium text-green-600 dark:text-green-400">
@@ -130,6 +141,11 @@ export function TelemetryTransmissionLog() {
                 ) : d.outcomeTone === 'dropped' ? (
                   <span className="inline-flex items-center gap-1 font-medium text-destructive">
                     <X className="size-3 shrink-0" aria-hidden />
+                    {d.outcomeLabel}
+                  </span>
+                ) : d.outcomeTone === 'rejected' ? (
+                  <span className="inline-flex items-center gap-1 font-medium text-amber-600 dark:text-amber-400">
+                    <AlertTriangle className="size-3 shrink-0" aria-hidden />
                     {d.outcomeLabel}
                   </span>
                 ) : (

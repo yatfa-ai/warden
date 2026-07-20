@@ -73,6 +73,16 @@ test('a dropped entry maps to Dropped / dropped tone', () => {
   assert.equal(d.attempts, 3);
 });
 
+test('a rejected entry maps to Rejected (pre-send) / rejected tone (WARDEN-817)', () => {
+  // A pre-send validate rejection never went to the wire, so it carries no HTTP
+  // status (DASH) and is DISTINCT from a transport 'dropped'.
+  const d = describeTransmissionEntry({ ...OK, outcome: 'rejected', attempts: 0, status: null });
+  assert.equal(d.outcomeLabel, 'Rejected (pre-send)', 'the distinct third label');
+  assert.equal(d.outcomeTone, 'rejected', 'a tone distinct from dropped and unknown');
+  assert.equal(d.statusLabel, TRANSMISSION_DASH, 'never went to the wire → no HTTP status');
+  assert.equal(d.attempts, 0);
+});
+
 // ==========================================================================
 // Null handling — the load-bearing part (a malformed entry never crashes)
 // ==========================================================================
@@ -141,22 +151,24 @@ test('non-finite numeric fields coerce to their safe fallbacks', () => {
 // summarizeTransmission — the section-header tally
 // ==========================================================================
 
-test('summarize tallies delivered + dropped + total across a mixed ring', () => {
+test('summarize tallies delivered + dropped + rejected + total across a mixed ring', () => {
   const entries = [
     { ...OK, outcome: 'ok' },
     { ...OK, outcome: 'dropped' },
+    { ...OK, outcome: 'rejected' },
     { ...OK, outcome: 'ok' },
     { ...OK, outcome: null }, // unknown counts toward neither bucket
   ];
   const s = summarizeTransmission(entries);
-  assert.equal(s.total, 4);
+  assert.equal(s.total, 5);
   assert.equal(s.delivered, 2);
   assert.equal(s.dropped, 1);
+  assert.equal(s.rejected, 1, 'pre-send rejections get their own bucket (WARDEN-817)');
 });
 
 test('an empty ring summarizes to all-zero (the header hides when total is 0)', () => {
   const s = summarizeTransmission([]);
-  assert.deepEqual(s, { total: 0, delivered: 0, dropped: 0 });
+  assert.deepEqual(s, { total: 0, delivered: 0, dropped: 0, rejected: 0 });
 });
 
 test('summarize ignores null/malformed entries in the buckets but still counts them in total', () => {
@@ -165,6 +177,7 @@ test('summarize ignores null/malformed entries in the buckets but still counts t
   assert.equal(s.total, 3, 'malformed entries are still entries the panel would render');
   assert.equal(s.delivered, 1);
   assert.equal(s.dropped, 0);
+  assert.equal(s.rejected, 0);
 });
 
 console.log(`\n✓ TELEMETRY TRANSMISSION-DISPLAY TESTS PASS (${passed})`);

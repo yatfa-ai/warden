@@ -96,7 +96,14 @@ function normalizeEntry(entry, clock) {
     endpointHost: typeof e.endpointHost === 'string' ? e.endpointHost : null,
     schemaVersion: typeof e.schemaVersion === 'number' ? e.schemaVersion : null,
     eventCount: typeof e.eventCount === 'number' ? e.eventCount : 0,
-    outcome: e.outcome === 'ok' || e.outcome === 'dropped' ? e.outcome : null,
+    // The allow-list is the SINGLE gate for which outcomes ever reach the ring. It
+    // MUST admit every outcome any record() site can produce, or the entry is
+    // silently stripped to outcome:null on BOTH the write path (record() → here)
+    // AND the reload path (seed() → here) — a no-op that renders as 'Unknown'.
+    // 'rejected' is the pre-send validate-rejection outcome (WARDEN-817): recorded
+    // at the pipeline's pre-send drop site, it is a real outcome alongside
+    // 'ok'/'dropped', so it is admitted here.
+    outcome: e.outcome === 'ok' || e.outcome === 'dropped' || e.outcome === 'rejected' ? e.outcome : null,
     attempts: typeof e.attempts === 'number' ? e.attempts : 0,
     status: e.status === null || typeof e.status === 'number' ? e.status : null,
   };
