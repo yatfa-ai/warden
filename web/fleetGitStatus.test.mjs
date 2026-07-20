@@ -1,7 +1,7 @@
 // Tests for the pure aggregation behind WARDEN-766's Fleet Health git-status fan:
 // buildFleetGitStatus (turn N per-agent /api/git-status outcomes into a per-agent
-// { clean, diffstat, conflictCount, behind } map + a fleet dirty count + a fleet
-// conflict count + a fleet behind count + an honest error count) +
+// { clean, diffstat, ahead, conflictCount, behind } map + a fleet dirty count + a fleet
+// unpushed count + a fleet conflict count + a fleet behind count + an honest error count) +
 // buildFleetGitStatusUrl (the /api/git-status?id= fetch URL).
 //
 // These are the working-tree-STATE counterparts to mergeFleetCommitsByEpoch /
@@ -11,11 +11,13 @@
 // per-agent statuses fold into the Fleet Health view, that the dirty signal keys on
 // `clean === false` (not the diffstat magnitude), that the conflict signal keys on
 // `conflictCount > 0` (the agent-level count of unmerged PATHS, WARDEN-796 — the
-// mirror of dirtyCount's agent-level dirty signal), that the behind signal keys on
-// `behind > 0` (the agent-level staleness count, WARDEN-815 — the same mirror again),
-// that a clean:null non-git agent is neither dirty nor conflict nor behind nor an
-// error, and that a per-agent failure is counted honestly without blanking the rest
-// (the WARDEN-89 false-empty contract).
+// mirror of dirtyCount's agent-level dirty signal), that the unpushed signal keys on
+// `ahead > 0` (the agent-level count of stranded-work AGENTS, WARDEN-822 — the mirror
+// of dirtyCount/conflictCount, surfacing the blind spot clean cannot speak to), that
+// the behind signal keys on `behind > 0` (the agent-level staleness count, WARDEN-815
+// — the same mirror again), that a clean:null non-git agent is neither dirty nor
+// unpushed nor conflict nor behind nor an error, and that a per-agent failure is
+// counted honestly without blanking the rest (the WARDEN-89 false-empty contract).
 //
 // Run: node fleetGitStatus.test.mjs   (from web/)
 import { transformWithOxc } from 'vite';
@@ -44,18 +46,24 @@ const test = (name, fn) => {
   console.log('  ok -', name);
 };
 
-// Tiny builders so each case reads as "which agents are clean/dirty/conflict/behind/unreachable".
-// `slice` mirrors FleetGitStatusSlice ({ clean, diffstat, conflictCount, behind }) — the four
+// Tiny builders so each case reads as "which agents are clean/dirty/conflict/behind/ahead/unreachable".
+// `slice` mirrors FleetGitStatusSlice ({ clean, diffstat, ahead, conflictCount, behind }) — the five
 // fields the UI reads off /api/git-status. clean === false ⇒ dirty; diffstat is
 // { files, insertions, deletions } | null (null for a clean / non-git / all-untracked
-// tree); conflictCount (WARDEN-796) is the # of unmerged paths for that agent (> 0 ⇒ a
+// tree); ahead (WARDEN-822) is the # of unpushed commits (> 0 ⇒ stranded locally — the
+// ahead axis clean cannot speak to; null for non-git / detached / no-upstream, 0 for
+// in-sync); conflictCount (WARDEN-796) is the # of unmerged paths for that agent (> 0 ⇒ a
 // mid-merge/rebase/cherry-pick block — the conflict axis); behind (WARDEN-815) is the #
 // of commits that agent's HEAD is behind its upstream (> 0 ⇒ stale — the staleness
 // axis; null for a non-git / no-branch / no-upstream cwd, the same null-is-quiet
-// discipline `clean` follows).
-const slice = (clean, insertions = null, deletions = null, files = 0, conflictCount = 0, behind = null) => ({
+// discipline `clean` follows). NOTE the positional order is (clean, insertions,
+// deletions, files, conflictCount, behind, ahead) — conflictCount before behind/ahead so
+// the older conflict-only call sites (5 args) keep working; behind at pos 6, ahead at
+// pos 7 so a call exercising ONE axis passes null for the other.
+const slice = (clean, insertions = null, deletions = null, files = 0, conflictCount = 0, behind = null, ahead = 0) => ({
   clean,
   diffstat: insertions === null ? null : { files, insertions, deletions },
+  ahead,
   conflictCount,
   behind,
 });
@@ -65,24 +73,26 @@ const ok = (key, status) => ({ ok: true, key, status });
 // A rejected/unreachable per-agent outcome.
 const bad = (key) => ({ ok: false, key });
 
-console.log('\nbuildFleetGitStatus — fold N per-agent statuses into a map + dirty/conflict/error counts');
+console.log('\nbuildFleetGitStatus — fold N per-agent statuses into a map + dirty/conflict/behind/ahead/error counts');
 test('empty input is safe (no agents → empty map, zero counts)', () => {
-  assert.deepEqual(buildFleetGitStatus([]), { statusByKey: {}, dirtyCount: 0, errorCount: 0, conflictCount: 0, behindCount: 0 });
+  assert.deepEqual(buildFleetGitStatus([]), { statusByKey: {}, dirtyCount: 0, errorCount: 0, conflictCount: 0, behindCount: 0, aheadCount: 0 });
 });
-test('one CLEAN agent: map gets an entry, dirtyCount stays 0, conflictCount 0, behindCount 0, errorCount 0', () => {
+test('one CLEAN agent: map gets an entry, dirtyCount stays 0, conflictCount 0, behindCount 0, aheadCount 0, errorCount 0', () => {
   const r = buildFleetGitStatus([ok('a1', slice(true))]);
-  assert.deepEqual(r.statusByKey, { a1: { clean: true, diffstat: null, conflictCount: 0, behind: null } });
+  assert.deepEqual(r.statusByKey, { a1: { clean: true, diffstat: null, ahead: 0, conflictCount: 0, behind: null } });
   assert.equal(r.dirtyCount, 0);
   assert.equal(r.conflictCount, 0);
   assert.equal(r.behindCount, 0);
+  assert.equal(r.aheadCount, 0);
   assert.equal(r.errorCount, 0);
 });
-test('one DIRTY agent with a magnitude: dirtyCount 1, conflictCount 0, behindCount 0, slice carried verbatim', () => {
+test('one DIRTY agent with a magnitude: dirtyCount 1, conflictCount 0, behindCount 0, aheadCount 0, slice carried verbatim', () => {
   const r = buildFleetGitStatus([ok('a1', slice(false, 12, 3, 2))]);
-  assert.deepEqual(r.statusByKey.a1, { clean: false, diffstat: { files: 2, insertions: 12, deletions: 3 }, conflictCount: 0, behind: null });
+  assert.deepEqual(r.statusByKey.a1, { clean: false, diffstat: { files: 2, insertions: 12, deletions: 3 }, ahead: 0, conflictCount: 0, behind: null });
   assert.equal(r.dirtyCount, 1);
   assert.equal(r.conflictCount, 0);
   assert.equal(r.behindCount, 0);
+  assert.equal(r.aheadCount, 0);
   assert.equal(r.errorCount, 0);
 });
 test('dirty keys on clean === false, NOT on the diffstat magnitude (all-untracked still counts)', () => {
@@ -102,31 +112,34 @@ test('a dirty agent with a +0−0 diffstat (tracked but zero-net) still counts a
   assert.equal(r.dirtyCount, 1);
   assert.deepEqual(r.statusByKey.a1.diffstat, { files: 0, insertions: 0, deletions: 0 });
 });
-test('a clean:null (non-git / no-branch) agent is NEITHER dirty NOR conflict NOR behind NOR an error', () => {
+test('a clean:null (non-git / no-branch) agent is NEITHER dirty NOR unpushed NOR conflict NOR behind NOR an error', () => {
   // The server gates `clean: branch ? clean : null` — a non-git cwd serves clean:null.
-  // null !== false ⇒ not dirty; conflictCount 0 ⇒ not a conflict; behind null (the
-  // server gates `behind: branch ? behind : null` too, and parseAheadBehind returns
-  // `{ behind: null }` for no-upstream) ⇒ not behind; the agent is a resolved ok
-  // outcome ⇒ not an error. It gets a map entry (clean:null) so the React layer could
-  // distinguish "fetched but non-git" from "still loading"; today both render no chip.
+  // null !== false ⇒ not dirty; conflictCount 0 ⇒ not a conflict; ahead 0 ⇒ not
+  // unpushed; behind null (the server gates `behind: branch ? behind : null` too, and
+  // parseAheadBehind returns `{ behind: null }` for no-upstream) ⇒ not behind; the agent
+  // is a resolved ok outcome ⇒ not an error. It gets a map entry (clean:null) so the
+  // React layer could distinguish "fetched but non-git" from "still loading"; today both
+  // render no chip.
   const r = buildFleetGitStatus([ok('a1', slice(null))]);
-  assert.deepEqual(r.statusByKey, { a1: { clean: null, diffstat: null, conflictCount: 0, behind: null } });
+  assert.deepEqual(r.statusByKey, { a1: { clean: null, diffstat: null, ahead: 0, conflictCount: 0, behind: null } });
   assert.equal(r.dirtyCount, 0);
   assert.equal(r.conflictCount, 0);
+  assert.equal(r.aheadCount, 0);
   assert.equal(r.behindCount, 0);
   assert.equal(r.errorCount, 0);
 });
-test('a failed agent (ok:false) is counted as an error, NEVER as dirty OR conflict OR behind, and gets no map entry', () => {
+test('a failed agent (ok:false) is counted as an error, NEVER as dirty OR conflict OR behind OR unpushed, and gets no map entry', () => {
   // The WARDEN-89 contract: an unreachable / non-git-error agent must never masquerade
   // as a clean/empty status. It is counted into errorCount and ABSENT from the map (so
   // statusByKey[id] is undefined → the React layer renders the graceful-N/A nothing,
-  // NOT a false clean chip) — and it is NOT counted as a conflict OR behind (a
-  // transiently-unreachable agent is never misread as blocked or stale).
+  // NOT a false clean chip) — and it is NOT counted as a conflict, behind, OR unpushed
+  // (a transiently-unreachable agent is never misread as blocked, stale, or stranded).
   const r = buildFleetGitStatus([bad('a1')]);
   assert.deepEqual(r.statusByKey, {});
   assert.equal(r.dirtyCount, 0);
   assert.equal(r.conflictCount, 0);
   assert.equal(r.behindCount, 0);
+  assert.equal(r.aheadCount, 0);
   assert.equal(r.errorCount, 1);
 });
 test('a failed agent does NOT blank the successful agents (partial-failure tolerance)', () => {
@@ -159,11 +172,12 @@ test('a clean ok agent gets a map entry too (fetched-vs-loading stays distinguis
   // defined lets a future surface tell "fetched + clean" apart from "still loading."
   const r = buildFleetGitStatus([ok('a1', slice(true)), ok('a2', slice(false, 2, 2, 1))]);
   assert.deepEqual(r.statusByKey, {
-    a1: { clean: true, diffstat: null, conflictCount: 0, behind: null },
-    a2: { clean: false, diffstat: { files: 1, insertions: 2, deletions: 2 }, conflictCount: 0, behind: null },
+    a1: { clean: true, diffstat: null, ahead: 0, conflictCount: 0, behind: null },
+    a2: { clean: false, diffstat: { files: 1, insertions: 2, deletions: 2 }, ahead: 0, conflictCount: 0, behind: null },
   });
   assert.equal(r.dirtyCount, 1);
   assert.equal(r.conflictCount, 0);
+  assert.equal(r.aheadCount, 0);
 });
 
 console.log('\nbuildFleetGitStatus — the conflict axis (WARDEN-796: conflictCount > 0 ⇒ blocked agent)');
@@ -177,12 +191,14 @@ test('one CONFLICT agent (conflictCount > 0) increments the fleet conflictCount,
   assert.deepEqual(r.statusByKey.a1, {
     clean: false,
     diffstat: { files: 3, insertions: 40, deletions: 12 },
+    ahead: 0,
     conflictCount: 3,
     behind: null,
   });
   assert.equal(r.conflictCount, 1);
   assert.equal(r.dirtyCount, 1);
   assert.equal(r.behindCount, 0);
+  assert.equal(r.aheadCount, 0);
   assert.equal(r.errorCount, 0);
 });
 test('a CONFLICT-but-clean agent still counts as a conflict (conflictCount is independent of clean)', () => {
@@ -244,6 +260,7 @@ test('one BEHIND agent (behind > 0) increments the fleet behindCount, slice carr
   assert.deepEqual(r.statusByKey.a1, {
     clean: true,
     diffstat: null,
+    ahead: 0,
     conflictCount: 0,
     behind: 4,
   });
@@ -268,7 +285,7 @@ test('a fresh agent (behind 0) or a non-git/no-upstream agent (behind null) does
   assert.equal(r.statusByKey.a2.behind, null);
 });
 test('behindCount is ORTHOGONAL to dirtyCount/conflictCount (a behind-and-dirty agent increments ALL applicable axes)', () => {
-  // The three axes are orthogonal agent-level counts over the same ok fleet, mirroring
+  // The four axes are orthogonal agent-level counts over the same ok fleet, mirroring
   // how dirty + conflict are orthogonal (a mid-merge repo is dirty too). A behind agent
   // that is ALSO dirty (uncommitted WIP on an out-of-date base — the dangerous case:
   // further commits diverge) increments BOTH behindCount and dirtyCount; add a conflict
@@ -310,30 +327,127 @@ test('a failed agent is NOT counted as behind (a transient miss is never stale)'
   assert.deepEqual(Object.keys(r.statusByKey), ['a1']); // a2 absent
 });
 
-test('full fleet shape — mixed clean/dirty/conflict/behind/non-git/unreachable with honest counts', () => {
+console.log('\nbuildFleetGitStatus — the unpushed axis (WARDEN-822: ahead > 0 ⇒ stranded-work agent)');
+test('one UNPUSHED agent (ahead > 0) increments the fleet aheadCount, slice carried verbatim', () => {
+  // The unpushed signal keys on ahead > 0 — the mirror of how dirty keys on
+  // clean === false and conflict keys on conflictCount > 0. The per-agent COMMIT count
+  // is carried on the slice (drives the per-row ↑N's magnitude); the fleet AGENT count
+  // is incremented here. This is THE case the axis exists for: an agent that committed
+  // 5 times and never pushed has clean === true, so WITHOUT this axis it reads
+  // identically to an agent fully in sync with upstream — its finished work is stranded
+  // locally and invisible to the rest of the fleet. The trailing null in the slice call
+  // holds the behind position so ahead lands at pos 7.
+  const r = buildFleetGitStatus([ok('a1', slice(true, null, null, 0, 0, null, 5))]);
+  assert.deepEqual(r.statusByKey.a1, {
+    clean: true,
+    diffstat: null,
+    ahead: 5,
+    conflictCount: 0,
+    behind: null,
+  });
+  assert.equal(r.aheadCount, 1);
+  assert.equal(r.dirtyCount, 0);          // clean === true ⇒ NOT dirty (the blind spot)
+  assert.equal(r.conflictCount, 0);
+  assert.equal(r.errorCount, 0);
+});
+test('ahead: 0 (in-sync) does NOT increment the fleet aheadCount', () => {
+  // The negative case: ahead === 0 (a branch fully in sync with its upstream) ⇒ not a
+  // stranded agent. Mirrors "a clean agent does not increment dirtyCount."
+  const r = buildFleetGitStatus([ok('a1', slice(true, null, null, 0, 0, null, 0))]);
+  assert.equal(r.statusByKey.a1.ahead, 0);
+  assert.equal(r.aheadCount, 0);
+});
+test('ahead: null (non-git / detached / no-upstream) does NOT increment the fleet aheadCount', () => {
+  // The null-is-quiet discipline: the server serves ahead:null for a non-git cwd, a
+  // detached HEAD, or a named branch with no upstream (all gated on `branch`). null is
+  // neither > 0 nor an error — the agent is NOT stranded (it simply has no upstream to
+  // be ahead of). This is the guard that keeps a no-upstream / non-git agent from being
+  // misread as having unpushed work. The slice carries the null verbatim so the React
+  // layer's chip guard (!status.ahead || <= 0) renders nothing.
+  const r = buildFleetGitStatus([ok('a1', { clean: true, diffstat: null, ahead: null, conflictCount: 0, behind: null })]);
+  assert.equal(r.statusByKey.a1.ahead, null);
+  assert.equal(r.aheadCount, 0);
+});
+test('aheadCount is ORTHOGONAL to dirtyCount/conflictCount — an unpushed-and-dirty agent increments BOTH', () => {
+  // The four axes (dirty / conflict / behind / ahead) are independent counts over the
+  // same ok fleet. An agent that is dirty (clean === false) AND unpushed (ahead > 0)
+  // increments BOTH dirtyCount and aheadCount: a clean === false tree says nothing
+  // about whether the committed work is pushed. An agent that is dirty + unpushed +
+  // blocked increments dirtyCount, aheadCount, AND conflictCount. This is the
+  // load-bearing orthogonality assertion — the counts must not gate on one another.
   const r = buildFleetGitStatus([
-    ok('a1', slice(false, 847, 203, 12)),      // dirty, heavy
-    ok('b1', slice(true)),                      // clean
-    ok('c1', slice(false, null)),               // dirty, all-untracked (still counts)
-    ok('d1', slice(null)),                      // non-git (neither)
-    bad('e1'),                                  // unreachable (error)
-    ok('f1', slice(false, 0, 0, 0)),            // dirty, +0−0 (still counts)
-    ok('g1', slice(false, 40, 12, 3, 3)),       // blocked mid-merge, 3 unmerged (WARDEN-796)
-    ok('h1', slice(false, 0, 0, 5, 5)),         // blocked mid-merge, 5 unmerged, +0−0 magnitude
-    ok('i1', slice(true, null, null, 0, 0, 6)), // stale, 6 behind, clean (WARDEN-815)
-    ok('j1', slice(false, 5, 2, 1, 0, 3)),      // dirty AND behind (the diverge case)
+    ok('a1', slice(false, 12, 3, 2, 4, null, 5)),  // dirty + conflict + unpushed (three axes)
+    ok('a2', slice(false, 1, 1, 1, 0, null, 2)),   // dirty + unpushed
+    ok('a3', slice(true, null, null, 0, 0, null, 7)), // unpushed only (clean tree — the blind spot)
   ]);
-  assert.equal(r.dirtyCount, 6);                // a1 + c1 + f1 + g1 + h1 + j1 (clean === false)
-  assert.equal(r.conflictCount, 2);             // g1 + h1 (conflictCount > 0) — agents, not 8 paths
-  assert.equal(r.behindCount, 2);               // i1 + j1 (behind > 0) — agents, not 9 commits
-  assert.equal(r.errorCount, 1);                // e1
-  assert.deepEqual(Object.keys(r.statusByKey), ['a1', 'b1', 'c1', 'd1', 'f1', 'g1', 'h1', 'i1', 'j1']); // e1 absent
+  assert.equal(r.aheadCount, 3);            // a1 + a2 + a3
+  assert.equal(r.dirtyCount, 2);            // a1 + a2 (a3 is clean === true)
+  assert.equal(r.conflictCount, 1);         // a1 only
+  assert.equal(r.errorCount, 0);
+});
+test('aheadCount counts stranded AGENTS, not total unpushed commits (the mirror of dirtyCount)', () => {
+  // dirtyCount counts dirty AGENTS (not total dirty files); conflictCount counts blocked
+  // agents (not total unmerged paths); aheadCount is their direct mirror — it counts
+  // stranded AGENTS, not the sum of their unpushed commits. Two unpushed agents (5 + 7
+  // commits) ⇒ aheadCount 2, NOT 12. This is the load-bearing assertion for the
+  // summary-bar "N unpushed" tally's honesty.
+  const r = buildFleetGitStatus([
+    ok('a1', slice(true, null, null, 0, 0, null, 5)),  // 5 unpushed, clean tree
+    ok('a2', slice(true, null, null, 0, 0, null, 7)),  // 7 unpushed, clean tree
+    ok('a3', slice(true)),                        // in-sync (ahead 0)
+  ]);
+  assert.equal(r.aheadCount, 2);            // a1 + a2 (agents), NOT 12 (commits)
+  assert.equal(r.dirtyCount, 0);            // all clean === true
+});
+test('a failed agent is NOT counted as unpushed (a transient miss is never stranded work)', () => {
+  // The WARDEN-89 contract extended to the ahead axis: an unreachable agent is counted
+  // into errorCount and absent from the map — it must NEVER be read as a stranded agent
+  // (which would inflate the "needs attention" tally on a transient miss). An unpushed
+  // agent + a failed agent ⇒ 1 unpushed, 1 error.
+  const r = buildFleetGitStatus([
+    ok('a1', slice(true, null, null, 0, 0, null, 5)),  // unpushed
+    bad('a2'),                                   // unreachable
+  ]);
+  assert.equal(r.aheadCount, 1);            // only a1
+  assert.equal(r.errorCount, 1);            // a2, NOT unpushed
+  assert.deepEqual(Object.keys(r.statusByKey), ['a1']); // a2 absent
+});
+
+test('full fleet shape — mixed clean/dirty/conflict/behind/ahead/non-git/unreachable with honest counts', () => {
+  // The integration test: every axis fires on a realistic mixed fleet, the four
+  // orthogonal counts (dirty / conflict / behind / ahead) are all honest agent tallies,
+  // and an ok:false agent is absent + counted only as an error. behind lives at pos 6,
+  // ahead at pos 7 of the slice() helper — a call exercising one axis passes null for
+  // the other so a single agent can be dirty+ahead (a1), dirty+behind (j1), behind-only
+  // clean (i1), or ahead-only clean (k1).
+  const r = buildFleetGitStatus([
+    ok('a1', slice(false, 847, 203, 12, 0, null, 2)),  // dirty, heavy, 2 unpushed (dirty AND ahead)
+    ok('b1', slice(true)),                              // clean, in-sync
+    ok('c1', slice(false, null)),                       // dirty, all-untracked (still counts)
+    ok('d1', slice(null)),                              // non-git (neither)
+    bad('e1'),                                          // unreachable (error)
+    ok('f1', slice(false, 0, 0, 0)),                    // dirty, +0−0 (still counts)
+    ok('g1', slice(false, 40, 12, 3, 3)),               // blocked mid-merge, 3 unmerged (WARDEN-796)
+    ok('h1', slice(false, 0, 0, 5, 5)),                 // blocked mid-merge, 5 unmerged, +0−0 magnitude
+    ok('i1', slice(true, null, null, 0, 0, 6)),         // stale, 6 behind, clean (WARDEN-815)
+    ok('j1', slice(false, 5, 2, 1, 0, 3)),              // dirty AND behind (the diverge case)
+    ok('k1', slice(true, null, null, 0, 0, null, 7)),   // CLEAN tree, 7 unpushed — the blind spot (WARDEN-822)
+  ]);
+  assert.equal(r.dirtyCount, 6);                  // a1 + c1 + f1 + g1 + h1 + j1 (clean === false)
+  assert.equal(r.conflictCount, 2);               // g1 + h1 (conflictCount > 0) — agents, not 8 paths
+  assert.equal(r.behindCount, 2);                  // i1 + j1 (behind > 0) — agents, not 9 commits
+  assert.equal(r.aheadCount, 2);                  // a1 + k1 (ahead > 0) — agents, not 9 commits
+  assert.equal(r.errorCount, 1);                  // e1
+  assert.deepEqual(Object.keys(r.statusByKey), ['a1', 'b1', 'c1', 'd1', 'f1', 'g1', 'h1', 'i1', 'j1', 'k1']); // e1 absent
   assert.equal(r.statusByKey.a1.diffstat.insertions, 847);
+  assert.equal(r.statusByKey.a1.ahead, 2);        // dirty agent can ALSO be unpushed (orthogonal axes)
   assert.equal(r.statusByKey.d1.clean, null);
   assert.equal(r.statusByKey.g1.conflictCount, 3); // per-agent path count carried verbatim
   assert.equal(r.statusByKey.h1.conflictCount, 5);
   assert.equal(r.statusByKey.i1.behind, 6);        // per-agent behind count carried verbatim
   assert.equal(r.statusByKey.j1.behind, 3);
+  assert.equal(r.statusByKey.k1.clean, true);      // the stranded agent's tree is clean — clean alone can't surface it
+  assert.equal(r.statusByKey.k1.ahead, 7);         // …but its 7 committed commits ARE unpushed
 });
 
 console.log('\nbuildFleetGitStatusUrl — the /api/git-status?id= fetch URL');

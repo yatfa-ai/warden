@@ -379,6 +379,42 @@ function BehindChip({ status }: { status?: FleetGitStatusSlice | null }) {
   );
 }
 
+/**
+ * Per-agent unpushed-commit chip (WARDEN-822) — the sibling of WipChip / ConflictChip
+ * for the ahead axis, surfacing the one git state clean cannot speak to: an agent that
+ * committed N times and never pushed has clean === true AND dirtyCount === 0, so it is
+ * indistinguishable from an agent fully in sync with upstream — its FINISHED work is
+ * stranded locally and invisible to every other agent pulling from shared upstream.
+ * WARDEN-766 (dirty ±N) and WARDEN-796 (conflict ⚑) shipped the axes clean CAN speak
+ * to; this is the natural next axis — "who has work no one else can see yet?", the
+ * silent coordination rot the dashboard exists to surface.
+ *
+ * Renders the sidebar's amber ↑N vocabulary VERBATIM (no new glyph/color system —
+ * WARDEN-68): the unpushed treatment established at GitBadges.tsx:1472 (glyph '↑',
+ * `text-amber-400`) — the SAME fleet/row agreement 766/796 establish (Fleet Health and
+ * the sidebar speak one vocabulary). The per-agent count (status.ahead) drives the
+ * chip's magnitude; the fleet-wide count of stranded AGENTS (fleetGit.aheadCount, the
+ * mirror of dirtyCount/conflictCount) drives the summary tally.
+ *
+ * Renders ONLY when status.ahead > 0 — absent (loading / not eligible / unreachable),
+ * a non-git / detached / no-upstream cwd (ahead: null), or an in-sync agent (ahead: 0)
+ * → nothing, the same graceful-N/A contract WipChip / ConflictChip / ResourceChip /
+ * TokenChip follow. `tabular-nums` mirrors WipChip / ConflictChip so the chips' digit
+ * widths align when several render together (an unpushed agent is often dirty too).
+ */
+function UnpushedChip({ status }: { status?: FleetGitStatusSlice | null }) {
+  if (!status || !status.ahead || status.ahead <= 0) return null;
+  const n = status.ahead;
+  return (
+    <span
+      className="shrink-0 tabular-nums text-amber-400 hover:text-amber-300"
+      title={`${n} commit${n === 1 ? '' : 's'} unpushed to upstream (stranded locally — pulling/re-syncing elsewhere won't see this work yet)`}
+    >
+      ↑ {n}
+    </span>
+  );
+}
+
 export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, groupBy, onGroupByChange: setGroupBy, collapsedHosts, onCollapsedHostsChange: setCollapsedHosts }: Props) {
   const [healthData, setHealthData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -677,6 +713,14 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
           graceful-N/A. See BehindChip. Sibling to WipChip/ConflictChip: a behind agent
           is often clean too, so ↓ may render alone OR alongside the ±N/⚑. */}
       <BehindChip status={fleetGit.statusByKey[id]} />
+
+      {/* Per-agent unpushed-commits block (WARDEN-822): the amber ↑N magnitude for
+          THIS agent — the ahead axis clean cannot speak to. Renders the ↑ only when the
+          fanned status reports ahead > 0 (committed-but-unpushed work); absent /
+          in-sync / no-upstream → nothing, identical graceful-N/A. See UnpushedChip.
+          Sibling to WipChip AND ConflictChip because an unpushed agent is often dirty
+          too: the three axes are orthogonal, so ALL THREE may render at once. */}
+      <UnpushedChip status={fleetGit.statusByKey[id]} />
     </div>
     );
   };
@@ -883,12 +927,13 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
                 agent's base is outdated and further edits will diverge." Reuses the
                 sidebar's blue ↓ vocabulary (the behind chip family) so "behind" reads in
                 the same color everywhere; placed after the conflict count
-                (severity-descending: dirty → conflict → behind → muted unreachable).
-                Only rendered when > 0 so a fresh fleet stays quiet. behindCount counts
-                stale AGENTS (the mirror of dirtyCount/conflictCount), not total
-                behind-commits, and excludes error/loading agents (counted in errorCount)
-                + null-behind non-git/no-upstream cwds, so a transiently-unreachable or
-                non-git agent is never misread as stale. */}
+                (severity-descending: dirty → conflict → behind → unpushed → muted
+                unreachable). Only rendered when > 0 so a fresh fleet stays quiet.
+                behindCount counts stale AGENTS (the mirror of
+                dirtyCount/conflictCount/aheadCount), not total behind-commits, and
+                excludes error/loading agents (counted in errorCount) + null-behind
+                non-git/no-upstream cwds, so a transiently-unreachable or non-git agent
+                is never misread as stale. */}
             {fleetGit.behindCount > 0 && (
               <>
                 <span className="text-muted-foreground">·</span>
@@ -897,6 +942,32 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
                   title={`${fleetGit.behindCount} agent${fleetGit.behindCount === 1 ? '' : 's'} behind upstream (stale — pulling re-syncs before further edits diverge; fanned /api/git-status across active project agents)`}
                 >
                   {fleetGit.behindCount} behind
+                </span>
+              </>
+            )}
+            {/* Fleet-wide unpushed-commits count (WARDEN-822): the # of fanned agents
+                with committed-but-unpushed work (ahead > 0) — the ahead axis alongside
+                the dirty/conflict/behind counts, surfacing the blind spot clean cannot
+                speak to: such an agent has clean === true, so WITHOUT this axis it is
+                indistinguishable from an agent fully in sync — its finished work is
+                stranded locally and invisible to the rest of the fleet. Reuses the
+                sidebar's amber ↑ vocabulary (the unpushed chip family, GitBadges.tsx) so
+                "unpushed" reads in the same color everywhere; placed after the behind
+                count (severity-descending: dirty → conflict → behind → unpushed → muted
+                unreachable). Only rendered when > 0 so a healthy fleet stays quiet.
+                aheadCount counts stranded AGENTS (the mirror of
+                dirtyCount/conflictCount/behindCount), not total unpushed commits, and
+                excludes error/loading agents (counted in errorCount) and
+                no-upstream/in-sync agents (ahead: null / 0), so a transiently-unreachable
+                agent is never misread as stranded. */}
+            {fleetGit.aheadCount > 0 && (
+              <>
+                <span className="text-muted-foreground">·</span>
+                <span
+                  className="text-amber-500"
+                  title={`${fleetGit.aheadCount} agent${fleetGit.aheadCount === 1 ? '' : 's'} with committed-but-unpushed work (fanned /api/git-status across active project agents; stranded locally — pulling/re-syncing elsewhere won't see this work yet)`}
+                >
+                  {fleetGit.aheadCount} unpushed
                 </span>
               </>
             )}
