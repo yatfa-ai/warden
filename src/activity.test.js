@@ -76,9 +76,9 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
 
   // ------------------------------------------------- appendEvent ----------
   describe('appendEvent', () => {
-    it('writes exactly one valid JSON line containing the spread event fields', () => {
+    it('writes exactly one valid JSON line containing the spread event fields', async () => {
       seed();
-      appendEvent({ type: 'attached', container: 'c1', host: 'hostA' });
+      await appendEvent({ type: 'attached', container: 'c1', host: 'hostA' });
       const rows = fs.readFileSync(activityPath, 'utf8').trim().split('\n');
       assert.strictEqual(rows.length, 1, 'exactly one line written');
       const ev = JSON.parse(rows[0]); // throws if the line is not valid JSON
@@ -87,10 +87,10 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
       assert.strictEqual(ev.host, 'hostA');
     });
 
-    it('assigns an ISO-8601 (UTC) timestamp at write time when the caller omits one', () => {
+    it('assigns an ISO-8601 (UTC) timestamp at write time when the caller omits one', async () => {
       seed();
       const before = Date.now();
-      appendEvent({ type: 'attached', container: 'c1' });
+      await appendEvent({ type: 'attached', container: 'c1' });
       const after = Date.now();
       const ev = JSON.parse(fs.readFileSync(activityPath, 'utf8'));
       const ts = new Date(ev.timestamp).getTime();
@@ -108,18 +108,18 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
     //   data-integrity bug, a source fix must flip the spread to
     //   `{ ...event, timestamp: new Date().toISOString() }` and update this
     //   assertion in the same change.
-    it('preserves a caller-supplied timestamp (spread merges AFTER the server value)', () => {
+    it('preserves a caller-supplied timestamp (spread merges AFTER the server value)', async () => {
       seed();
       const forged = '2020-01-01T00:00:00.000Z';
-      appendEvent({ type: 'attached', container: 'c1', timestamp: forged });
+      await appendEvent({ type: 'attached', container: 'c1', timestamp: forged });
       const ev = JSON.parse(fs.readFileSync(activityPath, 'utf8'));
       assert.strictEqual(ev.timestamp, forged, 'caller-supplied timestamp wins (forgeable)');
     });
 
-    it('appends rather than overwrites (two calls → two lines, in order)', () => {
+    it('appends rather than overwrites (two calls → two lines, in order)', async () => {
       seed();
-      appendEvent({ type: 'attached', container: 'c1' });
-      appendEvent({ type: 'ended', container: 'c2' });
+      await appendEvent({ type: 'attached', container: 'c1' });
+      await appendEvent({ type: 'ended', container: 'c2' });
       const rows = fs.readFileSync(activityPath, 'utf8').trim().split('\n');
       assert.strictEqual(rows.length, 2);
       const [first, second] = rows.map((r) => JSON.parse(r));
@@ -127,11 +127,11 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
       assert.strictEqual(second.type, 'ended');   // appended second
     });
 
-    it('creates the directory and file when they do not yet exist (ensure() path)', () => {
+    it('creates the directory and file when they do not yet exist (ensure() path)', async () => {
       // Wipe both the file and the .yatfa-warden dir; appendEvent must recreate them.
       fs.rmSync(wdir, { recursive: true, force: true });
       assert.ok(!fs.existsSync(wdir), 'precondition: dir is gone');
-      appendEvent({ type: 'attached', container: 'c1' });
+      await appendEvent({ type: 'attached', container: 'c1' });
       assert.ok(fs.existsSync(activityPath), 'ensure() recreated the dir and file');
       const rows = fs.readFileSync(activityPath, 'utf8').trim().split('\n');
       assert.strictEqual(rows.length, 1);
@@ -230,7 +230,7 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
         line('attached', now - SEVEN_DAYS - BUFFER), // removed (just outside cutoff)
         line('attached', now - 30 * DAY),          // removed (long expired)
       ]);
-      const removed = rotateEvents();
+      const removed = await rotateEvents();
       assert.strictEqual(removed, 2);
       const remaining = await readEvents();
       assert.strictEqual(remaining.length, 2);
@@ -247,7 +247,7 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
         '{ malformed-but-recent',          // un-parseable → catch → KEPT (not counted as removed)
         line('attached', now - 30 * DAY),  // valid + expired → removed
       ]);
-      const removed = rotateEvents();
+      const removed = await rotateEvents();
       assert.strictEqual(removed, 1, 'only the expired valid line counts as removed');
       const content = fs.readFileSync(activityPath, 'utf8');
       assert.ok(
@@ -263,7 +263,7 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
         line('attached', now - DAY),
         line('attached', now - 30 * DAY),
       ]);
-      rotateEvents();
+      await rotateEvents();
       const ev = await readEvents();
       assert.strictEqual(ev.length, 1);
       assert.strictEqual(new Date(ev[0].timestamp).getTime(), now - DAY);
@@ -275,19 +275,19 @@ describe('activity.js — appendEvent / readEvents / rotateEvents / getStatsSinc
         line('attached', now - DAY),
         line('attached', now - 30 * DAY),
       ]);
-      assert.strictEqual(rotateEvents(), 1);
-      assert.strictEqual(rotateEvents(), 0);
+      assert.strictEqual(await rotateEvents(), 1);
+      assert.strictEqual(await rotateEvents(), 0);
       assert.strictEqual((await readEvents()).length, 1);
     });
 
-    it('returns 0 and does not throw for an empty file', () => {
+    it('returns 0 and does not throw for an empty file', async () => {
       seed([]);
-      assert.strictEqual(rotateEvents(), 0);
+      assert.strictEqual(await rotateEvents(), 0);
     });
 
-    it('returns 0 and does not throw when the file is absent', () => {
+    it('returns 0 and does not throw when the file is absent', async () => {
       fs.rmSync(activityPath, { force: true });
-      assert.strictEqual(rotateEvents(), 0);
+      assert.strictEqual(await rotateEvents(), 0);
     });
   });
 

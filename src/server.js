@@ -24,7 +24,7 @@ import {
   readLocalSessionTranscript, buildSessionReadScript, parseSessionReadOutput,
 } from './claudeSessions.js';
 import { classifyProbe } from './sessionRecovery.js';
-import { Observer, readDirectives } from './observer.js';
+import { Observer, readDirectives, rotateDirectives } from './observer.js';
 import { hasCredentials, resolveModel } from './llm.js';
 import { listSessions, createSession, renameSession, deleteSession } from './sessions.js';
 import { appendEvent, rotateEvents, readEvents, getStatsSince, getSeriesSince } from './activity.js';
@@ -101,7 +101,7 @@ async function resolve(id) {
     // ssh), then — only if the id carries a known "<host>:..." prefix — discover that one
     // host. Bare container names (restored yatfa tabs) stay unresolved until the user
     // clicks the host. resolveChatWithRefresh re-matches against the refreshed cache.
-    if (!cache.length) cache = catalogChats(cfg).chats;
+    if (!cache.length) cache = (await catalogChats(cfg)).chats;
     const colon = id.lastIndexOf(':');
     if (colon > 0) {
       const hostHint = id.slice(0, colon);
@@ -148,8 +148,8 @@ const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 
 // Disk-only catalog list — instant, zero ssh (lazy mode). Live active/status are
 // resolved per host on demand via /api/discover.
-app.get('/api/chats', (_req, res) => {
-  const { chats, errors } = catalogChats(cfg);
+app.get('/api/chats', async (_req, res) => {
+  const { chats, errors } = await catalogChats(cfg);
   // Refresh catalog (disk) chats in the cache but KEEP any lazily-discovered yatfa chats,
   // so already-open remote panes keep streaming across list refreshes.
   const yatfa = cache.filter((c) => c.kind === 'yatfa');
@@ -487,16 +487,16 @@ app.post('/api/key', async (req, res) => {
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get('/api/sessions', (_req, res) => res.json({ sessions: listSessions() }));
-app.post('/api/sessions', (req, res) => {
+app.get('/api/sessions', async (_req, res) => res.json({ sessions: await listSessions() }));
+app.post('/api/sessions', async (req, res) => {
   const { name, host, container, project, role, chatKey } = req.body || {};
-  res.json(createSession(name, { host, container, project, role, chatKey }));
+  res.json(await createSession(name, { host, container, project, role, chatKey }));
 });
-app.patch('/api/sessions/:id', (req, res) => {
-  const s = renameSession(String(req.params.id), String(req.body?.name || ''));
+app.patch('/api/sessions/:id', async (req, res) => {
+  const s = await renameSession(String(req.params.id), String(req.body?.name || ''));
   return s ? res.json(s) : res.status(404).json({ error: 'not found' });
 });
-app.delete('/api/sessions/:id', (req, res) => { deleteSession(String(req.params.id)); res.json({ ok: true }); });
+app.delete('/api/sessions/:id', async (req, res) => { await deleteSession(String(req.params.id)); res.json({ ok: true }); });
 
 // Activity timeline endpoints
 app.get('/api/activity', async (req, res) => {
@@ -524,7 +524,7 @@ app.get('/api/activity/series', async (req, res) => {
   res.json(await getSeriesSince(after, { bucketMs: bucket }));
 });
 
-app.get('/api/ssh-hosts', (_req, res) => res.json({ hosts: allSshHosts(), configured: cfg.hosts }));
+app.get('/api/ssh-hosts', async (_req, res) => res.json({ hosts: await allSshHosts(), configured: cfg.hosts }));
 
 // Directive history — reads the append-only directives.md back as structured
 // records (the inverse of observer.js logDirective). Mirrors /api/activity's
@@ -569,9 +569,9 @@ app.get('/api/hosts/status', async (_req, res) => {
 
 // ---- Collections API ----
 // GET /api/collections - List all collections
-app.get('/api/collections', (_req, res) => {
+app.get('/api/collections', async (_req, res) => {
   try {
-    const allCollections = collections.loadCollections();
+    const allCollections = await collections.loadCollections();
     res.json({ collections: allCollections });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -579,13 +579,13 @@ app.get('/api/collections', (_req, res) => {
 });
 
 // POST /api/collections - Create new collection
-app.post('/api/collections', (req, res) => {
+app.post('/api/collections', async (req, res) => {
   try {
     const { name, criteria, metadata } = req.body;
     if (!name || typeof name !== 'string') {
       return res.status(400).json({ error: 'name is required (string)' });
     }
-    const newCollection = collections.createCollection(name, criteria, metadata);
+    const newCollection = await collections.createCollection(name, criteria, metadata);
     res.json({ collection: newCollection });
   } catch (e) {
     if (e.message.includes('already exists')) {
@@ -597,11 +597,11 @@ app.post('/api/collections', (req, res) => {
 });
 
 // PATCH /api/collections/:id - Update collection
-app.patch('/api/collections/:id', (req, res) => {
+app.patch('/api/collections/:id', async (req, res) => {
   try {
     const id = String(req.params.id);
     const updates = req.body;
-    const updated = collections.updateCollection(id, updates);
+    const updated = await collections.updateCollection(id, updates);
     res.json({ collection: updated });
   } catch (e) {
     if (e.message.includes('not found')) {
@@ -613,10 +613,10 @@ app.patch('/api/collections/:id', (req, res) => {
 });
 
 // DELETE /api/collections/:id - Delete collection
-app.delete('/api/collections/:id', (req, res) => {
+app.delete('/api/collections/:id', async (req, res) => {
   try {
     const id = String(req.params.id);
-    const deleted = collections.deleteCollection(id);
+    const deleted = await collections.deleteCollection(id);
     if (!deleted) {
       return res.status(404).json({ error: 'Collection not found' });
     }
@@ -630,7 +630,7 @@ app.delete('/api/collections/:id', (req, res) => {
 app.get('/api/collections/:id/agents', async (req, res) => {
   try {
     const id = String(req.params.id);
-    const allCollections = collections.loadCollections();
+    const allCollections = await collections.loadCollections();
     const collection = allCollections.find((c) => c.id === id);
     if (!collection) {
       return res.status(404).json({ error: 'Collection not found' });
@@ -664,9 +664,9 @@ app.get('/api/config', (_req, res) => res.json(
 // companion toggle (WARDEN-439), and the budget/attention poll restarts
 // (WARDEN-415/555) — declared as a pipeline so a refactor can't silently drop
 // them the way the source proposal's hooks would have.
-app.put('/api/config', (req, res) => {
+app.put('/api/config', async (req, res) => {
   applyConfigPut(cfg, req.body);
-  save(cfg); // persist to ~/.yatfa-warden/config.json
+  await save(cfg); // persist to ~/.yatfa-warden/config.json (atomic, async — WARDEN-831)
   afterSave(cfg, {
     companionOverridden: companionEnvOverridden,
     forwardTelemetryConfig,
@@ -794,11 +794,11 @@ app.post('/api/telemetry-test', async (req, res) => {
 app.get('/api/pins', (_req, res) => res.json({ pins: cfg.pins || [] }));
 
 // PUT /api/pins — update the pinned chat id list and persist
-app.put('/api/pins', (req, res) => {
+app.put('/api/pins', async (req, res) => {
   const { pins } = req.body;
   if (!Array.isArray(pins)) return res.status(400).json({ error: 'pins must be an array' });
   cfg.pins = pins;
-  save(cfg);
+  await save(cfg);
   res.json({ ok: true, pins });
 });
 
@@ -807,7 +807,7 @@ app.put('/api/pins', (req, res) => {
 // chat including un-renameable yatfa agents (rename is identity-only and 404s
 // for yatfa chats). WARDEN-89: validate input, never 500 on bad shapes.
 app.get('/api/agent-notes', (_req, res) => res.json({ notes: cfg.agentNotes || {} }));
-app.put('/api/agent-notes', (req, res) => {
+app.put('/api/agent-notes', async (req, res) => {
   const { id, note } = req.body;
   if (typeof id !== 'string' || !id.trim()) return res.status(400).json({ error: 'id must be a non-empty string' });
   if (typeof note !== 'string') return res.status(400).json({ error: 'note must be a string' });
@@ -815,7 +815,7 @@ app.put('/api/agent-notes', (req, res) => {
   if (!cfg.agentNotes || typeof cfg.agentNotes !== 'object' || Array.isArray(cfg.agentNotes)) cfg.agentNotes = {};
   if (value) cfg.agentNotes[id] = value;
   else delete cfg.agentNotes[id]; // empty/blank note → remove the key entirely
-  save(cfg);
+  await save(cfg);
   res.json({ ok: true, notes: cfg.agentNotes });
 });
 
@@ -826,7 +826,7 @@ app.put('/api/agent-notes', (req, res) => {
 // frontend's job — a tag on a session that later vanishes is ignored, never throws
 // (same leniency cfg.pins/cfg.agentNotes already imply for vanished chats).
 app.get('/api/session-tags', (_req, res) => res.json({ sessionTags: cfg.sessionTags || {} }));
-app.put('/api/session-tags', (req, res) => {
+app.put('/api/session-tags', async (req, res) => {
   const { id, tags } = req.body;
   if (typeof id !== 'string' || !id.trim()) return res.status(400).json({ error: 'id must be a non-empty string' });
   if (!Array.isArray(tags)) return res.status(400).json({ error: 'tags must be an array' });
@@ -847,7 +847,7 @@ app.put('/api/session-tags', (req, res) => {
   if (!cfg.sessionTags || typeof cfg.sessionTags !== 'object' || Array.isArray(cfg.sessionTags)) cfg.sessionTags = {};
   if (cleaned.length) cfg.sessionTags[id] = cleaned;
   else delete cfg.sessionTags[id]; // empty cleaned list → remove the key entirely
-  save(cfg);
+  await save(cfg);
   res.json({ ok: true, id, tags: cleaned });
 });
 
@@ -1201,18 +1201,18 @@ async function resolveClaudeCmd(host, cmd) {
   return { cmd: cmd.replace(/^claude(\s|$)/, (_m, sp) => `${claudePath}${sp}`) };
 }
 
-app.post('/api/rename', (req, res) => {
+app.post('/api/rename', async (req, res) => {
   const session = String(req.body?.session || '');
   const host = String(req.body?.host || LOCAL).trim() || LOCAL;
   const name = String(req.body?.name || '').trim().slice(0, 60);
   if (!session || !name) return res.status(400).json({ error: 'session and name required' });
-  const catalog = loadCatalog();
+  const catalog = await loadCatalog();
   // Composite identity: a session name can repeat across hosts, so scope the find
   // to host+session (host defaults to local for callers that don't send it).
   const entry = catalog.find((c) => sameCatalogEntry(c, host, session));
   if (!entry) return res.status(404).json({ error: 'not a renameable chat' });
   entry.name = name;
-  saveCatalog(catalog);
+  await saveCatalog(catalog);
   res.json({ ok: true });
 });
 
@@ -1248,16 +1248,16 @@ app.post('/api/spawn', async (req, res) => {
   const cmd = (cmdRaw === undefined ? 'claude --dangerously-skip-permissions' : String(cmdRaw)).trim();
   if (!session) return res.status(400).json({ error: 'session name is required' });
   if (!NAME_RE.test(session)) return res.status(400).json({ error: 'invalid session name (letters/digits/_-.)' });
-  const catalog = loadCatalog();
+  const catalog = await loadCatalog();
   // Composite identity: the same session name may exist on a DIFFERENT host (each
   // host's tmux server is independent), so only a same-host collision blocks spawn.
   if (catalog.some((c) => sameCatalogEntry(c, host, session))) return res.status(409).json({ error: `"${session}" already exists` });
   const r = await buildAndSpawn({ host, session, name: req.body?.name || session, cwd, cmd });
   if (r.error) return res.status(r.status).json({ error: r.error });
-  saveCatalog([...catalog, { kind: 'tmux', host, session, name: r.chat.name, cwd, cmd }]);
+  await saveCatalog([...catalog, { kind: 'tmux', host, session, name: r.chat.name, cwd, cmd }]);
   // Record the human's own spawn action so a returning human can see the agents
   // they brought up (WARDEN-484). Mirrors the existing attached/ended row shape.
-  appendEvent({ type: 'spawned', id: r.chat.id, host, container: r.chat.container ?? null, role: r.chat.role, name: r.chat.name });
+  await appendEvent({ type: 'spawned', id: r.chat.id, host, container: r.chat.container ?? null, role: r.chat.role, name: r.chat.name });
   res.json({ ok: true, chat: r.chat });
 });
 
@@ -1289,11 +1289,11 @@ app.post('/api/resume', async (req, res) => {
   }
   // Composite identity: only replace THIS host's same-named resume entry; a
   // different host may legitimately carry the same resume-<sid> session name.
-  const catalog = loadCatalog().filter((c) => !sameCatalogEntry(c, host, session));
-  saveCatalog([...catalog, { kind: 'tmux', host, session, name, cwd, cmd: chat.cmd }]);
+  const catalog = (await loadCatalog()).filter((c) => !sameCatalogEntry(c, host, session));
+  await saveCatalog([...catalog, { kind: 'tmux', host, session, name, cwd, cmd: chat.cmd }]);
   // Record the human's own resume action (WARDEN-484). container is always null
   // here (resume spawns a bare-tmux session), matching the existing row shape.
-  appendEvent({ type: 'resumed', id: out.id, host, container: null, role: out.role, name });
+  await appendEvent({ type: 'resumed', id: out.id, host, container: null, role: out.role, name });
   res.json({ ok: true, chat: out });
 });
 
@@ -1307,14 +1307,14 @@ app.post('/api/kill', async (req, res) => {
   // Remove from catalog (spawned chats only; yatfa are auto-discovered).
   // Composite identity: only drop the killed chat's own host+session entry — a
   // different host may carry the same session name and must be left intact.
-  if (chat.kind === 'tmux') saveCatalog(loadCatalog().filter((c) => !sameCatalogEntry(c, chat.host, chat.session)));
+  if (chat.kind === 'tmux') await saveCatalog((await loadCatalog()).filter((c) => !sameCatalogEntry(c, chat.host, chat.session)));
   // Record the human's deliberate kill — the authoritative signal that lets a
   // returning human tell an agent THEY stopped apart from one that crashed. Emitted
   // here rather than via the attach-PTY onExit handler, which stays silent for
   // client-killed sessions (server.js:3339) — so this ALWAYS lands, even with no
   // attach-viewer open (WARDEN-484). yatfa chats carry no `name`, so fall back to
   // the container (the agent's display name) for a friendlier label.
-  appendEvent({ type: 'killed', id: chat.id, host: chat.host, container: chat.container ?? null, role: chat.role, name: chat.name ?? chat.container ?? null });
+  await appendEvent({ type: 'killed', id: chat.id, host: chat.host, container: chat.container ?? null, role: chat.role, name: chat.name ?? chat.container ?? null });
   res.json({ ok: true });
 });
 
@@ -1831,7 +1831,7 @@ app.post('/api/search-files', async (req, res) => {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
-wss.on('connection', (ws, req) => {
+wss.on('connection', async (ws, req) => {
   if (!hasCredentials()) {
     ws.send(JSON.stringify({ type: 'error', error: 'no LLM credentials (ANTHROPIC_AUTH_TOKEN missing in the server environment)' }));
     return;
@@ -1845,7 +1845,7 @@ wss.on('connection', (ws, req) => {
   const chatRole = u.searchParams.get('role') || null;
   const chatKey = u.searchParams.get('chatKey') || null;
   if (!sid) {
-    const s = createSession(null, { host: chatHost, container: chatContainer, project: chatProject, role: chatRole, chatKey: chatKey });
+    const s = await createSession(null, { host: chatHost, container: chatContainer, project: chatProject, role: chatRole, chatKey: chatKey });
     sid = s.id;
     ws.send(JSON.stringify({
       type: 'session_created', sid: s.id, name: s.name,
@@ -1876,7 +1876,7 @@ wss.on('connection', (ws, req) => {
       // Otherwise, require confirmation
       const requestId = String(++reqCounter);
       send({ type: 'directive_proposed', requestId, container: chat.container, host: chat.host, role: chat.role, directive });
-      appendEvent({ type: 'directive_proposed', container: chat.container, host: chat.host, role: chat.role, directive });
+      await appendEvent({ type: 'directive_proposed', container: chat.container, host: chat.host, role: chat.role, directive });
       // Stash the directive meta alongside the resolver so the gate_decision
       // handler can append a `directive_rejected` event (approved sends are
       // recorded in observer.js at logDirective, which also covers auto-safe).
@@ -1895,7 +1895,7 @@ wss.on('connection', (ws, req) => {
       try { send({ type: 'done', text: await obs.step(String(msg.text || '')) }); }
       catch (e) {
         send({ type: 'error', error: e.message });
-        appendEvent({ type: 'error', error: e.message });
+        await appendEvent({ type: 'error', error: e.message });
       }
     } else if (msg.type === 'gate_decision') {
       const entry = pending.get(msg.requestId);
@@ -1904,7 +1904,7 @@ wss.on('connection', (ws, req) => {
         entry.resolve({ approved: !!msg.approved, edited: msg.edited });
         // A human rejection is distinct from an approved send — record it so the
         // timeline can show rejected directives separately from sent ones.
-        if (!msg.approved) appendEvent({ type: 'directive_rejected', ...entry.meta });
+        if (!msg.approved) await appendEvent({ type: 'directive_rejected', ...entry.meta });
       }
     }
   });
@@ -2001,7 +2001,7 @@ streamWss.on('connection', (ws) => {
         } catch { /* fall through; resolve() still has a locate fallback */ }
       }
       const r = await resolve(String(m.id));
-      if (r.error) { send({ type: 'attach_error', id: m.id, error: r.error }); appendEvent({ type: 'error', error: r.error, context: 'attach', id: m.id }); return; }
+      if (r.error) { send({ type: 'attach_error', id: m.id, error: r.error }); await appendEvent({ type: 'error', error: r.error, context: 'attach', id: m.id }); return; }
       const chat = r.chat;
       const cols = Math.max(20, Math.floor(m.cols || 100));
       const rows = Math.max(6, Math.floor(m.rows || 30));
@@ -2019,12 +2019,12 @@ streamWss.on('connection', (ws) => {
       catch { /* probe threw → leave reason null and attempt a normal attach */ }
       if (reason === 'host_unreachable') {
         send({ type: 'host_unreachable', id: m.id });
-        appendEvent({ type: 'error', error: 'host unreachable', context: 'attach', id: m.id, host: chat.host, container: chat.container });
+        await appendEvent({ type: 'error', error: 'host unreachable', context: 'attach', id: m.id, host: chat.host, container: chat.container });
         return;
       }
       if (reason === 'session_dead') {
         send({ type: 'session_dead', id: m.id });
-        appendEvent({ type: 'error', error: 'session dead', context: 'attach', id: m.id, host: chat.host, container: chat.container });
+        await appendEvent({ type: 'error', error: 'session dead', context: 'attach', id: m.id, host: chat.host, container: chat.container });
         return;
       }
 
@@ -2032,7 +2032,7 @@ streamWss.on('connection', (ws) => {
       try { pty = attachStream(chat, cfg, { cols, rows }); }
       catch (e) {
         send({ type: 'attach_error', id: m.id, error: String((e && e.message) || e) });
-        appendEvent({ type: 'error', error: String((e && e.message) || e), context: 'attach', id: m.id, host: chat.host, container: chat.container });
+        await appendEvent({ type: 'error', error: String((e && e.message) || e), context: 'attach', id: m.id, host: chat.host, container: chat.container });
         return;
       }
       // WARDEN-365 (defense-in-depth): bind a per-attach `entry` object and gate
@@ -2056,15 +2056,15 @@ streamWss.on('connection', (ws) => {
       const entry = { pty, chat };
       attaches.set(m.id, entry);
       pty.onData((d) => { if (attaches.get(m.id) === entry) send({ type: 'pty', id: m.id, data: d }); });
-      pty.onExit(({ exitCode }) => {
+      pty.onExit(async ({ exitCode }) => {
         if (attaches.get(m.id) !== entry) return; // stale — killed prior PTY; this exit is not the live session ending
         attaches.delete(m.id);
         send({ type: 'ended', id: m.id, code: exitCode });
-        appendEvent({ type: 'ended', id: m.id, code: exitCode, host: chat.host, container: chat.container });
+        await appendEvent({ type: 'ended', id: m.id, code: exitCode, host: chat.host, container: chat.container });
       });
       try { await resize(chat, cfg, cols, rows); } catch { /* noop */ }
       send({ type: 'attached', id: m.id });
-      appendEvent({ type: 'attached', id: m.id, host: chat.host, container: chat.container });
+      await appendEvent({ type: 'attached', id: m.id, host: chat.host, container: chat.container });
     } else if (m.type === 'input') {
       const a = attaches.get(m.id);
       if (a) { try { a.pty.write(String(m.data || '')); } catch { /* noop */ } }
@@ -2106,8 +2106,9 @@ streamWss.on('connection', (ws) => {
   });
 });
 
-// Rotate old activity events on startup
-try { rotateEvents(); } catch { /* ignore */ }
+// Rotate old activity events + directives on startup (async + atomic — WARDEN-831)
+try { await rotateEvents(); } catch { /* ignore */ }
+try { await rotateDirectives(); } catch { /* ignore */ }
 
 // --- Cross-host agent lifecycle polling -------------------------------------
 // appendEvent() is only reached from the local attach/observe path, so a remote
@@ -2162,8 +2163,15 @@ async function tickLifecycle(deps = {}) {
 // the webhook transport — mirroring tickBudget/tickAttention so the bridge is
 // testable with ZERO real network. Production callers (the timer, startLifecyclePoll)
 // pass nothing → dispatchWebhook falls through to globalThis.fetch.
-function appendLifecycleEvent(event, deps = {}) {
-  try { appendEvent(event); } catch { /* ignore single-event write failures */ }
+async function appendLifecycleEvent(event, deps = {}) {
+  // A single lifecycle event must never break the tick — a write failure is
+  // swallowed (the prior sync try/catch is now an await + catch since the append
+  // is async — WARDEN-831). AWAITING (not fire-and-forget) preserves the prior
+  // ordering guarantee: the event is on disk before the tick continues, so a
+  // concurrent /api/activity reader (or a test) never observes the tick's state
+  // change before the event lands. The append is async I/O, so this does not
+  // block the event loop — it only orders the tick behind its own append.
+  try { await appendEvent(event); } catch { /* ignore single-event write failures */ }
   if (event && event.type === 'agent_ended' && cfg.webhookAlertDone) {
     const { agent, reason } = notify.doneEndedIdentity(event);
     notify.dispatchWebhook({
@@ -2189,10 +2197,10 @@ async function tickLifecycleBody(deps = {}) {
   // other agent later reappears (the only thing that would un-freeze the diff).
   // diffLifecycles(prev, ∅) emits agent_ended for every tracked chat, so draining
   // then going dormant captures the real disappearance(s) and frees the snapshot.
-  if (!cfg.hosts.length && !loadCatalog().length) {
+  if (!cfg.hosts.length && !(await loadCatalog()).length) {
     if (prevSnapshot.size > 0) {
       for (const event of diffLifecycles(prevSnapshot, new Map())) {
-        appendLifecycleEvent(event, deps);
+        await appendLifecycleEvent(event, deps);
       }
       prevSnapshot = new Map();
     }
@@ -2220,7 +2228,7 @@ async function tickLifecycleBody(deps = {}) {
   }
 
   for (const event of diffLifecycles(prevSnapshot, next)) {
-    appendLifecycleEvent(event, deps);
+    await appendLifecycleEvent(event, deps);
   }
   prevSnapshot = next;
 }

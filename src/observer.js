@@ -20,6 +20,7 @@ import { classifyPane, stripAnsi } from './agentState.js';
 // sends, which previously had no activity record at all). Imported here because
 // logDirective (below) is the single point every confirmed send flows through.
 import { appendEvent } from './activity.js';
+import { atomicAppend, atomicWrite } from './persist.js';
 
 // fs.promises alias — readDirectives is async (WARDEN-828) so serving GET
 // /api/directives does not block the single-threaded event loop on a synchronous
@@ -122,12 +123,67 @@ export const TOOLS = [
 // DirectiveHistory tab reads back — see chatMeta.js for the fallback rationale
 // and the round-trip constraint the directives-header regex imposes.
 
-export function logDirective(chat, text) {
-  fs.mkdirSync(path.dirname(DIRECTIVES_LOG), { recursive: true });
-  const header = fs.existsSync(DIRECTIVES_LOG) ? '' : '# Yatfa Warden directives log\n';
+export async function logDirective(chat, text) {
+  await fsp.mkdir(path.dirname(DIRECTIVES_LOG), { recursive: true });
+  // Append-only (WARDEN-831): a torn write costs at most the final block, never
+  // the whole log. The title header is written only when the file is absent.
+  let header = '';
+  try { await fsp.access(DIRECTIVES_LOG); } catch { header = '# Yatfa Warden directives log\n'; }
   const ts = new Date().toISOString();
   const entry = `${header}\n## ${ts} → ${agentTarget(chat)} (${chat.role || 'agent'})\n\n${text}\n`;
-  fs.appendFileSync(DIRECTIVES_LOG, entry);
+  await atomicAppend(DIRECTIVES_LOG, entry);
+}
+
+// Rotate directives older than 7 days (mirrors activity.rotateEvents — WARDEN-831).
+// The log is append-only; this periodic compaction rewrites it ATOMICALLY (temp +
+// fsync + rename) dropping blocks whose header timestamp precedes the cutoff. A
+// crash mid-rotation leaves the previous complete file. Malformed blocks (no
+// parseable timestamp) are kept for inspection, never silently dropped.
+const DIRECTIVES_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// Block boundary = a real directive header, the EXACT pattern logDirective writes
+// and readDirectives anchors on (`## <ISO ts> → <container>@<host> (<role>)`).
+// Using the strict header (not a loose `## ` prefix) is what keeps a directive
+// BODY that contains a `## ` markdown line from being mistaken for a new block
+// during rotation — matching readDirectives' parse, so rotate never restructures
+// the file away from the writer's format.
+const DIRECTIVE_HEADER = /^## (\S+) → .+@[^ ]+ \([^)]*\)$/;
+export async function rotateDirectives() {
+  let content;
+  try {
+    content = await fsp.readFile(DIRECTIVES_LOG, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return 0;
+    throw err;
+  }
+  if (!content.trim()) return 0;
+
+  const lines = content.split('\n');
+  // Preserve any leading content before the first directive header (the title or
+  // any pre-block preamble) — these lines are not directive blocks.
+  const titleLines = [];
+  let i = 0;
+  while (i < lines.length && !DIRECTIVE_HEADER.test(lines[i])) { titleLines.push(lines[i]); i++; }
+
+  const cutoff = Date.now() - DIRECTIVES_TTL_MS;
+  const kept = [...titleLines];
+  let removed = 0;
+  while (i < lines.length) {
+    const headerLine = lines[i];
+    const m = DIRECTIVE_HEADER.exec(headerLine);
+    const ts = m ? new Date(m[1]).getTime() : NaN;
+    const block = [headerLine];
+    i++;
+    // A block runs until the NEXT directive header — body lines that happen to
+    // start with `## ` (markdown in the directive text) are NOT boundaries.
+    while (i < lines.length && !DIRECTIVE_HEADER.test(lines[i])) { block.push(lines[i]); i++; }
+    // Drop only blocks with a parseable timestamp older than the cutoff; keep
+    // malformed blocks (unparseable timestamp) for inspection.
+    if (Number.isFinite(ts) && ts < cutoff) { removed++; continue; }
+    kept.push(...block);
+  }
+  if (removed === 0) return 0;
+  await atomicWrite(DIRECTIVES_LOG, kept.join('\n').replace(/\n+$/, '\n'));
+  return removed;
 }
 
 // Read directives.md back into structured records — the inverse of `logDirective`.
@@ -828,14 +884,14 @@ export class Observer {
       const text = decision.edited != null ? decision.edited : input.directive;
       try {
         await this._io.sendPane(chat, this.cfg, text);
-        logDirective(chat, text);
+        await logDirective(chat, text);
         // Record the *sent* directive in the activity log. This is the single
         // point that proves the directive actually reached an agent, so it
         // captures BOTH paths: gated human-approve AND auto-safe auto-send
         // (which skips the directive_proposed gate entirely). The Activity
         // banner/timeline count `directive_sent` (not `directive_proposed`) so
         // rejected directives are no longer miscounted as sent.
-        appendEvent({ type: 'directive_sent', container: chat.container, host: chat.host, role: chat.role, directive: text });
+        await appendEvent({ type: 'directive_sent', container: chat.container, host: chat.host, role: chat.role, directive: text });
         return { sent: true, to: agentTarget(chat), chars: text.length };
       } catch (e) { return { error: e.message }; }
     }
@@ -856,7 +912,7 @@ export class Observer {
   // Run one user turn; returns the observer's final text. Tool calls loop internally.
   async step(userText) {
     this.messages.push({ role: 'user', content: userText });
-    if (this.sid) appendTranscript(this.sid, 'user', userText);
+    if (this.sid) await appendTranscript(this.sid, 'user', userText);
     let finalText = '';
     for (let i = 0; i < 8; i++) {
       const resp = await complete({ system: SYSTEM, messages: this.messages, tools: TOOLS, max_tokens: this.cfg.llm?.maxTokens ?? 2048 });
@@ -880,8 +936,8 @@ export class Observer {
     }
     if (!finalText) finalText = '(tool loop limit reached — try simplifying your request)';
     if (this.sid) {
-      saveMessages(this.sid, this.messages, this.name);
-      appendTranscript(this.sid, 'assistant', finalText);
+      await saveMessages(this.sid, this.messages, this.name);
+      await appendTranscript(this.sid, 'assistant', finalText);
     }
     return finalText;
   }
