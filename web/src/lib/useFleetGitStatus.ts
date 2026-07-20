@@ -54,13 +54,15 @@ export interface FleetGitStatusState extends FleetGitStatusResult {
   conflictCount: number;
   /** # of fanned agents running on stale, behind-upstream code (the fleet "N behind" count, WARDEN-815). */
   behindCount: number;
+  /** # of fanned agents with committed-but-unpushed work (the fleet "N unpushed" count, WARDEN-822). */
+  aheadCount: number;
   /** Pull a fresh view past mount (no auto-poll). */
   refresh: () => void;
   /** True only during a fetch whose result has not yet arrived (mount or manual ↻). */
   loading: boolean;
 }
 
-const EMPTY_RESULT: FleetGitStatusResult = { statusByKey: {}, dirtyCount: 0, errorCount: 0, conflictCount: 0, behindCount: 0 };
+const EMPTY_RESULT: FleetGitStatusResult = { statusByKey: {}, dirtyCount: 0, errorCount: 0, conflictCount: 0, behindCount: 0, aheadCount: 0 };
 
 /**
  * Fan /api/git-status across the eligible fleet and lift the result for
@@ -143,7 +145,15 @@ export function useFleetGitStatus(agents: readonly Chat[]): FleetGitStatusState 
           // `typeof === 'boolean'` coerce keeps null as null (typeof null === 'object'),
           // so an unknown-state agent is neither dirty nor clean. diffstat is
           // { files, insertions, deletions } | null (null for clean / non-git /
-          // all-untracked); `?? null` coerces an absent field to null. conflictCount
+          // all-untracked); `?? null` coerces an absent field to null. ahead (WARDEN-822)
+          // is the # of unpushed commits, a top-level number the server ALREADY serves
+          // (`ahead: branch ? ahead : null`, parsed from one `git rev-list --left-right
+          // --count @{u}...HEAD` — RIGHT count = HEAD has, upstream doesn't = unpushed);
+          // the `typeof === 'number'` coerce keeps null as null (null for a non-git /
+          // detached / no-upstream cwd, 0 for in-sync) — the SAME null-is-quiet discipline
+          // clean follows. This is the PER-AGENT commit count (drives the per-row ↑N's
+          // magnitude); the fleet-wide count of stranded AGENTS is derived in
+          // buildFleetGitStatus from `ahead > 0`. conflictCount
           // (WARDEN-796) is the # of unmerged PATHS, derived from the SAME response's
           // porcelain `files[]` (each row already tagged `conflict: boolean` by
           // gitStatus.js's parseGitStatusPorcelain) — the data ALREADY flows on this
@@ -155,6 +165,7 @@ export function useFleetGitStatus(agents: readonly Chat[]): FleetGitStatusState 
           const status: FleetGitStatusSlice = {
             clean: typeof j.clean === 'boolean' ? j.clean : null,
             diffstat: j.diffstat ?? null,
+            ahead: typeof j.ahead === 'number' ? j.ahead : null,
             conflictCount: (Array.isArray(j.files) ? j.files : []).filter(
               // Each porcelain row is tagged `conflict: boolean` by gitStatus.js
               // (isConflictStatus on the unmerged DD/AU/UD/UA/DU/AA/UU codes). `=== true`

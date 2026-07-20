@@ -1550,6 +1550,21 @@ export function bindFleetRowOpenFile(
 export interface FleetGitStatusSlice {
   clean: boolean | null;
   diffstat: { files: number; insertions: number; deletions: number } | null;
+  // # of unpushed commits for THIS agent (WARDEN-822) — the per-row ahead axis the
+  // dirty signal is structurally blind to: an agent that committed N times and never
+  // pushed has clean === true AND dirtyCount === 0, so it reads identically to an
+  // agent fully in sync with upstream — its FINISHED work is stranded locally and
+  // invisible to every other agent pulling from shared upstream. /api/git-status
+  // ALREADY serves `ahead` top-level (gitRoutes.js serializes `ahead: branch ? ahead :
+  // null`, parsed from one `git rev-list --left-right --count @{u}...HEAD` via
+  // parseAheadBehind in gitStatus.js — RIGHT count = HEAD has, upstream doesn't =
+  // unpushed), so this is a pure pass-through of one field — no new fetch, no backend
+  // change. null for a non-git / detached / no-upstream cwd (the server gates on
+  // `branch` → the SAME null-is-quiet discipline clean follows) and 0 for an in-sync
+  // branch. NOTE this is a PER-AGENT commit count, NOT the fleet-wide count of
+  // unpushed AGENTS (that is FleetGitStatusResult.aheadCount below — the mirror of
+  // dirtyCount / conflictCount).
+  ahead: number | null;
   // # of unmerged PATHS for THIS agent (WARDEN-796) — the per-row conflict axis
   // the dirty signal cannot speak to: an agent BLOCKED mid-merge/rebase/cherry-pick
   // (porcelain unmerged DD/AU/UD/UA/DU/AA/UU). /api/git-status ALREADY serves the
@@ -1620,28 +1635,48 @@ export interface FleetGitStatusResult {
   // the fleet-wide "N behind" count surfaced in the Fleet Health summary bar
   // (WARDEN-815). This counts stale AGENTS, NOT total behind-commits — the direct
   // mirror of dirtyCount (agents with clean === false) and conflictCount (agents with
-  // conflictCount > 0): all three are agent-level tallies, never file/commit sums. An
+  // conflictCount > 0): all four axes are agent-level tallies, never file/commit sums. An
   // error / loading agent is NOT behind (counted in errorCount / absent), and a null
   // behind (non-git / no-branch / no-upstream cwd) is neither, so a transiently-
   // unreachable or non-git agent is never misread as stale. The PER-AGENT behind count
   // lives on FleetGitStatusSlice.behind above (drives the per-row ↓'s "N" magnitude);
   // this fleet count drives the summary tally.
   behindCount: number;
+  // # of fanned agents with unpushed commits (status.ahead > 0) — the fleet-wide "N
+  // unpushed" count surfaced in the Fleet Health summary bar (WARDEN-822). This counts
+  // stranded-work AGENTS, NOT total unpushed commits — the direct mirror of dirtyCount
+  // (which counts agents with clean === false, not total dirty files) and conflictCount
+  // (which counts blocked agents, not total unmerged paths). It surfaces the blind spot
+  // clean cannot speak to: an agent that committed and never pushed has clean === true,
+  // so WITHOUT this axis it is indistinguishable from an agent fully in sync — its
+  // finished work is invisible to every other agent pulling from shared upstream. An
+  // error / loading agent is NOT unpushed (counted in errorCount / absent), and an
+  // ok agent with ahead: null (non-git / detached / no-upstream) or ahead: 0 (in-sync)
+  // is NOT counted, so a transiently-unreachable or no-upstream agent is never misread
+  // as stranded. The PER-AGENT commit count lives on FleetGitStatusSlice.ahead above
+  // (drives the per-row ↑N magnitude); this fleet count drives the summary tally.
+  aheadCount: number;
 }
 
 /**
  * Turn N per-agent /api/git-status outcomes into the Fleet Health view: a per-agent
- * { clean, diffstat, conflictCount, behind } map + a fleet-wide dirty count + a
- * fleet-wide conflict count + a fleet-wide behind count + an honest error count.
- * Every ok agent gets a map entry (clean OR dirty — the React layer gates the per-row
- * chip on clean === false, so a clean entry is harmless + keeps the "fetched vs
- * loading" distinction available); ok:false agents are counted into errorCount
- * WITHOUT blanking the ok agents' entries (the Promise.allSettled fleet contract).
- * dirtyCount counts ONLY ok agents whose clean === false; conflictCount counts ONLY
- * ok agents with conflictCount > 0 (the agent-level mirror of dirtyCount — blocked
- * AGENTS, not unmerged files); behindCount counts ONLY ok agents with behind > 0 (the
- * agent-level mirror of dirtyCount — stale AGENTS, not total behind-commits). An error
- * agent is never dirty, never a conflict, AND never behind.
+ * { clean, diffstat, conflictCount, behind, ahead } map + a fleet-wide dirty count + a
+ * fleet-wide conflict count + a fleet-wide behind count + a fleet-wide unpushed count +
+ * an honest error count. Every ok agent gets a map entry (clean OR dirty — the React
+ * layer gates the per-row chip on clean === false, so a clean entry is harmless + keeps
+ * the "fetched vs loading" distinction available); ok:false agents are counted into
+ * errorCount WITHOUT blanking the ok agents' entries (the Promise.allSettled fleet
+ * contract). dirtyCount counts ONLY ok agents whose clean === false; conflictCount
+ * counts ONLY ok agents with conflictCount > 0 (the agent-level mirror of dirtyCount —
+ * blocked AGENTS, not unmerged files); behindCount counts ONLY ok agents with behind > 0
+ * (the agent-level mirror of dirtyCount — stale AGENTS, not total behind-commits);
+ * aheadCount counts ONLY ok agents with ahead > 0 (the agent-level mirror of dirtyCount
+ * — stranded-work AGENTS, not total unpushed commits). The counts are ORTHOGONAL: an
+ * unpushed-and-dirty agent increments BOTH dirtyCount and aheadCount (a clean === false
+ * tree says nothing about whether the committed work is pushed), a behind agent is
+ * often clean too (clean upstream-synced work is still stale), and a mid-merge repo is
+ * dirty by definition so it increments dirtyCount and conflictCount. An error agent is
+ * never dirty, never a conflict, never behind, AND never unpushed.
  *
  * Outcomes are processed in caller (chats) order, so the map + counts are
  * deterministic and tests assert deep equality — the convention the rest of this
@@ -1655,6 +1690,7 @@ export function buildFleetGitStatus(outcomes: FleetGitStatusOutcome[]): FleetGit
   let errorCount = 0;
   let conflictCount = 0;
   let behindCount = 0;
+  let aheadCount = 0;
   for (const o of outcomes) {
     if (!o.ok) {
       errorCount += 1;
@@ -1677,8 +1713,18 @@ export function buildFleetGitStatus(outcomes: FleetGitStatusOutcome[]): FleetGit
     // often clean too — clean upstream-synced work is still stale); the axes are
     // orthogonal counts over the same ok fleet.
     if (o.status.behind && o.status.behind > 0) behindCount += 1;
+    // Mirror the dirtyCount/conflictCount/behindCount lines: count stranded-work AGENTS
+    // (those with ahead > 0 — committed-but-unpushed work), NOT total unpushed commits —
+    // the agent-level fleet tally the summary bar renders as "N unpushed". `ahead &&`
+    // guards null (non-git / detached / no-upstream cwd — the server serves ahead:null
+    // there, mirroring the null-is-quiet discipline clean follows) the SAME way the
+    // conflictCount line's `> 0` guards 0. An agent both dirty AND unpushed increments
+    // BOTH dirtyCount and aheadCount (a clean === false tree says nothing about whether
+    // the committed work is pushed — the four axes dirty/conflict/behind/ahead are
+    // orthogonal counts over the same ok fleet).
+    if (o.status.ahead && o.status.ahead > 0) aheadCount += 1;
   }
-  return { statusByKey, dirtyCount, errorCount, conflictCount, behindCount };
+  return { statusByKey, dirtyCount, errorCount, conflictCount, behindCount, aheadCount };
 }
 
 /**
