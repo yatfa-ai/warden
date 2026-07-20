@@ -252,14 +252,21 @@ function applyTelemetryConfig(prefs) {
 // drift armed shows the correct state immediately — the push handles liveness
 // (the status appears the moment drift arms, without reopening Settings).
 //
-// Metadata only: { drifted: boolean }. Never the payload, the endpoint URL, or any
-// identifier — consistent with the transmission log's discipline. Defensive: a
-// missing/destroyed window or a throwing webContents is swallowed (telemetry
-// status must never crash the host); before any window exists this is a no-op.
+// Metadata only: { drifted: boolean, deliveryFailing: boolean }. Never the
+// payload, the endpoint URL, or any identifier — consistent with the transmission
+// log's discipline. `deliveryFailing` (WARDEN-808) is the sustained non-415
+// delivery-failure signal the pipeline derives from the transmission-log ring;
+// it is pure observability (sending is NOT paused — unlike `drifted`).
+// Defensive: a missing/destroyed window or a throwing webContents is swallowed
+// (telemetry status must never crash the host); before any window exists this is
+// a no-op.
 function broadcastTelemetryRuntimeStatus(status) {
   try {
     if (win && !win.isDestroyed() && win.webContents && !win.webContents.isDestroyed()) {
-      win.webContents.send('telemetry:runtime-status', { drifted: status ? status.drifted === true : false });
+      win.webContents.send('telemetry:runtime-status', {
+        drifted: status ? status.drifted === true : false,
+        deliveryFailing: status ? status.deliveryFailing === true : false,
+      });
     }
   } catch {
     /* a status broadcast must never break the host */
@@ -704,7 +711,7 @@ ipcMain.handle('telemetry:get-runtime-status', () => {
   try {
     return telemetryPipeline.getRuntimeStatus();
   } catch {
-    return { drifted: false };
+    return { drifted: false, deliveryFailing: false };
   }
 });
 
@@ -720,7 +727,7 @@ ipcMain.handle('telemetry:clear-runtime-drift', () => {
     telemetryPipeline.clearRuntimeDrift();
     return telemetryPipeline.getRuntimeStatus();
   } catch {
-    return { drifted: false };
+    return { drifted: false, deliveryFailing: false };
   }
 });
 

@@ -446,9 +446,9 @@ await test('the runtime-status bridge tap fires on a live 415 arm and on its cle
   w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
   w.main.emit('uncaughtExceptionMonitor', new Error('drift'));
   await tick();
-  assert.deepEqual(statuses, [{ drifted: true }], 'the 415 pushed a drift-arm status to the bridge');
+  assert.deepEqual(statuses, [{ drifted: true, deliveryFailing: false }], 'the 415 pushed a drift-arm status to the bridge');
   w.apply({ telemetryEndpoint: 'https://telemetry-fixed.example/ingest' });
-  assert.deepEqual(statuses, [{ drifted: true }, { drifted: false }], 'the endpoint change pushed a clear');
+  assert.deepEqual(statuses, [{ drifted: true, deliveryFailing: false }, { drifted: false, deliveryFailing: false }], 'the endpoint change pushed a clear');
 });
 
 console.log(`\n✓ TELEMETRY LIVE-WIRE INTEGRATION TESTS PASS (${passed})`);
