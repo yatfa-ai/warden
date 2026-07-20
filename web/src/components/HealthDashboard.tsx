@@ -342,6 +342,43 @@ function ConflictChip({ status }: { status?: FleetGitStatusSlice | null }) {
   );
 }
 
+/**
+ * Per-agent behind-upstream chip (WARDEN-815) — the sibling of WipChip / ConflictChip
+ * for the staleness axis: an agent whose HEAD is BEHIND its upstream (a sibling pushed
+ * and this agent hasn't pulled). WARDEN-766 shipped the dirty axis (WipChip), WARDEN-796
+ * the conflict axis (ConflictChip); this is the coordination signal that rots silently
+ * in a multi-agent fleet — when agent A pushes to main, agents B/C/D are now behind and
+ * don't know it, so their next commits land on an outdated base and diverge. This lets a
+ * coordinator see who is running on stale code WITHOUT leaving Fleet Health for the
+ * sidebar's per-project ↓N chip (WARDEN-297) — the same detour 766/796 eliminated for
+ * the dirty/conflict axes.
+ *
+ * Renders the sidebar's blue ↓ vocabulary VERBATIM (no new glyph/color system —
+ * WARDEN-68): the behind treatment established by WARDEN-297 (GitBadges.tsx:280 →
+ * glyph '↓', `text-blue-400 hover:text-blue-300`) — the symmetric counterpart to
+ * unpushed amber ↑N. `↓` (not "behind") keeps Fleet Health and the sidebar speaking the
+ * same vocabulary, the same fleet/row agreement 766/796 already establish.
+ *
+ * Renders ONLY when status.behind > 0 — absent (loading / not eligible / unreachable),
+ * a fresh agent (behind 0), or a non-git / no-branch / no-upstream cwd (behind null,
+ * the same null-is-quiet discipline `clean` follows) → nothing, the same graceful-N/A
+ * contract WipChip / ConflictChip / ResourceChip / TokenChip follow. `tabular-nums`
+ * mirrors WipChip / ConflictChip so the chips' digit widths align when several render
+ * (a behind agent is often dirty too).
+ */
+function BehindChip({ status }: { status?: FleetGitStatusSlice | null }) {
+  if (!status || !status.behind || status.behind <= 0) return null;
+  const n = status.behind;
+  return (
+    <span
+      className="shrink-0 tabular-nums text-blue-400 hover:text-blue-300"
+      title={`${n} commit${n === 1 ? '' : 's'} behind upstream (stale — pulling re-syncs before further edits diverge)`}
+    >
+      ↓ {n}
+    </span>
+  );
+}
+
 export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, groupBy, onGroupByChange: setGroupBy, collapsedHosts, onCollapsedHostsChange: setCollapsedHosts }: Props) {
   const [healthData, setHealthData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -632,6 +669,14 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
           ConflictChip. Sibling to WipChip because a mid-merge repo is dirty too: BOTH
           may render (the +N −M magnitude AND the ⚑). */}
       <ConflictChip status={fleetGit.statusByKey[id]} />
+
+      {/* Per-agent behind-upstream block (WARDEN-815): the blue ↓ + "N" magnitude for
+          THIS agent — the staleness axis WipChip/ConflictChip cannot speak to. Renders
+          the ↓ only when the fanned status reports behind > 0 (HEAD behind upstream);
+          absent / fresh (0) / non-git-or-no-upstream (null) → nothing, identical
+          graceful-N/A. See BehindChip. Sibling to WipChip/ConflictChip: a behind agent
+          is often clean too, so ↓ may render alone OR alongside the ±N/⚑. */}
+      <BehindChip status={fleetGit.statusByKey[id]} />
     </div>
     );
   };
@@ -829,6 +874,29 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
                   title={`${fleetGit.conflictCount} agent${fleetGit.conflictCount === 1 ? '' : 's'} blocked mid-merge/rebase/cherry-pick with unmerged paths (fanned /api/git-status across active project agents)`}
                 >
                   {fleetGit.conflictCount} conflict
+                </span>
+              </>
+            )}
+            {/* Fleet-wide behind-upstream count (WARDEN-815): the # of fanned agents
+                running on stale, behind-upstream code (behind > 0) — the staleness axis
+                alongside the dirty/conflict counts, the one git state that means "this
+                agent's base is outdated and further edits will diverge." Reuses the
+                sidebar's blue ↓ vocabulary (the behind chip family) so "behind" reads in
+                the same color everywhere; placed after the conflict count
+                (severity-descending: dirty → conflict → behind → muted unreachable).
+                Only rendered when > 0 so a fresh fleet stays quiet. behindCount counts
+                stale AGENTS (the mirror of dirtyCount/conflictCount), not total
+                behind-commits, and excludes error/loading agents (counted in errorCount)
+                + null-behind non-git/no-upstream cwds, so a transiently-unreachable or
+                non-git agent is never misread as stale. */}
+            {fleetGit.behindCount > 0 && (
+              <>
+                <span className="text-muted-foreground">·</span>
+                <span
+                  className="text-blue-500"
+                  title={`${fleetGit.behindCount} agent${fleetGit.behindCount === 1 ? '' : 's'} behind upstream (stale — pulling re-syncs before further edits diverge; fanned /api/git-status across active project agents)`}
+                >
+                  {fleetGit.behindCount} behind
                 </span>
               </>
             )}
