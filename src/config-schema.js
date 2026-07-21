@@ -160,9 +160,16 @@ export const CONFIG_FIELDS = [
     default: 30,
     exposure: 'public',
     type: 'nullablePositiveNumber',
+    clamp: [1, 180],
     resolve: 'identity',
     order: 7,
     // minutes - auto-stop observer after inactivity, null to disable
+    // WARDEN-867: clamp into the [1, 180] bounds the Settings input advertises —
+    // mirrors WARDEN-747 (connectTimeout clamp) so a direct API call (or a typed
+    // out-of-range value the UI's onBlur didn't catch) can't persist 999/0.5.
+    // Honored by the nullablePositiveNumber case in applyField: null passes
+    // through unclamped (disable path), a finite positive number clamps, ≤ 0 is
+    // still rejected. The committed value matches what the UI displays.
   },
   {
     key: 'llm',
@@ -678,8 +685,16 @@ function applyField(d, target, value) {
       if (value && d.oneOf.includes(value)) target[key] = value;
       return;
     case 'nullablePositiveNumber':
-      if (value === null || (typeof value === 'number' && Number.isFinite(value) && value > 0)) {
-        target[key] = value;
+      // WARDEN-867: honor d.clamp when present (mirrors the 'number' case's
+      // ternary). Null is the disable path — it passes through UNclamped so the
+      // clamp can't silently turn a "disabled" into a number. A finite positive
+      // number clamps into [clamp[0], clamp[1]]; ≤ 0 is still rejected (no
+      // write). The `d.clamp ?` guard keeps the three clamp-less fields
+      // (healthWarningThresholdMin, healthCriticalThresholdMin, llm.maxTokens)
+      // byte-identical.
+      if (value === null) { target[key] = null; return; }
+      if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+        target[key] = d.clamp ? Math.min(d.clamp[1], Math.max(d.clamp[0], value)) : value;
       }
       return;
     case 'flooredNumber':

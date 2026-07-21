@@ -86,8 +86,26 @@ export function ObserverSection({
               observerSessionTimeout: e.target.value ? parseInt(e.target.value) : null,
             })
           }
+          onBlur={() => {
+            // [WARDEN-867]: clamp the committed value into the [1, 180] bounds
+            // the input advertises — mirrors WARDEN-747 (connectTimeout bilateral
+            // clamp + tokenBudget nullable floor). Null is the disable path and
+            // stays null; only clamp when a value is present.
+            const v = config.observerSessionTimeout;
+            if (v != null) {
+              const clamped = Math.min(180, Math.max(1, v));
+              if (clamped !== v) setConfig({ ...config, observerSessionTimeout: clamped });
+            }
+          }}
           placeholder="Disabled when empty"
         />
+        {config.observerSessionTimeout != null &&
+          (config.observerSessionTimeout < 1 || config.observerSessionTimeout > 180) && (
+            <p className="text-xs text-destructive">
+              Must be between 1 and 180 minutes — capped to{' '}
+              {Math.min(180, Math.max(1, config.observerSessionTimeout))} on blur.
+            </p>
+          )}
         <p className="text-xs text-muted-foreground">
           Automatically stop Observer after N minutes of inactivity. Leave empty to disable.
         </p>
