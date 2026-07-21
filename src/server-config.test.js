@@ -547,4 +547,106 @@ describe('/api/config clamps advisory-bounds numeric inputs so they cannot lie (
     const after = await (await fetch(`${baseUrl}/api/config`)).json();
     assert.strictEqual(after.tokenBudgetPerSessionThresholdTokens, null, 'null preserved (disable path untouched)');
   });
+
+  // observerSessionTimeout (WARDEN-867) — the last bounded nullable numeric
+  // input to persist out-of-range values. Nullable + bilateral [1,180]: a hybrid
+  // of connectTimeout (bilateral clamp) and tokenBudget (nullable — null is the
+  // disable path and must NOT be clamped into a number). The nullablePositiveNumber
+  // handler now honors d.clamp: null passes through, a finite positive number
+  // clamps, and ≤ 0 is still rejected (no write — NOT clamped up to 1, unlike the
+  // flooredNumber/number cases). Completes the WARDEN-747 sibling lane.
+
+  it('GET /api/config exposes observerSessionTimeout (default 30, within [1, 180])', async () => {
+    const body = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(body.observerSessionTimeout, 30);
+  });
+
+  it('PUT observerSessionTimeout: 999 clamps to 180 (read back via GET)', async () => {
+    const res = await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ observerSessionTimeout: 999 }),
+    });
+    assert.strictEqual(res.status, 200);
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.observerSessionTimeout, 180, 'over-max clamped down to 180');
+  });
+
+  it('PUT observerSessionTimeout: 0 is rejected (nullablePositiveNumber still requires > 0)', async () => {
+    // Seed a known value, then attempt the invalid PUT — the PRIOR value survives
+    // because the handler returns without writing (0 fails the > 0 guard; it is
+    // NOT clamped up to 1, unlike the number/flooredNumber cases).
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ observerSessionTimeout: 30 }),
+    });
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ observerSessionTimeout: 0 }),
+    });
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.observerSessionTimeout, 30, '0 rejected, prior in-range value survives');
+  });
+
+  it('PUT observerSessionTimeout: -5 is rejected (negative fails the > 0 guard)', async () => {
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ observerSessionTimeout: 30 }),
+    });
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ observerSessionTimeout: -5 }),
+    });
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.observerSessionTimeout, 30, '-5 rejected, prior in-range value survives');
+  });
+
+  it('PUT observerSessionTimeout: 30 (in range) is unchanged', async () => {
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ observerSessionTimeout: 30 }),
+    });
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.observerSessionTimeout, 30, 'in-range value not clamped');
+  });
+
+  it('PUT observerSessionTimeout: null clears to null (disable path, NOT clamped)', async () => {
+    // Null means "disable auto-stop" — the clamp must not turn null into 1.
+    // Mirrors the tokenBudgetThresholdTokens: null case above.
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ observerSessionTimeout: null }),
+    });
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.observerSessionTimeout, null, 'null preserved (disable path untouched)');
+  });
+
+  it('PUT observerSessionTimeout: 0.5 (fractional, direct API only) clamps up to 1', async () => {
+    // 0.5 passes the > 0 guard then clamps into [1,180] — a tightening consistent
+    // with the WARDEN-747 discipline. The UI's parseInt never produces a fraction,
+    // but a direct API call could.
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ observerSessionTimeout: 0.5 }),
+    });
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.observerSessionTimeout, 1, 'fractional in (0,1) clamped up to lower bound 1');
+  });
+
+  it('the clamped observerSessionTimeout persists to config.json (survives a restart)', async () => {
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ observerSessionTimeout: 9999 }),
+    });
+    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    assert.strictEqual(onDisk.observerSessionTimeout, 180);
+  });
 });
