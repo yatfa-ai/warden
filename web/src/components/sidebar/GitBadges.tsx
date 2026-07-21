@@ -832,16 +832,17 @@ export function GitCollisionBadge({ collisions, impending, outgoing, chats, gitS
   );
 }
 
-/** One touched-file row inside an expanded commit. Click to fetch and reveal the
- *  committed diff for that file (`git show --format= <hash> -- <path>`). Owns its
- *  diff fetch state so a re-collapse/re-expand is instant. */
-// Exported (WARDEN-597) so the FleetRecentCommits feed can render the SAME expanded
-// commit → changed-files → per-file /api/git-show diff path the per-agent popover
-// uses, without duplicating the diff machinery. Each row in that cross-fleet feed
-// passes its OWN agent key as `chatId` (git-show's `id` param), so the per-file diff
-// resolves against the right repo — the component is multi-agent where this badge is
-// single-agent, but `chatId` is just the git-show `id`, so it composes cleanly.
-export function CommitFile({ chatId, hash, file, onOpenFile }: { chatId: string; hash: string; file: GitFile; onOpenFile?: (path: string) => void }) {
+/** Shared body for the two byte-mirrored "click a touched file → lazily fetch its
+ *  diff → reveal it inline via <DiffBlock>" rows: CommitFile (committed) and StashFile
+ *  (stashed). Owns the open/diff/loading/fetched quartet so a re-collapse/re-expand is
+ *  instant. The ONLY behavior that varies between the two is parameterized here:
+ *  `buildUrl` (which per-file diff endpoint + how the change is addressed — a commit
+ *  `hash` vs a stash `ref`), `label` (committed|stashed, interpolated into the
+ *  aria-label + title), and the optional `onOpenFile` (renders the open-in-FileViewer
+ *  affordance — StashFile never passes it; when absent the toggle span gains `ml-auto`
+ *  to right-pack exactly as StashFile did). Pure DRY extraction; zero behavior change.
+ *  (Collapses the CommitFile/StashFile mirror — WARDEN-340, WARDEN-478, WARDEN-864.) */
+function DiffInspectRow({ file, buildUrl, label, onOpenFile }: { file: GitFile; buildUrl: () => string; label: 'committed' | 'stashed'; onOpenFile?: (path: string) => void }) {
   const [open, setOpen] = useState(false);
   const [diff, setDiff] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -851,7 +852,7 @@ export function CommitFile({ chatId, hash, file, onOpenFile }: { chatId: string;
     if (!open && !fetched) {
       setLoading(true);
       try {
-        const r = await fetch(`/api/git-show?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(hash)}&path=${encodeURIComponent(file.path)}`);
+        const r = await fetch(buildUrl());
         const j = await r.json();
         setDiff(typeof j.diff === 'string' ? j.diff : null);
       } catch {
@@ -870,19 +871,21 @@ export function CommitFile({ chatId, hash, file, onOpenFile }: { chatId: string;
         role="button"
         tabIndex={0}
         aria-expanded={open}
-        aria-label={`inspect committed diff for ${file.path}`}
+        aria-label={`inspect ${label} diff for ${file.path}`}
         onClick={(e) => { e.stopPropagation(); toggle(); }}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggle(); } }}
-        title="click to inspect this file's committed diff"
+        title={`click to inspect this file's ${label} diff`}
         className="flex w-full items-center gap-1 rounded px-0.5 py-px text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
       >
         <div className="min-w-0 flex-1"><GitChangedFile file={file} /></div>
-        {/* WARDEN-478: open this committed file in the FileViewer. The flex-1 path
-            wrapper above packs this icon + the toggle to the right edge. The inner
-            GitChangedFile is rendered WITHOUT onOpenFile so it stays a non-interactive
-            <span> (no nested affordance) — this row owns the only open-file control. */}
+        {/* WARDEN-478: open this file in the FileViewer. The flex-1 path wrapper above
+            packs this icon + the toggle to the right edge. The inner GitChangedFile is
+            rendered WITHOUT onOpenFile so it stays a non-interactive <span> (no nested
+            affordance) — when onOpenFile is present this row owns the only open-file
+            control; when absent (stashed rows) nothing renders here and ml-auto on the
+            toggle span right-packs it instead. */}
         {onOpenFile && <OpenFileAffordance path={file.path} onOpenFile={onOpenFile} className="shrink-0" />}
-        <span className="shrink-0 text-[10px] text-muted-foreground">{loading ? '…' : open ? '▾' : '▸'}</span>
+        <span className={`${onOpenFile ? 'shrink-0' : 'ml-auto shrink-0'} text-[10px] text-muted-foreground`}>{loading ? '…' : open ? '▾' : '▸'}</span>
       </div>
       {open && (
         loading ? (
@@ -897,60 +900,40 @@ export function CommitFile({ chatId, hash, file, onOpenFile }: { chatId: string;
   );
 }
 
+/** One touched-file row inside an expanded commit. Click to fetch and reveal the
+ *  committed diff for that file (`git show --format= <hash> -- <path>`). Delegates the
+ *  shared diff-fetch + inline-reveal machinery to DiffInspectRow; this wrapper only
+ *  supplies the committed-diff endpoint + the `committed` label. */
+// Exported (WARDEN-597) so the FleetRecentCommits feed can render the SAME expanded
+// commit → changed-files → per-file /api/git-show diff path the per-agent popover
+// uses, without duplicating the diff machinery. Each row in that cross-fleet feed
+// passes its OWN agent key as `chatId` (git-show's `id` param), so the per-file diff
+// resolves against the right repo — the component is multi-agent where this badge is
+// single-agent, but `chatId` is just the git-show `id`, so it composes cleanly.
+export function CommitFile({ chatId, hash, file, onOpenFile }: { chatId: string; hash: string; file: GitFile; onOpenFile?: (path: string) => void }) {
+  return (
+    <DiffInspectRow
+      file={file}
+      label="committed"
+      onOpenFile={onOpenFile}
+      buildUrl={() => `/api/git-show?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(hash)}&path=${encodeURIComponent(file.path)}`}
+    />
+  );
+}
+
 /** One touched-file row inside an expanded stash. Click to fetch and reveal the
  *  stashed diff for that file (`git diff stash@{n}^ stash@{n} -- <path>` via
- *  /api/git-stash-show). Owns its diff fetch state so a re-collapse/re-expand is
- *  instant. Mirrors CommitFile exactly; the only divergence is `ref=` instead of
- *  `hash=` (a stash is addressed by its reflog selector `stash@{n}`, not a commit
- *  hash). (WARDEN-340) */
+ *  /api/git-stash-show). Delegates the shared diff-fetch + inline-reveal machinery to
+ *  DiffInspectRow; the only thing this wrapper supplies is the stashed-diff endpoint
+ *  (addressed by its reflog selector `ref=stash@{n}`, not a commit hash) and the
+ *  `stashed` label. (WARDEN-340) */
 function StashFile({ chatId, stashRef, file }: { chatId: string; stashRef: string; file: GitFile }) {
-  const [open, setOpen] = useState(false);
-  const [diff, setDiff] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [fetched, setFetched] = useState(false);
-
-  const toggle = async () => {
-    if (!open && !fetched) {
-      setLoading(true);
-      try {
-        const r = await fetch(`/api/git-stash-show?id=${encodeURIComponent(chatId)}&ref=${encodeURIComponent(stashRef)}&path=${encodeURIComponent(file.path)}`);
-        const j = await r.json();
-        setDiff(typeof j.diff === 'string' ? j.diff : null);
-      } catch {
-        setDiff(null);
-      } finally {
-        setLoading(false);
-        setFetched(true);
-      }
-    }
-    setOpen((o) => !o);
-  };
-
   return (
-    <div className="pl-2">
-      <div
-        role="button"
-        tabIndex={0}
-        aria-expanded={open}
-        aria-label={`inspect stashed diff for ${file.path}`}
-        onClick={(e) => { e.stopPropagation(); toggle(); }}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggle(); } }}
-        title="click to inspect this file's stashed diff"
-        className="flex w-full items-center gap-1 rounded px-0.5 py-px text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
-      >
-        <div className="min-w-0 flex-1"><GitChangedFile file={file} /></div>
-        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{loading ? '…' : open ? '▾' : '▸'}</span>
-      </div>
-      {open && (
-        loading ? (
-          <div className="px-1 text-[10px] text-muted-foreground">loading diff…</div>
-        ) : diff ? (
-          <DiffBlock diff={diff} />
-        ) : (
-          <div className="px-1 text-[10px] text-muted-foreground">no diff</div>
-        )
-      )}
-    </div>
+    <DiffInspectRow
+      file={file}
+      label="stashed"
+      buildUrl={() => `/api/git-stash-show?id=${encodeURIComponent(chatId)}&ref=${encodeURIComponent(stashRef)}&path=${encodeURIComponent(file.path)}`}
+    />
   );
 }
 
