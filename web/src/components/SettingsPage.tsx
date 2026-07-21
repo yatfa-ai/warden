@@ -13,6 +13,7 @@ import { cn } from '@/lib/utils';
 import { type HostLabels } from '@/lib/chatDisplay';
 
 import { useBackendConfig } from '@/components/settings/useBackendConfig';
+import { sectionPersistence } from '@/components/settings/sectionPersistence';
 import {
   type AppearancePrefs,
   type NewChatsPrefs,
@@ -111,6 +112,11 @@ export function SettingsPage({
   // default; switching shows only that section, so there's no cross-section
   // page-level scroll. Persisting across visits is intentionally not done.
   const [activeSection, setActiveSection] = useState<SectionId>('hosts');
+
+  // The active section's persistence model, shown in the footer so Save/Cancel
+  // stop lying on the instant client-pref sections (Appearance/NewChats/
+  // Snippets). See sectionPersistence.ts (WARDEN-870).
+  const persistence = sectionPersistence(activeSection);
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
@@ -247,6 +253,23 @@ export function SettingsPage({
       </div>
 
       <footer className="flex items-center justify-end gap-2 px-4 h-14 border-t shrink-0">
+        {/* Persistence indicator (WARDEN-870). States the active section's
+            persistence model so Save/Cancel stop reading as undo/commit on the
+            instant client-pref sections (Appearance/NewChats/Snippets), mirroring
+            the in-section labels WARDEN-784 added to NotificationsSection. Hidden
+            while config is loading/failed — a server-config section can't commit
+            during a failed load, and Save is already disabled then. `mr-auto`
+            parks the label left while the buttons stay right; `min-w-0 truncate`
+            keeps it from crowding the buttons on narrow screens (full text on
+            hover via title). */}
+        {!(loading || loadError) && (
+          <span
+            className="mr-auto min-w-0 truncate text-xs text-muted-foreground"
+            title={persistence.label}
+          >
+            {persistence.label}
+          </span>
+        )}
         <Button variant="outline" onClick={onClose} disabled={saving}>
           Cancel
         </Button>
