@@ -1624,6 +1624,20 @@ export interface FleetGitStatusSlice {
   // per-row chip surfaces it. Provisional false at the fetch-seam literal;
   // buildFleetGitStatus(now) enriches it before the per-row 💤 chip reads it.
   stalled: boolean;
+  // # of PARKED WIP stashes for THIS agent (WARDEN-871) — the per-row parked-WIP axis
+  // every other axis is structurally blind to: an agent that ran `git stash` to shelve
+  // uncommitted work off-tree reads clean === true AND dirtyCount === 0 (porcelain
+  // status never surfaces stashes), so it looks identical to a fully-healthy agent —
+  // yet it holds easily-forgotten, drift-prone shelved work. /api/git-status ALREADY
+  // serves `stashCount` top-level (gitRoutes.js:654 — `stashCount: branch ? stashCount :
+  // null`, parsed from `git stash list` line count via parseStashCount in gitStatus.js),
+  // so this is a pure pass-through of one field — no new fetch, no backend change. null
+  // for a non-git / no-branch cwd (the server gates on `branch` → the SAME null-is-quiet
+  // discipline clean/ahead/behind follow) and 0 for a stash-free tree. NOTE this is the
+  // PER-AGENT stash magnitude (drives the per-row 🗄N chip); the fleet-wide count of
+  // stashed AGENTS is FleetGitStatusResult.stashedCount below (the mirror of
+  // dirtyCount/aheadCount/stalledCount — agent tallies, never a sum of stashes).
+  stashCount: number | null;
 }
 
 // One agent's fan-out outcome. `ok: false` = that agent's /api/git-status fetch
@@ -1708,13 +1722,29 @@ export interface FleetGitStatusResult {
   // FleetGitStatusSlice.stalled above (drives the per-row 💤 chip); this fleet count
   // drives the summary tally.
   stalledCount: number;
+  // # of fanned agents holding parked `git stash` WIP (status.stashCount > 0) — the
+  // fleet-wide "N stashed" count surfaced in the Fleet Health summary bar (WARDEN-871).
+  // This counts stashed AGENTS, NOT total stashes — the direct mirror of dirtyCount
+  // (which counts agents with clean === false, not total dirty files) and aheadCount
+  // (which counts stranded-work agents, not total unpushed commits): all six axes are
+  // agent-level tallies, never file/commit/stash sums. It surfaces the blind spot clean
+  // cannot speak to: an agent that shelved its work via `git stash` has clean === true,
+  // so WITHOUT this axis it is indistinguishable from a healthy agent — its parked,
+  // easily-forgotten, drift-prone WIP is invisible. An error / loading agent is NOT
+  // stashed (counted in errorCount / absent), and an ok agent with stashCount: null
+  // (non-git / no-branch cwd) or stashCount: 0 (stash-free) is NOT counted, so a
+  // transiently-unreachable or stash-free agent is never misread as parked. The
+  // PER-AGENT stash magnitude lives on FleetGitStatusSlice.stashCount above (drives the
+  // per-row 🗄N chip's "N" magnitude); this fleet count drives the summary tally.
+  stashedCount: number;
 }
 
 /**
  * Turn N per-agent /api/git-status outcomes into the Fleet Health view: a per-agent
- * { clean, diffstat, conflictCount, behind, ahead, headDate, headAgeMs, stalled } map +
- * a fleet-wide dirty count + a fleet-wide conflict count + a fleet-wide behind count +
- * a fleet-wide unpushed count + a fleet-wide stalled count + an honest error count.
+ * { clean, diffstat, conflictCount, behind, ahead, headDate, headAgeMs, stalled,
+ * stashCount } map + a fleet-wide dirty count + a fleet-wide conflict count + a
+ * fleet-wide behind count + a fleet-wide unpushed count + a fleet-wide stalled count +
+ * a fleet-wide stashed count + an honest error count.
  * Every ok agent gets a map entry (clean OR dirty — the React layer gates the per-row
  * chip on clean === false, so a clean entry is harmless + keeps the "fetched vs loading"
  * distinction available); ok:false agents are counted into errorCount WITHOUT blanking
@@ -1725,15 +1755,20 @@ export interface FleetGitStatusResult {
  * — stale AGENTS, not total behind-commits); aheadCount counts ONLY ok agents with ahead
  * > 0 (the agent-level mirror of dirtyCount — stranded-work AGENTS, not total unpushed
  * commits); stalledCount counts ONLY ok agents whose HEAD is >7d old (the agent-level
- * mirror of dirtyCount — stalled AGENTS, the sole recency axis). The counts are
+ * mirror of dirtyCount — stalled AGENTS, the sole recency axis); stashedCount counts ONLY
+ * ok agents with stashCount > 0 (the agent-level mirror of dirtyCount — parked-WIP
+ * AGENTS, not a sum of stashes). The counts are
  * ORTHOGONAL: an unpushed-and-dirty agent increments BOTH dirtyCount and aheadCount (a
  * clean === false tree says nothing about whether the committed work is pushed), a behind
  * agent is often clean too (clean upstream-synced work is still stale), a mid-merge repo
  * is dirty by definition so it increments dirtyCount and conflictCount, and a stalled
  * agent is VERY often otherwise clean (the canonical case this axis exists for: clean
  * tree, in sync, all pushed, but HEAD >7d old) so stalledCount fires where every other
- * axis reads zero. An error agent is never dirty, never a conflict, never behind, never
- * unpushed, AND never stalled.
+ * axis reads zero, and a stashed agent is independent of EVERY other axis by construction
+ * (a `git stash` can sit alongside a dirty tree, a conflict, divergence, unpushed commits,
+ * or a stalled HEAD) so stashedCount fires wherever parked WIP lives. An error agent is
+ * never dirty, never a conflict, never behind, never unpushed, never stalled, AND never
+ * stashed.
  *
  * `now` (defaulting to `Date.now()`) is the staleness reference: an ok agent is `stalled`
  * when its `headDate` parses to a finite ms older than `now - STALE_HEAD_AGE_MS`, derived
@@ -1757,6 +1792,7 @@ export function buildFleetGitStatus(outcomes: FleetGitStatusOutcome[], now: numb
   let behindCount = 0;
   let aheadCount = 0;
   let stalledCount = 0;
+  let stashedCount = 0;
   for (const o of outcomes) {
     if (!o.ok) {
       errorCount += 1;
@@ -1814,8 +1850,23 @@ export function buildFleetGitStatus(outcomes: FleetGitStatusOutcome[], now: numb
     // (the five axes are orthogonal counts over the same ok fleet), but a stalled agent
     // is VERY often otherwise clean, so `stalled` fires alone where every other axis is 0.
     if (stalled) stalledCount += 1;
+    // Mirror the ahead line (WARDEN-871): count parked-WIP AGENTS (those with
+    // stashCount > 0 — `git stash`-shelved work porcelain status is blind to), NOT a sum
+    // of stashes — the agent-level fleet tally the summary bar renders as "N stashed".
+    // `o.status.stashCount &&` guards null (non-git / no-branch cwd — the server gates
+    // `stashCount: branch ? stashCount : null`, mirroring the null-is-quiet discipline
+    // clean/ahead/behind follow) the SAME way the ahead line's `ahead &&` guards null,
+    // and `> 0` guards a stash-free tree the SAME way the conflictCount line guards 0.
+    // The canonical case this axis exists for: a clean, conflict-free, in-sync, pushed,
+    // fresh-HEAD agent that stashed its WIP reads ZERO across every other axis, so
+    // WITHOUT this line it is invisible — stashedCount surfaces parked work nothing else
+    // can see. stash is INDEPENDENT of every other axis by construction (a stash can sit
+    // alongside a dirty tree, a conflict, a behind/upstream divergence, unpushed commits,
+    // or a stalled HEAD), so an agent both stashed AND dirty increments BOTH stashedCount
+    // and dirtyCount — the six axes are orthogonal counts over the same ok fleet.
+    if (o.status.stashCount && o.status.stashCount > 0) stashedCount += 1;
   }
-  return { statusByKey, dirtyCount, errorCount, conflictCount, behindCount, aheadCount, stalledCount };
+  return { statusByKey, dirtyCount, errorCount, conflictCount, behindCount, aheadCount, stalledCount, stashedCount };
 }
 
 /**

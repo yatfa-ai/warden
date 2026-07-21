@@ -58,13 +58,15 @@ export interface FleetGitStatusState extends FleetGitStatusResult {
   aheadCount: number;
   /** # of fanned agents whose HEAD commit is >7d old (the fleet "N stalled" count, WARDEN-847). */
   stalledCount: number;
+  /** # of fanned agents holding parked `git stash` WIP (the fleet "N stashed" count, WARDEN-871). */
+  stashedCount: number;
   /** Pull a fresh view past mount (no auto-poll). */
   refresh: () => void;
   /** True only during a fetch whose result has not yet arrived (mount or manual ↻). */
   loading: boolean;
 }
 
-const EMPTY_RESULT: FleetGitStatusResult = { statusByKey: {}, dirtyCount: 0, errorCount: 0, conflictCount: 0, behindCount: 0, aheadCount: 0, stalledCount: 0 };
+const EMPTY_RESULT: FleetGitStatusResult = { statusByKey: {}, dirtyCount: 0, errorCount: 0, conflictCount: 0, behindCount: 0, aheadCount: 0, stalledCount: 0, stashedCount: 0 };
 
 /**
  * Fan /api/git-status across the eligible fleet and lift the result for
@@ -183,6 +185,18 @@ export function useFleetGitStatus(agents: readonly Chat[]): FleetGitStatusState 
             // — the same null-is-quiet discipline `clean` follows. The fleet-wide count
             // of stale AGENTS is derived in buildFleetGitStatus from `behind > 0`.
             behind: typeof j.behind === 'number' ? j.behind : null,
+            // stashCount (WARDEN-871): the # of `git stash`-shelved WIP entries for this
+            // agent — the parked-WIP axis every state axis is blind to (porcelain status
+            // never surfaces stashes, so a stashed agent reads clean === true). A direct
+            // pass-through of /api/git-status's top-level `stashCount` (gitRoutes.js:654
+            // `stashCount: branch ? stashCount : null`, parsed from `git stash list` line
+            // count via parseStashCount in gitStatus.js), NOT derived. The `typeof ===
+            // 'number'` coerce keeps null as null (typeof null === 'object') so a non-git
+            // / no-branch cwd reads null — the same null-is-quiet discipline clean/ahead/
+            // behind follow. The fleet-wide count of parked-WIP AGENTS is derived in
+            // buildFleetGitStatus from `stashCount > 0`. This is the PER-AGENT magnitude
+            // (drives the per-row 🗄N chip's "N"); the fleet tally is stashedCount below.
+            stashCount: typeof j.stashCount === 'number' ? j.stashCount : null,
             // headDate (WARDEN-847): the strict ISO-8601 last-commit time /api/git-status
             // ALREADY serves top-level (gitRoutes.js:664 `headDate: branch ? headDate :
             // null`, parsed from git `%cI` at gitStatus.js:200) — the sole RECENCY axis
