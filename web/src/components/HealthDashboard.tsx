@@ -461,6 +461,52 @@ function StalledChip({ status }: { status?: FleetGitStatusSlice | null }) {
   );
 }
 
+/**
+ * Per-agent parked-WIP chip (WARDEN-871) — the sibling of WipChip / ConflictChip /
+ * BehindChip / UnpushedChip / StalledChip for the parked-WIP axis: an agent holding
+ * `git stash`-shelved work. dirty/conflict/behind/unpushed/stalled are all STATE or
+ * RECENCY axes porcelain status can speak to; stash answers "did this agent SHELVE work
+ * off-tree?" — the signal for easily-forgotten, drift-prone parked WIP. This is the
+ * canonical blind spot the chip exists for: an agent that stashed its WIP has a clean
+ * tree (clean === true), no conflicts, in sync, fully pushed, AND a fresh HEAD, so it
+ * reads ZERO across every existing Fleet Health axis — WITHOUT this chip it is
+ * indistinguishable from a healthy agent, yet it holds shelved work nothing else can
+ * see. This closes Fleet Health's LAST parity gap with the sidebar's git-state system
+ * (all 6 of the sidebar's axes now surfaced per-row).
+ *
+ * Renders the sidebar's fuchsia 🗄 vocabulary VERBATIM (no new glyph/color system —
+ * WARDEN-68): the parked-WIP treatment established by WARDEN-667/689
+ * (GitBadges.tsx:306-308 → glyph '🗄', `text-fuchsia-400 hover:text-fuchsia-300`, label
+ * 'stashed WIP') — the SAME fleet/row agreement 766/796/815/822/847 establish (Fleet
+ * Health and the sidebar speak one vocabulary). The 🗄 glyph + fuchsia hue are EACH
+ * distinct from every existing Fleet Health chip (± yellow / ⚑ rose / ↓ blue / ↑ amber
+ * / 💤 sky) — no collision on hue OR glyph. The per-agent stash magnitude
+ * (status.stashCount, the pure pass-through of /api/git-status's top-level stashCount,
+ * parsed from `git stash list` line count — null for a non-git / no-branch cwd, 0 for a
+ * stash-free tree) drives the chip's "N"; the fleet-wide count of stashed AGENTS
+ * (fleetGit.stashedCount, the mirror of dirtyCount/conflictCount/behindCount/aheadCount/
+ * stalledCount) drives the summary tally.
+ *
+ * Renders ONLY when status.stashCount > 0 — absent (loading / not eligible / unreachable),
+ * a non-git / no-branch cwd (stashCount: null), or a stash-free agent (stashCount: 0)
+ * → nothing, the same null-is-quiet + graceful-N/A contract the sibling chips /
+ * ResourceChip / TokenChip follow. `tabular-nums` mirrors WipChip / ConflictChip /
+ * UnpushedChip so the chips' digit widths align when several render together (a stashed
+ * agent is often clean too, so 🗄N may render alone where every state chip is absent).
+ */
+function StashChip({ status }: { status?: FleetGitStatusSlice | null }) {
+  if (!status || !status.stashCount || status.stashCount <= 0) return null;
+  const n = status.stashCount;
+  return (
+    <span
+      className="shrink-0 tabular-nums text-fuchsia-400 hover:text-fuchsia-300"
+      title={`${n} parked stash${n === 1 ? '' : 'es'} — uncommitted work stashed off-tree via git stash (easily forgotten / drift-prone; fanned /api/git-status)`}
+    >
+      🗄 {n}
+    </span>
+  );
+}
+
 export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, groupBy, onGroupByChange: setGroupBy, collapsedHosts, onCollapsedHostsChange: setCollapsedHosts }: Props) {
   const [healthData, setHealthData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -776,6 +822,16 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
           clean, conflict-free, in sync, AND fully pushed reads ZERO across every axis
           above, so the 💤 may render ALONE where every other chip is absent. */}
       <StalledChip status={fleetGit.statusByKey[id]} />
+
+      {/* Per-agent parked-WIP block (WARDEN-871): the fuchsia 🗄N for THIS agent — the
+          parked-WIP axis every state/recency axis above is blind to. Renders the 🗄N
+          only when the fanned status reports stashCount > 0 (`git stash`-shelved work
+          porcelain status never surfaces); absent / stash-free (0) / non-git-or-no-branch
+          (null) → nothing, identical graceful-N/A. See StashChip. This is the canonical
+          blind-spot case: an agent that is clean, conflict-free, in sync, fully pushed,
+          AND fresh-HEAD but stashed its WIP reads ZERO across every axis above, so the 🗄N
+          may render ALONE where every other chip is absent. */}
+      <StashChip status={fleetGit.statusByKey[id]} />
     </div>
     );
   };
@@ -1035,7 +1091,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
                 Reuses the sidebar's sky 💤 vocabulary (the stalled chip family,
                 GitBadges.tsx) so "stalled" reads in the same color everywhere; placed
                 after the unpushed count (severity-descending: dirty → conflict → behind →
-                unpushed → stalled → muted unreachable). Only rendered when > 0 so a fresh
+                unpushed → stalled → stashed → muted unreachable). Only rendered when > 0 so a fresh
                 fleet stays quiet. stalledCount counts stalled AGENTS (the mirror of
                 dirtyCount/conflictCount/behindCount/aheadCount), not a sum, and excludes
                 error/loading agents (counted in errorCount) + null-headDate non-git /
@@ -1049,6 +1105,32 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
                   title={`${fleetGit.stalledCount} agent${fleetGit.stalledCount === 1 ? '' : 's'} whose HEAD commit is >7d old (fanned /api/git-status across active project agents; may be silently stalled, abandoned, or rotting)`}
                 >
                   {fleetGit.stalledCount} stalled
+                </span>
+              </>
+            )}
+            {/* Fleet-wide parked-WIP count (WARDEN-871): the # of fanned agents holding
+                `git stash`-shelved work (stashCount > 0) — the parked-WIP axis alongside
+                the dirty/conflict/behind/unpushed/stalled axes, surfacing the canonical
+                blind spot: such an agent has a clean tree (porcelain status never surfaces
+                stashes), so WITHOUT this axis it is indistinguishable from a healthy agent
+                — yet it holds easily-forgotten, drift-prone shelved WIP. Reuses the
+                sidebar's fuchsia 🗄 vocabulary (the stashed chip family, GitBadges.tsx) so
+                "stashed" reads in the same color everywhere; placed after the stalled
+                count (severity-descending: dirty → conflict → behind → unpushed → stalled
+                → stashed → muted unreachable). Only rendered when > 0 so a stash-free
+                fleet stays quiet. stashedCount counts parked-WIP AGENTS (the mirror of
+                dirtyCount/conflictCount/behindCount/aheadCount/stalledCount), not a sum of
+                stashes, and excludes error/loading agents (counted in errorCount) +
+                stashCount: null / 0 non-git / no-branch / stash-free agents, so a
+                transiently-unreachable or stash-free agent is never misread as parked. */}
+            {fleetGit.stashedCount > 0 && (
+              <>
+                <span className="text-muted-foreground">·</span>
+                <span
+                  className="text-fuchsia-500"
+                  title={`${fleetGit.stashedCount} agent${fleetGit.stashedCount === 1 ? '' : 's'} with parked git-stash WIP (fanned /api/git-status across active project agents; easily forgotten / drift-prone shelved work)`}
+                >
+                  {fleetGit.stashedCount} stashed
                 </span>
               </>
             )}
