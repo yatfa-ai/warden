@@ -38,13 +38,25 @@ rmSync(tmpDir, { recursive: true, force: true });
 let passed = 0;
 const testAsync = (name, fn) => fn().then(() => { passed += 1; console.log('  ok -', name); });
 
+// Node 21+ ships globalThis.navigator as a getter-only accessor (undici: get,
+// configurable, but no setter), so direct assignment throws:
+//   globalThis.navigator = {...}  → TypeError: ... only a getter
+// (this is why the file used to crash at the first mock-setup, before any
+// assertion ran — a red suite asserting nothing, per the WARDEN-739 lesson).
+// defineProperty redefines it cleanly on all Node versions: the descriptor is
+// configurable, so it installs on ≥21 and overwrites the plain data property on
+// ≤20. document has no global today, but routing it through the same helper is
+// free symmetry and future-proofs against Node shipping it as an accessor too.
+const setGlobal = (name, value) =>
+  Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
+
 // Save originals (Node 24 has a navigator global; document is undefined) and
 // restore after every case so mocks never leak across tests.
 const realNavigator = globalThis.navigator;
 const realDocument = globalThis.document;
 const restore = () => {
-  globalThis.navigator = realNavigator;
-  globalThis.document = realDocument;
+  setGlobal('navigator', realNavigator);
+  setGlobal('document', realDocument);
 };
 
 // A mock DOM whose textarea captures the copied value and whose execCommand
@@ -75,8 +87,8 @@ console.log('\nasync Clipboard API path');
 // ---------------------------------------------------------------------------
 await testAsync('navigator.clipboard.writeText succeeds → true, text passed through', async () => {
   let saved;
-  globalThis.document = undefined;
-  globalThis.navigator = { clipboard: { writeText: async (t) => { saved = t; } } };
+  setGlobal('document', undefined);
+  setGlobal('navigator', { clipboard: { writeText: async (t) => { saved = t; } } });
   const ok = await copyText('hello');
   assert.equal(ok, true);
   assert.equal(saved, 'hello');
@@ -88,8 +100,8 @@ console.log('\nexecCommand fallback path');
 // ---------------------------------------------------------------------------
 await testAsync('no clipboard API → execCommand fallback, textarea holds the text', async () => {
   const m = mockDoc();
-  globalThis.navigator = {};
-  globalThis.document = m.document;
+  setGlobal('navigator', {});
+  setGlobal('document', m.document);
   const ok = await copyText('fallback!');
   assert.equal(ok, true);
   assert.equal(m.execCalled(), true);
@@ -99,8 +111,8 @@ await testAsync('no clipboard API → execCommand fallback, textarea holds the t
 
 await testAsync('clipboard.writeText rejects → falls through to execCommand fallback', async () => {
   const m = mockDoc();
-  globalThis.navigator = { clipboard: { writeText: async () => { throw new Error('denied'); } } };
-  globalThis.document = m.document;
+  setGlobal('navigator', { clipboard: { writeText: async () => { throw new Error('denied'); } } });
+  setGlobal('document', m.document);
   const ok = await copyText('recover');
   assert.equal(ok, true);
   assert.equal(m.execCalled(), true);
@@ -110,8 +122,8 @@ await testAsync('clipboard.writeText rejects → falls through to execCommand fa
 
 await testAsync('execCommand returns false → false (copy unsupported)', async () => {
   const m = mockDoc({ execReturns: false });
-  globalThis.navigator = {};
-  globalThis.document = m.document;
+  setGlobal('navigator', {});
+  setGlobal('document', m.document);
   const ok = await copyText('unsupported');
   assert.equal(ok, false);
   assert.equal(m.execCalled(), true);
@@ -119,8 +131,8 @@ await testAsync('execCommand returns false → false (copy unsupported)', async 
 });
 
 await testAsync('no clipboard API and no document → false (nothing to copy with)', async () => {
-  globalThis.navigator = {};
-  globalThis.document = undefined;
+  setGlobal('navigator', {});
+  setGlobal('document', undefined);
   const ok = await copyText('nowhere');
   assert.equal(ok, false);
   restore();
@@ -140,8 +152,8 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 // observe exactly what handleOsc52 copies; no document → no execCommand fallback.
 const clipCapture = () => {
   let saved;
-  globalThis.document = undefined;
-  globalThis.navigator = { clipboard: { writeText: async (t) => { saved = t; } } };
+  setGlobal('document', undefined);
+  setGlobal('navigator', { clipboard: { writeText: async (t) => { saved = t; } } });
   return { get saved() { return saved; } };
 };
 
