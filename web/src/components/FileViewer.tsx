@@ -28,7 +28,7 @@ import { classifyChangesView, resolveViewToggles } from '@/lib/fileViewerChanges
 import type { CoEditor } from '@/lib/fileCoEditors';
 import { MarkdownBody } from './MarkdownBody';
 import { tokenizeCode, languageFromPath, type Leaf } from '@/lib/highlight';
-import { Loader2Icon, FileIcon, FolderIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon, RotateCwIcon, CircleDotIcon, FilePenIcon } from 'lucide-react';
+import { Loader2Icon, FileIcon, FolderIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon, RotateCwIcon, CircleDotIcon, FilePenIcon, GitCompare } from 'lucide-react';
 import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
 import { copyText } from '@/lib/clipboard';
 import { basename } from '@/lib/chatDisplay';
@@ -86,6 +86,15 @@ interface FileViewerProps {
   // shape). Optional so a mount without a chatId swap (PaneGrid / HealthDashboard)
   // renders non-clickable rows. Mirrors onNavigate's optional-degrades-safely shape.
   onOpenCoEditor?: (key: string) => void;
+  // Open CollisionCompareDialog on a co-editor's version vs the reader's
+  // (WARDEN-868): the parent owns the dialog + its `compareTarget` state and
+  // mounts CollisionCompareDialog as a sibling of this viewer. The sibling's
+  // `unpushed` flag (the row's ↑ glyph) is the source proxy the parent reads —
+  // an unpushed sibling's change lives in a committed range (source 'outgoing');
+  // a dirty-working-tree sibling is 'wip'. Optional so mounts without gitStatus
+  // in scope (PaneGrid / HealthDashboard) render swap-only rows with no Compare
+  // affordance — identical optional-degrades-safely discipline to onOpenCoEditor.
+  onCompare?: (siblingKey: string) => void;
   // Follow live-update cadence (WARDEN-749): the already-resolved web-safe poll
   // interval. App owns + resolves cfg.pollIntervalMs via resolvePollIntervalMs at
   // the source (the same value the catalog poll uses), so Follow shares the
@@ -107,7 +116,7 @@ type BlameLine = { line: number; hash: string; author: string; date: string; sum
 // git-show accepts abbreviated hashes, so it resolves unambiguously on click.
 type HistoryCommit = { hash: string; subject: string; author: string; date: string };
 
-export function FileViewer({ chatId, filePath, open, line, timestampFormat, viewMode, onViewModeChange, onNavigate, coEditors, onOpenCoEditor, pollIntervalMs, onOpenChange }: FileViewerProps) {
+export function FileViewer({ chatId, filePath, open, line, timestampFormat, viewMode, onViewModeChange, onNavigate, coEditors, onOpenCoEditor, onCompare, pollIntervalMs, onOpenChange }: FileViewerProps) {
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -598,6 +607,12 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
   // chatId swap (PaneGrid / HealthDashboard) leave it undefined, and their rows
   // render non-clickable. Mirrors `navigable`'s optional-degrades-safely shape.
   const canOpenCoEditor = typeof onOpenCoEditor === 'function';
+  // Whether a co-editor row offers a Compare action (WARDEN-868). The ChatSidebar
+  // mount wires onCompare (it owns the CollisionCompareDialog sibling); mounts
+  // without gitStatus in scope (PaneGrid / HealthDashboard) leave it undefined,
+  // and their rows render swap-only — no Compare affordance. Mirrors
+  // `canOpenCoEditor`'s optional-degrades-safely shape.
+  const canCompare = typeof onCompare === 'function';
 
   // Copy text to the clipboard through the shared Electron-safe helper, surfacing
   // the boolean result via toast — never bare navigator.clipboard, which rejects
@@ -705,28 +720,56 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
                         <ul>
                           {coEditors.map((ce) => (
                             <li key={ce.key}>
-                              {/* role="button" div (not a <button>) so the row is
-                                  keyboard-operable without nesting interactive
-                                  elements inside the portaled popover content —
-                                  mirrors GitCollisionBadge's per-agent rows. Click →
-                                  deep-link to the sibling's version (parent swaps
-                                  chatId) + close the popover. Non-clickable when no
-                                  onOpenCoEditor is wired (degrades gracefully). */}
-                              <div
-                                role={canOpenCoEditor ? 'button' : undefined}
-                                tabIndex={canOpenCoEditor ? 0 : undefined}
-                                aria-label={canOpenCoEditor ? `open ${ce.label}'s version of this file` : undefined}
-                                onClick={canOpenCoEditor ? (e) => { e.stopPropagation(); setCoEditorOpen(false); onOpenCoEditor?.(ce.key); } : undefined}
-                                onKeyDown={canOpenCoEditor ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setCoEditorOpen(false); onOpenCoEditor?.(ce.key); } } : undefined}
-                                title={canOpenCoEditor ? `open ${ce.label}'s version of this file` : ce.label}
-                                className={`flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left${canOpenCoEditor ? ' hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary' : ''}`}
-                              >
-                                <span className="min-w-0 flex-1 truncate text-foreground" title={ce.label}>{ce.label}</span>
-                                <span className="flex shrink-0 items-center gap-1 text-[11px] leading-none">
-                                  {ce.dirty && <span className="text-yellow-400" title="uncommitted changes">±</span>}
-                                  {ce.conflict && <span className="text-rose-400" title="merge conflict">⚑</span>}
-                                  {ce.unpushed && <span className="text-amber-400" title="unpushed commit">↑</span>}
-                                </span>
+                              {/* Non-interactive flex row so the swap + Compare controls
+                                  sit as SIBLINGS (no nested interactive elements inside
+                                  the portaled popover content), mirroring AgentDiffPanel's
+                                  "sibling interactive elements inside a non-interactive
+                                  header row" discipline. */}
+                              <div className="flex w-full items-center gap-1">
+                                {/* SWAP — role="button" div (not a <button>) so the row
+                                    is keyboard-operable. Click → deep-link to the sibling's
+                                    version (parent swaps chatId) + close the popover.
+                                    Non-clickable when no onOpenCoEditor is wired (degrades
+                                    gracefully). flex-1 (not w-full) so the Compare control
+                                    below can sit beside it without overflowing. */}
+                                <div
+                                  role={canOpenCoEditor ? 'button' : undefined}
+                                  tabIndex={canOpenCoEditor ? 0 : undefined}
+                                  aria-label={canOpenCoEditor ? `open ${ce.label}'s version of this file` : undefined}
+                                  onClick={canOpenCoEditor ? (e) => { e.stopPropagation(); setCoEditorOpen(false); onOpenCoEditor?.(ce.key); } : undefined}
+                                  onKeyDown={canOpenCoEditor ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setCoEditorOpen(false); onOpenCoEditor?.(ce.key); } } : undefined}
+                                  title={canOpenCoEditor ? `open ${ce.label}'s version of this file` : ce.label}
+                                  className={`flex min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 py-1 text-left${canOpenCoEditor ? ' hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary' : ''}`}
+                                >
+                                  <span className="min-w-0 flex-1 truncate text-foreground" title={ce.label}>{ce.label}</span>
+                                  <span className="flex shrink-0 items-center gap-1 text-[11px] leading-none">
+                                    {ce.dirty && <span className="text-yellow-400" title="uncommitted changes">±</span>}
+                                    {ce.conflict && <span className="text-rose-400" title="merge conflict">⚑</span>}
+                                    {ce.unpushed && <span className="text-amber-400" title="unpushed commit">↑</span>}
+                                  </span>
+                                </div>
+                                {/* COMPARE (WARDEN-868): diff this sibling's version vs
+                                    the reader's via CollisionCompareDialog. A sibling
+                                    role="button" (no nesting) with the same role/tabIndex/
+                                    aria-label discipline as the swap. stopPropagation +
+                                    close the popover so the dialog takes focus, mirroring
+                                    GitBadges' Compare-edits button. Rendered ONLY when
+                                    onCompare is wired (ChatSidebar mount); omitted at the
+                                    PaneGrid/HealthDashboard mounts → rows render swap-only
+                                    (graceful degradation). */}
+                                {canCompare && (
+                                  <div
+                                    role="button"
+                                    tabIndex={0}
+                                    aria-label={`compare ${ce.label}'s version of this file with yours`}
+                                    onClick={(e) => { e.stopPropagation(); setCoEditorOpen(false); onCompare?.(ce.key); }}
+                                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setCoEditorOpen(false); onCompare?.(ce.key); } }}
+                                    title={`compare ${ce.label}'s version with yours`}
+                                    className="flex shrink-0 items-center rounded px-1.5 py-1 text-muted-foreground hover:bg-accent hover:text-foreground cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+                                  >
+                                    <GitCompare className="w-3 h-3" aria-hidden="true" />
+                                  </div>
+                                )}
                               </div>
                             </li>
                           ))}
