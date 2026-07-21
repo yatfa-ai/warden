@@ -28,6 +28,11 @@ import { copyText } from '@/lib/clipboard';
 import { DiffViewer } from './DiffViewer';
 import { ConflictView } from './ConflictView';
 import { FileViewer } from './FileViewer';
+// The cross-agent file-edit compare dialog (WARDEN-321): mounted as a sibling of
+// FileViewer so a coordinator reading a file can diff a co-editor's version A↔B
+// without leaving the FileViewer (WARDEN-868). Self-contained — fans /api/git-diff
+// + /api/cross-agent-diff per agent itself; the parent only supplies path + agents.
+import { CollisionCompareDialog } from './CollisionCompareDialog';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { RECENTLY_CLOSED_PREVIEW, type Snippet, type RecentlyClosedEntry } from '@/lib/storage';
 import { THIS_MACHINE, basename, chatType, displayName, hostLabelFor } from '@/lib/chatDisplay';
@@ -275,6 +280,13 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // line (open at top); onNavigate resets it on a path change so a stale highlight
   // never survives a breadcrumb/dir-click navigation (mirrors PaneGrid WARDEN-334).
   const [fileTarget, setFileTarget] = useState<{ chatId: string; path: string; line?: number } | null>(null);
+  // The co-editor Compare target (WARDEN-868): set by FileViewer's onCompare, the
+  // reader's open path + the two agents to diff — the reader (no source → treated
+  // as 'wip' by the dialog) and the picked sibling (source 'outgoing' when its
+  // change is an unpushed commit, else 'wip'). Shaped like GitBadges' compareTarget
+  // (the sidebar fleet mount) so the same CollisionCompareDialog reads either. null
+  // while closed; onOpenChange clears it so a re-open re-fetches fresh state.
+  const [compareTarget, setCompareTarget] = useState<{ path: string; agents: { key: string; source?: 'outgoing' | 'wip' }[] } | null>(null);
   const { prefs } = useNotificationPrefs();
 
   // Multi-select broadcast (WARDEN-292): the set of selected agent ids, held at
@@ -1628,8 +1640,42 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
         onNavigate={(p) => setFileTarget((prev) => (prev ? { ...prev, path: p, line: undefined } : prev))}
         coEditors={fileCoEditors}
         onOpenCoEditor={(key) => setFileTarget((prev) => (prev ? { ...prev, chatId: key } : prev))}
+        // WARDEN-868: open CollisionCompareDialog on the reader's version vs the
+        // picked sibling's. The reader (fileTarget.chatId) contributes no source →
+        // the dialog treats it as 'wip' (working tree), which is correct: a CLEAN
+        // reader renders the dialog's 'empty' panel note rather than misreading as
+        // resolved. The sibling's `unpushed` flag (its ↑ glyph) selects the diff
+        // range — an unpushed sibling's change lives in a committed range (source
+        // 'outgoing' → &range=outgoing); a dirty-working-tree sibling is 'wip'.
+        // fileTarget is guaranteed set at call time (onCompare only fires from a row
+        // inside an OPEN FileViewer), but guard anyway for TS + safety.
+        onCompare={(siblingKey) => {
+          if (!fileTarget) return;
+          const ce = fileCoEditors?.find((c) => c.key === siblingKey);
+          setCompareTarget({
+            path: fileTarget.path,
+            agents: [
+              { key: fileTarget.chatId },
+              { key: siblingKey, source: ce?.unpushed ? 'outgoing' : 'wip' },
+            ],
+          });
+        }}
         pollIntervalMs={pollIntervalMs}
         onOpenChange={(o) => { if (!o) setFileTarget(null); }}
+      />
+      {/* Scoped to the path + two agents selected by the co-editor Compare action
+          above. Rendered as a sibling of FileViewer (not inside it) so Radix's
+          Dialog portal stacks cleanly above the already-dismissed FileViewer /
+          popover — the same sibling-mount discipline GitBadges uses for its fleet
+          Compare-edits dialog. */}
+      <CollisionCompareDialog
+        open={!!compareTarget}
+        onOpenChange={(o) => { if (!o) setCompareTarget(null); }}
+        path={compareTarget?.path ?? ''}
+        agents={compareTarget?.agents ?? []}
+        chats={chats}
+        gitStatus={gitStatus}
+        onOpenChat={onOpenChat}
       />
       <BroadcastDialog
         open={broadcastOpen}
