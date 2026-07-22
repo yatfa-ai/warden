@@ -37,7 +37,7 @@ import { checkHost } from './hostStatus.js';
 import {
   probeReceiverCapabilities,
 } from './telemetry-capabilities.js';
-import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep } from './companion.js';
+import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep, getCompanionStatus } from './companion.js';
 import { createGitRouter, runLocalCapture, runInContext, gitCwd } from './gitRoutes.js';
 export { runGit, gitCwd, parseInProgressDetail, stripCommitSubject, diffNoIndex, getLocalGitDiff } from './gitRoutes.js';
 
@@ -695,8 +695,19 @@ app.get('/api/hosts/health', async (req, res) => {
 // Host connectivity status endpoint for sidebar indicators
 app.get('/api/hosts/status', async (_req, res) => {
   const hosts = [LOCAL, ...cfg.hosts];
+  // WARDEN-878: when the companion transport is enabled, attach each host's
+  // companion state (active/bootstrapping/error/inactive) to its result — one
+  // per-host status the UI already polls, so no new endpoint or poll cadence.
+  // The toggle is read at REQUEST time (isCompanionTransportEnabled) so a flip
+  // takes effect on the next poll without a restart; when off, the field is
+  // omitted entirely (the transport is opt-in, so there is nothing to surface).
+  const companionOn = isCompanionTransportEnabled();
   const results = await Promise.all(
-    hosts.map((host) => checkHost(host, validateHost, cfg))
+    hosts.map(async (host) => {
+      const result = await checkHost(host, validateHost, cfg);
+      if (companionOn) result.companion = getCompanionStatus(host);
+      return result;
+    })
   );
   res.json({ hosts: results });
 });
