@@ -1,9 +1,12 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { RotateCw } from 'lucide-react';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { cn } from '@/lib/utils';
 import { displayName } from '@/lib/chatDisplay';
+import { copyText } from '@/lib/clipboard';
 import {
   fleetCommitSearchEligible,
   mergeFleetCommitsByEpoch,
@@ -243,6 +246,16 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
     setRefreshTick((t) => t + 1);
   };
 
+  // Copy via the Electron-safe helper + a sonner success/error toast — the same
+  // pattern WorkspaceSearchDialog / GlobalSearchDialog Copy items use. Never bare
+  // navigator.clipboard, which fails silently in Electron (WARDEN-68 Rule 3); the
+  // caller owns the toast per the copyText contract (lib/clipboard.ts).
+  const handleCopy = async (text: string) => {
+    const ok = await copyText(text);
+    if (ok) toast.success('Copied');
+    else toast.error('Copy failed');
+  };
+
   // The glance: slice the merged, epoch-sorted rows to the bound (top FLEET_RECENT_LIMIT
   // across the fleet). Slice AFTER the sort so the newest N survive regardless of how
   // many each agent contributed.
@@ -337,36 +350,52 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
                   // expanded file list as a sibling — the FleetCommitSearch / GitBadges
                   // pattern. Click → expand to that commit's /api/git-show diff.
                   <li key={cacheKey} className="rounded">
-                    <div
-                      role="button"
-                      tabIndex={0}
-                      aria-expanded={isExpanded}
-                      aria-label={`inspect ${name} commit ${row.commit.hash}: ${row.commit.subject}`}
-                      onClick={() => toggleRow(row.key, row.commit.hash)}
-                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleRow(row.key, row.commit.hash); } }}
-                      title={`inspect files changed by ${row.commit.hash} — ${name}`}
-                      className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
-                    >
-                      <span className="min-w-0 flex-1">
-                        {/* Agent name (foreground) · relative time (muted, right). The
-                            relative time is %ar from GIT_LOG_PRETTY — the same "2 hours
-                            ago" the per-agent row shows. */}
-                        <span className="flex items-baseline gap-1">
-                          <span className="truncate text-[10px] font-medium text-foreground" title={name}>{name}</span>
-                          <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{row.commit.date}</span>
-                        </span>
-                        {/* hash (cyan mono, mirrors GitBadges) · amber ↑ when the commit is
-                            still unpushed (local-only — HEAD has it, @{u} doesn't; the
-                            outgoing (@{u}..HEAD) hash-join WARDEN-723 ported from
-                            FleetCommitSearch) · subject (truncated). */}
-                        <span className="flex items-center gap-1">
-                          <span className="shrink-0 font-mono text-[10px] text-cyan-400/80">{row.commit.hash}</span>
-                          {row.unpushed && <span className="shrink-0 text-[10px] text-amber-400" title="unpushed (local, not yet pushed)">↑</span>}
-                          <span className="min-w-0 truncate text-[10px] text-foreground" title={row.commit.subject}>{row.commit.subject}</span>
-                        </span>
-                      </span>
-                      <span className="ml-auto shrink-0 self-center text-[10px] text-muted-foreground">{isExpanded ? '▾' : '▸'}</span>
-                    </div>
+                    <ContextMenu>
+                      <ContextMenuTrigger asChild>
+                        <div
+                          role="button"
+                          tabIndex={0}
+                          aria-expanded={isExpanded}
+                          aria-label={`inspect ${name} commit ${row.commit.hash}: ${row.commit.subject}`}
+                          onClick={() => toggleRow(row.key, row.commit.hash)}
+                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleRow(row.key, row.commit.hash); } }}
+                          title={`inspect files changed by ${row.commit.hash} — ${name}`}
+                          className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+                        >
+                          <span className="min-w-0 flex-1">
+                            {/* Agent name (foreground) · relative time (muted, right). The
+                                relative time is %ar from GIT_LOG_PRETTY — the same "2 hours
+                                ago" the per-agent row shows. */}
+                            <span className="flex items-baseline gap-1">
+                              <span className="truncate text-[10px] font-medium text-foreground" title={name}>{name}</span>
+                              <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{row.commit.date}</span>
+                            </span>
+                            {/* hash (cyan mono, mirrors GitBadges) · amber ↑ when the commit is
+                                still unpushed (local-only — HEAD has it, @{u} doesn't; the
+                                outgoing (@{u}..HEAD) hash-join WARDEN-723 ported from
+                                FleetCommitSearch) · subject (truncated). */}
+                            <span className="flex items-center gap-1">
+                              <span className="shrink-0 font-mono text-[10px] text-cyan-400/80">{row.commit.hash}</span>
+                              {row.unpushed && <span className="shrink-0 text-[10px] text-amber-400" title="unpushed (local, not yet pushed)">↑</span>}
+                              <span className="min-w-0 truncate text-[10px] text-foreground" title={row.commit.subject}>{row.commit.subject}</span>
+                            </span>
+                          </span>
+                          <span className="ml-auto shrink-0 self-center text-[10px] text-muted-foreground">{isExpanded ? '▾' : '▸'}</span>
+                        </div>
+                      </ContextMenuTrigger>
+                      {/* Themed right-click Copy menu (Context-Menu Completeness roadmap /
+                          WARDEN-875): wraps the ROW div only, so the expanded CommitFile
+                          sub-rows below stay menu-less. Each item copies a field that is
+                          rendered-but-truncated / selection-hostile today (the subject +
+                          agent name are tooltip-only). onSelect (not onClick) mirrors every
+                          sibling Copy slice. asChild only adds onContextMenu — left-click
+                          still toggles, Enter·Space still expand. */}
+                      <ContextMenuContent>
+                        <ContextMenuItem onSelect={() => handleCopy(row.commit.hash)}>Copy commit hash</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => handleCopy(row.commit.subject)}>Copy commit subject</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => handleCopy(name)}>Copy agent name</ContextMenuItem>
+                      </ContextMenuContent>
+                    </ContextMenu>
                     {isExpanded && (
                       // Expanded: that commit's changed files + per-file diff via
                       // /api/git-show — the SAME path GitBadges' per-agent row takes,
