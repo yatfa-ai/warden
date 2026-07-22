@@ -31,6 +31,7 @@ import {
   CompanionRpcError, getChannel, discover, capturePanes, hasSession, spawnSession, killSession,
   isCompanionTransportEnabled, applyCompanionToggle, loadManifest,
   projectSpawnModel, _resetChannelCacheForTests,
+  buildUninstallScript, uninstallCompanion, _channelCacheHasForTests,
   resize as companionResize,
   // WARDEN-413: pane-delta push (subscribePanes) — event routing, delta cache, subscriptions.
   applyPaneDelta, hasFreshPaneDelta, readPaneDeltas, PANE_DELTA_FRESH_MS,
@@ -353,6 +354,80 @@ describe('buildUploadScript (validated through bash)', () => {
     assert.ok(fs.existsSync(written), 'binary written to ~/.warden/');
     assert.strictEqual(fs.readFileSync(written, 'utf8'), 'fake-go-binary-bytes', 'contents streamed verbatim');
     assert.ok(fs.statSync(written).mode & 0o111, 'binary is executable (chmod +x)');
+  });
+});
+
+describe('buildUninstallScript (validated through bash — WARDEN-882)', () => {
+  // The precise mirror of buildUploadScript: kill any running companion, rm -f
+  // the binary, and rmdir ~/.warden ONLY if empty. All three legs are
+  // best-effort — the script must exit 0 across every partial state.
+
+  it('rm -f removes the binary and pkill/rmdir are best-effort (exits 0)', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-uninstall-'));
+    const remotePath = remoteBinaryPath('abc123');
+    fs.mkdirSync(path.join(tmp, '.warden'), { recursive: true });
+    const bin = path.join(tmp, '.warden', 'companion-abc123');
+    fs.writeFileSync(bin, '#!/bin/sh\n', { mode: 0o755 });
+    const r = spawnSync('bash', ['-c', buildUninstallScript(remotePath)], {
+      env: { ...process.env, HOME: tmp }, encoding: 'utf8',
+    });
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.ok(!fs.existsSync(bin), 'binary removed');
+  });
+
+  it('NEVER removes ~/.warden when the user keeps other files there (only-if-empty)', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-uninstall-kept-'));
+    const remotePath = remoteBinaryPath('abc123');
+    fs.mkdirSync(path.join(tmp, '.warden'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, '.warden', 'companion-abc123'), 'x', { mode: 0o755 });
+    // A user-owned sibling that MUST survive the only-if-empty rmdir.
+    const kept = path.join(tmp, '.warden', 'user-config.json');
+    fs.writeFileSync(kept, '{}');
+    const r = spawnSync('bash', ['-c', buildUninstallScript(remotePath)], {
+      env: { ...process.env, HOME: tmp }, encoding: 'utf8',
+    });
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.ok(fs.existsSync(path.join(tmp, '.warden')), '~/.warden preserved (was non-empty)');
+    assert.ok(fs.existsSync(kept), 'the user file in ~/.warden is untouched');
+  });
+
+  it('removes ~/.warden when it is empty after the binary is gone', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-uninstall-empty-'));
+    const remotePath = remoteBinaryPath('deadbeef');
+    fs.mkdirSync(path.join(tmp, '.warden'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, '.warden', 'companion-deadbeef'), 'x', { mode: 0o755 });
+    const r = spawnSync('bash', ['-c', buildUninstallScript(remotePath)], {
+      env: { ...process.env, HOME: tmp }, encoding: 'utf8',
+    });
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.ok(!fs.existsSync(path.join(tmp, '.warden')), 'removed an empty ~/.warden');
+  });
+
+  it('exits 0 with no binary and no ~/.warden at all (idempotent / never-fatal)', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-uninstall-missing-'));
+    const remotePath = remoteBinaryPath('fff000');
+    // pkill finds nothing; rm -f is a no-op; rmdir is a no-op. Must still exit 0.
+    const r = spawnSync('bash', ['-c', buildUninstallScript(remotePath)], {
+      env: { ...process.env, HOME: tmp }, encoding: 'utf8',
+    });
+    assert.strictEqual(r.status, 0, r.stderr);
+  });
+
+  it('quotes the (validated-hex) binary path + companion dir so they interpolate safely', () => {
+    const remotePath = remoteBinaryPath('abc123');
+    const script = buildUninstallScript(remotePath);
+    // rm -f the manifest-version binary path, quoted; $HOME left literal.
+    assert.ok(script.includes('rm -f "$HOME/.warden/companion-abc123"'), `rm -f quotes the remote path: ${script}`);
+    // pkill targets the full $HOME-relative path (NOT the basename — a basename
+    // pattern would self-match the bash -lc wrapper executing this script; see
+    // buildUninstallScript's WHY comment). $HOME stays literal in the script
+    // text; the subshell expands it before calling pkill.
+    assert.ok(script.includes('pkill -f'), `pkill -f present: ${script}`);
+    assert.ok(script.includes('pkill -f "$HOME/.warden/companion-abc123"'), `pkill matches the full path: ${script}`);
+    assert.ok(script.includes('companion-abc123'), `pkill/rm target the manifest version: ${script}`);
+    assert.ok(script.includes('|| true'), `best-effort || true guards present: ${script}`);
+    // rmdir the companion dir, quoted.
+    assert.ok(script.includes('rmdir "$HOME/.warden"'), `rmdir targets the companion dir: ${script}`);
   });
 });
 
@@ -1331,6 +1406,96 @@ describe('getChannel / bootstrap orchestration', () => {
     assert.notStrictEqual(second, first, 'got a NEW channel, not the dead one');
     assert.ok(!second.dead, 'the new channel is alive');
     assert.strictEqual(calls.spawnChannel, 2, 'bootstrapped a second time');
+  });
+});
+
+describe('uninstallCompanion() (WARDEN-882 Removability — companion-or-fail)', () => {
+  beforeEach(() => _resetChannelCacheForTests());
+
+  it('tears down the cached channel for the host BEFORE the script runs, then runs it via runFn with the right path', async () => {
+    // Seed the cache with a real live channel (the state uninstall must clear).
+    // fakeDeps() returns { deps, calls } — pass .deps so bootstrap uses the
+    // fake run/upload/spawnChannel legs, not the real ssh default.
+    const { deps: bootDeps } = fakeDeps();
+    const ch = await getChannel('prod-uninstall', {}, bootDeps);
+    let killed = false;
+    ch.kill = () => { killed = true; };
+
+    let runHost = null;
+    let runScript = null;
+    let killedAtRunTime = null;
+    let cacheHasAtRunTime = null;
+    const res = await uninstallCompanion('prod-uninstall', {}, {
+      manifest: TEST_MANIFEST,
+      run: async (host, script, _opts, _cfg) => {
+        runHost = host;
+        runScript = script;
+        // The teardown (kill + cache delete) must have happened BEFORE runFn.
+        killedAtRunTime = killed;
+        cacheHasAtRunTime = _channelCacheHasForTests('prod-uninstall');
+        return { ok: true, code: 0, stdout: '', stderr: '' };
+      },
+    });
+
+    assert.strictEqual(runHost, 'prod-uninstall', 'runFn received the host');
+    assert.strictEqual(runScript, buildUninstallScript(remoteBinaryPath(TEST_VER)),
+      'runFn received the uninstall script at the manifest-version path');
+    assert.strictEqual(killedAtRunTime, true, 'cached channel was killed BEFORE runFn ran');
+    assert.strictEqual(cacheHasAtRunTime, false, 'cache entry was deleted BEFORE runFn ran');
+    assert.strictEqual(killed, true, 'channel kill() was invoked');
+    assert.deepStrictEqual(res, { host: 'prod-uninstall', ok: true, code: 0, stderr: '' },
+      'returns the raw {ok, code, stderr} shape');
+  });
+
+  it('refuses LOCAL (the companion serves remote hosts only)', async () => {
+    let runCalled = false;
+    const res = await uninstallCompanion('(local)', {}, {
+      manifest: TEST_MANIFEST,
+      run: async () => { runCalled = true; return { ok: true, code: 0, stderr: '' }; },
+    });
+    assert.strictEqual(runCalled, false, 'runFn never invoked for LOCAL');
+    assert.strictEqual(res.ok, false);
+    assert.ok(/local host/.test(res.stderr), `LOCAL refusal message: ${res.stderr}`);
+  });
+
+  it('works even when the host has no cached channel (never-bootstrapped)', async () => {
+    // No getChannel first — cache has no entry. uninstall must still run the
+    // script and return the raw result.
+    const res = await uninstallCompanion('prod-fresh', {}, {
+      manifest: TEST_MANIFEST,
+      run: async () => ({ ok: true, code: 0, stdout: '', stderr: '' }),
+    });
+    assert.deepStrictEqual(res, { host: 'prod-fresh', ok: true, code: 0, stderr: '' });
+  });
+
+  it('surfaces a failed run (raw {ok:false} — companion-or-fail, no thrown error)', async () => {
+    const res = await uninstallCompanion('prod-fail', {}, {
+      manifest: TEST_MANIFEST,
+      run: async () => ({ ok: false, code: 255, stdout: '', stderr: 'Permission denied (publickey).' }),
+    });
+    assert.strictEqual(res.ok, false);
+    assert.strictEqual(res.code, 255);
+    assert.ok(/Permission denied/.test(res.stderr), `surfaces the ssh stderr: ${res.stderr}`);
+  });
+
+  it('encodes a thrown transport failure as ok:false in the return shape (never rejects)', async () => {
+    const res = await uninstallCompanion('prod-throw', {}, {
+      manifest: TEST_MANIFEST,
+      run: async () => { throw new Error('spawn failed: ENOENT'); },
+    });
+    assert.strictEqual(res.ok, false);
+    assert.strictEqual(res.code, -1);
+    assert.ok(/spawn failed/.test(res.stderr), `surfaces the thrown message: ${res.stderr}`);
+  });
+
+  it('uses the default run path (deps.run ?? defaultRun) when no run is injected', async () => {
+    // defaultRun is the raw `ssh host 'bash -lc …'` helper. It will fail in this
+    // sandbox (no such host), which proves the DEFAULT path is wired — the
+    // uninstall script reaches the host through the same leg the probe uses.
+    const res = await uninstallCompanion('nonexistent-host-xyz', {}, { manifest: TEST_MANIFEST });
+    assert.strictEqual(res.ok, false, 'default ssh run failed (expected — host is unreachable)');
+    assert.strictEqual(res.host, 'nonexistent-host-xyz');
+    assert.strictEqual(typeof res.stderr, 'string');
   });
 });
 

@@ -28,6 +28,7 @@ import { FileViewer } from '@/components/FileViewer';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { KillDialog } from './KillDialog';
 import { KeySendDialog } from './KeySendDialog';
 import { SelectionActionBar } from './sidebar/SidebarBits';
@@ -41,10 +42,11 @@ import { useFleetGitStatus } from '@/lib/useFleetGitStatus';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { buildAgentActivity, selectAgentSparkline } from '@/lib/agentSparkline';
-import { displayName, hostLabelFor } from '@/lib/chatDisplay';
+import { displayName, hostLabelFor, THIS_MACHINE } from '@/lib/chatDisplay';
 import { formatTokens } from '@/lib/formatTokens';
 import { useHostLabels } from '@/lib/hostLabels';
 import { cn } from '@/lib/utils';
+import { Trash2 } from 'lucide-react';
 
 interface Props {
   onOpenChat: (id: string) => void;
@@ -83,6 +85,11 @@ interface Props {
   // started for the grouping toggle itself. Default {} = every host expanded.
   collapsedHosts: Record<string, boolean>;
   onCollapsedHostsChange: (next: Record<string, boolean>) => void;
+  // WARDEN-882 — whether the companion transport is enabled. Gates the per-host
+  // "Remove companion" affordance's visibility (Host mode, remote hosts only).
+  // The same gate every companion surface uses; the action is hidden unless the
+  // transport is on. Lifted from App, which reads it from /api/config.
+  companionTransportEnabled: boolean;
 }
 
 // Closed sits between idle and unknown: a dead session is non-critical and less
@@ -507,7 +514,7 @@ function StashChip({ status }: { status?: FleetGitStatusSlice | null }) {
   );
 }
 
-export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, groupBy, onGroupByChange: setGroupBy, collapsedHosts, onCollapsedHostsChange: setCollapsedHosts }: Props) {
+export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, groupBy, onGroupByChange: setGroupBy, collapsedHosts, onCollapsedHostsChange: setCollapsedHosts, companionTransportEnabled }: Props) {
   const [healthData, setHealthData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -545,6 +552,13 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
   // ChatSidebar's fileTarget (also a local useState, never in the persisted UI
   // state). Null = the viewer is closed.
   const [fileTarget, setFileTarget] = useState<{ chatId: string; path: string } | null>(null);
+  // WARDEN-882 — the host targeted by the per-host "Remove companion" action
+  // (Host mode header). Null = the confirm dialog is closed; the host string is
+  // the raw config host (the same value /api/companion/uninstall takes).
+  // `removingCompanion` drives the confirm button's spinner (mirrors KillDialog's
+  // killing state). Transient dialog state — never persisted.
+  const [removeCompanionHost, setRemoveCompanionHost] = useState<string | null>(null);
+  const [removingCompanion, setRemovingCompanion] = useState(false);
   // Result-toast gating reuses the sidebar's notifyChatOps pref so a kill from
   // Fleet Health has the SAME UX contract (toast on success / partial failure) as
   // a kill from the sidebar (WARDEN-328).
@@ -907,6 +921,44 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
     // The interrupt's intent is discharged — clear the selection regardless of outcome.
     setSelectedIds(new Set());
     return summary;
+  };
+
+  // Remove warden's auto-bootstrapped companion binary from a remote host on
+  // request (WARDEN-882 — the Removability outcome of roadmap WARDEN-270). The
+  // write/action sibling of the kill path above: where that stops an agent's
+  // tmux session, this takes warden's own companion binary off the host. POSTs
+  // {host} to /api/companion/uninstall (the same {ok}/{error} shape /api/kill
+  // serves), then toasts the result and re-reads health so the host-status
+  // surface reflects the change. Never throws — failure is encoded as a toast.
+  // The companion serves REMOTE hosts only, and the affordance is rendered only
+  // when companionTransportEnabled is on (the gate every companion surface uses).
+  const handleRemoveCompanion = async (host: string) => {
+    setRemovingCompanion(true);
+    try {
+      const r = await fetch('/api/companion/uninstall', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (r.ok && body.ok) {
+        toast.success(`Removed companion from ${hostLabelFor(host, hostLabels) || host}`);
+        setRemoveCompanionHost(null);
+        // Re-read health so the host-status surface reflects the removal (the
+        // companion-state chip itself is WARDEN-878, not yet shipped).
+        await fetchHealth();
+      } else {
+        toast.error(`Failed to remove companion from ${hostLabelFor(host, hostLabels) || host}`, {
+          description: body.error || `HTTP ${r.status}`,
+        });
+      }
+    } catch (e) {
+      toast.error(`Failed to remove companion from ${hostLabelFor(host, hostLabels) || host}`, {
+        description: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setRemovingCompanion(false);
+    }
   };
 
   return (
@@ -1551,6 +1603,30 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
                           </div>
                         )}
                       </Button>
+                        {/* WARDEN-882 — per-host "Remove companion" (Removability
+                            outcome of roadmap WARDEN-270). A ghost icon Button
+                            (shadcn, icon-xs size — no magic-number sizing, no raw
+                            element — WARDEN-68 Rule 1/2) SIBLING of the collapse
+                            Button, so clicking it does NOT toggle collapse (no
+                            nesting). Rendered ONLY for remote hosts when the
+                            companion transport is enabled — the same gate every
+                            companion surface uses. Local hosts never carry a
+                            companion; the trash is omitted for them. Opens the
+                            destructive ConfirmDialog below. */}
+                        {companionTransportEnabled && group.host !== THIS_MACHINE && (
+                          <span className="flex items-center pt-1 shrink-0">
+                            <Button
+                              variant="ghost"
+                              size="icon-xs"
+                              onClick={() => setRemoveCompanionHost(group.host)}
+                              title={`Remove the warden companion binary from ${hostLabel}`}
+                              aria-label={`Remove companion from ${hostLabel}`}
+                              className="text-muted-foreground hover:text-destructive"
+                            >
+                              <Trash2 />
+                            </Button>
+                          </span>
+                        )}
                       </div>
 
                       {/* Agents beneath, reusing the standard row */}
@@ -1604,6 +1680,26 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
         onOpenChange={setInterruptOpen}
         targets={selectedChats}
         onSend={handleInterruptSelected}
+      />
+
+      {/* WARDEN-882 — per-host "Remove companion" destructive confirm. Reuses the
+          shared ConfirmDialog (shadcn Dialog + Button — WARDEN-68 Rule 1/7: a
+          short, bounded confirmation is exactly the ≤200-symbol modal case).
+          Nothing is removed until the destructive Confirm; Cancel/Esc/overlay
+          just close. Spins while the uninstall runs (mirrors KillDialog's
+          killing state). */}
+      <ConfirmDialog
+        open={removeCompanionHost !== null}
+        onOpenChange={(o) => { if (!removingCompanion) setRemoveCompanionHost(o ? removeCompanionHost : null); }}
+        title={`Remove companion from ${removeCompanionHost ? (hostLabelFor(removeCompanionHost, hostLabels) || removeCompanionHost) : ''}?`}
+        description={
+          <>
+            Removes warden&apos;s companion binary from <code className="bg-muted px-1 rounded">{removeCompanionHost ?? ''}</code> and stops its cached SSH connection. <code className="bg-muted px-1 rounded">~/.warden</code> is removed only if empty — your other files there are kept.
+          </>
+        }
+        confirmLabel={removingCompanion ? 'Removing…' : 'Remove'}
+        destructive
+        onConfirm={() => { if (removeCompanionHost && !removingCompanion) void handleRemoveCompanion(removeCompanionHost); }}
       />
 
       {/* Fleet-recent-commits FileViewer (WARDEN-757). Mounted as a sibling of the

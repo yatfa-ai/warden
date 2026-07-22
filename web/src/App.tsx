@@ -495,6 +495,14 @@ function App() {
   // below consume it directly — a stale CLI default (1500) or sub-floor value
   // can never reach setInterval and flood SSH.
   const [pollIntervalMs, setPollIntervalMs] = useState<number>(WEB_POLL_DEFAULT_MS);
+  // WARDEN-882 — whether the companion transport is enabled (the experimental
+  // per-host Go-binary transport, default off). Read from /api/config on mount
+  // and after Settings saves, then threaded into Fleet Health so the per-host
+  // "Remove companion" action appears ONLY when the transport is on (the same
+  // gate every companion surface uses). The companion can be removed even after
+  // the flag is turned off, but the affordance is shown only while it's on —
+  // matching the WARDEN-878 companion-state chip's future gating.
+  const [companionTransportEnabled, setCompanionTransportEnabled] = useState(false);
 
   useEffect(() => {
     streamApi.onOpen = () => setStreamConn(true);
@@ -713,6 +721,9 @@ function App() {
       // land on the 60s web default (resolvePollIntervalMs). The resolved value
       // feeds both dashboard poll effects so the pref actually governs refresh.
       setPollIntervalMs(resolvePollIntervalMs(cfg.pollIntervalMs));
+      // WARDEN-882 — companion transport toggle drives the Fleet Health
+      // per-host "Remove companion" affordance's visibility.
+      setCompanionTransportEnabled(cfg.companionTransportEnabled ?? false);
     } catch (e) {
       console.error('Failed to refresh config preferences:', e);
     }
@@ -1995,6 +2006,7 @@ function App() {
             onGroupByChange={setHealthGroupBy}
             collapsedHosts={healthCollapsedHosts}
             onCollapsedHostsChange={setHealthCollapsedHosts}
+            companionTransportEnabled={companionTransportEnabled}
           />
         </section>
       </main>
