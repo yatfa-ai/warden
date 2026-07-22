@@ -1984,6 +1984,7 @@ wss.on('connection', (ws, req) => {
     ws.send(JSON.stringify({
       type: 'session_created', sid: s.id, name: s.name,
       chatContext: { host: s.host, container: s.container, project: s.project, role: s.role, chatKey: s.chatKey },
+      model: resolveModel(),
     }));
   }
 
@@ -2018,7 +2019,7 @@ wss.on('connection', (ws, req) => {
       return new Promise((resolveDecision) => pending.set(requestId, { resolve: resolveDecision, meta }));
     },
   });
-  send({ type: 'history', name: obs.name, items: obs.serializeForUi(), chatContext: obs.getChatContext() });
+  send({ type: 'history', name: obs.name, items: obs.serializeForUi(), chatContext: obs.getChatContext(), model: resolveModel() });
 
   ws.on('message', async (data) => {
     let msg;
