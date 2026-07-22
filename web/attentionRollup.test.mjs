@@ -30,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-attention-test-'));
 const tmpFile = join(tmpDir, 'attentionRollup.mjs');
 writeFileSync(tmpFile, code);
-const { buildAttentionRollup, EMPTY_ATTENTION_ROLLUP, rankAttention, pickCalloutTop, attentionReason, hasReturnContent, isDoneTransition } = await import(tmpFile);
+const { buildAttentionRollup, EMPTY_ATTENTION_ROLLUP, rankAttention, pickCalloutTop, attentionReason, hasReturnContent, isDoneTransition, rollupSeverity } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -610,6 +610,59 @@ test('a health-group top (Chat, no pane state) has no enteredAt (duration is pan
   const { ranked } = rankAttention(r);
   assert.equal(ranked.length, 1);
   assert.equal('enteredAt' in ranked[0], false);
+});
+
+console.log('\nrollupSeverity (WARDEN-880): one tested severity decision shared by the badge + persistent view');
+test('a truly idle fleet (total 0, no done) → amber (the empty/zero state is not an alarm, not positive)', () => {
+  const r = roll(health({ healthy: [agent('a1')] }), stats());
+  assert.equal(rollupSeverity(r).severity, 'amber');
+  assert.equal(rollupSeverity(r).onlyDone, false);
+});
+test('a waiting pane → amber (the milder needs-your-eye case, not red)', () => {
+  const r = roll(health(), stats(), [stateRow('w1', 'waiting')]);
+  assert.equal(rollupSeverity(r).severity, 'amber');
+  assert.equal(rollupSeverity(r).onlyDone, false);
+});
+test('pending directives only → amber', () => {
+  const r = roll(health(), stats({ directive_proposed: 2 }));
+  assert.equal(rollupSeverity(r).severity, 'amber');
+});
+test('a critical-health agent → red', () => {
+  const r = roll(health({ critical: [agent('c1')] }), stats());
+  assert.equal(rollupSeverity(r).severity, 'red');
+});
+test('a stuck pane → red', () => {
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck')]);
+  assert.equal(rollupSeverity(r).severity, 'red');
+});
+test('an erroring pane → red', () => {
+  const r = roll(health(), stats(), [stateRow('e1', 'erroring')]);
+  assert.equal(rollupSeverity(r).severity, 'red');
+});
+test('recent errors → red', () => {
+  const r = roll(health(), stats({ error: 1 }));
+  assert.equal(rollupSeverity(r).severity, 'red');
+});
+test('a red signal beats amber: critical + waiting → red', () => {
+  const r = roll(health({ critical: [agent('c1')] }), stats(), [stateRow('w1', 'waiting')]);
+  assert.equal(rollupSeverity(r).severity, 'red');
+});
+test('only-finished agents (total 0, done > 0) → positive (the green review cue), not amber/red', () => {
+  // done bucket is populated via doneKeys; total stays 0 (done never counts toward total).
+  const r = roll(health(), stats(), [stateRow('d1', 'idle')], { doneKeys: new Set(['d1']) });
+  assert.equal(r.total, 0);
+  assert.equal(r.done.length, 1);
+  assert.equal(rollupSeverity(r).severity, 'positive');
+  assert.equal(rollupSeverity(r).onlyDone, true);
+});
+test('a problem alongside finished agents → red/amber (onlyDone requires total === 0)', () => {
+  const r = roll(health(), stats(), [
+    stateRow('d1', 'idle'),
+    stateRow('w1', 'waiting'),
+  ], { doneKeys: new Set(['d1']) });
+  assert.equal(r.total, 1);
+  assert.equal(rollupSeverity(r).onlyDone, false);
+  assert.equal(rollupSeverity(r).severity, 'amber');
 });
 
 console.log(`\n✓ ATTENTION ROLLUP TESTS PASS (${passed})`);

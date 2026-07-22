@@ -397,6 +397,47 @@ export function attentionReason(item: AttentionItem): string {
   return item.signal || fallback || 'needs attention';
 }
 
+// ─── Severity tone (shared by every surface that renders the rollup) ──────────
+//
+// The badge popover header, the always-visible trigger button, AND the persistent
+// Attention view (WARDEN-880) all show the SAME severity tone for a given rollup:
+// green when the only items are recently-finished agents (a positive review cue),
+// red when something is broken, amber for the milder "needs your eye" cases. Keeping
+// the DECISION pure + dependency-free (only the erased `import type` above) lets every
+// surface import one helper (and attentionRollup.test.mjs cover it) so the three never
+// drift on which rollup maps to which tone — the class STRING is mapped at the call
+// site (a view concern), this helper returns only the semantic severity.
+
+export type AttentionSeverity = 'positive' | 'red' | 'amber';
+
+/**
+ * The semantic severity of a rollup + whether it is the all-finished positive case.
+ *
+ *  - `onlyDone` — total === 0 AND done.length > 0: no problems, only recently-finished
+ *    agents. This is a POSITIVE "go review their work" cue (green), NOT an alarm, and
+ *    it is distinct from a truly idle fleet (total === 0 AND done === 0) which is the
+ *    empty/zero state.
+ *  - `severity` — 'positive' when onlyDone; 'red' when something is broken
+ *    (a critical/stuck/erroring agent or a recent error); otherwise 'amber' (warnings,
+ *    waiting, blocked, pending directives).
+ *
+ * The badge's header + trigger and the persistent Attention view consume this so the
+ * severity-to-rollup mapping stays in one tested place (each maps `severity` to a tone
+ * class at its call site). Pure + dependency-free so attentionRollup.test.mjs covers it.
+ */
+export function rollupSeverity(rollup: AttentionRollup): {
+  onlyDone: boolean;
+  severity: AttentionSeverity;
+} {
+  const onlyDone = rollup.total === 0 && rollup.done.length > 0;
+  const severity: AttentionSeverity = onlyDone
+    ? 'positive'
+    : rollup.critical.length > 0 || rollup.stuck.length > 0 || rollup.erroring.length > 0 || rollup.errors > 0
+      ? 'red'
+      : 'amber';
+  return { onlyDone, severity };
+}
+
 /**
  * Whether the "While you were away" return banner has anything to surface at all:
  * recent activity events since close (`activityTotal`) OR a current ranked

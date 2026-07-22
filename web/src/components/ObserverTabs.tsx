@@ -12,11 +12,13 @@ import { loadObs, saveObs } from '@/lib/storage';
 import { postJson } from '@/lib/api';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { hasBoundSession, selectIdleTabs, IDLE_TICK_MS } from '@/lib/observerLifecycle';
+import { AttentionView } from './AttentionView';
+import type { AttentionListProps } from './AttentionList';
 import type { Chat, SessionMeta } from '@/lib/types';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
 
 interface Props {
-  externalViewMode?: 'sessions' | 'activity' | 'directives' | null;
+  externalViewMode?: 'sessions' | 'activity' | 'directives' | 'attention' | null;
   // The currently-focused chat pane, used to bind a new observer session to
   // the agent the user is looking at ("observe this agent").
   focusedChat?: Chat | null;
@@ -36,17 +38,24 @@ interface Props {
   // so every observer/timeline time honors it via the shared formatTimestamp helper.
   // Optional with a 'relative' default so this component's `= {}` default stays valid.
   timestampFormat?: TimestampFormat;
+  // WARDEN-880 — the Attention view's data + handlers, threaded from App's lifted
+  // attentionRollup (the SAME values the header AttentionBadge consumes). When
+  // provided, a 4th "Attention" tab renders as a persistent peer to Activity/Directives
+  // — the ranked "where am I needed, because X" answer that stays mounted while the
+  // human opens/switches agent panes (the popover on the header badge dismisses on every
+  // pane switch). Optional so the component degrades gracefully without it (no tab).
+  attention?: AttentionListProps;
 }
 
 // Manages persisted observer sessions as tabs. Every open tab keeps its own
 // ObserverPanel (and WS) mounted; inactive ones are display:none so their
 // conversations stay live. Open tabs + active tab persist in localStorage.
-export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, timestampFormat = 'relative' }: Props = {}) {
+export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, timestampFormat = 'relative', attention }: Props = {}) {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const hostLabels = useHostLabels();
   const [openIds, setOpenIds] = useState<string[]>(() => loadObs().openIds);
   const [activeId, setActiveId] = useState<string | null>(() => loadObs().activeId);
-  const [viewMode, setViewMode] = useState<'sessions' | 'activity' | 'directives'>(() => loadObs().viewMode || 'sessions');
+  const [viewMode, setViewMode] = useState<'sessions' | 'activity' | 'directives' | 'attention'>(() => loadObs().viewMode || 'sessions');
   const [booted, setBooted] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingTimeout, setLoadingTimeout] = useState(false);
@@ -204,12 +213,21 @@ export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, o
     }
   }, [booted, activeId, sessions, onReconnectChat]);
 
-  // Respond to external view mode changes
+  // Respond to external view mode changes. WARDEN-880: only act when externalViewMode
+  // genuinely CHANGES — NOT on every viewMode change. externalViewMode is set by App
+  // (e.g. openActivityTab → 'activity') and never reset to null, so the previous
+  // viewMode-in-deps form would yank the human BACK to that tab on every manual switch:
+  // once a directives/error link navigated to Activity, clicking the new Attention tab
+  // (or any other) would immediately bounce to Activity. The ref tracks the last value
+  // we consumed, so a manual edit is respected and a repeat external nav to a NEW value
+  // still overrides.
+  const lastExternalViewModeRef = useRef(externalViewMode);
   useEffect(() => {
-    if (externalViewMode && externalViewMode !== viewMode) {
+    if (externalViewMode && externalViewMode !== lastExternalViewModeRef.current) {
       setViewMode(externalViewMode);
     }
-  }, [externalViewMode, viewMode]);
+    lastExternalViewModeRef.current = externalViewMode;
+  }, [externalViewMode]);
 
   // WARDEN-332 — Behavior 1: auto-start an observer session for the focused chat.
   // When observerAutoStart is on and a chat becomes focused, spawn+open a bound
@@ -312,6 +330,14 @@ export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, o
           >
             Directives
           </button>
+          {attention && (
+            <button
+              onClick={() => setViewMode('attention')}
+              className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap shrink-0 transition-all duration-150 ease-out active:scale-95 ${viewMode === 'attention' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50'}`}
+            >
+              Attention
+            </button>
+          )}
         </div>
         {viewMode === 'sessions' && (
           <div className="flex items-center gap-0.5">
@@ -383,6 +409,18 @@ export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, o
       {viewMode === 'directives' && (
         <div className="flex-1 min-h-0">
           <DirectiveHistory timestampFormat={timestampFormat} />
+        </div>
+      )}
+
+      {/* Attention view (WARDEN-880) — the PERSISTENT ranked "where am I needed, because
+          X" rundown, a peer to Activity/Directives. Unlike the header badge's transient
+          popover (which dismisses on every pane switch), this stays mounted while the
+          human opens/switches agent panes — the core Job #2 triage workflow. Consumes
+          App's lifted attentionRollup via the shared AttentionList, so it is bit-for-bit
+          identical to the badge. */}
+      {viewMode === 'attention' && attention && (
+        <div className="flex-1 min-h-0">
+          <AttentionView {...attention} />
         </div>
       )}
     </div>
