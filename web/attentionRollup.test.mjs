@@ -612,4 +612,47 @@ test('a health-group top (Chat, no pane state) has no enteredAt (duration is pan
   assert.equal('enteredAt' in ranked[0], false);
 });
 
+console.log('\nanchor threading (WARDEN-877): the deep-link line that jumps scrollback to the trigger');
+// `anchor` is the RAW line text findNext should land on — distinct from `signal`, which
+// for a custom match is a formatted `'line' (pattern: …)` string that would NOT match the
+// raw scrollback. A separate field is the load-bearing design choice, so these cases pin
+// both WHAT anchor carries and that it stays ABSENT when there is nothing to jump to
+// (so openChat(id) is byte-for-byte the old focus-only behavior).
+test('a pane-state row carries anchor === its signal (the triggering line)', () => {
+  const r = roll(health(), stats(), [
+    stateRow('w1', 'waiting', { signal: 'press enter to continue' }),
+    stateRow('e1', 'erroring', { signal: 'TypeError: undefined is not a function' }),
+  ]);
+  const byId = Object.fromEntries(rankAttention(r).ranked.map((x) => [x.id, x]));
+  assert.equal(byId.w1.anchor, 'press enter to continue');
+  assert.equal(byId.e1.anchor, 'TypeError: undefined is not a function');
+});
+test('a custom row carries anchor === the EXACT matched line (NOT the formatted signal)', () => {
+  // This is the case that requires a separate field: signal is wrapped in quotes + a
+  // pattern suffix that would not findNext-match the raw scrollback; anchor is the bare
+  // matched line. They must DIFFER.
+  const r = roll(health(), stats(), [stateRow('d1', 'idle', { customMatch: cm('Deploy', 'deploy failed at step 3') })]);
+  const { ranked } = rankAttention(r);
+  assert.equal(ranked[0].anchor, 'deploy failed at step 3', 'anchor is the raw matched line');
+  assert.notEqual(ranked[0].signal, ranked[0].anchor, 'signal is the formatted string, anchor is the bare line');
+  assert.match(ranked[0].signal, /deploy failed at step 3/);
+  assert.match(ranked[0].signal, /Deploy/);
+});
+test('a pane row with NO signal carries NO anchor (focus-only — graceful no-op)', () => {
+  const r = roll(health(), stats(), [stateRow('w1', 'waiting')]);
+  const { ranked } = rankAttention(r);
+  assert.equal('anchor' in ranked[0], false, 'no signal → no anchor field at all');
+});
+test('an empty-string signal carries NO anchor (treated as absent, like attentionReason)', () => {
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck', { signal: '' })]);
+  const { ranked } = rankAttention(r);
+  assert.equal('anchor' in ranked[0], false, 'empty signal → no anchor (would not usefully match)');
+});
+test('a health-group item (critical/warning) carries NO anchor (Chat has no triggering line)', () => {
+  const r = roll(health({ critical: [agent('c1')], warning: [agent('w1')] }), stats());
+  const byId = Object.fromEntries(rankAttention(r).ranked.map((x) => [x.id, x]));
+  assert.equal('anchor' in byId.c1, false, 'critical health → no anchor');
+  assert.equal('anchor' in byId.w1, false, 'warning health → no anchor');
+});
+
 console.log(`\n✓ ATTENTION ROLLUP TESTS PASS (${passed})`);

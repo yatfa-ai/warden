@@ -73,7 +73,7 @@ export interface WatchCatchupState {
  * ackKey); (3) the × advances the seen boundary past every recorded miss (ack-all).
  */
 export function useWatchCatchup(
-  onOpenChat?: (id: string) => void,
+  onOpenChat?: (id: string, anchor?: string) => void,
   // WARDEN-476: the watched chats' CURRENT states (exposed by useAttentionRollup as
   // its watchedStates return — built from the same open ∪ watched poll the watch diff
   // already rides, so zero extra SSH cost). Used at read-time to suppress away misses
@@ -149,7 +149,11 @@ export function useWatchCatchup(
     // onclick uses — openChat's chokepoint ack also fires — then ack THIS chat only
     // (idempotent with the chokepoint ack; guarantees a recompute even when onOpenChat
     // is absent), so the OTHER watched chats' misses remain until opened or dismissed.
-    onOpenChat?.(miss.key);
+    // WARDEN-877: thread the miss's triggering line as the anchor so the pane's
+    // scrollback jumps to it (reuses findNext). miss.signal is the exact matched line
+    // for a custom ping (toWatchMiss) or the offending line otherwise; undefined →
+    // openChat treats it as a no-anchor, focus-only open (graceful no-op).
+    onOpenChat?.(miss.key, miss.signal);
     ackKey(miss.key);
   }, [onOpenChat, ackKey]);
 

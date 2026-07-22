@@ -919,7 +919,7 @@ function App() {
   // provides ackKey below, so openChat calls through a stable ref that the hook
   // fills in once it mounts. Defaults to a no-op so an open before that point is safe.
   const ackWatchMissRef = useRef<(key: string) => void>(() => {});
-  const openChat = useCallback((id: string) => {
+  const openChat = useCallback((id: string, anchor?: string) => {
     // WARDEN-417: ack-on-open — clear any catch-up miss for this chat first, so a
     // ping the human is acting on (by opening the chat) is acknowledged regardless of
     // which open path they used. No-op when there is nothing to ack (ackKey short-
@@ -936,6 +936,16 @@ function App() {
     // remember this pane's host so a restored remote pane knows which host to discover
     const c = chatsRef.current.find((x) => (x.key || x.id) === id);
     if (c?.host) setPaneHost((p) => (p[id] === c.host ? p : { ...p, [id]: c.host }));
+    // WARDEN-877: when an attention surface handed an anchor, position the pane's
+    // scrollback at the triggering line by reusing the SAME externalSearchQuery→findNext
+    // mechanism global search uses (PaneTile's 100ms-settle effect opens the in-pane
+    // search bar + runs findNext, so a wrong occurrence is one ↑/↓ away). Fires here —
+    // BEFORE the owner early-return below — so it runs in BOTH branches: a pane already
+    // open in another workspace still scrolls to the line, exactly as a newly-opened one
+    // does. A no-anchor openChat(id) is byte-for-bit today's focus-only behavior (the
+    // guard skips the setState entirely; React batches it with the workspace/focus sets
+    // below into one render, so placement here is equivalent to firing it in both paths).
+    if (anchor) setExternalSearchQuery({ paneId: id, query: anchor });
     // Search EVERY workspace for an existing pane with this id. If it's already
     // open elsewhere, switch to that workspace + focus it (no duplicate pane).
     const owner = workspacesRef.current.find((w) => w.openPanes.includes(id));
@@ -1702,7 +1712,7 @@ function App() {
                 <div className="flex items-center gap-1 min-w-0">
                   <Button
                     variant="ghost"
-                    onClick={() => openChat(attentionTop.id)}
+                    onClick={() => openChat(attentionTop.id, attentionTop.anchor ?? undefined)}
                     aria-label={`You're needed in ${attentionTop.name ?? attentionTop.id}. Open it.`}
                     className="shrink min-w-0 gap-2 h-auto py-1 px-2.5 rounded-md bg-white/80 dark:bg-blue-900/50 hover:bg-white dark:hover:bg-blue-900/70 text-blue-900 dark:text-blue-50 font-normal"
                   >
