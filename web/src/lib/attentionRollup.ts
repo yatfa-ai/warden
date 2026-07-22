@@ -266,9 +266,12 @@ const ATTENTION_RANK: Record<string, number> = {
  *               fallback rundown.
  *
  * `enabledStates` is already honored upstream by `buildAttentionRollup` (a silenced
- * state's bucket is empty), so a silenced state can never become `top`. Ties (same
- * precedence tier — e.g. several `waiting` panes) resolve in input order, since
- * `Array#sort` is stable: the order `/api/agent-states` returned is preserved.
+ * state's bucket is empty), so a silenced state can never become `top`. Same-precedence
+ * ties (e.g. several `waiting` panes) break oldest-entered-first by `enteredAt` ASC
+ * (WARDEN-890), matching the sectioned rundown's per-section order — so the directed
+ * Callout's single pick never contradicts the rundown beneath it. Rows with no
+ * `enteredAt` (health-group agents, or unstamped panes) sink to +∞ and keep stable input
+ * order, so the tieback only reorders where it should: same-urgency pane states.
  */
 export function rankAttention(rollup: AttentionRollup): {
   top: AttentionItem | null;
@@ -321,9 +324,24 @@ export function rankAttention(rollup: AttentionRollup): {
     ...rollup.warning.map(fromChat('warning')),
   ];
 
-  const ranked = items
-    .slice()
-    .sort((a, b) => (ATTENTION_RANK[b.state] ?? 0) - (ATTENTION_RANK[a.state] ?? 0));
+  // Urgency precedence DESC, then break ties by `enteredAt` ASC (oldest / most
+  // languishing first) so the directed Callout's single pick matches the sectioned
+  // rundown beneath it, which already sorts each section oldest-entered-first
+  // (sortOldestEnteredAtFirst, AttentionBadge.tsx). Without this tiebreak, same-tier
+  // panes resolved in arbitrary server-return order — so the callout could promote the
+  // NEWEST-waiting pane while its own section listed the OLDEST-waiting first. Mirrors
+  // the exact comparator discipline of sortOldestEnteredAtFirst (stateDuration.ts):
+  // `?? Infinity` sinks unstamped rows (notably health-group critical/warning agents,
+  // which carry no enteredAt — duration is a pane-state concept) last within their tier,
+  // and returning 0 on a tie keeps the stable sort NaN-safe (never Infinity - Infinity).
+  const ranked = items.slice().sort((a, b) => {
+    const byUrgency = (ATTENTION_RANK[b.state] ?? 0) - (ATTENTION_RANK[a.state] ?? 0);
+    if (byUrgency !== 0) return byUrgency; // precedence still dominates
+    const ai = a.enteredAt ?? Infinity; // unstamped (health agents) → last in tier
+    const bi = b.enteredAt ?? Infinity;
+    if (ai === bi) return 0; // NaN-safe; stable within input order
+    return ai - bi; // oldest (most languishing) first
+  });
 
   return { top: ranked.length > 0 ? ranked[0] : null, ranked };
 }
