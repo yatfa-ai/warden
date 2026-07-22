@@ -44,6 +44,14 @@
 // channel — after this slice the ONLY remaining raw-SSH path on the attach flow
 // is the live interactive PTY itself. All four legs are reported below.
 //
+// WARDEN-888 (the final slice) adds the WRITE-path leg: send (a directive) +
+// sendKey (a special key) are the user-input ops — the HIGHEST-FREQUENCY
+// interactive action (typing a directive). On the ControlMaster-disabled /
+// Windows path each write today pays a full ~30s handshake; the companion
+// collapses it to near-instant after bootstrap. This is the last un-migrated op
+// family: with it on the channel, no remote op pays a per-op handshake, unblocking
+// the sole-transport / default-on destination. All six legs are reported below.
+//
 // Two parts:
 //   Part 1 (always):  a deterministic spawn/handshake-count projection per tick —
 //                     the roadmap's success measure, with no host required.
@@ -70,6 +78,8 @@ import {
   spawnSession as companionSpawnSession,
   killSession as companionKillSession,
   resize as companionResize,
+  send as companionSend,
+  sendKey as companionSendKey,
   _resetChannelCacheForTests,
   projectSpawnModel,
 } from '../src/companion.js';
@@ -282,6 +292,44 @@ function printControlPlaneProjection(hosts, ticks) {
   console.log();
   console.log('This is the roadmap\'s "attach-path control-plane" success-metric leg: the');
   console.log('open + resize ops no longer pay per-op SSH handshakes.');
+  console.log();
+}
+
+// WARDEN-888 (the final slice): the WRITE-path leg. send (a directive) + sendKey
+// (a special key) are the user-input ops — the HIGHEST-FREQUENCY interactive
+// action (typing a directive). On the ControlMaster-disabled / Windows path each
+// pays a full ~30s handshake today; routing them over the persistent companion
+// channel collapses that to near-instant after bootstrap. This is the roadmap's
+// reason for existing: you cannot flip the default on while the most common
+// interactive op still pays a per-message handshake. The model: 1 handshake per
+// send AND per sendKey on the default path; 0 per action on the companion
+// channel (bootstrap-only, reused from discover). projectSpawnModel's
+// after.perTick === 0 is the "done" proof for this leg.
+function printSendProjection(hosts, ticks) {
+  // ticks = write actions (a send or a sendKey each).
+  const m = projectSpawnModel({ hosts, ticks });
+  console.log('━'.repeat(72));
+  console.log(`Part 1.f — write path (send + sendKey): handshake projection  (${hosts} host(s), ${ticks} write action(s))`);
+  console.log('━'.repeat(72));
+  console.log('send + sendKey are the user-input WRITE ops — the highest-frequency');
+  console.log('interactive action (typing a directive). On the ControlMaster-disabled /');
+  console.log('Windows path each write today pays a full ~30s handshake:');
+  console.log();
+  console.log('  DEFAULT path (runTmux, no companion):');
+  console.log(`    1 handshake / send AND / sendKey  →  ${hosts} × ${ticks} = ${m.before.totalSpawns} handshakes`);
+  console.log('  COMPANION path:');
+  console.log(`    reuses slice 1's bootstrapped channel — 0 handshakes/write action`);
+  console.log(`    (bootstrap cost was paid by discover; writes ride the same channel)`);
+  console.log(`    total = ${m.after.totalSpawns} handshakes (all bootstrap, 0 write)`);
+  console.log(`    after.perTick = ${m.after.perTick}  (the roadmap's "done" proof for the write path)`);
+  console.log();
+  const delta = m.before.totalSpawns - m.after.totalSpawns;
+  console.log(`  ▶ handshakes saved over ${ticks} write action(s): ${m.before.totalSpawns} → ${m.after.totalSpawns}  (−${delta})`);
+  console.log('  ▶ per directive a human types: ~30s handshake → near-instant after bootstrap.');
+  console.log();
+  console.log('This is the roadmap\'s "write path" success-metric leg — the LAST un-migrated');
+  console.log('op family. With it on the channel, NO remote op pays a per-op SSH handshake,');
+  console.log('the sole-transport / default-on destination is unblocked.');
   console.log();
 }
 
@@ -719,6 +767,99 @@ async function liveControlPlaneBenchmark(host, ticks) {
   console.log();
 }
 
+// WARDEN-888 (the final slice) live leg: the WRITE path. send + sendKey are the
+// user-input ops — on the ControlMaster-disabled path each is one fresh ssh
+// handshake; the companion serves them over the persistent channel (0/write). A
+// directive is harmless to type into a live agent pane (the shell/agent absorbs
+// it), so this replays real sends + sendKeys and reports the per-action handshake
+// cost before vs after.
+async function liveSendBenchmark(host, ticks) {
+  console.log('━'.repeat(72));
+  console.log(`Part 2.f — write path (send + sendKey): LIVE ControlMaster-disabled replay  (host: ${host}, ${ticks} write action(s))`);
+  console.log('━'.repeat(72));
+  console.log('Default side: one fresh ssh handshake per write op (send / sendKey).');
+  console.log('Companion side: send/sendKey RPC over slice 1\'s channel — 0 handshakes/write.');
+  console.log();
+
+  // Discover once (default path) to get a container + session both sides target.
+  const probe = await sshRunNoMaster(host, DISCOVER_SCRIPT, 60000, { val: 0 });
+  const chats = chatsFromDiscoverStdout(host, probe.stdout);
+  if (!chats.length) {
+    console.log(`(no discoverable yatfa chats on ${host} — write-path leg skipped; earlier legs still valid.)\n`);
+    return;
+  }
+  const target = chats[0];
+  // The default write path builds these (src/tmux.js send / sendKey):
+  //   send    : docker exec <container> tmux send-keys -t <session> -l '<text>' && ... Enter
+  //   sendKey : docker exec <container> tmux send-keys -t <session> <key>
+  // A benign marker text + a benign key (C-c clears the line) keep the live pane clean.
+  const sendCmd = `docker exec ${target.container} tmux send-keys -t ${target.session} -l 'warden-bench'`;
+  const sendKeyCmd = `docker exec ${target.container} tmux send-keys -t ${target.session} C-c`;
+  console.log(`targeting container '${target.container}' session '${target.session}'\n`);
+
+  const defaultSpawns = { val: 0 };
+  const companionSpawns = { val: 0 };
+  const countingSpawn = (...a) => { companionSpawns.val++; return spawn(...a); };
+  const countingRun = (...a) => { companionSpawns.val++; return sshRun(...a); };
+  const companionDeps = { spawn: countingSpawn, run: countingRun };
+
+  // ---- DEFAULT: N write actions, each ONE ControlMaster-disabled ssh op ----
+  console.log(`▶ default path: ${ticks} write action(s), handshake each …`);
+  const defaultSamples = [];
+  for (let i = 0; i < ticks; i++) {
+    const t0 = process.hrtime.bigint();
+    // Alternate send / sendKey so both halves of the write path are measured.
+    await sshRunNoMaster(host, i % 2 === 0 ? sendCmd : sendKeyCmd, 30000, defaultSpawns);
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    defaultSamples.push({ ms, ok: true });
+    process.stdout.write(`   write ${i + 1}/${ticks}: ${ms.toFixed(0).padStart(6)} ms  (${i % 2 === 0 ? 'send' : 'sendKey'})\n`);
+  }
+
+  // ---- COMPANION: bootstrap once, then N write actions over the channel ----
+  console.log(`▶ companion path: bootstrap + ${ticks} write action(s) over the channel …`);
+  _resetChannelCacheForTests();
+  const cfg = { connectTimeout: 10 };
+  const bootT0 = process.hrtime.bigint();
+  // The first call bootstraps (probe + upload + channel) AND does the op.
+  await companionSend(host, { container: target.container, session: target.session, text: 'warden-bench' }, cfg, { timeout: 30000 }, companionDeps);
+  const bootMs = Number(process.hrtime.bigint() - bootT0) / 1e6;
+  console.log(`   bootstrap + 1st write: ${bootMs.toFixed(0).padStart(6)} ms  (send)`);
+  const companionSamples = [{ ms: bootMs, ok: true }];
+  for (let i = 1; i < ticks; i++) {
+    const t0 = process.hrtime.bigint();
+    if (i % 2 === 0) {
+      await companionSend(host, { container: target.container, session: target.session, text: 'warden-bench' }, cfg, { timeout: 30000 }, companionDeps);
+    } else {
+      await companionSendKey(host, { container: target.container, session: target.session, key: 'C-c' }, cfg, { timeout: 30000 }, companionDeps);
+    }
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    companionSamples.push({ ms, ok: true });
+    process.stdout.write(`   write ${i + 1}/${ticks}: ${ms.toFixed(0).padStart(6)} ms  (${i % 2 === 0 ? 'send' : 'sendKey'})\n`);
+  }
+  _resetChannelCacheForTests();
+
+  // ---- report ----
+  const def = summarize(defaultSamples);
+  const steady = summarize(companionSamples.slice(1));
+
+  console.log();
+  console.log('── results ──────────────────────────────────────────────────');
+  console.log(`  spawns (ssh processes started):`);
+  console.log(`     default   : ${defaultSpawns.val}  (≈ ${ticks} handshakes — one per write action)`);
+  console.log(`     companion : ${companionSpawns.val}  (bootstrap only; writes ride the channel, 0/write)`);
+  console.log(`  per-write wall-clock (handshake + remote work, 1 op):`);
+  console.log(`     default   : avg ${def.avg.toFixed(0)} ms  (p95 ${def.p95.toFixed(0)} ms) over ${def.n}`);
+  if (steady.n > 0) {
+    console.log(`     companion : avg ${steady.avg.toFixed(0)} ms  (p95 ${steady.p95.toFixed(0)} ms) over ${steady.n} steady write(s)`);
+    const saved = def.avg - steady.avg;
+    console.log(`  ▶ handshake cost eliminated per write: ~${Math.max(0, saved).toFixed(0)} ms`);
+  }
+  console.log('────────────────────────────────────────────────────────────');
+  console.log('Note: a directive is the highest-frequency interactive op — this per-write');
+  console.log('handshake win is the roadmap\'s reason for existing (the last un-migrated op).');
+  console.log();
+}
+
 // Parse the default discover script's stdout into chat objects capturePanes can
 // consume (key/container/session). The discover TSV is name \t status \t cwd \t
 // active; only name (the container) is needed to target a capture. yatfa chats
@@ -747,16 +888,17 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) { console.log(HELP); return; }
 
-  console.log('warden companion-transport benchmark  (WARDEN-272 + WARDEN-276 + WARDEN-382 + WARDEN-386 + WARDEN-409 / roadmap WARDEN-270)\n');
+  console.log('warden companion-transport benchmark  (WARDEN-272 + WARDEN-276 + WARDEN-382 + WARDEN-386 + WARDEN-409 + WARDEN-888 / roadmap WARDEN-270)\n');
 
   // Part 1 always runs — deterministic, no host needed. The discover, capture-pane,
-  // has-session, lifecycle, and attach-path control-plane handshake projections (the
-  // roadmap's success measure).
+  // has-session, lifecycle, attach-path control-plane, and write-path handshake
+  // projections (the roadmap's success measure).
   printProjection(args.hosts, args.ticks);
   printCaptureProjection(args.hosts, args.ticks);
   printProbeProjection(args.hosts, args.ticks);
   printLifecycleProjection(args.hosts, args.ticks);
   printControlPlaneProjection(args.hosts, args.ticks);
+  printSendProjection(args.hosts, args.ticks);
 
   if (!args.host) {
     console.log('Part 2 (live replay) skipped — pass --host <ssh-host> to measure the real');
@@ -772,6 +914,7 @@ async function main() {
     await liveProbeBenchmark(args.host, args.ticks);
     await liveLifecycleBenchmark(args.host, args.ticks);
     await liveControlPlaneBenchmark(args.host, args.ticks);
+    await liveSendBenchmark(args.host, args.ticks);
   } catch (e) {
     console.error(`\nbenchmark failed: ${e?.message ?? e}`);
     console.error('(is the host reachable over SSH with key auth? BatchMode=yes is used.)');

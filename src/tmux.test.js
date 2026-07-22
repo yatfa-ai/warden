@@ -1,6 +1,6 @@
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert';
-import { send, spawn, kill } from './tmux.js';
+import { send, sendKey, spawn, kill } from './tmux.js';
 
 // WARDEN-254: multiline send must deliver one bracketed paste (+ a single
 // submit), not N line-by-line submits. These tests drive the actual argv
@@ -305,5 +305,120 @@ describe('tmux kill() — kill-session argv + best-effort (WARDEN-386)', () => {
     assert.strictEqual(fn.mock.callCount(), 1);
     assert.strictEqual(killSession.mock.callCount(), 0);
     assert.deepStrictEqual(calls[0].args, ['kill-session', '-t', 's']);
+  });
+});
+
+// WARDEN-888: send / sendKey companion routing — the user-input WRITE path is the
+// last op family migrated onto the companion channel. remote + enabled routes
+// through the companion client; a stale binary ({unsupported:true}) degrades to
+// runTmux; a dead channel throws (companion-or-fail); LOCAL + flag-off keep
+// runTmux. ALLOWED_KEYS stays JS-side for both branches. Same deps seam + recording
+// mocks as spawn/kill above; no real tmux is spawned.
+
+describe('tmux send() — companion routing (WARDEN-888)', () => {
+  it('a remote chat with companion enabled routes through the companion client, NOT runTmux', async () => {
+    const { fn, calls } = recordingClient({ ok: true });
+    const runTmux = neverRun();
+    const chat = { host: 'prod-1', container: 'p-worker', session: 'agent' };
+    const r = await send(chat, {}, 'do the thing', { runTmux, isCompanionTransportEnabled: () => true, companionSend: fn });
+    assert.strictEqual(r, true);
+    assert.strictEqual(fn.mock.callCount(), 1, 'routed through the companion client');
+    assert.strictEqual(runTmux.mock.callCount(), 0, 'did NOT use runTmux');
+    // The params carry the semantic fields the host-side RPC builds the script from.
+    assert.strictEqual(calls[0].host, 'prod-1');
+    assert.deepStrictEqual(calls[0].params, { container: 'p-worker', session: 'agent', text: 'do the thing' });
+  });
+
+  it('passes the text VERBATIM (multiline survives intact to the host)', async () => {
+    const { fn, calls } = recordingClient({ ok: true });
+    const runTmux = neverRun();
+    await send({ host: 'prod-1', container: 'c', session: 'agent' }, {}, 'line1\nline2\n-line', {
+      runTmux, isCompanionTransportEnabled: () => true, companionSend: fn,
+    });
+    assert.strictEqual(calls[0].params.text, 'line1\nline2\n-line', 'multiline + leading-dash text carried verbatim');
+  });
+
+  it('throws on a companion failure (companion-or-fail: no silent runTmux fallback)', async () => {
+    const { fn } = recordingClient({ ok: false, code: -1, stderr: 'companion transport failed' });
+    const runTmux = neverRun();
+    await assert.rejects(
+      () => send({ host: 'prod-1', session: 'agent' }, {}, 'x',
+        { runTmux, isCompanionTransportEnabled: () => true, companionSend: fn }),
+      /companion transport failed/,
+    );
+    assert.strictEqual(runTmux.mock.callCount(), 0, 'did NOT fall back to runTmux on a dead channel');
+  });
+
+  it('a stale host binary ({unsupported:true}) degrades to runTmux (graceful)', async () => {
+    const { fn } = recordingClient({ unsupported: true });
+    const { fn: run, calls } = recordingRun();
+    // single-line text -> runTmux fires send-keys -l then Enter (two calls).
+    await send({ host: 'prod-1', session: 'agent' }, {}, 'one line', {
+      runTmux: run, isCompanionTransportEnabled: () => true, companionSend: fn });
+    assert.strictEqual(fn.mock.callCount(), 1, 'companion was consulted first');
+    assert.strictEqual(run.mock.callCount(), 2, 'stale binary -> fell back to runTmux (text + Enter)');
+    assert.deepStrictEqual(calls[0].args, ['send-keys', '-t', 'agent', '-l', 'one line']);
+  });
+
+  it('a LOCAL chat keeps the runTmux fast path even with companion enabled', async () => {
+    const { fn, calls } = recordingRun();
+    const companionSend = neverRun();
+    await send({ host: '(local)', session: 'agent' }, {}, 'x', {
+      runTmux: fn, isCompanionTransportEnabled: () => true, companionSend });
+    assert.strictEqual(fn.mock.callCount(), 2, 'local chat used runTmux');
+    assert.strictEqual(companionSend.mock.callCount(), 0, 'local chat did NOT route through the companion');
+    assert.deepStrictEqual(calls[0].args, ['send-keys', '-t', 'agent', '-l', 'x']);
+  });
+
+  it('a remote chat with companion DISABLED uses runTmux (the default path is unchanged)', async () => {
+    const { fn, calls } = recordingRun();
+    const companionSend = neverRun();
+    await send({ host: 'prod-1', session: 's' }, {}, 'hi', {
+      runTmux: fn, isCompanionTransportEnabled: () => false, companionSend });
+    assert.strictEqual(fn.mock.callCount(), 2);
+    assert.strictEqual(companionSend.mock.callCount(), 0);
+    assert.deepStrictEqual(calls[0].args, ['send-keys', '-t', 's', '-l', 'hi']);
+  });
+});
+
+describe('tmux sendKey() — companion routing + ALLOWED_KEYS (WARDEN-888)', () => {
+  it('a remote chat with companion enabled routes through the companion client, NOT runTmux', async () => {
+    const { fn, calls } = recordingClient({ ok: true });
+    const runTmux = neverRun();
+    const chat = { host: 'prod-1', container: 'p-worker', session: 'agent' };
+    await sendKey(chat, {}, 'C-c', { runTmux, isCompanionTransportEnabled: () => true, companionSendKey: fn });
+    assert.strictEqual(fn.mock.callCount(), 1, 'routed through the companion client');
+    assert.strictEqual(runTmux.mock.callCount(), 0, 'did NOT use runTmux');
+    assert.deepStrictEqual(calls[0].params, { container: 'p-worker', session: 'agent', key: 'C-c' });
+  });
+
+  it('validates ALLOWED_KEYS before routing — an unsupported key throws (trust boundary stays JS-side)', async () => {
+    const companionSendKey = neverRun();
+    await assert.rejects(
+      () => sendKey({ host: 'prod-1', session: 'agent' }, {}, 'INVALID-KEY',
+        { isCompanionTransportEnabled: () => true, companionSendKey }),
+      /unsupported key/,
+    );
+    assert.strictEqual(companionSendKey.mock.callCount(), 0, 'an invalid key never reaches the transport');
+  });
+
+  it('a stale host binary ({unsupported:true}) degrades to runTmux (graceful)', async () => {
+    const { fn } = recordingClient({ unsupported: true });
+    const { fn: run, calls } = recordingRun();
+    await sendKey({ host: 'prod-1', session: 'agent' }, {}, 'Enter', {
+      runTmux: run, isCompanionTransportEnabled: () => true, companionSendKey: fn });
+    assert.strictEqual(fn.mock.callCount(), 1, 'companion was consulted first');
+    assert.strictEqual(run.mock.callCount(), 1, 'stale binary -> fell back to runTmux');
+    assert.deepStrictEqual(calls[0].args, ['send-keys', '-t', 'agent', 'Enter']);
+  });
+
+  it('a LOCAL chat keeps the runTmux fast path even with companion enabled', async () => {
+    const { fn, calls } = recordingRun();
+    const companionSendKey = neverRun();
+    await sendKey({ host: '(local)', session: 's' }, {}, 'C-c', {
+      runTmux: fn, isCompanionTransportEnabled: () => true, companionSendKey });
+    assert.strictEqual(fn.mock.callCount(), 1);
+    assert.strictEqual(companionSendKey.mock.callCount(), 0);
+    assert.deepStrictEqual(calls[0].args, ['send-keys', '-t', 's', 'C-c']);
   });
 });
