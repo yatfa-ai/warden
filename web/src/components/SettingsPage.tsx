@@ -102,11 +102,12 @@ export function SettingsPage({
   // successful PUT (App's config refresh + close) — matching the prior behavior.
   const {
     config, setConfig, availableHosts, loading, loadError, reload, saving, handleSave,
+    resetting, resetBackendConfig,
     observerAuthTokenSet, observerAuthTokenTail, observerAuthTokenInput, setObserverAuthTokenInput,
     webhookSecretSet, webhookSecretTail, webhookSecretInput, setWebhookSecretInput, testingWebhook, sendTestAlert,
     telemetryAuthTokenSet, telemetryAuthTokenTail, telemetryAuthTokenInput, setTelemetryAuthTokenInput,
     telemetryTestLoading, telemetryTestVerdict, setTelemetryTestVerdict, sendTestConnection, telemetryRuntimeStatus,
-  } = useBackendConfig({ onSaved: () => { onConfigChange(); onClose(); } });
+  } = useBackendConfig({ onSaved: () => { onConfigChange(); onClose(); }, onConfigChange });
 
   // Active section in the master-detail nav. The first section is selected by
   // default; switching shows only that section, so there's no cross-section
@@ -244,7 +245,11 @@ export function SettingsPage({
                     sendTestAlert={sendTestAlert}
                     hidden={activeSection !== 'notifications'}
                   />
-                  <ResetSection resetUiPrefsToDefaults={resetUiPrefsToDefaults} />
+                  <ResetSection
+                    resetUiPrefsToDefaults={resetUiPrefsToDefaults}
+                    resettingBackend={resetting}
+                    onResetBackendConfig={resetBackendConfig}
+                  />
                 </>
               )}
             </div>

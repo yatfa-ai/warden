@@ -17,7 +17,7 @@
 // altered, only moved.
 import { useState, useEffect, useCallback } from 'react';
 import { toast } from 'sonner';
-import { putJson, fetchJson } from '@/lib/api';
+import { putJson, fetchJson, postJson } from '@/lib/api';
 import { type TelemetryTestVerdict } from '@/lib/telemetry/testConnection';
 import {
   getTelemetryRuntimeStatus,
@@ -74,15 +74,22 @@ const DEFAULT_CONFIG: ConfigData = {
 /**
  * Owns the backend config state + its GET/PUT round-trip + the write-only
  * secrets + the live test/runtime status. `onSaved` is fired after a successful
- * PUT (SettingsPage wires it to App's onConfigChange + close). Returns a flat
- * bag that SettingsPage destructures and passes through to the backend-touching
- * sections.
+ * PUT (SettingsPage wires it to App's onConfigChange + close). `onConfigChange`
+ * is fired after an INSTANT backend reset so the LIVE app reflects the restored
+ * defaults without closing the page (the reset button stays in the danger zone,
+ * mirroring the client-prefs reset). Returns a flat bag that SettingsPage
+ * destructures and passes through to the backend-touching sections.
  */
-export function useBackendConfig({ onSaved }: { onSaved: () => void }) {
+export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => void; onConfigChange: () => void }) {
   const [config, setConfig] = useState<ConfigData>(DEFAULT_CONFIG);
   const [availableHosts, setAvailableHosts] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  // WARDEN-889 — in-flight flag for the backend-config reset (POST /api/config/
+  // reset). Disables the reset button while the round-trip is pending so a user
+  // cannot double-fire the destructive action. Distinct from `saving` (the
+  // footer PUT) because the two are independent actions with independent gates.
+  const [resetting, setResetting] = useState(false);
   // WARDEN-828 — a bounded error state for the GET /api/config load. The prior
   // load path coupled config + hosts in a bare Promise.all with no timeout, so a
   // transiently-slow backend spun `loading` forever. Now config is fetched with a
@@ -310,6 +317,54 @@ export function useBackendConfig({ onSaved }: { onSaved: () => void }) {
     }
   };
 
+  // "Reset backend configuration to defaults" (WARDEN-889): restore EVERY backend
+  // preference to its default in one shot. Unlike handleSave (a draft → PUT), this
+  // is INSTANT — the backend applies deriveDefaults() live (afterSave re-forwards
+  // telemetry, re-applies the companion toggle, restarts the polls) and round-
+  // trips through config.json. It also CLEARS the write-only secrets (observer /
+  // webhook / telemetry auth tokens) that a normal Save cannot blank (the secret
+  // no-clobber preserves an untouched field) — that clear is the whole reason the
+  // reset bypasses applyConfigPut. On success we snap the form back to the GET
+  // (so the inputs show the restored defaults), clear the write-only secret inputs
+  // + their masked indicators, and fire onConfigChange so the LIVE app reflects
+  // the reset without closing the page (parity with the client-prefs reset, which
+  // also stays open). Pinned chats / notes / session tags are backend-side user
+  // data, NOT settings, and are preserved by the backend (internal exposure).
+  const resetBackendConfig = async () => {
+    setResetting(true);
+    try {
+      const { ok, error } = await postJson('/api/config/reset', {});
+      if (!ok) {
+        throw new Error(error || 'Failed to reset backend configuration');
+      }
+      // Clear the write-only secret inputs + their masked indicators — the
+      // backend wiped the stored tokens, so the fields must read empty/unset
+      // immediately rather than flashing the stale "set" tail until the reload
+      // settles.
+      setObserverAuthTokenInput('');
+      setObserverAuthTokenSet(false);
+      setObserverAuthTokenTail(null);
+      setWebhookSecretInput('');
+      setWebhookSecretSet(false);
+      setWebhookSecretTail(null);
+      setTelemetryAuthTokenInput('');
+      setTelemetryAuthTokenSet(false);
+      setTelemetryAuthTokenTail(null);
+      // Re-fetch the config into the form so every input reflects the restored
+      // defaults (source of truth — never assume the default map locally).
+      reload();
+      // Refresh the LIVE app so the reset takes effect app-wide (webhook,
+      // observer, poll cadence) without closing Settings.
+      onConfigChange();
+      toast.success('Backend configuration reset to defaults');
+    } catch (err) {
+      console.error('Failed to reset backend config:', err);
+      toast.error(err instanceof Error ? err.message : 'Failed to reset backend configuration');
+    } finally {
+      setResetting(false);
+    }
+  };
+
   // "Send test alert" (WARDEN-555): POST a test payload so the user can verify
   // their ntfy/Discord/Slack/Telegram topic end-to-end. The draft URL is sent in
   // the BODY so the user can test a typo'd URL BEFORE saving — parity with
@@ -415,6 +470,10 @@ export function useBackendConfig({ onSaved }: { onSaved: () => void }) {
     reload,
     saving,
     handleSave,
+    // Reset every backend preference to its default (WARDEN-889). Instant —
+    // persists + live-applies via the backend, distinct from the footer Save.
+    resetting,
+    resetBackendConfig,
     // Observer write-only auth token.
     observerAuthTokenSet,
     observerAuthTokenTail,

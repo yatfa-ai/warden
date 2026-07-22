@@ -22,6 +22,7 @@ import {
   buildGetResponse,
   applyConfigPut,
   afterSave,
+  resetConfig,
   validateRegistry,
 } from './config-schema.js';
 
@@ -65,6 +66,26 @@ describe('deriveDefaults — DEFAULTS is fully derived from CONFIG_FIELDS', () =
     assert.strictEqual(d.companionTransportEnabled, false);
     // internal-only fields are present (managed by other endpoints, not /api/config)
     assert.ok('agentNotes' in d && 'sessionTags' in d);
+  });
+
+  it('CLONES mutable defaults — a consumer mutating a derived value never corrupts the registry (WARDEN-889)', () => {
+    // load() shallow-spreads DEFAULTS into the live cfg, so without cloning a
+    // shared mutable default (e.g. llm / hosts) would BE the registry's default
+    // object — and applyLlmPut's in-place mutation during a PUT would corrupt
+    // it, so a later deriveDefaults() (resetConfig) would return the mutated
+    // value instead of the pristine default. Pin that deriveDefaults hands out
+    // fresh copies every call: mutating one derivation must not affect the next.
+    const a = deriveDefaults();
+    a.llm.model = 'mutated';
+    a.hosts.push('sneaky-host');
+    a.watchPatterns.push({ id: 'x' });
+    const b = deriveDefaults();
+    assert.deepStrictEqual(b.llm, {}, 'llm default not corrupted by a prior mutation');
+    assert.deepStrictEqual(b.hosts, [], 'hosts default not corrupted');
+    assert.deepStrictEqual(b.watchPatterns, [], 'watchPatterns default not corrupted');
+    // Identity: two derivations are distinct objects (not the shared registry ref).
+    assert.notStrictEqual(b.llm, a.llm, 'each derivation gets its own llm object');
+    assert.notStrictEqual(b.hosts, a.hosts, 'each derivation gets its own hosts array');
   });
 });
 
@@ -209,6 +230,121 @@ describe('applyConfigPut — PUT guards derived from the registry', () => {
     assert.strictEqual(cfg.tmuxSession, 'agent', 'non-string rejected');
     assert.strictEqual(cfg.observerConfirmMode, 'always', 'non-oneOf rejected');
     assert.ok(!('bogusField' in cfg), 'unknown field not stored');
+  });
+});
+
+describe('resetConfig — restore every backend preference to its default (WARDEN-889)', () => {
+  // A seeded non-default backend state across every exposure class: public
+  // (webhookUrl/enabled, observer knobs, thresholds, tokens), secret (the three
+  // write-only auth tokens a GET masks), and the nested llm object. internal
+  // fields (pins/agentNotes/sessionTags) are user DATA, not settings, so they
+  // are seeded too and asserted to SURVIVE the reset.
+  function seeded() {
+    return {
+      hosts: ['prod-box', 'staging'],
+      tmuxSession: 'watcher',
+      connectTimeout: 60,
+      pollIntervalMs: 99,
+      observerConfirmMode: 'auto-safe',
+      observerAutoStart: true,
+      observerSessionTimeout: 180,
+      llm: { model: 'glm-5.2', baseUrl: 'https://x.example', maxTokens: 9000, authToken: 'sk-secret' },
+      healthWarningThresholdMin: 25,
+      healthCriticalThresholdMin: 200,
+      tokenBudgetEnabled: true,
+      tokenBudgetThresholdTokens: 500,
+      tokenBudgetWindowHours: 7,
+      tokenBudgetPerSessionThresholdTokens: 250,
+      companionTransportEnabled: true,
+      confirmDestructiveActions: false,
+      notifyChatOps: false,
+      notifyErrors: false,
+      notifySuccess: false,
+      notifyObserver: false,
+      showHostTags: false,
+      showTypeBadges: false,
+      showStatusIndicators: false,
+      showProjectBadges: true,
+      hideOfflineHosts: true,
+      telemetryBaseEnabled: true,
+      telemetryExtendedEnabled: true,
+      telemetryEndpoint: 'https://receiver.example/ingest',
+      telemetryAuthToken: 'tok-ABCD',
+      webhookUrl: 'https://hooks.example/notify',
+      webhookEnabled: true,
+      webhookSecret: 'sec-WXYZ',
+      webhookAlertAttention: false,
+      webhookAlertBudget: false,
+      webhookAlertDone: false,
+      watchPatterns: [{ id: 'p1', name: 'X', expression: 'x', mode: 'string', enabled: true }],
+      // USER DATA — must survive a backend-config reset (not a setting).
+      pins: ['chat-1', 'chat-2'],
+      agentNotes: { agentA: 'note' },
+      sessionTags: { sess1: ['tag'] },
+    };
+  }
+
+  it('restores every public + secret field to deriveDefaults()', () => {
+    const cfg = seeded();
+    resetConfig(cfg);
+    const defaults = deriveDefaults();
+    for (const f of CONFIG_FIELDS) {
+      if (f.exposure !== 'public' && f.exposure !== 'secret') continue;
+      assert.deepStrictEqual(cfg[f.key], defaults[f.key],
+        `field '${f.key}' reset to its default`);
+    }
+  });
+
+  it('clears the write-only secrets a GET masks (the tokens a user cannot otherwise clear)', () => {
+    // This is the load-bearing reason resetConfig bypasses applyConfigPut: the
+    // secret no-clobber that protects an untouched password field on a normal
+    // Save would refuse to blank these. A reset MUST clear them.
+    const cfg = seeded();
+    resetConfig(cfg);
+    assert.strictEqual(cfg.webhookSecret, '', 'webhookSecret cleared');
+    assert.strictEqual(cfg.telemetryAuthToken, '', 'telemetryAuthToken cleared');
+    assert.deepStrictEqual(cfg.llm, {}, 'llm (incl. authToken) cleared to {}');
+  });
+
+  it('clears a configured webhook + endpoint back to unconfigured (sends nothing)', () => {
+    const cfg = seeded();
+    resetConfig(cfg);
+    assert.strictEqual(cfg.webhookUrl, '');
+    assert.strictEqual(cfg.webhookEnabled, false);
+    assert.strictEqual(cfg.telemetryEndpoint, '');
+    assert.strictEqual(cfg.telemetryBaseEnabled, false);
+  });
+
+  it('PRESERVES internal user data (pins / agentNotes / sessionTags)', () => {
+    // internal fields are managed by their own endpoints, not /api/config — a
+    // backend-config reset must not wipe a user's pinned chats, notes, or tags.
+    const cfg = seeded();
+    resetConfig(cfg);
+    assert.deepStrictEqual(cfg.pins, ['chat-1', 'chat-2'], 'pins preserved');
+    assert.deepStrictEqual(cfg.agentNotes, { agentA: 'note' }, 'agentNotes preserved');
+    assert.deepStrictEqual(cfg.sessionTags, { sess1: ['tag'] }, 'sessionTags preserved');
+  });
+
+  it('leaves the restored state well-formed (crossField invariants hold)', () => {
+    // The restored defaults run through crossField, exactly as a PUT would, so
+    // the persisted pair stays well-ordered and telemetry extended cannot be on
+    // without base. (Defaults are well-formed by construction; these assert the
+    // reset output satisfies the same invariants a PUT leaves behind.)
+    const cfg = seeded();
+    resetConfig(cfg);
+    assert.ok(cfg.healthWarningThresholdMin <= cfg.healthCriticalThresholdMin,
+      'health warning <= critical after reset');
+    assert.ok(!(cfg.telemetryExtendedEnabled && !cfg.telemetryBaseEnabled),
+      'telemetry extended-requires-base holds after reset');
+  });
+
+  it('mutates the cfg object in place and returns it', () => {
+    // The server holds a single cfg reference; reset must mutate THAT object
+    // (not return a fresh one) so every consumer sees the restored defaults.
+    const cfg = seeded();
+    const ret = resetConfig(cfg);
+    assert.strictEqual(ret, cfg, 'returns the same cfg object');
+    assert.strictEqual(cfg.webhookUrl, '', 'cfg mutated in place');
   });
 });
 

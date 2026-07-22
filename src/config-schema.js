@@ -583,9 +583,72 @@ export function deriveDefaults() {
   for (const d of CONFIG_FIELDS) {
     if (d.exposure === 'derived') continue; // never persisted
     if (!('default' in d)) continue;
-    out[d.key] = d.default;
+    // Mutable defaults (arrays/objects: hosts, llm, watchPatterns, pins,
+    // agentNotes, sessionTags) are CLONED, never shared by reference, so a
+    // consumer that mutates the value in place (applyLlmPut mutates cfg.llm's
+    // sub-fields; applyField reassigns array entries) can never corrupt the
+    // registry's canonical default. load() shallow-spreads DEFAULTS into the
+    // live cfg, so without this clone cfg.llm WOULD be the very same object as
+    // the registry's llm default — and a PUT would mutate the default a later
+    // deriveDefaults() returns. Primitives are immutable and pass through.
+    // (WARDEN-889: resetConfig re-derives defaults on every reset; the clone is
+    // what lets it restore a pristine llm/hosts/watchPatterns after a PUT has
+    // mutated the live cfg copies.)
+    out[d.key] = (typeof d.default === 'object' && d.default !== null)
+      ? structuredClone(d.default)
+      : d.default;
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// RESET — restore the backend config to its defaults (WARDEN-889).
+//
+// The danger zone previously had exactly ONE reset action and it touched ONLY
+// client-side UI prefs (appearance/terminal/new-chat/behavior), leaving the
+// consequential backend settings (webhook/telemetry/observer/hosts/thresholds…)
+// with no reset path at all — to start over on any of them a user had to
+// hand-edit ~/.yatfa-warden/config.json, and the write-only secrets (webhook /
+// telemetry / observer auth tokens — the ones a GET masks and a user cannot even
+// SEE) could not be cleared through the UI at all.
+//
+// resetConfig restores every USER-CONFIGURABLE backend field to its declared
+// default in one shot. It is the single source of truth (deriveDefaults) routed
+// through the SAME persist + live-apply path a PUT uses, so a reset takes effect
+// on the next tick (afterSave re-forwards telemetry, re-applies the companion
+// toggle, restarts the budget/attention polls) and round-trips through save
+// (survives a restart). The endpoint wires save + afterSave; this function owns
+// only the pure "what does a reset config look like" derivation.
+//
+// WHY this writes defaults DIRECTLY instead of going through applyConfigPut:
+// applyField's 'secret' case is no-clobber (only a non-empty string overwrites,
+// so an untouched password field survives a save). Routing a reset through it
+// would therefore REFUSE to blank the secrets — the exact write-only tokens this
+// path exists to clear. Writing the default ('' / {}) straight to cfg bypasses
+// that guard by design: clearing is the intent, not a no-op to preserve.
+//
+// SCOPE — only `public` + `secret` exposure are reset:
+//   `internal` fields (pins / agentNotes / sessionTags) are USER DATA managed by
+//     their own endpoints, not settings — a config reset must not wipe a user's
+//     pinned chats, notes, or session tags, so they are left untouched.
+//   `derived` fields (companionTransportOverridden) are boot-computed from env,
+//     not persisted in cfg, so there is nothing to reset.
+// crossField then runs so the restored state is well-formed exactly as a PUT
+// would leave it (health warning<=critical, telemetry extended-requires-base) —
+// defensive: the defaults are already well-formed, but a future default that
+// wasn't would still come out clean.
+export function resetConfig(cfg) {
+  // deriveDefaults() is the single source of truth for every default — use a
+  // FRESH derivation so object/array fields (llm / hosts / watchPatterns) are
+  // pristine copies the live cfg owns, not the registry's shared default a later
+  // PUT could mutate (see deriveDefaults' clone note).
+  const defaults = deriveDefaults();
+  for (const d of CONFIG_FIELDS) {
+    if (d.exposure !== 'public' && d.exposure !== 'secret') continue;
+    cfg[d.key] = defaults[d.key];
+  }
+  crossField(cfg);
+  return cfg;
 }
 
 // ---------------------------------------------------------------------------
