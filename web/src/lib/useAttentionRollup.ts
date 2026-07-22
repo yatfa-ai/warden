@@ -36,13 +36,16 @@ import {
   applySeverityPrefs,
   diffNewAttention,
   excludeFocusedPane,
+  applyFleetAttentionCooldown,
   formatInAppEntry,
   watchReasonTone,
   formatWatchInApp,
   ATTENTION_SEVERITY_DEFAULTS,
   type AttentionSeverityPrefs,
+  type FleetLastFiredMap,
+  type NewAttentionEntry,
 } from '@/lib/desktopAlerts';
-import { diffWatchAlerts, indexByWatchKey, applyWatchCooldown, type WatchLastFiredMap, type WatchReason } from '@/lib/chatWatch';
+import { diffWatchAlerts, indexByWatchKey, applyWatchCooldown, WATCH_PING_COOLDOWN_MS, type WatchLastFiredMap, type WatchReason } from '@/lib/chatWatch';
 import { recordWatchMiss, shouldRecordMiss } from '@/lib/watchCatchup';
 import { activeSnoozedKeys, type SnoozeMap } from '@/lib/snooze';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
@@ -124,6 +127,13 @@ export interface AttentionRollupState {
  * stable per-key sonner `id` means a still-visible ping for the same chat updates
  * rather than stacking — the in-app analog of the OS channel's stable `tag`.
  *
+ * WARDEN-891: the caller now builds the entrant list itself — diffNewAttention →
+ * applyFleetAttentionCooldown (the per-key flap cooldown) → excludeFocusedPane (the
+ * focus-gate) — and passes the prepared survivors here. So this function is purely
+ * the delivery loop: it toasts exactly the entrants it receives. A flapping agent
+ * whose re-entry the cooldown suppressed (and the pane the human is reading, which
+ * the focus-gate dropped) simply is not in the list → no toast for it.
+ *
  * Auto-dismisses (sonner's transience — the property the relaxed visible-gate's
  * noise-avoidance relied on): it fires ONCE per genuine new need (the increase-only
  * shouldFireAlert gate the caller already enforced) and then leaves, so it is NOT
@@ -132,22 +142,9 @@ export interface AttentionRollupState {
  * resolution path is the Activity tab, surfaced in the badge. Never throws.
  */
 function fireAttentionInApp(
-  prev: AttentionRollup,
-  next: AttentionRollup,
+  entries: NewAttentionEntry[],
   onOpenChat?: (id: string) => void,
-  // WARDEN-482: the pane the human is currently focused on (focusedPaneRef.current at
-  // the call site). The entrant matching this key is the pane the human is already
-  // reading, so its toast is suppressed by excludeFocusedPane before the loop — the
-  // symmetric "not-after" focus-gate to the watch ping's WARDEN-421 gate. Aggregate
-  // (no-key) entrants still toast. Only ever passed on the VISIBLE branch below, which
-  // is exactly when focus is meaningful.
-  focusedPaneKey?: string | null,
 ): void {
-  // WARDEN-482: drop the entrant for the focused pane BEFORE toasting — the pure,
-  // unit-tested excludeFocusedPane. (See desktopAlerts.ts: a focused pane is open +
-  // visible, so it already appears in the OPEN-only AttentionBadge with its "because
-  // X" signal; pinging it is the "fires when nothing's needed" product-killer.)
-  const entries = excludeFocusedPane(diffNewAttention(prev, next), focusedPaneKey);
   for (const entry of entries) {
     const { title, description } = formatInAppEntry(entry);
     // Themed tone maps 1:1 to the badge's red/amber severity split (WARDEN-68): a
@@ -347,6 +344,17 @@ export function useAttentionRollup(
   // the ping cooldown must PERSIST across that flap so a re-finish within the window
   // does not re-ping. Pruned to open keys each poll so it stays bounded.
   const doneLastFiredRef = useRef<Map<string, number>>(new Map());
+
+  // WARDEN-891: per-key cooldown anchor for the fleet PROBLEM-state alert — the third
+  // attention channel's flap cooldown (sibling of watchLastFiredRef above + doneLastFiredRef
+  // just above). A {key → {tone, firedAt}} map advanced each fire so a flapping UNWATCHED agent
+  // re-fires ONE alert per episode window, not once per recover→re-enter (escalations override +
+  // reset). Pruned by age in the alert effect below: the fleet alert has no persistent per-key
+  // identity set that survives recovery the way watched/open keys do (a recovered agent leaves
+  // every rollup bucket), so age is the liveness proxy — and an anchor older than the window can
+  // no longer suppress (elapsed >= window → the cooldown fires anyway), so that prune never
+  // weakens suppression, only bounds growth.
+  const fleetLastFiredRef = useRef<FleetLastFiredMap>({});
 
   // WARDEN-587: key → epoch-ms the agent ENTERED its current attention state — the
   // timestamp behind the live "stuck 2h 14m" duration suffix on the badge rows. A
@@ -853,13 +861,54 @@ export function useAttentionRollup(
     }
     const prev = prevRoutableRef.current;
     prevRoutableRef.current = routable;
+    // WARDEN-891: prune the fleet flap-cooldown anchors older than the window. Runs every
+    // poll (not only on an increase) so a quiet fleet still sheds stale anchors and the map
+    // stays bounded. The fleet alert has no persistent per-key identity set that survives
+    // recovery the way watched/open keys do (a recovered agent leaves every rollup bucket),
+    // so age is the liveness proxy — and an anchor older than the window can no longer
+    // suppress (elapsed >= window → the cooldown fires anyway), so this never weakens
+    // suppression, only bounds growth.
+    const now = Date.now();
+    const fleetLastFired = fleetLastFiredRef.current;
+    for (const k of Object.keys(fleetLastFired)) {
+      if (now - fleetLastFired[k].firedAt > WATCH_PING_COOLDOWN_MS) delete fleetLastFired[k];
+    }
     if (!attentionDesktopAlerts) return;
     // `prev &&` narrows the nullable ref for TS — and is a true no-op logically, since
     // shouldFireAlert already returns false when prev is null (its missing-input guard).
     if (prev && shouldFireAlert(prev, routable)) {
+      // WARDEN-891: per-key flap cooldown for the fleet problem-state alert — the third
+      // attention channel's cooldown (sibling of the watch ping's applyWatchCooldown + the
+      // done ping's DONE_PING_COOLDOWN_MS gate). Run it over diffNewAttention's entrants so a
+      // flapping agent (state→recovered→same-state across polls) re-fires ONE alert per
+      // WATCH_PING_COOLDOWN_MS window, not once per re-increase — the crying-wolf spam the
+      // roadmap names as the product-killer (the stable OS `tag` / sonner `id` only collapses
+      // a STILL-DISPLAYED notification, and the 6s sonner duration << the ~60s flap period).
+      // Reuses WATCH_PING_COOLDOWN_MS so a flap reads identically whether the agent is watched
+      // (watch ping), merely open (done ping), or hidden/unwatched (this alert). Aggregate
+      // key:'' entrants pass through unchanged (a count rise is not a flap).
+      const entrants = diffNewAttention(prev, routable);
+      const { fire: fireable, lastFired: nextFleetLastFired } = applyFleetAttentionCooldown(
+        entrants,
+        fleetLastFiredRef.current,
+        now,
+        WATCH_PING_COOLDOWN_MS,
+      );
+      fleetLastFiredRef.current = nextFleetLastFired;
       if (document.visibilityState === 'visible') {
-        fireAttentionInApp(prev, routable, onOpenChatRef.current, focusedPaneRef.current);
-      } else {
+        // In-app: toast only the cooldown survivors (genuinely-new / escalated entrants),
+        // then the existing per-pane focus-gate (excludeFocusedPane) + per-entrant delivery.
+        // A suppressed flapping key produces no toast.
+        fireAttentionInApp(
+          excludeFocusedPane(fireable, focusedPaneRef.current),
+          onOpenChatRef.current,
+        );
+      } else if (fireable.length > 0) {
+        // OS lumped toast: fire ONLY if at least one entrant survived the cooldown. If the
+        // total increase was caused ENTIRELY by re-entered flapping keys (all suppressed →
+        // fireable empty), the lumped toast would cry wolf on the same episode, so suppress
+        // it; a genuine new/escalated entrant still fires (the toast is lumped, so it carries
+        // the full routable total — correct, there IS new attention).
         fireAttentionNotification(routable);
       }
     }
