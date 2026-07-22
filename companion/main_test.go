@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os/exec"
 	"strings"
 	"testing"
@@ -347,4 +348,223 @@ func TestCaptureOnceHeartbeat(t *testing.T) {
 	if len(emitted[1].Panes) != 0 {
 		t.Fatalf("heartbeat paneDelta carries NO panes (liveness only); got %v", emitted[1].Panes)
 	}
+}
+
+// ------------------------------- send / sendKeys --------------------------------
+// WARDEN-888 (the final slice): the user-input WRITE path. buildSendScript must
+// reproduce src/tmux.js send()'s WARDEN-254 bracketed-paste sequence in ONE
+// atomic bash -lc script — byte-for-byte the SAME tmux argv the default runTmux
+// path issues (single-line send-keys -l + Enter; multiline set-buffer /
+// paste-buffer -p -d / send-keys Enter with a delete-buffer cleanup that does NOT
+// mask the failure exit code). buildSendKeysScript must reproduce sendKey()'s
+// `send-keys -t <target> <key>`.
+
+func TestBuildSendScript(t *testing.T) {
+	t.Run("single-line: docker exec prefix, send-keys -l then Enter, no buffer", func(t *testing.T) {
+		got := buildSendScript("p-worker", "agent", "just one line", "warden-send-test")
+		want := "docker exec 'p-worker' tmux send-keys -t 'agent' -l 'just one line' && docker exec 'p-worker' tmux send-keys -t 'agent' Enter"
+		if got != want {
+			t.Fatalf("buildSendScript single-line mismatch:\ngot:  %s\nwant: %s", got, want)
+		}
+	})
+
+	t.Run("single-line: bare-tmux (no container), custom session shellQuoted", func(t *testing.T) {
+		got := buildSendScript("", "my session", "hello", "warden-send-test")
+		want := "tmux send-keys -t 'my session' -l 'hello' && tmux send-keys -t 'my session' Enter"
+		if got != want {
+			t.Fatalf("bare-tmux single-line mismatch:\ngot:  %s\nwant: %s", got, want)
+		}
+	})
+
+	t.Run("single-line text with an apostrophe is shellQuoted", func(t *testing.T) {
+		got := buildSendScript("", "agent", "it's here", "warden-send-test")
+		if !strings.Contains(got, "send-keys -t 'agent' -l 'it'\\''s here'") {
+			t.Fatalf("expected shellQuoted apostrophe text; got: %s", got)
+		}
+	})
+
+	t.Run("single-line text with a leading dash is shellQuoted (tmux -l still sees it verbatim)", func(t *testing.T) {
+		got := buildSendScript("", "agent", "-flag start", "warden-send-test")
+		// single-line uses send-keys -l (no buffer), so the leading '-' is just an
+		// arg to -l after shell-quoting; tmux receives it verbatim.
+		if !strings.Contains(got, "-l '-flag start'") {
+			t.Fatalf("expected leading-dash text preserved verbatim; got: %s", got)
+		}
+	})
+
+	t.Run("multiline: set-buffer / paste-buffer -p -d / send-keys Enter, byte-exact", func(t *testing.T) {
+		// text carries an ACTUAL newline; shellQuote keeps it inside the single
+		// quotes (a single-quoted string may span newlines), so tmux set-buffer
+		// receives the whole block as one arg — matching the JS multiline path.
+		got := buildSendScript("p-worker", "agent", "line1\nline2", "warden-send-test")
+		want := "docker exec 'p-worker' tmux set-buffer -b 'warden-send-test' -- 'line1\nline2' && " +
+			"docker exec 'p-worker' tmux paste-buffer -p -d -b 'warden-send-test' -t 'agent' && " +
+			"docker exec 'p-worker' tmux send-keys -t 'agent' Enter || " +
+			"{ rc=$?; docker exec 'p-worker' tmux delete-buffer -b 'warden-send-test' 2>/dev/null; exit $rc; }"
+		if got != want {
+			t.Fatalf("buildSendScript multiline mismatch:\ngot:  %s\nwant: %s", got, want)
+		}
+	})
+
+	t.Run("multiline: bracketed-paste flags -p and -d are both present", func(t *testing.T) {
+		got := buildSendScript("", "agent", "a\nb", "warden-send-test")
+		if !strings.Contains(got, "paste-buffer -p -d -b 'warden-send-test'") {
+			t.Fatalf("expected paste-buffer -p (bracketed) -d (reclaim); got: %s", got)
+		}
+	})
+
+	t.Run("multiline leading-dash data is protected by the -- separator", func(t *testing.T) {
+		got := buildSendScript("", "agent", "-flag start\nsecond", "warden-send-test")
+		if !strings.Contains(got, "set-buffer -b 'warden-send-test' -- '-flag start\nsecond'") {
+			t.Fatalf("expected `--` to protect leading-dash multiline data; got: %s", got)
+		}
+	})
+
+	t.Run("multiline cleanup reclaims the SAME buffer and preserves the failure exit code", func(t *testing.T) {
+		// The cleanup must (a) target the same buffer set-buffer created, (b) run
+		// only on failure (`||`), and (c) propagate the real exit code via
+		// `exit $rc` so a failed paste can never look like a 0. Capturing rc
+		// BEFORE delete-buffer is what keeps the failure code intact.
+		got := buildSendScript("", "agent", "a\nb", "warden-send-test")
+		if !strings.Contains(got, "|| { rc=$?; tmux delete-buffer -b 'warden-send-test' 2>/dev/null; exit $rc; }") {
+			t.Fatalf("expected rc-preserving cleanup block; got: %s", got)
+		}
+		if strings.HasSuffix(strings.TrimSpace(got), "|| true") {
+			t.Fatalf("cleanup must NOT end in `|| true` (that masks the failure as a 0); got: %s", got)
+		}
+	})
+
+	t.Run("empty target defaults to agent", func(t *testing.T) {
+		got := buildSendScript("p-worker", "", "hi", "warden-send-test")
+		if !strings.Contains(got, "send-keys -t 'agent' -l 'hi'") {
+			t.Fatalf("expected target to default to 'agent'; got: %s", got)
+		}
+	})
+
+	t.Run("container name with an apostrophe is shellQuoted", func(t *testing.T) {
+		got := buildSendScript("c'x", "agent", "hi", "warden-send-test")
+		if !strings.Contains(got, "docker exec 'c'\\''x' tmux") {
+			t.Fatalf("expected shellQuoted container; got: %s", got)
+		}
+	})
+}
+
+func TestBuildSendKeysScript(t *testing.T) {
+	t.Run("docker exec prefix, send-keys -t <target> <key>", func(t *testing.T) {
+		got := buildSendKeysScript("p-worker", "agent", "C-c")
+		want := "docker exec 'p-worker' tmux send-keys -t 'agent' 'C-c'"
+		if got != want {
+			t.Fatalf("buildSendKeysScript mismatch:\ngot:  %s\nwant: %s", got, want)
+		}
+	})
+
+	t.Run("bare-tmux, custom session shellQuoted, key shellQuoted", func(t *testing.T) {
+		got := buildSendKeysScript("", "my session", "Enter")
+		want := "tmux send-keys -t 'my session' 'Enter'"
+		if got != want {
+			t.Fatalf("bare-tmux sendKeys mismatch:\ngot:  %s\nwant: %s", got, want)
+		}
+	})
+
+	t.Run("empty target defaults to agent", func(t *testing.T) {
+		got := buildSendKeysScript("p-worker", "", "C-c")
+		if !strings.Contains(got, "send-keys -t 'agent' 'C-c'") {
+			t.Fatalf("expected target to default to 'agent'; got: %s", got)
+		}
+	})
+}
+
+// TestNextSendBufferUnique pins the per-call buffer uniqueness multiline send
+// relies on: two consecutive calls return distinct names so two concurrent sends
+// to the same tmux server can't clobber each other's buffer (mirrors the JS
+// `warden-send-${Date.now()}-${++sendSeq}` contract at src/tmux.js:59).
+func TestNextSendBufferUnique(t *testing.T) {
+	a := nextSendBuffer()
+	b := nextSendBuffer()
+	if a == b {
+		t.Fatalf("consecutive nextSendBuffer() calls must differ; got %q twice", a)
+	}
+	for _, name := range []string{a, b} {
+		if !strings.HasPrefix(name, "warden-send-") {
+			t.Fatalf("buffer name must keep the warden-send- prefix; got %q", name)
+		}
+	}
+}
+
+// TestSendLiveTmux drives the REAL send() / sendKeys() against a LIVE tmux
+// session: single-line + multiline send must land the text on the pane, and
+// sendKeys must run send-keys against the live session without error. Proves the
+// atomic bash -lc script buildSendScript produces actually works end-to-end on a
+// real tmux server (the docker-exec path is the same code with a prefix). Skipped
+// without tmux.
+func TestSendLiveTmux(t *testing.T) {
+	if !tmuxAvailable() {
+		t.Skip("tmux not available")
+	}
+	session := uniqueSession()
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", session).Output(); err != nil {
+		t.Fatalf("tmux new-session failed: %v; %s", err, out)
+	}
+	defer exec.Command("tmux", "kill-session", "-t", session).Run()
+
+	capture := func() string {
+		out, _ := exec.Command("tmux", "capture-pane", "-t", session, "-p").Output()
+		return string(out)
+	}
+
+	t.Run("single-line send lands the text on the pane", func(t *testing.T) {
+		params, _ := json.Marshal(map[string]any{"container": "", "session": session, "text": "WARDEN_SEND_SINGLE_7"})
+		res := send(params)
+		if !res.OK {
+			t.Fatalf("single-line send failed: code=%d stderr=%q", res.Code, res.Stderr)
+		}
+		waitForRendered(t, session, "WARDEN_SEND_SINGLE_7")
+		if !strings.Contains(capture(), "WARDEN_SEND_SINGLE_7") {
+			t.Fatalf("single-line marker never landed on the pane; got:\n%s", capture())
+		}
+	})
+
+	t.Run("multiline send lands the whole block (bracketed paste, one submit)", func(t *testing.T) {
+		params, _ := json.Marshal(map[string]any{"container": "", "session": session, "text": "WARDEN_LINE_ONE\nWARDEN_LINE_TWO"})
+		res := send(params)
+		if !res.OK {
+			t.Fatalf("multiline send failed: code=%d stderr=%q", res.Code, res.Stderr)
+		}
+		waitForRendered(t, session, "WARDEN_LINE_TWO")
+		got := capture()
+		if !strings.Contains(got, "WARDEN_LINE_ONE") || !strings.Contains(got, "WARDEN_LINE_TWO") {
+			t.Fatalf("multiline block did not land intact; got:\n%s", got)
+		}
+	})
+
+	t.Run("send against a dead session reclaims the buffer and returns ok:false (no leak, no false success)", func(t *testing.T) {
+		// A dead session makes paste-buffer fail ("can't find session"). The
+		// cleanup must reclaim the set buffer (no leak) AND the result must be
+		// ok:false with the real tmux error — the rc-preserving `exit $rc` is what
+		// stops the cleanup delete-buffer from turning the failure into a 0.
+		params, _ := json.Marshal(map[string]any{"container": "", "session": session + "-nope", "text": "a\nb\nc"})
+		res := send(params)
+		if res.OK {
+			t.Fatalf("send against a dead session must be ok:false, not ok:true (cleanup masked the failure?)")
+		}
+		// tmux's exact wording is version/target-dependent ("can't find session" /
+		// "can't find pane"); the meaningful signal is that the REAL tmux error
+		// surfaced on stderr (not masked) rather than a specific string.
+		if !strings.Contains(res.Stderr, "can't find") {
+			t.Fatalf("expected the real tmux 'can't find ...' error on stderr; got %q", res.Stderr)
+		}
+		// The buffer must NOT leak: list-buffers should not hold a warden-send-* buf.
+		lb, _ := exec.Command("tmux", "list-buffers").Output()
+		if strings.Contains(string(lb), "warden-send-") {
+			t.Fatalf("multiline send leaked a warden-send-* buffer on the dead-session failure; list-buffers:\n%s", lb)
+		}
+	})
+
+	t.Run("sendKeys runs send-keys -t <session> <key> against the live session", func(t *testing.T) {
+		params, _ := json.Marshal(map[string]any{"container": "", "session": session, "key": "C-c"})
+		res := sendKeys(params)
+		if !res.OK {
+			t.Fatalf("sendKeys failed against a live session: code=%d stderr=%q", res.Code, res.Stderr)
+		}
+	})
 }

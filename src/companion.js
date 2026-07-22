@@ -790,6 +790,85 @@ export async function resize(host, { container, session } = {}, cfg = {}, opts =
   }
 }
 
+// --------------------------------- send --------------------------------------
+// WARDEN-888 (the final slice of roadmap WARDEN-270). The user-input WRITE path
+// — send (a directive) + sendKey (a special key) — is the last op family that
+// still pays a per-op SSH handshake on remote hosts. Routing it over the
+// persistent companion channel collapses the per-message handshake (the ~30s/
+// action cost on the ControlMaster-disabled / Windows path that is this roadmap's
+// reason for existing). The host side runs the WARDEN-254 bracketed-paste
+// sequence in ONE atomic bash -lc script (companion/main.go send). The bootstrap
+// + channel are slice 1's, reused verbatim; this only adds the RPC clients.
+//
+// Returns the SAME raw {host, ok, code, stdout, stderr} shape resize produces (so
+// src/tmux.js maps it to the identical runTmux result the default path emits),
+// or {host, ok:false, code:-1, stderr} on ANY channel failure — companion-or-fail,
+// NEVER a silent raw-SSH fallback.
+//
+// Stale-binary graceful degradation: a cached binary predating this slice does
+// not advertise `send`/`sendKeys` in its ping methods. That is NOT a failure —
+// it returns {host, unsupported:true} so the caller falls back to runTmux
+// (mirroring subscribePanes' methods check), so rolling this JS out does not
+// require every host re-bootstrapped at once. A DEAD channel (the one case that
+// must NOT silently fall back) fails earlier at getChannel and surfaces a real
+// {ok:false, code:-1, stderr} error — the unsupported sentinel only fires when
+// the channel is alive but its binary is old.
+
+// send() over the companion channel: runs the WARDEN-254 write sequence
+// (single-line send-keys -l + Enter; multiline set-buffer / paste-buffer -p -d /
+// send-keys Enter) host-side. <text> is an arbitrary user directive carried as a
+// JSON param and shell-quoted HOST-SIDE (never interpolated raw). The target
+// falls back session → container → "agent", identical to resize / hasSession.
+export async function send(host, { container, session, text } = {}, cfg = {}, opts = {}, deps = {}) {
+  if (host === LOCAL) {
+    return { host, ok: false, code: -1, stdout: '', stderr: 'companion transport does not apply to the local host' };
+  }
+  try {
+    const channel = await getChannel(host, cfg, deps);
+    const methods = await channelMethods(channel, opts);
+    if (!methods.includes('send')) {
+      // Stale cached binary (predates WARDEN-888): degrade to runTmux. The channel
+      // is alive (getChannel succeeded); only the binary lacks the `send` RPC.
+      return { host, unsupported: true };
+    }
+    const target = session || container || 'agent';
+    const result = await channel.call('send', {
+      container: container || null,
+      session: target,
+      text: text == null ? '' : String(text),
+    }, { timeout: opts.timeout ?? 15000 });
+    return mapCmdResult(host, result);
+  } catch (e) {
+    return mapCmdError(host, e);
+  }
+}
+
+// sendKey() over the companion channel: runs `send-keys -t <target> <key>` for a
+// key the caller ALREADY validated against ALLOWED_KEYS (the trust boundary stays
+// JS-side, identical to the default sendKey path). Mirrors send's shape + stale-
+// binary degradation.
+export async function sendKey(host, { container, session, key } = {}, cfg = {}, opts = {}, deps = {}) {
+  if (host === LOCAL) {
+    return { host, ok: false, code: -1, stdout: '', stderr: 'companion transport does not apply to the local host' };
+  }
+  try {
+    const channel = await getChannel(host, cfg, deps);
+    const methods = await channelMethods(channel, opts);
+    if (!methods.includes('sendKeys')) {
+      return { host, unsupported: true };
+    }
+    const target = session || container || 'agent';
+    const result = await channel.call('sendKeys', {
+      container: container || null,
+      session: target,
+      key,
+    }, { timeout: opts.timeout ?? 15000 });
+    return mapCmdResult(host, result);
+  } catch (e) {
+    return mapCmdError(host, e);
+  }
+}
+
 // ------------------------------- subscribePanes --------------------------------
 // WARDEN-413 (problem #3 of roadmap WARDEN-270). capture-pane is polled every 2s
 // monitor tick + every observer poll even when nothing changed; for an idle fleet

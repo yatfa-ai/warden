@@ -32,6 +32,7 @@ import {
   isCompanionTransportEnabled, applyCompanionToggle, loadManifest,
   projectSpawnModel, _resetChannelCacheForTests,
   resize as companionResize,
+  send as companionSend, sendKey as companionSendKey,
   // WARDEN-413: pane-delta push (subscribePanes) — event routing, delta cache, subscriptions.
   applyPaneDelta, hasFreshPaneDelta, readPaneDeltas, PANE_DELTA_FRESH_MS,
   subscribePanes, unsubscribePanes,
@@ -39,7 +40,7 @@ import {
   _resetPaneDeltaStateForTests, _getPaneSubscriptionsForTests,
   startPaneDeltaSweep, _stopPaneDeltaSweepForTests,
 } from './companion.js';
-import { probeSession, hasSession as tmuxHasSession, resize as tmuxResize } from './tmux.js';
+import { probeSession, hasSession as tmuxHasSession, resize as tmuxResize, send as tmuxSend, sendKey as tmuxSendKey } from './tmux.js';
 import { classifyProbe } from './sessionRecovery.js';
 import { buildChat, parseActivityTimestamp } from './chatMeta.js';
 import { buildCaptureScript, parseCaptureSentinels } from './chats.js';
@@ -1082,13 +1083,15 @@ const TEST_MANIFEST = {
 
 // Build a fake transport whose ping reports the test version (a healthy channel).
 const healthyTransport = (extra = {}) => fakeTransport((req) => {
-  if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'discover', 'capturePanes', 'hasSession', 'spawnSession', 'killSession', 'resize'] } };
+  if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'discover', 'capturePanes', 'hasSession', 'spawnSession', 'killSession', 'resize', 'send', 'sendKeys'] } };
   if (req.method === 'discover') return { id: req.id, ok: true, result: { containers: extra.containers ?? [] } };
   if (req.method === 'capturePanes') return { id: req.id, ok: true, result: { panes: extra.panes ?? {} } };
   if (req.method === 'hasSession') return { id: req.id, ok: true, result: { exists: extra.exists ?? true } };
   if (req.method === 'spawnSession') return { id: req.id, ok: true, result: {} };
   if (req.method === 'killSession') return { id: req.id, ok: true, result: {} };
   if (req.method === 'resize') return { id: req.id, ok: true, result: { ok: true, code: 0, stdout: '', stderr: '' } };
+  if (req.method === 'send') return { id: req.id, ok: true, result: { ok: true, code: 0, stdout: '', stderr: '' } };
+  if (req.method === 'sendKeys') return { id: req.id, ok: true, result: { ok: true, code: 0, stdout: '', stderr: '' } };
   return { id: req.id, ok: false, error: 'unknown method' };
 });
 
@@ -1998,6 +2001,285 @@ describe('resize() via companion (companion-or-fail, raw result shape)', () => {
   });
 });
 
+// WARDEN-888 (the final slice): the send / sendKey RPC clients — the user-input
+// WRITE path. Same raw {host, ok, code, stdout, stderr} contract as resize (so
+// the call site is unchanged) and companion-or-fail (never falls back to raw
+// SSH), PLUS stale-binary graceful degradation: a cached binary predating this
+// slice returns {unsupported:true} so the caller falls back to runTmux (rolling
+// this out must not require every host re-bootstrapped at once).
+
+describe('send() / sendKey() via companion (companion-or-fail + stale-binary degrade)', () => {
+  beforeEach(() => _resetChannelCacheForTests());
+
+  it('send returns the raw {host, ok, code, stdout, stderr} shape on success', async () => {
+    const { deps } = fakeDeps({ spawnChannel: () => healthyTransport() });
+    const res = await companionSend('prod', { container: 'p-worker', session: 'agent', text: 'do the thing' }, {}, {}, deps);
+    assert.strictEqual(res.host, 'prod');
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.code, 0);
+    assert.strictEqual(res.stdout, '');
+    assert.strictEqual(res.stderr, '');
+  });
+
+  it('send sends {container, session, text} with the target fallback applied on the JS side', async () => {
+    let sent = null;
+    const t = fakeTransport((req) => {
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'send'] } };
+      if (req.method === 'send') { sent = req.params; return { id: req.id, ok: true, result: { ok: true, code: 0, stdout: '', stderr: '' } }; }
+      return { id: req.id, ok: false, error: 'unknown method' };
+    });
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    // yatfa chat: container + session + text carried verbatim.
+    await companionSend('prod', { container: 'p-worker', session: 'agent', text: 'hello\nworld' }, {}, {}, deps);
+    assert.deepStrictEqual(sent, { container: 'p-worker', session: 'agent', text: 'hello\nworld' });
+    // empty session -> target falls back to container; container null when unset.
+    await companionSend('prod', { container: 'c1', session: '', text: 'x' }, {}, {}, deps);
+    assert.strictEqual(sent.session, 'c1', 'empty session falls back to container');
+    await companionSend('prod', { text: 'x' }, {}, {}, deps);
+    assert.strictEqual(sent.session, 'agent', 'no container/session -> agent');
+    assert.strictEqual(sent.container, null, 'no container -> null');
+  });
+
+  it('send is companion-or-fail: a dead channel surfaces {ok:false, code:-1}, NOT a raw-ssh fallback', async () => {
+    const { deps } = fakeDeps({
+      run: async () => ({ ok: false, code: 255, stderr: 'Permission denied (publickey).' }),
+    });
+    const res = await companionSend('prod', { container: 'p-worker', session: 'agent', text: 'x' }, {}, {}, deps);
+    assert.strictEqual(res.ok, false);
+    assert.strictEqual(res.code, -1);
+    assert.strictEqual(res.stdout, '');
+    assert.ok(res.stderr.includes('companion'), `error names the companion: ${res.stderr}`);
+    assert.ok(res.stderr.includes('WARDEN_COMPANION_TRANSPORT=0'),
+      `bootstrap error must tell the user how to opt out: ${res.stderr}`);
+  });
+
+  it('send RPC error ({ok:false}) propagates as {ok:false} without fallback', async () => {
+    const { deps } = fakeDeps({
+      spawnChannel: () => fakeTransport((req) =>
+        req.method === 'ping'
+          ? { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'send'] } }
+          : req.method === 'send'
+            ? { id: req.id, ok: false, error: "send failed: can't find session" }
+            : null), // send never gets a success reply
+    });
+    const res = await companionSend('prod', { container: 'p-worker', session: 'agent', text: 'x' }, {}, { timeout: 60 }, deps);
+    assert.strictEqual(res.ok, false);
+    assert.ok(res.stderr.includes("can't find session"), res.stderr);
+  });
+
+  it('send degrades on a STALE binary (no send in methods) -> {unsupported:true}, no send RPC issued', async () => {
+    const seen = [];
+    const stale = fakeTransport((req) => {
+      seen.push(req.method);
+      // A binary predating WARDEN-888 advertises every op EXCEPT send/sendKeys.
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'discover', 'capturePanes', 'hasSession', 'resize'] } };
+      return { id: req.id, ok: true, result: {} };
+    });
+    const { deps } = fakeDeps({ spawnChannel: () => stale });
+    const res = await companionSend('prod', { container: 'p-worker', session: 'agent', text: 'x' }, {}, {}, deps);
+    assert.strictEqual(res.unsupported, true, 'stale binary -> unsupported sentinel so the caller falls back to runTmux');
+    assert.ok(!res.ok, 'unsupported is NOT a success');
+    assert.ok(!seen.includes('send'), 'never sent send to a stale binary');
+  });
+
+  it('send (local) host is refused (companion serves remote hosts only)', async () => {
+    const res = await companionSend('(local)', { container: null, session: 'agent', text: 'x' }, {});
+    assert.strictEqual(res.ok, false);
+    assert.ok(/local/.test(res.stderr));
+  });
+
+  it('sendKey returns the raw shape on success and sends the already-validated key', async () => {
+    let sent = null;
+    const t = fakeTransport((req) => {
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'sendKeys'] } };
+      if (req.method === 'sendKeys') { sent = req.params; return { id: req.id, ok: true, result: { ok: true, code: 0, stdout: '', stderr: '' } }; }
+      return { id: req.id, ok: false, error: 'unknown method' };
+    });
+    const { deps } = fakeDeps({ spawnChannel: () => t });
+    const res = await companionSendKey('prod', { container: 'p-worker', session: 'agent', key: 'C-c' }, {}, {}, deps);
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.code, 0);
+    assert.deepStrictEqual(sent, { container: 'p-worker', session: 'agent', key: 'C-c' });
+  });
+
+  it('sendKey degrades on a stale binary (no sendKeys in methods) -> {unsupported:true}', async () => {
+    const stale = fakeTransport((req) => {
+      if (req.method === 'ping') return { id: req.id, ok: true, result: { version: TEST_VER, methods: ['ping', 'resize'] } };
+      return { id: req.id, ok: true, result: {} };
+    });
+    const { deps } = fakeDeps({ spawnChannel: () => stale });
+    const res = await companionSendKey('prod', { container: 'p-worker', session: 'agent', key: 'Enter' }, {}, {}, deps);
+    assert.strictEqual(res.unsupported, true);
+  });
+});
+
+// ---------------------- write-path routing over the companion ----------------
+// WARDEN-888: the routing change lives in src/tmux.js (send / sendKey), tested
+// here alongside the rest of the transport surface. Drives the REAL exported
+// functions through injected companion clients (no real ssh) and asserts the
+// parity contract: under the flag a REMOTE host routes through the companion;
+// LOCAL and the flag-off path keep runTmux byte-for-byte; a stale binary falls
+// back to runTmux; a dead channel throws (companion-or-fail).
+
+describe('write-path routing over the companion (WARDEN-888 parity)', () => {
+  const remoteChat = { host: 'prod-1', container: 'p-worker', session: 'agent' };
+  const localChat = { host: '(local)', session: 'agent' };
+
+  beforeEach(() => { process.env.WARDEN_COMPANION_TRANSPORT = '1'; });
+  afterEach(() => {
+    if (ORIG_COMPANION_ENV === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = ORIG_COMPANION_ENV;
+  });
+
+  it('send under the flag routes through the companion, NOT runTmux', async () => {
+    let runTmuxCalls = 0;
+    let rpcCalls = 0;
+    await tmuxSend(remoteChat, {}, 'a directive', {
+      runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+      companionSend: async () => { rpcCalls++; return { host: 'prod-1', ok: true, code: 0, stdout: '', stderr: '' }; },
+      isCompanionTransportEnabled: () => true,
+    });
+    assert.strictEqual(rpcCalls, 1, 'remote send under the flag routes through the companion');
+    assert.strictEqual(runTmuxCalls, 0, 'remote send under the flag does NOT call runTmux');
+  });
+
+  it('send under the flag still throws on a real companion failure (companion-or-fail, no runTmux fallback)', async () => {
+    let runTmuxCalls = 0;
+    await assert.rejects(
+      () => tmuxSend(remoteChat, {}, 'x', {
+        runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+        companionSend: async () => ({ host: 'prod-1', ok: false, code: -1, stdout: '', stderr: "can't find session" }),
+        isCompanionTransportEnabled: () => true,
+      }),
+      /can't find session/,
+    );
+    assert.strictEqual(runTmuxCalls, 0, 'a dead channel does NOT fall back to runTmux');
+  });
+
+  it('send falls back to runTmux when the host binary is stale ({unsupported:true})', async () => {
+    let runTmuxCalls = 0;
+    let rpcCalls = 0;
+    const calls = [];
+    const r = await tmuxSend(remoteChat, {}, 'just one line', {
+      runTmux: async (chat, args) => { runTmuxCalls++; calls.push(args); return { ok: true, code: 0, stdout: '', stderr: '' }; },
+      companionSend: async () => { rpcCalls++; return { host: 'prod-1', unsupported: true }; },
+      isCompanionTransportEnabled: () => true,
+    });
+    assert.strictEqual(rpcCalls, 1, 'the companion was consulted first');
+    assert.strictEqual(runTmuxCalls, 2, 'stale binary -> fell back to runTmux (single-line: -l then Enter)');
+    assert.deepStrictEqual(calls[0], ['send-keys', '-t', 'agent', '-l', 'just one line'], 'fallback used the unchanged default argv');
+    assert.strictEqual(r, true);
+  });
+
+  it('send LOCAL still uses runTmux (never the companion), even under the flag', async () => {
+    let runTmuxCalls = 0;
+    let companionCalls = 0;
+    await tmuxSend(localChat, {}, 'x', {
+      runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+      companionSend: async () => { companionCalls++; return { host: '(local)', ok: true }; },
+      isCompanionTransportEnabled: () => true,
+    });
+    assert.strictEqual(runTmuxCalls, 2, 'local send uses runTmux (single-line: -l then Enter)');
+    assert.strictEqual(companionCalls, 0, 'local send does NOT call the companion');
+  });
+
+  it('sendKey under the flag routes through the companion, NOT runTmux', async () => {
+    let runTmuxCalls = 0;
+    let rpcCalls = 0;
+    await tmuxSendKey(remoteChat, {}, 'C-c', {
+      runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+      companionSendKey: async () => { rpcCalls++; return { host: 'prod-1', ok: true, code: 0, stdout: '', stderr: '' }; },
+      isCompanionTransportEnabled: () => true,
+    });
+    assert.strictEqual(rpcCalls, 1, 'remote sendKey routes through the companion');
+    assert.strictEqual(runTmuxCalls, 0, 'remote sendKey does NOT call runTmux');
+  });
+
+  it('sendKey validates ALLOWED_KEYS on the JS path for BOTH branches (trust boundary stays JS-side)', async () => {
+    // An unsupported key is rejected before any transport is consulted — even with
+    // the companion enabled and a healthy client standing by.
+    const companionSendKey = async () => { throw new Error('companion should not be reached for an invalid key'); };
+    await assert.rejects(
+      () => tmuxSendKey(remoteChat, {}, 'C-a-INVALID', { companionSendKey, isCompanionTransportEnabled: () => true }),
+      /unsupported key/,
+    );
+  });
+
+  it('sendKey falls back to runTmux when the host binary is stale ({unsupported:true})', async () => {
+    let runTmuxCalls = 0;
+    let captured = null;
+    await tmuxSendKey(remoteChat, {}, 'Enter', {
+      runTmux: async (chat, args) => { runTmuxCalls++; captured = args; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+      companionSendKey: async () => ({ host: 'prod-1', unsupported: true }),
+      isCompanionTransportEnabled: () => true,
+    });
+    assert.strictEqual(runTmuxCalls, 1, 'stale binary -> fell back to runTmux');
+    assert.deepStrictEqual(captured, ['send-keys', '-t', 'agent', 'Enter'], 'fallback used the unchanged default argv');
+  });
+
+  it('sendKey LOCAL still uses runTmux (never the companion)', async () => {
+    let runTmuxCalls = 0;
+    let companionCalls = 0;
+    await tmuxSendKey(localChat, {}, 'Enter', {
+      runTmux: async () => { runTmuxCalls++; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+      companionSendKey: async () => { companionCalls++; return { host: '(local)', ok: true }; },
+      isCompanionTransportEnabled: () => true,
+    });
+    assert.strictEqual(runTmuxCalls, 1);
+    assert.strictEqual(companionCalls, 0);
+  });
+});
+
+describe('write-path routing: the default path (flag off) is byte-for-byte unchanged', () => {
+  const remoteChat = { host: 'prod-1', container: 'p-worker', session: 'agent' };
+
+  afterEach(() => {
+    if (ORIG_COMPANION_ENV === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = ORIG_COMPANION_ENV;
+  });
+
+  it('flag OFF -> send uses runTmux and the argv is unchanged (single-line)', async () => {
+    delete process.env.WARDEN_COMPANION_TRANSPORT;
+    let runTmuxCalls = 0;
+    let companionCalls = 0;
+    let captured = null;
+    const runTmux = async (chat, args) => { runTmuxCalls++; captured = args; return { ok: true, code: 0, stdout: '', stderr: '' }; };
+    await tmuxSend(remoteChat, {}, 'one line', {
+      runTmux,
+      companionSend: async () => { companionCalls++; return { host: 'prod-1', ok: true }; },
+      isCompanionTransportEnabled: () => false,
+    });
+    assert.strictEqual(runTmuxCalls, 2, 'single-line: send-keys -l then Enter');
+    assert.strictEqual(companionCalls, 0, 'flag OFF -> companion not consulted');
+    assert.deepStrictEqual(captured, ['send-keys', '-t', 'agent', 'Enter'], 'argv byte-for-byte unchanged');
+  });
+
+  it('flag OFF -> send uses runTmux and the multiline bracketed-paste argv is unchanged', async () => {
+    delete process.env.WARDEN_COMPANION_TRANSPORT;
+    const calls = [];
+    const runTmux = async (chat, args) => { calls.push(args); return { ok: true, code: 0, stdout: '', stderr: '' }; };
+    await tmuxSend(remoteChat, {}, 'line1\nline2', {
+      runTmux,
+      companionSend: async () => { throw new Error('companion should not be reached with the flag off'); },
+      isCompanionTransportEnabled: () => false,
+    });
+    assert.strictEqual(calls[0][0], 'set-buffer');
+    assert.ok(calls[1].includes('-p') && calls[1].includes('-d'), 'bracketed paste flags preserved');
+    assert.deepStrictEqual(calls[2], ['send-keys', '-t', 'agent', 'Enter']);
+  });
+
+  it('flag OFF -> sendKey uses runTmux and the argv is unchanged', async () => {
+    delete process.env.WARDEN_COMPANION_TRANSPORT;
+    let captured = null;
+    await tmuxSendKey(remoteChat, {}, 'C-c', {
+      runTmux: async (chat, args) => { captured = args; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+      companionSendKey: async () => { throw new Error('companion should not be reached with the flag off'); },
+      isCompanionTransportEnabled: () => false,
+    });
+    assert.deepStrictEqual(captured, ['send-keys', '-t', 'agent', 'C-c'], 'argv byte-for-byte unchanged');
+  });
+});
+
 // ---------------------- control-plane routing over the companion ----------------
 // WARDEN-409: the routing change lives in src/tmux.js (resize), tested here
 // alongside the rest of the transport surface. Drives
@@ -2212,6 +2494,8 @@ function realBinaryTransport() {
       assert.ok(res.methods.includes('capturePanes'), 'ping advertises the capturePanes RPC');
       assert.ok(res.methods.includes('hasSession'), 'ping advertises the hasSession RPC (WARDEN-382)');
       assert.ok(res.methods.includes('resize'), 'ping advertises the resize RPC (WARDEN-409)');
+      assert.ok(res.methods.includes('send'), 'ping advertises the send RPC (WARDEN-888)');
+      assert.ok(res.methods.includes('sendKeys'), 'ping advertises the sendKeys RPC (WARDEN-888)');
     } finally {
       ch.kill();
     }
@@ -2375,6 +2659,90 @@ function realBinaryTransport() {
         assert.strictEqual(rz.ok, true, 'resize against a live session -> ok:true');
         assert.strictEqual(rz.code, 0, 'resize exit code carried in the raw result');
         assert.strictEqual(rz.stdout, '', 'resize writes no stdout');
+      } finally {
+        ch.kill();
+      }
+    } finally {
+      spawnSync(TMUX_BIN, ['kill-session', '-t', session], { encoding: 'utf8' });
+    }
+  });
+
+  // WARDEN-888 (the final slice) parity test: the Go companion runs the user-
+  // input WRITE path LOCALLY via bash -lc against a REAL tmux session and returns
+  // the raw {ok, code, stdout, stderr} shape. send lands a single-line marker
+  // (send-keys -l + Enter) AND a multiline block (set-buffer / paste-buffer -p -d
+  // / send-keys Enter) intact; sendKeys runs send-keys -t <session> <key> against
+  // the live session. Proves the atomic host-side script works end-to-end on a
+  // real tmux server (the docker-exec path is the same code with a prefix).
+  // Skipped unless tmux + the binary are available.
+  function waitForMarker(session, marker) {
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      const cap = spawnSync(TMUX_BIN, ['capture-pane', '-t', session, '-p'], { encoding: 'utf8' });
+      if ((cap.stdout || '').includes(marker)) return cap.stdout;
+      // busy-wait a few ms — send-keys is synchronous, but the shell's echo of the
+      // typed line can straddle a back-to-back capture (the render race WARDEN-413
+      // documented). A short poll eliminates that ~5% flake.
+      const start = Date.now(); while (Date.now() - start < 20) { /* spin */ }
+    }
+    return spawnSync(TMUX_BIN, ['capture-pane', '-t', session, '-p'], { encoding: 'utf8' }).stdout;
+  }
+
+  (canCapture ? it : it.skip)('send: real binary types a single-line directive into a live tmux session over stdio', async () => {
+    const session = uniqueSession();
+    const setup = spawnSync(TMUX_BIN, ['new-session', '-d', '-s', session], { encoding: 'utf8' });
+    assert.strictEqual(setup.status, 0, `tmux new-session failed: ${setup.stderr}`);
+    try {
+      const ch = new CompanionChannel('local-binary', realBinaryTransport());
+      try {
+        const res = await ch.call('send', { container: '', session, text: 'WARDEN_SEND_E2E_SINGLE_9' }, { timeout: 8000 });
+        assert.ok(res && typeof res === 'object', 'send response is an object');
+        assert.strictEqual(res.ok, true, 'send against a live session -> ok:true');
+        assert.strictEqual(res.code, 0, 'send exit code carried in the raw result');
+        const pane = waitForMarker(session, 'WARDEN_SEND_E2E_SINGLE_9');
+        assert.ok(pane.includes('WARDEN_SEND_E2E_SINGLE_9'),
+          `the typed single-line marker landed on the pane; got:\n${pane}`);
+      } finally {
+        ch.kill();
+      }
+    } finally {
+      spawnSync(TMUX_BIN, ['kill-session', '-t', session], { encoding: 'utf8' });
+    }
+  });
+
+  (canCapture ? it : it.skip)('send: real binary delivers a multiline block as one bracketed paste over stdio', async () => {
+    const session = uniqueSession();
+    const setup = spawnSync(TMUX_BIN, ['new-session', '-d', '-s', session], { encoding: 'utf8' });
+    assert.strictEqual(setup.status, 0, `tmux new-session failed: ${setup.stderr}`);
+    try {
+      const ch = new CompanionChannel('local-binary', realBinaryTransport());
+      try {
+        const res = await ch.call('send', { container: '', session, text: 'WARDEN_MULTI_ONE\nWARDEN_MULTI_TWO' }, { timeout: 8000 });
+        assert.strictEqual(res.ok, true, 'multiline send -> ok:true');
+        const pane = waitForMarker(session, 'WARDEN_MULTI_TWO');
+        assert.ok(pane.includes('WARDEN_MULTI_ONE') && pane.includes('WARDEN_MULTI_TWO'),
+          `the whole multiline block landed intact; got:\n${pane}`);
+      } finally {
+        ch.kill();
+      }
+    } finally {
+      spawnSync(TMUX_BIN, ['kill-session', '-t', session], { encoding: 'utf8' });
+    }
+  });
+
+  (canCapture ? it : it.skip)('sendKeys: real binary sends a special key into a live tmux session over stdio', async () => {
+    const session = uniqueSession();
+    const setup = spawnSync(TMUX_BIN, ['new-session', '-d', '-s', session], { encoding: 'utf8' });
+    assert.strictEqual(setup.status, 0, `tmux new-session failed: ${setup.stderr}`);
+    try {
+      const ch = new CompanionChannel('local-binary', realBinaryTransport());
+      try {
+        // C-c is an ALLOWED_KEY; the host runs send-keys -t <session> C-c verbatim
+        // (JS validated already). ok:true proves the argv ran against the live session.
+        const res = await ch.call('sendKeys', { container: '', session, key: 'C-c' }, { timeout: 8000 });
+        assert.ok(res && typeof res === 'object', 'sendKeys response is an object');
+        assert.strictEqual(res.ok, true, 'sendKeys against a live session -> ok:true');
+        assert.strictEqual(res.code, 0);
       } finally {
         ch.kill();
       }
