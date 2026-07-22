@@ -219,6 +219,18 @@ export interface AttentionItem {
   state: string;
   signal?: string | null;
   /**
+   * WARDEN-877: the raw anchorable line text a deep-link should jump the pane's
+   * scrollback to, reusing the global-search `externalSearchQuery→findNext` mechanism
+   * (threaded through App's `openChat(id, anchor?)` chokepoint). This is the EXACT line
+   * that appears in the scrollback, NOT the formatted `signal`: `fromCustom` folds the
+   * matched line into a `'line' (pattern: …)` signal string that would NOT match the raw
+   * scrollback, so a separate anchor is genuinely required. Populated from the source
+   * `signal` in `fromRow` and from `customMatch.line` in `fromCustom`. Absent for
+   * health-group `fromChat` items (Chat rows carry no triggering line) — those stay
+   * focus-only. Absent → `openChat(id)` behaves byte-for-bit as before (graceful no-op).
+   */
+  anchor?: string;
+  /**
    * WARDEN-587: the epoch-ms this item entered its current attention state (copied from
    * the source `AgentStateRow.enteredAt`), so the directed Callout can show the same
    * live "stuck 2h 14m" duration suffix the section rows do. Absent for health-group
@@ -294,6 +306,10 @@ export function rankAttention(rollup: AttentionRollup): {
     // WARDEN-587: carry the enteredAt stamp through so the directed Callout can render
     // the same live duration suffix the section rows do.
     ...(typeof a.enteredAt === 'number' ? { enteredAt: a.enteredAt } : {}),
+    // WARDEN-877: the raw triggering line is the deep-link anchor (reuses findNext). An
+    // empty-string signal is treated as absent (it would not usefully match) — same rule
+    // attentionReason applies, so a vague/empty signal falls through to focus-only.
+    ...(a.signal ? { anchor: a.signal } : {}),
   });
   // WARDEN-540: a custom-pattern match is its own AttentionItem — state 'custom'
   // (NOT the pane's underlying state, which is irrelevant to this signal) with the
@@ -305,6 +321,10 @@ export function rankAttention(rollup: AttentionRollup): {
     state: 'custom',
     signal: a.customMatch ? `'${a.customMatch.line}' (pattern: ${a.customMatch.pattern})` : null,
     ...(typeof a.enteredAt === 'number' ? { enteredAt: a.enteredAt } : {}),
+    // WARDEN-877: anchor on the EXACT matched line — NOT the formatted signal above
+    // (which wraps it in quotes + a pattern suffix that would not findNext-match the raw
+    // scrollback). This is the load-bearing reason anchor is a SEPARATE field.
+    ...(a.customMatch ? { anchor: a.customMatch.line } : {}),
   });
 
   // `directives`/`errors` are raw event counts with no single pane to deep-link, so
