@@ -202,6 +202,30 @@ describe('applyConfigPut — PUT guards derived from the registry', () => {
     assert.strictEqual(cfg.telemetryAuthToken, 'new');
   });
 
+  it('explicit null CLEARS a stored secret (the Remove path — WARDEN-883)', () => {
+    // All three secret fields clear to '' on an explicit null, mirroring the
+    // nullablePositiveNumber null path. buildGetResponse then reads {key}Set as
+    // false (Boolean('') === false), so the field flips to "Not set".
+    const cfg = {
+      telemetryAuthToken: 'tok',
+      webhookSecret: 'sec',
+      llm: { authToken: 'sk' },
+    };
+    applyConfigPut(cfg, {
+      telemetryAuthToken: null,
+      webhookSecret: null,
+      llm: { authToken: null },
+    });
+    assert.strictEqual(cfg.telemetryAuthToken, '', 'top-level secret cleared');
+    assert.strictEqual(cfg.webhookSecret, '', 'top-level secret cleared');
+    assert.strictEqual(cfg.llm.authToken, '', 'nested llm secret cleared');
+    // After clearing, GET reports each as unset.
+    const out = buildGetResponse(cfg, { companionEnvOverridden: false });
+    assert.strictEqual(out.telemetryAuthTokenSet, false);
+    assert.strictEqual(out.webhookSecretSet, false);
+    assert.strictEqual(out.llm.authTokenSet, false);
+  });
+
   it('ignores unknown fields and rejects malformed values (PATCH semantics)', () => {
     const cfg = { notifyErrors: true, tmuxSession: 'agent', observerConfirmMode: 'always' };
     applyConfigPut(cfg, { bogusField: 123, notifyErrors: 'yes', tmuxSession: 42, observerConfirmMode: 'bogus' });

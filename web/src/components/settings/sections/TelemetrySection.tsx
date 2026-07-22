@@ -2,10 +2,12 @@
 // write-only receiver auth token + the live test-connection probe + runtime
 // schema-drift status. Extracted verbatim from SettingsPage (WARDEN-664);
 // behavior is unchanged.
+import { useState } from 'react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { TelemetryTransparency } from '@/components/TelemetryTransparency';
 import { describeTelemetryTestVerdict, type TelemetryTestVerdict } from '@/lib/telemetry/testConnection';
 import { deriveTelemetryRuntimeStatus } from '@/lib/telemetry/runtimeStatus';
@@ -27,6 +29,11 @@ export interface TelemetrySectionProps {
   telemetryAuthTokenTail: string | null;
   telemetryAuthTokenInput: string;
   setTelemetryAuthTokenInput: (v: string) => void;
+  // WARDEN-883 — the Remove action queues a clear (pendingClear → save sends
+  // explicit null). undoRemove cancels a queued clear before Save.
+  telemetryAuthTokenPendingClear: boolean;
+  removeTelemetryAuthToken: () => void;
+  undoRemoveTelemetryAuthToken: () => void;
   // Live test-connection probe (WARDEN-595) — never persisted.
   telemetryTestLoading: boolean;
   telemetryTestVerdict: TelemetryTestVerdict | null;
@@ -44,6 +51,9 @@ export function TelemetrySection({
   telemetryAuthTokenTail,
   telemetryAuthTokenInput,
   setTelemetryAuthTokenInput,
+  telemetryAuthTokenPendingClear,
+  removeTelemetryAuthToken,
+  undoRemoveTelemetryAuthToken,
   telemetryTestLoading,
   telemetryTestVerdict,
   setTelemetryTestVerdict,
@@ -56,7 +66,10 @@ export function TelemetrySection({
   // still retrying) wins over the default sending status. Gated on baseEnabled in
   // the JSX below so NEITHER runtime banner shows when telemetry is off.
   const runtimeKind = deriveTelemetryRuntimeStatus(telemetryRuntimeStatus).kind;
+  // WARDEN-883 — confirm the irreversible token removal before queueing it.
+  const [confirmRemoveOpen, setConfirmRemoveOpen] = useState(false);
   return (
+    <>
     <SettingsSection title="Telemetry" className={hidden ? 'hidden' : undefined}>
       <p className="text-xs text-muted-foreground">
         Optional, off by default. Help improve warden by sending
@@ -163,22 +176,56 @@ export function TelemetrySection({
 
       <div className="flex flex-col gap-2">
         <Label htmlFor="telemetryAuthToken">Receiver auth token (optional)</Label>
-        <Input
-          id="telemetryAuthToken"
-          type="password"
-          value={telemetryAuthTokenInput}
-          onChange={(e) => {
-            setTelemetryAuthTokenInput(e.target.value);
-            // An edited token invalidates any prior probe result.
-            setTelemetryTestVerdict(null);
-          }}
-          placeholder={telemetryAuthTokenSet ? `••••• set${telemetryAuthTokenTail ? ` (…${telemetryAuthTokenTail})` : ''}` : 'Not set'}
-        />
-        <p className="text-xs text-muted-foreground">
-          {telemetryAuthTokenSet
-            ? `A token is saved${telemetryAuthTokenTail ? ` (ends …${telemetryAuthTokenTail})` : ''}. It is sent as Authorization: Bearer so a receiver that requires auth (AUTH_TOKEN) accepts your events. Type a new one to replace it; leave blank to keep it.`
-            : 'Optional. Sent as Authorization: Bearer when your receiver is gated by a shared secret (AUTH_TOKEN). Leave blank if your receiver runs open.'}
-        </p>
+        <div className="flex items-center gap-2">
+          <Input
+            id="telemetryAuthToken"
+            type="password"
+            className="flex-1"
+            value={telemetryAuthTokenInput}
+            onChange={(e) => {
+              setTelemetryAuthTokenInput(e.target.value);
+              // An edited token invalidates any prior probe result.
+              setTelemetryTestVerdict(null);
+            }}
+            placeholder={
+              telemetryAuthTokenPendingClear
+                ? 'Will be removed on Save'
+                : telemetryAuthTokenSet
+                  ? `••••• set${telemetryAuthTokenTail ? ` (…${telemetryAuthTokenTail})` : ''}`
+                  : 'Not set'
+            }
+          />
+          {/* WARDEN-883 — Remove surfaces only when a token is stored and not
+              already queued for removal. The confirm dialog gates the click. */}
+          {telemetryAuthTokenSet && !telemetryAuthTokenPendingClear && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              onClick={() => setConfirmRemoveOpen(true)}
+            >
+              Remove
+            </Button>
+          )}
+        </div>
+        {telemetryAuthTokenPendingClear ? (
+          <p className="text-xs text-amber-600 dark:text-amber-400">
+            The saved token will be removed when you press Save.{' '}
+            <button
+              type="button"
+              className="underline cursor-pointer"
+              onClick={undoRemoveTelemetryAuthToken}
+            >
+              Undo
+            </button>
+          </p>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            {telemetryAuthTokenSet
+              ? `A token is saved${telemetryAuthTokenTail ? ` (ends …${telemetryAuthTokenTail})` : ''}. It is sent as Authorization: Bearer so a receiver that requires auth (AUTH_TOKEN) accepts your events. Type a new one to replace it; leave blank to keep it.`
+              : 'Optional. Sent as Authorization: Bearer when your receiver is gated by a shared secret (AUTH_TOKEN). Leave blank if your receiver runs open.'}
+          </p>
+        )}
       </div>
 
       {/* WARDEN-595 — config-time "Test connection" probe. The destination
@@ -233,5 +280,17 @@ export function TelemetrySection({
         telemetryExtendedEnabled={config.telemetryExtendedEnabled}
       />
     </SettingsSection>
+
+    {/* WARDEN-883 — confirm the token removal before queueing the clear. */}
+    <ConfirmDialog
+      open={confirmRemoveOpen}
+      onOpenChange={(o) => { if (!o) setConfirmRemoveOpen(false); }}
+      title="Remove saved receiver auth token?"
+      description="The stored telemetry auth token will be deleted from config.json, and events will be sent without an Authorization: Bearer header (works against an AUTH_TOKEN-unset receiver). You'll need to re-enter a token if your receiver requires one. Applies when you press Save."
+      confirmLabel="Remove token"
+      destructive
+      onConfirm={() => { removeTelemetryAuthToken(); setConfirmRemoveOpen(false); }}
+    />
+    </>
   );
 }

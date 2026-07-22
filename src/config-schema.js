@@ -188,7 +188,8 @@ export const CONFIG_FIELDS = [
       { key: 'baseUrl', type: 'string', get: 'orEmpty' },
       { key: 'maxTokens', type: 'nullablePositiveNumber', get: 'numberOrNull' },
       // null clears to "use the llm.js default (2048)"; a finite positive int sets it.
-      // authToken is a SECRET: GET masks it (Set + Tail only), PUT is no-clobber.
+      // authToken is a SECRET: GET masks it (Set + Tail only), PUT is no-clobber
+      // (non-empty overwrites; explicit null CLEARS it — WARDEN-883).
       { key: 'authToken', type: 'secret' },
     ],
   },
@@ -338,7 +339,8 @@ export const CONFIG_FIELDS = [
     // `Authorization: Bearer <token>`. This is a SECRET: GET never returns it in
     // cleartext (only a set + last-4 mask), and PUT only overwrites it on a
     // non-empty value (no-clobber — mirroring llm.authToken / webhookSecret) so
-    // an untouched password field preserves the stored token.
+    // an untouched password field preserves the stored token. An explicit null
+    // CLEARS it (WARDEN-883) — the Settings Remove action.
   },
   {
     key: 'webhookUrl',
@@ -377,7 +379,8 @@ export const CONFIG_FIELDS = [
     order: 22,
     //   webhookSecret — shared secret (write-only on the wire: sent as
     //                   Authorization: Bearer + X-Webhook-Secret). No-clobber on
-    //                   save, mirroring llm.authToken.
+    //                   save (non-empty overwrites; explicit null CLEARS it —
+    //                   WARDEN-883), mirroring llm.authToken.
   },
   {
     key: 'webhookAlertAttention',
@@ -713,6 +716,12 @@ function applyField(d, target, value) {
     case 'secret':
       // NO-CLOBBER: only a non-empty string overwrites the stored secret, so an
       // untouched password field (GET never seeds cleartext) survives a save.
+      // An explicit null CLEARS the stored secret to '' (WARDEN-883) — the Remove
+      // control mirrors the nullablePositiveNumber null path (above) so a user
+      // can fall back to "no token" without hand-editing config.json. The '' /
+      // undefined / other branches below are byte-identical to the prior behavior
+      // (still no-clobber), so an untouched or blank field is left as-is.
+      if (value === null) { target[key] = ''; return; }
       if (typeof value === 'string' && value.length > 0) target[key] = value;
       return;
     default:

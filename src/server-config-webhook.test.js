@@ -188,6 +188,20 @@ describe('/api/config webhook secret — masking + no-clobber (acceptance #3)', 
     const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     assert.strictEqual(onDisk.webhookSecret, secret, 'empty string did not clear the secret');
   });
+
+  it('explicit null CLEARS the stored webhookSecret (the Remove action — WARDEN-883)', async () => {
+    const secret = 'sec_remove_me_3456';
+    await put({ webhookSecret: secret });
+    assert.strictEqual((await get()).webhookSecretSet, true, 'precondition: secret is set');
+    // The Remove control sends the field as explicit null (NOT omitted, NOT '').
+    await put({ webhookSecret: null });
+    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    assert.strictEqual(onDisk.webhookSecret, '', 'cleartext cleared on disk');
+    const body = await get();
+    assert.strictEqual(body.webhookSecretSet, false, 'GET reports the secret as unset');
+    assert.strictEqual(body.webhookSecretTail, null, 'no tail once cleared');
+    assert.ok(!('webhookSecret' in body), 'still no cleartext secret in the GET response');
+  });
 });
 
 describe('/api/config webhook fields — type guards (acceptance #6, no mutation)', () => {

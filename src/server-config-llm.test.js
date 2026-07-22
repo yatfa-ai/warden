@@ -154,6 +154,33 @@ describe('/api/config llm (Observer model — WARDEN-350)', () => {
     assert.strictEqual(onDisk.llm.authToken, 'sk-replaced-9999', 'empty string must not blank the stored secret');
   });
 
+  it('PUT with llm.authToken: null CLEARS the stored token (the Remove action — WARDEN-883)', async () => {
+    const token = 'sk-clear-on-remove-4242';
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ llm: { authToken: token } }),
+    });
+    assert.strictEqual(
+      (await (await fetch(`${baseUrl}/api/config`)).json()).llm.authTokenSet,
+      true,
+      'precondition: token is set',
+    );
+    // The Remove control sends the nested field as explicit null (NOT omitted, NOT '').
+    const res = await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ llm: { authToken: null } }),
+    });
+    assert.strictEqual(res.status, 200);
+    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    assert.strictEqual(onDisk.llm.authToken, '', 'cleartext cleared on disk (nested path)');
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.llm.authTokenSet, false, 'GET reports the token as unset');
+    assert.strictEqual(after.llm.authTokenTail, null, 'no tail once cleared');
+    assert.ok(!('authToken' in after.llm), 'still no cleartext token in the GET response');
+  });
+
   it('PUT with maxTokens: null clears the override (GET reports null / default)', async () => {
     const res = await fetch(`${baseUrl}/api/config`, {
       method: 'PUT',
