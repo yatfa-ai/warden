@@ -12,6 +12,7 @@
 
 import { useEffect, useState } from 'react';
 import type { HostConnectivity, HostConnectivityStatus } from '@/lib/healthUtils';
+import { normalizeCompanionStatus } from '@/lib/healthUtils';
 
 const POLL_MS = 30_000; // fixed host-dot cadence (see WARDEN-609: option (a))
 const FRESH_MS = 5_000; // a response younger than this is reused as-is
@@ -37,9 +38,16 @@ async function loadHostStatuses(): Promise<void> {
       const data = await res.json();
       const hosts = Array.isArray(data?.hosts) ? data.hosts : [];
       const next: Record<string, HostConnectivity> = {};
-      for (const h of hosts as Array<{ host: string; status?: string; latency_ms?: number | null }>) {
+      for (const h of hosts as Array<{ host: string; status?: string; latency_ms?: number | null; companion?: unknown }>) {
         if (!h || typeof h.host !== 'string') continue;
-        next[h.host] = { status: normalizeStatus(h.status), latency_ms: h.latency_ms ?? null };
+        // WARDEN-878: carry the per-host companion field through when the server
+        // emitted it (present only while the transport is enabled). Absent → the
+        // field stays undefined and the UI renders no companion indicator.
+        next[h.host] = {
+          status: normalizeStatus(h.status),
+          latency_ms: h.latency_ms ?? null,
+          ...(h.companion !== undefined ? { companion: normalizeCompanionStatus(h.companion) } : {}),
+        };
       }
       cache = next;
       lastFetchAt = Date.now();

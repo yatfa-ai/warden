@@ -31,6 +31,7 @@ import {
   CompanionRpcError, getChannel, discover, capturePanes, hasSession, spawnSession, killSession,
   isCompanionTransportEnabled, applyCompanionToggle, loadManifest,
   projectSpawnModel, _resetChannelCacheForTests,
+  getCompanionStatus, getAllCompanionStatuses,
   resize as companionResize,
   // WARDEN-413: pane-delta push (subscribePanes) — event routing, delta cache, subscriptions.
   applyPaneDelta, hasFreshPaneDelta, readPaneDeltas, PANE_DELTA_FRESH_MS,
@@ -1331,6 +1332,127 @@ describe('getChannel / bootstrap orchestration', () => {
     assert.notStrictEqual(second, first, 'got a NEW channel, not the dead one');
     assert.ok(!second.dead, 'the new channel is alive');
     assert.strictEqual(calls.spawnChannel, 2, 'bootstrapped a second time');
+  });
+});
+
+// --- per-host companion transport status (WARDEN-878 / roadmap WARDEN-270) ---
+// The visibility surface: getCompanionStatus is the single source the API layer
+// surfaces on /api/hosts/status. The linchpin correctness property is THE TRAP
+// the ticket calls out: channelCache.delete(host) runs on bootstrap failure, so
+// an errored host leaves NO cache entry — last-error/state CANNOT be derived by
+// reading the cache. The status map captures state at the failure site instead,
+// so a failed host shows its error rather than silently reading "no companion."
+describe('companion transport status (WARDEN-878)', () => {
+  let savedEnv;
+  beforeEach(() => {
+    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+    process.env.WARDEN_COMPANION_TRANSPORT = '1';
+    _resetChannelCacheForTests();
+  });
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
+  });
+
+  it('getCompanionStatus reads inactive while the transport is disabled', () => {
+    process.env.WARDEN_COMPANION_TRANSPORT = '0';
+    assert.deepStrictEqual(getCompanionStatus('any-host'), { state: 'inactive' });
+  });
+
+  it('getCompanionStatus reads inactive for LOCAL (the companion is remote-only)', () => {
+    assert.deepStrictEqual(getCompanionStatus('(local)'), { state: 'inactive' });
+  });
+
+  it('getCompanionStatus reads inactive for a host no companion op has engaged yet', () => {
+    assert.deepStrictEqual(getCompanionStatus('never-touched'), { state: 'inactive' });
+  });
+
+  it('a successful bootstrap -> active with the ping-verified version', async () => {
+    const { deps } = fakeDeps();
+    await getChannel('prod-active', {}, deps);
+    assert.deepStrictEqual(getCompanionStatus('prod-active'), { state: 'active', version: TEST_VER });
+  });
+
+  it('THE TRAP: a FAILED bootstrap leaves no cache entry but status persists as error', async () => {
+    // channelCache.delete(host) runs in getChannel's .catch on bootstrap failure,
+    // so reading the cache alone would show "no companion" for exactly the host
+    // that most needs a status. The status map captures the error at the failure
+    // site instead — surfacing the same actionable message + recovery hint the op
+    // contracts build.
+    const { deps } = fakeDeps({
+      run: async () => ({ ok: false, code: 255, stderr: 'Permission denied (publickey).' }),
+    });
+    await assert.rejects(() => getChannel('prod-errored', {}, deps), (e) => {
+      assert.ok(e instanceof CompanionTransportError);
+      return true;
+    });
+    const status = getCompanionStatus('prod-errored');
+    assert.strictEqual(status.state, 'error');
+    assert.ok(typeof status.lastErrorAt === 'number', 'lastErrorAt is a numeric epoch-ms timestamp');
+    assert.ok(status.lastErrorAt > 0, 'lastErrorAt is positive');
+    assert.ok(Date.now() - status.lastErrorAt < 5000, 'lastErrorAt is recent');
+    assert.ok(status.lastError.includes('bootstrap probe failed'), 'surfaces the actionable error');
+    assert.ok(status.lastError.includes('Permission denied'), 'preserves the underlying stderr');
+    assert.ok(status.lastError.includes('WARDEN_COMPANION_TRANSPORT=0'), 'surfaces the recovery hint');
+    assert.ok(!('version' in status), 'an errored host carries no version');
+  });
+
+  it('a bootstrap that fails at ping (not probe) is still captured as error', async () => {
+    const { deps } = fakeDeps({
+      spawnChannel: () => fakeTransport(() => null), // companion never answers ping
+    });
+    await assert.rejects(() => getChannel('prod-pingfail', {}, deps));
+    const status = getCompanionStatus('prod-pingfail');
+    assert.strictEqual(status.state, 'error');
+    assert.ok(/did not respond to ping/.test(status.lastError), status.lastError);
+  });
+
+  it('bootstrapping is visible while a bootstrap promise is in flight', async () => {
+    // A probe that resolves on demand holds the bootstrap promise in flight; while
+    // it is pending the host reads "bootstrapping" (not "inactive"), then flips to
+    // active once the bootstrap completes.
+    let resolveProbe;
+    const { deps } = fakeDeps({
+      run: () => new Promise((resolve) => { resolveProbe = resolve; }),
+    });
+    const pending = getChannel('prod-booting', {}, deps);
+    // getChannel sets bootstrapping synchronously before returning the promise,
+    // but flush a microtask to be robust against any refactor.
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual(getCompanionStatus('prod-booting').state, 'bootstrapping');
+    // Release the probe so the bootstrap finishes (and the channel teardown stays clean).
+    resolveProbe({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' });
+    await pending;
+    assert.deepStrictEqual(getCompanionStatus('prod-booting'), { state: 'active', version: TEST_VER });
+  });
+
+  it('getAllCompanionStatuses returns the per-host map, empty while disabled', async () => {
+    const { deps } = fakeDeps();
+    await getChannel('prod-all-1', {}, deps);
+    await getChannel('prod-all-2', {}, deps);
+    const all = getAllCompanionStatuses();
+    assert.strictEqual(all['prod-all-1'].state, 'active');
+    assert.strictEqual(all['prod-all-2'].state, 'active');
+    process.env.WARDEN_COMPANION_TRANSPORT = '0';
+    assert.deepStrictEqual(getAllCompanionStatuses(), {}, 'disabled transport -> empty map (no stale leak)');
+  });
+
+  it('a re-bootstrap after a dead channel flips the stale active back through bootstrapping', async () => {
+    // A channel that dies (ssh process exits) is re-bootstrapped on the next
+    // getChannel call. The status must follow: active → bootstrapping → active,
+    // never stuck on a stale "active" once a fresh bootstrap is underway.
+    const { deps } = fakeDeps();
+    const first = await getChannel('prod-redead', {}, deps);
+    assert.strictEqual(getCompanionStatus('prod-redead').state, 'active');
+    first.kill(); // simulate the ssh process exiting
+    let resolveProbe;
+    deps.run = () => new Promise((resolve) => { resolveProbe = resolve; });
+    const pending = getChannel('prod-redead', {}, deps);
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual(getCompanionStatus('prod-redead').state, 'bootstrapping');
+    resolveProbe({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' });
+    await pending;
+    assert.strictEqual(getCompanionStatus('prod-redead').state, 'active');
   });
 });
 

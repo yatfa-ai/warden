@@ -233,3 +233,66 @@ describe('/api/hosts/status HTTP endpoint (real Express app from server.js)', ()
     assert.strictEqual(res.status, 404);
   });
 });
+
+describe('/api/hosts/status companion field (WARDEN-878)', () => {
+  // The endpoint attaches a per-host `companion` field ONLY while the companion
+  // transport is enabled, read at request time (so a toggle flip takes effect on
+  // the next poll). LOCAL always reads inactive (the companion is remote-only).
+  // These boot the real app with the env-var toggle forced on (the operator
+  // override path applyCompanionToggle never clobbers), so no remote hosts are
+  // needed — the (local) host is enough to prove the field is wired + omitted.
+  let httpServer;
+  let baseUrl;
+  let originalHome;
+  let tempHome;
+  let savedEnv;
+
+  before(async () => {
+    savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+    process.env.WARDEN_COMPANION_TRANSPORT = '1';
+    originalHome = process.env.HOME;
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-hosts-companion-'));
+    process.env.HOME = tempHome;
+    const wardenDir = path.join(tempHome, '.yatfa-warden');
+    fs.mkdirSync(wardenDir, { recursive: true });
+    fs.writeFileSync(path.join(wardenDir, 'config.json'), JSON.stringify({ hosts: [] }));
+
+    const { app } = await import('./server.js');
+    httpServer = app.listen(0, '127.0.0.1');
+    await new Promise((resolve, reject) => {
+      httpServer.once('listening', resolve);
+      httpServer.once('error', reject);
+    });
+    baseUrl = `http://127.0.0.1:${httpServer.address().port}`;
+  });
+
+  after(async () => {
+    if (httpServer) await new Promise((r) => httpServer.close(r));
+    if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+    else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  it('attaches companion: {state:"inactive"} to each host while the transport is enabled', async () => {
+    process.env.WARDEN_COMPANION_TRANSPORT = '1';
+    const body = await (await fetch(`${baseUrl}/api/hosts/status`)).json();
+    const local = body.hosts.find((h) => h.host === '(local)');
+    assert.ok(local, 'must include the (local) host');
+    assert.deepStrictEqual(local.companion, { state: 'inactive' },
+      'LOCAL reads inactive (the companion transport is remote-only)');
+  });
+
+  it('omits the companion field entirely while the transport is disabled', async () => {
+    process.env.WARDEN_COMPANION_TRANSPORT = '0';
+    const body = await (await fetch(`${baseUrl}/api/hosts/status`)).json();
+    const local = body.hosts.find((h) => h.host === '(local)');
+    assert.ok(local, 'must include the (local) host');
+    assert.strictEqual(local.companion, undefined,
+      'no companion field when the transport is off (opt-in: nothing to surface)');
+    // The connectivity fields are unaffected — companion is strictly additive.
+    assert.strictEqual(typeof local.status, 'string');
+    assertValidIso(local.last_check);
+  });
+});

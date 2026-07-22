@@ -209,6 +209,22 @@ export class CompanionRpcError extends Error {
   }
 }
 
+// Format the actionable message a thrown channel error carries — the SAME text
+// the op sites (discover/capturePanes/hasSession/…) build inline: a
+// CompanionTransportError's message plus its recovery hint (how to return to the
+// default SSH path), an RPC error's message, or a generic fallback. Centralised
+// so the WARDEN-878 status surface shows byte-identical text to the op contracts
+// (a failed host's tooltip and the op's thrown error read the same). (WARDEN-878)
+function formatCompanionError(host, e) {
+  if (e instanceof CompanionTransportError) {
+    return e.message + (e.recovery ? ` ${e.recovery}` : '');
+  }
+  if (e instanceof CompanionRpcError) {
+    return e.message;
+  }
+  return `companion op failed on ${host}: ${e?.message ?? e}`;
+}
+
 // ------------------------------- RPC channel --------------------------------
 // A CompanionChannel wraps ONE persistent ssh-to-companion process and multiplexes
 // request/response by id. The transport layer (write/onLine/onExit/kill) is
@@ -391,11 +407,59 @@ function streamFileToHost(host, localBinaryPath, remotePath, cfg, spawnFn) {
 
 const channelCache = new Map(); // host -> CompanionChannel
 
+// --------------------- per-host transport status (WARDEN-878) --------------------
+// WARDEN-270 Visibility: the human must be able to see, per host, whether the
+// companion transport is working — active (with version), bootstrapping, or
+// errored (with the actionable last error). Per-host state lives ONLY in the
+// in-memory channelCache while healthy and in THROWN errors when it isn't, so it
+// is nowhere a human can read. Worse, getChannel deletes the cache entry on
+// bootstrap FAILURE (the .catch below), so an ERRORED host leaves NO cache entry:
+// last error/state CANNOT be derived by reading the cache — an approach that
+// "reads the cache, finds nothing for the hosts that most need a status" ships a
+// no-op. This map captures state at the transition sites (bootstrapping → active
+// | error) so a failed host shows its error instead of silently reading "no
+// companion."
+//
+//   state: 'active'        — channel live; version = the ping-verified manifest version
+//        | 'bootstrapping' — a bootstrap promise is in flight
+//        | 'error'         — last bootstrap threw; lastError = actionable message
+//        | 'inactive'      — toggle off, LOCAL, or no op has engaged the host yet
+const companionStatus = new Map(); // host -> { state, version?, lastError?, lastErrorAt? }
+
+// Module-private writer; the only writers are the getChannel bootstrap transitions
+// (bootstrapping/active/error) below. Kept narrow so all status mutation funnels
+// through one place the reachability trace can reason about.
+function setCompanionStatus(host, status) {
+  companionStatus.set(host, status);
+}
+
+// Read one host's companion transport status — the single source the API layer
+// surfaces on /api/hosts/status. Returns {state:'inactive'} when the transport is
+// disabled (toggle off), for LOCAL (the companion is remote-only), or for a host
+// no companion op has engaged yet, so a reader never mistakes "not applicable /
+// not yet" for an error. (WARDEN-878)
+export function getCompanionStatus(host) {
+  if (!isCompanionTransportEnabled()) return { state: 'inactive' };
+  if (host === LOCAL) return { state: 'inactive' };
+  return companionStatus.get(host) ?? { state: 'inactive' };
+}
+
+// Read every host's status (host -> status object). Empty when the transport is
+// disabled (the toggle check short-circuits, so stale entries from a prior
+// enabled-window never leak out while off). (WARDEN-878)
+export function getAllCompanionStatuses() {
+  if (!isCompanionTransportEnabled()) return {};
+  const out = {};
+  for (const [host, status] of companionStatus) out[host] = status;
+  return out;
+}
+
 export function _resetChannelCacheForTests() {
   for (const ch of channelCache.values()) {
     try { if (ch && typeof ch.kill === 'function') ch.kill(); } catch { /* noop */ }
   }
   channelCache.clear();
+  companionStatus.clear(); // WARDEN-878: clear captured per-host status too
 }
 
 // Ping the channel once. Returns {ok:true} | {ok:false, reason:'mismatch', got}
@@ -505,13 +569,36 @@ export async function getChannel(host, cfg = {}, deps = {}) {
     if (typeof existing.then === 'function') return existing; // bootstrap in flight — await it
     if (!existing.dead) return existing;                      // live channel — reuse
   }
+  // WARDEN-878: mark bootstrapping BEFORE the promise is created so the host
+  // reads "bootstrapping" (not "inactive") on the status surface while the first
+  // channel comes up. getChannel runs this body synchronously through to the
+  // cache set below, so a concurrent caller sees the in-flight promise (above)
+  // and never re-sets this.
+  setCompanionStatus(host, { state: 'bootstrapping' });
   const bootstrapPromise = bootstrapChannel(host, cfg, deps)
     .then((channel) => {
       channelCache.set(host, channel);
+      // WARDEN-878: successful bootstrap → active + the version the ping just
+      // verified. pingOnce confirms the host's companion reports manifest.version,
+      // so the active version IS the manifest version (deps.manifest when a test
+      // overrode it, else the cached real manifest — safe to read because a
+      // successful bootstrap just loaded and cached it).
+      const version = deps.manifest?.version ?? loadManifest().version;
+      setCompanionStatus(host, { state: 'active', version });
       return channel;
     })
     .catch((err) => {
       if (channelCache.get(host) === bootstrapPromise) channelCache.delete(host);
+      // WARDEN-878 (THE TRAP): channelCache.delete above means an errored host
+      // leaves NO cache entry — reading the cache alone would show "no companion"
+      // for exactly the hosts that most need a status. Capture the error at the
+      // failure site instead, surfacing the same actionable message + recovery
+      // hint the op contracts build.
+      setCompanionStatus(host, {
+        state: 'error',
+        lastError: formatCompanionError(host, err),
+        lastErrorAt: Date.now(),
+      });
       throw err;
     });
   channelCache.set(host, bootstrapPromise);

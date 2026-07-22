@@ -18,6 +18,7 @@ import {
   type HealthStateValue,
   type HostHealthGroup,
   type ProjectHealthGroup,
+  type CompanionStatus,
 } from '@/lib/healthUtils';
 import { StatusDot, type StatusTone } from '@/components/StatusDot';
 import { Sparkline } from '@/components/Sparkline';
@@ -504,6 +505,44 @@ function StashChip({ status }: { status?: FleetGitStatusSlice | null }) {
     >
       🗄 {n}
     </span>
+  );
+}
+
+// Companion transport indicator (WARDEN-878 / roadmap WARDEN-270 Visibility): a
+// per-host dot placed next to the connectivity dot so the human can tell at a
+// glance whether the companion transport is working on each host — active (with
+// version), bootstrapping, or errored (with the actionable last error).
+//
+// Renders ONLY for active/bootstrapping/error. `inactive` (LOCAL, or a host no
+// companion op has engaged yet) renders nothing — the indicator appears ONLY when
+// there is actionable state to read, so a healthy fleet isn't blanketed in gray
+// dots. The `companion` field is itself absent entirely when the transport is
+// disabled (the server omits it), so a toggle-off fleet shows no indicators.
+//
+// Reuses the themed StatusDot primitive (WARDEN-68 Rule 3): the connectivity
+// dot's green-solid / red-square vocabulary transfers directly — active is the
+// "working" green solid, error the "bad" red square, and bootstrapping gets the
+// pulse variant (its literal meaning: an in-flight connection).
+function CompanionIndicator({ companion }: { companion?: CompanionStatus }) {
+  if (!companion || companion.state === 'inactive') return null;
+  const tone: StatusTone = companion.state === 'active' ? 'green'
+    : companion.state === 'bootstrapping' ? 'yellow'
+    : 'red'; // error
+  const variant = companion.state === 'active' ? 'solid'
+    : companion.state === 'bootstrapping' ? 'pulse'
+    : 'square'; // error
+  const label = companion.state === 'active'
+    ? `Companion active${companion.version ? ` (v${companion.version})` : ''}`
+    : companion.state === 'bootstrapping'
+      ? 'Companion bootstrapping'
+      : `Companion error${companion.lastError ? `: ${companion.lastError}` : ''}`;
+  return (
+    <StatusDot
+      tone={tone}
+      variant={variant}
+      label={label}
+      title={label}
+    />
   );
 }
 
@@ -1386,6 +1425,8 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
                                       : span.status || 'unknown'
                                   }
                                 />
+                                {/* WARDEN-878: companion state, the same indicator the Host header shows. */}
+                                <CompanionIndicator companion={span.companion} />
                                 <span className="text-[10px] text-muted-foreground truncate">{spanLabel}</span>
                                 <span className="text-[10px] text-muted-foreground/60">({span.agentCount})</span>
                                 {span.status === 'offline' && (
@@ -1504,6 +1545,10 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
                                 : status?.status || 'unknown'
                             }
                           />
+                          {/* WARDEN-878: per-host companion transport state, next to the
+                              connectivity dot (active/bootstrapping/errored; absent when the
+                              transport is off or there is nothing actionable to show). */}
+                          <CompanionIndicator companion={status?.companion} />
                           <span className="text-xs font-semibold truncate flex-1 min-w-0">
                             {hostLabel}
                           </span>
