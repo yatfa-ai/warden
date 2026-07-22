@@ -1,8 +1,16 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { RotateCw } from 'lucide-react';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 import { cn } from '@/lib/utils';
+import { copyText } from '@/lib/clipboard';
 import { displayName } from '@/lib/chatDisplay';
 import {
   fleetCommitSearchEligible,
@@ -243,6 +251,18 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
     setRefreshTick((t) => t + 1);
   };
 
+  // Copy via the Electron-safe helper + a sonner success/error toast — the same
+  // pattern GlobalSearchDialog / WorkspaceSearchDialog use for their Copy items.
+  // `copyText` (lib/clipboard.ts) owns the Electron fallback path and the true/
+  // false outcome; the caller owns the toast (its documented contract), so the
+  // row's three Copy payloads each route through this one closure. Never bare
+  // navigator.clipboard — that fails silently in Electron (WARDEN-68 Rule 3).
+  const handleCopy = async (text: string) => {
+    const ok = await copyText(text);
+    if (ok) toast.success('Copied');
+    else toast.error('Copy failed');
+  };
+
   // The glance: slice the merged, epoch-sorted rows to the bound (top FLEET_RECENT_LIMIT
   // across the fleet). Slice AFTER the sort so the newest N survive regardless of how
   // many each agent contributed.
@@ -337,6 +357,8 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
                   // expanded file list as a sibling — the FleetCommitSearch / GitBadges
                   // pattern. Click → expand to that commit's /api/git-show diff.
                   <li key={cacheKey} className="rounded">
+                    <ContextMenu>
+                      <ContextMenuTrigger asChild>
                     <div
                       role="button"
                       tabIndex={0}
@@ -367,6 +389,19 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
                       </span>
                       <span className="ml-auto shrink-0 self-center text-[10px] text-muted-foreground">{isExpanded ? '▾' : '▸'}</span>
                     </div>
+                      </ContextMenuTrigger>
+                      <ContextMenuContent>
+                        {/* Three Copy items — each maps to a field rendered-but-truncated /
+                            selection-hostile today (the hash is mono-cyan, the subject and
+                            agent name are truncate + tooltip-only, so they were never
+                            select-copyable). onSelect (not onClick) so keyboard menu
+                            activation — arrow + Enter — also fires the copy, mirroring the
+                            host-row / session-row / search-result-row menus exactly. */}
+                        <ContextMenuItem onSelect={() => handleCopy(row.commit.hash)}>Copy commit hash</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => handleCopy(row.commit.subject)}>Copy commit subject</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => handleCopy(name)}>Copy agent name</ContextMenuItem>
+                      </ContextMenuContent>
+                    </ContextMenu>
                     {isExpanded && (
                       // Expanded: that commit's changed files + per-file diff via
                       // /api/git-show — the SAME path GitBadges' per-agent row takes,
