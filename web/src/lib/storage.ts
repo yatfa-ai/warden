@@ -1325,11 +1325,30 @@ export function resetUiPrefsPreservingWorkspace(live: UiState): UiState {
 const OBS_KEY = 'warden:observer:v1';
 const OBS_PREFIX = 'warden:observer';
 const OBS_VERSION = 1;
-export interface ObsUi { openIds: string[]; activeId: string | null; viewMode?: 'sessions' | 'activity' | 'directives' }
+// WARDEN-879: the Activity + Directives tab filters persist alongside viewMode,
+// riding the same loadObs/saveObs path. Raw Select value strings ('all' or a
+// concrete type/container/host) round-trip verbatim — no encoding. Optional
+// with all-'all' defaults so an existing localStorage payload upgrades with no
+// migration; consumers read each field with `?? 'all'`.
+export interface ObsUi {
+  openIds: string[];
+  activeId: string | null;
+  viewMode?: 'sessions' | 'activity' | 'directives';
+  activityFilters?: { type: string; agent: string; host: string };
+  directiveFilters?: { agent: string; host: string };
+}
 export function loadObs(): ObsUi {
   try {
     const v = JSON.parse(readVersioned(OBS_PREFIX, OBS_VERSION) ?? 'null');
-    if (v && Array.isArray(v.openIds)) return { openIds: v.openIds, activeId: v.activeId ?? null, viewMode: v.viewMode || 'sessions' };
+    if (v && Array.isArray(v.openIds)) {
+      return {
+        openIds: v.openIds,
+        activeId: v.activeId ?? null,
+        viewMode: v.viewMode || 'sessions',
+        activityFilters: v.activityFilters,
+        directiveFilters: v.directiveFilters,
+      };
+    }
   } catch (e) {
     console.warn('[warden:storage] loadObs failed, using defaults', e);
   }

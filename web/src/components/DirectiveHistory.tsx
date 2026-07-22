@@ -29,7 +29,21 @@ import { POLL_INTERVAL_MS, shouldPoll, shouldRefreshOnVisibility } from '@/lib/t
 
 const DIRECTIVE_POLL_MS = POLL_INTERVAL_MS; // directives change rarely, but a sent directive should appear live.
 
-export function DirectiveHistory({ timestampFormat }: { timestampFormat: TimestampFormat }) {
+export function DirectiveHistory({
+  timestampFormat,
+  agentFilter, setAgentFilter,
+  hostFilter, setHostFilter,
+}: {
+  timestampFormat: TimestampFormat;
+  // WARDEN-879: the two filters are now OWNED by ObserverTabs (persisted across
+  // restart via loadObs/saveObs) and passed in as controlled props. The Selects
+  // and DirectiveEntry's context menu already call these setters, so they keep
+  // working unchanged once the setters arrive from props instead of local useState.
+  agentFilter: string;
+  setAgentFilter: (v: string) => void;
+  hostFilter: string;
+  setHostFilter: (v: string) => void;
+}) {
   const [directives, setDirectives] = useState<Directive[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -37,8 +51,6 @@ export function DirectiveHistory({ timestampFormat }: { timestampFormat: Timesta
   const [isHidden, setIsHidden] = useState<boolean>(typeof document !== 'undefined' ? document.hidden : false);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [agentFilter, setAgentFilter] = useState<string>('all');
-  const [hostFilter, setHostFilter] = useState<string>('all');
   const [limit, setLimit] = useState(100);
   // Re-render once per second so the "Updated Ns ago" label stays fresh.
   const [now, setNow] = useState(() => Date.now());

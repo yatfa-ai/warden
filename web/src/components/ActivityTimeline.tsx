@@ -36,12 +36,26 @@ async function copyToClipboard(text: string) {
   toast.success('Copied');
 }
 
-export function ActivityTimeline({ timestampFormat }: { timestampFormat: TimestampFormat }) {
+export function ActivityTimeline({
+  timestampFormat,
+  typeFilter, setTypeFilter,
+  agentFilter, setAgentFilter,
+  hostFilter, setHostFilter,
+}: {
+  timestampFormat: TimestampFormat;
+  // WARDEN-879: the three filters are now OWNED by ObserverTabs (persisted across
+  // restart via loadObs/saveObs) and passed in as controlled props. The Selects
+  // and the row context menu already call these setters, so they keep working
+  // unchanged once the setters arrive from props instead of local useState.
+  typeFilter: string;
+  setTypeFilter: (v: string) => void;
+  agentFilter: string;
+  setAgentFilter: (v: string) => void;
+  hostFilter: string;
+  setHostFilter: (v: string) => void;
+}) {
   const [filtered, setFiltered] = useState<ActivityEvent[]>([]);
   const hostLabels = useHostLabels();
-  const [typeFilter, setTypeFilter] = useState<string>('all');
-  const [agentFilter, setAgentFilter] = useState<string>('all');
-  const [hostFilter, setHostFilter] = useState<string>('all');
   const [limit, setLimit] = useState(100);
   // Re-render once per second so the "Updated Ns ago" label stays fresh.
   const [now, setNow] = useState(() => Date.now());
