@@ -103,8 +103,12 @@ export function SettingsPage({
   const {
     config, setConfig, availableHosts, loading, loadError, reload, saving, handleSave,
     observerAuthTokenSet, observerAuthTokenTail, observerAuthTokenInput, setObserverAuthTokenInput,
-    webhookSecretSet, webhookSecretTail, webhookSecretInput, setWebhookSecretInput, testingWebhook, sendTestAlert,
+    observerAuthTokenPendingClear, removeObserverAuthToken, undoRemoveObserverAuthToken,
+    webhookSecretSet, webhookSecretTail, webhookSecretInput, setWebhookSecretInput,
+    webhookSecretPendingClear, removeWebhookSecret, undoRemoveWebhookSecret,
+    testingWebhook, sendTestAlert,
     telemetryAuthTokenSet, telemetryAuthTokenTail, telemetryAuthTokenInput, setTelemetryAuthTokenInput,
+    telemetryAuthTokenPendingClear, removeTelemetryAuthToken, undoRemoveTelemetryAuthToken,
     telemetryTestLoading, telemetryTestVerdict, setTelemetryTestVerdict, sendTestConnection, telemetryRuntimeStatus,
   } = useBackendConfig({ onSaved: () => { onConfigChange(); onClose(); } });
 
@@ -207,6 +211,9 @@ export function SettingsPage({
                     observerAuthTokenTail={observerAuthTokenTail}
                     observerAuthTokenInput={observerAuthTokenInput}
                     setObserverAuthTokenInput={setObserverAuthTokenInput}
+                    observerAuthTokenPendingClear={observerAuthTokenPendingClear}
+                    removeObserverAuthToken={removeObserverAuthToken}
+                    undoRemoveObserverAuthToken={undoRemoveObserverAuthToken}
                     hidden={activeSection !== 'observer'}
                   />
                   <SafetySection config={config} setConfig={setConfig} hidden={activeSection !== 'safety'} />
@@ -220,6 +227,9 @@ export function SettingsPage({
                     telemetryAuthTokenTail={telemetryAuthTokenTail}
                     telemetryAuthTokenInput={telemetryAuthTokenInput}
                     setTelemetryAuthTokenInput={setTelemetryAuthTokenInput}
+                    telemetryAuthTokenPendingClear={telemetryAuthTokenPendingClear}
+                    removeTelemetryAuthToken={removeTelemetryAuthToken}
+                    undoRemoveTelemetryAuthToken={undoRemoveTelemetryAuthToken}
                     telemetryTestLoading={telemetryTestLoading}
                     telemetryTestVerdict={telemetryTestVerdict}
                     setTelemetryTestVerdict={setTelemetryTestVerdict}
@@ -240,6 +250,9 @@ export function SettingsPage({
                     webhookSecretTail={webhookSecretTail}
                     webhookSecretInput={webhookSecretInput}
                     setWebhookSecretInput={setWebhookSecretInput}
+                    webhookSecretPendingClear={webhookSecretPendingClear}
+                    removeWebhookSecret={removeWebhookSecret}
+                    undoRemoveWebhookSecret={undoRemoveWebhookSecret}
                     testingWebhook={testingWebhook}
                     sendTestAlert={sendTestAlert}
                     hidden={activeSection !== 'notifications'}

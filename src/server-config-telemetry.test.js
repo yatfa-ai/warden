@@ -186,6 +186,28 @@ describe('/api/config telemetryAuthToken (WARDEN-569) — secret, write-only', (
     assert.strictEqual(after.telemetryAuthTokenSet, true, 'token preserved when the field is omitted');
   });
 
+  it('explicit null CLEARS the stored telemetryAuthToken (the Remove action — WARDEN-883)', async () => {
+    const token = 'clear-me-on-remove-569';
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ telemetryAuthToken: token }),
+    });
+    assert.strictEqual((await (await fetch(`${baseUrl}/api/config`)).json()).telemetryAuthTokenSet, true, 'precondition: token is set');
+    // The Remove control sends the field as explicit null (NOT omitted, NOT '').
+    await fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ telemetryAuthToken: null }),
+    });
+    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    assert.strictEqual(onDisk.telemetryAuthToken, '', 'cleartext cleared on disk');
+    const after = await (await fetch(`${baseUrl}/api/config`)).json();
+    assert.strictEqual(after.telemetryAuthTokenSet, false, 'GET reports the token as unset');
+    assert.strictEqual(after.telemetryAuthTokenTail, null, 'no tail once cleared');
+    assert.ok(!('telemetryAuthToken' in after), 'still no cleartext token in the GET response');
+  });
+
   it('PUT with a non-string is ignored by the type guard (no mutation, no crash)', async () => {
     const token = 'guard-me-569';
     await fetch(`${baseUrl}/api/config`, {

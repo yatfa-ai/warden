@@ -1,8 +1,11 @@
 // Observer Preferences section (backend /api/config + write-only auth token).
 // Extracted verbatim from SettingsPage (WARDEN-664); behavior is unchanged.
+import { useState } from 'react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
+import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import {
   Select,
   SelectContent,
@@ -23,6 +26,11 @@ export interface ObserverSectionProps {
   observerAuthTokenTail: string | null;
   observerAuthTokenInput: string;
   setObserverAuthTokenInput: (v: string) => void;
+  // WARDEN-883 — the Remove action queues a clear (pendingClear → save sends
+  // explicit null). undoRemove cancels a queued clear before Save.
+  observerAuthTokenPendingClear: boolean;
+  removeObserverAuthToken: () => void;
+  undoRemoveObserverAuthToken: () => void;
   hidden: boolean;
 }
 
@@ -33,9 +41,18 @@ export function ObserverSection({
   observerAuthTokenTail,
   observerAuthTokenInput,
   setObserverAuthTokenInput,
+  observerAuthTokenPendingClear,
+  removeObserverAuthToken,
+  undoRemoveObserverAuthToken,
   hidden,
 }: ObserverSectionProps) {
+  // WARDEN-883 — confirm the irreversible token removal (cleartext is deleted;
+  // the Observer falls back to env / config-file credentials). Always gated by
+  // the confirm, matching the Reset section's stance that reverting credentials
+  // is worth the friction regardless of the kill-confirm toggle.
+  const [confirmRemoveOpen, setConfirmRemoveOpen] = useState(false);
   return (
+    <>
     <SettingsSection title="Observer Preferences" className={hidden ? 'hidden' : undefined}>
       <div className="flex flex-col gap-2">
         <Label htmlFor="observerConfirmMode">Directive Confirmation</Label>
@@ -146,18 +163,52 @@ export function ObserverSection({
         </div>
         <div className="flex flex-col gap-2">
           <Label htmlFor="observerAuthToken">Auth token</Label>
-          <Input
-            id="observerAuthToken"
-            type="password"
-            value={observerAuthTokenInput}
-            onChange={(e) => setObserverAuthTokenInput(e.target.value)}
-            placeholder={observerAuthTokenSet ? `••••• set${observerAuthTokenTail ? ` (…${observerAuthTokenTail})` : ''}` : 'Not set'}
-          />
-          <p className="text-xs text-muted-foreground">
-            {observerAuthTokenSet
-              ? `A token is saved${observerAuthTokenTail ? ` (ends …${observerAuthTokenTail})` : ''}. Type a new one to replace it; leave blank to keep the saved token.`
-              : 'No token saved here. Enter one to authenticate the Observer, or leave blank to keep using env / config-file credentials.'}
-          </p>
+          <div className="flex items-center gap-2">
+            <Input
+              id="observerAuthToken"
+              type="password"
+              className="flex-1"
+              value={observerAuthTokenInput}
+              onChange={(e) => setObserverAuthTokenInput(e.target.value)}
+              placeholder={
+                observerAuthTokenPendingClear
+                  ? 'Will be removed on Save'
+                  : observerAuthTokenSet
+                    ? `••••• set${observerAuthTokenTail ? ` (…${observerAuthTokenTail})` : ''}`
+                    : 'Not set'
+              }
+            />
+            {/* WARDEN-883 — Remove surfaces only when a token is stored and not
+                already queued for removal. The confirm dialog gates the click. */}
+            {observerAuthTokenSet && !observerAuthTokenPendingClear && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="shrink-0"
+                onClick={() => setConfirmRemoveOpen(true)}
+              >
+                Remove
+              </Button>
+            )}
+          </div>
+          {observerAuthTokenPendingClear ? (
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              The saved token will be removed when you press Save.{' '}
+              <button
+                type="button"
+                className="underline cursor-pointer"
+                onClick={undoRemoveObserverAuthToken}
+              >
+                Undo
+              </button>
+            </p>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              {observerAuthTokenSet
+                ? `A token is saved${observerAuthTokenTail ? ` (ends …${observerAuthTokenTail})` : ''}. Type a new one to replace it; leave blank to keep the saved token.`
+                : 'No token saved here. Enter one to authenticate the Observer, or leave blank to keep using env / config-file credentials.'}
+            </p>
+          )}
         </div>
         <div className="flex flex-col gap-2">
           <Label htmlFor="observerMaxTokens">Max output tokens</Label>
@@ -179,5 +230,17 @@ export function ObserverSection({
         </div>
       </div>
     </SettingsSection>
+
+    {/* WARDEN-883 — confirm the token removal before queueing the clear. */}
+    <ConfirmDialog
+      open={confirmRemoveOpen}
+      onOpenChange={(o) => { if (!o) setConfirmRemoveOpen(false); }}
+      title="Remove saved auth token?"
+      description="The stored Observer auth token will be deleted from config.json, and the Observer will fall back to env / config-file credentials. You'll need to re-enter a token to authenticate again. Applies when you press Save."
+      confirmLabel="Remove token"
+      destructive
+      onConfirm={() => { removeObserverAuthToken(); setConfirmRemoveOpen(false); }}
+    />
+    </>
   );
 }
