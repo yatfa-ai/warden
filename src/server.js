@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { load, save, loadCatalog, saveCatalog, allSshHosts, sameCatalogEntry } from './config.js';
-import { buildGetResponse, applyConfigPut, afterSave } from './config-schema.js';
+import { buildGetResponse, applyConfigPut, afterSave, resetConfig } from './config-schema.js';
 import { applyCompanionToggle } from './companion.js';
 import * as collections from './collections.js';
 import { capturePanes, resolveChatWithRefresh, catalogChats, discoverHost, discoverAll } from './chats.js';
@@ -801,6 +801,41 @@ app.get('/api/config', (_req, res) => res.json(
 app.put('/api/config', (req, res) => {
   applyConfigPut(cfg, req.body);
   save(cfg); // persist to ~/.yatfa-warden/config.json
+  afterSave(cfg, {
+    companionOverridden: companionEnvOverridden,
+    forwardTelemetryConfig,
+    applyCompanionToggle,
+    restartBudgetPoll,
+    restartAttentionPoll,
+  });
+  res.json({ ok: true });
+});
+
+// POST /api/config/reset — restore EVERY backend preference to its default
+// (WARDEN-889). Until this endpoint the danger zone's only reset action touched
+// CLIENT-side UI prefs; the consequential backend settings (webhook / telemetry /
+// observer / hosts / thresholds / …) had no reset path, so reverting an
+// experiment or rotating a compromised setup meant hand-editing config.json —
+// and the write-only secrets (webhook / telemetry / observer auth tokens, which
+// a GET masks and a user cannot even see) could not be cleared via the UI at all.
+//
+// resetConfig overwrites every public + secret field with deriveDefaults(),
+// bypassing applyConfigPut's per-field guards on purpose: the secret no-clobber
+// that protects an untouched password field on a normal Save would otherwise
+// REFUSE to blank those tokens — clearing them is the whole point. internal
+// fields (pins / agentNotes / sessionTags — user data, not settings) and derived
+// fields (boot-computed) are left untouched. crossField then runs so the
+// restored state is well-formed exactly as a PUT would leave it.
+//
+// The persist + live-apply path is IDENTICAL to PUT's: save round-trips through
+// config.json (survives a restart) and afterSave re-forwards the telemetry
+// config to main, re-applies the companion toggle, and restarts the budget /
+// attention polls — so the reset takes effect live on the next tick, not on
+// restart. This is an INSTANT action (not a draft-then-Save); the UI labels it
+// so. No request body is consulted.
+app.post('/api/config/reset', (_req, res) => {
+  resetConfig(cfg);
+  save(cfg); // persist the restored defaults to ~/.yatfa-warden/config.json
   afterSave(cfg, {
     companionOverridden: companionEnvOverridden,
     forwardTelemetryConfig,
