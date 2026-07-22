@@ -213,7 +213,7 @@ function App() {
   // pure, unit-tested predicate (hasReturnContent).
   const [returnedAfterAbsence, setReturnedAfterAbsence] = useState(false);
   const [bannerDismissed, setBannerDismissed] = useState(false);
-  const [externalViewMode, setExternalViewMode] = useState<'sessions' | 'activity' | 'directives' | null>(null);
+  const [externalViewMode, setExternalViewMode] = useState<'sessions' | 'activity' | 'directives' | 'attention' | null>(null);
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
   // The past-conversation whose read-only transcript is open from a global-search
   // result (WARDEN-719). Lifted to App level — NOT inside GlobalSearchDialog —
@@ -1979,7 +1979,7 @@ function App() {
             title="Drag to resize observer panel"
           />
           <ErrorBoundary onError={(error, info) => forwardRendererError(error, info.componentStack)}>
-            <ObserverTabs externalViewMode={externalViewMode} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} timestampFormat={timestampFormat} />
+            <ObserverTabs externalViewMode={externalViewMode} focusedChat={focusedChat} onReconnectChat={handleReconnectChat} observerAutoStart={observerAutoStart} observerSessionTimeout={observerSessionTimeout} timestampFormat={timestampFormat} attention={{ rollup: attentionRollup, onOpenChat: openChat, onOpenActivity: openActivityTab, attentionDesktopAlerts, mutedAlertKeys, snoozedAlertKeys, onSetAlertMute: setAlertMute, focusedPaneKey, snippets, onReplyResult: handleReplyResult }} />
           </ErrorBoundary>
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden"
