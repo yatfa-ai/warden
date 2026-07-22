@@ -612,4 +612,48 @@ test('a health-group top (Chat, no pane state) has no enteredAt (duration is pan
   assert.equal('enteredAt' in ranked[0], false);
 });
 
+console.log('\nanchor threading (WARDEN-877): the raw scrollback line an attention deep-link jumps to');
+// The anchor is the RAW line text handed to openChat → externalSearchQuery → PaneTile's
+// findNext, so clicking an attention row lands on the triggering line. It must be the RAW
+// line — fromCustom's formatted signal string ('<line>' (pattern: <name>)) would NOT
+// findNext-match the scrollback, so it cannot serve as the anchor. Absent for health-group
+// Chat rows (no triggering line) and any anchorless state → focus-only open.
+test('a pane-state row with a signal → ranked item carries that signal as the anchor', () => {
+  const r = roll(health(), stats(), [stateRow('w1', 'waiting', { signal: 'press enter to continue' })]);
+  const { ranked } = rankAttention(r);
+  assert.equal(ranked[0].anchor, 'press enter to continue', 'anchor is the raw signal line');
+});
+test('a custom row → anchor is the RAW matched line, NOT the formatted signal string', () => {
+  // fromCustom folds the line into "'<line>' (pattern: <name>)" for DISPLAY; the anchor
+  // must be the bare line so findNext matches it in the scrollback.
+  const r = roll(health(), stats(), [stateRow('d1', 'idle', { customMatch: cm('Deploy', 'deploy failed') })]);
+  const { ranked } = rankAttention(r);
+  assert.equal(ranked[0].state, 'custom');
+  assert.equal(ranked[0].anchor, 'deploy failed', 'anchor is the raw matched line');
+  assert.match(ranked[0].signal, /deploy failed/);
+  assert.match(ranked[0].signal, /Deploy/);
+  assert.notEqual(ranked[0].signal, ranked[0].anchor, 'the formatted signal differs from the raw anchor');
+});
+test('a pane-state row with NO signal → no anchor (focus-only open, no false jump)', () => {
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck')]);
+  const { ranked } = rankAttention(r);
+  assert.equal('anchor' in ranked[0], false, 'a signal-less row yields no anchor');
+});
+test('an empty-string signal → no anchor (not a useful scrollback search term)', () => {
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck', { signal: '' })]);
+  const { ranked } = rankAttention(r);
+  assert.equal('anchor' in ranked[0], false, 'empty signal is treated as absent');
+});
+test('a health-group top (critical/warning Chat) has no anchor (no triggering line)', () => {
+  const r = roll(health({ critical: [agent('c1')] }), stats());
+  const { ranked } = rankAttention(r);
+  assert.equal(ranked.length, 1);
+  assert.equal('anchor' in ranked[0], false, 'health-group agents carry no anchor');
+});
+test('the directed top carries its anchor through (integration with the callout target)', () => {
+  const r = roll(health(), stats(), [stateRow('e1', 'erroring', { signal: 'TypeError: undefined' })]);
+  const { top } = rankAttention(r);
+  assert.equal(top.anchor, 'TypeError: undefined', 'the promoted callout target carries the anchor');
+});
+
 console.log(`\n✓ ATTENTION ROLLUP TESTS PASS (${passed})`);

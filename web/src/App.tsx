@@ -919,7 +919,18 @@ function App() {
   // provides ackKey below, so openChat calls through a stable ref that the hook
   // fills in once it mounts. Defaults to a no-op so an open before that point is safe.
   const ackWatchMissRef = useRef<(key: string) => void>(() => {});
-  const openChat = useCallback((id: string) => {
+  const openChat = useCallback((id: string, anchor?: string) => {
+    // WARDEN-877: position the pane's scrollback at the triggering line when an anchor
+    // (the raw signal / matched line) is threaded in by an attention deep-link. Fires the
+    // SAME externalSearchQuery→PaneTile.findNext mechanism global search uses (handleJumpToMatch),
+    // so the deep-link lands on the line, not the scrollback bottom. Anchored in BOTH open
+    // branches below — a pane already open in another workspace still needs to scroll to
+    // the line — so the jump is placed before the owner early-return AND at the end of the
+    // new-pane branch. `openChat(id, undefined)` no-ops this (the `if (anchor)` gate) and is
+    // byte-for-byte today's focus-only open, so every existing call site is unchanged.
+    const jumpToAnchor = () => {
+      if (anchor) setExternalSearchQuery({ paneId: id, query: anchor });
+    };
     // WARDEN-417: ack-on-open — clear any catch-up miss for this chat first, so a
     // ping the human is acting on (by opening the chat) is acknowledged regardless of
     // which open path they used. No-op when there is nothing to ack (ackKey short-
@@ -942,12 +953,14 @@ function App() {
     if (owner) {
       if (owner.id !== activeWorkspaceIdRef.current) setActiveWorkspaceId(owner.id);
       if (autoFocusNewPane) setWorkspaces((prev) => prev.map((w) => (w.id === owner.id && w.focused !== id ? { ...w, focused: id } : w)));
+      jumpToAnchor();
       return;
     }
     // Otherwise add to the active workspace + focus it.
     setOpenPanes((p) => p.includes(id) ? p : [...p, id]);
     if (autoFocusNewPane) setFocused(id);
-  }, [autoFocusNewPane, setOpenPanes, setFocused]);
+    jumpToAnchor();
+  }, [autoFocusNewPane, setOpenPanes, setFocused, setExternalSearchQuery]);
 
   // WARDEN-417 / WARDEN-476: in-app catch-up for per-chat watch pings that fired while
   // the human was away (the OS notification was unsupported / denied / cleared / lost).
@@ -1702,7 +1715,7 @@ function App() {
                 <div className="flex items-center gap-1 min-w-0">
                   <Button
                     variant="ghost"
-                    onClick={() => openChat(attentionTop.id)}
+                    onClick={() => openChat(attentionTop.id, attentionTop.anchor)}
                     aria-label={`You're needed in ${attentionTop.name ?? attentionTop.id}. Open it.`}
                     className="shrink min-w-0 gap-2 h-auto py-1 px-2.5 rounded-md bg-white/80 dark:bg-blue-900/50 hover:bg-white dark:hover:bg-blue-900/70 text-blue-900 dark:text-blue-50 font-normal"
                   >
