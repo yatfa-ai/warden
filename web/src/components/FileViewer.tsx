@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect, type ReactNode } from 'react';
+import { Fragment, useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect, type ReactNode, type DependencyList } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -115,6 +115,61 @@ type BlameLine = { line: number; hash: string; author: string; date: string; sum
 // ChatSidebar (the only other consumer of this route). `hash` is %h (abbreviated);
 // git-show accepts abbreviated hashes, so it resolves unambiguously on click.
 type HistoryCommit = { hash: string; subject: string; author: string; date: string };
+
+// Shared gated-fetch for a git-data slice shown only while a view-mode is on
+// (blame / history). Collapses two byte-mirrored effects into one envelope: the
+// cancelled guard, the loading/error reset, the try → fetch → `!r.ok` early-return
+// → json → cancelled-check → `Array.isArray(j[field]) ? j[field] : []` →
+// `j.error || null` → catch → `finally { setLoading(false) }` body, and the
+// `return () => { cancelled = true }` cleanup. Gates the success path on
+// response.ok so a 4xx/5xx (e.g. unknown chat → 404) surfaces as an error, not a
+// silent success (WARDEN-89). The six per-slice differences are the parameters;
+// the two call sites below are byte-equivalent to the effects they replaced
+// (WARDEN-884; same DRY move as useGitLogFetcher in ChatSidebar + DiffInspectRow
+// in GitBadges). `j` from r.json() is `any`, so `Array.isArray(j[field]) ? j[field]
+// : []` stays `any` and onData typechecks against any typed setter — no cast.
+function useGatedFetch<T>(opts: {
+  gate: boolean;
+  buildUrl: () => string;
+  onData: (data: T[]) => void;
+  onLoading: (loading: boolean) => void;
+  onError: (error: string | null) => void;
+  field: string;
+  label: string;
+  deps: DependencyList;
+}): void {
+  const { gate, buildUrl, onData, onLoading, onError, field, label, deps } = opts;
+  useEffect(() => {
+    if (!gate) return;
+    let cancelled = false;
+    const run = async () => {
+      onLoading(true);
+      onError(null);
+      try {
+        const r = await fetch(buildUrl());
+        if (!r.ok) {
+          if (!cancelled) onError(`Failed to load ${label} (${r.status})`);
+          return;
+        }
+        const j = await r.json();
+        if (cancelled) return;
+        onData(Array.isArray(j[field]) ? j[field] : []);
+        onError(j.error || null);
+      } catch (e) {
+        if (!cancelled) onError(e instanceof Error ? e.message : `Failed to load ${label}`);
+      } finally {
+        if (!cancelled) onLoading(false);
+      }
+    };
+    run();
+    return () => { cancelled = true; };
+    // deps are passed verbatim by each caller (the exact list each effect used
+    // pre-refactor); setters are stable state dispatchers and buildUrl closes over
+    // the same chatId/filePath as before, so behavior is identical. Satisfied
+    // out-of-band — hence the exhaustive-deps disable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+}
 
 export function FileViewer({ chatId, filePath, open, line, timestampFormat, viewMode, onViewModeChange, onNavigate, coEditors, onOpenCoEditor, onCompare, pollIntervalMs, onOpenChange }: FileViewerProps) {
   const [content, setContent] = useState<string | null>(null);
@@ -420,65 +475,36 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
     loadChangesDiff();
   }, [open, changes, chatId, filePath, loadChangesDiff]);
 
-  // Fetch blame only while annotating. Gates the success path on response.ok so a
-  // 4xx/5xx (e.g. an unknown chat → 404) is surfaced as an error, not silent success
-  // (WARDEN-89: a resolved fetch is not necessarily a success).
-  useEffect(() => {
-    if (!open || !annotate) return;
-    let cancelled = false;
-    const fetchBlame = async () => {
-      setBlameLoading(true);
-      setBlameError(null);
-      try {
-        const r = await fetch(`/api/git-blame?id=${encodeURIComponent(chatId)}&path=${encodeURIComponent(filePath)}`);
-        if (!r.ok) {
-          if (!cancelled) setBlameError(`Failed to load annotation (${r.status})`);
-          return;
-        }
-        const j = await r.json();
-        if (cancelled) return;
-        setBlame(Array.isArray(j.lines) ? j.lines : []);
-        setBlameError(j.error || null);
-      } catch (e) {
-        if (!cancelled) setBlameError(e instanceof Error ? e.message : 'Failed to load annotation');
-      } finally {
-        if (!cancelled) setBlameLoading(false);
-      }
-    };
-    fetchBlame();
-    return () => { cancelled = true; };
-  }, [open, annotate, chatId, filePath]);
+  // Fetch blame only while annotating. useGatedFetch owns the cancelled guard,
+  // the loading/error reset, the response.ok-gated fetch + j.error surfacing, and
+  // the cleanup (WARDEN-884); a 4xx/5xx (e.g. unknown chat → 404) surfaces as an
+  // error, not a silent success (WARDEN-89: a resolved fetch is not a success).
+  useGatedFetch<BlameLine>({
+    gate: open && annotate,
+    buildUrl: () => `/api/git-blame?id=${encodeURIComponent(chatId)}&path=${encodeURIComponent(filePath)}`,
+    onData: setBlame,
+    onLoading: setBlameLoading,
+    onError: setBlameError,
+    field: 'lines',
+    label: 'annotation',
+    deps: [open, annotate, chatId, filePath],
+  });
 
-  // Fetch the file's commit history only while in history view-mode. Mirrors the blame
-  // fetch above: gates the success path on response.ok so a 4xx/5xx (e.g. unknown chat
-  // → 404) surfaces as an error, not silent success (WARDEN-89). The `path` query
-  // flips /api/git-log into file-history mode (git log --follow -- <path>), so this
-  // lists every commit that touched the open file, across renames.
-  useEffect(() => {
-    if (!open || !history) return;
-    let cancelled = false;
-    const fetchHistory = async () => {
-      setHistoryLoading(true);
-      setHistoryError(null);
-      try {
-        const r = await fetch(`/api/git-log?id=${encodeURIComponent(chatId)}&path=${encodeURIComponent(filePath)}&limit=20`);
-        if (!r.ok) {
-          if (!cancelled) setHistoryError(`Failed to load history (${r.status})`);
-          return;
-        }
-        const j = await r.json();
-        if (cancelled) return;
-        setCommits(Array.isArray(j.commits) ? j.commits : []);
-        setHistoryError(j.error || null);
-      } catch (e) {
-        if (!cancelled) setHistoryError(e instanceof Error ? e.message : 'Failed to load history');
-      } finally {
-        if (!cancelled) setHistoryLoading(false);
-      }
-    };
-    fetchHistory();
-    return () => { cancelled = true; };
-  }, [open, history, chatId, filePath]);
+  // Fetch the file's commit history only while in history view-mode. Mirrors the
+  // blame fetch via useGatedFetch (WARDEN-884): a 4xx/5xx (e.g. unknown chat → 404)
+  // surfaces as an error, not a silent success (WARDEN-89). The `path` query flips
+  // /api/git-log into file-history mode (git log --follow -- <path>), so this lists
+  // every commit that touched the open file, across renames.
+  useGatedFetch<HistoryCommit>({
+    gate: open && history,
+    buildUrl: () => `/api/git-log?id=${encodeURIComponent(chatId)}&path=${encodeURIComponent(filePath)}&limit=20`,
+    onData: setCommits,
+    onLoading: setHistoryLoading,
+    onError: setHistoryError,
+    field: 'commits',
+    label: 'history',
+    deps: [open, history, chatId, filePath],
+  });
 
   // Fetch the file's full blob at the selected historical commit (WARDEN-354).
   // Mirrors the blame/history fetches: gates the success path on response.ok so a
