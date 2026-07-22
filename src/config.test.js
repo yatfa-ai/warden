@@ -45,12 +45,17 @@ describe('config notification preferences', () => {
   });
 
   it('falls back to defaults when the config file is corrupt', () => {
+    // WARDEN-831: a corrupt config.json is now backed up (not silently swallowed).
+    // Mock the backup write so the test doesn't touch the real home dir.
+    const writes = mock.method(fs, 'writeFileSync', () => {});
     mock.method(fs, 'readFileSync', () => 'not valid json {{{');
     const cfg = load();
     assert.strictEqual(cfg.notifyErrors, true);
     assert.strictEqual(cfg.notifyChatOps, true);
     assert.strictEqual(cfg.notifySuccess, true);
     assert.strictEqual(cfg.notifyObserver, true);
+    // The corrupt text was surfaced to a .corrupt-<ts>.json backup, not lost.
+    assert.ok(writes.mock.calls.some((c) => String(c.arguments[0]).includes('.corrupt-')));
   });
 
   it('disabling chat ops is observable through load() round-trip', () => {
@@ -86,6 +91,7 @@ describe('config confirm-before-destructive-actions preference', () => {
   });
 
   it('falls back to ON when the config file is corrupt', () => {
+    mock.method(fs, 'writeFileSync', () => {}); // absorb the corruption backup (WARDEN-831)
     mock.method(fs, 'readFileSync', () => 'not valid json {{{');
     const cfg = load();
     assert.strictEqual(cfg.confirmDestructiveActions, true);
