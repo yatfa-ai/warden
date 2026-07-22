@@ -37,7 +37,7 @@ import { checkHost } from './hostStatus.js';
 import {
   probeReceiverCapabilities,
 } from './telemetry-capabilities.js';
-import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep } from './companion.js';
+import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep, uninstallCompanion } from './companion.js';
 import { createGitRouter, runLocalCapture, runInContext, gitCwd } from './gitRoutes.js';
 export { runGit, gitCwd, parseInProgressDetail, stripCommitSubject, diffNoIndex, getLocalGitDiff } from './gitRoutes.js';
 
@@ -1499,6 +1499,49 @@ app.post('/api/respawn', async (req, res) => {
     return res.status(500).json({ error: `\`${bin}\` failed to start on ${chat.host} — tmux session died immediately. Is it installed and on PATH there?` });
   }
   res.json({ ok: true });
+});
+
+// Remove warden's auto-bootstrapped companion binary from a remote host on
+// request (WARDEN-882 — the Removability outcome of roadmap WARDEN-270). The
+// write/action sibling of the Visibility slice: once installed, it can be taken
+// off. Mirrors install: uninstallCompanion kills the cached ssh child, then
+// rm -f's ~/.warden/companion-<ver> (and rmdir's ~/.warden only-if-empty) over
+// the SAME raw-ssh path bootstrap/probe use — no new port, no root. Body
+// {host}; the companion serves REMOTE hosts only, so LOCAL/(local) is rejected.
+//
+// Host-validation correction: this endpoint takes a HOST (not a chat id), so it
+// validates with validateHost(host, cfg) — the helper /api/hosts/health uses —
+// rather than resolve() (which resolves a chat id). Mirrors /api/kill's
+// {ok}/{error} response shape. Companion-or-fail: surfaces what failed via
+// {error}; it does not fall back to raw SSH. Not gated on the companion flag:
+// a host that had the flag on (then off) must still be cleanable, so the
+// endpoint works regardless of the current toggle state.
+app.post('/api/companion/uninstall', async (req, res) => {
+  const host = String(req.body?.host || '');
+  if (!host || host === LOCAL) {
+    return res.status(400).json({ error: 'a remote host is required (the companion serves remote hosts only)' });
+  }
+  // Validate the host the same way /api/hosts/health does, so an unreachable
+  // host surfaces a clear connectivity message rather than an opaque ssh
+  // failure from the uninstall run.
+  try {
+    const check = await validateHost(host, cfg);
+    if (!check.ok) {
+      return res.status(400).json({ error: check.error || `host ${host} is unreachable` });
+    }
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  try {
+    const result = await uninstallCompanion(host, cfg);
+    if (!result.ok) {
+      const stderr = (result.stderr || '').trim();
+      return res.status(500).json({ error: stderr || `failed to remove companion on ${host}` });
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Helper function to detect binary files by extension

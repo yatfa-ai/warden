@@ -140,6 +140,38 @@ export function buildUploadScript(remotePath) {
   return `mkdir -p "${COMPANION_DIR}" && cat > "${remotePath}" && chmod +x "${remotePath}"`;
 }
 
+// Remove the binary from the host — the precise mirror of buildUploadScript
+// (WARDEN-882, the Removability outcome of roadmap WARDEN-270). Best-effort,
+// never-fatal ordering so a partial state (no process to kill, no binary to
+// remove, a non-empty ~/.warden) still exits 0:
+//   1. `pkill -f` any running companion process so a warden-crash-orphaned
+//      binary doesn't survive removal (the Go companion has no self-uninstall
+//      RPC, and the process is otherwise reachable only via the ssh child warden
+//      is about to kill — companion/main.go speaks only over the SSH channel);
+//   2. `rm -f` the binary itself;
+//   3. `rmdir ~/.warden` ONLY if empty — NEVER clobber a user's other files.
+// `version` is validated hex from the manifest (safe to interpolate) and
+// `$HOME` is left literal so it expands on the host — the same convention
+// buildProbeScript / buildUploadScript follow. The three steps are `;`-joined
+// (not `&&`-joined): each is independently best-effort, so a missing process or
+// a kept ~/.warden does not short-circuit the `rm -f` that does the real work.
+//
+// WHY pkill matches the FULL path, not the basename: pkill -f matches its
+// pattern against every process's FULL command line, including the very shell
+// executing this script (the remote `bash -lc '<this script>'` wrapper — its
+// argv carries the literal script text). A basename pattern `companion-<ver>`
+// appears verbatim in that wrapper's argv, so pkill would SIGTERM the wrapper
+// itself before `rm -f` ever ran — the script would kill its own shell and the
+// binary would survive. Matching the `$HOME`-relative path avoids this: the
+// subshell EXPANDS `$HOME` → `/home/.../companion-<ver>` before calling pkill,
+// so pkill searches for the expanded absolute path. The running companion's
+// cmdline carries that expanded path (match), but the wrapper shell's argv
+// keeps `$HOME` literal (no self-match). This is the same kill-by-pattern
+// self-match hazard that makes `pkill -f <literal>` dangerous locally.
+export function buildUninstallScript(remotePath) {
+  return `pkill -f "${remotePath}" 2>/dev/null || true; rm -f "${remotePath}"; rmdir "${COMPANION_DIR}" 2>/dev/null || true`;
+}
+
 export function parseProbe(stdout) {
   const s = stdout || '';
   const os = (/^OS=(.+)$/m.exec(s) || [])[1];
@@ -398,6 +430,13 @@ export function _resetChannelCacheForTests() {
   channelCache.clear();
 }
 
+// Test-only: whether a host currently has a cached channel/bootstrap — so
+// uninstallCompanion's "tear down the cache entry FIRST" contract (kill + delete
+// BEFORE the uninstall script runs) is unit-testable. Not for production use.
+export function _channelCacheHasForTests(host) {
+  return channelCache.has(host);
+}
+
 // Ping the channel once. Returns {ok:true} | {ok:false, reason:'mismatch', got}
 // | {ok:false, reason:'unreachable', err}.
 async function pingOnce(channel, expectedVersion, cfg) {
@@ -516,6 +555,63 @@ export async function getChannel(host, cfg = {}, deps = {}) {
     });
   channelCache.set(host, bootstrapPromise);
   return bootstrapPromise;
+}
+
+// --------------------------------- uninstall ---------------------------------
+// WARDEN-882 (Removability outcome of roadmap WARDEN-270). The mirror of
+// bootstrap: where bootstrap installs ~/.warden/companion-<ver> over the raw
+// ssh path, uninstall takes it off. The human can cleanly remove warden's
+// auto-bootstrapped companion from any remote host on request — "nothing gets
+// installed that can't be taken off" (the roadmap's Removability bar) becomes
+// literally true.
+//
+// Companion-or-fail: returns the raw {host, ok, code, stderr} (the same shape
+// the probe / streamFileToHost return) so the caller surfaces what failed; it
+// NEVER falls back to raw SSH (the experimental path's contract is unchanged).
+// No new network port — the op rides the same `ssh host 'bash -lc …'` path the
+// probe uses (companion.js), not streamFileToHost (this is a command, not a
+// binary stream). No root; the host runtime footprint removed is JUST the
+// binary (companion/main.go opens no listening socket, writes no pid file).
+
+// uninstallCompanion(host) tears down the host's cached ssh child FIRST (so the
+// binary isn't busy when rm runs — the single-host analogue of
+// _resetChannelCacheForTests), then runs buildUninstallScript over the same
+// runFn/defaultRun path the probe uses. ~/.warden is removed only-if-empty.
+// LOCAL is refused (the companion serves remote hosts only). `deps.run` /
+// `deps.manifest` are the same test seam bootstrap uses (deps.run ?? defaultRun).
+export async function uninstallCompanion(host, cfg = {}, deps = {}) {
+  if (host === LOCAL) {
+    return { host, ok: false, code: -1, stderr: 'companion transport does not apply to the local host' };
+  }
+  // Tear down the host's channel cache entry FIRST — SIGTERM the cached ssh
+  // child (and the companion process it fronts) so the binary file isn't busy
+  // when rm runs. A never-bootstrapped host simply has no entry to delete; an
+  // in-flight bootstrap Promise has no kill() and is dropped from the cache.
+  const ch = channelCache.get(host);
+  if (ch && typeof ch.kill === 'function') {
+    try { ch.kill(); } catch { /* noop — a dead channel is fine */ }
+  }
+  channelCache.delete(host);
+  // Resolve the manifest version → remote path (companion.js:116) and run the
+  // uninstall script via the same runFn/defaultRun path the probe uses. The
+  // version is validated hex, safe to interpolate.
+  const runFn = deps.run ?? defaultRun;
+  const manifest = deps.manifest ?? loadManifest();
+  const remotePath = remoteBinaryPath(manifest.version);
+  try {
+    const res = await runFn(host, buildUninstallScript(remotePath), {}, cfg);
+    return {
+      host,
+      ok: !!res?.ok,
+      code: typeof res?.code === 'number' ? res.code : (res?.ok ? 0 : -1),
+      stderr: res?.stderr || '',
+    };
+  } catch (e) {
+    // runFn is the raw ssh helper; a throw is a transport failure (e.g. spawn
+    // error). Encode it as ok:false rather than propagating so the
+    // companion-or-fail contract stays in the return shape, not thrown.
+    return { host, ok: false, code: -1, stderr: e?.message ?? String(e) };
+  }
 }
 
 // --------------------------------- discover ---------------------------------
