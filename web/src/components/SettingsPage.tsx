@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import {
   Select,
   SelectContent,
@@ -8,7 +9,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
-import { ArrowLeft, RefreshCw } from 'lucide-react';
+import { ArrowLeft, RefreshCw, SearchIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { type HostLabels } from '@/lib/chatDisplay';
 
@@ -113,6 +114,27 @@ export function SettingsPage({
   // page-level scroll. Persisting across visits is intentionally not done.
   const [activeSection, setActiveSection] = useState<SectionId>('hosts');
 
+  // Section search: a case-insensitive substring match over each section's
+  // label AND description, so any preference is findable by term (e.g.
+  // `font`→Appearance, `kill`→Safety, `webhook`→Notifications). Pure UI over
+  // the static SETTINGS_SECTIONS metadata — adds no preferences, touches no
+  // config/persistence, so it cannot disturb the client-pref / PUT /api/config
+  // invariant. When the query hides the active section, the content pane stays
+  // put until the user picks a match (VS-Code-style filter-then-click).
+  const [search, setSearch] = useState('');
+  const q = search.trim().toLowerCase();
+  const matches =
+    q === ''
+      ? SETTINGS_SECTIONS
+      : SETTINGS_SECTIONS.filter(
+          (s) => s.label.toLowerCase().includes(q) || s.description.toLowerCase().includes(q),
+        );
+  // The narrow-screen Select resolves its trigger label from the rendered item
+  // matching `value`; if the active section is filtered out of the list the
+  // trigger would go blank, so always include the active section here.
+  const matchIds = new Set(matches.map((s) => s.id));
+  const selectItems = SETTINGS_SECTIONS.filter((s) => matchIds.has(s.id) || s.id === activeSection);
+
   // The active section's persistence model, shown in the footer so Save/Cancel
   // stop lying on the instant client-pref sections (Appearance/NewChats/
   // Snippets). See sectionPersistence.ts (WARDEN-870).
@@ -127,30 +149,51 @@ export function SettingsPage({
           </Button>
         </IconTooltip>
         <h1 className="text-sm font-semibold tracking-wide">Settings</h1>
-        <span className="text-xs text-muted-foreground">
-          {SETTINGS_SECTIONS.find((s) => s.id === activeSection)?.description}
-        </span>
+        {!q && (
+          <span className="min-w-0 truncate text-xs text-muted-foreground">
+            {SETTINGS_SECTIONS.find((s) => s.id === activeSection)?.description}
+          </span>
+        )}
+        {/* Section search — filters the wide-screen rail and the narrow-screen
+            dropdown by label+description (see `matches`/`selectItems` above).
+            Leading SearchIcon uses the established icon-input convention
+            (relative wrapper, absolute affordance, padded input). */}
+        <div className="relative ml-auto w-40 sm:w-64">
+          <SearchIcon className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search settings…"
+            aria-label="Search settings"
+            className="pl-8"
+          />
+        </div>
       </header>
 
       <div className="flex flex-1 min-h-0">
         {/* Section nav rail — wide screens (md+). A VS Code-style master-detail
             left rail: pick a section, see only that section in the content pane. */}
         <nav aria-label="Settings sections" className="hidden w-56 shrink-0 flex-col gap-1 overflow-y-auto border-r p-2 md:flex">
-          {SETTINGS_SECTIONS.map((s) => (
-            <Button
-              key={s.id}
-              variant="ghost"
-              size="sm"
-              className={cn(
-                'w-full justify-start',
-                activeSection === s.id && 'bg-accent font-medium text-accent-foreground hover:bg-accent hover:text-accent-foreground',
-              )}
-              onClick={() => setActiveSection(s.id)}
-              aria-current={activeSection === s.id ? 'page' : undefined}
-            >
-              {s.label}
-            </Button>
-          ))}
+          {matches.length === 0 ? (
+            <p className="px-2 py-4 text-xs text-muted-foreground">No matching sections.</p>
+          ) : (
+            matches.map((s) => (
+              <Button
+                key={s.id}
+                variant="ghost"
+                size="sm"
+                className={cn(
+                  'w-full justify-start',
+                  activeSection === s.id && 'bg-accent font-medium text-accent-foreground hover:bg-accent hover:text-accent-foreground',
+                )}
+                onClick={() => setActiveSection(s.id)}
+                aria-current={activeSection === s.id ? 'page' : undefined}
+              >
+                {s.label}
+              </Button>
+            ))
+          )}
         </nav>
         <main className="flex min-w-0 min-h-0 flex-1 flex-col">
           {/* Compact section picker — narrow screens (<md). The rail would crowd
@@ -162,7 +205,7 @@ export function SettingsPage({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {SETTINGS_SECTIONS.map((s) => (
+                {selectItems.map((s) => (
                   <SelectItem key={s.id} value={s.id}>
                     {s.label}
                   </SelectItem>
