@@ -226,6 +226,21 @@ export interface AttentionItem {
    * pane row that was never stamped.
    */
   enteredAt?: number;
+  /**
+   * WARDEN-877: the RAW scrollback line an attention deep-link should jump to — a pane
+   * state's repeating `signal`, or a watch pattern's matched `customMatch.line`. Threaded
+   * through openChat → externalSearchQuery → PaneTile's findNext so clicking an attention
+   * row positions that pane's scrollback at the triggering line (the SAME hit global
+   * search produces) instead of the bottom.
+   *
+   * This is deliberately the RAW line, NOT the formatted `signal` `fromCustom` builds
+   * (`'<line>' (pattern: <name>)`) — that formatted string would not findNext-match the
+   * scrollback, so it cannot serve as the anchor. Absent when no concrete anchor exists:
+   * health-group Chat rows (critical/warning carry no triggering line), a pane state with
+   * a null/empty signal, or any anchorless state — those fall through to byte-for-byte
+   * today's focus-only open (openChat(id, undefined) behaves identically to openChat(id)).
+   */
+  anchor?: string;
 }
 
 /**
@@ -294,6 +309,9 @@ export function rankAttention(rollup: AttentionRollup): {
     // WARDEN-587: carry the enteredAt stamp through so the directed Callout can render
     // the same live duration suffix the section rows do.
     ...(typeof a.enteredAt === 'number' ? { enteredAt: a.enteredAt } : {}),
+    // WARDEN-877: the raw repeating/offending `signal` is the scrollback anchor — jump
+    // the pane to it on open. Absent when signal is null/empty (focus-only open).
+    ...(a.signal ? { anchor: a.signal } : {}),
   });
   // WARDEN-540: a custom-pattern match is its own AttentionItem — state 'custom'
   // (NOT the pane's underlying state, which is irrelevant to this signal) with the
@@ -305,6 +323,10 @@ export function rankAttention(rollup: AttentionRollup): {
     state: 'custom',
     signal: a.customMatch ? `'${a.customMatch.line}' (pattern: ${a.customMatch.pattern})` : null,
     ...(typeof a.enteredAt === 'number' ? { enteredAt: a.enteredAt } : {}),
+    // WARDEN-877: the RAW matched line (NOT the formatted signal string above) is the
+    // scrollback anchor — the formatted `'…' (pattern: …)` would not findNext-match the
+    // raw scrollback, so the anchor must be the bare line text.
+    ...(a.customMatch?.line ? { anchor: a.customMatch.line } : {}),
   });
 
   // `directives`/`errors` are raw event counts with no single pane to deep-link, so

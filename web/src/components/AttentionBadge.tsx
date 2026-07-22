@@ -41,8 +41,14 @@ interface Props {
    * from the rollup it's handed.
    */
   rollup: AttentionRollup;
-  /** Open the agent's chat pane (reuses App's openChat). */
-  onOpenChat: (id: string) => void;
+  /**
+   * Open the agent's chat pane (reuses App's openChat). WARDEN-877: the optional
+   * `anchor` is the raw scrollback line an attention deep-link should jump to —
+   * openChat threads it into externalSearchQuery→findNext so the pane lands on the
+   * triggering line, not the scrollback bottom. Absent for health-group rows (no
+   * triggering line) and any anchorless state → focus-only open, byte-for-byte today.
+   */
+  onOpenChat: (id: string, anchor?: string) => void;
   /** Open the observer panel's Activity tab (reuses App's openActivityTab). */
   onOpenActivity: () => void;
   /** Opt-in desktop alerts (WARDEN-259). Now used only for the per-row mute bell
@@ -168,9 +174,9 @@ export function AttentionBadge({
     ? `${done.length} agent${done.length !== 1 ? 's' : ''} finished`
     : `${total} item${total !== 1 ? 's' : ''} need attention`;
 
-  const openChat = (id: string) => {
+  const openChat = (id: string, anchor?: string) => {
     setOpen(false);
-    onOpenChat(id);
+    onOpenChat(id, anchor);
   };
   const goActivity = () => {
     setOpen(false);
@@ -203,7 +209,7 @@ export function AttentionBadge({
         </div>
         {calloutTop && ranked.length >= 2 && (
           <div className="px-1.5 pt-1.5">
-            <Callout top={calloutTop} onClick={() => openChat(calloutTop.id)} />
+            <Callout top={calloutTop} onClick={() => openChat(calloutTop.id, calloutTop.anchor)} />
           </div>
         )}
         {/*
@@ -244,14 +250,14 @@ export function AttentionBadge({
             {stuck.length > 0 && (
               <Section title="Stuck" count={stuck.length} tone="text-red-500">
                 {sortOldestEnteredAtFirst(stuck).map((a) => (
-                  <AgentRow key={a.key || a.id} agent={a} dot="bg-red-500" detail={a.signal} enteredAt={a.enteredAt} durationStateLabel="stuck" onClick={() => openChat(a.key || a.id)} />
+                  <AgentRow key={a.key || a.id} agent={a} dot="bg-red-500" detail={a.signal} enteredAt={a.enteredAt} durationStateLabel="stuck" onClick={() => openChat(a.key || a.id, a.customMatch?.line ?? a.signal ?? undefined)} />
                 ))}
               </Section>
             )}
             {erroring.length > 0 && (
               <Section title="Erroring" count={erroring.length} tone="text-red-500">
                 {sortOldestEnteredAtFirst(erroring).map((a) => (
-                  <AgentRow key={a.key || a.id} agent={a} dot="bg-red-500" detail={a.signal} enteredAt={a.enteredAt} durationStateLabel="erroring" onClick={() => openChat(a.key || a.id)} />
+                  <AgentRow key={a.key || a.id} agent={a} dot="bg-red-500" detail={a.signal} enteredAt={a.enteredAt} durationStateLabel="erroring" onClick={() => openChat(a.key || a.id, a.customMatch?.line ?? a.signal ?? undefined)} />
                 ))}
               </Section>
             )}
@@ -284,7 +290,7 @@ export function AttentionBadge({
                     detail={a.signal}
                     enteredAt={a.enteredAt}
                     durationStateLabel="waiting"
-                    onClick={() => openChat(a.key || a.id)}
+                    onClick={() => openChat(a.key || a.id, a.customMatch?.line ?? a.signal ?? undefined)}
                     // WARDEN-770: the two states that resolve with a one-line human
                     // input earn the inline reply affordance. waiting (parked at a
                     // "press enter"/"needs input" prompt) is the headline case.
@@ -305,7 +311,7 @@ export function AttentionBadge({
                     detail={a.signal}
                     enteredAt={a.enteredAt}
                     durationStateLabel="blocked"
-                    onClick={() => openChat(a.key || a.id)}
+                    onClick={() => openChat(a.key || a.id, a.customMatch?.line ?? a.signal ?? undefined)}
                     // WARDEN-770: blocked (waiting on approval/dependency) is the
                     // second replyable state — the human can unblock inline.
                     replyable
@@ -327,7 +333,7 @@ export function AttentionBadge({
                     detail={a.customMatch ? `'${a.customMatch.line}' (${a.customMatch.pattern})` : undefined}
                     enteredAt={a.enteredAt}
                     durationStateLabel="matching a watch pattern"
-                    onClick={() => openChat(a.key || a.id)}
+                    onClick={() => openChat(a.key || a.id, a.customMatch?.line ?? a.signal ?? undefined)}
                   />
                 ))}
               </Section>
@@ -354,7 +360,7 @@ export function AttentionBadge({
                     // hold — the active→idle transition that populated `done` IS the
                     // enteredAt stamp, so the duration is the age of the completion.
                     durationTense="ago"
-                    onClick={() => openChat(a.key || a.id)}
+                    onClick={() => openChat(a.key || a.id, a.customMatch?.line ?? a.signal ?? undefined)}
                   />
                 ))}
               </Section>
