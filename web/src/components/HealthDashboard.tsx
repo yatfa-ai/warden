@@ -28,10 +28,12 @@ import { FileViewer } from '@/components/FileViewer';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { KillDialog } from './KillDialog';
 import { KeySendDialog } from './KeySendDialog';
 import { SelectionActionBar } from './sidebar/SidebarBits';
 import { DiffStatChip } from './sidebar/DiffStatChip';
+import { copyText } from '@/lib/clipboard';
 import { formatKillToast, runKillFanout } from '@/lib/kill';
 import { formatKeySendToast, runKeySendFanout } from '@/lib/keysend';
 import { isSelectedAll, toggleGroupSelection } from '@/lib/selection';
@@ -198,6 +200,18 @@ function byRecencyDesc(a: Chat, b: Chat): number {
 // (WARDEN-371)
 function agentIdOf(a: Chat): string {
   return a.key || a.id;
+}
+
+// Copy text to the clipboard through the shared Electron-safe helper, surfacing
+// the boolean result via toast — never bare navigator.clipboard, which rejects
+// silently in a non-secure context (WARDEN-285). Mirrors the copy+toast shape in
+// FileViewer (and the module-level helper in ActivityTimeline): the right-click
+// copy is the fleet row's reflex, so toasting success/failure lives here, not in
+// the deliberately UI-free clipboard.ts.
+async function copyToClipboard(text: string) {
+  const ok = await copyText(text);
+  if (ok) toast.success('Copied');
+  else toast.error('Copy failed');
 }
 
 /**
@@ -710,9 +724,14 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
     const id = agentIdOf(agent);
     const isSelected = selectedIds.has(id);
     const selectionActive = selectedIds.size > 0;
+    // Captured so the Copy-role menu item (rendered only when present) narrows to
+    // `string` inside the onSelect closure — TS keeps const narrowing into the
+    // callback, where a bare `agent.role` property access would stay `string | undefined`.
+    const role = agent.role;
     return (
+    <ContextMenu key={agent.id}>
+      <ContextMenuTrigger asChild>
     <div
-      key={agent.id}
       role="button"
       tabIndex={0}
       aria-label={`open chat ${agent.name || agent.key || agent.id}`}
@@ -833,6 +852,16 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
           may render ALONE where every other chip is absent. */}
       <StashChip status={fleetGit.statusByKey[id]} />
     </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={() => onOpenChat(agent.key || agent.id)}>Open</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyToClipboard(agent.name || agent.key || agent.id)}>Copy agent name</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyToClipboard(agent.host)}>Copy host</ContextMenuItem>
+        {agent.isAgent && role && (
+          <ContextMenuItem onSelect={() => copyToClipboard(role)}>Copy role</ContextMenuItem>
+        )}
+      </ContextMenuContent>
+    </ContextMenu>
     );
   };
 
