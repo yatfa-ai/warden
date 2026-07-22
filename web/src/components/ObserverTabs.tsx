@@ -47,6 +47,17 @@ export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, o
   const [openIds, setOpenIds] = useState<string[]>(() => loadObs().openIds);
   const [activeId, setActiveId] = useState<string | null>(() => loadObs().activeId);
   const [viewMode, setViewMode] = useState<'sessions' | 'activity' | 'directives'>(() => loadObs().viewMode || 'sessions');
+  // WARDEN-879: Activity + Directives tab filters persist alongside viewMode,
+  // hydrated from loadObs() (each field defaults to 'all' when never saved) and
+  // saved on every change via the saveObs effect below. Owned here (not in the
+  // children) so a warden restart reopens each tab with its view-shaping filters
+  // intact — mirroring how viewMode/openIds/activeId already ride this path.
+  // `act*` = Activity tab (type/agent/host); `dir*` = Directives tab (agent/host).
+  const [actTypeFilter, setActTypeFilter] = useState<string>(() => loadObs().activityFilters?.type ?? 'all');
+  const [actAgentFilter, setActAgentFilter] = useState<string>(() => loadObs().activityFilters?.agent ?? 'all');
+  const [actHostFilter, setActHostFilter] = useState<string>(() => loadObs().activityFilters?.host ?? 'all');
+  const [dirAgentFilter, setDirAgentFilter] = useState<string>(() => loadObs().directiveFilters?.agent ?? 'all');
+  const [dirHostFilter, setDirHostFilter] = useState<string>(() => loadObs().directiveFilters?.host ?? 'all');
   const [booted, setBooted] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingTimeout, setLoadingTimeout] = useState(false);
@@ -187,7 +198,15 @@ export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, o
     })();
   }, [refresh]);
 
-  useEffect(() => { if (booted) saveObs({ openIds, activeId, viewMode }); }, [openIds, activeId, viewMode, booted]);
+  useEffect(() => {
+    if (booted) saveObs({
+      openIds, activeId, viewMode,
+      // WARDEN-879: persist the Activity + Directives tab filters into the
+      // activityFilters/directiveFilters shapes loadObs() reads back.
+      activityFilters: { type: actTypeFilter, agent: actAgentFilter, host: actHostFilter },
+      directiveFilters: { agent: dirAgentFilter, host: dirHostFilter },
+    });
+  }, [openIds, activeId, viewMode, booted, actTypeFilter, actAgentFilter, actHostFilter, dirAgentFilter, dirHostFilter]);
 
   // Seamless resume: when a session bound to an agent chat becomes active,
   // reconnect to that chat (open its pane on the right host) exactly once. This
@@ -375,14 +394,23 @@ export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, o
       {/* Activity view */}
       {viewMode === 'activity' && (
         <div className="flex-1 min-h-0">
-          <ActivityTimeline timestampFormat={timestampFormat} />
+          <ActivityTimeline
+            timestampFormat={timestampFormat}
+            typeFilter={actTypeFilter} setTypeFilter={setActTypeFilter}
+            agentFilter={actAgentFilter} setAgentFilter={setActAgentFilter}
+            hostFilter={actHostFilter} setHostFilter={setActHostFilter}
+          />
         </div>
       )}
 
       {/* Directives view — read-only history of every directive that reached an agent */}
       {viewMode === 'directives' && (
         <div className="flex-1 min-h-0">
-          <DirectiveHistory timestampFormat={timestampFormat} />
+          <DirectiveHistory
+            timestampFormat={timestampFormat}
+            agentFilter={dirAgentFilter} setAgentFilter={setDirAgentFilter}
+            hostFilter={dirHostFilter} setHostFilter={setDirHostFilter}
+          />
         </div>
       )}
     </div>
