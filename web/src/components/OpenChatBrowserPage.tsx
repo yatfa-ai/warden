@@ -3,7 +3,15 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 import { ArrowLeft, EyeIcon } from 'lucide-react';
+import { toast } from 'sonner';
 import { SessionTranscriptViewer } from './SessionTranscriptViewer';
 import { StatusDot } from '@/components/StatusDot';
 import type { Chat } from '@/lib/types';
@@ -13,6 +21,7 @@ import { THIS_MACHINE, basename, displayName, hostTagOf, hostLabelFor } from '@/
 import { useHostLabels } from '@/lib/hostLabels';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTokens } from '@/lib/formatTokens';
+import { copyText } from '@/lib/clipboard';
 import { budgetProgress, budgetOverPercent, type BudgetState } from '@/lib/tokenBudget';
 import type { ClaudeSession, SessionSearchResult, TokenUsage } from './ChatSidebar';
 
@@ -57,48 +66,83 @@ interface DiscoverItem {
 }
 
 function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFormat, showHostTags, isBudgetOffender }: { it: DiscoverItem; resumingId: string | null; onOpen: () => void; onResume: () => void; onView: () => void; timestampFormat: TimestampFormat; showHostTags?: boolean; isBudgetOffender?: boolean; }) {
+  // Copy via the Electron-safe helper + a sonner success/error toast — the same
+  // handleCopy the GlobalSearchDialog rows (GlobalSearchResultRow /
+  // GlobalSearchSessionRow) use for their right-click Copy items. copyText has a
+  // textarea+execCommand fallback (never call navigator.clipboard directly).
+  const handleCopy = async (text: string) => {
+    const ok = await copyText(text);
+    if (ok) toast.success('Copied');
+    else toast.error('Copy failed');
+  };
+
   if (it.kind === 'live') {
     return (
-      <Button variant="ghost" onClick={onOpen} className="w-full h-auto justify-start gap-2 px-2 py-1.5 text-xs font-normal hover:bg-accent">
-        <StatusDot tone="green" variant="solid" label="Live session" />
-        <span className="truncate flex-1">{it.label}</span>
-        {it.time ? <span className="text-[10px] text-muted-foreground shrink-0">{formatTimestamp(it.time, timestampFormat)}</span> : null}
-        {showHostTags !== false && it.hostTag ? <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span> : null}
-        <span className="text-[10px] text-green-500/80 shrink-0">live</span>
-      </Button>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <Button variant="ghost" onClick={onOpen} className="w-full h-auto justify-start gap-2 px-2 py-1.5 text-xs font-normal hover:bg-accent">
+            <StatusDot tone="green" variant="solid" label="Live session" />
+            <span className="truncate flex-1">{it.label}</span>
+            {it.time ? <span className="text-[10px] text-muted-foreground shrink-0">{formatTimestamp(it.time, timestampFormat)}</span> : null}
+            {showHostTags !== false && it.hostTag ? <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span> : null}
+            <span className="text-[10px] text-green-500/80 shrink-0">live</span>
+          </Button>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem onSelect={onOpen}>Open</ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem onSelect={() => handleCopy(it.label)}>Copy summary</ContextMenuItem>
+          <ContextMenuItem onSelect={() => handleCopy(it.hostTag)}>Copy host</ContextMenuItem>
+          <ContextMenuItem onSelect={() => handleCopy(it.openId ?? '')}>Copy session id</ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
     );
   }
   const isLoading = resumingId === it.id;
   return (
-    <div className={`group flex items-center gap-2 px-2 py-1.5 rounded-md text-xs hover:bg-accent transition-colors${isBudgetOffender ? ' ring-1 ring-red-500/50 bg-red-500/5' : ''}`}>
-      <StatusDot tone="cyan" variant="ring" label="History session (resumable)" />
-      <div className="flex-1 min-w-0">
-        <Button variant="ghost" onClick={onResume} disabled={isLoading} className="h-auto w-full justify-start px-1 py-0 truncate text-xs font-normal">{it.label}</Button>
-        {it.snippet ? <div className="px-1 truncate text-[10px] text-muted-foreground/80 italic" title={it.snippet}>{it.snippet}</div> : null}
-      </div>
-      {it.time ? <span className="text-[10px] text-muted-foreground shrink-0">{formatTimestamp(it.time, timestampFormat)}</span> : null}
-      {it.tokenUsage?.total ? (
-        <IconTooltip label="Total tokens this session consumed (input + output + cache). Model-agnostic — not dollar cost.">
-          <span className="text-[10px] text-amber-500/80 shrink-0 tabular-nums">{formatTokens(it.tokenUsage.total)}</span>
-        </IconTooltip>
-      ) : null}
-      {isBudgetOffender ? (
-        <IconTooltip label="Budget breach — heaviest session in the alert window (the row the alert deep-linked here). An older, out-of-window session may sit above it because this list sorts by lifetime total.">
-          <span className="text-[10px] text-red-400 shrink-0 font-medium" aria-label="budget offender">⚑ offender</span>
-        </IconTooltip>
-      ) : null}
-      {showHostTags !== false && it.hostTag ? <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span> : null}
-      <IconTooltip label="view transcript (read-only)">
-        <Button variant="ghost" size="icon-xs" onClick={onView} aria-label="View transcript" className="text-muted-foreground hover:text-foreground">
-          <EyeIcon />
-        </Button>
-      </IconTooltip>
-      <IconTooltip label="bump to live (resume)" disabled={isLoading}>
-        <Button variant="ghost" size="xs" onClick={onResume} disabled={isLoading} className="text-[10px] text-cyan-400 hover:text-cyan-300 px-1 h-auto">
-          {isLoading ? <Skeleton className="h-3 w-6 inline-block" /> : '↻ resume'}
-        </Button>
-      </IconTooltip>
-    </div>
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div className={`group flex items-center gap-2 px-2 py-1.5 rounded-md text-xs hover:bg-accent transition-colors${isBudgetOffender ? ' ring-1 ring-red-500/50 bg-red-500/5' : ''}`}>
+          <StatusDot tone="cyan" variant="ring" label="History session (resumable)" />
+          <div className="flex-1 min-w-0">
+            <Button variant="ghost" onClick={onResume} disabled={isLoading} className="h-auto w-full justify-start px-1 py-0 truncate text-xs font-normal">{it.label}</Button>
+            {it.snippet ? <div className="px-1 truncate text-[10px] text-muted-foreground/80 italic" title={it.snippet}>{it.snippet}</div> : null}
+          </div>
+          {it.time ? <span className="text-[10px] text-muted-foreground shrink-0">{formatTimestamp(it.time, timestampFormat)}</span> : null}
+          {it.tokenUsage?.total ? (
+            <IconTooltip label="Total tokens this session consumed (input + output + cache). Model-agnostic — not dollar cost.">
+              <span className="text-[10px] text-amber-500/80 shrink-0 tabular-nums">{formatTokens(it.tokenUsage.total)}</span>
+            </IconTooltip>
+          ) : null}
+          {isBudgetOffender ? (
+            <IconTooltip label="Budget breach — heaviest session in the alert window (the row the alert deep-linked here). An older, out-of-window session may sit above it because this list sorts by lifetime total.">
+              <span className="text-[10px] text-red-400 shrink-0 font-medium" aria-label="budget offender">⚑ offender</span>
+            </IconTooltip>
+          ) : null}
+          {showHostTags !== false && it.hostTag ? <span className="text-[10px] text-muted-foreground shrink-0">{it.hostTag}</span> : null}
+          <IconTooltip label="view transcript (read-only)">
+            <Button variant="ghost" size="icon-xs" onClick={onView} aria-label="View transcript" className="text-muted-foreground hover:text-foreground">
+              <EyeIcon />
+            </Button>
+          </IconTooltip>
+          <IconTooltip label="bump to live (resume)" disabled={isLoading}>
+            <Button variant="ghost" size="xs" onClick={onResume} disabled={isLoading} className="text-[10px] text-cyan-400 hover:text-cyan-300 px-1 h-auto">
+              {isLoading ? <Skeleton className="h-3 w-6 inline-block" /> : '↻ resume'}
+            </Button>
+          </IconTooltip>
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={onView}>View transcript</ContextMenuItem>
+        <ContextMenuItem onSelect={onResume} disabled={isLoading}>Resume</ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onSelect={() => handleCopy(it.label)}>Copy summary</ContextMenuItem>
+        <ContextMenuItem onSelect={() => handleCopy(it.resume?.cwd ?? '')}>Copy cwd</ContextMenuItem>
+        <ContextMenuItem onSelect={() => handleCopy(it.resume?.host ?? '')}>Copy host</ContextMenuItem>
+        <ContextMenuItem onSelect={() => handleCopy(it.resume?.id ?? '')}>Copy session id</ContextMenuItem>
+        {it.snippet ? <ContextMenuItem onSelect={() => handleCopy(it.snippet ?? '')}>Copy snippet</ContextMenuItem> : null}
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
