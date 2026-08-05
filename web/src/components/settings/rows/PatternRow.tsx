@@ -11,6 +11,7 @@
  *
  *  Extracted verbatim from SettingsPage (WARDEN-664); behavior is unchanged. */
 import { useState, useEffect } from 'react';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
@@ -24,6 +25,13 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
+import { copyText } from '@/lib/clipboard';
+import {
   type WatchPattern,
   WATCH_PATTERN_NAME_MAX,
   WATCH_PATTERN_EXPRESSION_MAX,
@@ -36,6 +44,7 @@ export function PatternRow({
   onExpressionChange,
   onModeChange,
   onToggleEnabled,
+  onDuplicate,
   onDelete,
 }: {
   pattern: WatchPattern;
@@ -43,6 +52,7 @@ export function PatternRow({
   onExpressionChange: (id: string, expression: string) => void;
   onModeChange: (id: string, mode: 'string' | 'regex') => void;
   onToggleEnabled: (id: string) => void;
+  onDuplicate: (id: string) => void;
   onDelete: (id: string) => void;
 }) {
   const [nameDraft, setNameDraft] = useState(pattern.name);
@@ -71,8 +81,22 @@ export function PatternRow({
   // the "not yet editing" state, not a malformed rule.
   const regexInvalid = pattern.mode === 'regex' && exprDraft.trim().length > 0 && !isValidRegex(exprDraft);
 
+  // Themed right-click menu (WARDEN-898): Copy name · Copy expression · Duplicate ·
+  // Delete. Mirrors the established copyText+toast pattern (DiffViewer/FileViewer/
+  // WorkspaceTabs) so the expression payload — which right-click used to fall through
+  // to the native webview menu for — is finally copyable. Right-click moves focus to
+  // the menu the same way clicking elsewhere does, so an in-flight name/expression
+  // edit still commits on blur (commitName/commitExpr above).
+  const handleCopy = async (text: string) => {
+    const ok = await copyText(text);
+    if (ok) toast.success('Copied');
+    else toast.error('Copy failed');
+  };
+
   return (
-    <div className="flex flex-col gap-1 rounded-md border bg-muted/30 p-2">
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div className="flex flex-col gap-1 rounded-md border bg-muted/30 p-2">
       <div className="flex items-center gap-2">
         <Input
           value={nameDraft}
@@ -134,6 +158,14 @@ export function PatternRow({
       {regexInvalid && (
         <p className="text-xs text-red-500">Invalid regex — it will be skipped until fixed.</p>
       )}
-    </div>
+        <ContextMenuContent>
+          <ContextMenuItem onSelect={() => handleCopy(pattern.name)}>Copy name</ContextMenuItem>
+          <ContextMenuItem onSelect={() => handleCopy(pattern.expression)}>Copy expression</ContextMenuItem>
+          <ContextMenuItem onSelect={() => onDuplicate(pattern.id)}>Duplicate</ContextMenuItem>
+          <ContextMenuItem variant="destructive" onSelect={() => onDelete(pattern.id)}>Delete</ContextMenuItem>
+        </ContextMenuContent>
+        </div>
+      </ContextMenuTrigger>
+    </ContextMenu>
   );
 }

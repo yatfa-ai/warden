@@ -114,6 +114,38 @@ export function PatternsSection({ config, setConfig, hidden }: PatternsSectionPr
     setConfig({ ...config, watchPatterns: config.watchPatterns.filter((p) => p.id !== id) });
   };
 
+  // Duplicate a pattern via the right-click menu (WARDEN-898). Mirrors the proven
+  // addPattern path (same genPatternId / setConfig round-trip); only the name is
+  // synthesized. The copy gets a non-colliding "Name (copy)" / "Name (copy 2)" …
+  // suffix, truncated so a source name already at the WATCH_PATTERN_NAME_MAX cap
+  // doesn't overflow once suffixed. validatePatternName only loops on 'duplicate'
+  // (a suffixed copy of a valid name can never be empty, and truncation caps the
+  // length), so the loop always terminates on a free slot.
+  const duplicatePattern = (id: string) => {
+    const src = config.watchPatterns.find((p) => p.id === id);
+    if (!src) return;
+    if (config.watchPatterns.length >= WATCH_PATTERN_MAX_COUNT) {
+      toast.error(`You can have at most ${WATCH_PATTERN_MAX_COUNT} watch patterns.`);
+      return;
+    }
+    const makeName = (n: number) => {
+      const suffix = n === 1 ? ' (copy)' : ` (copy ${n})`;
+      const base = src.name.slice(0, WATCH_PATTERN_NAME_MAX - suffix.length);
+      return `${base}${suffix}`;
+    };
+    let n = 1;
+    let name = makeName(n);
+    while (validatePatternName(name, config.watchPatterns) === 'duplicate') {
+      n++;
+      name = makeName(n);
+    }
+    setConfig({
+      ...config,
+      watchPatterns: [...config.watchPatterns,
+        { id: genPatternId(), name, expression: src.expression, mode: src.mode, enabled: src.enabled }],
+    });
+  };
+
   return (
     <SettingsSection title="Watch patterns" className={hidden ? 'hidden' : undefined}>
       <p className="text-xs text-muted-foreground">
@@ -134,6 +166,7 @@ export function PatternsSection({ config, setConfig, hidden }: PatternsSectionPr
                 onExpressionChange={updatePatternExpression}
                 onModeChange={setPatternMode}
                 onToggleEnabled={togglePatternEnabled}
+                onDuplicate={duplicatePattern}
                 onDelete={deletePattern}
               />
             ))}
