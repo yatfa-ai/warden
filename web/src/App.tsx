@@ -1882,7 +1882,7 @@ function App() {
         </div>
       </header>
       <main className="flex flex-1 min-h-0">
-        <section className="border-r min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"
+        <section className="chat-sidebar border-r min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"
           style={{ width: sidebarCollapsed ? 0 : sidebarWidth, flexShrink: 0, opacity: sidebarCollapsed ? 0 : 1 }}>
           <div
             className="absolute top-0 right-0 bottom-0 w-1 hover:bg-accent hover:w-1.5 transition-all cursor-col-resize z-10"

@@ -218,7 +218,7 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
       aria-current={open ? 'true' : undefined}
       onClick={onOpen}
       onKeyDown={(e) => { if (!editing && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onOpen(); } }}
-      className={`group flex items-center gap-2 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent cursor-pointer transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${open ? 'bg-accent' : ''} ${dim || hostOffline ? 'opacity-60' : ''}`}
+      className={`group flex flex-wrap items-center gap-2 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent cursor-pointer transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${open ? 'bg-accent' : ''} ${dim || hostOffline ? 'opacity-60' : ''}`}
     >
       {onToggleSelect && (
         // The selection checkbox sits leftmost, before the status dot. Click +
@@ -262,9 +262,9 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
         )
       )}
       {editing ? (
-        <Input autoFocus value={val} onClick={(e) => e.stopPropagation()} onChange={(e) => setVal(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { setVal(c.name || c.key || c.id); setEditing(false); } }} className="h-5 text-[11px] px-1 flex-1" />
+        <Input autoFocus value={val} onClick={(e) => e.stopPropagation()} onChange={(e) => setVal(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { setVal(c.name || c.key || c.id); setEditing(false); } }} className="h-5 text-[11px] px-1 flex-1 min-w-0" />
       ) : (
-        <span className="truncate flex-1" onDoubleClick={(e) => { if (canRename) { e.stopPropagation(); setVal(c.name || c.key || c.id); setEditing(true); } }} title={canRename ? 'double-click to rename' : undefined}>
+        <span className="flex-1 min-w-0 wrap-anywhere" onDoubleClick={(e) => { if (canRename) { e.stopPropagation(); setVal(c.name || c.key || c.id); setEditing(true); } }} title={canRename ? 'double-click to rename' : undefined}>
           {c.name || c.key || c.id}
           {(showTypeBadges !== false || showProjectBadges || gitInfo?.branch) && (
             <>
@@ -332,7 +332,7 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
           {noteEditing ? (
             <Input autoFocus value={noteVal} onClick={(e) => e.stopPropagation()} onChange={(e) => setNoteVal(e.target.value)} onBlur={commitNote} onKeyDown={(e) => { if (e.key === 'Enter') commitNote(); if (e.key === 'Escape') setNoteEditing(false); }} placeholder="add a note…" maxLength={200} className="block mt-0.5 h-5 w-full text-[10px] px-1 text-muted-foreground" />
           ) : note ? (
-            <span className="block mt-0.5 truncate text-[10px] italic text-muted-foreground/80" title={note}>{note}</span>
+            <span className="block mt-0.5 wrap-anywhere text-[10px] italic text-muted-foreground/80" title={note}>{note}</span>
           ) : null}
         </span>
       )}
@@ -341,43 +341,53 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
           chat is recognizable at a glance; when it CURRENTLY needs the human (WARDEN-514)
           the static eye becomes a state-aware needs-you indicator (WatchToggle).
           Unwatched is hover/focus-revealed to keep the default fleet list quiet. */}
-      {!editing && onToggleWatch && (
-        <WatchToggle isWatched={isWatched} watchState={watchState} onToggle={onToggleWatch} />
-      )}
-      {!editing && onTogglePin && (
-        <IconTooltip label={isPinned ? 'unpin' : 'pin'}>
-          <button
-            className={`px-0.5 ${isPinned ? 'text-yellow-500' : 'text-muted-foreground hover:text-foreground'} ${isUser ? 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100' : ''} active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded`}
-            onClick={(e) => { e.stopPropagation(); onTogglePin(); }}
-          >
-            📌
-          </button>
-        </IconTooltip>
-      )}
-      {/* WARDEN-305: per-agent note affordance — mirrors the 📌 pin button, but built
-          on shadcn <Button> per WARDEN-68 (Rule 1 + Rule 2): no raw <button>. */}
-      {!editing && onSetNote && (
-        <IconTooltip label={note ? 'edit note' : 'add note'}>
-          <Button
-            variant="ghost"
-            size="xs"
-            className={`px-0.5 ${note ? 'text-yellow-600' : 'text-muted-foreground hover:text-foreground'} ${isUser ? 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100' : ''}`}
-            onClick={(e) => { e.stopPropagation(); setNoteVal(note || ''); setNoteEditing(true); }}
-            aria-label={note ? 'edit note' : 'add note'}
-          >
-            🗒
-          </Button>
-        </IconTooltip>
-      )}
-      {isUser && !editing && (
-          <IconTooltip label="kill + forget">
-            <button
-              className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-red-500 px-0.5 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded"
-              onClick={(e) => { e.stopPropagation(); onKill(); }}
-            >
-              ×
-            </button>
-          </IconTooltip>
+      {/* WARDEN-892: the action buttons are grouped so that at narrow sidebar widths
+          (container query, ≤13rem) the whole group drops to its own line
+          (@max-[13rem]:basis-full) instead of squeezing the name span into a
+          sub-readable column — which collapsed the GitBranchBadge branch token into a
+          one-character-wide, hundreds-of-px-tall column. Requires an @container
+          ancestor (the host/collection view roots carry @container). */}
+      {!editing && (
+        <div className="flex items-center gap-0.5 @max-[13rem]:basis-full @max-[13rem]:justify-start @max-[13rem]:gap-1">
+          {onToggleWatch && (
+            <WatchToggle isWatched={isWatched} watchState={watchState} onToggle={onToggleWatch} />
+          )}
+          {onTogglePin && (
+            <IconTooltip label={isPinned ? 'unpin' : 'pin'}>
+              <button
+                className={`px-0.5 ${isPinned ? 'text-yellow-500' : 'text-muted-foreground hover:text-foreground'} ${isUser ? 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100' : ''} active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded`}
+                onClick={(e) => { e.stopPropagation(); onTogglePin(); }}
+              >
+                📌
+              </button>
+            </IconTooltip>
+          )}
+          {/* WARDEN-305: per-agent note affordance — mirrors the 📌 pin button, but built
+              on shadcn <Button> per WARDEN-68 (Rule 1 + Rule 2): no raw <button>. */}
+          {onSetNote && (
+            <IconTooltip label={note ? 'edit note' : 'add note'}>
+              <Button
+                variant="ghost"
+                size="xs"
+                className={`px-0.5 ${note ? 'text-yellow-600' : 'text-muted-foreground hover:text-foreground'} ${isUser ? 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100' : ''}`}
+                onClick={(e) => { e.stopPropagation(); setNoteVal(note || ''); setNoteEditing(true); }}
+                aria-label={note ? 'edit note' : 'add note'}
+              >
+                🗒
+              </Button>
+            </IconTooltip>
+          )}
+          {isUser && (
+            <IconTooltip label="kill + forget">
+              <button
+                className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-red-500 px-0.5 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded"
+                onClick={(e) => { e.stopPropagation(); onKill(); }}
+              >
+                ×
+              </button>
+            </IconTooltip>
+          )}
+        </div>
       )}
     </div>
   );
@@ -467,7 +477,7 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
       onKeyDown={(e) => { if (!editing && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onOpen(); } }}
       className={`group flex flex-col gap-0.5 px-2 py-1.5 compact:py-1 rounded-md text-left text-xs hover:bg-accent cursor-pointer transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background ${dead ? 'opacity-50' : ''}`}
     >
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
         {showStatusIndicators !== false && (
           <StatusDot
             tone={dead ? 'red' : isOpen ? 'green' : 'muted'}
@@ -476,9 +486,9 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
           />
         )}
         {editing ? (
-          <Input autoFocus value={val} onClick={(e) => e.stopPropagation()} onChange={(e) => setVal(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { setVal(c ? displayName(c) : id); setEditing(false); } }} className="h-5 text-[11px] px-1 flex-1" />
+          <Input autoFocus value={val} onClick={(e) => e.stopPropagation()} onChange={(e) => setVal(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { setVal(c ? displayName(c) : id); setEditing(false); } }} className="h-5 text-[11px] px-1 flex-1 min-w-0" />
         ) : (
-          <span className={`truncate flex-1 ${dead ? 'line-through text-muted-foreground' : ''}`}>
+          <span className={`flex-1 min-w-0 wrap-anywhere ${dead ? 'line-through text-muted-foreground' : ''}`}>
             {c ? displayName(c) : id}
           </span>
         )}
@@ -525,7 +535,7 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
           {noteEditing ? (
             <Input autoFocus value={noteVal} onClick={(e) => e.stopPropagation()} onChange={(e) => setNoteVal(e.target.value)} onBlur={commitNote} onKeyDown={(e) => { if (e.key === 'Enter') commitNote(); if (e.key === 'Escape') setNoteEditing(false); }} placeholder="add a note…" maxLength={200} className="h-5 text-[10px] px-1 text-muted-foreground" />
           ) : (
-            <span className="block truncate text-[10px] italic text-muted-foreground/80" title={note}>🗒 {note}</span>
+            <span className="block wrap-anywhere text-[10px] italic text-muted-foreground/80" title={note}>🗒 {note}</span>
           )}
         </div>
       )}

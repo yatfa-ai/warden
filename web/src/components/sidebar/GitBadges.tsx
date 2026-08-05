@@ -156,15 +156,16 @@ export function GitChangedFile({ file, onOpen, onOpenConflict, onOpenFile }: { f
   const useConflict = file.conflict && !!onOpenConflict;
   const content = (
     <>
-      <span className="inline-flex items-center">
+      <span className="inline-flex items-center shrink-0">
         {segments.map((s, i) => (
           <span key={i} className={s.cls}>{s.text}</span>
         ))}
       </span>
-      <span className="min-w-0 flex-1 truncate">{file.path}</span>
+      <span className="min-w-0 flex-1 wrap-anywhere">{file.path}</span>
       {/* WARDEN-478: an "open this file in the FileViewer" affordance — a sibling of
-          the path, shrunk to the right edge. The path's flex-1 + min-w-0 keep it
-          truncating so long paths never push this icon off the row. */}
+          the path, shrunk to the right edge. WARDEN-892: the path wraps internally
+          (no truncation) so a long path never pushes this icon off the row; the
+          row's flex-wrap drops the icon to its own line before letting it clip. */}
       {onOpenFile && <OpenFileAffordance path={file.path} onOpenFile={onOpenFile} className="shrink-0 ml-1" />}
     </>
   );
@@ -183,14 +184,14 @@ export function GitChangedFile({ file, onOpen, onOpenConflict, onOpenFile }: { f
         // the button's activation click can fire.
         onKeyDown={(e) => e.stopPropagation()}
         title={`${fileSlotLabel(file)} · ${useConflict ? 'view conflict' : isStaged ? 'view staged diff' : 'view diff'}: ${file.path}`}
-        className="flex items-center gap-1 w-full text-left rounded-sm text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+        className="flex flex-wrap items-center gap-1 w-full text-left rounded-sm text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
       >
         {content}
       </button>
     );
   }
   return (
-    <span className="flex items-center gap-1 text-[10px] text-muted-foreground">{content}</span>
+    <span className="flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground">{content}</span>
   );
 }
 
@@ -547,13 +548,13 @@ export function GitTriageCallout({ agents, chats, focused, onOpenChat }: {
       onClick={() => onOpenChat(top.key)}
       title={`Triage ${name} first — ${reason}`}
       aria-label={`Triage ${name} first: ${reason}`}
-      className="h-7 max-w-[18rem] gap-1 rounded-md border border-border bg-muted/40 px-2 text-muted-foreground hover:bg-accent hover:text-foreground"
+      className="max-w-full gap-1 rounded-md border border-border bg-muted/40 px-2 py-1 text-muted-foreground hover:bg-accent hover:text-foreground"
     >
       <span className={cn('text-xs shrink-0', cfg.color)} aria-hidden>{cfg.glyph}</span>
-      <span className="min-w-0 flex-1 flex items-baseline gap-1 overflow-hidden">
+      <span className="min-w-0 flex-1 flex flex-wrap items-baseline gap-x-1 gap-y-0">
         <span className="text-[10px] shrink-0">triage first:</span>
-        <span className="min-w-0 shrink truncate text-xs font-medium text-foreground">{name}</span>
-        <span className="min-w-0 shrink truncate text-[10px]">· {reason}</span>
+        <span className="min-w-0 shrink wrap-anywhere whitespace-normal text-xs font-medium text-foreground">{name}</span>
+        <span className="min-w-0 shrink wrap-anywhere whitespace-normal text-[10px]">· {reason}</span>
       </span>
     </Button>
   );
@@ -1432,29 +1433,29 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
         <button
           type="button"
           onClick={(e) => e.stopPropagation()}
-          className={cn('inline-flex items-center gap-0.5 text-[10px] cursor-pointer', isDetached ? 'text-amber-400 hover:text-amber-300' : 'text-cyan-400 hover:text-cyan-300', className)}
+          className={cn('inline-flex items-center gap-0.5 text-[10px] cursor-pointer min-w-0 max-w-full', isDetached ? 'text-amber-400 hover:text-amber-300' : 'text-cyan-400 hover:text-cyan-300', className)}
           title={`${titleParts.join(' · ')} — click for recent commits`}
         >
-          {operation && <span className="text-red-400 font-medium" title={inProgressTitle || `${operation} in progress`}>⚠ {operation}</span>}
+          {operation && <span className="shrink-0 text-red-400 font-medium" title={inProgressTitle || `${operation} in progress`}>⚠ {operation}</span>}
           {isDetached ? (
             <>
-              <span title="detached HEAD — commits not on a branch; at risk if reflog expires">⎇</span>
-              {sha && <span className="font-mono">{sha}</span>}
+              <span className="shrink-0" title="detached HEAD — commits not on a branch; at risk if reflog expires">⎇</span>
+              {sha && <span className="min-w-0 wrap-anywhere font-mono">{sha}</span>}
             </>
-          ) : branch}
+          ) : <span className="min-w-0 wrap-anywhere">{branch}</span>}
           {headFresh && (
             // WARDEN-545: always-on `· Nd` last-commit freshness append. Stale
             // (>7d) tints amber so a quiet agent pops while fresh ones stay muted.
             // Rendered for branch AND detached agents (headDate is fetched
             // unconditionally server-side), so a human scanning the un-expanded
             // sidebar can pick out stalled agents without expanding a commit list.
-            <span className={headStale ? 'text-amber-400' : 'text-muted-foreground'}>· {formatRelative(headMs)}</span>
+            <span className={cn('shrink-0', headStale ? 'text-amber-400' : 'text-muted-foreground')}>· {formatRelative(headMs)}</span>
           )}
-          {clean === false && <span className="text-yellow-400">±</span>}
-          {noUpstream && <span className="text-muted-foreground" title="no remote tracking — local-only work, not backed up remotely">🔒</span>}
-          {aheadCount > 0 && <span className="text-amber-400">↑{aheadCount}</span>}
-          {behindCount > 0 && <span className="text-blue-400">↓{behindCount}</span>}
-          {stashN > 0 && <span className="text-fuchsia-400" title={`${stashN} stashed`}>🗄{stashN}</span>}
+          {clean === false && <span className="shrink-0 text-yellow-400">±</span>}
+          {noUpstream && <span className="shrink-0 text-muted-foreground" title="no remote tracking — local-only work, not backed up remotely">🔒</span>}
+          {aheadCount > 0 && <span className="shrink-0 text-amber-400">↑{aheadCount}</span>}
+          {behindCount > 0 && <span className="shrink-0 text-blue-400">↓{behindCount}</span>}
+          {stashN > 0 && <span className="shrink-0 text-fuchsia-400" title={`${stashN} stashed`}>🗄{stashN}</span>}
         </button>
       </RadixPopover.Trigger>
       <RadixPopover.Portal>

@@ -241,16 +241,16 @@ function CollectionCard({ collection, agentCount, onOpen, onRename, onDelete, on
                   onBlur={commit}
                   onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { setVal(collection.name); setEditing(false); } }}
                   maxLength={60}
-                  className="h-5 text-[11px] px-1 flex-1"
+                  className="h-5 text-[11px] px-1 flex-1 min-w-0"
                 />
               ) : (
-                <span className="truncate flex-1 font-medium">{collection.name}</span>
+                <span className="flex-1 min-w-0 wrap-anywhere font-medium">{collection.name}</span>
               )}
-              {!editing && <span className="text-[10px] text-muted-foreground">{agentCount}</span>}
-              {!editing && <span className="text-muted-foreground/60 group-hover:text-foreground transition-colors">›</span>}
+              {!editing && <span className="shrink-0 text-[10px] text-muted-foreground">{agentCount}</span>}
+              {!editing && <span className="shrink-0 text-muted-foreground/60 group-hover:text-foreground transition-colors">›</span>}
             </div>
             {description && !editing && (
-              <span className="text-[10px] text-muted-foreground truncate ml-4">{description}</span>
+              <span className="min-w-0 wrap-anywhere ml-4 text-[10px] text-muted-foreground">{description}</span>
             )}
           </div>
         </ContextMenuTrigger>
