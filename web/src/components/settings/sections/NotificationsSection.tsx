@@ -306,13 +306,15 @@ export function NotificationsSection(props: NotificationsSectionProps) {
           {webhookSecretPendingClear ? (
             <p className="text-xs text-amber-600 dark:text-amber-400">
               The saved secret will be removed when you press Save.{' '}
-              <button
+              <Button
                 type="button"
-                className="underline cursor-pointer"
+                variant="link"
+                size="sm"
+                className="h-auto p-0 align-baseline"
                 onClick={undoRemoveWebhookSecret}
               >
                 Undo
-              </button>
+              </Button>
             </p>
           ) : (
             <p className="text-xs text-muted-foreground">
