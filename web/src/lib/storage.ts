@@ -1333,7 +1333,7 @@ const OBS_VERSION = 1;
 export interface ObsUi {
   openIds: string[];
   activeId: string | null;
-  viewMode?: 'sessions' | 'activity' | 'directives';
+  viewMode?: 'sessions' | 'activity' | 'directives' | 'attention';
   activityFilters?: { type: string; agent: string; host: string };
   directiveFilters?: { agent: string; host: string };
 }
