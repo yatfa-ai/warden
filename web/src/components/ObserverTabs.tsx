@@ -19,6 +19,17 @@ import type { TimestampFormat } from '@/lib/formatTimestamp';
 
 interface Props {
   externalViewMode?: 'sessions' | 'activity' | 'directives' | 'attention' | null;
+  // WARDEN-880 — externalViewMode is a ONE-SHOT command, not a persistent override.
+  // App sets it (e.g. openActivityTab → 'activity') to deep-link into a tab; this
+  // component applies it once, then calls onExternalViewModeConsumed so App resets
+  // it to null. That reset is what keeps the deep-link firing on every click:
+  // without it, setExternalViewMode('activity') when it is ALREADY 'activity' is a
+  // React same-value bailout (no re-render, no effect run) so the 2nd+ click is a
+  // silent no-op. Reseting to null between deep-links also means a manual tab
+  // switch is never yanked back (the prop is null between deep-links, so the
+  // effect's `externalViewMode &&` guard short-circuits). Optional so the
+  // component degrades gracefully without it (no deep-link consumption).
+  onExternalViewModeConsumed?: () => void;
   // The currently-focused chat pane, used to bind a new observer session to
   // the agent the user is looking at ("observe this agent").
   focusedChat?: Chat | null;
@@ -50,7 +61,7 @@ interface Props {
 // Manages persisted observer sessions as tabs. Every open tab keeps its own
 // ObserverPanel (and WS) mounted; inactive ones are display:none so their
 // conversations stay live. Open tabs + active tab persist in localStorage.
-export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, timestampFormat = 'relative', attention }: Props = {}) {
+export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, timestampFormat = 'relative', attention }: Props = {}) {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const hostLabels = useHostLabels();
   const [openIds, setOpenIds] = useState<string[]>(() => loadObs().openIds);
@@ -232,21 +243,29 @@ export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, o
     }
   }, [booted, activeId, sessions, onReconnectChat]);
 
-  // Respond to external view mode changes. WARDEN-880: only act when externalViewMode
-  // genuinely CHANGES — NOT on every viewMode change. externalViewMode is set by App
-  // (e.g. openActivityTab → 'activity') and never reset to null, so the previous
-  // viewMode-in-deps form would yank the human BACK to that tab on every manual switch:
-  // once a directives/error link navigated to Activity, clicking the new Attention tab
-  // (or any other) would immediately bounce to Activity. The ref tracks the last value
-  // we consumed, so a manual edit is respected and a repeat external nav to a NEW value
-  // still overrides.
+  // Respond to external view mode changes. externalViewMode is a ONE-SHOT command:
+  // App sets it to deep-link into a tab (e.g. openActivityTab → 'activity'), this
+  // effect applies it, then calls onExternalViewModeConsumed so App resets it to null.
+  //
+  // WARDEN-880: the previous ref-only form stopped the yank bug (a no-deps / viewMode-
+  // in-deps effect would re-assert externalViewMode on every render, bouncing a manual
+  // switch back to the last deep-linked tab) but traded it for a dead-link bug: because
+  // openActivityTab is the only setter and never reset to null, after the first deep-link
+  // externalViewMode is permanently 'activity', so a 2nd setExternalViewMode('activity')
+  // is a React same-value bailout — no state change, this effect never runs, the click
+  // navigates nowhere. Consuming the command (reset → null) makes every deep-link a fresh
+  // null → 'activity' transition the on-change effect reliably catches, AND keeps manual
+  // switches respected (the prop is null between deep-links, so the `externalViewMode &&`
+  // guard prevents any yank). The ref still defends against a double-apply if a stale
+  // non-null value happens to be re-rendered before the reset propagates.
   const lastExternalViewModeRef = useRef(externalViewMode);
   useEffect(() => {
     if (externalViewMode && externalViewMode !== lastExternalViewModeRef.current) {
       setViewMode(externalViewMode);
+      onExternalViewModeConsumed?.();
     }
     lastExternalViewModeRef.current = externalViewMode;
-  }, [externalViewMode]);
+  }, [externalViewMode, onExternalViewModeConsumed]);
 
   // WARDEN-332 — Behavior 1: auto-start an observer session for the focused chat.
   // When observerAutoStart is on and a chat becomes focused, spawn+open a bound
