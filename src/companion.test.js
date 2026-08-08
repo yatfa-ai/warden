@@ -1619,6 +1619,67 @@ describe('uninstallCompanion() (WARDEN-882 Removability — companion-or-fail)',
     assert.strictEqual(res.host, 'nonexistent-host-xyz');
     assert.strictEqual(typeof res.stderr, 'string');
   });
+
+  // REGRESSION (the rebase-integration miss): WARDEN-878 added the companionStatus
+  // map AFTER this slice was written. Its only writers are getChannel's bootstrap
+  // transitions, so clearing channelCache alone leaves {state:'active', version}
+  // behind — and /api/hosts/status → getCompanionStatus → the host row's
+  // CompanionIndicator would keep reading "active" after a successful removal.
+  // That is success criterion 3 ("the host-status surface reflects the companion
+  // as absent") failing on the very surface that confirms the action worked.
+  // The transport flag MUST be on here: getCompanionStatus short-circuits to
+  // 'inactive' while it is off, which would make this assertion tautological.
+  it('clears the host companionStatus so the status surface reads absent after removal (WARDEN-878 integration)', async () => {
+    const savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+    process.env.WARDEN_COMPANION_TRANSPORT = '1';
+    try {
+      // Drive the host to a real 'active' status through the bootstrap path (the
+      // only writer of companionStatus), and assert that precondition — so a
+      // green result cannot come from the status never having been 'active'.
+      const { deps: bootDeps } = fakeDeps();
+      await getChannel('prod-status-clear', {}, bootDeps);
+      assert.deepStrictEqual(getCompanionStatus('prod-status-clear'),
+        { state: 'active', version: TEST_VER },
+        'precondition: the host reads active with a version before removal');
+
+      const res = await uninstallCompanion('prod-status-clear', {}, {
+        manifest: TEST_MANIFEST,
+        run: async () => ({ ok: true, code: 0, stdout: '', stderr: '' }),
+      });
+      assert.strictEqual(res.ok, true, 'removal succeeded');
+
+      assert.deepStrictEqual(getCompanionStatus('prod-status-clear'), { state: 'inactive' },
+        'the host-status surface reads inactive (companion absent) after removal');
+      assert.ok(!('prod-status-clear' in getAllCompanionStatuses()),
+        'the removed host is gone from the all-hosts status map too (no stale version leaks)');
+    } finally {
+      if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+      else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
+    }
+  });
+
+  it('leaves OTHER hosts\' companionStatus intact (removal is per-host, not a global wipe)', async () => {
+    const savedEnv = process.env.WARDEN_COMPANION_TRANSPORT;
+    process.env.WARDEN_COMPANION_TRANSPORT = '1';
+    try {
+      const { deps: bootDeps } = fakeDeps();
+      await getChannel('host-removed', {}, bootDeps);
+      await getChannel('host-kept', {}, bootDeps);
+
+      await uninstallCompanion('host-removed', {}, {
+        manifest: TEST_MANIFEST,
+        run: async () => ({ ok: true, code: 0, stdout: '', stderr: '' }),
+      });
+
+      assert.deepStrictEqual(getCompanionStatus('host-removed'), { state: 'inactive' },
+        'the targeted host reads absent');
+      assert.deepStrictEqual(getCompanionStatus('host-kept'), { state: 'active', version: TEST_VER },
+        'an untouched host keeps its active status — uninstall is not a global clear');
+    } finally {
+      if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
+      else process.env.WARDEN_COMPANION_TRANSPORT = savedEnv;
+    }
+  });
 });
 
 describe('discover() via companion (companion-or-fail)', () => {

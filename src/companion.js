@@ -458,9 +458,13 @@ const channelCache = new Map(); // host -> CompanionChannel
 //        | 'inactive'      — toggle off, LOCAL, or no op has engaged the host yet
 const companionStatus = new Map(); // host -> { state, version?, lastError?, lastErrorAt? }
 
-// Module-private writer; the only writers are the getChannel bootstrap transitions
-// (bootstrapping/active/error) below. Kept narrow so all status mutation funnels
-// through one place the reachability trace can reason about.
+// Module-private writer; the only writers that SET a status are the getChannel
+// bootstrap transitions (bootstrapping/active/error) below. Kept narrow so all
+// status mutation funnels through one place the reachability trace can reason
+// about. Two places INVALIDATE instead of setting, by deleting the entry so
+// getCompanionStatus falls back to {state:'inactive'}: uninstallCompanion (the
+// host's companion was just removed — WARDEN-882) and
+// _resetChannelCacheForTests (whole-map clear).
 function setCompanionStatus(host, status) {
   companionStatus.set(host, status);
 }
@@ -679,6 +683,16 @@ export async function uninstallCompanion(host, cfg = {}, deps = {}) {
     try { ch.kill(); } catch { /* noop — a dead channel is fine */ }
   }
   channelCache.delete(host);
+  // Invalidate the captured per-host status too (WARDEN-878's companionStatus
+  // map). channelCache.delete alone is NOT enough: companionStatus is written
+  // only at getChannel's bootstrap transitions, so a dead/removed channel
+  // leaves the last {state:'active', version} behind, and /api/hosts/status →
+  // getCompanionStatus → the host row's CompanionIndicator would keep showing
+  // "active" after a successful removal — the confirmation surface lying about
+  // whether the uninstall worked (success criterion 3). Deleting is the right
+  // reset: getCompanionStatus falls back to {state:'inactive'}, i.e. "companion
+  // absent". This mirrors _resetChannelCacheForTests, which clears BOTH maps.
+  companionStatus.delete(host);
   // Resolve the manifest version → remote path (companion.js:116) and run the
   // uninstall script via the same runFn/defaultRun path the probe uses. The
   // version is validated hex, safe to interpolate.
