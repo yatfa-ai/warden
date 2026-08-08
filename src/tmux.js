@@ -3,7 +3,7 @@
 // executes them via the transport layer (ssh.js runTmux/attachTmux), which routes
 // to a remote host over SSH or to this machine locally. tmux is required everywhere.
 import { runTmux, attachTmux, attachInteractiveTmux, toMsysPath } from './ssh.js';
-import { isCompanionTransportEnabled, hasSession as companionHasSession, spawnSession, killSession, resize as companionResize } from './companion.js';
+import { isCompanionTransportEnabled, hasSession as companionHasSession, spawnSession, killSession, resize as companionResize, send as companionSend, sendKey as companionSendKey } from './companion.js';
 
 const sess = (chat, cfg) => (chat && chat.session) || (cfg && cfg.tmuxSession) || 'agent';
 
@@ -36,11 +36,32 @@ export async function read(chat, cfg, lines = 500) {
 // receives `line1\rline2\rline3` (raw), never the markers — so we never "fix" an
 // app that hasn't opted in.
 //
-// `deps.runTmux` is an optional test seam (production callers omit it); mirrors
-// the deps seam in ssh.js runWithPool, since node:test mock.module is unavailable
-// on Node 20 and child_process exports are non-configurable (see ssh.test.js).
+// Companion routing (WARDEN-888, the final slice of roadmap WARDEN-270): for a
+// REMOTE host under WARDEN_COMPANION_TRANSPORT=1 the whole WARDEN-254 sequence
+// runs host-side in ONE atomic bash -lc script over the persistent channel (zero
+// per-op SSH handshakes — the highest-frequency interactive op, typing a
+// directive, is the last one that still paid a full per-message handshake). The
+// companion client returns the SAME raw {ok,code,stdout,stderr} shape runTmux
+// produces, so the call sites are unchanged. LOCAL never routes through the
+// companion. Stale-binary graceful degradation: a cached host binary predating
+// this slice returns {unsupported:true} and send falls back to runTmux (so
+// rolling this out doesn't require every host re-bootstrapped at once); a DEAD
+// channel surfaces {ok:false} and send throws (companion-or-fail, never a silent
+// raw-SSH fallback).
+//
+// `deps.runTmux` / `deps.companionSend` / `deps.isCompanionTransportEnabled` are
+// optional test seams (production callers omit them); mirrors the deps seam in
+// ssh.js runWithPool, since node:test mock.module is unavailable on Node 20 and
+// child_process exports are non-configurable (see ssh.test.js).
 let sendSeq = 0;
-export async function send(chat, cfg, text, deps = {}) {
+
+// sendViaRunTmux is the default ssh.js runTmux path for send(): the WARDEN-254
+// bracketed-paste sequence (single-line send-keys -l + Enter; multiline
+// set-buffer / paste-buffer -p -d / send-keys Enter, with a best-effort
+// delete-buffer reclaim on failure). Extracted so the companion route can fall
+// back to it verbatim when a stale cached binary predates the companion `send`
+// RPC (graceful degradation), and so the default path is byte-for-byte unchanged.
+async function sendViaRunTmux(chat, cfg, text, deps) {
   const run = deps.runTmux ?? runTmux;
   const s = sess(chat, cfg);
   const str = String(text);
@@ -75,9 +96,54 @@ export async function send(chat, cfg, text, deps = {}) {
   return true;
 }
 
-export async function sendKey(chat, cfg, k) {
+export async function send(chat, cfg, text, deps = {}) {
+  const isEnabled = deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled;
+  if (chat.host !== '(local)' && isEnabled()) {
+    const res = await (deps.companionSend ?? companionSend)(chat.host, {
+      container: chat.container || null,
+      session: sess(chat, cfg),
+      text,
+    }, cfg, {});
+    if (!res || !res.unsupported) {
+      // Companion-or-fail: map the raw envelope to runTmux's shape and throw on a
+      // real failure (a dead channel, a host-side command error). Never a silent
+      // runTmux fallback — identical to the spawn/kill sibling contract.
+      const r = companionRawResult(res);
+      if (!r.ok) throw new Error((r.stderr || '').trim() || `send failed (exit ${r.code})`);
+      return true;
+    }
+    // {unsupported:true} → stale cached binary predating this slice. Fall through
+    // to the unchanged runTmux default path (graceful degradation).
+  }
+  return sendViaRunTmux(chat, cfg, text, deps);
+}
+
+// sendKey sends a single special key (Enter, C-c, …). ALLOWED_KEYS is validated
+// FIRST, on the JS path, for BOTH the default runTmux branch and the companion
+// branch — the trust boundary stays JS-side (the host-side companion runs
+// send-keys for the already-validated key verbatim, never re-validating).
+// Companion routing mirrors send (WARDEN-888): REMOTE + enabled → companion RPC
+// (zero per-op SSH handshakes); {unsupported:true} → runTmux (stale binary); a
+// dead channel → throws (companion-or-fail). LOCAL keeps runTmux. `deps.runTmux`
+// / `deps.companionSendKey` / `deps.isCompanionTransportEnabled` are test seams.
+export async function sendKey(chat, cfg, k, deps = {}) {
   if (!ALLOWED_KEYS.has(k)) throw new Error(`unsupported key "${k}". allowed: ${[...ALLOWED_KEYS].join(', ')}`);
-  const r = await runTmux(chat, ['send-keys', '-t', sess(chat, cfg), k]);
+  const isEnabled = deps.isCompanionTransportEnabled ?? isCompanionTransportEnabled;
+  if (chat.host !== '(local)' && isEnabled()) {
+    const res = await (deps.companionSendKey ?? companionSendKey)(chat.host, {
+      container: chat.container || null,
+      session: sess(chat, cfg),
+      key: k,
+    }, cfg, {});
+    if (!res || !res.unsupported) {
+      const r = companionRawResult(res);
+      if (!r.ok) throw new Error((r.stderr || '').trim() || `key failed (exit ${r.code})`);
+      return true;
+    }
+    // {unsupported:true} → stale cached binary. Fall through to runTmux.
+  }
+  const run = deps.runTmux ?? runTmux;
+  const r = await run(chat, ['send-keys', '-t', sess(chat, cfg), k]);
   if (!r.ok) throw new Error((r.stderr || '').trim() || `key failed (exit ${r.code})`);
   return true;
 }

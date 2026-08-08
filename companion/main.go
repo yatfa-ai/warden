@@ -11,7 +11,7 @@
 //
 // Protocol (one JSON object per line):
 //
-//	request : {"id":<any-json>,"method":"ping"|"discover"|"capturePanes"|"hasSession"|"resize"|"subscribePanes"|"unsubscribePanes","params":{...}}
+//	request : {"id":<any-json>,"method":"ping"|"discover"|"capturePanes"|"hasSession"|"resize"|"send"|"sendKeys"|"subscribePanes"|"unsubscribePanes","params":{...}}
 //	response: {"id":<echoed>,"ok":true,"result":{...}}
 //	          {"id":<echoed>,"ok":false,"error":"..."}
 //	event   : {"event":"paneDelta","panes":{key:content,…}}   // UNSOLICITED — no id
@@ -138,7 +138,7 @@ func main() {
 		case "ping":
 			write(Response{ID: req.ID, OK: true, Result: map[string]any{
 				"version": version,
-				"methods": []string{"ping", "discover", "capturePanes", "hasSession", "spawnSession", "killSession", "resize", "subscribePanes", "unsubscribePanes"},
+				"methods": []string{"ping", "discover", "capturePanes", "hasSession", "spawnSession", "killSession", "resize", "send", "sendKeys", "subscribePanes", "unsubscribePanes"},
 			}})
 		case "discover":
 			containers, err := discover(req.Params)
@@ -185,6 +185,19 @@ func main() {
 			// hasSession, only richer (it carries stdout/stderr/code so the JS side
 			// maps it to the identical runTmux result the default path produces).
 			write(Response{ID: req.ID, OK: true, Result: resize(req.Params)})
+		case "send":
+			// send is the user-input WRITE op (WARDEN-888): runs the WARDEN-254
+			// bracketed-paste sequence host-side in ONE atomic bash -lc script. It
+			// returns the raw cmdResult — never an RPC error for a host-side command
+			// failure (e.g. "can't find session") — same shape as resize, so the JS
+			// side maps it to the identical runTmux result the default path produces.
+			write(Response{ID: req.ID, OK: true, Result: send(req.Params)})
+		case "sendKeys":
+			// sendKeys is the special-key WRITE op (WARDEN-888): runs
+			// `send-keys -t <target> <key>` for a key the JS side ALREADY validated
+			// against its ALLOWED_KEYS trust boundary. Returns the raw cmdResult,
+			// same shape as send/resize.
+			write(Response{ID: req.ID, OK: true, Result: sendKeys(req.Params)})
 		case "subscribePanes":
 			// WARDEN-413: start (or replace) a background watcher that re-captures
 			// the pane set on a short interval and pushes paneDelta events for ONLY
@@ -975,4 +988,140 @@ func resize(params json.RawMessage) cmdResult {
 		target = p.Container
 	}
 	return runTmuxRaw(buildResizeScript(p.Container, target))
+}
+
+// ------------------------------- send / sendKeys ------------------------------
+// WARDEN-888 (the final slice of roadmap WARDEN-270). The user-input WRITE path —
+// send (a directive) + sendKey (a special key) — is the last op family that still
+// pays a per-op SSH handshake on remote hosts. Routing it over the persistent
+// companion channel collapses the per-message handshake (the ~30s/action cost on
+// the ControlMaster-disabled / Windows path that is this roadmap's reason for
+// existing). The bootstrap + channel are slice 1's, reused verbatim; this only
+// adds the two RPCs. Both return the raw cmdResult (ok/code/stdout/stderr) —
+// never an RPC error for a host-side command failure — identical to resize, so
+// the JS side maps each to the runTmux result the default path produces.
+
+// sendParams is the send RPC params (WARDEN-888). Container is the docker
+// container (empty for a bare-tmux / manual chat); Session is the tmux target,
+// falling back to Container then "agent" — identical to resize / hasSession. Text
+// is the message body (an arbitrary user directive; shell-quoted host-side via
+// shellQuote, never interpolated raw). All JSON-serialized RPC params, never
+// persisted fields (the same trust boundary resize's target already relies on).
+type sendParams struct {
+	Container string `json:"container"`
+	Session   string `json:"session"`
+	Text      string `json:"text"`
+}
+
+// sendKeysParams is the sendKey RPC params (WARDEN-888). Key is a special-key
+// name the JS side has ALREADY validated against its ALLOWED_KEYS allowlist
+// (tmux.js); the trust boundary stays JS-side, so the host runs send-keys with
+// the already-validated key verbatim.
+type sendKeysParams struct {
+	Container string `json:"container"`
+	Session   string `json:"session"`
+	Key       string `json:"key"`
+}
+
+// sendSeqCounter + sendBufMu generate a per-process-unique tmux buffer name for
+// one multiline send, mirroring the JS `warden-send-${Date.now()}-${++sendSeq}`
+// (src/tmux.js). Uniqueness keeps two concurrent sends to the same tmux server
+// from clobbering each other's buffer between the set-buffer and paste-buffer
+// calls. Requests are read serially today, but the mutex makes the counter safe
+// if that ever changes.
+var (
+	sendBufSeq uint64
+	sendBufMu  sync.Mutex
+)
+
+func nextSendBuffer() string {
+	sendBufMu.Lock()
+	defer sendBufMu.Unlock()
+	sendBufSeq++
+	return fmt.Sprintf("warden-send-%d-%d", time.Now().UnixNano(), sendBufSeq)
+}
+
+// buildSendScript builds the atomic bash -lc script the send RPC runs host-side.
+// It reproduces src/tmux.js send()'s WARDEN-254 bracketed-paste sequence in ONE
+// shell script (one local round-trip, zero further ssh), building the SAME tmux
+// argv the default runTmux path issues:
+//
+//   - single-line (no embedded newline): `send-keys -t <target> -l <text>` then
+//     `send-keys -t <target> Enter` (chained with && so Enter fires only on
+//     success, exactly like the JS `if (r.ok) r = await … Enter`).
+//   - multiline: `set-buffer -b <buf> -- <text>` && `paste-buffer -p -d -b <buf>
+//     -t <target>` && `send-keys -t <target> Enter`, then a best-effort
+//     delete-buffer on failure.
+//
+// The multiline buffer is reclaimed two ways, matching tmux.js:63-74: paste-buffer
+// `-d` deletes it on a successful paste (happy path → single -d), and the
+// `|| { rc=$?; delete-buffer; exit $rc; }` block reclaims it when the paste itself
+// failed (the buffer would otherwise leak on the durable tmux server once per retry
+// against a dead session). Capturing rc BEFORE the cleanup (delete-buffer would
+// clobber $?) and explicitly `exit $rc` preserves the REAL failure's exit code —
+// the cleanup never turns a failed send into a 0. delete-buffer errors if the
+// buffer is already gone (a -d-reclaimed successful paste, or a failed set-buffer)
+// — `2>/dev/null` swallows that stderr so it can't clobber the real tmux error.
+// <buf> is unique per call (see nextSendBuffer) so two concurrent sends can't
+// clobber each other's buffer. <text> is shellQuoted (handles arbitrary user input
+// + embedded newlines + a leading "-"); the `--` separator protects leading-dash
+// data from tmux itself. Exposed + tested directly (mirrors buildResizeScript /
+// buildCaptureScript).
+func buildSendScript(container, target, text, buf string) string {
+	tmux := tmuxCmdFor(container)
+	if target == "" {
+		target = "agent"
+	}
+	// Single-line (no embedded newline): literal text via send-keys -l, then Enter
+	// (chained with && so Enter fires only on success — exactly like the JS
+	// `if (r.ok) r = await … Enter`).
+	if !strings.Contains(text, "\n") {
+		return tmux + " send-keys -t " + shellQuote(target) + " -l " + shellQuote(text) +
+			" && " + tmux + " send-keys -t " + shellQuote(target) + " Enter"
+	}
+	// Multiline → one bracketed paste via a per-call named buffer, then a single
+	// Enter. On success the buffer is already reclaimed by paste-buffer -d and the
+	// `||` cleanup is skipped; on failure the cleanup reclaims it and propagates
+	// the real exit code via `exit $rc`.
+	return tmux + " set-buffer -b " + shellQuote(buf) + " -- " + shellQuote(text) +
+		" && " + tmux + " paste-buffer -p -d -b " + shellQuote(buf) + " -t " + shellQuote(target) +
+		" && " + tmux + " send-keys -t " + shellQuote(target) + " Enter" +
+		" || { rc=$?; " + tmux + " delete-buffer -b " + shellQuote(buf) + " 2>/dev/null; exit $rc; }"
+}
+
+// buildSendKeysScript builds the `send-keys -t <target> <key>` command the sendKey
+// RPC runs host-side via bash -lc, byte-for-byte identical to src/tmux.js
+// sendKey()'s default runTmux path. <key> is the already-VALIDATED special-key
+// name (ALLOWED_KEYS lives JS-side). Exposed + tested directly.
+func buildSendKeysScript(container, target, key string) string {
+	if target == "" {
+		target = "agent"
+	}
+	return tmuxCmdFor(container) + " send-keys -t " + shellQuote(target) + " " + shellQuote(key)
+}
+
+// send runs the WARDEN-254 write sequence LOCALLY via bash -lc, mirroring
+// src/tmux.js send() byte-for-byte for both single-line and multiline input.
+// Returns the raw cmdResult — never an RPC error for a host-side command failure
+// (e.g. "can't find session") — so the JS side maps it to the identical runTmux
+// result the default path produces.
+func send(params json.RawMessage) cmdResult {
+	var p sendParams
+	if len(params) > 0 {
+		_ = json.Unmarshal(params, &p) // bad params → fall through to defaults
+	}
+	target := resolveSession(p.Session, p.Container)
+	return runTmuxRaw(buildSendScript(p.Container, target, p.Text, nextSendBuffer()))
+}
+
+// sendKeys runs `send-keys -t <target> <key>` LOCALLY via bash -lc, mirroring
+// src/tmux.js sendKey() byte-for-byte (the key is already validated JS-side).
+// Returns the raw cmdResult — same shape as send / resize.
+func sendKeys(params json.RawMessage) cmdResult {
+	var p sendKeysParams
+	if len(params) > 0 {
+		_ = json.Unmarshal(params, &p) // bad params → fall through to defaults
+	}
+	target := resolveSession(p.Session, p.Container)
+	return runTmuxRaw(buildSendKeysScript(p.Container, target, p.Key))
 }
