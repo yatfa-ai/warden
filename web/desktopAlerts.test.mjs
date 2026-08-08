@@ -30,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-desktop-alerts-test-'));
 const tmpFile = join(tmpDir, 'desktopAlerts.mjs');
 writeFileSync(tmpFile, code);
-const { shouldFireAlert, shouldFireWatch, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage, watchReasonTone, formatWatchInApp, diffNewAttention, excludeFocusedPane, formatInAppEntry, fireWatchNotification, watchStateLabel } = await import(tmpFile);
+const { shouldFireAlert, shouldFireWatch, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage, watchReasonTone, formatWatchInApp, diffNewAttention, excludeFocusedPane, applyFleetAttentionCooldown, formatInAppEntry, fireWatchNotification, watchStateLabel } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -844,6 +844,206 @@ test('a real diff with an aggregate delta + a focused named entrant → aggregat
   const next = roll({ waiting: [pane('w1', null, 'waiting')], errors: 2 });
   const out = excludeFocusedPane(diffNewAttention(roll(), next), 'w1');
   assert.deepEqual(out.map((e) => e.key), [''], 'named focused entrant dropped; aggregate error delta still toasts');
+});
+
+// --- WARDEN-891: applyFleetAttentionCooldown (the fleet problem-state alert's flap cooldown) ----
+//
+// The per-key cooldown gate for the THIRD attention channel (the fleet problem-state alert).
+// Sibling of applyWatchCooldown (chatWatch.ts, WARDEN-452) + the done ping's DONE_PING_COOLDOWN_MS
+// gate (WARDEN-575): a flapping UNWATCHED agent (erroring → active → erroring across polls)
+// re-fires ONE alert per need-episode (escalations override + reset), closing the asymmetry
+// where this channel alone re-fired on every recover→re-enter. Reads only `key` + `tone` off
+// each entrant, so a minimal NewAttentionEntry suffices (reusing the `entry` shape above).
+const fentry = (key, tone = 'critical', extra = {}) => ({ key, name: key || 'summary', reason: 'x', tone, ...extra });
+
+console.log('\napplyFleetAttentionCooldown (WARDEN-891): one alert per flapping need-episode');
+test('first fire (no prior) fires + anchors the window at now', () => {
+  const { fire, lastFired } = applyFleetAttentionCooldown([fentry('a', 'critical')], {}, 1000, 5000);
+  assert.equal(fire.length, 1);
+  assert.equal(fire[0].key, 'a');
+  assert.equal(lastFired.a.tone, 'critical');
+  assert.equal(lastFired.a.firedAt, 1000);
+});
+
+test('null lastFired → every entrant fires (first-fire baseline)', () => {
+  const { fire, lastFired } = applyFleetAttentionCooldown([fentry('a', 'warning'), fentry('b', 'critical')], null, 1000, 5000);
+  assert.equal(fire.length, 2);
+  assert.equal(lastFired.a.firedAt, 1000);
+  assert.equal(lastFired.b.firedAt, 1000);
+});
+
+test('same key + same tone re-entered WITHIN the window is SUPPRESSED', () => {
+  const prev = { a: { tone: 'critical', firedAt: 1000 } };
+  const { fire, lastFired } = applyFleetAttentionCooldown([fentry('a', 'critical')], prev, 3000, 5000);
+  assert.equal(fire.length, 0);
+  // the anchor is NOT advanced — the window stays measured from the first fire
+  assert.equal(lastFired.a.firedAt, 1000);
+  assert.equal(lastFired.a.tone, 'critical');
+});
+
+test('same key + same tone re-entered AFTER the window fires + re-anchors', () => {
+  const prev = { a: { tone: 'critical', firedAt: 1000 } };
+  const { fire, lastFired } = applyFleetAttentionCooldown([fentry('a', 'critical')], prev, 7000, 5000);
+  assert.equal(fire.length, 1);
+  assert.equal(lastFired.a.firedAt, 7000);
+});
+
+test('warning → critical WITHIN the window is an ESCALATION → fires + resets timer', () => {
+  // lower priority number = more urgent: critical(0) < warning(1)
+  const prev = { a: { tone: 'warning', firedAt: 1000 } };
+  const { fire, lastFired } = applyFleetAttentionCooldown([fentry('a', 'critical')], prev, 3000, 5000);
+  assert.equal(fire.length, 1);
+  assert.equal(lastFired.a.tone, 'critical');
+  assert.equal(lastFired.a.firedAt, 3000); // reset
+});
+
+test('escalation RESETS the timer: a later same-tone re-entry is suppressed vs the NEW anchor', () => {
+  // fire warning@1000; escalate critical@3000 (resets anchor to 3000); re-enter
+  // critical@7000. From the RESET anchor: 7000-3000=4000 < 5000 → suppressed. From
+  // the original t=1000 it would be 6000 >= 5000 → fire. The suppress proves reset.
+  let lastFired = {};
+  let fired = 0;
+  const step = (entries, now) => {
+    const r = applyFleetAttentionCooldown(entries, lastFired, now, 5000);
+    lastFired = r.lastFired;
+    fired += r.fire.length;
+  };
+  step([fentry('a', 'warning')], 1000);  // fires (1)
+  step([fentry('a', 'critical')], 3000); // escalation → fires + resets to 3000 (2)
+  step([fentry('a', 'critical')], 7000); // 7000-3000=4000 < 5000 → suppressed
+  assert.equal(fired, 2);
+});
+
+test('critical → warning WITHIN the window is LOWER urgency → suppressed', () => {
+  const prev = { a: { tone: 'critical', firedAt: 1000 } };
+  const { fire } = applyFleetAttentionCooldown([fentry('a', 'warning')], prev, 3000, 5000);
+  assert.equal(fire.length, 0);
+});
+
+test('a flapping key (erroring → active → erroring each poll) → ONE alert per episode window', () => {
+  const cooldown = 5 * 60 * 1000;
+  let lastFired = {};
+  let fired = 0;
+  const step = (entries, now) => {
+    const r = applyFleetAttentionCooldown(entries, lastFired, now, cooldown);
+    lastFired = r.lastFired;
+    fired += r.fire.length;
+  };
+  // episode window [0, 5min): several re-entries into erroring (critical tone)
+  step([fentry('a', 'critical')], 0);            // first erroring → fires (1)
+  step([fentry('a', 'critical')], 60_000);       // re-entry within window → suppressed
+  step([fentry('a', 'critical')], 120_000);      // suppressed
+  step([fentry('a', 'critical')], 240_000);      // suppressed
+  assert.equal(fired, 1);
+  // after the window elapses, a re-entry fires again (a new episode)
+  step([fentry('a', 'critical')], cooldown + 60_000);
+  assert.equal(fired, 2);
+});
+
+test('different keys are independent (no cross-key cooldown)', () => {
+  const prev = { a: { tone: 'critical', firedAt: 1000 } };
+  // key a same-tone within window → suppressed; key b no prior → fires
+  const { fire } = applyFleetAttentionCooldown([fentry('a', 'critical'), fentry('b', 'critical')], prev, 3000, 5000);
+  assert.equal(fire.length, 1);
+  assert.equal(fire[0].key, 'b');
+});
+
+test('a key with a prior anchor but no entrant this diff KEEPS its anchor (carry-forward)', () => {
+  // THIS is what collapses the recover→re-enter flap: the agent leaves every rollup
+  // bucket while recovered (no entrant that poll), so its identity is "absent" — the
+  // carried-forward anchor keeps the window measured correctly across that absence.
+  const prev = { a: { tone: 'critical', firedAt: 1000 }, b: { tone: 'warning', firedAt: 2000 } };
+  const { fire, lastFired } = applyFleetAttentionCooldown([], prev, 3000, 5000);
+  assert.equal(fire.length, 0);
+  assert.equal(lastFired.a.firedAt, 1000); // preserved
+  assert.equal(lastFired.b.firedAt, 2000); // preserved
+});
+
+test('the input lastFired map is NOT mutated (immutability)', () => {
+  const prev = { a: { tone: 'critical', firedAt: 1000 } };
+  const { lastFired } = applyFleetAttentionCooldown([fentry('a', 'critical')], prev, 3000, 5000);
+  assert.equal(prev.a.firedAt, 1000);      // input unchanged
+  assert.equal(lastFired.a.firedAt, 1000); // suppressed → anchor retained
+  assert.notEqual(lastFired, prev);        // a new map is returned
+});
+
+console.log('\napplyFleetAttentionCooldown: aggregate (key: "") entrants pass through unchanged');
+test('an aggregate entrant always fires (no per-key identity to anchor)', () => {
+  // A count rise is not a flap; aggregate entries stay on the increase-only shouldFireAlert gate.
+  const { fire, lastFired } = applyFleetAttentionCooldown([AGG], { a: { tone: 'critical', firedAt: 1000 } }, 3000, 5000);
+  assert.equal(fire.length, 1);
+  assert.equal(fire[0].key, '');
+  assert.ok(!('' in lastFired), 'aggregate never enters the map (no key to anchor)');
+});
+test('a flapping named key is suppressed while an aggregate delta still fires', () => {
+  const prev = { a: { tone: 'critical', firedAt: 1000 } };
+  const { fire } = applyFleetAttentionCooldown([fentry('a', 'critical'), AGG], prev, 3000, 5000);
+  assert.deepEqual(fire.map((e) => e.key), [''], 'flapping a suppressed; aggregate passes through');
+});
+
+console.log('\napplyFleetAttentionCooldown: composes with diffNewAttention (the real entrant shape)');
+test('a flapping agent (recovered→re-enter) fires ONCE per window end-to-end', () => {
+  // The end-to-end flap the ticket targets: in the hook, prev advances each poll, so a
+  // recovered-then-re-entered key is ABSENT from prev's buckets and reads as "new" to
+  // diffNewAttention — but the cooldown's carried-forward anchor collapses it to one fire.
+  const cooldown = 5 * 60 * 1000;
+  let lastFired = {};
+  let prev = roll();
+  let fired = 0;
+  const poll = (next, now) => {
+    const entrants = diffNewAttention(prev, next);
+    const r = applyFleetAttentionCooldown(entrants, lastFired, now, cooldown);
+    lastFired = r.lastFired;
+    prev = next;
+    fired += r.fire.length;
+  };
+  poll(roll({ erroring: [pane('a', null, 'erroring')] }), 60_000);   // first erroring → fires (1)
+  poll(roll(), 120_000);                                             // recovery (no entrant; anchor carried)
+  poll(roll({ erroring: [pane('a', null, 'erroring')] }), 180_000);  // re-entry within window → suppressed
+  poll(roll(), 240_000);                                             // recovery
+  poll(roll({ erroring: [pane('a', null, 'erroring')] }), 300_000);  // suppressed (1)
+  assert.equal(fired, 1);
+  // after the window from the first fire (t=60_000) elapses, a re-entry fires
+  poll(roll(), 60_000 + cooldown + 10_000);
+  poll(roll({ erroring: [pane('a', null, 'erroring')] }), 60_000 + cooldown + 20_000);  // fires (2)
+  assert.equal(fired, 2);
+});
+test('a genuine escalation (waiting→erroring) overrides + resets the window end-to-end', () => {
+  const cooldown = 5 * 60 * 1000;
+  let lastFired = {};
+  let prev = roll();
+  let fired = 0;
+  const poll = (next, now) => {
+    const entrants = diffNewAttention(prev, next);
+    const r = applyFleetAttentionCooldown(entrants, lastFired, now, cooldown);
+    lastFired = r.lastFired;
+    prev = next;
+    fired += r.fire.length;
+  };
+  poll(roll({ waiting: [pane('a', null, 'waiting')] }), 60_000);    // waiting (warning) → fires (1)
+  poll(roll(), 120_000);                                            // recovery
+  poll(roll({ erroring: [pane('a', null, 'erroring')] }), 180_000); // re-entry as erroring (critical) = ESCALATION → fires (2)
+  assert.equal(fired, 2, 'the escalation fired despite being within the window');
+});
+test('a persistently-needy agent (no recovery) is NOT re-alerted', () => {
+  // The existing increase-only shouldFireAlert gate already prevents a persistent condition
+  // from re-firing (total stays flat → diffNewAttention returns no entrant). The cooldown
+  // adds no false positive on top: no entrant → no fire, anchor carried untouched.
+  const cooldown = 5 * 60 * 1000;
+  let lastFired = {};
+  let prev = roll();
+  let fired = 0;
+  const poll = (next, now) => {
+    const entrants = diffNewAttention(prev, next);
+    const r = applyFleetAttentionCooldown(entrants, lastFired, now, cooldown);
+    lastFired = r.lastFired;
+    prev = next;
+    fired += r.fire.length;
+  };
+  poll(roll({ stuck: [pane('a', null, 'stuck')] }), 60_000);  // first stuck → fires (1)
+  poll(roll({ stuck: [pane('a', null, 'stuck')] }), 120_000); // persists → no entrant → no fire
+  poll(roll({ stuck: [pane('a', null, 'stuck')] }), 180_000); // persists → no fire
+  assert.equal(fired, 1);
 });
 
 // --- WARDEN-426: shouldFireWatch (focus-gate the per-chat watch ping) ----
