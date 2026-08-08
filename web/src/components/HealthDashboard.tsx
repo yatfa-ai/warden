@@ -1011,8 +1011,11 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
       if (r.ok && body.ok) {
         toast.success(`Removed companion from ${hostLabelFor(host, hostLabels) || host}`);
         setRemoveCompanionHost(null);
-        // Re-read health so the host-status surface reflects the removal (the
-        // companion-state chip itself is WARDEN-878, not yet shipped).
+        // Re-read health so the host-status surface reflects the removal: the
+        // backend clears the host's companionStatus entry during uninstall, so
+        // this refetch flips the row's WARDEN-878 CompanionIndicator to
+        // "inactive" (companion absent) rather than re-rendering a stale
+        // "active".
         await fetchHealth();
       } else {
         toast.error(`Failed to remove companion from ${hostLabelFor(host, hostLabels) || host}`, {
