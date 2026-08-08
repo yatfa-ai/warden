@@ -291,13 +291,59 @@ test('a silenced state can never become top (silenced waiting → next-highest w
   assert.notEqual(top.state, 'waiting');
   assert.equal(top.id, 's1');
 });
-test('ties (same urgency tier) resolve in input order, deterministically', () => {
+test('unstamped same-tier rows (no enteredAt) keep input order + are stable across calls', () => {
+  // WARDEN-890: with no enteredAt, all rows are +∞ so the duration tieback is a no-op —
+  // the stable sort preserves input order. This is the case for any pane row that was
+  // never stamped (and would be the case for health-group agents, which carry no
+  // enteredAt at all).
   const r = roll(health(), stats(), [stateRow('w1', 'waiting'), stateRow('w2', 'waiting'), stateRow('w3', 'waiting')]);
   const a = rankAttention(r);
   const b = rankAttention(r);
-  assert.deepEqual(a.ranked.map((x) => x.id), ['w1', 'w2', 'w3'], 'same-tier order preserved');
+  assert.deepEqual(a.ranked.map((x) => x.id), ['w1', 'w2', 'w3'], 'unstamped → input order preserved');
   assert.deepEqual(a.ranked, b.ranked, 'stable across calls');
   assert.equal(a.top.id, 'w1');
+});
+test('same-tier ties break oldest-entered-first regardless of input order (WARDEN-890)', () => {
+  // The directed Callout picks ranked[0] (after focus exclusion); the sectioned rundown
+  // beneath it lists each section oldest-entered-first. Both must come from the SAME rule,
+  // so a newest-waiting pane returned first by the server must NOT be promoted above an
+  // older, more languishing one. Fixed epoch values keep this deterministic.
+  const r = roll(health(), stats(), [
+    stateRow('w_newer', 'waiting', { enteredAt: 3000 }),
+    stateRow('w_oldest', 'waiting', { enteredAt: 1000 }),
+    stateRow('w_mid', 'waiting', { enteredAt: 2000 }),
+  ]);
+  const { top, ranked } = rankAttention(r);
+  assert.deepEqual(ranked.map((x) => x.id), ['w_oldest', 'w_mid', 'w_newer'], 'oldest-entered first within the tier');
+  assert.equal(top.id, 'w_oldest', 'the most languishing pane is the directed answer');
+});
+test('cross-tier: urgency precedence still dominates over enteredAt (WARDEN-890)', () => {
+  // A higher-urgency pane with a NEWER enteredAt still outranks a lower-urgency pane with
+  // an OLDER enteredAt — the duration tiebreak only applies WITHIN a tier, never across.
+  const r = roll(health(), stats(), [
+    stateRow('stuck_old', 'stuck', { enteredAt: 1000 }),
+    stateRow('waiting_new', 'waiting', { enteredAt: 9000 }),
+  ]);
+  const { top, ranked } = rankAttention(r);
+  assert.deepEqual(ranked.map((x) => x.id), ['waiting_new', 'stuck_old'], 'waiting outranks stuck despite newer enteredAt');
+  assert.equal(top.id, 'waiting_new');
+});
+test('unstamped rows sink to +∞ (last within their tier) when mixed with stamped rows (WARDEN-890)', () => {
+  // Health-group agents (critical/warning) carry no enteredAt, and any pane row that was
+  // never stamped is likewise absent — both must sort AFTER stamped same-tier peers, not
+  // crash the comparator (no Infinity - NaN). This is the "graceful no-op where it
+  // shouldn't apply" guarantee.
+  const r = roll(health(), stats(), [
+    stateRow('w_unstamped_a', 'waiting'),
+    stateRow('w_stamped', 'waiting', { enteredAt: 2000 }),
+    stateRow('w_unstamped_b', 'waiting'),
+  ]);
+  const { ranked } = rankAttention(r);
+  assert.deepEqual(
+    ranked.map((x) => x.id),
+    ['w_stamped', 'w_unstamped_a', 'w_unstamped_b'],
+    'stamped first, then unstamped in stable input order',
+  );
 });
 test('below the waiting bias, the encoded precedence holds (erroring > stuck > blocked)', () => {
   const r = roll(health(), stats(), [
