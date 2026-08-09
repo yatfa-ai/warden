@@ -1046,6 +1046,77 @@ test('a persistently-needy agent (no recovery) is NOT re-alerted', () => {
   assert.equal(fired, 1);
 });
 
+// --- WARDEN-891 (revision): the OS-branch guard must not false-negative on a real worsening -----
+//
+// The fleet alert effect's hidden-tab branch fires the lumped OS desktop toast. Its guard was
+// widened from `fireable.length > 0` to `entrants.length === 0 || fireable.length > 0` after review
+// found a silent false negative: a genuine `total` increase can produce ZERO per-key entrants — and
+// thus an empty `fireable` — when the increase is an ALREADY-KNOWN key crossing into a SECOND
+// bucket. `critical`/`warning` come from /api/health (Chat[]) while `stuck`/`erroring`/`waiting`/
+// `blocked` come from /api/agent-states (AgentStateRow[]); the two sources are independent, share
+// one key space, and `diffNewAttention` skips any key already present in prev's buckets. So an
+// agent already `erroring` whose health THEN degrades to `critical` raises total 1→2 with zero
+// entrants — a real worsening the OS toast MUST surface (a false negative is the worse failure
+// class for an alert). These compose the exact pure chain the guard reads — shouldFireAlert →
+// diffNewAttention → applyFleetAttentionCooldown — and pin the guard's boolean. The guard line
+// itself lives in useAttentionRollup.ts (a React effect that imports sonner + the @/ alias, so it
+// cannot load standalone under this OXC transform); modeled here is the property it must satisfy,
+// mirroring the file's existing purity discipline for the fireAttentionNotification delivery path.
+console.log('\nWARDEN-891 OS guard: a genuine worsening with no per-key entrant still fires (no false negative)');
+// The exact OS-branch guard condition from useAttentionRollup.ts's hidden-tab branch, fed the same
+// pure inputs the effect feeds it. Returns whether the lumped OS toast would fire.
+const osGuardFires = (prev, next, lastFired, now, cooldown) => {
+  if (!shouldFireAlert(prev, next)) return false; // the effect's outer increase-only gate
+  const entrants = diffNewAttention(prev, next);
+  const { fire: fireable } = applyFleetAttentionCooldown(entrants, lastFired, now, cooldown);
+  return entrants.length === 0 || fireable.length > 0;
+};
+const FLEET_COOLDOWN = 5 * 60 * 1000;
+
+test('already-erroring agent whose health degrades to critical → OS toast FIRES (the regression)', () => {
+  // prev: agent 'a' is erroring (pane-state, /api/agent-states). total 1.
+  // next: agent 'a' is STILL erroring AND now critical-health (health, /api/health). total 2.
+  // 'a' is already in prevKeys → diffNewAttention returns [] → fireable []. OLD guard
+  // (`fireable.length > 0`) silenced this; the widened guard fires it.
+  const prev = roll({ erroring: [pane('a', null, 'erroring')] });
+  const next = roll({ critical: [agent('a')], erroring: [pane('a', null, 'erroring')] });
+  assert.equal(shouldFireAlert(prev, next), true, 'total rose 1→2 (genuine worsening)');
+  assert.equal(diffNewAttention(prev, next).length, 0, 'no per-key entrant — key already known');
+  assert.equal(osGuardFires(prev, next, {}, 1000, FLEET_COOLDOWN), true, 'OS toast must fire');
+});
+
+test('reverse overlap: critical-health agent that also becomes erroring → OS toast FIRES', () => {
+  // Symmetric: the health bucket was already known; the pane-state bucket is the new total rise.
+  const prev = roll({ critical: [agent('a')] });
+  const next = roll({ critical: [agent('a')], erroring: [pane('a', null, 'erroring')] });
+  assert.equal(shouldFireAlert(prev, next), true);
+  assert.equal(diffNewAttention(prev, next).length, 0);
+  assert.equal(osGuardFires(prev, next, {}, 1000, FLEET_COOLDOWN), true);
+});
+
+test('a genuine new agent (a real entrant) still fires the OS toast', () => {
+  // Control: a brand-new key produces a per-key entrant → fireable non-empty → fires on either
+  // clause. Worked before the widening; must keep working.
+  const prev = roll({ erroring: [pane('a', null, 'erroring')] });
+  const next = roll({ erroring: [pane('a', null, 'erroring'), pane('b', null, 'erroring')] });
+  assert.equal(diffNewAttention(prev, next).length, 1);
+  assert.equal(osGuardFires(prev, next, {}, 1000, FLEET_COOLDOWN), true);
+});
+
+test('a pure flap (entrant present but cooled down) does NOT fire the OS toast', () => {
+  // The other half of the guard: entrants NON-empty (a re-entered key) but ALL suppressed by the
+  // cooldown → fireable empty AND entrants non-empty → NEITHER clause met → suppress. This pins
+  // that the `entrants.length === 0` widening did not weaken the flap collapse.
+  const prev = roll(); // the recovered gap: agent 'a' left every rollup bucket
+  const next = roll({ erroring: [pane('a', null, 'erroring')] }); // re-entered
+  const lastFired = { a: { tone: 'critical', firedAt: 1000 } }; // carried anchor, within window
+  const entrants = diffNewAttention(prev, next);
+  assert.equal(entrants.length, 1, 'the re-entered key reads as a new entrant');
+  const { fire: fireable } = applyFleetAttentionCooldown(entrants, lastFired, 2000, FLEET_COOLDOWN);
+  assert.equal(fireable.length, 0, 'but the cooldown suppresses it (within window)');
+  assert.equal(osGuardFires(prev, next, lastFired, 2000, FLEET_COOLDOWN), false, 'flap → no OS toast');
+});
+
 // --- WARDEN-426: shouldFireWatch (focus-gate the per-chat watch ping) ----
 // The helper takes the live document.visibilityState as its 3rd arg because
 // `focused` is STICKY: it is not cleared when Warden hides, so focus-on-the-pane

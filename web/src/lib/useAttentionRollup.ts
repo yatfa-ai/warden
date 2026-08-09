@@ -903,12 +903,22 @@ export function useAttentionRollup(
           excludeFocusedPane(fireable, focusedPaneRef.current),
           onOpenChatRef.current,
         );
-      } else if (fireable.length > 0) {
-        // OS lumped toast: fire ONLY if at least one entrant survived the cooldown. If the
-        // total increase was caused ENTIRELY by re-entered flapping keys (all suppressed →
-        // fireable empty), the lumped toast would cry wolf on the same episode, so suppress
-        // it; a genuine new/escalated entrant still fires (the toast is lumped, so it carries
-        // the full routable total — correct, there IS new attention).
+      } else if (entrants.length === 0 || fireable.length > 0) {
+        // OS lumped toast. Two cases fire it:
+        //  1. fireable.length > 0 — a genuine new/escalated/aggregate entrant survived the
+        //     cooldown. The toast is lumped, so it carries the full routable total — correct,
+        //     there IS new attention.
+        //  2. entrants.length === 0 — the total increase produced NO per-key entrant at all, so
+        //     nothing flapped and the cooldown had nothing to suppress. This is reachable because
+        //     `critical`/`warning` come from /api/health (Chat[]) while `stuck`/`erroring`/
+        //     `waiting`/`blocked` come from /api/agent-states (AgentStateRow[]) — INDEPENDENT
+        //     sources that share one key space and are summed into `total` with no cross-dedup
+        //     (diffNewAttention skips any key already in prev's buckets). An agent already
+        //     `erroring` whose health THEN degrades to `critical` raises total 1→2 with zero
+        //     entrants — a genuine worsening that must fire (a false negative is the worse
+        //     failure class for an alert). The only case we suppress is the flap: entrants
+        //     present (a re-entered key) but ALL cooled down → fireable empty AND entrants
+        //     non-empty, which satisfies neither clause.
         fireAttentionNotification(routable);
       }
     }
