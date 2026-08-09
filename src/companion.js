@@ -172,6 +172,28 @@ export function buildUninstallScript(remotePath) {
   return `pkill -f "${remotePath}" 2>/dev/null || true; rm -f "${remotePath}"; rmdir "${COMPANION_DIR}" 2>/dev/null || true`;
 }
 
+// Reap SUPERSEDED companion-* binaries on the bootstrap upgrade path (WARDEN-904).
+// A version bump uploads companion-<newver> but historically left the orphaned
+// companion-<oldver> behind, leaking a multi-MB static Go binary per host per
+// upgrade. This runs AFTER the channel is verified via ping (the live
+// companion-<manifest.version> is in use), so reaping a superseded sibling can
+// never rip out the binary the running channel fronts.
+//
+// Targets ONLY non-current companion-* siblings in $HOME/.warden and NEVER the
+// current path: the for-loop globs the dir's companion-* entries, skips anything
+// that isn't a regular file ([ -f ]), skips the current path ([ != ]), and rm -f's
+// the rest. Files not matching companion-* (a user's ~/.warden contents) are never
+// iterated, so they are untouched. `$HOME` stays double-quoted so it expands on
+// the host in BOTH the glob and the current-path comparison (so an expanded `$f`
+// compares against the expanded current path — the current binary always excludes
+// itself); the version is validated hex so the interpolated current path is safe.
+// The trailing `; true` keeps the script exit 0 even when the glob matches nothing
+// or the last loop body short-circuits — the bootstrap caller treats the reap as
+// best-effort regardless (a reap failure is NEVER fatal to a successful bring-up).
+export function buildReapScript(currentRemotePath) {
+  return `for f in "${COMPANION_DIR}"/companion-*; do [ -f "$f" ] && [ "$f" != "${currentRemotePath}" ] && rm -f "$f"; done; true`;
+}
+
 export function parseProbe(stdout) {
   const s = stdout || '';
   const os = (/^OS=(.+)$/m.exec(s) || [])[1];
@@ -528,6 +550,7 @@ async function pingOnce(channel, expectedVersion, cfg) {
 //  1. probe arch + whether the right-version binary already exists
 //  2. upload the binary if missing (stream over ssh; chmod +x; no host prep)
 //  3. spawn the persistent ssh process and verify identity with a ping
+//  4. reap superseded companion-* binaries left by a prior version bump (WARDEN-904)
 // On a version mismatch from a pre-existing (stale) binary, force one re-upload
 // — the warden-upgrade case. Any failure throws CompanionTransportError.
 async function bootstrapChannel(host, cfg, deps) {
@@ -569,28 +592,56 @@ async function bootstrapChannel(host, cfg, deps) {
   }
 
   // 3. Spawn + ping. A stale cached binary (wrong version) triggers one re-upload.
+  // Both success paths (first ping ok, or mismatch → re-upload → re-ping ok)
+  // converge on `liveChannel` so the reap below runs once, AFTER the channel is
+  // verified, regardless of which path brought it up.
   const channel = new CompanionChannel(host, spawnChannelFn(host, remotePath, cfg));
   const ping = await pingOnce(channel, manifest.version, cfg);
-  if (ping.ok) return channel;
-
-  channel.kill();
-  if (ping.reason === 'mismatch' && !didUpload) {
-    const up = await uploadFn(host, binaryPath, remotePath, cfg);
-    if (!up.ok) {
-      throw new CompanionTransportError(host,
-        `re-upload of stale companion failed: ${(up.stderr || '').trim() || `ssh exited ${up.code}`}`);
+  let liveChannel;
+  if (ping.ok) {
+    liveChannel = channel;
+  } else {
+    channel.kill();
+    if (ping.reason === 'mismatch' && !didUpload) {
+      const up = await uploadFn(host, binaryPath, remotePath, cfg);
+      if (!up.ok) {
+        throw new CompanionTransportError(host,
+          `re-upload of stale companion failed: ${(up.stderr || '').trim() || `ssh exited ${up.code}`}`);
+      }
+      didUpload = true;
+      const channel2 = new CompanionChannel(host, spawnChannelFn(host, remotePath, cfg));
+      const ping2 = await pingOnce(channel2, manifest.version, cfg);
+      if (ping2.ok) {
+        liveChannel = channel2;
+      } else {
+        channel2.kill();
+        throw new CompanionTransportError(host, ping2.reason === 'mismatch'
+          ? `companion on host reports version '${ping2.got}' after re-upload; expected '${manifest.version}'`
+          : `companion did not respond after re-upload: ${ping2.err?.message ?? ping2.err}`);
+      }
+    } else {
+      throw new CompanionTransportError(host, ping.reason === 'mismatch'
+        ? `companion on host reports version '${ping.got}'; expected '${manifest.version}'. The cached binary is stale — remove ${remotePath} on the host and retry.`
+        : `companion bootstrap uploaded the binary but the process did not respond to ping: ${ping.err?.message ?? ping.err}.`);
     }
-    const channel2 = new CompanionChannel(host, spawnChannelFn(host, remotePath, cfg));
-    const ping2 = await pingOnce(channel2, manifest.version, cfg);
-    if (ping2.ok) return channel2;
-    channel2.kill();
-    throw new CompanionTransportError(host, ping2.reason === 'mismatch'
-      ? `companion on host reports version '${ping2.got}' after re-upload; expected '${manifest.version}'`
-      : `companion did not respond after re-upload: ${ping2.err?.message ?? ping2.err}`);
   }
-  throw new CompanionTransportError(host, ping.reason === 'mismatch'
-    ? `companion on host reports version '${ping.got}'; expected '${manifest.version}'. The cached binary is stale — remove ${remotePath} on the host and retry.`
-    : `companion bootstrap uploaded the binary but the process did not respond to ping: ${ping.err?.message ?? ping.err}.`);
+
+  // 4. Reap superseded companion-* binaries (WARDEN-904). The channel is now
+  // verified via ping, so the live companion-<manifest.version> is in use and is
+  // NEVER a reap target (buildReapScript excludes the current path). Gated on
+  // didUpload — a same-version re-bootstrap (HAVE=1) installs nothing, so it reaps
+  // nothing and pays no extra ssh round-trip (a true no-op); the reap fires only
+  // when a binary was just installed/upgraded, which is exactly when an orphaned
+  // companion-<oldver> may exist. Best-effort: a reap failure is NEVER fatal to an
+  // otherwise-successful channel bring-up (the channel is already live).
+  if (didUpload) {
+    try {
+      await runFn(host, buildReapScript(remotePath), { timeout: connectMs + 5000 }, cfg);
+    } catch {
+      // Swallow: reaping is best-effort hygiene, not part of the channel contract.
+    }
+  }
+  return liveChannel;
 }
 
 // Get the cached channel for a host, or bootstrap one. The cache is what makes
@@ -1435,11 +1486,12 @@ export function _stopPaneDeltaSweepForTests() {
 //   default  : discover() does ONE runWithPool ssh spawn per host per tick; on
 //              the ControlMaster-disabled / Windows path each is a full handshake.
 //   companion: bootstrap pays a bounded number of ssh spawns ONCE per host
-//              (probe + upload-once + channel), then ZERO per tick thereafter.
+//              (probe + upload-once + channel + best-effort reap, WARDEN-904),
+//              then ZERO per tick thereafter.
 export function projectSpawnModel({ hosts = 1, ticks = 1, alreadyBootstrapped = false } = {}) {
   const h = Math.max(0, hosts);
   const t = Math.max(0, ticks);
-  const bootstrapPerHost = alreadyBootstrapped ? 0 : 3; // probe + upload + channel
+  const bootstrapPerHost = alreadyBootstrapped ? 0 : 4; // probe + upload + channel + reap (WARDEN-904)
   const beforeTotal = h * t;            // 1 handshake / host / tick
   const afterTotal = h * bootstrapPerHost; // bootstrap once; 0/tick after
   return {
