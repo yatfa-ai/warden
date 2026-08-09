@@ -15,7 +15,7 @@
 //
 // The logic is relocated verbatim from SettingsPage; no useState/effect/rule is
 // altered, only moved.
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { toast } from 'sonner';
 import { putJson, fetchJson, postJson } from '@/lib/api';
 import { type TelemetryTestVerdict } from '@/lib/telemetry/testConnection';
@@ -100,6 +100,19 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
   const [loadError, setLoadError] = useState<{ message: string } | null>(null);
   const [loadToken, setLoadToken] = useState(0);
   const reload = useCallback(() => setLoadToken((t) => t + 1), []);
+  // Silent reload — re-fetch config WITHOUT flipping `loading` to true. `loading`
+  // gates the WHOLE content pane (SettingsPage swaps to "Loading configuration…",
+  // unmounting the danger zone), so a plain `reload()` after the instant backend
+  // reset would flash the entire pane to a loader — a jarring response to a
+  // destructive confirm. Instead the form stays mounted showing the prior values
+  // while the GET silently swaps in the restored defaults. The ref is read+cleared
+  // at the top of the load effect, so it only affects the very next load (a later
+  // manual Retry still shows the loader). (WARDEN-889)
+  const silentNextLoadRef = useRef(false);
+  const reloadSilent = useCallback(() => {
+    silentNextLoadRef.current = true;
+    setLoadToken((t) => t + 1);
+  }, []);
 
   // Observer auth token — write-only (WARDEN-350). GET /api/config returns only
   // a masked indicator (authTokenSet + optional last-4); there is no cleartext
@@ -223,7 +236,11 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
   // concurrently but settle independently; config never waits on hosts.
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    // A silent reload (post-reset re-fetch) keeps the pane mounted: skip the
+    // `loading` flip so the danger zone doesn't flash to the full-pane loader.
+    const silent = silentNextLoadRef.current;
+    silentNextLoadRef.current = false;
+    if (!silent) setLoading(true);
     setLoadError(null);
 
     // Primary — gates the render. Bounded timeout + retry → ok, or a retry state.
@@ -380,6 +397,9 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
   // the reset without closing the page (parity with the client-prefs reset, which
   // also stays open). Pinned chats / notes / session tags are backend-side user
   // data, NOT settings, and are preserved by the backend (internal exposure).
+  // NOTE: client-side host labels (UI pref keyed by host) are intentionally NOT
+  // touched here — resetting `hosts` to [] can orphan labels for now-absent
+  // hosts. Cosmetic and self-healing: a label re-attaches if the host is re-added.
   const resetBackendConfig = async () => {
     setResetting(true);
     try {
@@ -401,8 +421,10 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
       setTelemetryAuthTokenSet(false);
       setTelemetryAuthTokenTail(null);
       // Re-fetch the config into the form so every input reflects the restored
-      // defaults (source of truth — never assume the default map locally).
-      reload();
+      // defaults (source of truth — never assume the default map locally). Silent:
+      // keep the pane mounted (no full-pane loader flash) while the GET swaps in
+      // the defaults behind the still-visible form.
+      reloadSilent();
       // Refresh the LIVE app so the reset takes effect app-wide (webhook,
       // observer, poll cadence) without closing Settings.
       onConfigChange();

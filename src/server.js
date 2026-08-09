@@ -844,9 +844,13 @@ app.put('/api/config', async (req, res) => {
 // attention polls — so the reset takes effect live on the next tick, not on
 // restart. This is an INSTANT action (not a draft-then-Save); the UI labels it
 // so. No request body is consulted.
-app.post('/api/config/reset', (_req, res) => {
+app.post('/api/config/reset', async (_req, res) => {
   resetConfig(cfg);
-  save(cfg); // persist the restored defaults to ~/.yatfa-warden/config.json
+  // save is async + atomic (temp + fsync + rename, WARDEN-831) — AWAIT it so the
+  // reset's blanked secrets actually land on disk before we respond, mirroring the
+  // PUT handler. Responding first would race the rename and leave the old (secret-
+  // bearing) config.json observable.
+  await save(cfg); // persist the restored defaults to ~/.yatfa-warden/config.json
   afterSave(cfg, {
     companionOverridden: companionEnvOverridden,
     forwardTelemetryConfig,

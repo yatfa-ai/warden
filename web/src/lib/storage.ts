@@ -1282,9 +1282,11 @@ export function persistUiState(
 // panel-layout fields from `live`. Pure (no localStorage): the App callback
 // (resetUiPrefsToDefaults) applies it via the pref setters, and the existing
 // saveUi effect persists the result via persistUiState. This is the single
-// non-destructive "Reset preferences to defaults" path: appearance/terminal/
-// new-chat/behavior prefs snap to defaults while the open workspace (tabs,
-// panes, focus, host map) AND panel layout (collapse state + widths) survive.
+// client-side "Reset UI preferences" path (the danger-zone button of the same
+// name): appearance/terminal/new-chat/behavior prefs snap to defaults while the
+// open workspace (tabs, panes, focus, host map) AND panel layout (collapse
+// state + widths) survive. Distinct from the BACKEND config reset, which lives
+// in ResetSection/useBackendConfig and never touches these client prefs.
 //
 // The preserved fields are exactly the WORKSPACE + LAYOUT set (mirroring the
 // setters App's reset callback does NOT call): workspaces, activeWorkspaceId,

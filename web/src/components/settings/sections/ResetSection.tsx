@@ -18,6 +18,7 @@ import { useState } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { Separator } from '@/components/ui/separator';
 import { SettingsSection } from '../SettingsSection';
 
 export interface ResetSectionProps {
@@ -82,7 +83,7 @@ export function ResetSection({ resetUiPrefsToDefaults, resettingBackend, onReset
             </div>
           </div>
 
-          <div className="h-px bg-border" role="separator" />
+          <Separator />
 
           {/* (2) BACKEND config — every backend preference restored to its
               default, including the write-only secrets no Save can clear.
@@ -91,7 +92,7 @@ export function ResetSection({ resetUiPrefsToDefaults, resettingBackend, onReset
             <div className="flex flex-col gap-1">
               <span className="text-sm font-medium">Reset backend configuration to defaults</span>
               <span className="text-xs text-muted-foreground">
-                Restores every backend setting (webhook, telemetry, observer, hosts, attention thresholds, token budget, and more) to its defaults, including the write-only secrets (observer, webhook, and telemetry auth tokens) that have no other clear button. Applies instantly — no Save needed. Pinned chats, agent notes, and session tags are preserved.
+                Restores every backend setting (webhook, telemetry, observer, hosts, attention thresholds, token budget, and more) to its defaults, including the write-only secrets (observer, webhook, and telemetry auth tokens) that have no other clear button. This also deletes your watch patterns (alert rules) and resets the tmux session name. Applies instantly — no Save needed. Pinned chats, agent notes, and session tags are preserved.
               </span>
             </div>
             <div>
@@ -123,7 +124,7 @@ export function ResetSection({ resetUiPrefsToDefaults, resettingBackend, onReset
         open={resetBackendOpen}
         onOpenChange={(o) => { if (!o) setResetBackendOpen(false); }}
         title="Reset backend configuration to defaults?"
-        description="This instantly restores every backend setting (webhook, telemetry, observer, hosts, attention thresholds, token budget, etc.) to its defaults and clears the write-only auth tokens (observer, webhook, telemetry). This action cannot be undone. Pinned chats, agent notes, and session tags are preserved."
+        description="This instantly restores every backend setting to its defaults and clears the write-only auth tokens (observer, webhook, telemetry). Your watch patterns (alert rules) and hosts list are deleted, and the tmux session name reverts to its default — bare-tmux chats using a custom session name will stop resolving until you set it again. Attention thresholds, token budget, and all other backend preferences also revert. This action cannot be undone. Pinned chats, agent notes, and session tags are preserved."
         confirmLabel="Reset backend"
         cancelLabel="Cancel"
         destructive
