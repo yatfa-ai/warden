@@ -88,6 +88,19 @@ function stopPollingIfIdle() {
 }
 
 /**
+ * Force an immediate out-of-band refresh of the shared /api/hosts/status poll.
+ * Use after an action that changes per-host state the poll carries but that the
+ * caller wants reflected before the next 30s tick — e.g. WARDEN-882's companion
+ * removal, where the backend clears the host's companionStatus and the row's
+ * CompanionIndicator should flip to "inactive" at once rather than lagging up
+ * to 30s. Shares the singleton's in-flight dedup, so a refresh already underway
+ * is reused rather than doubled.
+ */
+export function refreshHostStatuses(): Promise<void> {
+  return loadHostStatuses();
+}
+
+/**
  * Subscribe to the shared /api/hosts/status poll. Returns the latest per-host
  * connectivity map (host -> { status, latency_ms }). Mounting the first
  * subscriber starts the 30s interval; unmounting the last one stops it, so the
