@@ -11,6 +11,7 @@
  *
  *  Extracted verbatim from SettingsPage (WARDEN-664); behavior is unchanged. */
 import { useState, useEffect } from 'react';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
@@ -24,6 +25,14 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
+import { copyText } from '@/lib/clipboard';
+import {
   type WatchPattern,
   WATCH_PATTERN_NAME_MAX,
   WATCH_PATTERN_EXPRESSION_MAX,
@@ -36,6 +45,7 @@ export function PatternRow({
   onExpressionChange,
   onModeChange,
   onToggleEnabled,
+  onDuplicate,
   onDelete,
 }: {
   pattern: WatchPattern;
@@ -43,6 +53,7 @@ export function PatternRow({
   onExpressionChange: (id: string, expression: string) => void;
   onModeChange: (id: string, mode: 'string' | 'regex') => void;
   onToggleEnabled: (id: string) => void;
+  onDuplicate: (id: string) => void;
   onDelete: (id: string) => void;
 }) {
   const [nameDraft, setNameDraft] = useState(pattern.name);
@@ -71,69 +82,92 @@ export function PatternRow({
   // the "not yet editing" state, not a malformed rule.
   const regexInvalid = pattern.mode === 'regex' && exprDraft.trim().length > 0 && !isValidRegex(exprDraft);
 
+  // Themed right-click menu (WARDEN-898): Copy name · Copy expression · Duplicate ·
+  // Delete. Mirrors the established copyText+toast pattern (DiffViewer/FileViewer/
+  // WorkspaceTabs) so the expression payload — which right-click used to fall through
+  // to the native webview menu for — is finally copyable. Right-click moves focus to
+  // the menu the same way clicking elsewhere does, so an in-flight name/expression
+  // edit still commits on blur (commitName/commitExpr above).
+  const handleCopy = async (text: string) => {
+    const ok = await copyText(text);
+    if (ok) toast.success('Copied');
+    else toast.error('Copy failed');
+  };
+
   return (
-    <div className="flex flex-col gap-1 rounded-md border bg-muted/30 p-2">
-      <div className="flex items-center gap-2">
-        <Input
-          value={nameDraft}
-          onChange={(e) => setNameDraft(e.target.value)}
-          onBlur={commitName}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') e.currentTarget.blur();
-            if (e.key === 'Escape') setNameDraft(pattern.name);
-          }}
-          className="h-8 flex-1"
-          placeholder="name (e.g. Deploy failed)"
-          aria-label="Pattern name"
-          maxLength={WATCH_PATTERN_NAME_MAX}
-        />
-        {/* Enabled toggle: silence a pattern without deleting it. */}
-        <IconTooltip label={pattern.enabled ? 'disable — stop alerting on this pattern' : 'enable — alert when this matches'}>
-          <Switch
-            checked={pattern.enabled}
-            onCheckedChange={() => onToggleEnabled(pattern.id)}
-            aria-label={`Toggle ${pattern.name} pattern`}
-          />
-        </IconTooltip>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          onClick={() => onDelete(pattern.id)}
-          aria-label={`Delete ${pattern.name} pattern`}
-        >
-          <Trash2 />
-        </Button>
-      </div>
-      <div className="flex items-center gap-2">
-        <Input
-          value={exprDraft}
-          onChange={(e) => setExprDraft(e.target.value)}
-          onBlur={commitExpr}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') e.currentTarget.blur();
-            if (e.key === 'Escape') setExprDraft(pattern.expression);
-          }}
-          className="h-8 flex-1"
-          placeholder={pattern.mode === 'regex' ? 'regex (e.g. payment (required|due))' : 'text to match (e.g. merge conflict)'}
-          aria-label={`${pattern.name} match expression`}
-          maxLength={WATCH_PATTERN_EXPRESSION_MAX}
-        />
-        <Select
-          value={pattern.mode}
-          onValueChange={(v) => onModeChange(pattern.id, v === 'regex' ? 'regex' : 'string')}
-        >
-          <SelectTrigger className="h-8 w-[104px]" aria-label="Match mode">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="string">text</SelectItem>
-            <SelectItem value="regex">regex</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-      {regexInvalid && (
-        <p className="text-xs text-red-500">Invalid regex — it will be skipped until fixed.</p>
-      )}
-    </div>
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div className="flex flex-col gap-1 rounded-md border bg-muted/30 p-2">
+          <div className="flex items-center gap-2">
+            <Input
+              value={nameDraft}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onBlur={commitName}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur();
+                if (e.key === 'Escape') setNameDraft(pattern.name);
+              }}
+              className="h-8 flex-1"
+              placeholder="name (e.g. Deploy failed)"
+              aria-label="Pattern name"
+              maxLength={WATCH_PATTERN_NAME_MAX}
+            />
+            {/* Enabled toggle: silence a pattern without deleting it. */}
+            <IconTooltip label={pattern.enabled ? 'disable — stop alerting on this pattern' : 'enable — alert when this matches'}>
+              <Switch
+                checked={pattern.enabled}
+                onCheckedChange={() => onToggleEnabled(pattern.id)}
+                aria-label={`Toggle ${pattern.name} pattern`}
+              />
+            </IconTooltip>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={() => onDelete(pattern.id)}
+              aria-label={`Delete ${pattern.name} pattern`}
+            >
+              <Trash2 />
+            </Button>
+          </div>
+          <div className="flex items-center gap-2">
+            <Input
+              value={exprDraft}
+              onChange={(e) => setExprDraft(e.target.value)}
+              onBlur={commitExpr}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur();
+                if (e.key === 'Escape') setExprDraft(pattern.expression);
+              }}
+              className="h-8 flex-1"
+              placeholder={pattern.mode === 'regex' ? 'regex (e.g. payment (required|due))' : 'text to match (e.g. merge conflict)'}
+              aria-label={`${pattern.name} match expression`}
+              maxLength={WATCH_PATTERN_EXPRESSION_MAX}
+            />
+            <Select
+              value={pattern.mode}
+              onValueChange={(v) => onModeChange(pattern.id, v === 'regex' ? 'regex' : 'string')}
+            >
+              <SelectTrigger className="h-8 w-[104px]" aria-label="Match mode">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="string">text</SelectItem>
+                <SelectItem value="regex">regex</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          {regexInvalid && (
+            <p className="text-xs text-red-500">Invalid regex — it will be skipped until fixed.</p>
+          )}
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={() => handleCopy(pattern.name)}>Copy name</ContextMenuItem>
+        <ContextMenuItem onSelect={() => handleCopy(pattern.expression)}>Copy expression</ContextMenuItem>
+        <ContextMenuItem onSelect={() => onDuplicate(pattern.id)}>Duplicate</ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem variant="destructive" onSelect={() => onDelete(pattern.id)}>Delete</ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
