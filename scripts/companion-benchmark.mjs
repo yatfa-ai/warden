@@ -139,14 +139,14 @@ function printProjection(hosts, ticks) {
   console.log('  DEFAULT path (runWithPool, no companion):');
   console.log(`    1 handshake / host / tick  →  ${hosts} × ${ticks} = ${m.before.totalSpawns} handshakes`);
   console.log('  COMPANION path:');
-  console.log(`    bootstrap once/host: probe + upload + channel = 3 spawns × ${hosts} = ${m.after.bootstrap}`);
+  console.log(`    bootstrap once/host: probe + upload + channel + reap = 4 spawns × ${hosts} = ${m.after.bootstrap}`);
   console.log(`    then 0 / tick for the remaining ${steadyTicks} steady tick(s)`);
   console.log(`    total = ${m.after.totalSpawns} handshakes`);
   console.log();
   const delta = m.before.totalSpawns - m.after.totalSpawns;
   console.log(`  ▶ handshakes saved over ${ticks} ticks: ${m.before.totalSpawns} → ${m.after.totalSpawns}  (−${delta})`);
   if (ticks > 0) {
-    const winTicks = m.after.bootstrap / hosts; // ticks until companion breaks even (3/host)
+    const winTicks = m.after.bootstrap / hosts; // ticks until companion breaks even (4/host)
     console.log(`  ▶ companion breaks even after ~${Math.ceil(winTicks)} tick(s)/host, then every further tick is free.`);
   }
   console.log();
@@ -389,13 +389,13 @@ async function liveDiscoverBenchmark(host, ticks) {
   const defaultSpawns = { val: 0 };
   const companionSpawns = { val: 0 };
   const countingSpawn = (...a) => { companionSpawns.val++; return spawn(...a); };
-  // The bootstrap PROBE runs through ssh.js `run()`, which spawns its own ssh
-  // process internally (independent of the `spawn` above). Without wrapping it,
-  // the probe's handshake is invisible to the counter and the live replay
-  // undercounts bootstrap spawns (reports 2 instead of the model's 3: probe +
-  // upload + channel). Inject a counting `run` so all three bootstrap legs are
-  // counted and the live Part 2 agrees with the Part 1 projection. (WARDEN-272
-  // review #2.)
+  // The bootstrap PROBE + REAP (WARDEN-904) run through ssh.js `run()`, which
+  // spawns its own ssh process internally (independent of the `spawn` above).
+  // Without wrapping it, those handshakes are invisible to the counter and the
+  // live replay undercounts bootstrap spawns (reports 2 instead of the model's 4:
+  // probe + upload + channel + reap). Inject a counting `run` so all bootstrap
+  // legs are counted and the live Part 2 agrees with the Part 1 projection.
+  // (WARDEN-272 review #2; WARDEN-904 added the reap as a second `run` leg.)
   const countingRun = (...a) => { companionSpawns.val++; return sshRun(...a); };
   const companionDeps = { spawn: countingSpawn, run: countingRun };
 
@@ -413,7 +413,7 @@ async function liveDiscoverBenchmark(host, ticks) {
   _resetChannelCacheForTests();
   const bootR = await timed(() =>
     companionDiscover(host, { connectTimeout: 10 }, { timeout: 60000 }, companionDeps));
-  // First call bootstraps (probe + upload + channel) AND does a discover.
+  // First call bootstraps (probe + upload + channel + reap, WARDEN-904) AND does a discover.
   console.log(`   bootstrap + 1st discover: ${bootR.ms.toFixed(0).padStart(6)} ms  ${bootR.ok ? 'ok' : `error: ${(bootR.error || '').slice(0, 80)}`}`);
   const companionSamples = [{ ms: bootR.ms, ok: bootR.ok }];
   for (let i = 1; i < ticks; i++) {
@@ -433,7 +433,7 @@ async function liveDiscoverBenchmark(host, ticks) {
   console.log('── results ──────────────────────────────────────────────────────');
   console.log(`  spawns (ssh processes started):`);
   console.log(`     default   : ${defaultSpawns.val}  (≈ ${ticks} handshakes — one per tick)`);
-  console.log(`     companion : ${companionSpawns.val}  (bootstrap: probe+upload+channel, then 0/tick)`);
+  console.log(`     companion : ${companionSpawns.val}  (bootstrap: probe+upload+channel+reap, then 0/tick)`);
   console.log(`  per-tick wall-clock (handshake + remote work):`);
   console.log(`     default   : avg ${def.avg.toFixed(0)} ms  (p95 ${def.p95.toFixed(0)} ms) over ${def.n}`);
   if (steady.n > 0) {
@@ -619,8 +619,9 @@ async function liveLifecycleBenchmark(host, ticks) {
   const companionSpawns = { val: 0 };
   const countingSpawn = (...a) => { companionSpawns.val++; return spawn(...a); };
   // The bootstrap PROBE runs through ssh.js `run()` (spawns its own ssh); wrap it
-  // so all three bootstrap legs are counted and the live replay agrees with the
-  // Part 1 projection (probe + upload + channel = 3). (WARDEN-272 review #2.)
+  // so all bootstrap legs are counted and the live replay agrees with the
+  // Part 1 projection (probe + upload + channel + reap = 4). (WARDEN-272 review #2;
+  // WARDEN-904 added the reap as the 4th best-effort bootstrap leg.)
   const countingRun = (...a) => { companionSpawns.val++; return sshRun(...a); };
   const companionDeps = { spawn: countingSpawn, run: countingRun };
   const unique = (tag, i) => `warden-bench-life-${process.pid}-${tag}-${i}`;
@@ -647,7 +648,7 @@ async function liveLifecycleBenchmark(host, ticks) {
     const kl = await companionKillSession(host, { container: '', session: s }, { connectTimeout: 10 }, { timeout: 15000 }, companionDeps);
     return { ok: sp.ok && kl.ok, error: sp.error || kl.error };
   };
-  // First cycle bootstraps (probe + upload + channel) AND does a spawn+kill.
+  // First cycle bootstraps (probe + upload + channel + reap, WARDEN-904) AND does a spawn+kill.
   const bootR = await timed(() => runCycle(unique('comp', 0)));
   console.log(`   bootstrap + 1st spawn+kill: ${bootR.ms.toFixed(0).padStart(6)} ms  ${bootR.ok ? 'ok' : `error: ${(bootR.error || '').slice(0, 80)}`}`);
   const companionSamples = [{ ms: bootR.ms, ok: bootR.ok }];
@@ -731,7 +732,7 @@ async function liveControlPlaneBenchmark(host, ticks) {
   _resetChannelCacheForTests();
   const cfg = { connectTimeout: 10 };
   const bootT0 = process.hrtime.bigint();
-  // The first call bootstraps (probe + upload + channel) AND does the op.
+  // The first call bootstraps (probe + upload + channel + reap, WARDEN-904) AND does the op.
   await companionResize(host, { container: target.container, session: target.session }, cfg, { timeout: 30000 }, companionDeps);
   const bootMs = Number(process.hrtime.bigint() - bootT0) / 1e6;
   console.log(`   bootstrap + 1st open: ${bootMs.toFixed(0).padStart(6)} ms  (resize)`);
@@ -820,7 +821,7 @@ async function liveSendBenchmark(host, ticks) {
   _resetChannelCacheForTests();
   const cfg = { connectTimeout: 10 };
   const bootT0 = process.hrtime.bigint();
-  // The first call bootstraps (probe + upload + channel) AND does the op.
+  // The first call bootstraps (probe + upload + channel + reap, WARDEN-904) AND does the op.
   await companionSend(host, { container: target.container, session: target.session, text: 'warden-bench' }, cfg, { timeout: 30000 }, companionDeps);
   const bootMs = Number(process.hrtime.bigint() - bootT0) / 1e6;
   console.log(`   bootstrap + 1st write: ${bootMs.toFixed(0).padStart(6)} ms  (send)`);

@@ -33,6 +33,7 @@ import {
   projectSpawnModel, _resetChannelCacheForTests,
   getCompanionStatus, getAllCompanionStatuses,
   buildUninstallScript, uninstallCompanion, _channelCacheHasForTests,
+  buildReapScript,
   resize as companionResize,
   send as companionSend, sendKey as companionSendKey,
   // WARDEN-413: pane-delta push (subscribePanes) — event routing, delta cache, subscriptions.
@@ -229,7 +230,7 @@ describe('projectSpawnModel (benchmark spawn counter)', () => {
     const m = projectSpawnModel({ hosts: 4, ticks: 10 });
     assert.strictEqual(m.before.totalSpawns, 40, '4 hosts × 10 ticks');
     assert.strictEqual(m.before.perTick, 4);
-    assert.strictEqual(m.after.totalSpawns, 12, '4 hosts × 3 bootstrap spawns, once');
+    assert.strictEqual(m.after.totalSpawns, 16, '4 hosts × 4 bootstrap spawns, once');
     assert.strictEqual(m.after.perTick, 0, 'zero spawns per tick after bootstrap');
     assert.ok(m.savedSpawns > 0);
   });
@@ -430,6 +431,96 @@ describe('buildUninstallScript (validated through bash — WARDEN-882)', () => {
     assert.ok(script.includes('|| true'), `best-effort || true guards present: ${script}`);
     // rmdir the companion dir, quoted.
     assert.ok(script.includes('rmdir "$HOME/.warden"'), `rmdir targets the companion dir: ${script}`);
+  });
+});
+
+describe('buildReapScript (validated through bash — WARDEN-904)', () => {
+  // The bootstrap upgrade-path hygiene op: after the channel is verified, remove
+  // orphaned companion-<oldver> siblings a version bump left behind — WITHOUT ever
+  // touching the current binary or the user's other ~/.warden files. Best-effort:
+  // the script must exit 0 across every state (nothing to reap, only the current
+  // binary, a dir matching the glob).
+
+  it('reaps superseded companion-* siblings but leaves the current binary + user files', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-reap-'));
+    const currentPath = remoteBinaryPath('newver'); // $HOME/.warden/companion-newver
+    fs.mkdirSync(path.join(tmp, '.warden'), { recursive: true });
+    // The current binary (MUST survive — the live channel fronts it).
+    const cur = path.join(tmp, '.warden', 'companion-newver');
+    fs.writeFileSync(cur, 'CURRENT', { mode: 0o755 });
+    // Two superseded siblings left by prior version bumps (MUST be reaped).
+    fs.writeFileSync(path.join(tmp, '.warden', 'companion-oldver1'), 'OLD1');
+    fs.writeFileSync(path.join(tmp, '.warden', 'companion-oldver2'), 'OLD2');
+    // A user-owned file in ~/.warden (MUST survive — not a companion-* sibling).
+    const user = path.join(tmp, '.warden', 'user-config.json');
+    fs.writeFileSync(user, '{}');
+    const r = spawnSync('bash', ['-c', buildReapScript(currentPath)], {
+      env: { ...process.env, HOME: tmp }, encoding: 'utf8',
+    });
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.ok(fs.existsSync(cur), 'the current binary is preserved');
+    assert.strictEqual(fs.readFileSync(cur, 'utf8'), 'CURRENT', 'current binary contents intact');
+    assert.ok(!fs.existsSync(path.join(tmp, '.warden', 'companion-oldver1')), 'old sibling 1 reaped');
+    assert.ok(!fs.existsSync(path.join(tmp, '.warden', 'companion-oldver2')), 'old sibling 2 reaped');
+    assert.ok(fs.existsSync(user), 'a non-companion user file is untouched');
+  });
+
+  it('is a no-op (exit 0) when only the current binary exists — the same-version re-bootstrap case', () => {
+    // Success criterion 2: a same-version re-bootstrap reaps nothing. With only
+    // the current binary present, the glob matches it but the [ != current ]
+    // guard skips it, so nothing is removed and the script still exits 0.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-reap-solo-'));
+    const currentPath = remoteBinaryPath('abc123');
+    fs.mkdirSync(path.join(tmp, '.warden'), { recursive: true });
+    const cur = path.join(tmp, '.warden', 'companion-abc123');
+    fs.writeFileSync(cur, 'x', { mode: 0o755 });
+    const r = spawnSync('bash', ['-c', buildReapScript(currentPath)], {
+      env: { ...process.env, HOME: tmp }, encoding: 'utf8',
+    });
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.ok(fs.existsSync(cur), 'the lone current binary is untouched (reaped nothing)');
+  });
+
+  it('is a no-op (exit 0) when there is no ~/.warden / nothing to reap', () => {
+    // A first-ever bootstrap (no ~/.warden) or a host with no companion-* files:
+    // the glob matches nothing, the loop body short-circuits, `; true` exits 0.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-reap-empty-'));
+    // Intentionally do NOT create ~/.warden.
+    const r = spawnSync('bash', ['-c', buildReapScript(remoteBinaryPath('abc123'))], {
+      env: { ...process.env, HOME: tmp }, encoding: 'utf8',
+    });
+    assert.strictEqual(r.status, 0, 'exits 0 even with nothing to reap (never-fatal)');
+  });
+
+  it('never removes a directory that happens to match companion-* (the -f guard)', () => {
+    // A directory matching the glob must not be touched: [ -f "$f" ] skips it
+    // (and rm -f would not remove a non-empty dir anyway). Defense-in-depth so a
+    // stray dir name can never trip the reap.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-reap-dir-'));
+    fs.mkdirSync(path.join(tmp, '.warden', 'companion-strangedir'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, '.warden', 'companion-abc'), 'x');
+    const r = spawnSync('bash', ['-c', buildReapScript(remoteBinaryPath('abc'))], {
+      env: { ...process.env, HOME: tmp }, encoding: 'utf8',
+    });
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.ok(fs.existsSync(path.join(tmp, '.warden', 'companion-strangedir')), 'the dir survived');
+  });
+
+  it('targets only non-current companion-* siblings and quotes $HOME + the current path', () => {
+    const currentPath = remoteBinaryPath('abc123');
+    const script = buildReapScript(currentPath);
+    // Globs the companion dir's companion-* siblings ($HOME double-quoted → remote expand).
+    assert.ok(script.includes('"$HOME/.warden"/companion-*'), `globs companion-* in $HOME/.warden: ${script}`);
+    // Excludes the current path; $HOME stays literal so it expands on the host,
+    // matching the expanded $f (the current binary always excludes itself).
+    assert.ok(script.includes('[ "$f" != "$HOME/.warden/companion-abc123" ]'),
+      `excludes the current path: ${script}`);
+    // rm -f the sibling, quoted against spaces/special chars in the path.
+    assert.ok(script.includes('rm -f "$f"'), `quoted rm -f: ${script}`);
+    // Forces exit 0 (best-effort) even when the glob is empty or the body short-circuits.
+    assert.ok(script.endsWith('; true'), `trailing ; true forces exit 0: ${script}`);
+    // Only the regular-file guard lets a target through (skips the empty-glob literal + dirs).
+    assert.ok(script.includes('[ -f "$f" ]'), `regular-file guard present: ${script}`);
   });
 });
 
@@ -1231,13 +1322,13 @@ describe('getChannel / bootstrap orchestration', () => {
     const { deps, calls } = fakeDeps();
     const ch = await getChannel('prod-1', {}, deps);
     assert.ok(ch instanceof CompanionChannel);
-    assert.strictEqual(calls.run, 1, 'one probe');
+    assert.strictEqual(calls.run, 2, 'probe + best-effort reap (WARDEN-904; reap fires after an upload)');
     assert.strictEqual(calls.upload, 1, 'uploaded the missing binary');
     assert.strictEqual(calls.spawnChannel, 1, 'spawned one channel');
     // Second call reuses the cached channel — no new ssh spawns.
     const ch2 = await getChannel('prod-1', {}, deps);
     assert.strictEqual(ch2, ch, 'same channel object (cached)');
-    assert.strictEqual(calls.run, 1, 'no re-probe on cache hit');
+    assert.strictEqual(calls.run, 2, 'no re-probe or re-reap on cache hit');
     assert.strictEqual(calls.spawnChannel, 1, 'no re-spawn on cache hit');
   });
 
@@ -1361,14 +1452,15 @@ describe('getChannel / bootstrap orchestration', () => {
     });
   });
 
-  it('a fresh bootstrap routes ALL three legs through deps.spawn/deps.run (count == 3)', async () => {
+  it('a fresh bootstrap routes ALL four legs through deps.spawn/deps.run (count == 4)', async () => {
     // Mirrors scripts/companion-benchmark.mjs's counting shape exactly: the
     // benchmark injects ONE deps.spawn (upload + channel legs) and ONE deps.run
-    // (the probe leg, since ssh.js run() spawns internally). The probe previously
-    // bypassed the counter, so the live replay reported 2 instead of 3 and
-    // disagreed with the Part 1 projection. This locks the wiring: default upload
-    // + default spawnChannel MUST call deps.spawn, and the probe MUST call deps.run.
-    // (WARDEN-272 review #2.)
+    // (the probe + reap legs, since ssh.js run() spawns internally). The probe
+    // previously bypassed the counter, so the live replay reported 2 instead of 3
+    // and disagreed with the Part 1 projection. This locks the wiring: default
+    // upload + default spawnChannel MUST call deps.spawn, and the probe + reap
+    // MUST call deps.run. (WARDEN-272 review #2; WARDEN-904 added the reap as the
+    // 4th best-effort bootstrap leg.)
     let runCalls = 0;
     let spawnCalls = 0;
     const ch = await getChannel('prod-count', {}, {
@@ -1377,9 +1469,9 @@ describe('getChannel / bootstrap orchestration', () => {
       spawn: (...a) => { spawnCalls++; return fakeSpawnChildFactory(TEST_VER)(...a); },
     });
     assert.ok(ch instanceof CompanionChannel);
-    assert.strictEqual(runCalls, 1, 'probe leg: exactly one deps.run call');
+    assert.strictEqual(runCalls, 2, 'probe + reap legs: exactly two deps.run calls');
     assert.strictEqual(spawnCalls, 2, 'upload + channel legs: exactly two deps.spawn calls');
-    assert.strictEqual(runCalls + spawnCalls, 3, 'total == Part 1 projection (probe + upload + channel = 3)');
+    assert.strictEqual(runCalls + spawnCalls, 4, 'total == Part 1 projection (probe + upload + channel + reap = 4)');
   });
 
   it('concurrent getChannel for the SAME host shares one bootstrap (no leaked ssh)', async () => {
@@ -1394,7 +1486,7 @@ describe('getChannel / bootstrap orchestration', () => {
       getChannel('prod-race', {}, deps),
     ]);
     assert.strictEqual(a, b, 'both callers got the SAME channel');
-    assert.strictEqual(calls.run, 1, 'probe ran once (not twice)');
+    assert.strictEqual(calls.run, 2, 'probe + reap ran once each (not twice — coalesced)');
     assert.strictEqual(calls.spawnChannel, 1, 'channel spawned once (not twice)');
   });
 
@@ -1410,6 +1502,57 @@ describe('getChannel / bootstrap orchestration', () => {
     assert.notStrictEqual(second, first, 'got a NEW channel, not the dead one');
     assert.ok(!second.dead, 'the new channel is alive');
     assert.strictEqual(calls.spawnChannel, 2, 'bootstrapped a second time');
+  });
+
+  // --- reap superseded binaries on the bootstrap upgrade path (WARDEN-904) ---
+  // A version bump uploads companion-<newver> but must not leave the orphaned
+  // companion-<oldver> behind. After a successful bootstrap that installed a
+  // binary, bootstrapChannel runs buildReapScript over the same raw-ssh runFn the
+  // probe uses — best-effort, AFTER the channel is verified via ping, and NEVER
+  // fatal to the bring-up. A same-version re-bootstrap (HAVE=1) installs nothing,
+  // so it reaps nothing (a true no-op).
+  it('reaps superseded binaries via runFn after an upgrade bootstrap (WARDEN-904)', async () => {
+    const runScripts = [];
+    const { deps } = fakeDeps({
+      run: async (_host, script) => { runScripts.push(script); return { ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' }; },
+    });
+    const remotePath = remoteBinaryPath(TEST_VER);
+    await getChannel('prod-reap-upgrade', {}, deps);
+    // The probe ran, then — after the channel was verified — the reap ran via the
+    // SAME runFn, at the current-version path (the only runFn legs bootstrap has).
+    assert.strictEqual(runScripts.length, 2, 'probe + reap (the two runFn legs)');
+    assert.strictEqual(runScripts[0], buildProbeScript(remotePath), 'first runFn call is the probe');
+    assert.strictEqual(runScripts[1], buildReapScript(remotePath), 'second runFn call is the reap at the current path');
+  });
+
+  it('a reap failure is NON-FATAL: bootstrap still returns a live channel (best-effort hygiene)', async () => {
+    // Success criterion 5: a failed rm must never fail an otherwise-successful
+    // channel bring-up. The reap throws here, yet bootstrap resolves with the
+    // verified channel (the channel was already live before the reap ran).
+    const reapScript = buildReapScript(remoteBinaryPath(TEST_VER));
+    let reapRan = false;
+    const { deps } = fakeDeps({
+      run: async (_host, script) => {
+        if (script === reapScript) { reapRan = true; throw new Error('rm failed: read-only filesystem'); }
+        return { ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' };
+      },
+    });
+    const ch = await getChannel('prod-reap-fail', {}, deps);
+    assert.ok(reapRan, 'the reap ran (and threw)');
+    assert.ok(ch instanceof CompanionChannel, 'bootstrap still returned the verified channel');
+    assert.ok(!ch.dead, 'the channel is alive despite the reap failure');
+  });
+
+  it('a same-version re-bootstrap (HAVE=1) installs nothing and reaps NOTHING (a no-op)', async () => {
+    // Success criterion 2: HAVE=1 → no upload → nothing superseded to reap → the
+    // reap step does not even run (gated on didUpload), so no extra ssh round-trip.
+    const runScripts = [];
+    const { deps } = fakeDeps({
+      run: async (_host, script) => { runScripts.push(script); return { ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=1\n' }; },
+    });
+    await getChannel('prod-reap-samever', {}, deps);
+    assert.strictEqual(runScripts.length, 1, 'only the probe ran (no reap on a same-version re-bootstrap)');
+    assert.strictEqual(runScripts[0], buildProbeScript(remoteBinaryPath(TEST_VER)), 'the single runFn call is the probe');
   });
 });
 
@@ -1488,10 +1631,15 @@ describe('companion transport status (WARDEN-878)', () => {
   it('bootstrapping is visible while a bootstrap promise is in flight', async () => {
     // A probe that resolves on demand holds the bootstrap promise in flight; while
     // it is pending the host reads "bootstrapping" (not "inactive"), then flips to
-    // active once the bootstrap completes.
+    // active once the bootstrap completes. Only the PROBE (the first runFn call) is
+    // deferred; the reap (WARDEN-904) is a later best-effort runFn call and must
+    // resolve immediately so the bootstrap completes.
     let resolveProbe;
+    let firstRun = true;
     const { deps } = fakeDeps({
-      run: () => new Promise((resolve) => { resolveProbe = resolve; }),
+      run: () => firstRun
+        ? (firstRun = false, new Promise((resolve) => { resolveProbe = resolve; }))
+        : Promise.resolve({ ok: true, stdout: '', stderr: '' }),
     });
     const pending = getChannel('prod-booting', {}, deps);
     // getChannel sets bootstrapping synchronously before returning the promise,
@@ -1523,8 +1671,13 @@ describe('companion transport status (WARDEN-878)', () => {
     const first = await getChannel('prod-redead', {}, deps);
     assert.strictEqual(getCompanionStatus('prod-redead').state, 'active');
     first.kill(); // simulate the ssh process exiting
+    // Only the PROBE (first runFn call of the re-bootstrap) is deferred; the reap
+    // (WARDEN-904) is a later best-effort runFn call and resolves immediately.
     let resolveProbe;
-    deps.run = () => new Promise((resolve) => { resolveProbe = resolve; });
+    let firstRun = true;
+    deps.run = () => firstRun
+      ? (firstRun = false, new Promise((resolve) => { resolveProbe = resolve; }))
+      : Promise.resolve({ ok: true, stdout: '', stderr: '' });
     const pending = getChannel('prod-redead', {}, deps);
     await new Promise((r) => setImmediate(r));
     assert.strictEqual(getCompanionStatus('prod-redead').state, 'bootstrapping');
