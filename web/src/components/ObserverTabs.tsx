@@ -12,11 +12,24 @@ import { loadObs, saveObs } from '@/lib/storage';
 import { postJson } from '@/lib/api';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { hasBoundSession, selectIdleTabs, IDLE_TICK_MS } from '@/lib/observerLifecycle';
+import { AttentionView } from './AttentionView';
+import type { AttentionListProps } from './AttentionList';
 import type { Chat, SessionMeta } from '@/lib/types';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
 
 interface Props {
-  externalViewMode?: 'sessions' | 'activity' | 'directives' | null;
+  externalViewMode?: 'sessions' | 'activity' | 'directives' | 'attention' | null;
+  // WARDEN-880 — externalViewMode is a ONE-SHOT command, not a persistent override.
+  // App sets it (e.g. openActivityTab → 'activity') to deep-link into a tab; this
+  // component applies it once, then calls onExternalViewModeConsumed so App resets
+  // it to null. That reset is what keeps the deep-link firing on every click:
+  // without it, setExternalViewMode('activity') when it is ALREADY 'activity' is a
+  // React same-value bailout (no re-render, no effect run) so the 2nd+ click is a
+  // silent no-op. Reseting to null between deep-links also means a manual tab
+  // switch is never yanked back (the prop is null between deep-links, so the
+  // effect's `externalViewMode &&` guard short-circuits). Optional so the
+  // component degrades gracefully without it (no deep-link consumption).
+  onExternalViewModeConsumed?: () => void;
   // The currently-focused chat pane, used to bind a new observer session to
   // the agent the user is looking at ("observe this agent").
   focusedChat?: Chat | null;
@@ -36,17 +49,35 @@ interface Props {
   // so every observer/timeline time honors it via the shared formatTimestamp helper.
   // Optional with a 'relative' default so this component's `= {}` default stays valid.
   timestampFormat?: TimestampFormat;
+  // WARDEN-880 — the Attention view's data + handlers, threaded from App's lifted
+  // attentionRollup (the SAME values the header AttentionBadge consumes). When
+  // provided, a 4th "Attention" tab renders as a persistent peer to Activity/Directives
+  // — the ranked "where am I needed, because X" answer that stays mounted while the
+  // human opens/switches agent panes (the popover on the header badge dismisses on every
+  // pane switch). Optional so the component degrades gracefully without it (no tab).
+  attention?: AttentionListProps;
 }
 
 // Manages persisted observer sessions as tabs. Every open tab keeps its own
 // ObserverPanel (and WS) mounted; inactive ones are display:none so their
 // conversations stay live. Open tabs + active tab persist in localStorage.
-export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, timestampFormat = 'relative' }: Props = {}) {
+export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, focusedChat, onReconnectChat, observerAutoStart, observerSessionTimeout, timestampFormat = 'relative', attention }: Props = {}) {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const hostLabels = useHostLabels();
   const [openIds, setOpenIds] = useState<string[]>(() => loadObs().openIds);
   const [activeId, setActiveId] = useState<string | null>(() => loadObs().activeId);
-  const [viewMode, setViewMode] = useState<'sessions' | 'activity' | 'directives'>(() => loadObs().viewMode || 'sessions');
+  const [viewMode, setViewMode] = useState<'sessions' | 'activity' | 'directives' | 'attention'>(() => loadObs().viewMode || 'sessions');
+  // WARDEN-879: Activity + Directives tab filters persist alongside viewMode,
+  // hydrated from loadObs() (each field defaults to 'all' when never saved) and
+  // saved on every change via the saveObs effect below. Owned here (not in the
+  // children) so a warden restart reopens each tab with its view-shaping filters
+  // intact — mirroring how viewMode/openIds/activeId already ride this path.
+  // `act*` = Activity tab (type/agent/host); `dir*` = Directives tab (agent/host).
+  const [actTypeFilter, setActTypeFilter] = useState<string>(() => loadObs().activityFilters?.type ?? 'all');
+  const [actAgentFilter, setActAgentFilter] = useState<string>(() => loadObs().activityFilters?.agent ?? 'all');
+  const [actHostFilter, setActHostFilter] = useState<string>(() => loadObs().activityFilters?.host ?? 'all');
+  const [dirAgentFilter, setDirAgentFilter] = useState<string>(() => loadObs().directiveFilters?.agent ?? 'all');
+  const [dirHostFilter, setDirHostFilter] = useState<string>(() => loadObs().directiveFilters?.host ?? 'all');
   const [booted, setBooted] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingTimeout, setLoadingTimeout] = useState(false);
@@ -187,7 +218,15 @@ export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, o
     })();
   }, [refresh]);
 
-  useEffect(() => { if (booted) saveObs({ openIds, activeId, viewMode }); }, [openIds, activeId, viewMode, booted]);
+  useEffect(() => {
+    if (booted) saveObs({
+      openIds, activeId, viewMode,
+      // WARDEN-879: persist the Activity + Directives tab filters into the
+      // activityFilters/directiveFilters shapes loadObs() reads back.
+      activityFilters: { type: actTypeFilter, agent: actAgentFilter, host: actHostFilter },
+      directiveFilters: { agent: dirAgentFilter, host: dirHostFilter },
+    });
+  }, [openIds, activeId, viewMode, booted, actTypeFilter, actAgentFilter, actHostFilter, dirAgentFilter, dirHostFilter]);
 
   // Seamless resume: when a session bound to an agent chat becomes active,
   // reconnect to that chat (open its pane on the right host) exactly once. This
@@ -204,12 +243,29 @@ export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, o
     }
   }, [booted, activeId, sessions, onReconnectChat]);
 
-  // Respond to external view mode changes
+  // Respond to external view mode changes. externalViewMode is a ONE-SHOT command:
+  // App sets it to deep-link into a tab (e.g. openActivityTab → 'activity'), this
+  // effect applies it, then calls onExternalViewModeConsumed so App resets it to null.
+  //
+  // WARDEN-880: the previous ref-only form stopped the yank bug (a no-deps / viewMode-
+  // in-deps effect would re-assert externalViewMode on every render, bouncing a manual
+  // switch back to the last deep-linked tab) but traded it for a dead-link bug: because
+  // openActivityTab is the only setter and never reset to null, after the first deep-link
+  // externalViewMode is permanently 'activity', so a 2nd setExternalViewMode('activity')
+  // is a React same-value bailout — no state change, this effect never runs, the click
+  // navigates nowhere. Consuming the command (reset → null) makes every deep-link a fresh
+  // null → 'activity' transition the on-change effect reliably catches, AND keeps manual
+  // switches respected (the prop is null between deep-links, so the `externalViewMode &&`
+  // guard prevents any yank). The ref still defends against a double-apply if a stale
+  // non-null value happens to be re-rendered before the reset propagates.
+  const lastExternalViewModeRef = useRef(externalViewMode);
   useEffect(() => {
-    if (externalViewMode && externalViewMode !== viewMode) {
+    if (externalViewMode && externalViewMode !== lastExternalViewModeRef.current) {
       setViewMode(externalViewMode);
+      onExternalViewModeConsumed?.();
     }
-  }, [externalViewMode, viewMode]);
+    lastExternalViewModeRef.current = externalViewMode;
+  }, [externalViewMode, onExternalViewModeConsumed]);
 
   // WARDEN-332 — Behavior 1: auto-start an observer session for the focused chat.
   // When observerAutoStart is on and a chat becomes focused, spawn+open a bound
@@ -312,6 +368,14 @@ export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, o
           >
             Directives
           </button>
+          {attention && (
+            <button
+              onClick={() => setViewMode('attention')}
+              className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap shrink-0 transition-all duration-150 ease-out active:scale-95 ${viewMode === 'attention' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50'}`}
+            >
+              Attention
+            </button>
+          )}
         </div>
         {viewMode === 'sessions' && (
           <div className="flex items-center gap-0.5">
@@ -375,14 +439,35 @@ export function ObserverTabs({ externalViewMode, focusedChat, onReconnectChat, o
       {/* Activity view */}
       {viewMode === 'activity' && (
         <div className="flex-1 min-h-0">
-          <ActivityTimeline timestampFormat={timestampFormat} />
+          <ActivityTimeline
+            timestampFormat={timestampFormat}
+            typeFilter={actTypeFilter} setTypeFilter={setActTypeFilter}
+            agentFilter={actAgentFilter} setAgentFilter={setActAgentFilter}
+            hostFilter={actHostFilter} setHostFilter={setActHostFilter}
+          />
         </div>
       )}
 
       {/* Directives view — read-only history of every directive that reached an agent */}
       {viewMode === 'directives' && (
         <div className="flex-1 min-h-0">
-          <DirectiveHistory timestampFormat={timestampFormat} />
+          <DirectiveHistory
+            timestampFormat={timestampFormat}
+            agentFilter={dirAgentFilter} setAgentFilter={setDirAgentFilter}
+            hostFilter={dirHostFilter} setHostFilter={setDirHostFilter}
+          />
+        </div>
+      )}
+
+      {/* Attention view (WARDEN-880) — the PERSISTENT ranked "where am I needed, because
+          X" rundown, a peer to Activity/Directives. Unlike the header badge's transient
+          popover (which dismisses on every pane switch), this stays mounted while the
+          human opens/switches agent panes — the core Job #2 triage workflow. Consumes
+          App's lifted attentionRollup via the shared AttentionList, so it is bit-for-bit
+          identical to the badge. */}
+      {viewMode === 'attention' && attention && (
+        <div className="flex-1 min-h-0">
+          <AttentionView {...attention} />
         </div>
       )}
     </div>

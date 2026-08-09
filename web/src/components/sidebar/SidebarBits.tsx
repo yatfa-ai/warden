@@ -39,7 +39,7 @@ export function SectionToggle({ expanded, onClick, label, title }: {
       className="justify-start gap-1 w-full h-auto px-2 pt-2 pb-1 text-xs font-normal uppercase tracking-wider text-muted-foreground/60"
     >
       <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
-      <span className="flex-1 truncate text-left">{label}</span>
+      <span className="flex-1 min-w-0 wrap-anywhere whitespace-normal text-left">{label}</span>
     </Button>
   );
 }
@@ -82,9 +82,9 @@ export function SelectionActionBar({ count, onSelectAll, onClear, onSend, onInte
   onKill: () => void;
 }) {
   return (
-    <div className="flex items-center gap-1.5 px-2 py-1.5 border-t shrink-0 bg-accent/40">
+    <div className="flex flex-wrap items-center gap-1.5 px-2 py-1.5 border-t shrink-0 bg-accent/40">
       <span className="text-xs text-muted-foreground whitespace-nowrap">{count} selected</span>
-      <div className="ml-auto flex items-center gap-1">
+      <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
         <Button variant="ghost" size="xs" onClick={onSelectAll} title="select every agent in this list">All</Button>
         <Button variant="ghost" size="xs" onClick={onClear} title="clear the selection">Clear</Button>
         {onSend && <Button size="xs" onClick={onSend}>Send to {count}…</Button>}

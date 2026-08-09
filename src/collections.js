@@ -1,9 +1,8 @@
 // Collections module for organizing agent workforce into user-defined groups.
 // Collections persist in ~/.yatfa-warden/collections.json.
-import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import { dir } from './config.js';
+import { atomicWriteJson, readJsonDefensive } from './persist.js';
 
 export const collectionsPath = path.join(dir, 'collections.json');
 
@@ -11,26 +10,25 @@ export const collectionsPath = path.join(dir, 'collections.json');
 const DEFAULT_COLLECTIONS = [];
 
 /**
- * Load collections from storage. Returns empty array if file doesn't exist or is corrupted.
+ * Load collections from storage (async + defensive — WARDEN-831). Returns the
+ * default empty array if the file is missing or corrupt; a corrupt file is
+ * backed up rather than silently swallowed. The revive hook enforces the array
+ * shape so a syntactically-valid-but-wrong-type file is recovered, not propagated.
  */
-export function loadCollections() {
-  try {
-    const raw = fs.readFileSync(collectionsPath, 'utf8');
-    const collections = JSON.parse(raw);
-    if (!Array.isArray(collections)) return DEFAULT_COLLECTIONS;
-    return collections;
-  } catch {
-    // First run or corrupted file — return empty array
-    return DEFAULT_COLLECTIONS;
-  }
+export async function loadCollections() {
+  return readJsonDefensive(collectionsPath, {
+    fallback: DEFAULT_COLLECTIONS,
+    revive: (v) => { if (!Array.isArray(v)) throw new Error('collections.json root is not a JSON array'); return v; },
+  });
 }
 
 /**
- * Save collections to storage. Creates directory if needed.
+ * Save collections to storage atomically (temp + fsync + rename, async — WARDEN-831).
+ * A crash mid-write leaves the previous complete file in place instead of a
+ * truncated one.
  */
-export function saveCollections(collections) {
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(collectionsPath, JSON.stringify(collections, null, 2) + '\n');
+export async function saveCollections(collections) {
+  await atomicWriteJson(collectionsPath, collections);
 }
 
 /**
@@ -48,13 +46,13 @@ function generateId() {
  * @returns {object} The created collection
  * @throws {Error} If name is invalid or duplicate
  */
-export function createCollection(name, criteria = {}, metadata = {}) {
+export async function createCollection(name, criteria = {}, metadata = {}) {
   const trimmedName = String(name || '').trim().slice(0, 60);
   if (!trimmedName) {
     throw new Error('Collection name is required');
   }
 
-  const collections = loadCollections();
+  const collections = await loadCollections();
   if (collections.some((c) => c.name === trimmedName)) {
     throw new Error(`Collection "${trimmedName}" already exists`);
   }
@@ -69,7 +67,7 @@ export function createCollection(name, criteria = {}, metadata = {}) {
     updatedAt: now,
   };
 
-  saveCollections([...collections, newCollection]);
+  await saveCollections([...collections, newCollection]);
   return newCollection;
 }
 
@@ -80,8 +78,8 @@ export function createCollection(name, criteria = {}, metadata = {}) {
  * @returns {object} The updated collection
  * @throws {Error} If collection not found or name conflict
  */
-export function updateCollection(id, updates = {}) {
-  const collections = loadCollections();
+export async function updateCollection(id, updates = {}) {
+  const collections = await loadCollections();
   const index = collections.findIndex((c) => c.id === id);
   if (index === -1) {
     throw new Error('Collection not found');
@@ -104,7 +102,7 @@ export function updateCollection(id, updates = {}) {
   };
 
   collections[index] = updated;
-  saveCollections(collections);
+  await saveCollections(collections);
   return updated;
 }
 
@@ -113,13 +111,13 @@ export function updateCollection(id, updates = {}) {
  * @param {string} id - Collection ID
  * @returns {boolean} True if deleted, false if not found
  */
-export function deleteCollection(id) {
-  const collections = loadCollections();
+export async function deleteCollection(id) {
+  const collections = await loadCollections();
   const filtered = collections.filter((c) => c.id !== id);
   if (filtered.length === collections.length) {
     return false; // Not found
   }
-  saveCollections(filtered);
+  await saveCollections(filtered);
   return true;
 }
 

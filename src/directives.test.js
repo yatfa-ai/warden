@@ -1,4 +1,4 @@
-import { describe, it, before, after } from 'node:test';
+import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -232,7 +232,7 @@ describe('agentTarget + logDirective — never null@host for local/tmux chats (W
       id: '(local):myproject', key: 'myproject', kind: 'tmux', host: '(local)',
       container: null, session: 'myproject', project: 'manual', role: 'claude',
     };
-    logDirective(localChat, 'show git status');
+    await logDirective(localChat, 'show git status');
 
     // On-disk header must be session@host — never null@host (the WARDEN-642 bug).
     const onDisk = fs.readFileSync(logPath, 'utf8');
@@ -253,7 +253,7 @@ describe('agentTarget + logDirective — never null@host for local/tmux chats (W
       id: 'hostA:agent', key: 'agent', kind: 'yatfa', host: 'hostA',
       container: 'proj-worker', session: 'agent', project: 'proj', role: 'worker',
     };
-    logDirective(dockerChat, 'list the open tickets');
+    await logDirective(dockerChat, 'list the open tickets');
 
     const onDisk = fs.readFileSync(logPath, 'utf8');
     assert.ok(onDisk.includes(' → proj-worker@hostA ('), 'docker header is container@host');
@@ -264,5 +264,75 @@ describe('agentTarget + logDirective — never null@host for local/tmux chats (W
     const docker = (await readDirectives()).find((d) => d.container === 'proj-worker');
     assert.ok(docker, 'docker directive parsed');
     assert.strictEqual(docker.host, 'hostA');
+  });
+});
+
+// rotateDirectives (WARDEN-831): 7-day age-based compaction of the append-only
+// directives log. Mirrors activity.rotateEvents. The critical invariant: a
+// directive BODY that contains a `## ` markdown line must NOT be mistaken for a
+// new block boundary during rotation (rotate anchors on the same strict header
+// regex readDirectives uses), or rotation would restructure the file away from
+// logDirective's format and mis-attribute body lines.
+describe('rotateDirectives — age-based compaction (WARDEN-831)', () => {
+  let originalHome, tempHome, logPath, logDirective, readDirectives, rotateDirectives;
+  const MIN = 60 * 1000, DAY = 24 * 60 * MIN;
+
+  before(async () => {
+    originalHome = process.env.HOME;
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-rotate-directives-'));
+    process.env.HOME = tempHome;
+    const wdir = path.join(tempHome, '.yatfa-warden');
+    fs.mkdirSync(wdir, { recursive: true });
+    logPath = path.join(wdir, 'directives.md');
+    ({ logDirective, readDirectives, rotateDirectives } = await import('./observer.js?rotate'));
+  });
+  after(() => {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  });
+  beforeEach(() => { fs.rmSync(logPath, { force: true }); });
+
+  it('returns 0 and is a no-op when the log is absent or empty', async () => {
+    assert.strictEqual(await rotateDirectives(), 0);
+    fs.writeFileSync(logPath, '');
+    assert.strictEqual(await rotateDirectives(), 0);
+  });
+
+  it('removes only directives older than 7d, keeps the rest + the title', async () => {
+    const oldChat = { container: 'old-worker', host: 'hostA', role: 'worker' };
+    const newChat = { container: 'new-worker', host: 'hostA', role: 'worker' };
+    // Seed one old directive (raw bytes with an old ISO ts) + one recent via logDirective.
+    const oldTs = new Date(Date.now() - 30 * DAY).toISOString();
+    fs.writeFileSync(logPath, `# Yatfa Warden directives log\n\n## ${oldTs} → old-worker@hostA (worker)\n\nold body\n`);
+    await logDirective(newChat, 'fresh directive');
+
+    const removed = await rotateDirectives();
+    assert.strictEqual(removed, 1, 'the one expired directive was removed');
+
+    const after = await readDirectives();
+    assert.strictEqual(after.length, 1, 'only the recent directive remains');
+    assert.strictEqual(after[0].container, 'new-worker');
+    // The title header survives rotation.
+    assert.ok(fs.readFileSync(logPath, 'utf8').startsWith('# Yatfa Warden directives log'), 'title preserved');
+  });
+
+  it('does NOT split a directive whose body contains a `## ` markdown line', async () => {
+    // The regression: a loose `## `-prefix block boundary would treat the body's
+    // `## Sub-heading` line as a new directive header, restructuring the file and
+    // mis-attributing the body. The strict header regex keeps it as body.
+    const chat = { container: 'worker-a', host: 'hostA', role: 'worker' };
+    // Body contains a markdown `## ` line AND a `→ ` arrow (extra temptation to mis-parse).
+    await logDirective(chat, 'Here is a plan:\n\n## Sub-heading → detail\n\nmore body');
+
+    const removed = await rotateDirectives();
+    assert.strictEqual(removed, 0, 'nothing is expired, nothing removed');
+
+    const after = await readDirectives();
+    assert.strictEqual(after.length, 1, 'still ONE directive (body ## line is not a block boundary)');
+    assert.strictEqual(after[0].container, 'worker-a');
+    // The body's markdown heading survives inside the directive text.
+    assert.ok(after[0].text.includes('## Sub-heading → detail'), 'body ## line preserved verbatim in the directive');
+    assert.ok(after[0].text.includes('more body'), 'trailing body preserved');
   });
 });

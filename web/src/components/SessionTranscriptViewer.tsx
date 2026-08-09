@@ -9,6 +9,12 @@ import {
   DialogDescription,
   DialogClose,
 } from '@/components/ui/dialog';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -17,6 +23,8 @@ import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { EyeIcon, AlertCircleIcon, Loader2Icon, SearchIcon, ChevronUpIcon, ChevronDownIcon, XIcon } from 'lucide-react';
 import { ObserverMarkdown } from './ObserverMarkdown';
 import { cn } from '@/lib/utils';
+import { copyText } from '@/lib/clipboard';
+import { toast } from 'sonner';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTokens } from '@/lib/formatTokens';
 import { findTranscriptMatches, stepMatchIndex, activeMatchMessageIndex } from '@/lib/transcriptSearch';
@@ -534,26 +542,59 @@ function MessageBubble({
   const isUser = message.role === 'user';
   const usage = message.usage;
   const usageLabel = usage ? formatTokens(usage.total) : '';
+  // Single source of truth for the copy targets (WARDEN-902): the same strings the
+  // header renders are what the context menu copies, so the two can never drift.
+  const roleLabel = isUser ? 'You' : 'Assistant';
+  const tsLabel = message.ts ? formatTs(message.ts, timestampFormat) : undefined;
   return (
-    <div ref={bubbleRef} className={cn('flex', isUser ? 'justify-end' : 'justify-start')}>
-      <div className={cn(
-        'max-w-[85%] rounded-lg border px-3 py-2',
-        isUser ? 'border-primary/30 bg-primary/10' : 'border-border bg-background',
-        isActive && 'ring-2 ring-blue-500/70 ring-offset-1 ring-offset-background',
-      )}>
-        <div className="mb-1 flex items-center gap-2">
-          <span className="text-xs font-medium text-muted-foreground">{isUser ? 'You' : 'Assistant'}</span>
-          {message.ts && <span className="text-xs text-muted-foreground/70">{formatTs(message.ts, timestampFormat)}</span>}
-          {usage && usageLabel ? (
-            <IconTooltip label={<UsageBreakdown usage={usage} />}>
-              <span className="ml-auto text-[10px] text-amber-500/80 shrink-0 tabular-nums">{usageLabel}</span>
-            </IconTooltip>
-          ) : null}
+    // WARDEN-902: themed radix context menu over each message bubble so right-click
+    // opens Copy message / Copy role / Copy timestamp instead of falling through to
+    // the broken native webview menu. Wraps the bubble root (asChild merges radix's
+    // trigger props + ref with the search feature's callback ref). A ContextMenu
+    // inside a Dialog is already de-risked (ConflictView / FileViewer / DiffViewer).
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div ref={bubbleRef} className={cn('flex', isUser ? 'justify-end' : 'justify-start')}>
+          <div className={cn(
+            'max-w-[85%] rounded-lg border px-3 py-2',
+            isUser ? 'border-primary/30 bg-primary/10' : 'border-border bg-background',
+            isActive && 'ring-2 ring-blue-500/70 ring-offset-1 ring-offset-background',
+          )}>
+            <div className="mb-1 flex items-center gap-2">
+              <span className="text-xs font-medium text-muted-foreground">{roleLabel}</span>
+              {tsLabel && <span className="text-xs text-muted-foreground/70">{tsLabel}</span>}
+              {usage && usageLabel ? (
+                <IconTooltip label={<UsageBreakdown usage={usage} />}>
+                  <span className="ml-auto text-[10px] text-amber-500/80 shrink-0 tabular-nums">{usageLabel}</span>
+                </IconTooltip>
+              ) : null}
+            </div>
+            <ObserverMarkdown>{message.text}</ObserverMarkdown>
+          </div>
         </div>
-        <ObserverMarkdown>{message.text}</ObserverMarkdown>
-      </div>
-    </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={() => handleCopy(message.text)}>Copy message</ContextMenuItem>
+        <ContextMenuItem onSelect={() => handleCopy(roleLabel)}>Copy role</ContextMenuItem>
+        {/* Only offered when the message carries a timestamp — mirrors the header's
+            `tsLabel &&` guard, so copy never targets a value that isn't shown. */}
+        {tsLabel && (
+          <ContextMenuItem onSelect={() => handleCopy(tsLabel)}>Copy timestamp</ContextMenuItem>
+        )}
+      </ContextMenuContent>
+    </ContextMenu>
   );
+}
+
+// Copy through the shared Electron-safe helper, surfacing the boolean result via
+// toast — never bare navigator.clipboard, which rejects silently in the webview
+// (WARDEN-285). Module-level: it closes over no per-bubble state, so 500+ bubbles
+// share one instance instead of allocating a closure per render. Matches the
+// handleCopy in ConflictView / FileViewer / DiffViewer.
+async function handleCopy(text: string) {
+  const ok = await copyText(text);
+  if (ok) toast.success('Copied');
+  else toast.error('Copy failed');
 }
 
 // Token breakdown shown on hover of a turn's token chip (WARDEN-474). Reuses the

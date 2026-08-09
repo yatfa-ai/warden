@@ -219,6 +219,18 @@ export interface AttentionItem {
   state: string;
   signal?: string | null;
   /**
+   * WARDEN-877: the raw anchorable line text a deep-link should jump the pane's
+   * scrollback to, reusing the global-search `externalSearchQuery→findNext` mechanism
+   * (threaded through App's `openChat(id, anchor?)` chokepoint). This is the EXACT line
+   * that appears in the scrollback, NOT the formatted `signal`: `fromCustom` folds the
+   * matched line into a `'line' (pattern: …)` signal string that would NOT match the raw
+   * scrollback, so a separate anchor is genuinely required. Populated from the source
+   * `signal` in `fromRow` and from `customMatch.line` in `fromCustom`. Absent for
+   * health-group `fromChat` items (Chat rows carry no triggering line) — those stay
+   * focus-only. Absent → `openChat(id)` behaves byte-for-bit as before (graceful no-op).
+   */
+  anchor?: string;
+  /**
    * WARDEN-587: the epoch-ms this item entered its current attention state (copied from
    * the source `AgentStateRow.enteredAt`), so the directed Callout can show the same
    * live "stuck 2h 14m" duration suffix the section rows do. Absent for health-group
@@ -266,9 +278,12 @@ const ATTENTION_RANK: Record<string, number> = {
  *               fallback rundown.
  *
  * `enabledStates` is already honored upstream by `buildAttentionRollup` (a silenced
- * state's bucket is empty), so a silenced state can never become `top`. Ties (same
- * precedence tier — e.g. several `waiting` panes) resolve in input order, since
- * `Array#sort` is stable: the order `/api/agent-states` returned is preserved.
+ * state's bucket is empty), so a silenced state can never become `top`. Same-precedence
+ * ties (e.g. several `waiting` panes) break oldest-entered-first by `enteredAt` ASC
+ * (WARDEN-890), matching the sectioned rundown's per-section order — so the directed
+ * Callout's single pick never contradicts the rundown beneath it. Rows with no
+ * `enteredAt` (health-group agents, or unstamped panes) sink to +∞ and keep stable input
+ * order, so the tieback only reorders where it should: same-urgency pane states.
  */
 export function rankAttention(rollup: AttentionRollup): {
   top: AttentionItem | null;
@@ -294,6 +309,10 @@ export function rankAttention(rollup: AttentionRollup): {
     // WARDEN-587: carry the enteredAt stamp through so the directed Callout can render
     // the same live duration suffix the section rows do.
     ...(typeof a.enteredAt === 'number' ? { enteredAt: a.enteredAt } : {}),
+    // WARDEN-877: the raw triggering line is the deep-link anchor (reuses findNext). An
+    // empty-string signal is treated as absent (it would not usefully match) — same rule
+    // attentionReason applies, so a vague/empty signal falls through to focus-only.
+    ...(a.signal ? { anchor: a.signal } : {}),
   });
   // WARDEN-540: a custom-pattern match is its own AttentionItem — state 'custom'
   // (NOT the pane's underlying state, which is irrelevant to this signal) with the
@@ -305,6 +324,10 @@ export function rankAttention(rollup: AttentionRollup): {
     state: 'custom',
     signal: a.customMatch ? `'${a.customMatch.line}' (pattern: ${a.customMatch.pattern})` : null,
     ...(typeof a.enteredAt === 'number' ? { enteredAt: a.enteredAt } : {}),
+    // WARDEN-877: anchor on the EXACT matched line — NOT the formatted signal above
+    // (which wraps it in quotes + a pattern suffix that would not findNext-match the raw
+    // scrollback). This is the load-bearing reason anchor is a SEPARATE field.
+    ...(a.customMatch ? { anchor: a.customMatch.line } : {}),
   });
 
   // `directives`/`errors` are raw event counts with no single pane to deep-link, so
@@ -321,9 +344,24 @@ export function rankAttention(rollup: AttentionRollup): {
     ...rollup.warning.map(fromChat('warning')),
   ];
 
-  const ranked = items
-    .slice()
-    .sort((a, b) => (ATTENTION_RANK[b.state] ?? 0) - (ATTENTION_RANK[a.state] ?? 0));
+  // Urgency precedence DESC, then break ties by `enteredAt` ASC (oldest / most
+  // languishing first) so the directed Callout's single pick matches the sectioned
+  // rundown beneath it, which already sorts each section oldest-entered-first
+  // (sortOldestEnteredAtFirst, AttentionBadge.tsx). Without this tiebreak, same-tier
+  // panes resolved in arbitrary server-return order — so the callout could promote the
+  // NEWEST-waiting pane while its own section listed the OLDEST-waiting first. Mirrors
+  // the exact comparator discipline of sortOldestEnteredAtFirst (stateDuration.ts):
+  // `?? Infinity` sinks unstamped rows (notably health-group critical/warning agents,
+  // which carry no enteredAt — duration is a pane-state concept) last within their tier,
+  // and returning 0 on a tie keeps the stable sort NaN-safe (never Infinity - Infinity).
+  const ranked = items.slice().sort((a, b) => {
+    const byUrgency = (ATTENTION_RANK[b.state] ?? 0) - (ATTENTION_RANK[a.state] ?? 0);
+    if (byUrgency !== 0) return byUrgency; // precedence still dominates
+    const ai = a.enteredAt ?? Infinity; // unstamped (health agents) → last in tier
+    const bi = b.enteredAt ?? Infinity;
+    if (ai === bi) return 0; // NaN-safe; stable within input order
+    return ai - bi; // oldest (most languishing) first
+  });
 
   return { top: ranked.length > 0 ? ranked[0] : null, ranked };
 }
@@ -395,6 +433,47 @@ const ATTENTION_REASON_FALLBACK: Record<string, string> = {
 export function attentionReason(item: AttentionItem): string {
   const fallback = ATTENTION_REASON_FALLBACK[item.state];
   return item.signal || fallback || 'needs attention';
+}
+
+// ─── Severity tone (shared by every surface that renders the rollup) ──────────
+//
+// The badge popover header, the always-visible trigger button, AND the persistent
+// Attention view (WARDEN-880) all show the SAME severity tone for a given rollup:
+// green when the only items are recently-finished agents (a positive review cue),
+// red when something is broken, amber for the milder "needs your eye" cases. Keeping
+// the DECISION pure + dependency-free (only the erased `import type` above) lets every
+// surface import one helper (and attentionRollup.test.mjs cover it) so the three never
+// drift on which rollup maps to which tone — the class STRING is mapped at the call
+// site (a view concern), this helper returns only the semantic severity.
+
+export type AttentionSeverity = 'positive' | 'red' | 'amber';
+
+/**
+ * The semantic severity of a rollup + whether it is the all-finished positive case.
+ *
+ *  - `onlyDone` — total === 0 AND done.length > 0: no problems, only recently-finished
+ *    agents. This is a POSITIVE "go review their work" cue (green), NOT an alarm, and
+ *    it is distinct from a truly idle fleet (total === 0 AND done === 0) which is the
+ *    empty/zero state.
+ *  - `severity` — 'positive' when onlyDone; 'red' when something is broken
+ *    (a critical/stuck/erroring agent or a recent error); otherwise 'amber' (warnings,
+ *    waiting, blocked, pending directives).
+ *
+ * The badge's header + trigger and the persistent Attention view consume this so the
+ * severity-to-rollup mapping stays in one tested place (each maps `severity` to a tone
+ * class at its call site). Pure + dependency-free so attentionRollup.test.mjs covers it.
+ */
+export function rollupSeverity(rollup: AttentionRollup): {
+  onlyDone: boolean;
+  severity: AttentionSeverity;
+} {
+  const onlyDone = rollup.total === 0 && rollup.done.length > 0;
+  const severity: AttentionSeverity = onlyDone
+    ? 'positive'
+    : rollup.critical.length > 0 || rollup.stuck.length > 0 || rollup.erroring.length > 0 || rollup.errors > 0
+      ? 'red'
+      : 'amber';
+  return { onlyDone, severity };
 }
 
 /**

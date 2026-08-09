@@ -7,6 +7,7 @@ import { load, save, configPath, cachePath } from './config.js';
 import { discover, discoverAll, resolveChatWithRefresh, agentTarget } from './chats.js';
 import { read, send, sendKey, attachInteractive } from './tmux.js';
 import { run } from './ssh.js';
+import { atomicWriteJson, readJsonDefensiveSync } from './persist.js';
 
 // ---------- tiny ANSI ----------
 const C = {
@@ -37,12 +38,15 @@ function parseFlags(argv, bools = []) {
 }
 
 // ---------- chat cache (last scan) ----------
+// The CLI is a short-lived offline process, not the server request path, so a
+// sync read is tolerable here — but the write is still atomic (WARDEN-831) and
+// the read is defensive (backup-on-corrupt) so a half-written cache never makes
+// `warden <id>` resolution silently fail.
 function readCache() {
-  try { return JSON.parse(fs.readFileSync(cachePath, 'utf8')); } catch { return null; }
+  return readJsonDefensiveSync(cachePath, { fallback: null });
 }
-function writeCache(chats) {
-  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-  fs.writeFileSync(cachePath, JSON.stringify({ ts: Date.now(), chats }, null, 2));
+async function writeCache(chats) {
+  await atomicWriteJson(cachePath, { ts: Date.now(), chats });
 }
 
 // Resolve an id arg (substring) to one chat. Refreshes cache if no match.
@@ -55,7 +59,7 @@ async function resolveChat(idArg, cfg) {
     // Log refresh errors (cli.js specific behavior)
     for (const e of errors) console.error(paint(`! ${e.host}: ${e.error}`, C.red));
     // Update cache and return
-    writeCache(chats);
+    await writeCache(chats);
     return { chats, errors };
   });
 
@@ -187,9 +191,9 @@ async function cmdConfig(argv, cfg) {
   const [action] = argv;
   if (!action || action === 'list') { console.log(JSON.stringify(cfg, null, 2)); return; }
   if (action === 'path') { console.log(configPath); return; }
-  if (action === 'init') { save(cfg); console.log('wrote', configPath); return; }
+  if (action === 'init') { await save(cfg); console.log('wrote', configPath); return; }
   if (action === 'edit') {
-    if (!fs.existsSync(configPath)) save(cfg);
+    if (!fs.existsSync(configPath)) await save(cfg);
     const editor = process.env.EDITOR || 'notepad';
     const { spawn } = await import('node:child_process');
     const c = spawn(editor, [configPath], { stdio: 'inherit' });

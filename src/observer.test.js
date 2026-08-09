@@ -598,36 +598,36 @@ describe('Observer chat context (cross-host resumption)', () => {
     assert.deepStrictEqual(obs.effectiveOpenTabs().sort(), ['worker-a', 'worker-b']);
   });
 
-  it('restores chat context from the persisted session on resume', () => {
-    const s = createSession(null, { host: 'host1', container: 'c1', project: 'p', role: 'worker', chatKey: 'c1' });
+  it('restores chat context from the persisted session on resume', async () => {
+    const s = await createSession(null, { host: 'host1', container: 'c1', project: 'p', role: 'worker', chatKey: 'c1' });
     try {
       const obs = new Observer(cfg, { sid: s.id }); // resume path: sid set, no chatContext
       assert.strictEqual(obs.boundKey, 'c1');
       assert.strictEqual(obs.getChatContext().host, 'host1');
       assert.strictEqual(obs.getChatContext().role, 'worker');
     } finally {
-      deleteSession(s.id);
+      await deleteSession(s.id);
     }
   });
 
-  it('persisted session context takes precedence over a passed chatContext on resume', () => {
-    const s = createSession(null, { host: 'host1', container: 'c1', chatKey: 'c1', role: 'worker' });
+  it('persisted session context takes precedence over a passed chatContext on resume', async () => {
+    const s = await createSession(null, { host: 'host1', container: 'c1', chatKey: 'c1', role: 'worker' });
     try {
       const obs = new Observer(cfg, { sid: s.id, chatContext: { container: 'OTHER', chatKey: 'OTHER' } });
       assert.strictEqual(obs.boundKey, 'c1', 'the persisted context is the source of truth');
     } finally {
-      deleteSession(s.id);
+      await deleteSession(s.id);
     }
   });
 
-  it('a legacy session without chat context resumes unbound (backward compatible)', () => {
-    const s = createSession(null); // no context
+  it('a legacy session without chat context resumes unbound (backward compatible)', async () => {
+    const s = await createSession(null); // no context
     try {
       const obs = new Observer(cfg, { sid: s.id });
       assert.strictEqual(obs.boundKey, null);
       assert.strictEqual(obs.getChatContext(), null);
     } finally {
-      deleteSession(s.id);
+      await deleteSession(s.id);
     }
   });
 });

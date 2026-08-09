@@ -30,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-hostHealth-test-'));
 const tmpFile = join(tmpDir, 'healthUtils.mjs');
 writeFileSync(tmpFile, code);
-const { groupByHost, compareHostGroups, groupByProject, compareProjectGroups, summarizeProjectHosts, summarizeHostLoad, resourceTone } = await import(tmpFile);
+const { groupByHost, compareHostGroups, groupByProject, compareProjectGroups, summarizeProjectHosts, summarizeHostLoad, resourceTone, normalizeCompanionStatus } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -437,6 +437,57 @@ test('partial / garbage agent data does not throw (mirrors groupByHost robustnes
   const up = spans.find((s) => s.host === 'up');
   assert.equal(local.agentCount, 2);
   assert.equal(up.agentCount, 1);
+});
+
+// --- normalizeCompanionStatus + companion passthrough (WARDEN-878) ---
+// The wire-side normalizer for the per-host companion field, plus the
+// summarizeProjectHosts passthrough that lets the Project-mode host span carry the
+// same companion state the Host header's dot reads.
+
+console.log('\nnormalizeCompanionStatus: wire -> typed CompanionStatus');
+test('a known active state with a version passes through verbatim', () => {
+  assert.deepEqual(
+    normalizeCompanionStatus({ state: 'active', version: 'abc123def456' }),
+    { state: 'active', version: 'abc123def456' },
+  );
+});
+test('an error state carries its lastError + lastErrorAt', () => {
+  const out = normalizeCompanionStatus({ state: 'error', lastError: 'probe failed', lastErrorAt: 123 });
+  assert.equal(out.state, 'error');
+  assert.equal(out.lastError, 'probe failed');
+  assert.equal(out.lastErrorAt, 123);
+});
+test('bootstrapping passes through', () => {
+  assert.deepEqual(normalizeCompanionStatus({ state: 'bootstrapping' }), { state: 'bootstrapping' });
+});
+test('an unknown state string collapses to inactive (never crashes the render)', () => {
+  assert.deepEqual(normalizeCompanionStatus({ state: 'on-fire' }), { state: 'inactive' });
+});
+test('null / undefined / non-object -> inactive', () => {
+  assert.deepEqual(normalizeCompanionStatus(null), { state: 'inactive' });
+  assert.deepEqual(normalizeCompanionStatus(undefined), { state: 'inactive' });
+  assert.deepEqual(normalizeCompanionStatus('active'), { state: 'inactive' });
+});
+test('garbage typed fields are dropped (only correctly-typed fields carried)', () => {
+  const out = normalizeCompanionStatus({ state: 'active', version: 123, lastError: null, lastErrorAt: 'x' });
+  assert.deepEqual(out, { state: 'active' });
+});
+
+console.log('\nsummarizeProjectHosts: companion passthrough (WARDEN-878)');
+test('a host span carries the connectivity companion field through', () => {
+  const map = { prod: { status: 'online', latency_ms: 5, companion: { state: 'active', version: 'abc123' } } };
+  const spans = summarizeProjectHosts([agent('a1', { host: 'prod' })], (h) => map[h]);
+  assert.equal(spans.length, 1);
+  assert.deepEqual(spans[0].companion, { state: 'active', version: 'abc123' });
+});
+test('a host span with no companion field stays undefined (not inactive)', () => {
+  // The server OMITS the field when the transport is off; the passthrough must
+  // preserve that absence (undefined), so the UI renders no indicator — distinct
+  // from an explicit {state:'inactive'} which the UI would also skip.
+  const map = { prod: { status: 'online', latency_ms: 5 } };
+  const spans = summarizeProjectHosts([agent('a1', { host: 'prod' })], (h) => map[h]);
+  assert.equal(spans.length, 1);
+  assert.equal(spans[0].companion, undefined);
 });
 
 // --- summarizeHostLoad: per-host CPU/mem roll-up (WARDEN-361) ---

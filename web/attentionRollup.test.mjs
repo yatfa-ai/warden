@@ -30,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-attention-test-'));
 const tmpFile = join(tmpDir, 'attentionRollup.mjs');
 writeFileSync(tmpFile, code);
-const { buildAttentionRollup, EMPTY_ATTENTION_ROLLUP, rankAttention, pickCalloutTop, attentionReason, hasReturnContent, isDoneTransition } = await import(tmpFile);
+const { buildAttentionRollup, EMPTY_ATTENTION_ROLLUP, rankAttention, pickCalloutTop, attentionReason, hasReturnContent, isDoneTransition, rollupSeverity } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -291,13 +291,59 @@ test('a silenced state can never become top (silenced waiting → next-highest w
   assert.notEqual(top.state, 'waiting');
   assert.equal(top.id, 's1');
 });
-test('ties (same urgency tier) resolve in input order, deterministically', () => {
+test('unstamped same-tier rows (no enteredAt) keep input order + are stable across calls', () => {
+  // WARDEN-890: with no enteredAt, all rows are +∞ so the duration tieback is a no-op —
+  // the stable sort preserves input order. This is the case for any pane row that was
+  // never stamped (and would be the case for health-group agents, which carry no
+  // enteredAt at all).
   const r = roll(health(), stats(), [stateRow('w1', 'waiting'), stateRow('w2', 'waiting'), stateRow('w3', 'waiting')]);
   const a = rankAttention(r);
   const b = rankAttention(r);
-  assert.deepEqual(a.ranked.map((x) => x.id), ['w1', 'w2', 'w3'], 'same-tier order preserved');
+  assert.deepEqual(a.ranked.map((x) => x.id), ['w1', 'w2', 'w3'], 'unstamped → input order preserved');
   assert.deepEqual(a.ranked, b.ranked, 'stable across calls');
   assert.equal(a.top.id, 'w1');
+});
+test('same-tier ties break oldest-entered-first regardless of input order (WARDEN-890)', () => {
+  // The directed Callout picks ranked[0] (after focus exclusion); the sectioned rundown
+  // beneath it lists each section oldest-entered-first. Both must come from the SAME rule,
+  // so a newest-waiting pane returned first by the server must NOT be promoted above an
+  // older, more languishing one. Fixed epoch values keep this deterministic.
+  const r = roll(health(), stats(), [
+    stateRow('w_newer', 'waiting', { enteredAt: 3000 }),
+    stateRow('w_oldest', 'waiting', { enteredAt: 1000 }),
+    stateRow('w_mid', 'waiting', { enteredAt: 2000 }),
+  ]);
+  const { top, ranked } = rankAttention(r);
+  assert.deepEqual(ranked.map((x) => x.id), ['w_oldest', 'w_mid', 'w_newer'], 'oldest-entered first within the tier');
+  assert.equal(top.id, 'w_oldest', 'the most languishing pane is the directed answer');
+});
+test('cross-tier: urgency precedence still dominates over enteredAt (WARDEN-890)', () => {
+  // A higher-urgency pane with a NEWER enteredAt still outranks a lower-urgency pane with
+  // an OLDER enteredAt — the duration tiebreak only applies WITHIN a tier, never across.
+  const r = roll(health(), stats(), [
+    stateRow('stuck_old', 'stuck', { enteredAt: 1000 }),
+    stateRow('waiting_new', 'waiting', { enteredAt: 9000 }),
+  ]);
+  const { top, ranked } = rankAttention(r);
+  assert.deepEqual(ranked.map((x) => x.id), ['waiting_new', 'stuck_old'], 'waiting outranks stuck despite newer enteredAt');
+  assert.equal(top.id, 'waiting_new');
+});
+test('unstamped rows sink to +∞ (last within their tier) when mixed with stamped rows (WARDEN-890)', () => {
+  // Health-group agents (critical/warning) carry no enteredAt, and any pane row that was
+  // never stamped is likewise absent — both must sort AFTER stamped same-tier peers, not
+  // crash the comparator (no Infinity - NaN). This is the "graceful no-op where it
+  // shouldn't apply" guarantee.
+  const r = roll(health(), stats(), [
+    stateRow('w_unstamped_a', 'waiting'),
+    stateRow('w_stamped', 'waiting', { enteredAt: 2000 }),
+    stateRow('w_unstamped_b', 'waiting'),
+  ]);
+  const { ranked } = rankAttention(r);
+  assert.deepEqual(
+    ranked.map((x) => x.id),
+    ['w_stamped', 'w_unstamped_a', 'w_unstamped_b'],
+    'stamped first, then unstamped in stable input order',
+  );
 });
 test('below the waiting bias, the encoded precedence holds (erroring > stuck > blocked)', () => {
   const r = roll(health(), stats(), [
@@ -610,6 +656,102 @@ test('a health-group top (Chat, no pane state) has no enteredAt (duration is pan
   const { ranked } = rankAttention(r);
   assert.equal(ranked.length, 1);
   assert.equal('enteredAt' in ranked[0], false);
+});
+
+console.log('\nrollupSeverity (WARDEN-880): one tested severity decision shared by the badge + persistent view');
+test('a truly idle fleet (total 0, no done) → amber (the empty/zero state is not an alarm, not positive)', () => {
+  const r = roll(health({ healthy: [agent('a1')] }), stats());
+  assert.equal(rollupSeverity(r).severity, 'amber');
+  assert.equal(rollupSeverity(r).onlyDone, false);
+});
+test('a waiting pane → amber (the milder needs-your-eye case, not red)', () => {
+  const r = roll(health(), stats(), [stateRow('w1', 'waiting')]);
+  assert.equal(rollupSeverity(r).severity, 'amber');
+  assert.equal(rollupSeverity(r).onlyDone, false);
+});
+test('pending directives only → amber', () => {
+  const r = roll(health(), stats({ directive_proposed: 2 }));
+  assert.equal(rollupSeverity(r).severity, 'amber');
+});
+test('a critical-health agent → red', () => {
+  const r = roll(health({ critical: [agent('c1')] }), stats());
+  assert.equal(rollupSeverity(r).severity, 'red');
+});
+test('a stuck pane → red', () => {
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck')]);
+  assert.equal(rollupSeverity(r).severity, 'red');
+});
+test('an erroring pane → red', () => {
+  const r = roll(health(), stats(), [stateRow('e1', 'erroring')]);
+  assert.equal(rollupSeverity(r).severity, 'red');
+});
+test('recent errors → red', () => {
+  const r = roll(health(), stats({ error: 1 }));
+  assert.equal(rollupSeverity(r).severity, 'red');
+});
+test('a red signal beats amber: critical + waiting → red', () => {
+  const r = roll(health({ critical: [agent('c1')] }), stats(), [stateRow('w1', 'waiting')]);
+  assert.equal(rollupSeverity(r).severity, 'red');
+});
+test('only-finished agents (total 0, done > 0) → positive (the green review cue), not amber/red', () => {
+  // done bucket is populated via doneKeys; total stays 0 (done never counts toward total).
+  const r = roll(health(), stats(), [stateRow('d1', 'idle')], { doneKeys: new Set(['d1']) });
+  assert.equal(r.total, 0);
+  assert.equal(r.done.length, 1);
+  assert.equal(rollupSeverity(r).severity, 'positive');
+  assert.equal(rollupSeverity(r).onlyDone, true);
+});
+test('a problem alongside finished agents → red/amber (onlyDone requires total === 0)', () => {
+  const r = roll(health(), stats(), [
+    stateRow('d1', 'idle'),
+    stateRow('w1', 'waiting'),
+  ], { doneKeys: new Set(['d1']) });
+  assert.equal(r.total, 1);
+  assert.equal(rollupSeverity(r).onlyDone, false);
+  assert.equal(rollupSeverity(r).severity, 'amber');
+});
+
+console.log('\nanchor threading (WARDEN-877): the deep-link line that jumps scrollback to the trigger');
+// `anchor` is the RAW line text findNext should land on — distinct from `signal`, which
+// for a custom match is a formatted `'line' (pattern: …)` string that would NOT match the
+// raw scrollback. A separate field is the load-bearing design choice, so these cases pin
+// both WHAT anchor carries and that it stays ABSENT when there is nothing to jump to
+// (so openChat(id) is byte-for-byte the old focus-only behavior).
+test('a pane-state row carries anchor === its signal (the triggering line)', () => {
+  const r = roll(health(), stats(), [
+    stateRow('w1', 'waiting', { signal: 'press enter to continue' }),
+    stateRow('e1', 'erroring', { signal: 'TypeError: undefined is not a function' }),
+  ]);
+  const byId = Object.fromEntries(rankAttention(r).ranked.map((x) => [x.id, x]));
+  assert.equal(byId.w1.anchor, 'press enter to continue');
+  assert.equal(byId.e1.anchor, 'TypeError: undefined is not a function');
+});
+test('a custom row carries anchor === the EXACT matched line (NOT the formatted signal)', () => {
+  // This is the case that requires a separate field: signal is wrapped in quotes + a
+  // pattern suffix that would not findNext-match the raw scrollback; anchor is the bare
+  // matched line. They must DIFFER.
+  const r = roll(health(), stats(), [stateRow('d1', 'idle', { customMatch: cm('Deploy', 'deploy failed at step 3') })]);
+  const { ranked } = rankAttention(r);
+  assert.equal(ranked[0].anchor, 'deploy failed at step 3', 'anchor is the raw matched line');
+  assert.notEqual(ranked[0].signal, ranked[0].anchor, 'signal is the formatted string, anchor is the bare line');
+  assert.match(ranked[0].signal, /deploy failed at step 3/);
+  assert.match(ranked[0].signal, /Deploy/);
+});
+test('a pane row with NO signal carries NO anchor (focus-only — graceful no-op)', () => {
+  const r = roll(health(), stats(), [stateRow('w1', 'waiting')]);
+  const { ranked } = rankAttention(r);
+  assert.equal('anchor' in ranked[0], false, 'no signal → no anchor field at all');
+});
+test('an empty-string signal carries NO anchor (treated as absent, like attentionReason)', () => {
+  const r = roll(health(), stats(), [stateRow('s1', 'stuck', { signal: '' })]);
+  const { ranked } = rankAttention(r);
+  assert.equal('anchor' in ranked[0], false, 'empty signal → no anchor (would not usefully match)');
+});
+test('a health-group item (critical/warning) carries NO anchor (Chat has no triggering line)', () => {
+  const r = roll(health({ critical: [agent('c1')], warning: [agent('w1')] }), stats());
+  const byId = Object.fromEntries(rankAttention(r).ranked.map((x) => [x.id, x]));
+  assert.equal('anchor' in byId.c1, false, 'critical health → no anchor');
+  assert.equal('anchor' in byId.w1, false, 'warning health → no anchor');
 });
 
 console.log(`\n✓ ATTENTION ROLLUP TESTS PASS (${passed})`);

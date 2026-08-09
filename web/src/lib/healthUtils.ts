@@ -150,9 +150,51 @@ export function resourceTone(cpuPct?: number | null, memPct?: number | null): st
 /** Per-host connectivity, as returned by /api/hosts/status. */
 export type HostConnectivityStatus = 'online' | 'offline' | 'unknown';
 
+// ---- Companion transport state (WARDEN-878 / roadmap WARDEN-270 Visibility) ----
+// Per-host companion transport status, surfaced alongside the connectivity dot so
+// the human can tell at a glance whether the companion is working on each host.
+// `companion` is present on HostConnectivity ONLY when the companion transport is
+// enabled (server.ts omits the field when the toggle is off); `inactive` covers
+// LOCAL + a host no companion op has engaged yet. Mirrors src/companion.js's
+// getCompanionStatus shape exactly (state + optional version/lastError/lastErrorAt).
+export type CompanionState = 'active' | 'bootstrapping' | 'inactive' | 'error';
+
+export interface CompanionStatus {
+  state: CompanionState;
+  /** Ping-verified companion manifest version (active only). */
+  version?: string;
+  /** Actionable last bootstrap error + recovery hint (error only). */
+  lastError?: string;
+  /** Epoch ms of the last failure (error only). */
+  lastErrorAt?: number;
+}
+
 export interface HostConnectivity {
   status: HostConnectivityStatus;
   latency_ms: number | null;
+  /** Per-host companion transport state (present only when the transport is enabled). */
+  companion?: CompanionStatus;
+}
+
+/**
+ * Safely normalize an arbitrary companion-status object (from the wire) to a valid
+ * CompanionStatus. Missing/garbage state collapses to 'inactive' (the same
+ * "not applicable / not yet engaged" read the server emits) instead of crashing
+ * the render. Only known state strings pass through; version/lastError/lastErrorAt
+ * are carried only when correctly typed. (WARDEN-878)
+ */
+export function normalizeCompanionStatus(raw: unknown): CompanionStatus {
+  if (!raw || typeof raw !== 'object') return { state: 'inactive' };
+  const r = raw as Record<string, unknown>;
+  const VALID: CompanionState[] = ['active', 'bootstrapping', 'inactive', 'error'];
+  const state = typeof r.state === 'string' && (VALID as string[]).includes(r.state)
+    ? (r.state as CompanionState)
+    : 'inactive';
+  const out: CompanionStatus = { state };
+  if (typeof r.version === 'string') out.version = r.version;
+  if (typeof r.lastError === 'string') out.lastError = r.lastError;
+  if (typeof r.lastErrorAt === 'number') out.lastErrorAt = r.lastErrorAt;
+  return out;
 }
 
 /** Count of agents in each health state on one host. */
@@ -339,6 +381,8 @@ export interface ProjectHostSpan {
   status: HostConnectivityStatus;
   latency_ms: number | null;
   agentCount: number;
+  /** Per-host companion transport state, the same field the Host header's dot reads. (WARDEN-878) */
+  companion?: CompanionStatus;
 }
 
 /**
@@ -380,6 +424,9 @@ export function summarizeProjectHosts(
       status: conn?.status ?? 'unknown',
       latency_ms: conn?.latency_ms ?? null,
       agentCount,
+      // WARDEN-878: carry the companion field through so the Project-mode host
+      // span shows the same per-host transport state the Host header does.
+      ...(conn?.companion ? { companion: conn.companion } : {}),
     });
   }
   spans.sort((a, b) => {

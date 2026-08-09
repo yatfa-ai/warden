@@ -146,6 +146,7 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [loadingTimeout, setLoadingTimeout] = useState(false);
   const [chatContext, setChatContext] = useState<ChatContextMeta | null>(null);
+  const [model, setModel] = useState<string | null>(null);
   // Styled replacement for the native directive-edit prompt. The value/requestId
   // persist while `open` toggles so the textarea doesn't flash empty during the
   // dialog's close animation. Cancel (close) must NOT call `decide`; only the
@@ -282,6 +283,7 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
     setConnectionError(null);
     setLoadingTimeout(false);
     setChatContext(null);
+    setModel(null);
     setBusy(false);
     connectionTimeoutShownRef.current = false;
 
@@ -353,6 +355,7 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
       switch (m.type) {
         case 'history':
           setChatContext(m.chatContext ?? null);
+          setModel(m.model ?? null);
           setItems(
             m.items.map((i): Item => {
               if (i.role === 'user')
@@ -365,6 +368,7 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
           return;
         case 'session_created':
           setChatContext(m.chatContext ?? null);
+          setModel(m.model ?? null);
           return;
         case 'thinking':
           setBusy(true);
@@ -562,6 +566,14 @@ export function ObserverPanel({ sessionId, onActivity, timestampFormat }: Props)
           <span className="flex-1">drafts directives you approve</span>
         )}
         {loadingTimeout && !conn && <span className="italic text-yellow-500">taking longer than expected…</span>}
+        {model && (
+          <span
+            className="shrink-0 truncate text-muted-foreground"
+            title={`model: ${model}`}
+          >
+            model: {model}
+          </span>
+        )}
       </div>
 
       {/* Conversation */}

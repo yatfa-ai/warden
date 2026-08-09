@@ -1,137 +1,129 @@
-import { describe, it, mock, afterEach } from 'node:test';
+import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
-import {
-  collectionsPath,
-  loadCollections,
-  saveCollections,
-  createCollection,
-  updateCollection,
-  deleteCollection,
-  getAgentsInCollection,
-} from './collections.js';
+import path from 'node:path';
+import os from 'node:os';
 
-// collections.js persists to ~/.yatfa-warden/collections.json via fs.readFileSync /
-// fs.writeFileSync / fs.mkdirSync. We mock those calls (exactly like src/config.test.js)
-// so the tests drive the CRUD + parse-defensive behavior deterministically with no real
-// file I/O. The module-load `dir` binding is irrelevant here — we mock the fs *calls*,
-// not the path. getAgentsInCollection is pure and needs no mock.
+// collections.js now persists through the async atomic-write + defensive-read
+// helper (WARDEN-831), so we exercise it against REAL I/O under a redirected
+// HOME (the same pattern src/server-config.test.js uses) rather than mocking fs.
+// The module resolves ~/.yatfa-warden from os.homedir() at import time, so HOME
+// is redirected BEFORE the dynamic import() below.
+
+let mod; // dynamically-imported collections.js (after HOME redirect)
+let tmpHome;
+let wardenDir;
+let collectionsPath;
+let originalHome;
+
+before(async () => {
+  originalHome = process.env.HOME;
+  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-collections-'));
+  process.env.HOME = tmpHome;
+  wardenDir = path.join(tmpHome, '.yatfa-warden');
+  fs.mkdirSync(wardenDir, { recursive: true });
+  collectionsPath = path.join(wardenDir, 'collections.json');
+  mod = await import('./collections.js');
+});
+
+after(() => {
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  fs.rmSync(tmpHome, { recursive: true, force: true });
+});
+
+beforeEach(() => {
+  // Each test starts from a clean (absent) collections file.
+  fs.rmSync(collectionsPath, { force: true });
+});
+
+function seed(list) {
+  fs.writeFileSync(collectionsPath, JSON.stringify(list, null, 2) + '\n');
+}
 
 // ----------------------------- loadCollections -------------------------------
 describe('loadCollections — defensive parse contract', () => {
-  afterEach(() => {
-    mock.restoreAll();
+  it('returns [] when the file is missing (first run / ENOENT)', async () => {
+    assert.deepStrictEqual(await mod.loadCollections(), []);
   });
 
-  it('returns [] when the file is missing (first run / ENOENT)', () => {
-    mock.method(fs, 'readFileSync', () => {
-      throw new Error('ENOENT: collections.json does not exist');
-    });
-    assert.deepStrictEqual(loadCollections(), []);
+  it('returns [] when the file contains corrupt JSON, and backs it up (WARDEN-831)', async () => {
+    fs.writeFileSync(collectionsPath, 'not valid json {{{');
+    assert.deepStrictEqual(await mod.loadCollections(), []);
+    // The corrupt text was surfaced to a .corrupt-<ts>.json backup, not lost.
+    const backups = fs.readdirSync(wardenDir).filter((n) => n.startsWith('collections.corrupt-'));
+    assert.strictEqual(backups.length, 1);
+    assert.strictEqual(fs.readFileSync(path.join(wardenDir, backups[0]), 'utf8'), 'not valid json {{{');
   });
 
-  it('returns [] when the file contains corrupt JSON', () => {
-    mock.method(fs, 'readFileSync', () => 'not valid json {{{');
-    assert.deepStrictEqual(loadCollections(), []);
-  });
-
-  it('returns [] when the parsed value is not an array', () => {
+  it('returns [] when the parsed value is not an array', async () => {
     // A corrupted/garbled write could leave an object or primitive at the top level.
     // That must never crash the app or be treated as a list.
-    mock.method(fs, 'readFileSync', () => JSON.stringify({ not: 'an array' }));
-    assert.deepStrictEqual(loadCollections(), []);
+    seed({ not: 'an array' });
+    assert.deepStrictEqual(await mod.loadCollections(), []);
   });
 
-  it('returns the parsed array when the file is valid', () => {
+  it('returns the parsed array when the file is valid', async () => {
     const stored = [{ id: 'coll-1', name: 'codex', criteria: { role: 'worker' } }];
-    mock.method(fs, 'readFileSync', () => JSON.stringify(stored));
-    assert.deepStrictEqual(loadCollections(), stored);
+    seed(stored);
+    assert.deepStrictEqual(await mod.loadCollections(), stored);
   });
 });
 
 // ----------------------------- saveCollections -------------------------------
 describe('saveCollections — persistence shape', () => {
-  afterEach(() => {
-    mock.restoreAll();
+  it('writes pretty JSON terminated by a newline to collectionsPath', async () => {
+    const data = [{ id: 'coll-1', name: 'codex' }];
+    await mod.saveCollections(data);
+    assert.strictEqual(
+      fs.readFileSync(collectionsPath, 'utf8'),
+      JSON.stringify(data, null, 2) + '\n',
+    );
   });
 
-  it('ensures the directory exists and writes pretty JSON terminated by a newline', () => {
-    mock.method(fs, 'mkdirSync', () => undefined);
-    mock.method(fs, 'writeFileSync', () => {});
-
-    const data = [{ id: 'coll-1', name: 'codex' }];
-    saveCollections(data);
-
-    // mkdir must be recursive so a first-run dir tree is created.
-    const mkdirCall = fs.mkdirSync.mock.calls[0];
-    assert.deepStrictEqual(mkdirCall.arguments[1], { recursive: true });
-
-    // writeFileSync target is the module's collectionsPath; body is JSON + '\n'.
-    const writeCall = fs.writeFileSync.mock.calls[0];
-    assert.strictEqual(writeCall.arguments[0], collectionsPath);
-    assert.strictEqual(writeCall.arguments[1], JSON.stringify(data, null, 2) + '\n');
+  it('is durable: a re-read round-trips the saved value', async () => {
+    const data = [{ id: 'coll-1', name: 'codex' }, { id: 'coll-2', name: 'alpha' }];
+    await mod.saveCollections(data);
+    assert.deepStrictEqual(await mod.loadCollections(), data);
   });
 });
 
 // ----------------------------- createCollection ------------------------------
 describe('createCollection — name validation + persistence', () => {
-  afterEach(() => {
-    mock.restoreAll();
+  it('throws "Collection name is required" when the name is empty / whitespace / null', async () => {
+    await assert.rejects(() => mod.createCollection(''), /Collection name is required/);
+    await assert.rejects(() => mod.createCollection('   '), /Collection name is required/);
+    await assert.rejects(() => mod.createCollection(null), /Collection name is required/);
+    await assert.rejects(() => mod.createCollection(undefined), /Collection name is required/);
   });
 
-  // shared no-op writes so createCollection can persist without touching disk
-  function mockWrites() {
-    mock.method(fs, 'mkdirSync', () => undefined);
-    mock.method(fs, 'writeFileSync', () => {});
-  }
-
-  it('throws "Collection name is required" when the name is empty / whitespace / null', () => {
-    mock.method(fs, 'readFileSync', () => '[]');
-    assert.throws(() => createCollection(''), /Collection name is required/);
-    assert.throws(() => createCollection('   '), /Collection name is required/);
-    assert.throws(() => createCollection(null), /Collection name is required/);
-    assert.throws(() => createCollection(undefined), /Collection name is required/);
+  it('throws when a collection with the same name already exists', async () => {
+    seed([{ id: 'coll-1', name: 'codex' }]);
+    await assert.rejects(() => mod.createCollection('codex'), /Collection "codex" already exists/);
   });
 
-  it('throws when a collection with the same name already exists', () => {
-    // read-then-write uniqueness: an existing identical name must block creation.
-    mock.method(fs, 'readFileSync', () =>
-      JSON.stringify([{ id: 'coll-1', name: 'codex' }])
-    );
-    assert.throws(() => createCollection('codex'), /Collection "codex" already exists/);
-  });
-
-  it('trims surrounding whitespace and truncates the name to 60 characters', () => {
-    mock.method(fs, 'readFileSync', () => '[]');
-    mockWrites();
-
-    const trimmed = createCollection('   codex   ');
+  it('trims surrounding whitespace and truncates the name to 60 characters', async () => {
+    const trimmed = await mod.createCollection('   codex   ');
     assert.strictEqual(trimmed.name, 'codex', 'surrounding whitespace is trimmed');
 
     const longName = 'x'.repeat(80);
-    const truncated = createCollection(longName);
+    const truncated = await mod.createCollection(longName);
     assert.strictEqual(truncated.name.length, 60, 'name is sliced to max 60 chars');
     assert.strictEqual(truncated.name, longName.slice(0, 60));
   });
 
-  it('populates id/createdAt/updatedAt and persists the new collection', () => {
-    mock.method(fs, 'readFileSync', () => '[]');
-    mockWrites();
+  it('populates id/createdAt/updatedAt and persists the new collection', async () => {
+    const created = await mod.createCollection('codex', { role: 'worker' }, { color: 'blue' });
 
-    const created = createCollection('codex', { role: 'worker' }, { color: 'blue' });
-
-    // identity fields populated
     assert.ok(typeof created.id === 'string' && created.id.startsWith('coll-'), 'id is a coll-<…> string');
     assert.strictEqual(created.name, 'codex');
     assert.deepStrictEqual(created.criteria, { role: 'worker' });
     assert.deepStrictEqual(created.metadata, { color: 'blue' });
-    // createdAt and updatedAt come from the same Date.now() snapshot — must be equal
     assert.strictEqual(typeof created.createdAt, 'number');
     assert.strictEqual(created.createdAt, created.updatedAt);
 
     // the new collection was appended and written
-    const writeCall = fs.writeFileSync.mock.calls[0];
-    const persisted = JSON.parse(writeCall.arguments[1]);
+    const persisted = await mod.loadCollections();
     assert.strictEqual(persisted.length, 1);
     assert.strictEqual(persisted[0].id, created.id);
     assert.strictEqual(persisted[0].name, 'codex');
@@ -140,80 +132,42 @@ describe('createCollection — name validation + persistence', () => {
 
 // ----------------------------- updateCollection ------------------------------
 describe('updateCollection — identity preservation + uniqueness', () => {
-  afterEach(() => {
-    mock.restoreAll();
+  it('throws "Collection not found" when the id does not exist', async () => {
+    seed([{ id: 'coll-1', name: 'alpha' }]);
+    await assert.rejects(() => mod.updateCollection('coll-missing', { name: 'beta' }), /Collection not found/);
   });
 
-  function mockWrites() {
-    mock.method(fs, 'mkdirSync', () => undefined);
-    mock.method(fs, 'writeFileSync', () => {});
-  }
-
-  it('throws "Collection not found" when the id does not exist', () => {
-    mock.method(fs, 'readFileSync', () =>
-      JSON.stringify([{ id: 'coll-1', name: 'alpha' }])
-    );
-    assert.throws(() => updateCollection('coll-missing', { name: 'beta' }), /Collection not found/);
-  });
-
-  it('persists a new casing on rename (codex → Codex)', () => {
+  it('persists a new casing on rename (codex → Codex)', async () => {
     // A rename that only changes the casing of the row's own name must persist the new
     // casing. NOTE: this does NOT exercise the `c.id !== id` self-exclusion guard —
-    // case-sensitive compare means 'codex' !== 'Codex' regardless of that guard. The
-    // guard is driven by the same-trim self-rename test below (the only input that can
-    // reach it).
-    mock.method(fs, 'readFileSync', () =>
-      JSON.stringify([{ id: 'coll-1', name: 'codex', createdAt: 1000, updatedAt: 1000 }])
-    );
-    mockWrites();
-
-    const updated = updateCollection('coll-1', { name: 'Codex' });
+    // case-sensitive compare means 'codex' !== 'Codex' regardless of that guard.
+    seed([{ id: 'coll-1', name: 'codex', createdAt: 1000, updatedAt: 1000 }]);
+    const updated = await mod.updateCollection('coll-1', { name: 'Codex' });
     assert.strictEqual(updated.name, 'Codex');
   });
 
-  it('excludes the row itself from the uniqueness check on a self-rename that trims to the same name', () => {
-    // 'alpha' -> '  alpha  ' trims back to 'alpha'. With the `c.id !== id` term in the
-    // uniqueness check this succeeds; WITHOUT it, `c.name === trimmedName` ('alpha' ===
-    // 'alpha') would wrongly throw "Collection "alpha" already exists" — the exact
-    // false-positive the guard exists to prevent. This is the only input that actually
-    // drives that guard (a case-only rename can't reach it under case-sensitive compare).
-    mock.method(fs, 'readFileSync', () =>
-      JSON.stringify([{ id: 'coll-1', name: 'alpha', createdAt: 1000, updatedAt: 1000 }])
-    );
-    mockWrites();
-
-    const updated = updateCollection('coll-1', { name: '  alpha  ' });
+  it('excludes the row itself from the uniqueness check on a self-rename that trims to the same name', async () => {
+    // 'alpha' -> '  alpha  ' trims back to 'alpha'. With the `c.id !== id` term this
+    // succeeds; WITHOUT it, 'alpha' === 'alpha' would wrongly throw.
+    seed([{ id: 'coll-1', name: 'alpha', createdAt: 1000, updatedAt: 1000 }]);
+    const updated = await mod.updateCollection('coll-1', { name: '  alpha  ' });
     assert.strictEqual(updated.id, 'coll-1', 'rename succeeded (no self-collision)');
   });
 
-  it('throws when renaming to a name already used by a DIFFERENT collection', () => {
-    mock.method(fs, 'readFileSync', () =>
-      JSON.stringify([
-        { id: 'coll-1', name: 'alpha' },
-        { id: 'coll-2', name: 'beta' },
-      ])
-    );
-    assert.throws(() => updateCollection('coll-1', { name: 'beta' }), /Collection "beta" already exists/);
+  it('throws when renaming to a name already used by a DIFFERENT collection', async () => {
+    seed([{ id: 'coll-1', name: 'alpha' }, { id: 'coll-2', name: 'beta' }]);
+    await assert.rejects(() => mod.updateCollection('coll-1', { name: 'beta' }), /Collection "beta" already exists/);
   });
 
-  it('preserves id and createdAt and bumps only updatedAt', () => {
-    // Seed an old collection; after update the identity fields must be unchanged and
-    // updatedAt must move forward.
-    mock.method(fs, 'readFileSync', () =>
-      JSON.stringify([
-        { id: 'coll-1', name: 'alpha', createdAt: 1000, updatedAt: 1000 },
-      ])
-    );
-    mockWrites();
-
-    const updated = updateCollection('coll-1', { criteria: { role: 'worker' } });
+  it('preserves id and createdAt and bumps only updatedAt', async () => {
+    seed([{ id: 'coll-1', name: 'alpha', createdAt: 1000, updatedAt: 1000 }]);
+    const updated = await mod.updateCollection('coll-1', { criteria: { role: 'worker' } });
     assert.strictEqual(updated.id, 'coll-1', 'id preserved');
     assert.strictEqual(updated.createdAt, 1000, 'createdAt preserved');
     assert.ok(updated.updatedAt > 1000, 'updatedAt bumped to a newer timestamp');
     assert.deepStrictEqual(updated.criteria, { role: 'worker' }, 'merged update applied');
 
-    // persisted list still carries the (updated) row at the same slot
-    const persisted = JSON.parse(fs.writeFileSync.mock.calls[0].arguments[1]);
+    const persisted = await mod.loadCollections();
     assert.strictEqual(persisted[0].id, 'coll-1');
     assert.strictEqual(persisted[0].createdAt, 1000);
     assert.strictEqual(persisted[0].updatedAt, updated.updatedAt);
@@ -222,40 +176,20 @@ describe('updateCollection — identity preservation + uniqueness', () => {
 
 // ----------------------------- deleteCollection ------------------------------
 describe('deleteCollection — not-found vs removed', () => {
-  afterEach(() => {
-    mock.restoreAll();
-  });
-
-  function mockWrites() {
-    mock.method(fs, 'mkdirSync', () => undefined);
-    mock.method(fs, 'writeFileSync', () => {});
-  }
-
-  it('returns false and writes nothing when the id is not found', () => {
-    mock.method(fs, 'readFileSync', () =>
-      JSON.stringify([{ id: 'coll-1', name: 'alpha' }])
-    );
-    mockWrites();
-
-    const result = deleteCollection('coll-missing');
+  it('returns false and writes nothing when the id is not found', async () => {
+    seed([{ id: 'coll-1', name: 'alpha' }]);
+    const before = fs.readFileSync(collectionsPath, 'utf8');
+    const result = await mod.deleteCollection('coll-missing');
     assert.strictEqual(result, false);
-    // not-found must short-circuit BEFORE saveCollections — no write happened
-    assert.strictEqual(fs.writeFileSync.mock.calls.length, 0);
+    // not-found short-circuits BEFORE saveCollections — file is byte-identical.
+    assert.strictEqual(fs.readFileSync(collectionsPath, 'utf8'), before);
   });
 
-  it('returns true and persists the list without the deleted row', () => {
-    mock.method(fs, 'readFileSync', () =>
-      JSON.stringify([
-        { id: 'coll-1', name: 'alpha' },
-        { id: 'coll-2', name: 'beta' },
-      ])
-    );
-    mockWrites();
-
-    const result = deleteCollection('coll-1');
+  it('returns true and persists the list without the deleted row', async () => {
+    seed([{ id: 'coll-1', name: 'alpha' }, { id: 'coll-2', name: 'beta' }]);
+    const result = await mod.deleteCollection('coll-1');
     assert.strictEqual(result, true);
-
-    const persisted = JSON.parse(fs.writeFileSync.mock.calls[0].arguments[1]);
+    const persisted = await mod.loadCollections();
     assert.strictEqual(persisted.length, 1, 'deleted row removed');
     assert.strictEqual(persisted[0].id, 'coll-2');
   });
@@ -265,27 +199,25 @@ describe('deleteCollection — not-found vs removed', () => {
 describe('getAgentsInCollection — criteria matching (pure, no I/O)', () => {
   it('returns [] when the collection has no usable criteria', () => {
     const chat = { name: 'a', role: 'worker', project: 'warden', host: 'h1' };
-    assert.deepStrictEqual(getAgentsInCollection(null, [chat]), []);
-    assert.deepStrictEqual(getAgentsInCollection({}, [chat]), []);
-    assert.deepStrictEqual(getAgentsInCollection({ criteria: null }, [chat]), []);
-    assert.deepStrictEqual(getAgentsInCollection({ criteria: undefined }, [chat]), []);
+    assert.deepStrictEqual(mod.getAgentsInCollection(null, [chat]), []);
+    assert.deepStrictEqual(mod.getAgentsInCollection({}, [chat]), []);
+    assert.deepStrictEqual(mod.getAgentsInCollection({ criteria: null }, [chat]), []);
+    assert.deepStrictEqual(mod.getAgentsInCollection({ criteria: undefined }, [chat]), []);
   });
 
   it('returns [] when allChats is empty', () => {
     assert.deepStrictEqual(
-      getAgentsInCollection({ criteria: { role: 'worker' } }, []),
-      []
+      mod.getAgentsInCollection({ criteria: { role: 'worker' } }, []),
+      [],
     );
   });
 
   it('matches ALL chats when criteria is present but has no filters', () => {
-    // criteria:{} activates no role/project/host/custom branch, so nothing excludes
-    // a chat — every chat is returned. (Distinct from the no-criteria guard above.)
     const chats = [
       { name: 'a', role: 'worker', project: 'warden', host: 'h1' },
       { name: 'b', role: 'reviewer', project: 'other', host: 'h2' },
     ];
-    assert.deepStrictEqual(getAgentsInCollection({ criteria: {} }, chats), chats);
+    assert.deepStrictEqual(mod.getAgentsInCollection({ criteria: {} }, chats), chats);
   });
 
   it('ANDs role / project / host filters', () => {
@@ -295,62 +227,49 @@ describe('getAgentsInCollection — criteria matching (pure, no I/O)', () => {
       { name: 'role-mismatch', role: 'reviewer', project: 'warden', host: 'h1' },
       { name: 'host-mismatch', role: 'worker', project: 'warden', host: 'h2' },
     ];
-    const out = getAgentsInCollection(
+    const out = mod.getAgentsInCollection(
       { criteria: { role: 'worker', project: 'warden', host: 'h1' } },
-      chats
+      chats,
     );
-    assert.deepStrictEqual(
-      out.map((c) => c.name),
-      ['all-match']
-    );
+    assert.deepStrictEqual(out.map((c) => c.name), ['all-match']);
   });
 
   it('ORs the custom array against role / project / host / name', () => {
     const chats = [
-      { name: 'alice', role: 'reviewer', project: 'x', host: 'h' }, // name === 'alice'
-      { name: 'bob', role: 'worker', project: 'y', host: 'h' }, // role === 'worker'
-      { name: 'carol', role: 'reviewer', project: 'warden', host: 'h' }, // project === 'warden'
-      { name: 'dave', role: 'reviewer', project: 'z', host: 'remote' }, // host === 'remote'
-      { name: 'eve', role: 'reviewer', project: 'z', host: 'h' }, // matches none
+      { name: 'alice', role: 'reviewer', project: 'x', host: 'h' },
+      { name: 'bob', role: 'worker', project: 'y', host: 'h' },
+      { name: 'carol', role: 'reviewer', project: 'warden', host: 'h' },
+      { name: 'dave', role: 'reviewer', project: 'z', host: 'remote' },
+      { name: 'eve', role: 'reviewer', project: 'z', host: 'h' },
     ];
-    const out = getAgentsInCollection(
+    const out = mod.getAgentsInCollection(
       { criteria: { custom: ['alice', 'worker', 'warden', 'remote'] } },
-      chats
+      chats,
     );
-    assert.deepStrictEqual(
-      out.map((c) => c.name),
-      ['alice', 'bob', 'carol', 'dave']
-    );
+    assert.deepStrictEqual(out.map((c) => c.name), ['alice', 'bob', 'carol', 'dave']);
   });
 
   it('ANDs a scalar filter (role) with the custom array', () => {
-    // role must match AND at least one custom value must hit role/project/host/name.
     const chats = [
-      { name: 'a', role: 'worker', project: 'warden' }, // role ✓ + custom(project=warden) ✓
-      { name: 'b', role: 'worker', project: 'x' }, // role ✓ but custom ✗
-      { name: 'c', role: 'reviewer', project: 'warden' }, // role ✗ (custom would ✓)
+      { name: 'a', role: 'worker', project: 'warden' },
+      { name: 'b', role: 'worker', project: 'x' },
+      { name: 'c', role: 'reviewer', project: 'warden' },
     ];
-    const out = getAgentsInCollection(
+    const out = mod.getAgentsInCollection(
       { criteria: { role: 'worker', custom: ['warden'] } },
-      chats
+      chats,
     );
-    assert.deepStrictEqual(
-      out.map((c) => c.name),
-      ['a']
-    );
+    assert.deepStrictEqual(out.map((c) => c.name), ['a']);
   });
 
   it('treats an empty custom array as "no custom filter"', () => {
-    // criteria.custom = [] must not exclude anyone (length === 0 short-circuits the branch).
     const chats = [
       { name: 'a', role: 'worker', project: 'warden' },
       { name: 'b', role: 'reviewer', project: 'other' },
     ];
     assert.deepStrictEqual(
-      getAgentsInCollection({ criteria: { role: 'worker', custom: [] } }, chats).map(
-        (c) => c.name
-      ),
-      ['a']
+      mod.getAgentsInCollection({ criteria: { role: 'worker', custom: [] } }, chats).map((c) => c.name),
+      ['a'],
     );
   });
 });

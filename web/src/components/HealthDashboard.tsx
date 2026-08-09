@@ -18,6 +18,7 @@ import {
   type HealthStateValue,
   type HostHealthGroup,
   type ProjectHealthGroup,
+  type CompanionStatus,
 } from '@/lib/healthUtils';
 import { StatusDot, type StatusTone } from '@/components/StatusDot';
 import { Sparkline } from '@/components/Sparkline';
@@ -28,6 +29,8 @@ import { FileViewer } from '@/components/FileViewer';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
+import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem } from '@/components/ui/context-menu';
+import { copyText } from '@/lib/clipboard';
 import { KillDialog } from './KillDialog';
 import { KeySendDialog } from './KeySendDialog';
 import { SelectionActionBar } from './sidebar/SidebarBits';
@@ -507,6 +510,44 @@ function StashChip({ status }: { status?: FleetGitStatusSlice | null }) {
   );
 }
 
+// Companion transport indicator (WARDEN-878 / roadmap WARDEN-270 Visibility): a
+// per-host dot placed next to the connectivity dot so the human can tell at a
+// glance whether the companion transport is working on each host — active (with
+// version), bootstrapping, or errored (with the actionable last error).
+//
+// Renders ONLY for active/bootstrapping/error. `inactive` (LOCAL, or a host no
+// companion op has engaged yet) renders nothing — the indicator appears ONLY when
+// there is actionable state to read, so a healthy fleet isn't blanketed in gray
+// dots. The `companion` field is itself absent entirely when the transport is
+// disabled (the server omits it), so a toggle-off fleet shows no indicators.
+//
+// Reuses the themed StatusDot primitive (WARDEN-68 Rule 3): the connectivity
+// dot's green-solid / red-square vocabulary transfers directly — active is the
+// "working" green solid, error the "bad" red square, and bootstrapping gets the
+// pulse variant (its literal meaning: an in-flight connection).
+function CompanionIndicator({ companion }: { companion?: CompanionStatus }) {
+  if (!companion || companion.state === 'inactive') return null;
+  const tone: StatusTone = companion.state === 'active' ? 'green'
+    : companion.state === 'bootstrapping' ? 'yellow'
+    : 'red'; // error
+  const variant = companion.state === 'active' ? 'solid'
+    : companion.state === 'bootstrapping' ? 'pulse'
+    : 'square'; // error
+  const label = companion.state === 'active'
+    ? `Companion active${companion.version ? ` (v${companion.version})` : ''}`
+    : companion.state === 'bootstrapping'
+      ? 'Companion bootstrapping'
+      : `Companion error${companion.lastError ? `: ${companion.lastError}` : ''}`;
+  return (
+    <StatusDot
+      tone={tone}
+      variant={variant}
+      label={label}
+      title={label}
+    />
+  );
+}
+
 export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, groupBy, onGroupByChange: setGroupBy, collapsedHosts, onCollapsedHostsChange: setCollapsedHosts }: Props) {
   const [healthData, setHealthData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -710,9 +751,18 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
     const id = agentIdOf(agent);
     const isSelected = selectedIds.has(id);
     const selectionActive = selectedIds.size > 0;
+    // Copy + toast — the canonical FileViewer shape. `copyText` (clipboard.ts)
+    // is Electron-safe and returns a boolean so a failure toasts instead of
+    // dying silently (bare navigator.clipboard rejects in non-secure contexts).
+    const copyAndToast = async (text: string) => {
+      const ok = await copyText(text);
+      if (ok) toast.success('Copied');
+      else toast.error('Copy failed');
+    };
     return (
+    <ContextMenu key={agent.id}>
+      <ContextMenuTrigger asChild>
     <div
-      key={agent.id}
       role="button"
       tabIndex={0}
       aria-label={`open chat ${agent.name || agent.key || agent.id}`}
@@ -833,6 +883,23 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
           may render ALONE where every other chip is absent. */}
       <StashChip status={fleetGit.statusByKey[id]} />
     </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        {/* Open mirrors the row click and the Enter/Space keyboard open. */}
+        <ContextMenuItem onSelect={() => onOpenChat(agent.key || agent.id)}>Open</ContextMenuItem>
+        {/* The truncated name / host are selection-hostile in the row, so the
+            menu is the ergonomic way to copy them. Host copies the RAW SSH /
+            docker-exec identifier (agent.host) — what a human pastes into a
+            command — not the display label. */}
+        <ContextMenuItem onSelect={() => copyAndToast(agent.name || agent.key || agent.id)}>Copy agent name</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyAndToast(agent.host)}>Copy host</ContextMenuItem>
+        {/* Role appears only for yatfa agents that carry one — mirrors the row's
+            `agent.isAgent && agent.role` badge; manual/tmux chats show no role. */}
+        {agent.isAgent && agent.role && (
+          <ContextMenuItem onSelect={() => copyAndToast(agent.role!)}>Copy role</ContextMenuItem>
+        )}
+      </ContextMenuContent>
+    </ContextMenu>
     );
   };
 
@@ -1386,6 +1453,8 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
                                       : span.status || 'unknown'
                                   }
                                 />
+                                {/* WARDEN-878: companion state, the same indicator the Host header shows. */}
+                                <CompanionIndicator companion={span.companion} />
                                 <span className="text-[10px] text-muted-foreground truncate">{spanLabel}</span>
                                 <span className="text-[10px] text-muted-foreground/60">({span.agentCount})</span>
                                 {span.status === 'offline' && (
@@ -1504,6 +1573,10 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
                                 : status?.status || 'unknown'
                             }
                           />
+                          {/* WARDEN-878: per-host companion transport state, next to the
+                              connectivity dot (active/bootstrapping/errored; absent when the
+                              transport is off or there is nothing actionable to show). */}
+                          <CompanionIndicator companion={status?.companion} />
                           <span className="text-xs font-semibold truncate flex-1 min-w-0">
                             {hostLabel}
                           </span>

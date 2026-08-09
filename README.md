@@ -4,7 +4,7 @@
 
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](LICENSE)
 
-Yatfa Warden is a desktop dashboard for **AI agent chats** — see every agent's live output, type directly into any of them, and manage sessions across multiple hosts. Works with [yatfa](https://npmjs.org/package/yatfa) agents (auto-discovered) or any SSH + tmux terminal.
+Yatfa Warden is a desktop dashboard for **AI agent chats** — see every agent's live output, type directly into any of them, and manage sessions across multiple hosts. Works with [yatfa](https://yatfa.com) agents (auto-discovered) or any SSH + tmux terminal.
 
 ## Features
 
@@ -95,6 +95,10 @@ Stack: **Node.js** (backend: Express, ws, node-pty) + **React + TypeScript + Tai
 
 [ISC](LICENSE) — free to use, modify, and distribute.
 
-## Works with yatfa
+---
 
-Yatfa Warden is a showcase project for [yatfa](https://npmjs.org/package/yatfa) — it auto-discovers yatfa agent containers (`{project}-{role}`) and gives you a dashboard to manage them. Don't use yatfa? Yatfa Warden works standalone with any SSH + tmux setup.
+<p align="center">
+  <a href="https://yatfa.com">
+    <img src="assets/built-with-yatfa.png" alt="Built with yatfa — a team of AI agents that plans, builds &amp; ships software." width="100%">
+  </a>
+</p>

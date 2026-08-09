@@ -70,7 +70,7 @@ describe('human lifecycle actions recorded in the activity timeline — WARDEN-4
     const activity = await import('./activity.js');
     clearEvents = activity.clearEvents;
     readEvents = activity.readEvents;
-    clearEvents();
+    await clearEvents();
 
     const { app } = await import('./server.js');
     httpServer = app.listen(0, '127.0.0.1');
@@ -100,7 +100,7 @@ describe('human lifecycle actions recorded in the activity timeline — WARDEN-4
   const eventsOfType = async (type) => (await readEvents()).filter((e) => e.type === type);
 
   it('/api/spawn records one "spawned" event with id/host/container/name', async () => {
-    clearEvents();
+    await clearEvents();
     // cmd `sleep 300` keeps the session alive (resolveClaudeCmd only rewrites cmds
     // starting with `claude`, so this flows straight to tmux untouched) so
     // buildAndSpawn's hasSession check passes and the spawned event is reached.
@@ -121,7 +121,7 @@ describe('human lifecycle actions recorded in the activity timeline — WARDEN-4
   });
 
   it('/api/resume records one "resumed" event with id/host/container/name', async () => {
-    clearEvents();
+    await clearEvents();
     const res = await fetch(`${baseUrl}/api/resume`, json({ id: RESUME_SID, host: '(local)', cwd: '/tmp', name: 'my-resume' }));
     assert.strictEqual(res.status, 200, `resume should succeed via the shim, got ${res.status}`);
     try {
@@ -142,7 +142,7 @@ describe('human lifecycle actions recorded in the activity timeline — WARDEN-4
     // killTmux no-ops on the absent session; the catalog filter drops the entry;
     // the killed event is the authoritative human-action signal regardless.
     seedCatalog([{ kind: 'tmux', host: '(local)', session: KILL_SESSION, name: 'local-kill', cwd: '/tmp', cmd: 'claude' }]);
-    clearEvents();
+    await clearEvents();
     const res = await fetch(`${baseUrl}/api/kill`, json({ id: `(local):${KILL_SESSION}` }));
     assert.strictEqual(res.status, 200);
     try {
@@ -162,7 +162,7 @@ describe('human lifecycle actions recorded in the activity timeline — WARDEN-4
     // The timeline endpoint reads the same activity.jsonl the endpoints wrote, so a
     // spawned row must appear among the returned events (the UI joins per-agent by
     // container/host and lists each type in its dynamic filter dropdown).
-    clearEvents();
+    await clearEvents();
     const spawnRes = await fetch(`${baseUrl}/api/spawn`, json({ host: '(local)', session: 'w484tl', name: 'tl-spawn', cwd: '/tmp', cmd: 'sleep 300' }));
     assert.strictEqual(spawnRes.status, 200);
     spawnSync('tmux', ['kill-session', '-t', 'w484tl'], { stdio: 'ignore' });

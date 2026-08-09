@@ -927,7 +927,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
               variant={n ? 'solid' : 'ring'}
               label={n ? `${n} active chat${n !== 1 ? 's' : ''}` : 'No active chats'}
             />
-            <span className="flex-1 truncate">{hostLabelFor(h, hostLabels) || LABEL[h] || h}</span>
+            <span className="flex-1 min-w-0 wrap-anywhere">{hostLabelFor(h, hostLabels) || LABEL[h] || h}</span>
             {isLocal && <span className="text-[10px] text-cyan-400">local</span>}
             {!isLocal && (
               <StatusDot
@@ -1041,14 +1041,14 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
     const openFromCollection = (key: string) => { onOpenChat(key); setView({ kind: 'root' }); };
 
     return (
-      <div className="flex flex-col h-full min-h-0 animate-in slide-in-from-right-2 duration-150">
-        <div className="flex items-center gap-2 compact:gap-1 px-2 py-2 compact:py-1.5 border-b shrink-0">
+      <div className="@container flex flex-col h-full min-h-0 animate-in slide-in-from-right-2 duration-150">
+        <div className="flex flex-wrap items-center gap-2 compact:gap-1 px-2 py-2 compact:py-1.5 border-b shrink-0">
           <IconTooltip label="back"><button className="text-xs text-muted-foreground hover:text-foreground px-1 active:scale-95 transition-all duration-150 ease-out" onClick={() => setView({ kind: 'root' })}>‹</button></IconTooltip>
           <span
             className="w-2 h-2 rounded-full shrink-0"
             style={{ backgroundColor: C.metadata?.color || '#6366f1' }}
           />
-          <span className="text-xs font-medium flex-1 truncate">{C.name}</span>
+          <span className="text-xs font-medium flex-1 min-w-0 wrap-anywhere">{C.name}</span>
           {/* WARDEN-338: one-click broadcast to the whole collection. Resolves the
               collection's live membership (the same `agents` array the list renders,
               so the target set is byte-for-byte what the action bar's "All" button
@@ -1165,10 +1165,10 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
     // can't live in this conditional branch) and are already scoped to this host.
     const openFromHost = (key: string) => { onOpenChat(key); setView({ kind: 'root' }); };
     return (
-      <div className="flex flex-col h-full min-h-0 animate-in slide-in-from-right-2 duration-150">
-        <div className="flex items-center gap-2 compact:gap-1 px-2 py-2 compact:py-1.5 border-b shrink-0">
+      <div className="@container flex flex-col h-full min-h-0 animate-in slide-in-from-right-2 duration-150">
+        <div className="flex flex-wrap items-center gap-2 compact:gap-1 px-2 py-2 compact:py-1.5 border-b shrink-0">
           <IconTooltip label="back"><button className="text-xs text-muted-foreground hover:text-foreground px-1 rounded active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => setView({ kind: 'root' })}>‹</button></IconTooltip>
-          <span className="text-xs font-medium flex-1 truncate">{hostLabelFor(H, hostLabels) || LABEL[H] || H}</span>
+          <span className="text-xs font-medium flex-1 min-w-0 wrap-anywhere">{hostLabelFor(H, hostLabels) || LABEL[H] || H}</span>
           <AgentFilterSortControls
             agentFilter={agentFilter}
             agentSort={agentSort}
@@ -1285,7 +1285,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
                           disabled={isLoading}
                           className="flex flex-col gap-0.5 text-left active:bg-accent/80 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded-md"
                         >
-                          <span className="truncate">
+                          <span className="min-w-0 wrap-anywhere">
                             {isLoading ? (
                               <Skeleton className="h-3 w-3/4 inline-block" />
                             ) : (
@@ -1293,7 +1293,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
                             )}
                             {running && <span className="ml-1 text-green-400">● live</span>}
                           </span>
-                          <span className="text-[10px] text-muted-foreground truncate">
+                          <span className="min-w-0 wrap-anywhere text-[10px] text-muted-foreground">
                             {isLoading ? <Skeleton className="h-2.5 w-1/2 inline-block" /> : `${formatTimestamp(s.mtime, timestampFormat)} · ${basename(s.cwd)}${s.tokenUsage?.total ? ` · ${formatTokens(s.tokenUsage.total)}` : ''}`}
                           </span>
                         </button>
@@ -1397,7 +1397,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
 
   return (
     <div className="@container flex flex-col h-full min-h-0">
-      <div className="flex items-center gap-2 compact:gap-1 px-3 py-2 compact:py-1.5 border-b shrink-0">
+      <div className="flex flex-wrap items-center gap-2 compact:gap-1 px-3 py-2 compact:py-1.5 border-b shrink-0">
         <span className="text-xs text-muted-foreground @max-[20rem]:hidden">open</span>
         <Input
           placeholder="filter..."
@@ -1564,7 +1564,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
                     title={`reopen ${entry.name}`}
                   >
                     <StatusDot tone={open ? 'green' : 'muted'} variant={open ? 'solid' : 'ring'} label={open ? 'Open' : 'Reopen'} />
-                    <span className="truncate flex-1 text-left">{entry.name || entry.id}</span>
+                    <span className="flex-1 min-w-0 wrap-anywhere whitespace-normal text-left">{entry.name || entry.id}</span>
                     {entry.host && entry.host !== '(local)' && <span className="text-[10px] text-muted-foreground/70 shrink-0">{hostLabelFor(entry.host, hostLabels) || entry.host}</span>}
                     <span className="text-[10px] text-muted-foreground/70 shrink-0">{formatTimestamp(entry.closedAt, timestampFormat)}</span>
                   </Button>

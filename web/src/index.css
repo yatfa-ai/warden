@@ -6,6 +6,21 @@
 @custom-variant dark (&:is(.dark *));
 @custom-variant compact (&:is(.compact *));
 
+/* WARDEN-892: sidebar wrap-to-fit. overflow-wrap: anywhere both (a) lets a
+ * single unbreakable token — a git branch name, a file path, a long agent id —
+ * wrap to the next line as a last resort instead of forcing its row wider, and
+ * (b) collapses the token's intrinsic min/max-content size so an atomic
+ * inline-flex badge (e.g. GitBranchBadge) can shrink within a constrained flex
+ * item. Without it, atomic inlines ride out past the sidebar's overflow-hidden
+ * edge and have their right-side controls clipped. overflow-wrap is inherited,
+ * so putting this on a row's text container reaches the badges inside it. This
+ * is a layout behavior with no native Tailwind equivalent (break-words doesn't
+ * collapse intrinsic sizes; break-all is too aggressive for multi-word names),
+ * not a magic size — WARDEN-68 Rule 2 (no magic-number px) doesn't apply. */
+@utility wrap-anywhere {
+    overflow-wrap: anywhere;
+}
+
 @theme inline {
     --font-heading: var(--font-sans);
     --font-sans: 'Geist Variable', sans-serif;
@@ -603,6 +618,21 @@
  * line" belief here; only DOM geometry can establish non-overflow.
  */
 .health-fleet-scroll [data-slot="scroll-area-viewport"] > div {
+  display: block !important;
+}
+
+/* WARDEN-892: same display:table → display:block cap as WARDEN-237 above, but
+ * scoped to the chat sidebar. The shadcn ScrollArea viewport wraps its content
+ * in a `display: table; min-width: 100%` div that auto-sizes to the content's
+ * max-content — so a long git branch name / file path / agent id (an unbreakable
+ * token) inflates the wrapper past the sidebar's fixed (≤400px) width and the
+ * section's overflow-hidden slices off the right edge. Forcing block layout caps
+ * the wrapper to the sidebar width; the rows' min-w-0 + wrap-anywhere then wrap
+ * the token instead of clipping. Scoped to .chat-sidebar (App.tsx sidebar
+ * section) so it never reaches the FileViewer / transcript ScrollAreas that DO
+ * want horizontal overflow. Unlayered + !important to beat the inline
+ * display:table, mirroring WARDEN-237. */
+.chat-sidebar [data-slot="scroll-area-viewport"] > div {
   display: block !important;
 }
 

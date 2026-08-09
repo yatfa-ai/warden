@@ -322,7 +322,7 @@ async function discoverManual(host, entries, cfg) {
     await Promise.all(
       activeEntries.map(entry =>
         run(host, `tmux capture-pane -t ${entry.session} -p -S - -E - 2>/dev/null | head -1`, { timeout: 1000 })
-          .then(activityRes => {
+          .then(async activityRes => {
             if (activityRes.ok) {
               // Shared timestamp parse — same helper the companion + yatfa path
               // use (WARDEN-376).
@@ -330,8 +330,9 @@ async function discoverManual(host, entries, cfg) {
               if (ts != null) {
                 entry.lastActivity = ts;
                 // Persist while alive so the value survives the chat later going
-                // inactive AND a warden restart (WARDEN-245).
-                stampCatalogActivity(host, entry.session, entry.lastActivity);
+                // inactive AND a warden restart (WARDEN-245). Best-effort: a reject
+                // propagates to the .catch below (never blocks discovery).
+                await stampCatalogActivity(host, entry.session, entry.lastActivity);
               }
             }
           })
@@ -352,7 +353,7 @@ export async function discoverAll(hosts, cfg, opts = {}) {
   for (const r of results) if (r.ok) all = all.concat(r.chats);
 
   // catalog chats (all kind:'tmux' now): local host → local tmux; remote → ssh.
-  const catalog = loadCatalog();
+  const catalog = await loadCatalog();
   if (catalog.length) {
     const byHost = {};
     for (const e of catalog) (byHost[e.host || LOCAL] ||= []).push(e);
@@ -390,7 +391,7 @@ export async function discoverAll(hosts, cfg, opts = {}) {
             // non-blocking concurrent spawn, so this per-active-session sweep
             // never holds the event loop.
             runLocalTmux(['capture-pane', '-t', obj.session, '-p', '-S', '-', '-E', '-'])
-              .then(activityRes => {
+              .then(async activityRes => {
                 if (activityRes.ok) {
                   // Shared timestamp parse — same helper the companion + remote
                   // manual path use (WARDEN-376).
@@ -398,8 +399,8 @@ export async function discoverAll(hosts, cfg, opts = {}) {
                   if (ts != null) {
                     obj.lastActivity = ts;
                     // Persist while alive so lastActivity survives the chat going
-                    // inactive and a warden restart (WARDEN-245).
-                    stampCatalogActivity(host, obj.session, obj.lastActivity);
+                    // inactive and a warden restart (WARDEN-245). Best-effort.
+                    await stampCatalogActivity(host, obj.session, obj.lastActivity);
                   }
                 }
               })
@@ -444,9 +445,9 @@ function toCatalogChat(host, entry, active, lastActivity) {
 }
 
 // Disk-only catalog list — ZERO ssh. Used for the instant initial /api/chats in lazy mode.
-export function catalogChats(cfg) {
+export async function catalogChats(cfg) {
   const pins = new Set(cfg.pins || []);
-  const chats = loadCatalog().map((e) => toCatalogChat(e.host || LOCAL, e, null, null));
+  const chats = (await loadCatalog()).map((e) => toCatalogChat(e.host || LOCAL, e, null, null));
   chats.sort((a, b) => {
     const pc = comparePinned(a, b, pins);
     if (pc !== 0) return pc;
@@ -463,7 +464,7 @@ export async function discoverHost(host, cfg) {
   const chats = [];
 
   if (host === LOCAL) {
-    const entries = loadCatalog().filter((e) => (e.host || LOCAL) === LOCAL);
+    const entries = (await loadCatalog()).filter((e) => (e.host || LOCAL) === LOCAL);
     // ONE async list-sessions (runLocalTmux) resolves every local catalog chat's
     // alive/dead state — not N blocking has-session calls (this runs on the
     // frontend's 60s /api/discover refresh for THIS_MACHINE too).
@@ -474,7 +475,7 @@ export async function discoverHost(host, cfg) {
     await Promise.all(objs.filter((o) => o.active).map((o) =>
       // runLocalTmux is async (WARDEN-440): concurrent, non-blocking captures.
       runLocalTmux(['capture-pane', '-t', o.session, '-p', '-S', '-', '-E', '-'])
-        .then((r) => {
+        .then(async (r) => {
           if (r.ok) {
             // Shared timestamp parse — same helper every discovery path uses
             // (WARDEN-376).
@@ -482,8 +483,8 @@ export async function discoverHost(host, cfg) {
             if (ts != null) {
               o.lastActivity = ts;
               // Persist while alive so lastActivity survives the chat going
-              // inactive and a warden restart (WARDEN-245).
-              stampCatalogActivity(LOCAL, o.session, o.lastActivity);
+              // inactive and a warden restart (WARDEN-245). Best-effort.
+              await stampCatalogActivity(LOCAL, o.session, o.lastActivity);
             }
           }
         }).catch(() => {})
@@ -492,7 +493,7 @@ export async function discoverHost(host, cfg) {
   } else {
     const yatfa = await discover(host, cfg); // already in chat shape
     if (yatfa.ok) chats.push(...yatfa.chats);
-    const entries = loadCatalog().filter((e) => (e.host || LOCAL) === host);
+    const entries = (await loadCatalog()).filter((e) => (e.host || LOCAL) === host);
     if (entries.length) {
       const manual = await discoverManual(host, entries, cfg); // sets .active + .lastActivity
       chats.push(...manual.map((m) => toCatalogChat(host, m, m.active, m.lastActivity)));

@@ -1,36 +1,35 @@
 // Activity event persistence: JSONL log of key events for "while you were away" timeline.
 // One JSON line per event, rotated after 7 days to prevent unbounded growth.
-import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import fs from 'node:fs';
+import { atomicWrite, atomicAppend } from './persist.js';
 
-// fs.promises alias — the read path (readEvents → getStatsSince → getSeriesSince)
-// is async (WARDEN-828) so serving GET /api/activity* yields the event loop during
-// the JSONL read instead of blocking /api/config behind a synchronous readFileSync.
-// The write path (appendEvent/rotateEvents/clearEvents) stays sync — those are
-// tiny line appends / a one-shot startup rotation, not the hot GET-blocking reads.
+// fs.promises alias — every I/O here is async (WARDEN-828 made the reads async;
+// WARDEN-831 makes the writes async too) so serving /api/activity* OR appending an
+// event yields the event loop during disk I/O instead of blocking /api/config.
 const fsp = fs.promises;
 
 const DIR = path.join(os.homedir(), '.yatfa-warden');
 const FILE = path.join(DIR, 'activity.jsonl');
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
-// Ensure directory and file exist
-function ensure() {
-  fs.mkdirSync(DIR, { recursive: true });
-  if (!fs.existsSync(FILE)) {
-    fs.writeFileSync(FILE, '', 'utf8');
-  }
+// Ensure the data directory exists (async). The activity file itself is created
+// on demand by atomicAppend (append creates if missing) and reads tolerate a
+// missing file (ENOENT → ''), so we only need the directory.
+async function ensureDir() {
+  await fsp.mkdir(DIR, { recursive: true });
 }
 
-// Append an event to the activity log
-export function appendEvent(event) {
-  ensure();
+// Append an event to the activity log (append-only — WARDEN-831). A torn write
+// costs at most the final line, never the whole file.
+export async function appendEvent(event) {
+  await ensureDir();
   const line = JSON.stringify({
     timestamp: new Date().toISOString(),
     ...event,
   }) + '\n';
-  fs.appendFileSync(FILE, line, 'utf8');
+  await atomicAppend(FILE, line);
 }
 
 // Read all events from the log, optionally filtered by timestamp range.
@@ -40,7 +39,7 @@ export function appendEvent(event) {
 // resolves to '' via the catch, preserving the prior existsSync + empty → []
 // contract) instead of blocking /api/config behind a synchronous readFileSync.
 export async function readEvents({ after, before, limit } = {}) {
-  ensure();
+  await ensureDir();
   const content = await fsp.readFile(FILE, 'utf8').catch(() => '');
   if (!content.trim()) return [];
 
@@ -74,19 +73,26 @@ export async function readEvents({ after, before, limit } = {}) {
   return events;
 }
 
-// Remove events older than 7 days (called on startup and periodically)
-export function rotateEvents() {
-  ensure();
-  if (!fs.existsSync(FILE)) return 0;
-
-  const cutoff = Date.now() - SEVEN_DAYS_MS;
-  const content = fs.readFileSync(FILE, 'utf8');
+// Remove events older than 7 days (called on startup and periodically). The
+// compaction rewrites the whole file ATOMICALLY (temp + fsync + rename) — it is a
+// periodic rotation, NOT a per-append rewrite, so the append path stays O(1) and a
+// crash mid-rotation leaves the previous complete file (WARDEN-831).
+export async function rotateEvents() {
+  await ensureDir();
+  let content;
+  try {
+    content = await fsp.readFile(FILE, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return 0;
+    throw err;
+  }
   if (!content.trim()) return 0;
 
   const lines = content.trim().split('\n');
   const kept = [];
   let removed = 0;
 
+  const cutoff = Date.now() - SEVEN_DAYS_MS;
   for (const line of lines) {
     try {
       const event = JSON.parse(line);
@@ -102,15 +108,15 @@ export function rotateEvents() {
     }
   }
 
-  // Rewrite the file with only recent events
-  fs.writeFileSync(FILE, kept.join('\n') + '\n', 'utf8');
+  // Atomic rewrite with only recent events
+  await atomicWrite(FILE, kept.join('\n') + '\n');
   return removed;
 }
 
-// Clear all events (useful for testing or manual reset)
-export function clearEvents() {
-  ensure();
-  fs.writeFileSync(FILE, '', 'utf8');
+// Clear all events (useful for testing or manual reset). Atomic truncate.
+export async function clearEvents() {
+  await ensureDir();
+  await atomicWrite(FILE, '');
 }
 
 // Get activity statistics since a given timestamp

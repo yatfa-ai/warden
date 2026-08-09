@@ -979,6 +979,77 @@ test('observer round-trips under the current key without disturbing older keys',
   assert.ok(!mem.has('warden:observer'), 'no legacy key created on a normal save/load');
 });
 
+console.log('\nobserver Activity + Directives tab filters round-trip through loadObs/saveObs — WARDEN-879');
+// WARDEN-879: the filter selections inside the Activity (type/agent/host) and
+// Directives (agent/host) tabs persist alongside viewMode so a warden restart
+// reopens each tab with its filters intact — not reset to 'all'. These pin the
+// storage half of that contract: the activityFilters/directiveFilters shapes
+// survive the loadObs/saveObs round-trip, are absent (consumer ?? 'all'
+// governs) when never saved, and the two tabs are independent. ObserverTabs
+// reads each field as `loadObs().activityFilters?.type ?? 'all'`, so the
+// resolved-value assertions mirror the exact access pattern the UI uses.
+test('activityFilters/directiveFilters are absent when nothing is stored (consumer ?? \'all\' governs — zero regression)', () => {
+  reset();
+  const obs = loadObs();
+  assert.equal(obs.activityFilters, undefined);
+  assert.equal(obs.directiveFilters, undefined);
+  assert.equal(obs.activityFilters?.type ?? 'all', 'all');
+  assert.equal(obs.directiveFilters?.agent ?? 'all', 'all');
+});
+test('a payload with only openIds/activeId/viewMode loads filters as absent (an upgrading install keeps today\'s behavior)', () => {
+  reset();
+  mem.set('warden:observer:v1', JSON.stringify({ openIds: ['s1'], activeId: 's1', viewMode: 'activity' }));
+  const obs = loadObs();
+  assert.equal(obs.viewMode, 'activity');
+  assert.equal(obs.activityFilters, undefined);
+  assert.equal(obs.directiveFilters, undefined);
+});
+test('Activity tab filters (type/agent/host) round-trip — the headline fix', () => {
+  reset();
+  saveObs({ openIds: [], activeId: null, viewMode: 'activity', activityFilters: { type: 'directive_sent', agent: 'worker-1', host: 'prod-box' } });
+  assert.deepEqual(loadObs().activityFilters, { type: 'directive_sent', agent: 'worker-1', host: 'prod-box' });
+});
+test('Directives tab filters (agent/host, no type) round-trip', () => {
+  reset();
+  saveObs({ openIds: [], activeId: null, viewMode: 'directives', directiveFilters: { agent: 'reviewer-1', host: 'ci-host' } });
+  assert.deepEqual(loadObs().directiveFilters, { agent: 'reviewer-1', host: 'ci-host' });
+});
+test('clearing a filter back to \'all\' persists (criterion: clearing survives restart too)', () => {
+  reset();
+  saveObs({ openIds: [], activeId: null, viewMode: 'activity', activityFilters: { type: 'directive_sent', agent: 'all', host: 'all' } });
+  assert.equal(loadObs().activityFilters.type, 'directive_sent');
+  saveObs({ openIds: [], activeId: null, viewMode: 'activity', activityFilters: { type: 'all', agent: 'all', host: 'all' } });
+  assert.deepEqual(loadObs().activityFilters, { type: 'all', agent: 'all', host: 'all' });
+});
+test('changing one Activity filter leaves the others intact (no cross-field clobber)', () => {
+  reset();
+  saveObs({ openIds: [], activeId: null, viewMode: 'activity', activityFilters: { type: 'error', agent: 'worker-1', host: 'prod-box' } });
+  saveObs({ openIds: [], activeId: null, viewMode: 'activity', activityFilters: { type: 'error', agent: 'worker-1', host: 'ci-host' } });
+  const obs = loadObs();
+  assert.equal(obs.activityFilters.type, 'error');
+  assert.equal(obs.activityFilters.agent, 'worker-1');
+  assert.equal(obs.activityFilters.host, 'ci-host');
+});
+test('Activity and Directives filters are independent (same-named agent/host do not collide)', () => {
+  reset();
+  saveObs({ openIds: [], activeId: null, viewMode: 'activity', activityFilters: { type: 'all', agent: 'planner-1', host: 'host-a' }, directiveFilters: { agent: 'worker-1', host: 'host-b' } });
+  const obs = loadObs();
+  assert.equal(obs.activityFilters.agent, 'planner-1');
+  assert.equal(obs.activityFilters.host, 'host-a');
+  assert.equal(obs.directiveFilters.agent, 'worker-1');
+  assert.equal(obs.directiveFilters.host, 'host-b');
+});
+test('the full observer payload — sessions + viewMode + both filter shapes — round-trips together', () => {
+  reset();
+  saveObs({ openIds: ['s1', 's2'], activeId: 's2', viewMode: 'directives', activityFilters: { type: 'killed', agent: 'worker-1', host: 'prod-box' }, directiveFilters: { agent: 'reviewer-1', host: 'ci-host' } });
+  const obs = loadObs();
+  assert.deepEqual(obs.openIds, ['s1', 's2']);
+  assert.equal(obs.activeId, 's2');
+  assert.equal(obs.viewMode, 'directives');
+  assert.deepEqual(obs.activityFilters, { type: 'killed', agent: 'worker-1', host: 'prod-box' });
+  assert.deepEqual(obs.directiveFilters, { agent: 'reviewer-1', host: 'ci-host' });
+});
+
 console.log('\ndefaultShell (the unified shell for new-chat shell preset + ＋ split) round-trips through loadUi/saveUi — WARDEN-429');
 test('defaults to "" (auto-detect host login shell) when nothing is stored', () => {
   reset();

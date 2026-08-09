@@ -94,7 +94,7 @@ export function SourceControlPanel({ gitInfo, onOpenDiff, collapsed, onCollapsed
         aria-expanded={!collapsed}
         aria-label={`${collapsed ? 'expand' : 'collapse'} source control`}
         title={`${collapsed ? 'expand' : 'collapse'} source control`}
-        className="justify-start gap-1 w-full h-auto px-2 pt-2 pb-1 text-xs font-normal uppercase tracking-wider text-muted-foreground/60 hover:text-foreground"
+        className="flex-wrap justify-start gap-1 w-full h-auto px-2 pt-2 pb-1 text-xs font-normal uppercase tracking-wider text-muted-foreground/60 hover:text-foreground"
       >
         <span aria-hidden="true">{collapsed ? '▸' : '▾'}</span>
         <span>Source Control</span>
@@ -102,7 +102,7 @@ export function SourceControlPanel({ gitInfo, onOpenDiff, collapsed, onCollapsed
           <span className="text-[10px] text-muted-foreground">{changedCount}</span>
         )}
         <span
-          className="ml-auto truncate text-[10px] normal-case tracking-normal text-cyan-400/80"
+          className="ml-auto min-w-0 wrap-anywhere whitespace-normal text-[10px] normal-case tracking-normal text-cyan-400/80"
           title={branchTitle}
         >
           {isMerging && <span className="text-red-400" title={`${gitInfo.inProgress!.operation} in progress`}>⚠ </span>}

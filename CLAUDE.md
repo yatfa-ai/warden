@@ -1,7 +1,7 @@
 # CLAUDE.md — Yatfa Warden
 
 `warden` is a desktop dashboard for **AI agent chats** — see and control every agent from one place.
-Works with [yatfa](https://npmjs.org/package/yatfa) agents (auto-discovered) or any SSH/tmux terminal.
+Works with [yatfa](https://yatfa.com) agents (auto-discovered) or any SSH/tmux terminal.
 
 ## The agent topology
 A yatfa agent chat is layered:

@@ -82,8 +82,8 @@ export type ObserveMsg =
   | { type: 'done'; text: string }
   | { type: 'directive_proposed'; requestId: string; container: string; host: string; role?: string; directive: string }
   | { type: 'error'; error: string }
-  | { type: 'history'; name?: string; chatContext?: ChatContextMeta; items: { role: 'user' | 'assistant' | 'tool'; text?: string; name?: string; id?: string }[] }
-  | { type: 'session_created'; sid: string; name: string; chatContext?: ChatContextMeta };
+  | { type: 'history'; name?: string; chatContext?: ChatContextMeta; model?: string; items: { role: 'user' | 'assistant' | 'tool'; text?: string; name?: string; id?: string }[] }
+  | { type: 'session_created'; sid: string; name: string; chatContext?: ChatContextMeta; model?: string };
 
 // Which agent chat an observer session is bound to. Lets a resumed session
 // reconnect to its original agent (host becomes an attribute of the session).

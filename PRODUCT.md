@@ -112,7 +112,7 @@ Got 10 autonomous agents running but only watch 3? Hide the rest. They keep work
 
 ## Works with yatfa
 
-warden is a **showcase project for [yatfa](https://npmjs.org/package/yatfa)** — it auto-discovers yatfa agent containers and gives you a dashboard to manage them.
+warden is a **showcase project for [yatfa](https://yatfa.com)** — it auto-discovers yatfa agent containers and gives you a dashboard to manage them.
 
 - Detects `{project}-{role}` containers automatically (planners, workers, reviewers, researchers).
 - Shows the agent-bridge TUI live — exactly what the agent is doing.
