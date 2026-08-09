@@ -39,7 +39,7 @@ import { DiffStatChip } from './sidebar/DiffStatChip';
 import { formatKillToast, runKillFanout } from '@/lib/kill';
 import { formatKeySendToast, runKeySendFanout } from '@/lib/keysend';
 import { isSelectedAll, toggleGroupSelection } from '@/lib/selection';
-import { useHostStatuses } from '@/lib/useHostStatuses';
+import { useHostStatuses, refreshHostStatuses } from '@/lib/useHostStatuses';
 import { useActivitySeries } from '@/lib/useActivitySeries';
 import { useFleetGitStatus } from '@/lib/useFleetGitStatus';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
@@ -995,8 +995,10 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
   // write/action sibling of the kill path above: where that stops an agent's
   // tmux session, this takes warden's own companion binary off the host. POSTs
   // {host} to /api/companion/uninstall (the same {ok}/{error} shape /api/kill
-  // serves), then toasts the result and re-reads health so the host-status
-  // surface reflects the change. Never throws — failure is encoded as a toast.
+  // serves), then toasts the result and refreshes both host surfaces: the
+  // /api/hosts/status poll (so the row's CompanionIndicator reflects the
+  // removal) and /api/health (the agent rows). Never throws — failure is
+  // encoded as a toast.
   // The companion serves REMOTE hosts only, and the affordance is rendered only
   // when companionTransportEnabled is on (the gate every companion surface uses).
   const handleRemoveCompanion = async (host: string) => {
@@ -1011,12 +1013,15 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
       if (r.ok && body.ok) {
         toast.success(`Removed companion from ${hostLabelFor(host, hostLabels) || host}`);
         setRemoveCompanionHost(null);
-        // Re-read health so the host-status surface reflects the removal: the
-        // backend clears the host's companionStatus entry during uninstall, so
-        // this refetch flips the row's WARDEN-878 CompanionIndicator to
-        // "inactive" (companion absent) rather than re-rendering a stale
-        // "active".
-        await fetchHealth();
+        // Reflect the removal immediately. The host-status surface that carries
+        // the per-host companion field — and so feeds the row's WARDEN-878
+        // CompanionIndicator — is /api/hosts/status (polled by useHostStatuses),
+        // NOT /api/health: the backend clears the host's companionStatus entry
+        // during uninstall, and refreshHostStatuses() re-reads that surface so the
+        // indicator flips to "inactive" (companion absent) at once instead of
+        // lagging up to 30s for the next poll. fetchHealth() refreshes the
+        // separate /api/health agent rows in parallel.
+        await Promise.all([fetchHealth(), refreshHostStatuses()]);
       } else {
         toast.error(`Failed to remove companion from ${hostLabelFor(host, hostLabels) || host}`, {
           description: body.error || `HTTP ${r.status}`,
