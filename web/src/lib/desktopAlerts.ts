@@ -649,6 +649,127 @@ export function excludeFocusedPane(
   return entries.filter((e) => !(e.key && e.key === focusedPaneKey));
 }
 
+// --- Fleet problem-state alert flap cooldown (WARDEN-891) ---------------------
+//
+// The fleet problem-state alert (useAttentionRollup's increase-only effect) is the THIRD
+// attention channel, and — until WARDEN-891 — the only one WITHOUT the per-key flap
+// cooldown its two siblings already had:
+//  - Watch ping            (WARDEN-452): applyWatchCooldown (chatWatch.ts)        — WATCH_PING_COOLDOWN_MS
+//  - Fleet DONE ping       (WARDEN-575): DONE_PING_COOLDOWN_MS (useAttentionRollup) — inline per-key gate
+//  - Fleet PROBLEM-state   (WARDEN-891): applyFleetAttentionCooldown (here)        — reuses WATCH_PING_COOLDOWN_MS
+// Without it, a flapping UNWATCHED agent (erroring → active → erroring across polls) re-fires
+// the OS desktop toast + the in-app sonner toast on EVERY erroring→active→erroring re-increase
+// — the exact crying-wolf spam the Observer roadmap names as the product-killer. The stable OS
+// `tag` ('warden-attention') / sonner `id` ('warden-attention:<key>') only collapses a
+// STILL-DISPLAYED notification; the sonner toast duration (6000ms) is far shorter than the ~60s
+// flap period (two ~30s polls), so each re-fire is a fresh alert. This collapses a flapping key
+// to ONE alert per episode window (escalations override + reset), so a flapping agent reads
+// identically whether watched, merely open, or hidden/unwatched.
+
+/**
+ * The last fleet problem-state alert that fired for a key — the cooldown's per-key tracker
+ * (WARDEN-891). Sibling of chatWatch's WatchLastFired + useAttentionRollup's doneLastFiredRef:
+ * a {key → entry} map the caller stashes in a ref and advances each fire, so a flapping agent
+ * re-fires ONE alert per episode window, not one per re-increase once the prior toast is gone.
+ *
+ * `tone` (not a full reason vocabulary) is all the escalation detector needs: a fleet in-app
+ * entrant (NewAttentionEntry) carries only a critical/warning severity, and an escalation IS a
+ * warning→critical flip (e.g. waiting→erroring) — lower priority number = more urgent, mirroring
+ * applyWatchCooldown's WATCH_REASON_PRIORITY direction.
+ */
+export interface FleetLastFired {
+  /** The severity tone that last fired — to detect a higher-urgency escalation since. */
+  tone: 'critical' | 'warning';
+  /** Epoch-ms the last fire happened — the anchor the cooldown window is measured from. */
+  firedAt: number;
+}
+
+/** Per-key last-fired map: { key → { tone, firedAt } }. */
+export type FleetLastFiredMap = Record<string, FleetLastFired>;
+
+// Severity urgency for the fleet cooldown's escalation rule (WARDEN-891). Mirrors
+// applyWatchCooldown's WATCH_REASON_PRIORITY direction: a LOWER number = MORE urgent, so an
+// escalation (warning→critical) reads as priority[tone] < priority[last.tone]. Only the two
+// tones a NewAttentionEntry carries; there is no third — the positive `success` tone is
+// watch-only (watchReasonTone) and never reaches the fleet problem-state alert.
+const FLEET_TONE_PRIORITY: Record<'critical' | 'warning', number> = {
+  critical: 0,
+  warning: 1,
+};
+
+/**
+ * Pure: gate the fleet problem-state alert's newly-needy entrants (diffNewAttention's output)
+ * through a per-key cooldown so a flapping agent produces ONE alert per episode window —
+ * escalations override + reset (WARDEN-891). The fleet sibling of applyWatchCooldown
+ * (chatWatch.ts, WARDEN-452) + the done ping's inline DONE_PING_COOLDOWN_MS gate (WARDEN-575),
+ * closing the asymmetry where a flapping UNWATCHED agent re-fired this channel on every
+ * recover→re-enter.
+ *
+ * Gate rule (lower FLEET_TONE_PRIORITY number = MORE urgent — mind the direction, mirroring
+ * applyWatchCooldown):
+ *  - An AGGREGATE entrant (`key: ''` — directives/errors count delta, no per-agent identity) →
+ *    always FIRE, unchanged. A count rise is not a flap, and these have no per-key identity to
+ *    anchor; they stay on the existing increase-only shouldFireAlert gate and never enter the map.
+ *  - No prior fire for the key → FIRE; anchor the window at `now`.
+ *  - A HIGHER-URGENCY escalation (priority[tone] < priority[last.tone], e.g. waiting→erroring) →
+ *    FIRE immediately AND reset the anchor to `now`. A genuinely worse state is never a false
+ *    negative.
+ *  - Same-or-lower urgency (priority[tone] >= priority[last.tone]) WITHIN the window → SUPPRESS:
+ *    a re-entry into the same need-episode is the flap noise this collapses. The anchor is NOT
+ *    advanced, so the window stays measured from the last ACTUAL fire — a continuously-flapping
+ *    key re-alerts once the window elapses (a new episode), never silenced indefinitely.
+ *  - Same-or-lower urgency AFTER the window → FIRE; re-anchor at `now`.
+ *
+ * Returns the subset that may fire PLUS the updated last-fired map. `lastFired` is treated
+ * immutably — a NEW map is returned (the input is never mutated), and every prior anchor is
+ * carried forward so a key with no entrant this poll (stable needs-state, or momentarily
+ * recovered) KEEPS its anchor for the next poll's re-entry diff — THIS is what collapses a
+ * recover→re-enter flap (the agent leaves every rollup bucket while recovered, so its identity
+ * is "absent" that poll; carrying the anchor forward keeps the window measured correctly across
+ * that absence). The caller prunes stale anchors per poll (mirroring watchLastFiredRef /
+ * doneLastFiredRef). `now` is a parameter (not Date.now()) so the unit test pins the clock, the
+ * discipline applyWatchCooldown follows.
+ *
+ * Pure + dependency-free (reads only the NewAttentionEntry shape defined in this file) so
+ * web/desktopAlerts.test.mjs loads it standalone alongside diffNewAttention / excludeFocusedPane
+ * via Vite's OXC transform. At most one entrant per key per diff (diffNewAttention's "one entry
+ * PER KEY" contract), so the per-entrant update never races itself within one call.
+ */
+export function applyFleetAttentionCooldown(
+  entries: NewAttentionEntry[],
+  lastFired: FleetLastFiredMap | null,
+  now: number,
+  cooldownMs: number,
+): { fire: NewAttentionEntry[]; lastFired: FleetLastFiredMap } {
+  const prev = lastFired || {};
+  // Carry forward every prior anchor: a key with no entrant this poll (stable needs-state, or
+  // momentarily recovered) must KEEP its last-fire time so the window is measured correctly when
+  // it next re-enters — this carry-forward is what collapses the recover→re-enter flap. The
+  // caller prunes stale anchors per poll.
+  const next: FleetLastFiredMap = { ...prev };
+  const fire: NewAttentionEntry[] = [];
+  for (const e of entries) {
+    // Aggregate directives/errors entrants (key: '') have no per-key identity — a count rise is
+    // not a flap, and there is no key to anchor. They stay on the existing increase-only gate and
+    // always pass through unchanged (never enter the map).
+    if (!e.key) {
+      fire.push(e);
+      continue;
+    }
+    const last = prev[e.key];
+    const isEscalation = !!last
+      && FLEET_TONE_PRIORITY[e.tone] < FLEET_TONE_PRIORITY[last.tone];
+    const elapsed = last ? now - last.firedAt : Infinity;
+    if (!last || isEscalation || elapsed >= cooldownMs) {
+      fire.push(e);
+      next[e.key] = { tone: e.tone, firedAt: now };
+    }
+    // else: suppressed — next[e.key] retains the carried-forward prior anchor (the window is
+    // NOT slid forward, so a continuous flap re-alerts once it elapses).
+  }
+  return { fire, lastFired: next };
+}
+
 // --- Token-spend budget alert (WARDEN-415) -----------------------------------
 //
 // The "while the founder is away" alarm that completes the meter WARDEN-367
