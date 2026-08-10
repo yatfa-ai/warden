@@ -48,6 +48,7 @@ const {
   formatHealthState,
   getHealthIcon,
   normalizeHealthState,
+  shouldScheduleCheckingRetry,
 } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
@@ -248,6 +249,55 @@ test('CLOSED label is distinct from IDLE label ("Closed" vs "Idle")', () => {
 test('unknown / out-of-enum -> "Unknown" (switch default)', () => {
   assert.equal(formatHealthState(HealthState.UNKNOWN), 'Unknown');
   assert.equal(formatHealthState('on-fire'), 'Unknown');
+});
+
+// ---- shouldScheduleCheckingRetry (WARDEN-915) --------------------------------
+// The `checking` follow-up guard, extracted out of useHostStatuses so it can be
+// pinned by tests instead of by a paragraph of prose. `web/` has no component
+// harness, but this predicate is pure, and it is what keeps ONE short follow-up
+// poll from becoming a fan-out or an endless loop.
+console.log('\nshouldScheduleCheckingRetry (WARDEN-915)');
+
+const LIVE = { subscribers: 1, retryPending: false };
+const checking = (host) => ({ host, status: 'unknown', latency_ms: null, checking: true });
+const settled = (host) => ({ host, status: 'online', latency_ms: 12 });
+
+test('a response with a checking host schedules the follow-up', () => {
+  assert.equal(shouldScheduleCheckingRetry([settled('(local)'), checking('web1')], LIVE), true);
+});
+test('a fully-settled response schedules nothing', () => {
+  assert.equal(shouldScheduleCheckingRetry([settled('(local)'), settled('web1')], LIVE), false);
+});
+test('an offline host is settled, not checking — no follow-up (the dot is correct already)', () => {
+  const offline = { host: 'dead', status: 'offline', latency_ms: null, error: 'timed out' };
+  assert.equal(shouldScheduleCheckingRetry([offline], LIVE), false);
+});
+test('no subscribers -> no follow-up (nothing on screen would render it)', () => {
+  assert.equal(shouldScheduleCheckingRetry([checking('web1')], { subscribers: 0, retryPending: false }), false);
+});
+test('a follow-up already pending -> no second one (one at a time, never a fan-out)', () => {
+  assert.equal(shouldScheduleCheckingRetry([checking('web1')], { subscribers: 1, retryPending: true }), false);
+});
+test('many checking hosts still schedule exactly one follow-up decision', () => {
+  const many = ['a', 'b', 'c', 'd', 'e'].map(checking);
+  assert.equal(shouldScheduleCheckingRetry(many, LIVE), true);
+  assert.equal(shouldScheduleCheckingRetry(many, { subscribers: 1, retryPending: true }), false);
+});
+test('an empty host list schedules nothing', () => {
+  assert.equal(shouldScheduleCheckingRetry([], LIVE), false);
+});
+test('malformed payloads degrade to "no follow-up" rather than crashing or looping', () => {
+  // A garbage row must never pin the client into re-polling forever: an entry
+  // needs a string `host` to count, matching the caller's own map-building rule.
+  for (const bad of [undefined, null, {}, 'nope', 42, { hosts: [] }]) {
+    assert.equal(shouldScheduleCheckingRetry(bad, LIVE), false, `input: ${JSON.stringify(bad)}`);
+  }
+  assert.equal(shouldScheduleCheckingRetry([null, undefined, 7, 'x'], LIVE), false);
+  assert.equal(shouldScheduleCheckingRetry([{ checking: true }], LIVE), false, 'checking but no host string');
+});
+test('checking is read as truthy, matching the caller that builds the map', () => {
+  assert.equal(shouldScheduleCheckingRetry([{ host: 'a', checking: false }], LIVE), false);
+  assert.equal(shouldScheduleCheckingRetry([{ host: 'a' }], LIVE), false);
 });
 
 console.log(`\n${passed} passed`);

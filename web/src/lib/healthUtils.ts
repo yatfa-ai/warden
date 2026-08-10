@@ -197,6 +197,49 @@ export function normalizeCompanionStatus(raw: unknown): CompanionStatus {
   return out;
 }
 
+/**
+ * Given a /api/hosts/status response, should useHostStatuses schedule ONE short
+ * follow-up poll? (WARDEN-915)
+ *
+ * Since the server serves that endpoint from a background-refreshed cache, a host
+ * it has not probed yet comes back as `checking` rather than holding the response
+ * until its probe lands. Without a follow-up, such a dot would stay blank for a
+ * full 30s poll cadence, so a response carrying any `checking` host earns one
+ * short re-poll.
+ *
+ * Extracted from the hook as a pure predicate so the guard is pinned by a test
+ * rather than by a comment: `web/` has no component harness, but this decision is
+ * load-bearing (it is what stops the follow-up from becoming a fan-out or a loop).
+ *
+ * Three conditions, all required:
+ *   - some host is still `checking` — otherwise there is nothing to wait for;
+ *   - `subscribers > 0` — nothing is on screen that would render the result;
+ *   - `!retryPending` — at most ONE follow-up in flight, never a fan-out.
+ *
+ * TERMINATION. This cannot recur indefinitely: the server bounds every probe, so
+ * each host acquires a real status within that bound and stops reporting
+ * `checking`; a later staleness refresh replaces an entry in the background
+ * without ever reverting it to `checking`. So the retry only fires during the
+ * cold window right after boot.
+ *
+ * Malformed entries are ignored on the same terms the caller uses to build its
+ * map (an entry needs a string `host` to count), so a garbage row cannot pin the
+ * client into re-polling forever.
+ */
+export function shouldScheduleCheckingRetry(
+  hosts: unknown,
+  state: { subscribers: number; retryPending: boolean },
+): boolean {
+  if (state.subscribers <= 0) return false;
+  if (state.retryPending) return false;
+  if (!Array.isArray(hosts)) return false;
+  return hosts.some((h) => {
+    if (!h || typeof h !== 'object') return false;
+    const row = h as { host?: unknown; checking?: unknown };
+    return typeof row.host === 'string' && Boolean(row.checking);
+  });
+}
+
 /** Count of agents in each health state on one host. */
 export interface HostHealthCounts {
   healthy: number;

@@ -3,7 +3,12 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { checkHost } from './hostStatus.js';
+import {
+  checkHost,
+  createHostStatusCache,
+  HOST_STATUS_MAX_AGE_MS,
+  HOST_PROBE_TIMEOUT_MS,
+} from './hostStatus.js';
 
 /**
  * Tests for the /api/hosts/status feature.
@@ -294,5 +299,337 @@ describe('/api/hosts/status companion field (WARDEN-878)', () => {
     // The connectivity fields are unaffected — companion is strictly additive.
     assert.strictEqual(typeof local.status, 'string');
     assertValidIso(local.last_check);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WARDEN-915 — the non-blocking host-status cache.
+//
+// The measured defect: the route used to Promise.all a LIVE SSH probe of every
+// configured host on the request path. On a zero-host config (the agent-sandbox
+// default) that is 2.6ms and invisible; on a realistic 5-host config with one
+// unreachable host it measured 15.0s per request, every 30s poll, because the
+// response could not be produced until the WORST host finished timing out.
+//
+// These tests assert the properties that make that impossible to reintroduce:
+// a read never waits on a probe, an aged-out entry does not become a blocking
+// re-probe (the "first-open cliff"), the wait does not scale with host count,
+// and one bad host degrades only its own entry.
+// ---------------------------------------------------------------------------
+
+/** A probe whose settlement the test controls. */
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
+describe('checkHost — bounded probe (opts.timeoutMs)', () => {
+  it('reports offline with a timeout error when validateHost outlives the bound', async () => {
+    const never = () => new Promise(() => {});
+    const result = await checkHost('wedged', never, {}, { timeoutMs: 30 });
+
+    assert.strictEqual(result.status, 'offline');
+    assert.strictEqual(result.latency_ms, null);
+    assert.match(result.error, /timed out after 30ms/);
+    assertValidIso(result.last_check);
+  });
+
+  it('returns the real result when the probe settles inside the bound', async () => {
+    const validateHost = async () => ({ ok: true });
+    const result = await checkHost('quick', validateHost, {}, { timeoutMs: 1000 });
+
+    assert.strictEqual(result.status, 'online');
+    assert.strictEqual(typeof result.latency_ms, 'number');
+  });
+
+  it('is unbounded when no timeoutMs is given (unchanged default behaviour)', async () => {
+    const validateHost = async () => {
+      await new Promise((r) => setTimeout(r, 40));
+      return { ok: true };
+    };
+    const result = await checkHost('slow-but-fine', validateHost, {});
+
+    assert.strictEqual(result.status, 'online');
+  });
+});
+
+describe('createHostStatusCache — a read never waits on a probe', () => {
+  it('one unreachable host does not hold the other hosts hostage', async () => {
+    const hosts = ['(local)', 'dev-box', 'build-01', 'gpu-rig', 'unreach-vpn'];
+    const stuck = deferred();
+    const validateHost = async (host) => {
+      if (host === 'unreach-vpn') return stuck.promise; // never settles in time
+      return { ok: true };
+    };
+    const cache = createHostStatusCache({ settleMs: 60, probeTimeoutMs: 200 });
+
+    const start = Date.now();
+    const results = await cache.snapshot(hosts, validateHost, {});
+    const elapsed = Date.now() - start;
+
+    assert.ok(elapsed < 1_000, `snapshot must not wait on the bad host; took ${elapsed}ms`);
+    const byHost = Object.fromEntries(results.map((r) => [r.host, r]));
+    for (const good of ['(local)', 'dev-box', 'build-01', 'gpu-rig']) {
+      assert.strictEqual(byHost[good].status, 'online', `${good} must be reported live`);
+    }
+    // The bad host degrades on its own: reported as not-yet-known, not awaited.
+    assert.strictEqual(byHost['unreach-vpn'].status, 'unknown');
+    assert.strictEqual(byHost['unreach-vpn'].checking, true);
+    assert.strictEqual(byHost['unreach-vpn'].last_check, null);
+
+    stuck.resolve({ ok: false, error: 'Connection timed out' });
+  });
+
+  it('the bad host fills in on a later read, once its own probe lands', async () => {
+    const stuck = deferred();
+    const validateHost = async (host) => (host === 'bad' ? stuck.promise : { ok: true });
+    const cache = createHostStatusCache({ settleMs: 20, maxAgeMs: 10_000, probeTimeoutMs: 200 });
+
+    const first = await cache.snapshot(['good', 'bad'], validateHost, {});
+    assert.strictEqual(first.find((r) => r.host === 'bad').checking, true);
+
+    stuck.resolve({ ok: false, error: 'Connection timed out' });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const second = await cache.snapshot(['good', 'bad'], validateHost, {});
+    const bad = second.find((r) => r.host === 'bad');
+    assert.strictEqual(bad.status, 'offline');
+    assert.strictEqual(bad.error, 'Connection timed out');
+    assert.strictEqual(bad.checking, undefined, 'a probed host is no longer "checking"');
+  });
+
+  it('a warm read is served from cache with no new probe and no wait', async () => {
+    let probes = 0;
+    const validateHost = async () => { probes += 1; return { ok: true }; };
+    const cache = createHostStatusCache({ settleMs: 50, maxAgeMs: 10_000 });
+
+    await cache.snapshot(['h1', 'h2'], validateHost, {});
+    assert.strictEqual(probes, 2);
+
+    const start = Date.now();
+    const results = await cache.snapshot(['h1', 'h2'], validateHost, {});
+    const elapsed = Date.now() - start;
+
+    assert.strictEqual(probes, 2, 'a fresh entry must not be re-probed');
+    assert.ok(elapsed < 50, `a warm read must be immediate; took ${elapsed}ms`);
+    assert.deepStrictEqual(results.map((r) => r.status), ['online', 'online']);
+  });
+
+  it('adding hosts does not multiply the wait (the response is O(1) in host count)', async () => {
+    // Every host is slow and none is cached: the response must still come back
+    // inside the shared settle window, not settle × N and not slow × N.
+    const validateHost = () => new Promise((r) => setTimeout(() => r({ ok: true }), 3_000));
+    const cache = createHostStatusCache({ settleMs: 60, probeTimeoutMs: 200 });
+    const many = Array.from({ length: 40 }, (_, i) => `host-${i}`);
+
+    const start = Date.now();
+    await cache.snapshot(many, validateHost, {});
+    const elapsed = Date.now() - start;
+
+    assert.ok(elapsed < 1_000, `40 cold slow hosts must not compound the wait; took ${elapsed}ms`);
+  });
+});
+
+describe('createHostStatusCache — staleness costs freshness, never latency', () => {
+  it('an aged-out entry is still served immediately and refreshed in the background', async () => {
+    // The "first-open cliff" guard: an expired cache must NOT turn back into a
+    // blocking probe. The read returns the previous value at once; the fresh
+    // one lands on a later read.
+    let clock = 1_000;
+    let probes = 0;
+    const gate = [deferred(), deferred()];
+    const validateHost = async () => {
+      const d = gate[probes];
+      probes += 1;
+      return d ? d.promise : { ok: true };
+    };
+    const cache = createHostStatusCache({
+      settleMs: 30, maxAgeMs: 100, probeTimeoutMs: 200, now: () => clock,
+    });
+
+    gate[0].resolve({ ok: true });
+    await cache.snapshot(['h'], validateHost, {});
+    assert.strictEqual(probes, 1);
+
+    clock += 500; // the entry is now well past maxAgeMs
+
+    const start = Date.now();
+    const stale = await cache.snapshot(['h'], validateHost, {});
+    const elapsed = Date.now() - start;
+
+    assert.strictEqual(probes, 2, 'a stale entry must schedule a background refresh');
+    assert.ok(elapsed < 30, `a stale read must not block on the refresh; took ${elapsed}ms`);
+    assert.strictEqual(stale[0].status, 'online', 'the last known value is served meanwhile');
+
+    gate[1].resolve({ ok: false, error: 'went down' });
+    await new Promise((r) => setTimeout(r, 20));
+    const refreshed = await cache.snapshot(['h'], validateHost, {});
+    assert.strictEqual(refreshed[0].status, 'offline', 'the background refresh landed');
+  });
+
+  it('concurrent reads share one in-flight probe per host', async () => {
+    let probes = 0;
+    const stuck = deferred();
+    const validateHost = async () => { probes += 1; return stuck.promise; };
+    const cache = createHostStatusCache({ settleMs: 10, probeTimeoutMs: 200 });
+
+    await Promise.all([
+      cache.snapshot(['h'], validateHost, {}),
+      cache.snapshot(['h'], validateHost, {}),
+      cache.snapshot(['h'], validateHost, {}),
+    ]);
+
+    assert.strictEqual(probes, 1, 'a poll arriving mid-probe must join it, not stack another ssh child');
+    stuck.resolve({ ok: true });
+  });
+
+  it('a wedged probe frees its slot at the bound so later refreshes can run', async () => {
+    let probes = 0;
+    const validateHost = async () => { probes += 1; return new Promise(() => {}); };
+    const cache = createHostStatusCache({ settleMs: 10, maxAgeMs: 0, probeTimeoutMs: 40 });
+
+    await cache.snapshot(['wedged'], validateHost, {});
+    assert.strictEqual(probes, 1);
+
+    await new Promise((r) => setTimeout(r, 70)); // past the probe bound
+    const results = await cache.snapshot(['wedged'], validateHost, {});
+
+    assert.strictEqual(results[0].status, 'offline');
+    assert.match(results[0].error, /timed out/);
+    assert.strictEqual(probes, 2, 'the bound must release the in-flight slot');
+  });
+
+  it('drops hosts that are no longer configured', async () => {
+    const validateHost = async () => ({ ok: true });
+    const cache = createHostStatusCache({ settleMs: 50, maxAgeMs: 10_000 });
+
+    await cache.snapshot(['keep', 'drop'], validateHost, {});
+    await cache.snapshot(['keep'], validateHost, {});
+
+    // 'drop' is gone: re-adding it reads as never-probed, not as a stale value.
+    const back = await cache.snapshot(['keep', 'drop'], validateHost, { });
+    assert.strictEqual(back.find((r) => r.host === 'keep').status, 'online');
+    assert.ok(
+      ['unknown', 'online'].includes(back.find((r) => r.host === 'drop').status),
+      'a re-added host is re-probed rather than served from an evicted entry',
+    );
+  });
+
+  it('returns one entry per requested host, in order', async () => {
+    const validateHost = async (host) => (host === 'b' ? { ok: false, error: 'down' } : { ok: true });
+    const cache = createHostStatusCache({ settleMs: 100, maxAgeMs: 10_000 });
+
+    const results = await cache.snapshot(['a', 'b', 'c'], validateHost, {});
+
+    assert.deepStrictEqual(results.map((r) => r.host), ['a', 'b', 'c']);
+    assert.strictEqual(results[1].status, 'offline');
+  });
+});
+
+describe('createHostStatusCache — a permanently-unreachable host taxes nothing', () => {
+  it('does not re-spend the settle window on a probe that is already in flight', async () => {
+    // The bad host's probe outlives many polls. The FIRST read may spend the
+    // settle window on it; every later read while that same probe is still
+    // running must return immediately — otherwise one dead host quietly charges
+    // the settle window to every request, forever.
+    const stuck = deferred();
+    const validateHost = async (host) => (host === 'bad' ? stuck.promise : { ok: true });
+    const cache = createHostStatusCache({ settleMs: 120, maxAgeMs: 10_000, probeTimeoutMs: 2_000 });
+
+    await cache.snapshot(['good', 'bad'], validateHost, {});
+
+    const start = Date.now();
+    const again = await cache.snapshot(['good', 'bad'], validateHost, {});
+    const elapsed = Date.now() - start;
+
+    assert.ok(elapsed < 60, `a repeat read must not re-wait on the in-flight probe; took ${elapsed}ms`);
+    assert.strictEqual(again.find((r) => r.host === 'good').status, 'online');
+    assert.strictEqual(again.find((r) => r.host === 'bad').checking, true);
+
+    stuck.resolve({ ok: false, error: 'Connection timed out' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The server-side staleness bound and the CLIENT-side poll cadence are two
+// constants in two languages in two directories, and they are only correct
+// RELATIVE TO EACH OTHER. Nothing else in the suite covers that: every other
+// cache test passes an explicit `maxAgeMs`, so the production constant's
+// interaction with the production cadence is exactly the gap these close.
+// ---------------------------------------------------------------------------
+
+/** The client's real poll cadence, read out of the TS source. Read as text
+ *  rather than imported because POLL_MS is a module-private constant in a .ts
+ *  file (Node 20 cannot import either) — and because the point is to pin the
+ *  literal a future edit would change, wherever it lives. */
+function clientPollMs() {
+  const src = fs.readFileSync(
+    path.join(import.meta.dirname, '..', 'web', 'src', 'lib', 'useHostStatuses.ts'),
+    'utf8',
+  );
+  const m = src.match(/const POLL_MS\s*=\s*([\d_]+)\s*;/);
+  assert.ok(m, 'could not find `const POLL_MS = ...` in web/src/lib/useHostStatuses.ts — '
+    + 'if it was renamed or moved, update this test rather than deleting it');
+  return Number(m[1].replace(/_/g, ''));
+}
+
+describe('hostStatusCadence — the max-age bound vs the client poll cadence', () => {
+  it('leaves an entry stale by the next poll tick even after a worst-case probe', () => {
+    // THE INVARIANT. A background refresh lands ~probeLatency AFTER the response
+    // that scheduled it, so at the next tick the entry's age is
+    // POLL_MS - probeLatency. For the refresh to fire on EVERY tick, the max age
+    // must sit below that for the slowest probe we allow:
+    //
+    //     HOST_STATUS_MAX_AGE_MS + HOST_PROBE_TIMEOUT_MS < POLL_MS
+    //
+    // Equality (both 30s, as originally shipped) is the failure this pins: the
+    // refresh then fires on every OTHER tick and connectivity goes ~60s stale.
+    const pollMs = clientPollMs();
+    assert.ok(
+      HOST_STATUS_MAX_AGE_MS + HOST_PROBE_TIMEOUT_MS < pollMs,
+      `max age (${HOST_STATUS_MAX_AGE_MS}ms) + probe bound (${HOST_PROBE_TIMEOUT_MS}ms) must be `
+      + `< the client's POLL_MS (${pollMs}ms), or a slow probe pushes the entry's timestamp far `
+      + `enough forward that the next tick reads it as fresh and skips the refresh`,
+    );
+  });
+
+  it('refreshes on every poll tick when driven at the real cadence with the real constants', async () => {
+    // The reviewer's repro, promoted to a test: drive the REAL cache with the
+    // REAL production constants at the REAL cadence and count probes. Under the
+    // original 30s/30s collision this produced 4 probes in 180s instead of 7.
+    const pollMs = clientPollMs();
+    const probeLatencyMs = 200; // a realistic reachable-host handshake
+    let clock = 0;
+    let probes = 0;
+    const probe = async (host) => {
+      probes += 1;
+      const landsAt = clock + probeLatencyMs;
+      await Promise.resolve();
+      // The refresh resolves after its latency — i.e. AFTER the response that
+      // scheduled it has already gone out. That offset is the whole bug.
+      clock = Math.max(clock, landsAt);
+      return { host, status: 'online', latency_ms: probeLatencyMs, last_check: null };
+    };
+    const cache = createHostStatusCache({
+      // maxAgeMs and probeTimeoutMs deliberately left at their production
+      // defaults — those are the values under test.
+      settleMs: 0,
+      now: () => clock,
+      probe,
+    });
+
+    const ticks = 7;
+    for (let i = 0; i < ticks; i++) {
+      clock = Math.max(clock, i * pollMs);
+      await cache.snapshot(['h1'], async () => ({ ok: true }), {});
+      await new Promise((resolve) => setImmediate(resolve)); // let the refresh land
+    }
+
+    assert.strictEqual(
+      probes, ticks,
+      `expected one probe per poll tick (${ticks}), got ${probes} — the cache is skipping `
+      + `refreshes, so the connectivity the UI renders is up to ${2 * pollMs}ms old`,
+    );
   });
 });
