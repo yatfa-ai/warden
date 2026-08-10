@@ -10,6 +10,7 @@ import { hostTagOf } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
 import { handleOsc52 } from '@/lib/clipboard';
 import { hostKeyOf, attachEffectDeps } from '@/lib/paneAttach';
+import { createFitScheduler, browserFitEnv, type FitScheduler } from '@/lib/paneFit';
 import { DEFAULT_TERMINAL_FONT_FAMILY, type TerminalCursorStyle, type OnExitBehavior, type Snippet } from '@/lib/storage';
 import { PANE_DRAG_MIME } from '@/lib/dnd';
 import { getThemeById, type ThemeId } from '@/lib/themes';
@@ -191,7 +192,12 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   const wrapRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const hostLabels = useHostLabels();
-  const fitRef = useRef<FitAddon | null>(null);
+  // WARDEN-920: there is deliberately NO `fitRef` here any more. The FitAddon is
+  // reachable only through the scheduler below, so no call site can reach around
+  // the coalescer and call fit() directly — which is exactly how the un-debounced
+  // storm was assembled (four separate `try { fitRef.current?.fit() } catch {}`
+  // sites plus the ResizeObserver).
+  const fitSchedulerRef = useRef<FitScheduler | null>(null);
   const searchRef = useRef<SearchAddon | null>(null);
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -320,7 +326,39 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     term.loadAddon(unicode11);
     term.unicode.activeVersion = '11';
     term.open(wrapRef.current!);
-    termRef.current = term; fitRef.current = fit; searchRef.current = search;
+    termRef.current = term; searchRef.current = search;
+    // WARDEN-920: build this pane's fit→resize coalescer BEFORE any handler that
+    // can trigger a fit or a resize announcement, so nothing races an unset ref.
+    //
+    // `applyFit` is the only place fit() is called. It checks proposeDimensions()
+    // FIRST and reports "not ready" (false) when the renderer has no cell metrics
+    // yet (webfont still loading) — a ResizeObserver never re-fires for a font
+    // load, so the scheduler's bounded retry, not luck, is what gets such a pane
+    // to its correct size. The container-size guard that stops FitAddon's
+    // degenerate 2x1 clamp lives in the scheduler (isFittableRect); this callback
+    // is only reached once the container is real. A throw is LOGGED, never
+    // swallowed silently (WARDEN-89) — the old `try/catch {}` hid every fit
+    // failure, and the failures that mattered here never threw in the first place.
+    const applyFit = (): boolean => {
+      const dims = fit.proposeDimensions();
+      if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows)) return false;
+      try { fit.fit(); } catch (e) { console.warn('[pane] fit failed', id, e); return false; }
+      return true;
+    };
+    const fitScheduler = createFitScheduler({
+      // The container xterm was open()ed into — its BORDER-BOX extent, which is
+      // 0x0 exactly while the tile is mid-mount/mid-transition (the case the
+      // guard exists for).
+      measure: () => {
+        const el = wrapRef.current;
+        if (!el) return null;
+        return { width: el.clientWidth, height: el.clientHeight };
+      },
+      fit: applyFit,
+      currentSize: () => ({ cols: term.cols, rows: term.rows }),
+      announce: ({ cols, rows }) => streamApi.send({ type: 'resize', id, cols, rows }),
+    }, browserFitEnv);
+    fitSchedulerRef.current = fitScheduler;
     // WARDEN-437: route OSC 52 clipboard sequences to the system clipboard. On a
     // host whose tmux has mouse on (e.g. macmini) xterm never owns the selection,
     // so the pane's select + Ctrl/Cmd+C copy grabs nothing — but modern tmux
@@ -329,7 +367,14 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     // handler honors SET and ignores QUERY (never reads the local clipboard).
     const osc52 = term.parser.registerOscHandler(52, handleOsc52);
     term.onData((d) => streamApi.send({ type: 'input', id, data: d }));
-    term.onResize(() => streamApi.send({ type: 'resize', id, cols: term.cols, rows: term.rows }));
+    // WARDEN-920: a cols/rows change no longer ships straight to the PTY. Every
+    // change re-arms the scheduler's trailing settle window and only the geometry
+    // that survives it is announced (and only if it differs from what the PTY was
+    // last told). A workspace switch walks this pane through a run of intermediate
+    // sizes as the grid transition settles; tmux now redraws for the final one
+    // instead of once per transient — which is what stopped the input line from
+    // hopping. Coalescing fit() alone would NOT have fixed that.
+    term.onResize(() => fitScheduler.noteResize());
     // WARDEN-285: copy-on-select. Registered once at mount; the handler reads the
     // latest pref from copyOnSelectRef so a Settings toggle applies live to this
     // already-open pane (gating at mount only would leave a stale handler after a
@@ -478,12 +523,19 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
       },
     });
 
-    const doFit = () => { try { fit.fit(); } catch {} };
-    const ro = new ResizeObserver(doFit);
+    // WARDEN-920: the ResizeObserver only REQUESTS a fit — the scheduler collapses
+    // every request landing in one animation frame into a single fit and skips
+    // any container that is not really laid out yet. A gutter drag (WARDEN-660)
+    // still reflows every frame, so it stays live; what disappears is the burst
+    // of N fits per frame during a workspace switch / sidebar toggle / window
+    // resize. The old 50ms mount timer is kept as a backstop request for the case
+    // where the observer's initial delivery lands before the tile has any size.
+    const ro = new ResizeObserver(() => fitScheduler.request());
     ro.observe(wrapRef.current!);
-    const t = setTimeout(doFit, 50);
+    const t = setTimeout(() => fitScheduler.request(), 50);
     return () => {
       clearTimeout(t); ro.disconnect();
+      fitScheduler.dispose(); fitSchedulerRef.current = null;
       selectionDisposable.dispose();
       osc52.dispose();
       linkProvider.dispose(); hideTooltip();
@@ -517,7 +569,15 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     // Fresh attach attempt: reset the phase machine + per-attempt bookkeeping.
     setPhase('connecting');
     setElapsed(0);
-    try { fitRef.current?.fit(); } catch {}
+    // WARDEN-920: the attach message must carry cols/rows read in THIS tick, so
+    // this is the one site that fits synchronously (fitNow) instead of requesting
+    // a frame. It honors the same container guard: on a freshly-remounted pane
+    // whose container has not been laid out yet the fit is SKIPPED — xterm keeps
+    // its defaults and attach sends those — rather than fitting to FitAddon's
+    // degenerate 2x1 and binding the PTY to a 2-column terminal. The real
+    // geometry follows through the normal request→settle path once the grid
+    // transition finishes.
+    fitSchedulerRef.current?.fitNow();
     // WARDEN-365: read host from its REF at send-time, not from the render-scoped
     // prop. The effect's deps are [id, retryNonce] (see attachEffectDeps below) —
     // host and cols/rows are INPUTS to the attach message, not TRIGGERS. Reading
@@ -527,7 +587,16 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     // restored panes and set by openChat before a freshly-opened pane mounts), so
     // the single attach binds the correct host.
     const sendHost = hostRef.current;
-    streamApi.send({ type: 'attach', id, host: sendHost, cols: term?.cols ?? 100, rows: term?.rows ?? 30 });
+    const attachCols = term?.cols ?? 100;
+    const attachRows = term?.rows ?? 30;
+    streamApi.send({ type: 'attach', id, host: sendHost, cols: attachCols, rows: attachRows });
+    // WARDEN-920: the PTY now knows this geometry (the server applies the attach
+    // message's cols/rows with the same clamp a `resize` gets), so record it as
+    // announced. The first settle after the grid finishes transitioning then
+    // sends a resize only if the pane genuinely ended up a different size —
+    // a pane that settles back to where it already was stays silent, and tmux has
+    // no reason to redraw the prompt.
+    fitSchedulerRef.current?.markAnnounced({ cols: attachCols, rows: attachRows });
 
     // Elapsed-seconds counter so a slow host reads as "connecting… Ns". Stops
     // itself once we leave 'connecting' (probe settled, watchdog fired, or a
@@ -570,7 +639,10 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // buffered terminal; new panes always pick up the new value, existing open
   // panes pick it up on reopen. Setting options.scrollback here is harmless and
   // covers the cases where xterm does accept the live change.
-  useEffect(() => { if (termRef.current) { termRef.current.options.fontSize = safeFontSize; termRef.current.options.scrollback = safeScrollback; termRef.current.options.fontFamily = safeFontFamily; try { fitRef.current?.fit(); } catch {} } }, [safeFontSize, safeScrollback, safeFontFamily]);
+  // WARDEN-920: a font change alters the CELL metrics, so the pane must re-fit —
+  // but through the scheduler, so a Settings slider dragged across sizes coalesces
+  // to one fit per frame and one PTY resize once it settles.
+  useEffect(() => { if (termRef.current) { termRef.current.options.fontSize = safeFontSize; termRef.current.options.scrollback = safeScrollback; termRef.current.options.fontFamily = safeFontFamily; fitSchedulerRef.current?.request(); } }, [safeFontSize, safeScrollback, safeFontFamily]);
 
   // terminal theme (App-resolved terminalColorScheme + active theme) — re-theme
   // already-open panes live without a reopen, mirroring the font-size/scrollback
@@ -579,7 +651,7 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
   // — including a manual theme pick, the Terminal color scheme pref, or an OS
   // theme flip while the app theme = "System" (App tracks a resolvedThemeId
   // React state so the prop actually changes here).
-  useEffect(() => { if (termRef.current) { termRef.current.options.theme = terminalPalette; try { fitRef.current?.fit(); } catch {} } }, [terminalPalette]);
+  useEffect(() => { if (termRef.current) { termRef.current.options.theme = terminalPalette; fitSchedulerRef.current?.request(); } }, [terminalPalette]);
 
   // cursor style + blink — live-update already-open panes so a `steady-*`
   // selection stops the blink immediately. This is the accessibility payoff vs
