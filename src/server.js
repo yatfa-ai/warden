@@ -33,7 +33,7 @@ import { buildSnapshot, diffLifecycles } from './lifecycle.js';
 import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { classifyPane, stripAnsi, matchWatchPatterns } from './agentState.js';
 import * as notify from './notify.js';
-import { checkHost } from './hostStatus.js';
+import { createHostStatusCache } from './hostStatus.js';
 import {
   probeReceiverCapabilities,
 } from './telemetry-capabilities.js';
@@ -692,7 +692,17 @@ app.get('/api/hosts/health', async (req, res) => {
   res.json({ hosts: healthChecks, timestamp: Date.now() });
 });
 
-// Host connectivity status endpoint for sidebar indicators
+// Host connectivity status endpoint for sidebar indicators.
+//
+// WARDEN-915: served from a cache-first, background-refreshed per-host store —
+// this request NEVER waits on live SSH. It used to Promise.all a live probe of
+// [LOCAL, ...cfg.hosts] on the request path, which measured 2.6ms on a zero-host
+// config (the agent-sandbox default, hence invisible) but 15.0s on a realistic
+// 5-host config with one unreachable host, on EVERY 30s poll — one of the
+// renderer's six per-origin connections held for 15s at a time, which is what
+// pushes an unrelated `GET /api/config` (the gate on the whole Settings pane)
+// into the connection queue. See createHostStatusCache for the model.
+const hostStatusCache = createHostStatusCache();
 app.get('/api/hosts/status', async (_req, res) => {
   const hosts = [LOCAL, ...cfg.hosts];
   // WARDEN-878: when the companion transport is enabled, attach each host's
@@ -702,14 +712,15 @@ app.get('/api/hosts/status', async (_req, res) => {
   // takes effect on the next poll without a restart; when off, the field is
   // omitted entirely (the transport is opt-in, so there is nothing to surface).
   const companionOn = isCompanionTransportEnabled();
-  const results = await Promise.all(
-    hosts.map(async (host) => {
-      const result = await checkHost(host, validateHost, cfg);
-      if (companionOn) result.companion = getCompanionStatus(host);
-      return result;
-    })
-  );
-  res.json({ hosts: results });
+  const results = await hostStatusCache.snapshot(hosts, validateHost, cfg);
+  // Spread rather than mutate: the snapshot hands back the CACHED objects, and
+  // assigning onto them would leave a stale `companion` field attached after the
+  // transport is toggled back off (the field must vanish, not linger).
+  res.json({
+    hosts: companionOn
+      ? results.map((r) => ({ ...r, companion: getCompanionStatus(r.host) }))
+      : results,
+  });
 });
 
 // ---- Collections API ----
