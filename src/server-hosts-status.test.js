@@ -3,7 +3,12 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { checkHost, createHostStatusCache } from './hostStatus.js';
+import {
+  checkHost,
+  createHostStatusCache,
+  HOST_STATUS_MAX_AGE_MS,
+  HOST_PROBE_TIMEOUT_MS,
+} from './hostStatus.js';
 
 /**
  * Tests for the /api/hosts/status feature.
@@ -543,5 +548,88 @@ describe('createHostStatusCache — a permanently-unreachable host taxes nothing
     assert.strictEqual(again.find((r) => r.host === 'bad').checking, true);
 
     stuck.resolve({ ok: false, error: 'Connection timed out' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The server-side staleness bound and the CLIENT-side poll cadence are two
+// constants in two languages in two directories, and they are only correct
+// RELATIVE TO EACH OTHER. Nothing else in the suite covers that: every other
+// cache test passes an explicit `maxAgeMs`, so the production constant's
+// interaction with the production cadence is exactly the gap these close.
+// ---------------------------------------------------------------------------
+
+/** The client's real poll cadence, read out of the TS source. Read as text
+ *  rather than imported because POLL_MS is a module-private constant in a .ts
+ *  file (Node 20 cannot import either) — and because the point is to pin the
+ *  literal a future edit would change, wherever it lives. */
+function clientPollMs() {
+  const src = fs.readFileSync(
+    path.join(import.meta.dirname, '..', 'web', 'src', 'lib', 'useHostStatuses.ts'),
+    'utf8',
+  );
+  const m = src.match(/const POLL_MS\s*=\s*([\d_]+)\s*;/);
+  assert.ok(m, 'could not find `const POLL_MS = ...` in web/src/lib/useHostStatuses.ts — '
+    + 'if it was renamed or moved, update this test rather than deleting it');
+  return Number(m[1].replace(/_/g, ''));
+}
+
+describe('hostStatusCadence — the max-age bound vs the client poll cadence', () => {
+  it('leaves an entry stale by the next poll tick even after a worst-case probe', () => {
+    // THE INVARIANT. A background refresh lands ~probeLatency AFTER the response
+    // that scheduled it, so at the next tick the entry's age is
+    // POLL_MS - probeLatency. For the refresh to fire on EVERY tick, the max age
+    // must sit below that for the slowest probe we allow:
+    //
+    //     HOST_STATUS_MAX_AGE_MS + HOST_PROBE_TIMEOUT_MS < POLL_MS
+    //
+    // Equality (both 30s, as originally shipped) is the failure this pins: the
+    // refresh then fires on every OTHER tick and connectivity goes ~60s stale.
+    const pollMs = clientPollMs();
+    assert.ok(
+      HOST_STATUS_MAX_AGE_MS + HOST_PROBE_TIMEOUT_MS < pollMs,
+      `max age (${HOST_STATUS_MAX_AGE_MS}ms) + probe bound (${HOST_PROBE_TIMEOUT_MS}ms) must be `
+      + `< the client's POLL_MS (${pollMs}ms), or a slow probe pushes the entry's timestamp far `
+      + `enough forward that the next tick reads it as fresh and skips the refresh`,
+    );
+  });
+
+  it('refreshes on every poll tick when driven at the real cadence with the real constants', async () => {
+    // The reviewer's repro, promoted to a test: drive the REAL cache with the
+    // REAL production constants at the REAL cadence and count probes. Under the
+    // original 30s/30s collision this produced 4 probes in 180s instead of 7.
+    const pollMs = clientPollMs();
+    const probeLatencyMs = 200; // a realistic reachable-host handshake
+    let clock = 0;
+    let probes = 0;
+    const probe = async (host) => {
+      probes += 1;
+      const landsAt = clock + probeLatencyMs;
+      await Promise.resolve();
+      // The refresh resolves after its latency — i.e. AFTER the response that
+      // scheduled it has already gone out. That offset is the whole bug.
+      clock = Math.max(clock, landsAt);
+      return { host, status: 'online', latency_ms: probeLatencyMs, last_check: null };
+    };
+    const cache = createHostStatusCache({
+      // maxAgeMs and probeTimeoutMs deliberately left at their production
+      // defaults — those are the values under test.
+      settleMs: 0,
+      now: () => clock,
+      probe,
+    });
+
+    const ticks = 7;
+    for (let i = 0; i < ticks; i++) {
+      clock = Math.max(clock, i * pollMs);
+      await cache.snapshot(['h1'], async () => ({ ok: true }), {});
+      await new Promise((resolve) => setImmediate(resolve)); // let the refresh land
+    }
+
+    assert.strictEqual(
+      probes, ticks,
+      `expected one probe per poll tick (${ticks}), got ${probes} — the cache is skipping `
+      + `refreshes, so the connectivity the UI renders is up to ${2 * pollMs}ms old`,
+    );
   });
 });

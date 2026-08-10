@@ -75,6 +75,11 @@ if (fs.existsSync(DIST)) {
 // chat cache + resolver
 let cache = [];
 
+// Per-host connectivity cache behind GET /api/hosts/status (WARDEN-915), so that
+// request never waits on live SSH. See createHostStatusCache in src/hostStatus.js
+// for the model, and the route below for what it replaced.
+const hostStatusCache = createHostStatusCache();
+
 // Carry a chat's last-known lastActivity forward across a cache refresh
 // (WARDEN-245). Activity is captured for LIVE sessions only; when a session goes
 // inactive the fresh discover yields lastActivity === null, and a cache replace
@@ -698,11 +703,11 @@ app.get('/api/hosts/health', async (req, res) => {
 // this request NEVER waits on live SSH. It used to Promise.all a live probe of
 // [LOCAL, ...cfg.hosts] on the request path, which measured 2.6ms on a zero-host
 // config (the agent-sandbox default, hence invisible) but 15.0s on a realistic
-// 5-host config with one unreachable host, on EVERY 30s poll — one of the
-// renderer's six per-origin connections held for 15s at a time, which is what
-// pushes an unrelated `GET /api/config` (the gate on the whole Settings pane)
-// into the connection queue. See createHostStatusCache for the model.
-const hostStatusCache = createHostStatusCache();
+// 5-host config with one unreachable host, on EVERY 30s poll — because the
+// response could not be produced until the single WORST host finished timing
+// out, so four healthy hosts ready in ~300ms were withheld for 15s. See
+// createHostStatusCache (and `hostStatusCache`, declared with the other
+// module-level state above) for the model.
 app.get('/api/hosts/status', async (_req, res) => {
   const hosts = [LOCAL, ...cfg.hosts];
   // WARDEN-878: when the companion transport is enabled, attach each host's

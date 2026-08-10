@@ -12,7 +12,7 @@
 
 import { useEffect, useState } from 'react';
 import type { HostConnectivity, HostConnectivityStatus } from '@/lib/healthUtils';
-import { normalizeCompanionStatus } from '@/lib/healthUtils';
+import { normalizeCompanionStatus, shouldScheduleCheckingRetry } from '@/lib/healthUtils';
 
 const POLL_MS = 30_000; // fixed host-dot cadence (see WARDEN-609: option (a))
 const FRESH_MS = 5_000; // a response younger than this is reused as-is
@@ -46,10 +46,8 @@ async function loadHostStatuses(): Promise<void> {
       const data = await res.json();
       const hosts = Array.isArray(data?.hosts) ? data.hosts : [];
       const next: Record<string, HostConnectivity> = {};
-      let anyChecking = false;
       for (const h of hosts as Array<{ host: string; status?: string; latency_ms?: number | null; companion?: unknown; checking?: boolean }>) {
         if (!h || typeof h.host !== 'string') continue;
-        if (h.checking) anyChecking = true;
         // WARDEN-878: carry the per-host companion field through when the server
         // emitted it (present only while the transport is enabled). Absent → the
         // field stays undefined and the UI renders no companion indicator.
@@ -63,13 +61,10 @@ async function loadHostStatuses(): Promise<void> {
       lastFetchAt = Date.now();
       for (const fn of emit) fn(cache);
       // A host the server is still probing resolves shortly; check back once so
-      // its dot fills in promptly. Guarded on `subscribers` (nothing on screen
-      // needs it otherwise) and on `checkingTimer` (one pending follow-up at a
-      // time, never a fan-out). This can only run during the cold window right
-      // after boot: the server bounds every probe, so each host acquires a real
-      // status within that bound and `checking` never comes back once it has
-      // one — a stale entry refreshes in the background without reverting.
-      if (anyChecking && subscribers > 0 && !checkingTimer) {
+      // its dot fills in promptly. The decision (and its termination argument)
+      // lives in shouldScheduleCheckingRetry, which is unit-tested — see
+      // web/healthUtils.test.mjs.
+      if (shouldScheduleCheckingRetry(hosts, { subscribers, retryPending: checkingTimer !== null })) {
         checkingTimer = setTimeout(() => {
           checkingTimer = null;
           if (subscribers > 0 && document.visibilityState === 'visible') void loadHostStatuses();

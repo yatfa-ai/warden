@@ -15,10 +15,26 @@
 // runs on Node 20, where node:test's `mock.module` is unavailable).
 
 /** A host entry older than this schedules a BACKGROUND refresh on the next
- *  snapshot. Matches useHostStatuses' 30s poll cadence, so each poll tick
- *  refreshes the value the NEXT tick will serve — the cache is never allowed to
- *  go cold enough that a read has to wait for SSH. */
-export const HOST_STATUS_MAX_AGE_MS = 30_000;
+ *  snapshot, so every poll tick refreshes the value the NEXT tick will serve.
+ *
+ *  MUST STAY COMFORTABLY BELOW useHostStatuses' 30s poll cadence, and the margin
+ *  has to cover a slow probe. A background refresh lands AFTER the response it
+ *  was scheduled by, so an entry's `at` is `pollTime + probeLatency`, not
+ *  `pollTime`; at the next tick its age is `POLL_MS - probeLatency`. Setting
+ *  this equal to POLL_MS therefore makes every other tick read the entry as
+ *  still-fresh and skip the refresh — probing silently halves to one per 60s and
+ *  the dots go up to ~60s stale, which is worse the slower the host. Measured
+ *  against the real module with a 200ms probe: 4 probes in 180s instead of 7.
+ *
+ *  The invariant that rules that out is
+ *
+ *      HOST_STATUS_MAX_AGE_MS + HOST_PROBE_TIMEOUT_MS < POLL_MS
+ *
+ *  — even a probe that runs to its full bound leaves the entry stale by the next
+ *  tick. 15s + 8s = 23s against a 30s cadence. `hostStatusCadence` in
+ *  src/server-hosts-status.test.js pins this against the client's real POLL_MS
+ *  so the two cannot drift back into collision. */
+export const HOST_STATUS_MAX_AGE_MS = 15_000;
 
 /** Hard per-host probe bound. validateHost's own path can run to ~15s on an
  *  unreachable host (ControlMaster connect timeout, then a direct-ssh fallback),
@@ -115,12 +131,17 @@ function delay(ms) {
  * ~2ms — which is why the cost stayed invisible through several passes. On a
  * real 5-host config with one unreachable host it was MEASURED at 15.0s per
  * request, every request, because the response could not be produced until the
- * single worst host finished timing out. That response holds one of the
- * renderer's six per-origin connections for its whole duration, and the poll
- * re-pays it every 30s forever, so ordinary navigation — notably the
- * `GET /api/config` that gates the entire Settings pane behind "Loading
- * configuration…" — ends up queued behind SSH timeouts it has nothing to do
- * with.
+ * single worst host finished timing out: four healthy hosts ready in ~300ms were
+ * withheld for 15s by the fifth. The poll re-pays that every 30s, forever, and
+ * it grows with the host count — so this is an always-on 15s request that one
+ * bad host holds hostage, which the ticket names as a defect in its own right.
+ *
+ * (Scope note, so a later reader does not over-read this: what was measured is
+ * THIS endpoint, before and after. The originally-reported symptom — Settings
+ * taking many seconds to open — was NOT reproducible in the agent sandbox, where
+ * Settings opens in ~150ms both before and after, and no consumer of this
+ * endpoint is on the Settings render path. Whether this fully explains that
+ * symptom on the owner's machine is unconfirmed.)
  *
  * THE MODEL. A read never waits on a probe:
  *
