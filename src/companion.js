@@ -263,20 +263,29 @@ export class CompanionRpcError extends Error {
   }
 }
 
-// Format the actionable message a thrown channel error carries — the SAME text
-// the op sites (discover/capturePanes/hasSession/…) build inline: a
+// Format the actionable message a thrown channel error carries — the ONE place
+// the op sites (discover/capturePanes/hasSession/…) get their error text: a
 // CompanionTransportError's message plus its recovery hint (how to return to the
-// default SSH path), an RPC error's message, or a generic fallback. Centralised
-// so the WARDEN-878 status surface shows byte-identical text to the op contracts
-// (a failed host's tooltip and the op's thrown error read the same). (WARDEN-878)
-function formatCompanionError(host, e) {
+// default SSH path), an RPC error's message, or a generic fallback naming the op.
+// Centralised so the WARDEN-878 status surface shows byte-identical text to the
+// op contracts (a failed host's tooltip and the op's thrown error read the same).
+//
+// `op` names the operation in the generic fallback — the ONLY thing that varied
+// across the seven hand-rolled ladders this helper replaced (WARDEN-933). It
+// defaults to the literal 'op' for the callers that are not a single named
+// operation (the bootstrap status capture, and mapCmdError's best-effort
+// envelope), preserving their `companion op failed on <host>` text verbatim.
+// (WARDEN-878, WARDEN-933)
+function formatCompanionError(host, e, op = 'op') {
   if (e instanceof CompanionTransportError) {
+    // Surface the actionable recovery hint (opt-out env var) so the user knows
+    // exactly how to return to the default SSH path — no silent fallback.
     return e.message + (e.recovery ? ` ${e.recovery}` : '');
   }
   if (e instanceof CompanionRpcError) {
     return e.message;
   }
-  return `companion op failed on ${host}: ${e?.message ?? e}`;
+  return `companion ${op} failed on ${host}: ${e?.message ?? e}`;
 }
 
 // ------------------------------- RPC channel --------------------------------
@@ -792,16 +801,7 @@ export async function discover(host, cfg = {}, opts = {}, deps = {}) {
     const chats = mapCompanionContainers(host, result?.containers || [], session);
     return { host, ok: true, chats };
   } catch (e) {
-    let msg;
-    if (e instanceof CompanionTransportError) {
-      // Surface the actionable recovery hint (opt-out env var) so the user knows
-      // exactly how to return to the default SSH path — no silent fallback.
-      msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
-    } else if (e instanceof CompanionRpcError) {
-      msg = e.message;
-    } else {
-      msg = `companion discover failed on ${host}: ${e?.message ?? e}`;
-    }
+    const msg = formatCompanionError(host, e, 'discover');
     return { host, ok: false, error: msg, chats: [] };
   }
 }
@@ -838,14 +838,7 @@ export async function capturePanes(host, list, cfg = {}, opts = {}, deps = {}) {
     const result = await channel.call('capturePanes', { panes }, { timeout: opts.timeout ?? 15000 });
     return { host, ok: true, panes: (result && result.panes) || {} };
   } catch (e) {
-    let msg;
-    if (e instanceof CompanionTransportError) {
-      msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
-    } else if (e instanceof CompanionRpcError) {
-      msg = e.message;
-    } else {
-      msg = `companion capturePanes failed on ${host}: ${e?.message ?? e}`;
-    }
+    const msg = formatCompanionError(host, e, 'capturePanes');
     return { host, ok: false, error: msg, panes: {} };
   }
 }
@@ -879,14 +872,7 @@ export async function hasSession(host, { container, session } = {}, cfg = {}, op
     return { host, ok: true, exists: !!(result && result.exists) };
   } catch (e) {
     const transport = e instanceof CompanionTransportError;
-    let msg;
-    if (transport) {
-      msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
-    } else if (e instanceof CompanionRpcError) {
-      msg = e.message;
-    } else {
-      msg = `companion hasSession failed on ${host}: ${e?.message ?? e}`;
-    }
+    const msg = formatCompanionError(host, e, 'hasSession');
     return { host, ok: false, transport, error: msg, exists: false };
   }
 }
@@ -926,14 +912,7 @@ export async function spawnSession(host, params, cfg = {}, opts = {}, deps = {})
     await channel.call('spawnSession', payload, { timeout: opts.timeout ?? 30000 });
     return { host, ok: true };
   } catch (e) {
-    let msg;
-    if (e instanceof CompanionTransportError) {
-      msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
-    } else if (e instanceof CompanionRpcError) {
-      msg = e.message;
-    } else {
-      msg = `companion spawnSession failed on ${host}: ${e?.message ?? e}`;
-    }
+    const msg = formatCompanionError(host, e, 'spawnSession');
     return { host, ok: false, error: msg };
   }
 }
@@ -957,14 +936,7 @@ export async function killSession(host, params, cfg = {}, opts = {}, deps = {}) 
     await channel.call('killSession', payload, { timeout: opts.timeout ?? 15000 });
     return { host, ok: true };
   } catch (e) {
-    let msg;
-    if (e instanceof CompanionTransportError) {
-      msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
-    } else if (e instanceof CompanionRpcError) {
-      msg = e.message;
-    } else {
-      msg = `companion killSession failed on ${host}: ${e?.message ?? e}`;
-    }
+    const msg = formatCompanionError(host, e, 'killSession');
     return { host, ok: false, error: msg };
   }
 }
@@ -1007,15 +979,10 @@ function mapCmdResult(host, result) {
 // best-effort caller (resize, wrapped in try/catch at the server.js call site)
 // needs to swallow without distinguishing.
 function mapCmdError(host, e) {
-  let msg;
-  if (e instanceof CompanionTransportError) {
-    msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
-  } else if (e instanceof CompanionRpcError) {
-    msg = e.message;
-  } else {
-    msg = `companion op failed on ${host}: ${e?.message ?? e}`;
-  }
-  return { host, ok: false, code: -1, stdout: '', stderr: msg };
+  // No op name: the generic `companion op failed on <host>` default is this
+  // envelope's long-standing text (resize and friends share one best-effort
+  // mapper rather than naming a single op). (WARDEN-933)
+  return { host, ok: false, code: -1, stdout: '', stderr: formatCompanionError(host, e) };
 }
 
 // resize() over the companion channel: runs `set-option -t <target> window-size
@@ -1285,14 +1252,7 @@ async function syncSubscriptionOnce(host, cfg, opts = {}, deps = {}) {
     await channel.call('subscribePanes', { panes }, { timeout: opts.timeout ?? 15000 });
     return { host, ok: true, subscribed: true, count: panes.length };
   } catch (e) {
-    let msg;
-    if (e instanceof CompanionTransportError) {
-      msg = e.message + (e.recovery ? ` ${e.recovery}` : '');
-    } else if (e instanceof CompanionRpcError) {
-      msg = e.message;
-    } else {
-      msg = `companion subscribePanes failed on ${host}: ${e?.message ?? e}`;
-    }
+    const msg = formatCompanionError(host, e, 'subscribePanes');
     // Companion-or-fail surfaces the actionable error, but a subscription failure
     // does NOT break pane rendering: capturePanes keeps polling (freshness is
     // false until a real push arrives), so this is a recoverable degradation.
