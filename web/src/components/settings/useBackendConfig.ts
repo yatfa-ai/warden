@@ -26,6 +26,7 @@ import {
   type TelemetryRuntimeStatus,
 } from '@/lib/electron';
 import { type ConfigData } from './types';
+import { isBackendConfigDirty, type BackendConfigDraft } from './configDirty';
 
 /** The default `config` state, used before the GET /api/config load resolves. */
 const DEFAULT_CONFIG: ConfigData = {
@@ -99,6 +100,12 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
   // unmounting. A hosts failure does NOT set this — see the load effect.
   const [loadError, setLoadError] = useState<{ message: string } | null>(null);
   const [loadToken, setLoadToken] = useState(0);
+  // WARDEN-906 — the BASELINE snapshot of "what is persisted", captured when the
+  // GET load resolves and re-captured after a successful save. Everything the
+  // footer Save would send is diffed against it (see configDirty.ts) to derive
+  // `isDirty`, which SettingsPage uses to warn before Back/Cancel discards typed
+  // edits. null until the first successful load → not dirty (nothing to lose).
+  const [baseline, setBaseline] = useState<BackendConfigDraft | null>(null);
   const reload = useCallback(() => setLoadToken((t) => t + 1), []);
   // Silent reload — re-fetch config WITHOUT flipping `loading` to true. `loading`
   // gates the WHOLE content pane (SettingsPage swaps to "Loading configuration…",
@@ -257,7 +264,7 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
         return;
       }
       const configData = result.data ?? {};
-      setConfig({
+      const loaded: ConfigData = {
         hosts: configData.hosts || [],
         pollIntervalMs: configData.pollIntervalMs || 1500,
         tmuxSession: configData.tmuxSession || 'agent',
@@ -318,6 +325,21 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
         // response is already well-formed. Defensive ?? [] keeps an older backend
         // (no watchPatterns field) safely empty → no alerts.
         watchPatterns: Array.isArray(configData.watchPatterns) ? configData.watchPatterns : [],
+      };
+      setConfig(loaded);
+      // WARDEN-906 — this GET is the persisted truth, so it is also the dirty
+      // baseline. The write-only secrets are baselined EMPTY: GET never returns
+      // cleartext, so a persisted secret is represented by a blank input +
+      // no pending clear (= "leave it alone" on save). Typing one, or arming a
+      // Remove, therefore reads as an unsaved change — which it is.
+      setBaseline({
+        config: loaded,
+        observerAuthTokenInput: '',
+        observerAuthTokenPendingClear: false,
+        webhookSecretInput: '',
+        webhookSecretPendingClear: false,
+        telemetryAuthTokenInput: '',
+        telemetryAuthTokenPendingClear: false,
       });
       setObserverAuthTokenSet(Boolean(configData.llm?.authTokenSet));
       setObserverAuthTokenTail(configData.llm?.authTokenTail ?? null);
@@ -375,6 +397,20 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
       if (!ok) {
         throw new Error(error || 'Failed to save configuration');
       }
+      // WARDEN-906 — the PUT succeeded, so what is on screen IS what is
+      // persisted: re-baseline to the exact draft that was just sent (config +
+      // the secret inputs / pending clears the save consumed) so `isDirty` goes
+      // false. This must happen BEFORE onSaved(), which closes the page — the
+      // normal save-then-close path must never raise the discard dialog.
+      setBaseline({
+        config,
+        observerAuthTokenInput,
+        observerAuthTokenPendingClear,
+        webhookSecretInput,
+        webhookSecretPendingClear,
+        telemetryAuthTokenInput,
+        telemetryAuthTokenPendingClear,
+      });
       onSaved();
     } catch (err) {
       console.error('Failed to save config:', err);
@@ -533,6 +569,22 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
     }
   };
 
+  // WARDEN-906 — derived on every render from the live draft vs the baseline
+  // snapshot. Cheap (a structural compare of one small config object) and
+  // always in step with the state it describes.
+  const isDirty = isBackendConfigDirty(
+    {
+      config,
+      observerAuthTokenInput,
+      observerAuthTokenPendingClear,
+      webhookSecretInput,
+      webhookSecretPendingClear,
+      telemetryAuthTokenInput,
+      telemetryAuthTokenPendingClear,
+    },
+    baseline,
+  );
+
   return {
     config,
     setConfig,
@@ -542,6 +594,11 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
     reload,
     saving,
     handleSave,
+    // WARDEN-906 — "the footer Save would send something different from what is
+    // persisted". Derived (not stored) so it can never go stale behind the
+    // edits it describes. SettingsPage gates Back/Cancel on it; it is also the
+    // reusable signal a follow-up can use to disable Save when nothing changed.
+    isDirty,
     // Reset every backend preference to its default (WARDEN-889). Instant —
     // persists + live-applies via the backend, distinct from the footer Save.
     resetting,

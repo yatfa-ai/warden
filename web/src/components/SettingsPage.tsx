@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import {
   Select,
   SelectContent,
@@ -102,7 +103,7 @@ export function SettingsPage({
   // write-only secrets, the live test/runtime status. onSaved fires after a
   // successful PUT (App's config refresh + close) — matching the prior behavior.
   const {
-    config, setConfig, availableHosts, loading, loadError, reload, saving, handleSave,
+    config, setConfig, availableHosts, loading, loadError, reload, saving, handleSave, isDirty,
     resetting, resetBackendConfig,
     observerAuthTokenSet, observerAuthTokenTail, observerAuthTokenInput, setObserverAuthTokenInput,
     observerAuthTokenPendingClear, removeObserverAuthToken, undoRemoveObserverAuthToken,
@@ -118,6 +119,28 @@ export function SettingsPage({
   // default; switching shows only that section, so there's no cross-section
   // page-level scroll. Persisting across visits is intentionally not done.
   const [activeSection, setActiveSection] = useState<SectionId>('hosts');
+
+  // WARDEN-906 — leaving with unsaved BACKEND edits used to drop them silently:
+  // both exits (Back, Cancel) called `onClose` with no dirty check, so a typed
+  // webhook URL / observer model / attention threshold vanished on a misclick.
+  // Now both go through `requestClose`, which raises the same ConfirmDialog the
+  // danger zone uses when `isDirty`, and closes immediately when it is not (no
+  // friction on the common "opened, looked, left" path).
+  //
+  // Scope note: `isDirty` comes from useBackendConfig, so it covers ONLY the
+  // /api/config draft. The instant client-pref sections (Appearance / NewChats /
+  // Snippets) persist through App's saveUi effect the moment they change and are
+  // never "unsaved" — they cannot raise this dialog. The save-then-close path is
+  // clean too: handleSave re-baselines before firing onSaved.
+  const [discardOpen, setDiscardOpen] = useState(false);
+  const requestClose = () => {
+    if (isDirty) setDiscardOpen(true);
+    else onClose();
+  };
+  const confirmDiscard = () => {
+    setDiscardOpen(false);
+    onClose();
+  };
 
   // Section search: a case-insensitive substring match over each section's
   // label AND description, so any preference is findable by term (e.g.
@@ -149,7 +172,7 @@ export function SettingsPage({
     <div className="flex flex-col flex-1 min-h-0">
       <header className="flex items-center gap-2 px-3 h-11 border-b shrink-0">
         <IconTooltip label="Back to dashboard" side="bottom">
-          <Button variant="ghost" size="icon-sm" onClick={onClose} aria-label="Back to dashboard">
+          <Button variant="ghost" size="icon-sm" onClick={requestClose} aria-label="Back to dashboard">
             <ArrowLeft />
           </Button>
         </IconTooltip>
@@ -331,13 +354,27 @@ export function SettingsPage({
             {persistence.label}
           </span>
         )}
-        <Button variant="outline" onClick={onClose} disabled={saving}>
+        <Button variant="outline" onClick={requestClose} disabled={saving}>
           Cancel
         </Button>
         <Button onClick={handleSave} disabled={saving || loading || !!loadError}>
           {saving ? 'Saving…' : 'Save'}
         </Button>
       </footer>
+
+      {/* WARDEN-906 — the unsaved-backend-edits guard for both exits. Not marked
+          `destructive`: discarding a draft is reversible-by-retyping, not a
+          delete, so it uses the default (non-red) confirm styling — the danger
+          zone's red is reserved for the actual destructive resets. */}
+      <ConfirmDialog
+        open={discardOpen}
+        onOpenChange={(o) => { if (!o) setDiscardOpen(false); }}
+        title="Discard unsaved changes?"
+        description="Your edits to the server configuration haven't been saved. Leaving now discards them. Appearance and other instantly-applied preferences are unaffected."
+        confirmLabel="Discard changes"
+        cancelLabel="Keep editing"
+        onConfirm={confirmDiscard}
+      />
     </div>
   );
 }
