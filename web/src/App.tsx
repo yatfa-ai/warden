@@ -778,112 +778,101 @@ function App() {
   // Reset every UI PREF to its effective default value (the value loadUi()
   // yields post-coercion, so live React state / persisted state / a fresh
   // reload all agree) while leaving the WORKSPACE + panel layout untouched.
-  // The setters fire the existing saveUi effect, which persists defaults-for-
-  // prefs + preserved-workspace via persistUiState. Pure client-side: never
-  // touches the backend / config.json (display/terminal/new-chat prefs are
-  // client-side only by design). Stable identity — it reads the setter map
-  // through a ref, so its dep array is empty and the SettingsPage prop identity
-  // never churns, matching the other stable setters passed down.
+  // What survives is exactly RESET_PRESERVED_KEYS (storage.ts) — the single
+  // source of truth for the preserved set; see WARDEN-346. The setters fire
+  // the existing saveUi effect, which persists defaults-for-prefs + preserved-
+  // workspace via persistUiState. Pure client-side: never touches the backend
+  // / config.json (display/terminal/new-chat prefs are client-side only by
+  // design).
   //
-  // terminalFontFamily nuance: resets to DEFAULT_TERMINAL_FONT_FAMILY (the
-  // curated "System default" value), NOT DEFAULT_UI.terminalFontFamily ('').
-  // The persisted shape uses '' (blank = default stack), but the LIVE React
-  // initializer coerces '' → DEFAULT_TERMINAL_FONT_FAMILY via || (App.tsx:158)
-  // so a pane can never blank. Setting live state to '' here would leave the
-  // Settings font-select showing "Custom…" (no '' option in the curated list)
-  // until reload; DEFAULT_TERMINAL_FONT_FAMILY keeps live/persisted/reload in
-  // sync (the saveUi effect persists the curated value, loadUi returns it as-
-  // is, and it is NOT the DEFAULT_UI '' sentinel — but it renders identically).
-  // defaultNewChatCwd is reset too: it is a pref (in the saveUi spread), part
-  // of the defaultNewChat* family, and omitting it would leave the stale value
-  // in live state for the next persist — violating the "all agree" invariant.
-  // Does NOT touch workspace/layout setters (workspaces/activeWorkspaceId/
-  // paneHost/sidebarCollapsed/observerCollapsed/healthCollapsed/sidebarWidth/
-  // observerWidth) — those are preserved. See WARDEN-346.
-  //
-  // Every OTHER pref in App's persist spread is reset here so live state, the
-  // next saveUi persist, and a fresh reload all agree (acceptance criterion #2).
-  // Omitting any would leave it stale in live React state and silently survive
-  // the "reset everything" action — the next persist would then write the stale
-  // value right back. User-curated lists (customPresets/snippets/watchedChats/
-  // mutedAlertKeys) reset too: this is a destructive, confirm-gated "back to
-  // factory defaults", consistent with customPresets → [].
-  //
-  // WARDEN-934: that invariant used to be a COMMENT over a hand-enumerated list
-  // of ~35 setter calls, and it had already drifted — fileViewerViewMode
-  // (WARDEN-480) was never reset, so "Reset UI preferences" toasted success and
-  // left the File Viewer stuck in Source forever. The list is now DERIVED from
-  // one compile-enforced key source, exactly like the persist path
-  // (PERSISTED_PREF_KEYS → PersistedPrefSnapshot, which closed the identical
-  // WARDEN-442/468/500 drift):
+  // WARDEN-934: this used to be a hand-enumerated list of ~35 setter calls
+  // guarded only by a comment asserting it was complete — and it had already
+  // drifted. fileViewerViewMode (WARDEN-480) was never reset, so "Reset UI
+  // preferences" toasted success and left the File Viewer stuck in Source
+  // forever. The classification is now DERIVED from one compile-enforced key
+  // source, exactly like the persist path (PERSISTED_PREF_KEYS →
+  // PersistedPrefSnapshot, which closed the identical WARDEN-442/468/500
+  // drift):
   //
   //   ResettableKey = (PERSISTED_PREF_KEYS ∪ restoreOnStartup) − RESET_PRESERVED_KEYS
   //
-  // and BOTH maps below are keyed by it — resetUiPrefDefaults() (storage.ts) for
-  // the values, resetSetters for the state setters. A pref that is neither
+  // and BOTH maps are keyed by it — resetUiPrefDefaults() (storage.ts) for the
+  // values, resetSetters below for the state setters. A pref that is neither
   // listed in RESET_PRESERVED_KEYS nor given a default + setter is a TypeScript
   // error; the storage.test.mjs exhaustiveness test covers the runtime half.
-  const resetSetters: { [K in ResettableKey]: (value: ResetUiDefaults[K]) => void } = {
-    // Appearance
-    theme: setTheme,
-    density: setDensity,
-    paneLayout: setPaneLayout,
-    // Behavior
-    onExitBehavior: setOnExitBehavior,
-    autoFocusNewPane: setAutoFocusNewPane,
-    restoreOnStartup: setRestoreOnStartup,
-    copyOnSelect: setCopyOnSelect,
-    timestampFormat: setTimestampFormat,
-    // File Viewer markdown view mode (WARDEN-480) — the WARDEN-934 omission.
-    fileViewerViewMode: setFileViewerViewMode,
-    // Sidebar fleet filter/sort (WARDEN-442), health grouping (WARDEN-468),
-    // per-host collapse (WARDEN-500), per-host display labels (WARDEN-490).
-    agentFilter: setAgentFilter,
-    agentSort: setAgentSort,
-    healthGroupBy: setHealthGroupBy,
-    healthCollapsedHosts: setHealthCollapsedHosts,
-    hostLabels: setHostLabels,
-    // Terminal
-    terminalFontSize: setTerminalFontSize,
-    terminalScrollback: setTerminalScrollback,
-    terminalFontFamily: setTerminalFontFamily,
-    terminalColorScheme: setTerminalColorScheme,
-    terminalCursorStyle: setTerminalCursorStyle,
-    // New chats
-    defaultNewChatPreset: setDefaultNewChatPreset,
-    defaultNewChatPresetByHost: setDefaultNewChatPresetByHost,
-    defaultNewChatHost: setDefaultNewChatHost,
-    defaultNewChatCwd: setDefaultNewChatCwd,
-    defaultNewChatCwdByHost: setDefaultNewChatCwdByHost,
-    customPresets: setCustomPresets,
-    snippets: setSnippets,
-    defaultShell: setDefaultShell,
-    defaultShellByHost: setDefaultShellByHost,
-    // Attention / desktop alerts
-    attentionDesktopAlerts: setAttentionDesktopAlerts,
-    attentionStates: setAttentionStates,
-    alertCritical: setAlertCritical,
-    alertWarning: setAlertWarning,
-    alertDirective: setAlertDirective,
-    alertError: setAlertError,
-    mutedAlertKeys: setMutedAlertKeys,
-    snoozedAlertKeys: setSnoozedAlertKeys,
-    // watchedChats lives in useWatchState, which exposes a clear() rather than a
-    // raw setter — the reset value is always [] (see resetUiPrefDefaults).
-    watchedChats: () => clearWatchedChats(),
-  };
-  const resetSettersRef = useRef(resetSetters);
-  resetSettersRef.current = resetSetters;
-
+  //
+  // The two things the types can NOT say:
+  //   - terminalFontFamily resets to DEFAULT_TERMINAL_FONT_FAMILY (the curated
+  //     "System default" value), NOT DEFAULT_UI.terminalFontFamily (''). The
+  //     persisted shape uses '' (blank = default stack), but the live React
+  //     initializer coerces '' → DEFAULT_TERMINAL_FONT_FAMILY via || (the
+  //     useState at terminalFontFamily) so a pane can never blank. Setting live
+  //     state to '' here would leave the Settings font-select showing "Custom…"
+  //     (no '' option in the curated list) until reload.
+  //   - User-curated lists (customPresets/snippets/watchedChats/mutedAlertKeys)
+  //     reset too: this is a destructive, confirm-gated "back to factory
+  //     defaults", consistent with customPresets → [].
+  //
+  // Identity is stable because every value it closes over is: the useState
+  // setters are stable by React contract, and clearWatchedChats is a
+  // useCallback(..., []) (useWatchState.ts).
   const resetUiPrefsToDefaults = useCallback(() => {
+    const resetSetters: { [K in ResettableKey]: (value: ResetUiDefaults[K]) => void } = {
+      // Appearance
+      theme: setTheme,
+      density: setDensity,
+      paneLayout: setPaneLayout,
+      // Behavior
+      onExitBehavior: setOnExitBehavior,
+      autoFocusNewPane: setAutoFocusNewPane,
+      restoreOnStartup: setRestoreOnStartup,
+      copyOnSelect: setCopyOnSelect,
+      timestampFormat: setTimestampFormat,
+      // File Viewer markdown view mode (WARDEN-480) — the WARDEN-934 omission.
+      fileViewerViewMode: setFileViewerViewMode,
+      // Sidebar fleet filter/sort (WARDEN-442), health grouping (WARDEN-468),
+      // per-host collapse (WARDEN-500), per-host display labels (WARDEN-490).
+      agentFilter: setAgentFilter,
+      agentSort: setAgentSort,
+      healthGroupBy: setHealthGroupBy,
+      healthCollapsedHosts: setHealthCollapsedHosts,
+      hostLabels: setHostLabels,
+      // Terminal
+      terminalFontSize: setTerminalFontSize,
+      terminalScrollback: setTerminalScrollback,
+      terminalFontFamily: setTerminalFontFamily,
+      terminalColorScheme: setTerminalColorScheme,
+      terminalCursorStyle: setTerminalCursorStyle,
+      // New chats
+      defaultNewChatPreset: setDefaultNewChatPreset,
+      defaultNewChatPresetByHost: setDefaultNewChatPresetByHost,
+      defaultNewChatHost: setDefaultNewChatHost,
+      defaultNewChatCwd: setDefaultNewChatCwd,
+      defaultNewChatCwdByHost: setDefaultNewChatCwdByHost,
+      customPresets: setCustomPresets,
+      snippets: setSnippets,
+      defaultShell: setDefaultShell,
+      defaultShellByHost: setDefaultShellByHost,
+      // Attention / desktop alerts
+      attentionDesktopAlerts: setAttentionDesktopAlerts,
+      attentionStates: setAttentionStates,
+      alertCritical: setAlertCritical,
+      alertWarning: setAlertWarning,
+      alertDirective: setAlertDirective,
+      alertError: setAlertError,
+      mutedAlertKeys: setMutedAlertKeys,
+      snoozedAlertKeys: setSnoozedAlertKeys,
+      // watchedChats lives in useWatchState, which exposes a clear() rather than a
+      // raw setter — the reset value is always [] (see resetUiPrefDefaults).
+      watchedChats: () => clearWatchedChats(),
+    };
     const defaults = resetUiPrefDefaults();
-    const setters = resetSettersRef.current;
     // The per-key types are locked by the two maps above; TS cannot correlate
     // them across a dynamic index, so the call site casts once.
     for (const key of Object.keys(defaults) as ResettableKey[]) {
-      (setters[key] as (value: unknown) => void)(defaults[key]);
+      (resetSetters[key] as (value: unknown) => void)(defaults[key]);
     }
-  }, []);
+  }, [clearWatchedChats]);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
   // its entries in the chats list so dots update to green/red.
