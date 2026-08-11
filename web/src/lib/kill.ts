@@ -18,7 +18,7 @@
 // module loads under the same transpile-to-temp-`.mjs` + dynamic-`import()`
 // harness as broadcast.ts (see kill.test.mjs).
 
-import { summarizeFanout } from './fanout';
+import { summarizeFanout, type FanoutToast, type FanoutToastVariant } from './fanout';
 
 /** Outcome of one agent's /api/kill: either ok, or not-ok with a reason. */
 export interface KillOutcome { ok: boolean; error?: string }
@@ -49,14 +49,15 @@ export function summarizeKill(
   return { total, stopped: succeeded, failed };
 }
 
-/** Toast variant for a kill summary — success only when every agent was stopped. */
-export type KillToastVariant = 'success' | 'error';
+/**
+ * Toast variant / shape for a kill summary. Both alias the shared fan-out types
+ * (./fanout) — the three formatters emit structurally identical toasts, and one
+ * renderer (showFanoutToast) consumes all three. The names are kept as exported
+ * aliases so existing importers are unaffected.
+ */
+export type KillToastVariant = FanoutToastVariant;
 
-export interface KillToast {
-  title: string;
-  description?: string;
-  variant: KillToastVariant;
-}
+export type KillToast = FanoutToast;
 
 /**
  * Shape the result toast for a kill summary.
@@ -67,8 +68,9 @@ export interface KillToast {
  *   human can see WHICH sessions are still running and why — host unreachable,
  *   session already dead, etc.). The description is the full failure list (not
  *   truncated): the sidebar's own selection caps it at a human-scale N, and
- *   sonner wraps a long description in a scrollable toast body. Rendered with
- *   `whitespace-pre-line` by the caller so each failure lands on its own line.
+ *   sonner wraps a long description in a scrollable toast body. Rendered by
+ *   showFanoutToast (./fanoutToast), which wraps it in `whitespace-pre-line` so
+ *   each failure lands on its own line.
  */
 export function formatKillToast(s: KillSummary): KillToast {
   if (s.failed.length === 0) {

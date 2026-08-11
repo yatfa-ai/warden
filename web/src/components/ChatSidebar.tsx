@@ -24,6 +24,7 @@ import { SnoozeDialog } from './SnoozeDialog';
 import { summarizeBroadcast, formatBroadcastToast } from '@/lib/broadcast';
 import { formatKillToast, runKillFanout } from '@/lib/kill';
 import { formatKeySendToast, runKeySendFanout } from '@/lib/keysend';
+import { showFanoutToast } from '@/lib/fanoutToast';
 import { copyText } from '@/lib/clipboard';
 import { DiffViewer } from './DiffViewer';
 import { ConflictView } from './ConflictView';
@@ -642,18 +643,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
       return c ? displayName(c) : id;
     };
     const summary = summarizeBroadcast(results, ids, nameOf);
-    const outcome = formatBroadcastToast(summary);
-    if (prefs.notifyChatOps) {
-      if (outcome.variant === 'success') {
-        toast.success(outcome.title);
-      } else {
-        // whitespace-pre-line so the per-agent failure list (joined with \n in
-        // formatBroadcastToast) renders one failure per line instead of
-        // collapsing to a single run-on line — sonner's default description
-        // element normalizes whitespace.
-        toast.error(outcome.title, { description: <span className="whitespace-pre-line">{outcome.description}</span> });
-      }
-    }
+    showFanoutToast(formatBroadcastToast(summary), prefs.notifyChatOps);
     // The broadcast's intent is discharged — clear the selection regardless of
     // outcome. Failed targets remain visible in the toast; the human can
     // re-select and retry if needed.
@@ -690,16 +680,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
       selectedChats.forEach((c) => { if (c.host) hosts.add(c.host); });
       hosts.forEach((h) => onDiscoverHost(h));
     });
-    const outcome = formatKillToast(summary);
-    if (prefs.notifyChatOps) {
-      if (outcome.variant === 'success') {
-        toast.success(outcome.title);
-      } else {
-        // whitespace-pre-line so the per-agent failure list (joined with \n in
-        // formatKillToast) renders one failure per line instead of collapsing.
-        toast.error(outcome.title, { description: <span className="whitespace-pre-line">{outcome.description}</span> });
-      }
-    }
+    showFanoutToast(formatKillToast(summary), prefs.notifyChatOps);
     // The kill's intent is discharged — clear the selection regardless of
     // outcome. Failed targets remain visible in the toast; the human can
     // re-select and retry if needed.
@@ -727,16 +708,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
       return c ? displayName(c) : id;
     };
     const summary = await runKeySendFanout(ids, key, nameOf);
-    const outcome = formatKeySendToast(summary, key);
-    if (prefs.notifyChatOps) {
-      if (outcome.variant === 'success') {
-        toast.success(outcome.title);
-      } else {
-        // whitespace-pre-line so the per-agent failure list (joined with \n in
-        // formatKeySendToast) renders one failure per line instead of collapsing.
-        toast.error(outcome.title, { description: <span className="whitespace-pre-line">{outcome.description}</span> });
-      }
-    }
+    showFanoutToast(formatKeySendToast(summary, key), prefs.notifyChatOps);
     // The interrupt's intent is discharged — clear the selection regardless of
     // outcome. Failed targets remain visible in the toast; the human can
     // re-select and retry if needed.
