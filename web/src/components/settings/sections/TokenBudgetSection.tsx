@@ -1,6 +1,6 @@
 // Token budget section (WARDEN-415) — backend /api/config. Extracted verbatim
 // from SettingsPage (WARDEN-664); behavior is unchanged.
-import { Checkbox } from '@/components/ui/checkbox';
+import { Switch } from '@/components/ui/switch';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
@@ -11,12 +11,10 @@ export function TokenBudgetSection({ config, setConfig, hidden }: { config: Conf
   return (
     <SettingsSection title="Token budget" className={hidden ? 'hidden' : undefined}>
       <div className="flex items-center gap-2">
-        <Checkbox
+        <Switch
           id="tokenBudgetEnabled"
           checked={config.tokenBudgetEnabled ?? false}
-          onCheckedChange={(checked) =>
-            setConfig({ ...config, tokenBudgetEnabled: checked === true })
-          }
+          onCheckedChange={(v) => setConfig({ ...config, tokenBudgetEnabled: v })}
         />
         <Label htmlFor="tokenBudgetEnabled" className="cursor-pointer">
           Enable token-spend budget alerts

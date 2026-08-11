@@ -1,6 +1,6 @@
 // Performance section (WARDEN-439) — backend /api/config. Extracted verbatim
 // from SettingsPage (WARDEN-664); behavior is unchanged.
-import { Checkbox } from '@/components/ui/checkbox';
+import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
@@ -11,13 +11,11 @@ export function PerformanceSection({ config, setConfig, hidden }: { config: Conf
   return (
     <SettingsSection title="Performance" className={hidden ? 'hidden' : undefined}>
       <div className="flex items-center gap-2">
-        <Checkbox
+        <Switch
           id="companionTransportEnabled"
           checked={config.companionTransportEnabled ?? false}
           disabled={config.companionTransportOverridden}
-          onCheckedChange={(checked) =>
-            setConfig({ ...config, companionTransportEnabled: checked === true })
-          }
+          onCheckedChange={(v) => setConfig({ ...config, companionTransportEnabled: v })}
         />
         <Label
           htmlFor="companionTransportEnabled"
