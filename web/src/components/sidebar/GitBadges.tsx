@@ -9,13 +9,16 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu';
+import { toast } from 'sonner';
+import { copyText } from '@/lib/clipboard';
 import { GitCompare, FileIcon, Search, X, ExternalLink } from 'lucide-react';
 import { DiffBlock } from '@/components/DiffBlock';
 import { DiffViewer } from '@/components/DiffViewer';
 import { CollisionCompareDialog } from '../CollisionCompareDialog';
 import { cn } from '@/lib/utils';
 import { findChat } from '@/lib/agentFilter';
-import { displayName } from '@/lib/chatDisplay';
+import { displayName, basename } from '@/lib/chatDisplay';
 import {
   type ProjectGitAgent,
   type FileCollision,
@@ -130,6 +133,18 @@ function OpenFileAffordance({ path, onOpenFile, className }: { path: string; onO
   );
 }
 
+/** Copy via the Electron-safe helper + a sonner success/error toast — the same
+ *  pattern every sibling Copy slice uses (FleetRecentCommits, DiffViewer,
+ *  ConflictView). Never bare navigator.clipboard, which fails silently in
+ *  Electron (WARDEN-68 Rule 3); the caller owns the toast per the copyText
+ *  contract (lib/clipboard.ts). Module-level: GitChangedFile is rendered once
+ *  per changed file, so there is no reason to re-create it per row. */
+async function copyWithToast(text: string) {
+  const ok = await copyText(text);
+  if (ok) toast.success('Copied');
+  else toast.error('Copy failed');
+}
+
 /** A single changed-file row: status indicator (M/A/D/??) + truncated path.
  *  Interactive (a real <button>) only when `onOpen` is supplied — it opens the
  *  per-file DiffViewer and the click stops propagation so it never also opens the
@@ -169,29 +184,62 @@ export function GitChangedFile({ file, onOpen, onOpenConflict, onOpenFile }: { f
       {onOpenFile && <OpenFileAffordance path={file.path} onOpenFile={onOpenFile} className="shrink-0 ml-1" />}
     </>
   );
-  if (onOpen || onOpenConflict) {
-    return (
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          if (useConflict) onOpenConflict!(file.path);
-          else onOpen?.(file.path, isStaged);
-        }}
-        // Stop the keydown from reaching the parent row's onKeyDown (Enter/Space → open
-        // chat): without this, keyboard-activating the file button would open the chat
-        // pane instead of the diff, because the row handler calls preventDefault() before
-        // the button's activation click can fire.
-        onKeyDown={(e) => e.stopPropagation()}
-        title={`${fileSlotLabel(file)} · ${useConflict ? 'view conflict' : isStaged ? 'view staged diff' : 'view diff'}: ${file.path}`}
-        className="flex flex-wrap items-center gap-1 w-full text-left rounded-sm text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
-      >
-        {content}
-      </button>
-    );
-  }
-  return (
+  const row = onOpen || onOpenConflict ? (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        if (useConflict) onOpenConflict!(file.path);
+        else onOpen?.(file.path, isStaged);
+      }}
+      // Stop the keydown from reaching the parent row's onKeyDown (Enter/Space → open
+      // chat): without this, keyboard-activating the file button would open the chat
+      // pane instead of the diff, because the row handler calls preventDefault() before
+      // the button's activation click can fire.
+      onKeyDown={(e) => e.stopPropagation()}
+      title={`${fileSlotLabel(file)} · ${useConflict ? 'view conflict' : isStaged ? 'view staged diff' : 'view diff'}: ${file.path}`}
+      className="flex flex-wrap items-center gap-1 w-full text-left rounded-sm text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+    >
+      {content}
+    </button>
+  ) : (
     <span className="flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground">{content}</span>
+  );
+  return (
+    // Themed right-click Copy menu (Context-Menu Completeness roadmap / WARDEN-917).
+    // Wrapping the ROW here closes all three call sites at once — the Source Control
+    // panel's buckets, an expanded commit's/stash's touched-file list, and the
+    // non-interactive <span> inside CommitFile (the gap WARDEN-875's comment named) —
+    // with no new props and no change to SourceControlPanel. The path is otherwise
+    // completely uncopyable: left-click on the <button> branch is consumed to open the
+    // diff/ConflictView, so there is no drag-select and, until now, no menu.
+    //
+    // Radix's ContextMenu root renders no DOM element and `asChild` merges only
+    // handlers onto the existing <button>/<span>, so the row's layout, its role, and the
+    // interactive-nesting shape documented above are all unchanged — as is the onKeyDown
+    // stopPropagation that keeps the parent chat row from stealing Enter/Space.
+    //
+    // Nesting (call sites 2 + 3 sit inside ChatRows' own ContextMenuTrigger via
+    // GitBranchBadge): exactly ONE menu opens, and no explicit stopPropagation is needed.
+    // Radix's trigger calls event.preventDefault() after opening
+    // (@radix-ui/react-context-menu/dist/index.mjs:84-88) and the ANCESTOR trigger wraps
+    // its open handler in composeEventHandlers, which skips when event.defaultPrevented
+    // (@radix-ui/primitive/dist/index.mjs:3-9) — so the innermost trigger wins. Same
+    // mechanism PaneTile relies on for its terminal-inside-pane menus (WARDEN-380);
+    // verified live here by right-clicking a file row inside an expanded sidebar commit.
+    <ContextMenu>
+      <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
+      <ContextMenuContent>
+        {/* The full path, never truncated — the row wraps but is not selectable. */}
+        <ContextMenuItem onSelect={() => copyWithToast(file.path)}>Copy file path</ContextMenuItem>
+        {/* Mirrors the "Copy filename" vocabulary of the DiffViewer / FileViewer /
+            ConflictView siblings this row opens (WARDEN-472 / 445 / 536). */}
+        <ContextMenuItem onSelect={() => copyWithToast(basename(file.path))}>Copy filename</ContextMenuItem>
+        {/* The same human-readable staged/unstaged/conflict label the row's title
+            attribute shows — hover-only text, so copying it needed a menu. */}
+        <ContextMenuItem onSelect={() => copyWithToast(fileSlotLabel(file))}>Copy status</ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
