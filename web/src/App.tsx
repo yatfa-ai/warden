@@ -45,6 +45,7 @@ import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { useConfigPersistence, type PersistedPrefSnapshot } from '@/lib/useConfigPersistence';
 import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS } from '@/lib/pollInterval';
+import { swapPanes } from '@/lib/paneGrid';
 import { toast } from 'sonner';
 
 // WARDEN-436: the return banner may FIRST appear only within this window after the
@@ -1200,6 +1201,22 @@ function App() {
     // pane must restore the grid, not blank it.
     setMaximized((m) => (m === id ? null : m));
   }, [setOpenPanes, setFocused]);
+  // WARDEN-909: drag a pane onto another pane tile → swap their positions in the
+  // active workspace's openPanes. Routed through the setOpenPanes shim with a
+  // functional update, so it always targets the CURRENTLY active workspace and
+  // `workspaces` (already in PERSISTED_PREF_KEYS) persists the new order with no
+  // extra wiring — a reordered grid survives a reload under restoreOnStartup
+  // 'previous'. Nothing else needs touching: `focused` and `maximized` hold pane
+  // IDS and paneHost is keyed by pane id, so focus, maximize and each pane's host
+  // follow the pane into its new slot rather than staying with the slot. The
+  // column/row resize ratios are per-TRACK weights whose count is unchanged by a
+  // swap, so the grid's track sizes stay exactly as the user dragged them and
+  // nothing jumps — the two panes simply exchange slots inside that layout.
+  // swapPanes returns the SAME array on any no-op (self-drop, unknown id), which
+  // the shim's `next === w.openPanes` check turns into no state change at all.
+  const reorderPanes = useCallback((dragId: string, targetId: string) => {
+    setOpenPanes((p) => swapPanes(p, dragId, targetId));
+  }, [setOpenPanes]);
   // reopen a recently-closed pane: drop it from the recovery list (it is no longer
   // closed), then open it. openChat re-primes paneHost from the live catalog entry,
   // so a remote pane re-discovers its host on reopen.
@@ -1999,6 +2016,7 @@ function App() {
             fileViewerViewMode={fileViewerViewMode}
             onFileViewerViewModeChange={setFileViewerViewMode}
             pollIntervalMs={pollIntervalMs}
+            onReorderPanes={reorderPanes}
           />
         </section>
         <section className="border-l min-h-0 transition-all duration-200 ease-in-out overflow-hidden relative"

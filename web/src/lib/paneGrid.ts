@@ -234,3 +234,34 @@ export function gutterCenters(ratios: number[], size: number, gap: number, floor
   }
   return out;
 }
+
+// --- Drag-to-reorder panes within the grid (WARDEN-909) -----------------------
+//
+// Swap two panes' positions in an openPanes array, resolved BY ID — never by a
+// filtered/visible index. The grid's rendered tile list can be a strict SUBSET
+// of openPanes (maximized → exactly one tile), so a position derived from the
+// visible array would point at the wrong element of the source array: the
+// index-space trap (WARDEN-108). Both endpoints arrive here as stable pane ids
+// and are located with indexOf against the REAL array, so the visible set's
+// shape is irrelevant to the result.
+//
+// Returns the SAME array reference for every no-op — same id twice (a pane
+// dropped on itself), or either id absent (a stale drag payload, a pane closed
+// mid-drag, a drop from another workspace's grid). App routes this through the
+// `setOpenPanes` shim, whose updater short-circuits on `next === w.openPanes`,
+// so an identity return means no workspace object is replaced: no re-render, no
+// persistence write, no state churn. A no-op is therefore genuinely harmless,
+// not merely "harmless-looking".
+//
+// Swap, not insert/shift: the two panes exchange slots and every other pane
+// stays put (ticket scope — list-style reordering is explicitly out of scope).
+export function swapPanes(arr: string[], idA: string, idB: string): string[] {
+  if (!Array.isArray(arr) || idA === idB) return arr;
+  const a = arr.indexOf(idA);
+  const b = arr.indexOf(idB);
+  if (a < 0 || b < 0) return arr; // one endpoint isn't in this array → no-op
+  const next = arr.slice();
+  next[a] = idB;
+  next[b] = idA;
+  return next;
+}

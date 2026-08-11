@@ -39,7 +39,7 @@ const { code } = await transformWithOxc(src, paneGridPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-paneGrid-test-'));
 const tmpFile = join(tmpDir, 'paneGrid.mjs');
 writeFileSync(tmpFile, code);
-const { resolveVisibleTiles, gridShape, equalRatios, effectiveRatios, redistributeRatios, resolveJunctionAxis, gutterCenters, resolveTrackWidths, PANE_COL_FLOOR_REM, PANE_ROW_FLOOR_REM } = await import(tmpFile);
+const { resolveVisibleTiles, gridShape, equalRatios, effectiveRatios, redistributeRatios, resolveJunctionAxis, gutterCenters, resolveTrackWidths, swapPanes, PANE_COL_FLOOR_REM, PANE_ROW_FLOOR_REM } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -544,6 +544,102 @@ test('the threshold boundary: travel equal to threshold is decisive (>=, not str
   assert.equal(resolveJunctionAxis(3, 0, 3), 'col', 'dx == threshold → decisive');
   assert.equal(resolveJunctionAxis(2, 3, 3), 'row', 'dy == threshold, dx under → decisive row');
   assert.equal(resolveJunctionAxis(2, 2, 3), null, 'both == threshold-1 → still null');
+});
+
+// --- Drag-to-reorder: swapPanes (WARDEN-909) ---------------------------------
+//
+// Dropping a pane header onto another pane tile swaps the two panes' positions
+// in the active workspace's openPanes. The load-bearing property is WARDEN-108:
+// the drop resolves BY PANE ID, so it addresses the right elements of openPanes
+// even when the rendered tile list is a subset of it.
+
+test('a swap exchanges exactly the two panes and leaves every other pane put', () => {
+  const openPanes = ['a', 'b', 'c', 'd'];
+  assert.deepEqual(swapPanes(openPanes, 'a', 'd'), ['d', 'b', 'c', 'a'], 'ends swapped, middle untouched');
+  assert.deepEqual(swapPanes(openPanes, 'b', 'c'), ['a', 'c', 'b', 'd'], 'adjacent pair swapped in place');
+  assert.deepEqual(openPanes, ['a', 'b', 'c', 'd'], 'the source array is never mutated');
+});
+
+test('the swap is symmetric — drag direction does not change the result', () => {
+  // The drop handler passes (draggedId, targetId); dragging b onto d and d onto
+  // b are the same gesture from either end and must land the same order.
+  assert.deepEqual(swapPanes(['a', 'b', 'c', 'd'], 'b', 'd'), swapPanes(['a', 'b', 'c', 'd'], 'd', 'b'));
+});
+
+test('every no-op returns the SAME array reference (so App writes no state)', () => {
+  // App routes this through the setOpenPanes shim, whose updater short-circuits
+  // on `next === w.openPanes`. Identity — not just deep equality — is what makes
+  // a no-op cost zero renders and zero persistence writes, so it is asserted
+  // with strictEqual on the reference.
+  const openPanes = ['a', 'b', 'c'];
+  assert.strictEqual(swapPanes(openPanes, 'b', 'b'), openPanes, 'pane dropped on itself');
+  assert.strictEqual(swapPanes(openPanes, 'a', 'zz'), openPanes, 'target id absent (closed mid-drag)');
+  assert.strictEqual(swapPanes(openPanes, 'zz', 'a'), openPanes, 'dragged id absent (stale payload)');
+  assert.strictEqual(swapPanes(openPanes, 'zz', 'yy'), openPanes, 'neither id present');
+  const empty = [];
+  assert.strictEqual(swapPanes(empty, 'a', 'b'), empty, 'empty array is inert');
+});
+
+// Mini-model of the PaneGrid drop handler: the grid renders `visible` (which
+// resolveVisibleTiles may narrow to a single maximized tile), the user drops
+// tile X onto tile Y, and the handler swaps them in the REAL openPanes by id.
+const dropPaneOnPane = (openPanes, maximized, draggedId, targetId) => {
+  const { visible } = resolveVisibleTiles(maximized, openPanes.map(tile));
+  // Only a rendered tile can be a drop target — a drop on a tile that isn't in
+  // the grid is not reachable, so the model refuses it like the DOM would.
+  if (!visible.some((t) => t.id === targetId)) return openPanes;
+  return swapPanes(openPanes, draggedId, targetId);
+};
+
+test('a swap driven from a SUBSET view still moves the right panes (WARDEN-108)', () => {
+  // The regression this pins: `visible` is a filtered view, so a handler that
+  // used the VISIBLE index would reorder the wrong elements of openPanes. Here
+  // the grid is scrolled to a subset-shaped state — panes b and d are the ones
+  // dropped, and their positions in openPanes (1 and 3) are what must change,
+  // not positions 0 and 1 (their would-be indices in a two-element view).
+  const openPanes = ['a', 'b', 'c', 'd'];
+  const visibleIdx = ['b', 'd']; // what a filtered view would hand a naive handler
+  const naive = openPanes.slice();
+  // The BUG, kept to demonstrate it: swap by filtered index 0 <-> 1.
+  const i = visibleIdx.indexOf('b'), j = visibleIdx.indexOf('d');
+  [naive[i], naive[j]] = [naive[j], naive[i]];
+  assert.deepEqual(naive, ['b', 'a', 'c', 'd'], 'filtered indices corrupt the order (the trap)');
+  // The FIX: resolve by id against the real array.
+  assert.deepEqual(swapPanes(openPanes, 'b', 'd'), ['a', 'd', 'c', 'b'], 'id-space swap moves b and d');
+});
+
+test('a reorder attempt while maximized is a harmless no-op', () => {
+  // Maximized → resolveVisibleTiles narrows the grid to ONE tile, so the only
+  // reachable drop target is the maximized pane itself and the drop is a self-
+  // drop. Nothing may change and nothing may error.
+  const openPanes = ['a', 'b', 'c'];
+  assert.strictEqual(dropPaneOnPane(openPanes, 'b', 'b', 'b'), openPanes, 'self-drop on the only tile');
+  assert.strictEqual(dropPaneOnPane(openPanes, 'b', 'b', 'c'), openPanes, 'a hidden tile is not a drop target');
+});
+
+test('a swap leaves focus / maximize / host targets valid, since all are pane ids', () => {
+  // focused, maximized and paneHost's keys are pane IDS, so a reorder cannot
+  // invalidate them: every id present before the swap is present after it. This
+  // is the "nothing resets or jumps" acceptance, asserted as a set-identity
+  // property rather than by eyeballing the UI.
+  const openPanes = ['a', 'b', 'c', 'd'];
+  const next = swapPanes(openPanes, 'a', 'c');
+  assert.deepEqual([...next].sort(), [...openPanes].sort(), 'same pane id set, different order');
+  assert.equal(next.length, openPanes.length, 'no pane gained or lost');
+  for (const id of ['a', 'b', 'c', 'd']) {
+    assert.ok(next.includes(id), `${id} (a focus/maximize/paneHost key) survives the swap`);
+  }
+});
+
+test('the swapped order is what persists — it round-trips through JSON intact', () => {
+  // `workspaces` is persisted whole (PERSISTED_PREF_KEYS), so the reordered
+  // array is the thing that survives a reload under restoreOnStartup 'previous'.
+  // Modeled as the real serialize → restore hop the persistence layer performs.
+  const ws = { id: 'w1', name: 'Workspace 1', openPanes: ['a', 'b', 'c'], focused: 'c', recentlyClosed: [] };
+  const reordered = { ...ws, openPanes: swapPanes(ws.openPanes, 'a', 'c') };
+  const restored = JSON.parse(JSON.stringify([reordered]))[0];
+  assert.deepEqual(restored.openPanes, ['c', 'b', 'a'], 'the new order is what comes back');
+  assert.equal(restored.focused, 'c', 'focus still names the same pane, now in a new slot');
 });
 
 console.log(`\n✓ PANEGRID TESTS PASS (total: ${passed})`);
