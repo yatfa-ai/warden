@@ -11,7 +11,7 @@
 // transpile-to-temp-`.mjs` + dynamic-`import()` harness (see broadcast.test.mjs),
 // matching chatDisplay.test.mjs / gitStateSummary.test.mjs.
 
-import { summarizeFanout } from './fanout';
+import { summarizeFanout, type FanoutToast, type FanoutToastVariant } from './fanout';
 
 /** Outcome of one agent's /api/send: either ok, or not-ok with a reason. */
 export interface SendOutcome { ok: boolean; error?: string }
@@ -52,14 +52,14 @@ export function summarizeBroadcast(
   return { total, sent: succeeded, failed };
 }
 
-/** Toast variant for a broadcast summary — success only when every agent got it. */
-export type BroadcastToastVariant = 'success' | 'error';
+/**
+ * Toast variant / shape for a broadcast summary. Both alias the shared fan-out
+ * types (./fanout) — see kill.ts for the rationale. The names are kept as
+ * exported aliases so existing importers are unaffected.
+ */
+export type BroadcastToastVariant = FanoutToastVariant;
 
-export interface BroadcastToast {
-  title: string;
-  description?: string;
-  variant: BroadcastToastVariant;
-}
+export type BroadcastToast = FanoutToast;
 
 /**
  * Shape the result toast for a broadcast summary.
@@ -70,7 +70,9 @@ export interface BroadcastToast {
  *   WHICH sessions didn't get the message and why — host unreachable, session
  *   dead, etc.). The description is the full failure list (not truncated): the
  *   sidebar's own selection caps it at a human-scale N, and sonner wraps a long
- *   description in a scrollable toast body.
+ *   description in a scrollable toast body. Rendered by showFanoutToast
+ *   (./fanoutToast), which wraps it in `whitespace-pre-line` so each failure
+ *   lands on its own line.
  */
 export function formatBroadcastToast(s: BroadcastSummary): BroadcastToast {
   if (s.failed.length === 0) {

@@ -27,6 +27,25 @@ export interface FanoutSummary {
   failed: FanoutFailure[];
 }
 
+/** Result-toast variant — success only when EVERY agent in the fan-out succeeded. */
+export type FanoutToastVariant = 'success' | 'error';
+
+/**
+ * The shape every fan-out result formatter returns (formatKillToast /
+ * formatBroadcastToast / formatKeySendToast). The three used to declare three
+ * structurally identical interfaces; they now alias this one so the single
+ * renderer (showFanoutToast in ./fanoutToast) has one type to accept.
+ *
+ * `description`, when present, is the `\n`-joined per-agent failure list — it
+ * MUST be rendered with `whitespace-pre-line` (showFanoutToast does this) or the
+ * lines collapse into one run-on string.
+ */
+export interface FanoutToast {
+  title: string;
+  description?: string;
+  variant: FanoutToastVariant;
+}
+
 /**
  * Reduce `Promise.allSettled` outcomes into a per-agent fan-out summary.
  *

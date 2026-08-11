@@ -38,6 +38,7 @@ import { SelectionActionBar } from './sidebar/SidebarBits';
 import { DiffStatChip } from './sidebar/DiffStatChip';
 import { formatKillToast, runKillFanout } from '@/lib/kill';
 import { formatKeySendToast, runKeySendFanout } from '@/lib/keysend';
+import { showFanoutToast } from '@/lib/fanoutToast';
 import { isSelectedAll, toggleGroupSelection } from '@/lib/selection';
 import { useHostStatuses, refreshHostStatuses } from '@/lib/useHostStatuses';
 import { useActivitySeries } from '@/lib/useActivitySeries';
@@ -942,16 +943,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
       );
       await fetchHealth();
     });
-    const outcome = formatKillToast(summary);
-    if (prefs.notifyChatOps) {
-      if (outcome.variant === 'success') {
-        toast.success(outcome.title);
-      } else {
-        // whitespace-pre-line so the per-agent failure list (joined with \n in
-        // formatKillToast) renders one failure per line instead of collapsing.
-        toast.error(outcome.title, { description: <span className="whitespace-pre-line">{outcome.description}</span> });
-      }
-    }
+    showFanoutToast(formatKillToast(summary), prefs.notifyChatOps);
     // The kill's intent is discharged — clear the selection regardless of outcome.
     setSelectedIds(new Set());
     return summary;
@@ -975,16 +967,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
       return a ? displayName(a) : id;
     };
     const summary = await runKeySendFanout(ids, key, nameOf);
-    const outcome = formatKeySendToast(summary, key);
-    if (prefs.notifyChatOps) {
-      if (outcome.variant === 'success') {
-        toast.success(outcome.title);
-      } else {
-        // whitespace-pre-line so the per-agent failure list (joined with \n in
-        // formatKeySendToast) renders one failure per line instead of collapsing.
-        toast.error(outcome.title, { description: <span className="whitespace-pre-line">{outcome.description}</span> });
-      }
-    }
+    showFanoutToast(formatKeySendToast(summary, key), prefs.notifyChatOps);
     // The interrupt's intent is discharged — clear the selection regardless of outcome.
     setSelectedIds(new Set());
     return summary;

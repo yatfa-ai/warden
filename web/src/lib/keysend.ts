@@ -30,7 +30,7 @@
 // module loads under the same transpile-to-temp-`.mjs` + dynamic-`import()`
 // harness as broadcast.ts / kill.ts (see keysend.test.mjs).
 
-import { summarizeFanout } from './fanout';
+import { summarizeFanout, type FanoutToast, type FanoutToastVariant } from './fanout';
 
 /** Outcome of one agent's /api/key: either ok, or not-ok with a reason. */
 export interface KeySendOutcome { ok: boolean; error?: string }
@@ -61,14 +61,14 @@ export function summarizeKeySend(
   return { total, sent: succeeded, failed };
 }
 
-/** Toast variant for a key-send summary — success only when every agent got it. */
-export type KeySendToastVariant = 'success' | 'error';
+/**
+ * Toast variant / shape for a key-send summary. Both alias the shared fan-out
+ * types (./fanout) — see kill.ts for the rationale. The names are kept as
+ * exported aliases so existing importers are unaffected.
+ */
+export type KeySendToastVariant = FanoutToastVariant;
 
-export interface KeySendToast {
-  title: string;
-  description?: string;
-  variant: KeySendToastVariant;
-}
+export type KeySendToast = FanoutToast;
 
 // The human-facing verb depends on what the key DOES, not the raw tmux token:
 // C-c interrupts the foreground process (SIGINT); Escape dismisses a prompt /
@@ -97,8 +97,9 @@ const COPY: Record<string, { verb: string; verbInf: string; obj: string }> = {
  *   human can see WHICH sessions didn't respond and why — host unreachable,
  *   session dead, etc.). The description is the full failure list (not
  *   truncated): the selection caps it at a human-scale N, and sonner wraps a long
- *   description in a scrollable toast body. Rendered with `whitespace-pre-line`
- *   by the caller so each failure lands on its own line.
+ *   description in a scrollable toast body. Rendered by showFanoutToast
+ *   (./fanoutToast), which wraps it in `whitespace-pre-line` so each failure
+ *   lands on its own line.
  */
 export function formatKeySendToast(s: KeySendSummary, key: string): KeySendToast {
   const { verb = 'Sent', verbInf = 'send', obj = ` ${key} to` } = COPY[key] ?? {};
