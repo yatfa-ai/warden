@@ -701,10 +701,17 @@ export function attachTmux(chat, args, { cols = 100, rows = 30 } = {}) {
   return attachPty(chat.host, prefix + 'tmux ' + args.map(shellQuote).join(' '), { cols, rows });
 }
 
-// Resolve a binary through the WINDOWS PATH (`where`), PATHEXT-aware. Returns the
-// first hit as an absolute path, or null. Async (WARDEN-440): never blocks the
-// event loop. `deps.spawn` is a test seam so the Windows branch is assertable
-// from a Linux CI runner.
+// Extensions Windows can actually LAUNCH — `.exe`/`.com` are executable images
+// CreateProcess runs directly, `.cmd`/`.bat` are scripts cmd.exe runs. Anything
+// else `where` reports (notably npm's extensionless POSIX shim and its `.ps1`
+// sibling) is not something ConPTY can start.
+const LAUNCHABLE_EXT = /\.(exe|com|cmd|bat)$/i;
+
+// Resolve a binary through the WINDOWS PATH (`where`), PATHEXT-aware. Returns an
+// absolute path to a LAUNCHABLE hit (see LAUNCHABLE_EXT — not merely the first
+// line; see the note at the resolve below), or null. Async (WARDEN-440): never
+// blocks the event loop. `deps.spawn` is a test seam so the Windows branch is
+// assertable from a Linux CI runner.
 export function whereWindows(bin, deps = {}) {
   const sp = deps.spawn ?? spawn;
   return new Promise((resolve) => {
@@ -720,8 +727,17 @@ export function whereWindows(bin, deps = {}) {
     // 'close' (not 'exit') so stdout has fully drained before we read it.
     child.on('close', (code) => {
       if (code !== 0) return resolve(null);
-      const first = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0];
-      resolve(first || null);
+      const hits = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      // NOT simply `hits[0]`. `where` lists the EXACT-name match first, and npm on
+      // Windows drops three files in its prefix dir — `claude`, `claude.cmd`,
+      // `claude.ps1` — so the first line of the overwhelmingly common install is
+      // the EXTENSIONLESS POSIX shim (the same shape as the familiar
+      // `where npm` → `…\nodejs\npm` then `…\nodejs\npm.cmd`). That shim is not a
+      // launchable image: CreateProcess/ConPTY cannot run it, and handing it to
+      // cmd.exe would only work by accident, via cmd's implicit PATHEXT search.
+      // Choose the launchable entry explicitly instead — that is what makes
+      // buildLaunch's `.cmd` → %ComSpec% branch the branch that actually runs.
+      resolve(hits.find((p) => LAUNCHABLE_EXT.test(p)) || hits[0] || null);
     });
   });
 }
@@ -748,7 +764,7 @@ export async function detectClaude(host, deps = {}) {
     // ConPTY for the same .cmd reason. `where` gives us both, PATHEXT-aware, and
     // costs one async spawn.
     if (process.platform === 'win32') {
-      return whereWindows('claude');
+      return whereWindows('claude', deps);
     }
     // ASYNC spawn (WARDEN-440): `claude --version` is a Node CLI cold-start; a
     // synchronous spawnSync here held the event loop for its duration on every

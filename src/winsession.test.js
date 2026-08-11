@@ -398,6 +398,39 @@ describe('attach — the live pane handle', () => {
     assert.strictEqual(seen[seen.length - 1], 'live output');
   });
 
+  it('replays multi-line history as CRLF, not bare LF (the pane would staircase)', async () => {
+    // The pane's xterm is built with `convertEol: false` (PaneTile.tsx), so a bare
+    // LF moves the cursor DOWN without returning it to column 0. The scrollback's
+    // capture() is `\n`-joined by design (that IS what tmux capture-pane emits, and
+    // its other consumers want it), so the conversion has to happen where the text
+    // becomes a terminal BYTE STREAM. Asserted byte-for-byte: a regex match over a
+    // single line cannot see a missing CR, which is how this passed before.
+    const { mgr, pty } = harness();
+    await mgr.run(newSession('agent'));
+    pty().emit('PS C:\\Users\\me> dir\r\nfile1.txt\r\nfile2.txt\r\n');
+
+    const client = mgr.attach(['attach', '-t', 'agent'], { cols: 80, rows: 24 });
+    const seen = [];
+    client.onData((d) => seen.push(d));
+    await tick();
+    assert.strictEqual(seen[0], 'PS C:\\Users\\me> dir\r\nfile1.txt\r\nfile2.txt\r\n');
+  });
+
+  it('the replay is bounded to the client viewport, like tmux attach repainting the screen', async () => {
+    // Our scrollback is a linear log of every line ever printed; a full-screen TUI
+    // (Claude Code) redraws its whole frame continuously, so an unbounded replay
+    // would push thousands of stale frames ahead of the live stream on EVERY attach.
+    const { mgr, pty } = harness();
+    await mgr.run(newSession('agent'));
+    for (let i = 1; i <= 100; i++) pty().emit(`line ${i}\r\n`);
+
+    const client = mgr.attach(['attach', '-t', 'agent'], { cols: 80, rows: 10 });
+    const seen = [];
+    client.onData((d) => seen.push(d));
+    await tick();
+    assert.strictEqual(seen[0], Array.from({ length: 10 }, (_, i) => `line ${91 + i}`).join('\r\n') + '\r\n');
+  });
+
   it('output arriving during attach is queued BEHIND the replay, never ahead of it', async () => {
     // The replay is deferred one turn (so the caller can wire onExit first). Any
     // output the terminal produces in that window belongs AFTER the history it

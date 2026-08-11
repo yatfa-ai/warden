@@ -96,6 +96,16 @@ export class Scrollback {
   }
 }
 
+// `capture()` returns tmux `capture-pane` TEXT — `\n`-separated lines, with every
+// `\r` already consumed by the line model above. That is correct for its two
+// consumers (the transcript read and the activity preview), and matches what real
+// `tmux capture-pane -p` emits. But the attach replay feeds that same string to a
+// real xterm constructed with `convertEol: false`, where a bare LF moves the
+// cursor DOWN without returning it to column 0 — so the replayed screen
+// staircases. A terminal byte stream needs CRLF; the captured text does not.
+// Convert at that boundary only, never in `capture()` itself.
+function toCrlf(s) { return String(s).replace(/\r?\n/g, '\r\n'); }
+
 // ---------------- key + argv helpers ----------------
 
 // tmux key names → the bytes a terminal actually sends. Mirrors tmux.js
@@ -397,13 +407,19 @@ export function createSessionManager(deps = {}) {
     // order. Live chunks queue behind the backlog until it has been delivered —
     // without this, output produced between onData() and the deferred flush would
     // reach the pane BEFORE the history it comes after.
-    const backlog = session.scrollback.capture({ ansi: true });
+    // Bounded to the client's viewport because that is what `tmux attach` does:
+    // it repaints the CURRENT SCREEN, not the entire history buffer. Our
+    // scrollback is a linear log of every line the pty ever printed, so for a
+    // full-screen TUI (Claude Code, the headline consumer, redraws its whole
+    // frame continuously) an unbounded replay would push thousands of stale
+    // frames ahead of the live stream on every attach.
+    const backlog = toCrlf(session.scrollback.capture({ ansi: true, lines: rows }));
     const queued = [];
     let flushed = false;
     function flush() {
       if (flushed) return;
       flushed = true;
-      if (backlog) emit(backlog.endsWith('\n') ? backlog : backlog + '\r\n');
+      if (backlog) emit(backlog.endsWith('\r\n') ? backlog : backlog + '\r\n');
       while (queued.length) emit(queued.shift());
     }
     function emit(d) { for (const cb of [...dataCbs]) cb(d); }
@@ -492,7 +508,12 @@ function manager() {
   return shared;
 }
 
-export function runNative(args) {
+// `opts` (the `{ timeout }` runLocalTmux passes through) is accepted and
+// deliberately IGNORED: a native command is answered from the in-process session
+// registry with no child process and no I/O, so it always settles synchronously —
+// there is nothing a timeout could interrupt. Named rather than omitted so the
+// divergence from the ssh `run` contract is visible at the signature.
+export function runNative(args, _opts = {}) {
   return manager().run(args);
 }
 

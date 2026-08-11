@@ -37,7 +37,8 @@ All durable; survive a warden restart (reattaches to tmux).
 **Local Windows is native (WARDEN-922)** — no tmux, no MSYS2, no bash. `src/winsession.js` implements the
 tmux argv subset in-process over node-pty/ConPTY, spawning the native shell directly (the VSCode primitive).
 Local Windows sessions are tied to the Warden process and do NOT survive a restart; `WARDEN_WIN_TMUX=1`
-restores the legacy MSYS2-tmux path. Remote/docker/yatfa are untouched.
+restores the legacy MSYS2-tmux path, and `WARDEN_WIN_SHELL` overrides the shell that would otherwise be
+auto-detected (PowerShell, else `%ComSpec%`). Remote/docker/yatfa are untouched.
 
 **Resume** (`/api/resume`): spawn `claude --resume <id>` in tmux. Per-host Claude Code sessions listed lazily (`/api/claude-sessions?host=`).
 

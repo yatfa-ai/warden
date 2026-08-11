@@ -30,7 +30,8 @@ npm start
 VSCode's integrated terminal uses), so you get PowerShell/cmd rather than bash, and no MSYS2 install.
 Remote hosts you SSH into still need tmux on their side. (Local Windows sessions live in the Warden
 process and, like a VSCode terminal, don't survive Warden being closed; set `WARDEN_WIN_TMUX=1` to fall
-back to the old MSYS2-tmux behavior.)
+back to the old MSYS2-tmux behavior, or `WARDEN_WIN_SHELL=C:\path\to\shell.exe` to spawn a shell other
+than the auto-detected PowerShell/cmd.)
 
 **Requires Node.js 18+** (tested on v24).
 
