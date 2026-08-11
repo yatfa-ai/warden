@@ -184,8 +184,26 @@ describe('tmux spawn() — exact new-session argv (WARDEN-386)', () => {
     assert.strictEqual(calls[0].args[cwdIdx + 1], 'C:\\work\\proj', 'cwd passed verbatim, not msys-translated');
   });
 
-  it('omits -c when cwd is empty', async () => {
+  it('keeps a QUOTED path with spaces as one argv element (WARDEN-922)', async () => {
+    // resolveClaudeCmd quotes a resolved claude path that contains a space —
+    // routine on Windows (C:\Program Files\…\claude.cmd). A whitespace-only split
+    // would tear it into "C:\Program" + "Files\…", so `claude --resume <id>`
+    // would resolve to a real installed binary and then fail to launch.
     const { fn, calls } = recordingRun();
+    const chat = {
+      host: '(local)',
+      session: 'resume-abc',
+      cwd: '',
+      cmd: '"C:\\Program Files\\npm\\claude.cmd" --resume abc123 --dangerously-skip-permissions',
+    };
+    await spawn(chat, {}, { runTmux: fn, isCompanionTransportEnabled: () => false });
+    assert.deepStrictEqual(calls[0].args, [
+      'new-session', '-d', '-s', 'resume-abc', '-x', '120', '-y', '32',
+      'C:\\Program Files\\npm\\claude.cmd', '--resume', 'abc123', '--dangerously-skip-permissions',
+    ]);
+  });
+
+  it('omits -c when cwd is empty', async () => {    const { fn, calls } = recordingRun();
     const chat = { host: 'prod-1', session: 's', cwd: '', cmd: 'claude' };
     await spawn(chat, {}, { runTmux: fn, isCompanionTransportEnabled: () => false });
     assert.strictEqual(calls[0].args.includes('-c'), false, 'no -c when cwd is empty');

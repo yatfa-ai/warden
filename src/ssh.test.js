@@ -1,6 +1,6 @@
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert';
-import { isTransportFailure, runWithPool, detectClaude } from './ssh.js';
+import { isTransportFailure, runWithPool, detectClaude, whereWindows } from './ssh.js';
 
 /**
  * Tests for the SSH connection-pool self-healing layer (WARDEN-129):
@@ -336,5 +336,63 @@ describe('detectClaude (remote) — concurrent, priority-preserving (WARDEN-440)
     const result = await detectClaude('remote-host', { runWithPool });
 
     assert.strictEqual(result, '/usr/bin/claude', 'survived the rejecting zsh probe via the fallback bash/path probe');
+  });
+});
+
+/**
+ * WARDEN-922 — Claude resolution on local Windows must use the WINDOWS PATH.
+ *
+ * The old local probe was `spawn('claude', ['--version'])`, which on Windows can
+ * never succeed for an npm-installed claude: it lands as a `claude.cmd` shim, and
+ * CreateProcess (child_process.spawn without a shell, and ConPTY) cannot execute
+ * a .cmd at all — so a machine WITH claude installed reported "not found" and
+ * `claude --resume <id>` was unreachable. `where` resolves through PATHEXT and
+ * hands back the full path, which is also what ConPTY needs to launch it.
+ *
+ * The `deps.spawn` seam lets the Windows-only branch be driven from any runner.
+ */
+describe('whereWindows (Windows PATH resolution — WARDEN-922)', () => {
+  // Minimal child_process.spawn stand-in: emits `stdout`, then closes with `code`.
+  function fakeSpawn({ stdout = '', code = 0, error = null, throws = false } = {}) {
+    return mock.fn((_file, _args) => {
+      if (throws) throw new Error('spawn threw');
+      const outCbs = [];
+      const child = {
+        stdout: { on: (_e, cb) => outCbs.push(cb) },
+        on(event, cb) {
+          if (event === 'error' && error) setImmediate(() => cb(error));
+          if (event === 'close' && !error) {
+            setImmediate(() => {
+              for (const c of outCbs) c(stdout);
+              cb(code);
+            });
+          }
+          return child;
+        },
+      };
+      return child;
+    });
+  }
+
+  it('returns the FIRST `where` hit as a full path', async () => {
+    const spawn = fakeSpawn({ stdout: 'C:\\Users\\u\\AppData\\Roaming\\npm\\claude.cmd\r\nC:\\other\\claude.exe\r\n' });
+    const r = await whereWindows('claude', { spawn });
+    assert.strictEqual(r, 'C:\\Users\\u\\AppData\\Roaming\\npm\\claude.cmd');
+    assert.deepStrictEqual(spawn.mock.calls[0].arguments.slice(0, 2), ['where', ['claude']]);
+  });
+
+  it('returns null when `where` reports not found (non-zero exit)', async () => {
+    const r = await whereWindows('claude', { spawn: fakeSpawn({ stdout: '', code: 1 }) });
+    assert.strictEqual(r, null);
+  });
+
+  it('returns null (never throws) when the probe itself fails', async () => {
+    assert.strictEqual(await whereWindows('claude', { spawn: fakeSpawn({ error: new Error('ENOENT') }) }), null);
+    assert.strictEqual(await whereWindows('claude', { spawn: fakeSpawn({ throws: true }) }), null);
+  });
+
+  it('ignores blank lines rather than returning an empty string as a path', async () => {
+    const r = await whereWindows('claude', { spawn: fakeSpawn({ stdout: '\r\n\r\nC:\\tools\\claude.exe\r\n' }) });
+    assert.strictEqual(r, 'C:\\tools\\claude.exe');
   });
 });

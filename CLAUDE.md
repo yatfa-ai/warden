@@ -28,11 +28,16 @@ Non-interactive SSH doesn't load PATH, so **always wrap remote commands in a log
 - **Frontend** (`web/`): Vite + React + TS + Tailwind v4 + **shadcn/ui**, xterm via `@xterm/xterm`. `npm run build` → `web/dist`; node serves it.
 - Headless verification: `node web/smoke.cjs` (puppeteer-core + Edge).
 
-## Chat model — tmux everywhere
-**tmux is required** (native on Linux/macOS; MSYS2 on Windows). Every chat is a tmux session:
+## Chat model — tmux everywhere (except local Windows)
+**tmux is required** on Linux/macOS and on every remote host. Every chat is a tmux session:
 - **yatfa** (`kind:'yatfa'`): `container` set, `session='agent'`, in a docker container.
 - **manual** (`kind:'tmux'`): `container=null`, `session=<name>`. `host='(local)'` → local tmux; any other host → tmux over SSH.
 All durable; survive a warden restart (reattaches to tmux).
+
+**Local Windows is native (WARDEN-922)** — no tmux, no MSYS2, no bash. `src/winsession.js` implements the
+tmux argv subset in-process over node-pty/ConPTY, spawning the native shell directly (the VSCode primitive).
+Local Windows sessions are tied to the Warden process and do NOT survive a restart; `WARDEN_WIN_TMUX=1`
+restores the legacy MSYS2-tmux path. Remote/docker/yatfa are untouched.
 
 **Resume** (`/api/resume`): spawn `claude --resume <id>` in tmux. Per-host Claude Code sessions listed lazily (`/api/claude-sessions?host=`).
 

@@ -2,7 +2,7 @@
 // container; manual: a host/local tmux session). This module builds tmux argv and
 // executes them via the transport layer (ssh.js runTmux/attachTmux), which routes
 // to a remote host over SSH or to this machine locally. tmux is required everywhere.
-import { runTmux, attachTmux, attachInteractiveTmux, toMsysPath } from './ssh.js';
+import { runTmux, attachTmux, attachInteractiveTmux, toMsysPath, splitCmd } from './ssh.js';
 import { isCompanionTransportEnabled, hasSession as companionHasSession, spawnSession, killSession, resize as companionResize, send as companionSend, sendKey as companionSendKey } from './companion.js';
 
 const sess = (chat, cfg) => (chat && chat.session) || (cfg && cfg.tmuxSession) || 'agent';
@@ -283,7 +283,7 @@ export async function resize(chat, cfg, _cols, _rows, deps = {}) {
 export async function spawn(chat, _cfg, deps = {}) {
   const s = sess(chat, _cfg);
   const cwd = chat.host === '(local)' ? toMsysPath(chat.cwd || '') : (chat.cwd || '');
-  const cmdParts = chat.cmd ? String(chat.cmd).split(/\s+/).filter(Boolean) : [];
+  const cmdParts = chat.cmd ? splitCmd(chat.cmd) : [];
   const args = ['new-session', '-d', '-s', s, '-x', '120', '-y', '32'];
   if (cwd) args.push('-c', cwd);
   args.push(...cmdParts);
