@@ -4,9 +4,13 @@
 // addHost/removeHost/setHostLabel handlers are relocated here verbatim from
 // SettingsPage (WARDEN-664) — each operates only on props this section already
 // receives, so behavior is unchanged.
+import { useState } from 'react';
+import { Trash2 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import {
   Select,
   SelectContent,
@@ -38,6 +42,13 @@ export function HostsSection({
   availableHosts,
   hidden,
 }: HostsSectionProps) {
+  // WARDEN-928 — the host pending confirmed removal (`null` = dialog closed).
+  // Hosts are a list, so this is ONE piece of state driving ONE shared
+  // ConfirmDialog, not a boolean per chip. Cancel/Escape/overlay-click clear it
+  // WITHOUT touching setConfig, so a dismissed dialog leaves the draft
+  // byte-identical and never newly dirties the config (web/settingsDirty.test.mjs).
+  const [pendingRemoval, setPendingRemoval] = useState<string | null>(null);
+
   const addHost = (host: string) => {
     if (!config.hosts.includes(host)) {
       setConfig({ ...config, hosts: [...config.hosts, host] });
@@ -66,6 +77,7 @@ export function HostsSection({
   const availableHostsToAdd = availableHosts.filter((h) => !config.hosts.includes(h));
 
   return (
+    <>
     <SettingsSection title="Hosts & Connection" className={hidden ? 'hidden' : undefined}>
       {/* Host Management */}
       <div className="flex flex-col gap-2">
@@ -75,15 +87,23 @@ export function HostsSection({
             <span className="text-xs text-muted-foreground">No hosts configured</span>
           ) : (
             config.hosts.map((host) => (
-              <Badge
-                key={host}
-                variant="secondary"
-                className="cursor-pointer hover:bg-destructive/20"
-                onClick={() => removeHost(host)}
-                title="Click to remove"
-              >
-                {host} ×
-              </Badge>
+              // WARDEN-928 — the chip BODY is inert. Removal lives on a
+              // dedicated, keyboard-reachable ghost icon-button with an
+              // accessible name, matching PatternRow/SnippetRow/PresetRow.
+              // `icon-xs` (not `icon-sm`) because those rows are full-height
+              // form rows while this control sits beside an `h-5` Badge —
+              // its `size-3` glyph matches the badge's own icon scale.
+              <div key={host} className="inline-flex items-center gap-0.5">
+                <Badge variant="secondary">{host}</Badge>
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  onClick={() => setPendingRemoval(host)}
+                  aria-label={`Remove host ${host}`}
+                >
+                  <Trash2 />
+                </Button>
+              </div>
             ))
           )}
         </div>
@@ -203,5 +223,24 @@ export function HostsSection({
         )}
       </div>
     </SettingsSection>
+
+    {/* WARDEN-928 — removing a host un-discovers every agent on that machine
+        (chat catalog, /api/hosts/status, fleet health, the Observer), so the
+        delete is confirmed and names the host explicitly. Rendered as a sibling
+        of the section (the ObserverSection shape) so it never nests inside the
+        chip flow row. Dismissal does NOT call setConfig. */}
+    <ConfirmDialog
+      open={pendingRemoval !== null}
+      onOpenChange={(o) => { if (!o) setPendingRemoval(null); }}
+      title={`Remove host "${pendingRemoval ?? ''}"?`}
+      description={`Chats and agents on ${pendingRemoval ?? 'this host'} stop being discovered once you press Save — it disappears from the dashboard, host status, fleet health and the Observer. You can re-add it from the "Add Host" picker.`}
+      confirmLabel="Remove host"
+      destructive
+      onConfirm={() => {
+        if (pendingRemoval !== null) removeHost(pendingRemoval);
+        setPendingRemoval(null);
+      }}
+    />
+    </>
   );
 }
