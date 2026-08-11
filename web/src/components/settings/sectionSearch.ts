@@ -47,6 +47,23 @@
 // type for it (`poll interval` for Dashboard Refresh Interval, `system tray`
 // for Close to tray). Synonyms are additive; they never replace the real text.
 //
+// 3. TRANSCRIBE EVERY ROW — omission is the drift direction that bites next.
+//    Rules 1 and 2 are about text that IS here being wrong. The likelier future
+//    mistake is text that is simply absent: someone adds a row and forgets this
+//    file. That shipped too — `Match app theme (default)`, the DEFAULT option of
+//    Terminal color scheme, was missing while both its siblings (`Always dark`,
+//    `Always light`) were present, so a user typing what their own dropdown says
+//    was told Warden has no such setting. Three aria-labelled fields
+//    (`Custom terminal font family`, `New preset name`, `New preset command`)
+//    were missing the same way.
+//    A corpus->source test structurally CANNOT catch this: a row absent from
+//    both the corpus and the test table is invisible to both. The guard that
+//    catches it reads the SOURCE and requires every row/option/aria-label found
+//    there to resolve — see EVERY_SOURCE_ROW_IS_IN_THE_CORPUS in the test file.
+//    Note a row's accessible name may be an `aria-label` rather than a visible
+//    <Label> (Snippets, Patterns, the custom-font and preset inputs); those are
+//    rows too, and users search for them by that name.
+//
 // Invariant: adding or renaming a preference row means updating its entry here.
 
 /** One entry per row/option/synonym. Matching is per-entry (see `searchSections`). */
@@ -73,6 +90,7 @@ export const SETTINGS_SECTIONS = [
       'Configured Hosts',
       'Add Host',
       'Display label per host',
+      'this machine (local)',
       'Dashboard Refresh Interval (ms)',
       'Tmux Session Name',
       'Connect Timeout (seconds)',
@@ -212,6 +230,7 @@ export const SETTINGS_SECTIONS = [
       // Rows — AppearanceSection.tsx
       'Terminal font size',
       'Terminal font family',
+      'Custom terminal font family',
       'Terminal scrollback (lines)',
       'Theme',
       'Terminal color scheme',
@@ -228,6 +247,7 @@ export const SETTINGS_SECTIONS = [
       'Close to tray',
       // Select options — AppearanceSection.tsx
       'System (follow OS)',
+      'Match app theme (default)',
       'Always dark',
       'Always light',
       'Blinking block (default)',
@@ -270,13 +290,17 @@ export const SETTINGS_SECTIONS = [
       'Default agent type',
       'Custom presets',
       'Add preset',
+      'New preset name',
+      'New preset command',
       'Default host',
+      'this machine (local)',
       'Default shell (fallback for any host without its own)',
       'Default shell per host',
       'Default working directory (fallback for any host without its own)',
       'Working directory per host',
       'Agent type per host',
       'Use global default',
+      'claude (default)',
       'claude',
       'shell',
       // Synonyms

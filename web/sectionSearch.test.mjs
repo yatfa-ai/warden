@@ -22,7 +22,8 @@
 // "No matching sections." for a preference that demonstrably ships, which a
 // user reads as "Warden has no such setting."
 //
-// So there are two guards here, and they are deliberately different:
+// So there are three guards here, and they are deliberately different — the
+// first two run corpus -> source, the third runs source -> corpus:
 //
 //   1. LABELS_EXIST_IN_SOURCE — every label in the table below is really
 //      rendered by its section's .tsx. This catches a RENAME (the table, and
@@ -34,12 +35,18 @@
 //      `terminal scrollback lines`, `&` -> `and`, dropped `optional`/`also`),
 //      and since matching is a substring test, 22 of 29 verbatim on-screen
 //      labels returned the empty state.
+//   3. EVERY_SOURCE_ROW_IS_IN_THE_CORPUS — every row/option/aria-label the
+//      section SOURCE renders resolves to its own section. This catches an
+//      OMISSION, which guards 1 and 2 structurally cannot see: both read the
+//      hand-maintained table, so a row missing from both the table and the
+//      corpus is invisible to them. `Match app theme (default)` shipped
+//      unfindable past 12 green tests for exactly that reason.
 //
-// Guard 2 is the one that would have caught the shipped defect. Note it drives
-// the input shape that makes the property FAIL (the label verbatim), not the
-// one the corpus already satisfied (a short fragment).
+// Guard 2 caught the shipped defect; guard 3 closes the class rather than the
+// instance. Note both drive the input shape that makes the property FAIL (the
+// row's own verbatim text), not the one the corpus already satisfied.
 import { transformWithOxc } from 'vite';
-import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -88,6 +95,7 @@ const SHIPPED_LABELS = [
   ['hosts', 'Configured Hosts'],
   ['hosts', 'Add Host'],
   ['hosts', 'Display label per host'],
+  ['hosts', 'this machine (local)'],
   ['hosts', 'Dashboard Refresh Interval (ms)'],
   ['hosts', 'Tmux Session Name'],
   ['hosts', 'Connect Timeout (seconds)'],
@@ -127,9 +135,11 @@ const SHIPPED_LABELS = [
 
   ['appearance', 'Terminal font size'],
   ['appearance', 'Terminal font family'],
+  ['appearance', 'Custom terminal font family'],
   ['appearance', 'Terminal scrollback (lines)'],
   ['appearance', 'Theme'],
   ['appearance', 'Terminal color scheme'],
+  ['appearance', 'Match app theme (default)'],
   ['appearance', 'Terminal cursor style'],
   ['appearance', 'Copy on select'],
   ['appearance', 'Density'],
@@ -156,9 +166,13 @@ const SHIPPED_LABELS = [
   ['appearance', 'Start empty'],
 
   ['newchats', 'Default agent type'],
+  ['newchats', 'claude (default)'],
   ['newchats', 'Custom presets'],
   ['newchats', 'Add preset'],
+  ['newchats', 'New preset name'],
+  ['newchats', 'New preset command'],
   ['newchats', 'Default host'],
+  ['newchats', 'this machine (local)'],
   ['newchats', 'Default shell (fallback for any host without its own)'],
   ['newchats', 'Default shell per host'],
   ['newchats', 'Default working directory (fallback for any host without its own)'],
@@ -241,7 +255,95 @@ test('no shipped label ever produces the "No matching sections." empty state', (
   }
 });
 
-// --- WARDEN-887's shipped table must not regress ----------------------------
+// --- Guard 3: the corpus claims EVERYTHING the source renders ---------------
+// Guards 1 and 2 both run corpus -> source: they ask "does what I claim exist?"
+// and "does what I claim resolve?". Neither can ask "did I claim everything?",
+// because SHIPPED_LABELS is itself a hand-maintained mirror of `keywords` — a
+// row missing from BOTH is invisible to both. That is exactly how
+// `Match app theme (default)` shipped unfindable while its two sibling options
+// from the same dropdown were present, and it is the drift direction that
+// dominates from here (the next person ADDS a row; they rarely rename one).
+//
+// This guard runs the other way — source -> corpus — so it fails on a row that
+// was never transcribed at all.
+
+/** Files with no section id. Reset is always visible, outside activeSection gating. */
+const UNSECTIONED_FILES = new Set(['ResetSection.tsx']);
+
+// Text extracted from source that is deliberately NOT a searchable preference.
+// Keeping this explicit (rather than just absent from the corpus) is the point:
+// it makes "deliberately excluded" distinguishable from "forgotten".
+const NOT_A_PREFERENCE = new Set([
+  // PatternsSection's match-mode options are the bare words `text` and `regex`.
+  // Both already resolve via the section's `text substring` / `regex` synonyms;
+  // listed here only because the extractor cannot tell an option from a word.
+]);
+
+/**
+ * Every user-visible row/option/field name rendered by a section file.
+ *
+ * Covers the three shapes a row's accessible name actually takes in these files:
+ *   - <Label>/<SelectItem> children  (most rows and every dropdown option)
+ *   - font-medium <span>/<div> group headings (Notifications channels, Observer model)
+ *   - aria-label="…" on inputs with no visible label (Snippets, Patterns,
+ *     custom font, presets) — a user searches for these by that name too.
+ *
+ * Only the LEADING plain-text run of an element is taken: children are cut at
+ * the first nested tag or `{expression}`. That keeps a label from being
+ * concatenated with its sub-hint <span> (`Attention` + `stuck / erroring / …`,
+ * which would produce a string that renders nowhere), and it drops interpolated
+ * runtime values (`{defaultNewChatPreset} (deleted)`, `{host} (no longer
+ * available)`) — dynamic host/preset text, not preferences.
+ */
+function extractRowAndOptionText(source) {
+  const found = new Set();
+  const push = (raw) => {
+    const text = String(raw).split(/<|\{/)[0].replace(/\s+/g, ' ').replaceAll('&amp;', '&').trim();
+    if (text) found.add(text);
+  };
+  let m;
+  const rows = /<(Label|SelectItem)\b[^>]*>([\s\S]*?)<\/\1>/g;
+  while ((m = rows.exec(source))) push(m[2]);
+  const headings = /<(span|div)\b[^>]*\bfont-medium\b[^>]*>([\s\S]*?)<\/\1>/g;
+  while ((m = headings.exec(source))) push(m[2]);
+  const ariaLabels = /aria-label="([^"]+)"/g;
+  while ((m = ariaLabels.exec(source))) push(m[1]);
+  return [...found];
+}
+
+test('every section source file is mapped to a section id (new-section guard)', () => {
+  // Without this, a newly added FooSection.tsx would simply be skipped by the
+  // guard below — its rows unfindable, its absence silent.
+  for (const file of readdirSync(sectionsDir).filter((f) => f.endsWith('.tsx'))) {
+    assert.ok(
+      UNSECTIONED_FILES.has(file) || Object.values(SECTION_FILES).includes(file),
+      `${file} is not in SECTION_FILES — add it (and its keywords corpus), or list it in ` +
+        `UNSECTIONED_FILES if it renders outside the activeSection nav.`,
+    );
+  }
+});
+
+test('every row the source renders resolves to its own section (omission guard)', () => {
+  let checked = 0;
+  for (const [id, file] of Object.entries(SECTION_FILES)) {
+    const source = readFileSync(join(sectionsDir, file), 'utf8');
+    for (const text of extractRowAndOptionText(source)) {
+      if (NOT_A_PREFERENCE.has(text)) continue;
+      checked++;
+      assert.ok(
+        ids(text).includes(id),
+        `${file} renders "${text}", but searching it does not return "${id}" ` +
+          `(got: ${JSON.stringify(ids(text))}). This row was never transcribed into the ` +
+          `keywords corpus in sectionSearch.ts, so a user typing the row name they are ` +
+          `looking at gets "No matching sections." Add it verbatim.`,
+      );
+    }
+  }
+  // A regex that silently stops matching would make this test vacuously green.
+  assert.ok(checked > 100, `extractor found only ${checked} rows — it has stopped matching`);
+});
+
+
 // Normalization + a bigger corpus WIDEN matching, so these assert the exact
 // result set, not merely "contains" — a new section creeping in is a regression.
 test('WARDEN-887 shipped search table is unregressed', () => {
