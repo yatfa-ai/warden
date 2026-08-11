@@ -21,12 +21,24 @@
 // differs ("Recipients" for Broadcast, "Targets" for the other three) — so this
 // component renders only the bordered, scrollable list body. `targets` is a
 // Chat[] in display order, identical to the prop each dialog already receives.
+import { toast } from 'sonner';
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { chatType, displayName, hostTagOf } from '@/lib/chatDisplay';
+import { copyText } from '@/lib/clipboard';
 import { useHostLabels } from '@/lib/hostLabels';
 import type { Chat } from '@/lib/types';
 
 export function TargetAgentList({ targets }: { targets: Chat[] }) {
   const hostLabels = useHostLabels();
+  // Copy via the Electron-safe helper + a sonner success/error toast — the same
+  // pattern FleetRecentCommits' Copy items use. Never bare navigator.clipboard,
+  // which fails silently in Electron (WARDEN-68 Rule 3); the caller owns the
+  // toast per the copyText contract (lib/clipboard.ts).
+  const handleCopy = async (text: string) => {
+    const ok = await copyText(text);
+    if (ok) toast.success('Copied');
+    else toast.error('Copy failed');
+  };
   return (
     <div className="rounded-md border border-border max-h-44 overflow-auto">
       <ul className="divide-y divide-border">
@@ -37,13 +49,37 @@ export function TargetAgentList({ targets }: { targets: Chat[] }) {
           // falls back to the raw host otherwise (hostTagOf handles the
           // THIS_MACHINE → 'local' rewrite). The arity fix is the whole point.
           const host = hostTagOf(c.host || '', hostLabels);
+          const role = c.role;
           return (
-            <li key={c.key || c.id} className="flex items-center gap-2 px-2 py-1 text-xs">
-              <span className="truncate flex-1" title={name}>{name}</span>
-              <span className="shrink-0 text-muted-foreground">{type}</span>
-              <span className="shrink-0 text-muted-foreground">{host}</span>
-              {c.role && <span className="shrink-0 text-muted-foreground/70">{c.role}</span>}
-            </li>
+            // Themed right-click Copy menu (Context-Menu Completeness roadmap /
+            // WARDEN-908): the four dialogs are safety gates where the human reads
+            // target identity before confirming, so pulling a name/host out as text
+            // is a reflex — and the name span is TRUNCATED, so today its full text is
+            // tooltip-only and uncopyable. Wrapping here closes all four surfaces at
+            // once. Radix's ContextMenu root renders no DOM element, so `ul > li`
+            // stays valid and the key moves to this outermost per-target element.
+            // asChild only adds onContextMenu to the <li> — the row's layout and the
+            // native menu's replacement are the only changes. Copy-only, matching the
+            // shipped precedent (FleetRecentCommits, DiffViewer); onSelect (not
+            // onClick) mirrors every sibling Copy slice.
+            <ContextMenu key={c.key || c.id}>
+              <ContextMenuTrigger asChild>
+                <li className="flex items-center gap-2 px-2 py-1 text-xs">
+                  <span className="truncate flex-1" title={name}>{name}</span>
+                  <span className="shrink-0 text-muted-foreground">{type}</span>
+                  <span className="shrink-0 text-muted-foreground">{host}</span>
+                  {role && <span className="shrink-0 text-muted-foreground/70">{role}</span>}
+                </li>
+              </ContextMenuTrigger>
+              <ContextMenuContent>
+                <ContextMenuItem onSelect={() => handleCopy(name)}>Copy agent name</ContextMenuItem>
+                <ContextMenuItem onSelect={() => handleCopy(type)}>Copy type</ContextMenuItem>
+                <ContextMenuItem onSelect={() => handleCopy(host)}>Copy host</ContextMenuItem>
+                {/* Conditional, mirroring the role span above — no dead "Copy role"
+                    item on a target that has no role. */}
+                {role && <ContextMenuItem onSelect={() => handleCopy(role)}>Copy role</ContextMenuItem>}
+              </ContextMenuContent>
+            </ContextMenu>
           );
         })}
       </ul>
