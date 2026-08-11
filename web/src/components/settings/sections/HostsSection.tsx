@@ -21,6 +21,12 @@ import {
 import { resolvePollIntervalMs } from '@/lib/pollInterval';
 import { THIS_MACHINE, type HostLabels } from '@/lib/chatDisplay';
 import { SettingsSection } from '../SettingsSection';
+import {
+  POLL_INPUT_MAX_MS,
+  POLL_INPUT_MIN_MS,
+  commitPollIntervalDraft,
+  isPollDraftOutOfRange,
+} from '../pollIntervalDraft';
 import { type ConfigData, type SetConfig } from '../types';
 
 export interface HostsSectionProps {
@@ -48,6 +54,22 @@ export function HostsSection({
   // WITHOUT touching setConfig, so a dismissed dialog leaves the draft
   // byte-identical and never newly dirties the config (web/settingsDirty.test.mjs).
   const [pendingRemoval, setPendingRemoval] = useState<string | null>(null);
+
+  // WARDEN-938 — the Dashboard Refresh Interval draft. `null` means "the user
+  // has not typed in this field", in which case the input displays the RESOLVED
+  // cadence derived from config (what the dashboard actually runs). The moment
+  // the user types, the draft holds their raw keystrokes and the resolver leaves
+  // the render path entirely — previously `value` was the resolver output, so
+  // typing `1` (the first digit of `15000`) re-rendered as `60000` and the field
+  // could not be typed into at all.
+  //
+  // Nothing is written to `config` until blur, so an untouched field can never
+  // rewrite the stored value (it is shared with the CLI, whose watch mode uses
+  // the 1500ms default) and mid-edit keystrokes never dirty the settings draft
+  // behind the discard guard. Same local-draft shape as `customFontText` in
+  // AppearanceSection.
+  const [pollDraft, setPollDraft] = useState<string | null>(null);
+  const pollDisplay = pollDraft ?? String(resolvePollIntervalMs(config.pollIntervalMs));
 
   const addHost = (host: string) => {
     if (!config.hosts.includes(host)) {
@@ -170,16 +192,40 @@ export function HostsSection({
         <Input
           id="pollIntervalMs"
           type="number"
-          min="10000"
-          max="120000"
+          min={POLL_INPUT_MIN_MS}
+          max={POLL_INPUT_MAX_MS}
           step="5000"
-          value={resolvePollIntervalMs(config.pollIntervalMs)}
-          onChange={(e) =>
-            setConfig({ ...config, pollIntervalMs: parseInt(e.target.value) || 1500 })
-          }
+          value={pollDisplay}
+          onChange={(e) => setPollDraft(e.target.value)}
+          onBlur={() => {
+            // Commit the typed value, clamped into the [10000, 120000] band the
+            // input advertises — mirrors the connectTimeout clamp below. The
+            // untouched case is the one that matters: a `null` draft means the
+            // field was never edited, and clamping there would rewrite the
+            // STORED value (turning the CLI's 1500ms watch default into 10000ms
+            // just because the user tabbed past). Both this early return and
+            // `commitPollIntervalDraft`'s own null result keep that path silent.
+            // An unparseable draft likewise commits nothing, so clearing the
+            // field and leaving reverts to the stored cadence.
+            if (pollDraft === null) return;
+            const committed = commitPollIntervalDraft(pollDraft);
+            if (committed !== null && committed !== config.pollIntervalMs) {
+              setConfig({ ...config, pollIntervalMs: committed });
+            }
+            // Back to displaying the resolved stored value. Everything committed
+            // above is inside the pass-through band, so the field now shows
+            // exactly what was persisted and what the dashboard runs.
+            setPollDraft(null);
+          }}
         />
+        {isPollDraftOutOfRange(pollDraft) && (
+          <p className="text-xs text-destructive">
+            Must be between {POLL_INPUT_MIN_MS} and {POLL_INPUT_MAX_MS} ms — capped to{' '}
+            {commitPollIntervalDraft(pollDraft)} on blur.
+          </p>
+        )}
         <p className="text-xs text-muted-foreground">
-          How often the dashboard auto-refreshes — re-pulls the chat catalog, re-checks engaged hosts for live status, and re-checks host connectivity. Range 10000–120000ms (10s–2min). The dashboard enforces a 10s minimum and reverts any smaller value (including the 1500ms CLI default) to 60s, so the value shown is the cadence you get. The CLI reads the raw value directly for its watch mode (default 1500ms). Backgrounded tabs still skip ticks.
+          How often the dashboard auto-refreshes — re-pulls the chat catalog, re-checks engaged hosts for live status, and re-checks host connectivity. Range 10000–120000ms (10s–2min); a typed value outside that range is capped to it when you leave the field. The dashboard enforces a 10s minimum and reverts any smaller stored value (including the 1500ms CLI default) to 60s, so the value shown is the cadence you get. The CLI reads the raw value directly for its watch mode (default 1500ms) — this field leaves that default alone unless you edit it. Backgrounded tabs still skip ticks.
         </p>
       </div>
 
