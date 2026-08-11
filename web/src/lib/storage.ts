@@ -1022,6 +1022,116 @@ export const PERSISTED_PREF_KEYS = [
   'paneHost', 'agentFilter', 'agentSort', 'healthGroupBy', 'healthCollapsedHosts', 'hostLabels',
 ] as const satisfies readonly (keyof Omit<UiState, 'restoreOnStartup'>)[];
 
+// The WORKSPACE + LAYOUT set that Settings → Reset → "Reset appearance & UI
+// preferences" PRESERVES (WARDEN-346): the working set, where panes live, and
+// the panel geometry are not "preferences", and ResetSection's copy promises
+// "your open tabs, panes, focus, and panel layout are preserved". Everything
+// else is a pref and gets its default.
+//
+// NOTE (WARDEN-934): paneColRatios/paneRowRatios are PRESERVED here — they are
+// panel layout, which the shipped button promises to keep. This deliberately
+// differs from resetUiPrefsPreservingWorkspace() below, which snaps them to []
+// (it spreads DEFAULT_UI); that helper has no production call sites, so the
+// preserved set here is the shipped behavior.
+export const RESET_PRESERVED_KEYS = [
+  'workspaces', 'activeWorkspaceId', 'paneHost',
+  'sidebarCollapsed', 'observerCollapsed', 'healthCollapsed', 'sourceControlCollapsed',
+  'sidebarWidth', 'observerWidth', 'paneColRatios', 'paneRowRatios',
+] as const satisfies readonly (typeof PERSISTED_PREF_KEYS)[number][];
+
+/** A pref the UI-prefs reset intentionally leaves alone (workspace + layout). */
+export type ResetPreservedKey = (typeof RESET_PRESERVED_KEYS)[number];
+
+/**
+ * A pref the UI-prefs reset MUST restore: every persisted pref that is not in
+ * the preserved set, plus `restoreOnStartup` (the one UiState pref App persists
+ * as a separate arg rather than through the live object, so it is absent from
+ * PERSISTED_PREF_KEYS but is still reset).
+ *
+ * This is the compile-enforced half of the guard: App's reset callback keys BOTH
+ * its default-value map and its setter map off this type, so a pref that is
+ * neither preserved nor reset is a TypeScript error. The runtime half is the
+ * exhaustiveness test in storage.test.mjs (RESET_PRESERVED_KEYS ∪
+ * resetUiPrefDefaults() == PERSISTED_PREF_KEYS + restoreOnStartup).
+ */
+export type ResettableKey = Exclude<
+  (typeof PERSISTED_PREF_KEYS)[number] | 'restoreOnStartup',
+  ResetPreservedKey
+>;
+
+/** The default value for every resettable pref — no optional (?) fields. */
+export type ResetUiDefaults = Required<Pick<UiState, ResettableKey>>;
+
+/**
+ * The default LIVE-state value of every pref the UI-prefs reset restores.
+ *
+ * Mirrors DEFAULT_UI, with ONE deliberate deviation: `terminalFontFamily` is
+ * DEFAULT_TERMINAL_FONT_FAMILY rather than DEFAULT_UI's `''` sentinel. `''` is
+ * correct for the PERSISTED shape ("blank = default stack"), but App's live
+ * initializer coerces `'' → DEFAULT_TERMINAL_FONT_FAMILY`, and the Settings
+ * font-select has no `''` option — so pushing `''` into live state would show
+ * "Custom…" until reload. The curated value renders identically and keeps
+ * live/persisted/reload in sync. (See the note above
+ * resetUiPrefsPreservingWorkspace.)
+ *
+ * A FACTORY, not a constant: every object/array value is freshly built, so live
+ * React state can never alias a module-level default and corrupt it by in-place
+ * mutation (WARDEN-896).
+ *
+ * The return-type annotation is the compile enforcement: a missing key is a
+ * missing-property error, an unknown key an excess-property error.
+ */
+export function resetUiPrefDefaults(): ResetUiDefaults {
+  return {
+    // Appearance
+    theme: 'system',
+    density: 'comfortable',
+    paneLayout: 'auto',
+    // Behavior
+    onExitBehavior: 'keep',
+    autoFocusNewPane: true,
+    restoreOnStartup: 'previous',
+    copyOnSelect: false,
+    timestampFormat: 'relative',
+    fileViewerViewMode: 'rendered',
+    // Sidebar fleet filter/sort (WARDEN-442), health grouping (WARDEN-468),
+    // per-host collapse (WARDEN-500), per-host labels (WARDEN-490).
+    agentFilter: 'all',
+    agentSort: 'manual',
+    healthGroupBy: 'health',
+    healthCollapsedHosts: {},
+    hostLabels: {},
+    // Terminal
+    terminalFontSize: 14,
+    terminalScrollback: 10000,
+    terminalFontFamily: DEFAULT_TERMINAL_FONT_FAMILY,
+    terminalColorScheme: 'auto',
+    terminalCursorStyle: 'blink-block',
+    // New chats
+    defaultNewChatPreset: 'claude',
+    defaultNewChatPresetByHost: {},
+    defaultNewChatHost: '(local)',
+    defaultNewChatCwd: '',
+    defaultNewChatCwdByHost: {},
+    customPresets: [],
+    snippets: STARTER_SNIPPETS.map((s) => ({ ...s })),
+    defaultShell: '',
+    defaultShellByHost: {},
+    // Attention / desktop alerts
+    attentionDesktopAlerts: false,
+    attentionStates: { stuck: true, erroring: true, waiting: true, blocked: true, done: true },
+    alertCritical: true,
+    alertWarning: true,
+    alertDirective: true,
+    alertError: true,
+    mutedAlertKeys: [],
+    // WARDEN-551: clear active snoozes too, so a reset leaves no stale
+    // temporary suppression behind (mirrors clearing the permanent mute set).
+    snoozedAlertKeys: {},
+    watchedChats: [],
+  };
+}
+
 export function loadUi(): UiState {
   try {
     const v = JSON.parse(readVersioned(KEY_PREFIX, KEY_VERSION) ?? 'null');

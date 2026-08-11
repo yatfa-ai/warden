@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { streamApi } from '@/lib/stream';
 import { postJson } from '@/lib/api';
-import { loadUi, saveUi, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, STARTER_SNIPPETS, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
+import { loadUi, saveUi, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL_FONT_FAMILY, resetUiPrefDefaults, type ResettableKey, type ResetUiDefaults, type RestoreOnStartup, type PaneLayout, type TerminalCursorStyle, type OnExitBehavior, type CustomPreset, type Snippet, type WorkspacePaneSet, type RecentlyClosedEntry } from '@/lib/storage';
 import { clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/layout';
 import { displayName, type HostLabels } from '@/lib/chatDisplay';
 import { HostLabelsContext } from '@/lib/hostLabels';
@@ -781,9 +781,9 @@ function App() {
   // The setters fire the existing saveUi effect, which persists defaults-for-
   // prefs + preserved-workspace via persistUiState. Pure client-side: never
   // touches the backend / config.json (display/terminal/new-chat prefs are
-  // client-side only by design). Stable identity — it only calls useState
-  // setters (all stable) — so the SettingsPage prop identity never churns,
-  // matching the other stable setters passed down.
+  // client-side only by design). Stable identity — it reads the setter map
+  // through a ref, so its dep array is empty and the SettingsPage prop identity
+  // never churns, matching the other stable setters passed down.
   //
   // terminalFontFamily nuance: resets to DEFAULT_TERMINAL_FONT_FAMILY (the
   // curated "System default" value), NOT DEFAULT_UI.terminalFontFamily ('').
@@ -803,66 +803,87 @@ function App() {
   //
   // Every OTHER pref in App's persist spread is reset here so live state, the
   // next saveUi persist, and a fresh reload all agree (acceptance criterion #2).
-  // This includes prefs added by tickets that landed after WARDEN-346 branched
-  // (per-state attentionStates, per-severity alert routing, mutedAlertKeys,
-  // watchedChats, timestampFormat, per-host
-  // preset/cwd overrides, instruction snippets). Omitting any would leave it
-  // stale in live React state and silently survive the "reset everything"
-  // action — the next persist would then write the stale value right back.
-  // User-curated lists (customPresets/snippets/watchedChats/mutedAlertKeys)
-  // reset too: this is a destructive, confirm-gated "back to factory defaults",
-  // consistent with customPresets → [] (customPresets is user-authored as well).
-  const resetUiPrefsToDefaults = useCallback(() => {
+  // Omitting any would leave it stale in live React state and silently survive
+  // the "reset everything" action — the next persist would then write the stale
+  // value right back. User-curated lists (customPresets/snippets/watchedChats/
+  // mutedAlertKeys) reset too: this is a destructive, confirm-gated "back to
+  // factory defaults", consistent with customPresets → [].
+  //
+  // WARDEN-934: that invariant used to be a COMMENT over a hand-enumerated list
+  // of ~35 setter calls, and it had already drifted — fileViewerViewMode
+  // (WARDEN-480) was never reset, so "Reset UI preferences" toasted success and
+  // left the File Viewer stuck in Source forever. The list is now DERIVED from
+  // one compile-enforced key source, exactly like the persist path
+  // (PERSISTED_PREF_KEYS → PersistedPrefSnapshot, which closed the identical
+  // WARDEN-442/468/500 drift):
+  //
+  //   ResettableKey = (PERSISTED_PREF_KEYS ∪ restoreOnStartup) − RESET_PRESERVED_KEYS
+  //
+  // and BOTH maps below are keyed by it — resetUiPrefDefaults() (storage.ts) for
+  // the values, resetSetters for the state setters. A pref that is neither
+  // listed in RESET_PRESERVED_KEYS nor given a default + setter is a TypeScript
+  // error; the storage.test.mjs exhaustiveness test covers the runtime half.
+  const resetSetters: { [K in ResettableKey]: (value: ResetUiDefaults[K]) => void } = {
     // Appearance
-    setTheme('system');
-    setDensity('comfortable');
-    setPaneLayout('auto');
+    theme: setTheme,
+    density: setDensity,
+    paneLayout: setPaneLayout,
     // Behavior
-    setOnExitBehavior('keep');
-    setAutoFocusNewPane(true);
-    setRestoreOnStartup('previous');
-    setCopyOnSelect(false);
-    setTimestampFormat('relative');
-    // Sidebar fleet filter/sort (WARDEN-442): reset to the DEFAULT_UI values.
-    setAgentFilter('all');
-    setAgentSort('manual');
-    // Health group-by (WARDEN-468): reset to the DEFAULT_UI value ('health').
-    setHealthGroupBy('health');
-    // Health per-host collapse state (WARDEN-500): reset to the DEFAULT_UI value
-    // ({} = every host expanded), clearing any collapsed hosts.
-    setHealthCollapsedHosts({});
-    // Per-host display labels (WARDEN-490): reset to the empty map (no labels =
-    // raw hosts everywhere, today's behavior).
-    setHostLabels({});
+    onExitBehavior: setOnExitBehavior,
+    autoFocusNewPane: setAutoFocusNewPane,
+    restoreOnStartup: setRestoreOnStartup,
+    copyOnSelect: setCopyOnSelect,
+    timestampFormat: setTimestampFormat,
+    // File Viewer markdown view mode (WARDEN-480) — the WARDEN-934 omission.
+    fileViewerViewMode: setFileViewerViewMode,
+    // Sidebar fleet filter/sort (WARDEN-442), health grouping (WARDEN-468),
+    // per-host collapse (WARDEN-500), per-host display labels (WARDEN-490).
+    agentFilter: setAgentFilter,
+    agentSort: setAgentSort,
+    healthGroupBy: setHealthGroupBy,
+    healthCollapsedHosts: setHealthCollapsedHosts,
+    hostLabels: setHostLabels,
     // Terminal
-    setTerminalFontSize(14);
-    setTerminalScrollback(10000);
-    setTerminalFontFamily(DEFAULT_TERMINAL_FONT_FAMILY);
-    setTerminalColorScheme('auto');
-    setTerminalCursorStyle('blink-block');
+    terminalFontSize: setTerminalFontSize,
+    terminalScrollback: setTerminalScrollback,
+    terminalFontFamily: setTerminalFontFamily,
+    terminalColorScheme: setTerminalColorScheme,
+    terminalCursorStyle: setTerminalCursorStyle,
     // New chats
-    setDefaultNewChatPreset('claude');
-    setDefaultNewChatPresetByHost({});
-    setDefaultNewChatHost(THIS_MACHINE);
-    setDefaultNewChatCwd('');
-    setDefaultNewChatCwdByHost({});
-    setCustomPresets([]);
-    setSnippets(STARTER_SNIPPETS);
-    setDefaultShell('');
-    setDefaultShellByHost({});
+    defaultNewChatPreset: setDefaultNewChatPreset,
+    defaultNewChatPresetByHost: setDefaultNewChatPresetByHost,
+    defaultNewChatHost: setDefaultNewChatHost,
+    defaultNewChatCwd: setDefaultNewChatCwd,
+    defaultNewChatCwdByHost: setDefaultNewChatCwdByHost,
+    customPresets: setCustomPresets,
+    snippets: setSnippets,
+    defaultShell: setDefaultShell,
+    defaultShellByHost: setDefaultShellByHost,
     // Attention / desktop alerts
-    setAttentionDesktopAlerts(false);
-    setAttentionStates({ stuck: true, erroring: true, waiting: true, blocked: true });
-    setAlertCritical(true);
-    setAlertWarning(true);
-    setAlertDirective(true);
-    setAlertError(true);
-    setMutedAlertKeys([]);
-    // WARDEN-551: clear any active snoozes too, so a reset leaves no stale
-    // temporary suppression behind (mirrors clearing the permanent mute set).
-    setSnoozedAlertKeys({});
-    clearWatchedChats();
-  }, [clearWatchedChats]);
+    attentionDesktopAlerts: setAttentionDesktopAlerts,
+    attentionStates: setAttentionStates,
+    alertCritical: setAlertCritical,
+    alertWarning: setAlertWarning,
+    alertDirective: setAlertDirective,
+    alertError: setAlertError,
+    mutedAlertKeys: setMutedAlertKeys,
+    snoozedAlertKeys: setSnoozedAlertKeys,
+    // watchedChats lives in useWatchState, which exposes a clear() rather than a
+    // raw setter — the reset value is always [] (see resetUiPrefDefaults).
+    watchedChats: () => clearWatchedChats(),
+  };
+  const resetSettersRef = useRef(resetSetters);
+  resetSettersRef.current = resetSetters;
+
+  const resetUiPrefsToDefaults = useCallback(() => {
+    const defaults = resetUiPrefDefaults();
+    const setters = resetSettersRef.current;
+    // The per-key types are locked by the two maps above; TS cannot correlate
+    // them across a dynamic index, so the call site casts once.
+    for (const key of Object.keys(defaults) as ResettableKey[]) {
+      (setters[key] as (value: unknown) => void)(defaults[key]);
+    }
+  }, []);
 
   // Discover one host on demand (lazy mode): fetch live chats for that host and replace
   // its entries in the chats list so dots update to green/red.
