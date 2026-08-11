@@ -225,7 +225,24 @@ export function ObserverSection({
               setConfig({ ...config, llm: { ...config.llm, maxTokens: e.target.value === '' || Number.isNaN(n) ? null : n } });
             }}
             placeholder="2048 (default)"
+            onBlur={() => {
+              // WARDEN-925: floor at 1 (the min the input advertises) — mirrors
+              // observerSessionTimeout (WARDEN-867) above. `0`/negative reached
+              // the backend's `nullablePositiveNumber` guard (`value > 0`), which
+              // silently refuses the write while PUT /api/config still answers
+              // { ok: true }, so the field reverted on the next open with no error
+              // shown. Null is the use-the-default (2048) path and stays null.
+              // Nested under `llm`, so the setter spreads config.llm like the
+              // onChange above.
+              const v = config.llm.maxTokens;
+              if (v != null && v < 1) {
+                setConfig({ ...config, llm: { ...config.llm, maxTokens: 1 } });
+              }
+            }}
           />
+          {config.llm.maxTokens != null && config.llm.maxTokens < 1 && (
+            <p className="text-xs text-destructive">Must be at least 1 — capped to 1 on blur.</p>
+          )}
           <p className="text-xs text-muted-foreground">
             Maximum tokens the Observer model may generate per call. Leave empty for the default (2048).
           </p>
