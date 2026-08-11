@@ -40,7 +40,7 @@ const tmpDir = mkdtempSync(join(tmpdir(), 'warden-storage-test-'));
 writeFileSync(join(tmpDir, 'themes.mjs'), themesCode);
 const tmpFile = join(tmpDir, 'storage.mjs');
 writeFileSync(tmpFile, storageCode.replaceAll('@/lib/themes', './themes.mjs'));
-const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, mergeRecentlyClosed, RECENTLY_CLOSED_CAP, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, validateSnippetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, SNIPPET_MAX_COUNT, STARTER_SNIPPETS, validatePatternName, isValidRegex, WATCH_PATTERN_NAME_MAX, resetUiPrefsPreservingWorkspace, DEFAULT_UI, PERSISTED_PREF_KEYS } = await import(tmpFile);
+const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, mergeRecentlyClosed, RECENTLY_CLOSED_CAP, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, validateSnippetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, SNIPPET_MAX_COUNT, STARTER_SNIPPETS, validatePatternName, isValidRegex, WATCH_PATTERN_NAME_MAX, resetUiPrefsPreservingWorkspace, DEFAULT_UI, PERSISTED_PREF_KEYS, RESET_PRESERVED_KEYS, resetUiPrefDefaults } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -2044,6 +2044,94 @@ test('PERSISTED_PREF_KEYS is exactly the persisted UiState pref set (exhaustiven
     'PERSISTED_PREF_KEYS has no duplicate keys');
   assert.equal(PERSISTED_PREF_KEYS.length, defaultKeys.length - 1,
     'PERSISTED_PREF_KEYS length == Object.keys(DEFAULT_UI).length - 1');
+});
+
+// WARDEN-934: the sibling guard for the "Reset appearance & UI preferences"
+// button. Every pref is EITHER preserved (workspace + panel layout, WARDEN-346)
+// OR reset — nothing may fall between the two. fileViewerViewMode (WARDEN-480)
+// fell between them for months: the button hand-enumerated ~35 setter calls,
+// forgot it, and still toasted "Preferences reset to defaults" while the File
+// Viewer stayed stuck in Source across every reload.
+//
+// App.tsx type-locks BOTH its default-value map and its setter map to
+// ResettableKey = (PERSISTED_PREF_KEYS ∪ restoreOnStartup) − RESET_PRESERVED_KEYS,
+// so an unclassified pref is a compile error. This test is the runtime half:
+// it proves the two key sets PARTITION the pref set, so a pref added to
+// DEFAULT_UI and to PERSISTED_PREF_KEYS but classified in neither fails here.
+test('reset classification partitions every pref: RESET_PRESERVED_KEYS ⊎ resetUiPrefDefaults() == PERSISTED_PREF_KEYS + restoreOnStartup (WARDEN-934)', () => {
+  const preserved = [...RESET_PRESERVED_KEYS];
+  const resetKeys = Object.keys(resetUiPrefDefaults());
+  const sortedUnique = (arr) => JSON.stringify([...new Set(arr)].sort());
+
+  // Neither list may repeat a key, and the two must not overlap: a pref cannot
+  // be preserved AND reset.
+  assert.equal(preserved.length, new Set(preserved).size, 'RESET_PRESERVED_KEYS has no duplicates');
+  assert.deepEqual(preserved.filter((k) => resetKeys.includes(k)), [],
+    'no key is both preserved and reset');
+
+  // Union == every persisted pref plus restoreOnStartup (the one UiState pref
+  // App persists as a separate arg, absent from PERSISTED_PREF_KEYS but reset).
+  assert.equal(sortedUnique([...preserved, ...resetKeys]),
+    sortedUnique([...PERSISTED_PREF_KEYS, 'restoreOnStartup']),
+    'preserved ∪ reset == PERSISTED_PREF_KEYS + restoreOnStartup');
+
+  // Every preserved key is a real persisted pref (guards a typo'd entry from
+  // silently excusing a pref from the reset).
+  for (const k of preserved) {
+    assert.ok(PERSISTED_PREF_KEYS.includes(k), `preserved key ${k} is in PERSISTED_PREF_KEYS`);
+  }
+
+  // The regression anchor: the defect key is classified as RESET, not preserved.
+  assert.ok(resetKeys.includes('fileViewerViewMode'),
+    'fileViewerViewMode is reset by "Reset appearance & UI preferences"');
+  assert.equal(resetUiPrefDefaults().fileViewerViewMode, 'rendered',
+    'fileViewerViewMode resets to the DEFAULT_UI value');
+
+  // Panel layout stays preserved — ResetSection promises "your open tabs, panes,
+  // focus, and panel layout are preserved". (resetUiPrefsPreservingWorkspace
+  // snaps the ratios to [], but it has no production call sites; the shipped
+  // button keeps them. Do not "unify" these two without changing that copy.)
+  for (const k of ['workspaces', 'activeWorkspaceId', 'paneHost', 'paneColRatios', 'paneRowRatios']) {
+    assert.ok(preserved.includes(k), `${k} is preserved by the reset`);
+  }
+});
+
+// Every reset default must be the DEFAULT_UI value, so live React state, the
+// next saveUi persist, and a fresh reload all agree — with ONE documented
+// deviation: terminalFontFamily uses the curated DEFAULT_TERMINAL_FONT_FAMILY
+// stack rather than DEFAULT_UI's '' sentinel, because the Settings font-select
+// has no '' option and would read "Custom…" until reload.
+test('reset defaults match DEFAULT_UI (terminalFontFamily is the one documented live-state deviation)', () => {
+  const defaults = resetUiPrefDefaults();
+  for (const [k, v] of Object.entries(defaults)) {
+    if (k === 'terminalFontFamily') continue;
+    assert.deepEqual(v, DEFAULT_UI[k], `reset default for ${k} == DEFAULT_UI.${k}`);
+  }
+  assert.equal(DEFAULT_UI.terminalFontFamily, '', 'DEFAULT_UI keeps the blank sentinel');
+  assert.ok(defaults.terminalFontFamily.length > 0 && defaults.terminalFontFamily !== '',
+    'the reset pushes the curated font stack into live state, not the blank sentinel');
+});
+
+// WARDEN-896: live React state must never alias a module-level default, or an
+// in-place edit (e.g. a user adding a snippet) would corrupt the constant for
+// every later reset. The factory hands out fresh containers every call.
+test('resetUiPrefDefaults() returns fresh containers (no aliasing of DEFAULT_UI/STARTER_SNIPPETS)', () => {
+  const a = resetUiPrefDefaults();
+  const b = resetUiPrefDefaults();
+  assert.notEqual(a.snippets, b.snippets, 'snippets array is fresh per call');
+  assert.notEqual(a.snippets, STARTER_SNIPPETS, 'snippets do not alias STARTER_SNIPPETS');
+  assert.notEqual(a.snippets[0], STARTER_SNIPPETS[0], 'snippet entries are copies, not shared objects');
+  assert.deepEqual(a.snippets, STARTER_SNIPPETS, 'but the seeded content is identical');
+  assert.notEqual(a.attentionStates, b.attentionStates, 'attentionStates object is fresh per call');
+  assert.notEqual(a.attentionStates, DEFAULT_UI.attentionStates, 'attentionStates does not alias DEFAULT_UI');
+  assert.notEqual(a.mutedAlertKeys, b.mutedAlertKeys, 'mutedAlertKeys array is fresh per call');
+
+  // Mutating one call's containers cannot affect the next call's.
+  a.snippets.push({ name: 'x', text: 'y' });
+  a.attentionStates.stuck = false;
+  const c = resetUiPrefDefaults();
+  assert.deepEqual(c.snippets, STARTER_SNIPPETS, 'a mutated result does not leak into later calls');
+  assert.equal(c.attentionStates.stuck, true, 'a mutated result does not leak into later calls');
 });
 
 console.log(`\n✓ STORAGE TESTS PASS (${passed})`);
