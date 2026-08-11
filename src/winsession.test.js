@@ -84,6 +84,20 @@ describe('isNativeLocal — which machines take the native path', () => {
 });
 
 describe('Scrollback — the capture-pane model', () => {
+  it('reports whether the current line is still open (capture() alone cannot say)', () => {
+    // `capture()` joins with `\n` and drops the trailing empty element, so both a
+    // stream ending on a newline and one parked mid-line render as text with no
+    // trailing newline. The attach replay has to tell them apart to know whether
+    // restoring a line ending is a repair or a fabrication.
+    const s = new Scrollback();
+    assert.strictEqual(s.openLine, false, 'a fresh scrollback has no open line');
+    s.write('one\r\ntwo\r\n');
+    assert.strictEqual(s.openLine, false, 'the stream ended on a newline');
+    s.write('PROMPT> ');
+    assert.strictEqual(s.openLine, true, 'the cursor sits after an unterminated prompt');
+    assert.strictEqual(s.capture(), 'one\ntwo\nPROMPT> ');
+  });
+
   it('splits on newlines and normalizes CRLF (Windows shells emit \\r\\n)', () => {
     const s = new Scrollback();
     s.write('one\r\ntwo\r\n');
@@ -414,6 +428,28 @@ describe('attach — the live pane handle', () => {
     client.onData((d) => seen.push(d));
     await tick();
     assert.strictEqual(seen[0], 'PS C:\\Users\\me> dir\r\nfile1.txt\r\nfile2.txt\r\n');
+  });
+
+  it('does not append a line ending the terminal never emitted (the open-prompt case)', async () => {
+    // What a shell looks like on essentially EVERY re-attach: the last thing the
+    // pty printed is a prompt with no newline after it, and the cursor sits right
+    // after it awaiting input. The replay's trailing `\r\n` exists only to restore
+    // the ending `capture()` structurally drops when the stream DID end on a
+    // newline (the line model's final '' element). Appending it here instead
+    // fabricates a byte that was never in the stream, parking the pane's cursor at
+    // column 0 of the row BELOW the shell's — so the first character typed renders
+    // on the wrong row, and a TUI driving the screen with relative cursor motion
+    // stays offset rather than self-correcting. Asserted byte-for-byte: no current
+    // test used a payload lacking a trailing newline, which is why this passed.
+    const { mgr, pty } = harness();
+    await mgr.run(newSession('agent'));
+    pty().emit('PS C:\\Users\\me> dir\r\nfile1.txt\r\nPS C:\\Users\\me> ');
+
+    const client = mgr.attach(['attach', '-t', 'agent'], { cols: 80, rows: 24 });
+    const seen = [];
+    client.onData((d) => seen.push(d));
+    await tick();
+    assert.strictEqual(seen[0], 'PS C:\\Users\\me> dir\r\nfile1.txt\r\nPS C:\\Users\\me> ');
   });
 
   it('the replay is bounded to the client viewport, like tmux attach repainting the screen', async () => {

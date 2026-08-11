@@ -94,6 +94,14 @@ export class Scrollback {
     const text = out.join('\n');
     return ansi ? text : stripAnsi(text);
   }
+
+  // True when the current line is still OPEN — the byte stream did not end with a
+  // newline, so the cursor sits mid-line (a live shell prompt awaiting input is
+  // the normal case). `capture()` keeps that open line's text but, having joined
+  // with `\n`, cannot say whether the terminal ever emitted a line ending after
+  // it. The attach replay needs exactly that distinction: it may only restore an
+  // ending `capture()` structurally dropped, never fabricate one.
+  get openLine() { return this.lines[this.lines.length - 1] !== ''; }
 }
 
 // `capture()` returns tmux `capture-pane` TEXT — `\n`-separated lines, with every
@@ -413,13 +421,26 @@ export function createSessionManager(deps = {}) {
     // full-screen TUI (Claude Code, the headline consumer, redraws its whole
     // frame continuously) an unbounded replay would push thousands of stale
     // frames ahead of the live stream on every attach.
+    // Trade the bound carries: attributes established BEFORE the window are not
+    // carried in, so an SGR set further back than `rows` is sliced off while the
+    // text it colored remains — that text replays unstyled. Real `tmux
+    // capture-pane -e` has the comparable limitation.
     const backlog = toCrlf(session.scrollback.capture({ ansi: true, lines: rows }));
+    // Snapshotted alongside the backlog, not read inside the deferred flush: by
+    // then the pty may have printed more and moved the line model on.
+    const openLine = session.scrollback.openLine;
     const queued = [];
     let flushed = false;
     function flush() {
       if (flushed) return;
       flushed = true;
-      if (backlog) emit(backlog.endsWith('\r\n') ? backlog : backlog + '\r\n');
+      // The trailing `\r\n` is a REPAIR, not decoration: when the stream ended on
+      // a newline, the line model's final element is '' and `capture()` drops it
+      // (it is the unterminated current line, not content), taking a real line
+      // ending with it. Restore it there and only there — appending while the
+      // current line is open would fabricate an ending the terminal never emitted,
+      // parking the pane's cursor one row below where the shell's actually is.
+      if (backlog) emit(openLine || backlog.endsWith('\r\n') ? backlog : backlog + '\r\n');
       while (queued.length) emit(queued.shift());
     }
     function emit(d) { for (const cb of [...dataCbs]) cb(d); }
