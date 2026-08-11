@@ -1,17 +1,19 @@
 // Tests for the agent filter/sort cluster (WARDEN-249), extracted from
 // ChatSidebar into src/lib/agentFilter.ts so it is unit-testable without a React
-// runner. The extracted functions are PURE (no React, no imports), so (like
-// diff.test.mjs and gitStateSummary.test.mjs) this loads the REAL
-// src/lib/agentFilter.ts (transpiled TS -> ESM via Vite's OXC transform) and
-// exercises it directly with plain objects.
+// runner. The extracted functions are PURE (no React), so (like diff.test.mjs
+// and gitStateSummary.test.mjs) this loads the REAL src/lib/agentFilter.ts
+// (transpiled TS -> ESM via Vite's OXC transform) and exercises it directly with
+// plain objects. Since WARDEN-936 it has one relative sibling import
+// (chatType from ./chatDisplay), loaded via the kill.test.mjs two-file pattern
+// below rather than duplicated into the module.
 //
 // Coverage focus: the branching cases that lived untested inside the component —
 // matchesAgentFilter's 4 cases (claude matches both claude+resume, manual
 // matches both shell+manual), compareChats' status active-first with id
 // tiebreak, sortChats' manual no-op (drag order preserved), and findChat's
 // key-||-id lookup. (chatType/processCwdLabel/displayName/basename are tested in
-// chatDisplay.test.mjs — their canonical home after WARDEN-216; the local
-// chatType copy in agentFilter is exercised indirectly via matchesAgentFilter.)
+// chatDisplay.test.mjs — their canonical and now SOLE home after WARDEN-216 /
+// WARDEN-936; chatType is exercised here only indirectly via matchesAgentFilter.)
 // WARDEN-372: the 'active'/'hidden' filter cases are abolished (the root list is
 // the open panes; hide/unhide is gone), so matchesAgentFilter takes no
 // hiddenTabs arg and FILTER_OPTIONS has 4 values.
@@ -25,12 +27,26 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const libPath = resolve(__dirname, 'src/lib/agentFilter.ts');
+const libDir = resolve(__dirname, 'src/lib');
+const libPath = join(libDir, 'agentFilter.ts');
 
-// --- Load the REAL agentFilter.ts (TS -> ESM via the OXC transform Vite bundles)
-const src = readFileSync(libPath, 'utf8');
-const { code } = await transformWithOxc(src, libPath, {});
+// --- Load the REAL agentFilter.ts + its chatDisplay.ts dependency (TS -> ESM
+// via the OXC transform Vite bundles). agentFilter imports chatType from
+// ./chatDisplay (WARDEN-936), and chatDisplay's only import is an erased
+// `import type` — so transpile BOTH and rewrite agentFilter's relative
+// specifier to the transpiled chatDisplay.mjs in the temp dir, exactly as
+// kill.test.mjs does for ./fanout (WARDEN-328).
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-agentfilter-test-'));
+const chatDisplaySrc = readFileSync(join(libDir, 'chatDisplay.ts'), 'utf8');
+const { code: chatDisplayCode } = await transformWithOxc(chatDisplaySrc, join(libDir, 'chatDisplay.ts'), {});
+writeFileSync(join(tmpDir, 'chatDisplay.mjs'), chatDisplayCode);
+
+// Rewrite the ./chatDisplay import on the SOURCE string before transform so the
+// relative specifier resolves from the temp dir (transformWithOxc keeps import
+// specifiers as-is).
+const src = readFileSync(libPath, 'utf8')
+  .replace(/from ['"]\.\/chatDisplay['"]/, 'from "./chatDisplay.mjs"');
+const { code } = await transformWithOxc(src, libPath, {});
 const tmpFile = join(tmpDir, 'agentFilter.mjs');
 writeFileSync(tmpFile, code);
 const {
