@@ -6,6 +6,7 @@
 // receives, so behavior is unchanged.
 import { useState } from 'react';
 import { Trash2 } from 'lucide-react';
+import { toast } from 'sonner';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
@@ -19,6 +20,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { resolvePollIntervalMs } from '@/lib/pollInterval';
+import { validateNewHost } from '@/lib/hostInput';
 import { THIS_MACHINE, type HostLabels } from '@/lib/chatDisplay';
 import { SettingsSection } from '../SettingsSection';
 import {
@@ -71,10 +73,31 @@ export function HostsSection({
   const [pollDraft, setPollDraft] = useState<string | null>(null);
   const pollDisplay = pollDraft ?? String(resolvePollIntervalMs(config.pollIntervalMs));
 
+  // WARDEN-940 — the typed-host draft. Purely local component state: typing (or
+  // merely focusing) never touches setConfig, so the Settings dirty check
+  // (web/settingsDirty.test.mjs) still sees a byte-identical draft until an add
+  // is actually committed.
+  const [newHost, setNewHost] = useState('');
+
   const addHost = (host: string) => {
     if (!config.hosts.includes(host)) {
       setConfig({ ...config, hosts: [...config.hosts, host] });
     }
+  };
+
+  // Commit the typed host (Add button or Enter). Validation is local only — no
+  // connectivity probe (WARDEN-915 deliberately took that blocking work off this
+  // screen) and no ssh-config membership test, since accepting hosts the picker
+  // cannot see is the whole point. A rejection is SURFACED rather than swallowed
+  // by addHost's silent `includes` guard; a success clears the field.
+  const addTypedHost = () => {
+    const result = validateNewHost(newHost, config.hosts);
+    if (!result.ok) {
+      toast.error(result.error);
+      return;
+    }
+    addHost(result.host);
+    setNewHost('');
   };
 
   const removeHost = (host: string) => {
@@ -131,17 +154,23 @@ export function HostsSection({
         </div>
       </div>
 
-      {/* Add Host */}
-      {availableHostsToAdd.length > 0 && (
-        <div className="flex flex-col gap-2">
-          <Label htmlFor="addHost">Add Host</Label>
+      {/* Add Host — WARDEN-940: this block is ALWAYS rendered. It used to sit
+          entirely behind `availableHostsToAdd.length > 0`, so a user with an
+          empty/absent ~/.ssh/config (allSshHosts() → []) got no add control of
+          any kind and was told by a schema comment to hand-edit config.json.
+          Only the ssh-config PICKER is still gated — the text field takes its
+          place when there is nothing to pick, and both paths feed the same
+          addHost/config.hosts array. */}
+      <div className="flex flex-col gap-2">
+        <Label htmlFor="addHostName">Add Host</Label>
+        {availableHostsToAdd.length > 0 && (
           <Select
             value=""
             onValueChange={(v) => {
               if (v) addHost(v);
             }}
           >
-            <SelectTrigger id="addHost" className="w-full">
+            <SelectTrigger id="addHost" className="w-full" aria-label="Add a host from ~/.ssh/config">
               <SelectValue placeholder="Select a host to add…" />
             </SelectTrigger>
             <SelectContent>
@@ -152,8 +181,30 @@ export function HostsSection({
               ))}
             </SelectContent>
           </Select>
+        )}
+        <div className="flex items-center gap-2">
+          <Input
+            id="addHostName"
+            value={newHost}
+            onChange={(e) => setNewHost(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { e.preventDefault(); addTypedHost(); }
+            }}
+            className="h-8 flex-1"
+            placeholder="host name or IP (e.g. build-box or 10.0.0.5)"
+            aria-label="Host name to add"
+          />
+          <Button variant="outline" size="sm" onClick={addTypedHost}>
+            Add
+          </Button>
         </div>
-      )}
+        <p className="text-xs text-muted-foreground">
+          {availableHostsToAdd.length > 0
+            ? 'Pick an alias from ~/.ssh/config, or type any name Warden can reach with ssh <host> — a DNS name, an IP, or an alias the picker misses.'
+            : 'No ~/.ssh/config aliases to pick from — type any name Warden can reach with ssh <host> (a DNS name, an IP, or an alias defined elsewhere).'}{' '}
+          Added hosts take effect after Save.
+        </p>
+      </div>
 
       {/* Per-host display labels (WARDEN-490) — a friendly name for each
           host shown wherever a host tag appears (sidebar rows, pane
@@ -279,7 +330,7 @@ export function HostsSection({
       open={pendingRemoval !== null}
       onOpenChange={(o) => { if (!o) setPendingRemoval(null); }}
       title={`Remove host "${pendingRemoval ?? ''}"?`}
-      description={`Chats and agents on ${pendingRemoval ?? 'this host'} stop being discovered once you press Save — it disappears from the dashboard, host status, fleet health and the Observer. You can re-add it from the "Add Host" picker.`}
+      description={`Chats and agents on ${pendingRemoval ?? 'this host'} stop being discovered once you press Save — it disappears from the dashboard, host status, fleet health and the Observer. You can re-add it from the "Add Host" field above.`}
       confirmLabel="Remove host"
       destructive
       onConfirm={() => {
