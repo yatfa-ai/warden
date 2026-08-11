@@ -44,20 +44,131 @@ import { ResetSection } from '@/components/settings/sections/ResetSection';
 // hides itself unless its id matches `activeSection`. (Reset is intentionally
 // absent here: it is always visible at the bottom of the content pane, outside
 // the activeSection gating.)
+//
+// `keywords` is the search corpus for the individual preference ROWS that live
+// inside each section body (WARDEN-912). WARDEN-887 shipped search over
+// label+description only, so ~74 already-delivered preferences reported
+// "No matching sections." when searched by the name the product gives them
+// (`scrollback`, `density`, `timestamp`, `tray`, `poll interval`, …) — the box
+// looked wired and answered wrongly. Terms are transcribed from the row text
+// that actually ships in `settings/sections/*` (including inline Switch rows
+// with no <Label>, and Select option text), plus the obvious synonym a user
+// would type for that same row. Keeping them adjacent to the section metadata
+// keeps one legible corpus instead of scattering per-section exports.
+// Invariant: adding a preference row means adding its term here.
 const SETTINGS_SECTIONS = [
-  { id: 'hosts', label: 'Hosts & Connection', description: 'Manage SSH hosts and connection settings for Warden.' },
-  { id: 'observer', label: 'Observer Preferences', description: 'Control the observer meta-chat: directive confirmation, auto-start, idle auto-stop, and its model.' },
-  { id: 'safety', label: 'Safety', description: 'Choose whether Warden confirms before destructive actions like force-killing a chat.' },
-  { id: 'attention', label: 'Attention thresholds', description: 'Set how long an agent waits before Warden flags it as needing attention.' },
-  { id: 'tokenbudget', label: 'Token budget', description: 'Configure token-budget alerts that notify you — they never auto-kill or pause agents.' },
-  { id: 'performance', label: 'Performance', description: 'Route remote tmux operations through a persistent SSH channel (experimental).' },
-  { id: 'telemetry', label: 'Telemetry', description: 'Opt-in usage telemetry — off by default. Nothing leaves your machine until you turn it on.' },
-  { id: 'display', label: 'Display', description: 'Choose which badges and indicators Warden shows for hosts and chats.' },
-  { id: 'appearance', label: 'Appearance', description: 'Theme, terminal font, and color preferences — applied instantly.' },
-  { id: 'newchats', label: 'New Chats', description: 'Set the defaults for new chats: agent type, host, shell, and working directory.' },
-  { id: 'snippets', label: 'Instruction snippets', description: 'Manage reusable instruction snippets for broadcasts and pane sends.' },
-  { id: 'patterns', label: 'Watch patterns', description: 'Define watch patterns that flag matching agent output, matched server-side.' },
-  { id: 'notifications', label: 'Notifications', description: 'Control toast, desktop, and webhook notifications for agent events.' },
+  {
+    id: 'hosts',
+    label: 'Hosts & Connection',
+    description: 'Manage SSH hosts and connection settings for Warden.',
+    keywords:
+      'configured hosts, add host, remove host, display label per host, friendly name, host tag, ' +
+      'dashboard refresh interval, poll interval, polling, refresh rate, ms, ' +
+      'tmux session name, connect timeout, seconds, ssh',
+  },
+  {
+    id: 'observer',
+    label: 'Observer Preferences',
+    description: 'Control the observer meta-chat: directive confirmation, auto-start, idle auto-stop, and its model.',
+    keywords:
+      'directive confirmation, auto-start observer, session auto-stop, idle timeout, minutes, ' +
+      'observer model, base url, api endpoint, auth token, api key, secret, max output tokens',
+  },
+  {
+    id: 'safety',
+    label: 'Safety',
+    description: 'Choose whether Warden confirms before destructive actions like force-killing a chat.',
+    keywords: 'confirm before destructive actions, force-kill, kill chat, confirmation prompt, undo, dangerous',
+  },
+  {
+    id: 'attention',
+    label: 'Attention thresholds',
+    description: 'Set how long an agent waits before Warden flags it as needing attention.',
+    keywords: 'warning after minutes, critical after minutes, idle threshold, stale, needs attention, health',
+  },
+  {
+    id: 'tokenbudget',
+    label: 'Token budget',
+    description: 'Configure token-budget alerts that notify you — they never auto-kill or pause agents.',
+    keywords:
+      'enable token-spend budget alerts, fleet threshold tokens, window hours, ' +
+      'per-session threshold, spend, cost, usage alert',
+  },
+  {
+    id: 'performance',
+    label: 'Performance',
+    description: 'Route remote tmux operations through a persistent SSH channel (experimental).',
+    keywords:
+      'companion transport, experimental, persistent ssh channel, remote tmux ops, ' +
+      'capture, spawn, liveness, resize, env override, WARDEN_COMPANION_TRANSPORT',
+  },
+  {
+    id: 'telemetry',
+    label: 'Telemetry',
+    description: 'Opt-in usage telemetry — off by default. Nothing leaves your machine until you turn it on.',
+    keywords:
+      'anonymous errors crashes and freezes, include chat and session names, ' +
+      'receiver endpoint, receiver auth token, secret, privacy, opt-in, test connection',
+  },
+  {
+    id: 'display',
+    label: 'Display',
+    description: 'Choose which badges and indicators Warden shows for hosts and chats.',
+    keywords:
+      'show host tags, local hostname badges, show type badges, shell claude yatfa labels, ' +
+      'show status indicators, active idle dead dots, show project badges, hide offline hosts',
+  },
+  {
+    id: 'appearance',
+    label: 'Appearance',
+    description: 'Theme, terminal font, and color preferences — applied instantly.',
+    keywords:
+      'terminal font size, terminal font family, custom font, nerd font, ' +
+      'terminal scrollback lines, history buffer, ' +
+      'theme, system follow os, dark, light, terminal color scheme, ' +
+      'terminal cursor style, blinking block, steady underline, bar, ' +
+      'copy on select, clipboard, select-to-copy, ' +
+      'density, comfortable, compact, ' +
+      'timestamp format, relative, absolute, time, ' +
+      'pane layout, auto grid, stacked, side-by-side, ' +
+      'when an agent exits, keep pane, dim pane, auto-close pane, ' +
+      'auto-focus pane on open, restore workspace on startup, reopen previous, start empty, ' +
+      'remember window position and size, launch at login, launch warden at login, start on boot, startup, ' +
+      'close to tray, system tray, minimize to tray',
+  },
+  {
+    id: 'newchats',
+    label: 'New Chats',
+    description: 'Set the defaults for new chats: agent type, host, shell, and working directory.',
+    keywords:
+      'default agent type, custom presets, preset, default host, ' +
+      'default shell, shell per host, ' +
+      'default working directory, cwd, working directory per host, agent type per host',
+  },
+  {
+    id: 'snippets',
+    label: 'Instruction snippets',
+    description: 'Manage reusable instruction snippets for broadcasts and pane sends.',
+    keywords: 'snippet name, instruction text, reusable, broadcast, pane send, macro, template',
+  },
+  {
+    id: 'patterns',
+    label: 'Watch patterns',
+    description: 'Define watch patterns that flag matching agent output, matched server-side.',
+    keywords: 'pattern name, pattern expression, match mode, text substring, regex, regular expression, watched chats, flag output',
+  },
+  {
+    id: 'notifications',
+    label: 'Notifications',
+    description: 'Control toast, desktop, and webhook notifications for agent events.',
+    keywords:
+      'in-app toasts, chat operations, errors, success messages, observer events, ' +
+      'desktop alerts when agents need attention, unfocused, permission, mute, bell, ' +
+      'erroring, stuck, waiting on you, blocked, finished, ' +
+      'critical agents, warning agents, pending directives, recent errors, ' +
+      'enable webhook push, webhook url, shared secret, test alert, ' +
+      'attention alert, token budget alert, finished alert',
+  },
 ] as const;
 type SectionId = (typeof SETTINGS_SECTIONS)[number]['id'];
 
@@ -143,8 +254,9 @@ export function SettingsPage({
   };
 
   // Section search: a case-insensitive substring match over each section's
-  // label AND description, so any preference is findable by term (e.g.
-  // `font`→Appearance, `kill`→Safety, `webhook`→Notifications). Pure UI over
+  // label, description AND keyword corpus, so any preference is findable by
+  // term (e.g. `font`→Appearance, `kill`→Safety, `webhook`→Notifications,
+  // `scrollback`/`density`/`tray`→Appearance, `poll`→Hosts). Pure UI over
   // the static SETTINGS_SECTIONS metadata — adds no preferences, touches no
   // config/persistence, so it cannot disturb the client-pref / PUT /api/config
   // invariant. When the query hides the active section, the content pane stays
@@ -155,7 +267,10 @@ export function SettingsPage({
     q === ''
       ? SETTINGS_SECTIONS
       : SETTINGS_SECTIONS.filter(
-          (s) => s.label.toLowerCase().includes(q) || s.description.toLowerCase().includes(q),
+          (s) =>
+            s.label.toLowerCase().includes(q) ||
+            s.description.toLowerCase().includes(q) ||
+            s.keywords.toLowerCase().includes(q),
         );
   // The narrow-screen Select resolves its trigger label from the rendered item
   // matching `value`; if the active section is filtered out of the list the
