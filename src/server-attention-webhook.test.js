@@ -19,6 +19,7 @@ let baseUrl;
 let originalHome;
 let tempHome;
 let tickAttention;
+let __attentionSweepSettledForTest;
 
 const URL = 'https://ntfy.example.selfhosted.net/warden';
 const SECRET = 'sec_testtoken99';
@@ -31,7 +32,7 @@ before(async () => {
   fs.mkdirSync(wardenDir, { recursive: true });
   fs.writeFileSync(path.join(wardenDir, 'config.json'), JSON.stringify({ hosts: [] }));
 
-  ({ tickAttention } = await import('./server.js'));
+  ({ tickAttention, __attentionSweepSettledForTest } = await import('./server.js'));
   const { app } = await import('./server.js');
   httpServer = app.listen(0, '127.0.0.1');
   await new Promise((resolve, reject) => {
@@ -67,6 +68,12 @@ async function put(body) {
     body: JSON.stringify(body),
   });
   assert.strictEqual(res.status, 200);
+  // WARDEN-947: enabling the channel makes restartAttentionPoll kick a REAL sweep
+  // fire-and-forget. Left unawaited it lands mid-test and stomps prevAttentionStates
+  // (and its re-entrancy guard silently no-ops the test's own sweep) — the flake that
+  // made this file fail ~50% of runs with "0 POSTs, expected 1". Await the kicked
+  // sweep so every case below starts from a settled, test-owned baseline.
+  await __attentionSweepSettledForTest();
 }
 
 // fetch recorder — returns 2xx, records every call's { url, opts }.

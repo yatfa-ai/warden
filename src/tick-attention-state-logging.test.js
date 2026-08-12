@@ -80,9 +80,11 @@ describe('WARDEN-788 — tickAttention (60s webhook sweep) logs state_changed', 
     try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best-effort */ }
   });
 
-  beforeEach(() => {
+  // WARDEN-947: `clearEvents` is async — AWAIT it. Un-awaited, the truncate raced the
+  // next case's (now reliably-landing) appends and leaked events across tests.
+  beforeEach(async () => {
     __resetLastLoggedStateForTest();
-    clearEvents();
+    await clearEvents();
   });
 
   const stateEvents = async () => (await readEvents()).filter((e) => e.type === 'state_changed');

@@ -64,20 +64,26 @@ describe('WARDEN-788 — state-transition logging', () => {
   });
 
   // Pure-helper tests don't touch the store, but reset both for isolation.
-  beforeEach(() => {
+  // WARDEN-947: `clearEvents` is async — AWAIT it. Un-awaited, the truncate raced the
+  // next case's (now reliably-landing) appends and leaked events across tests.
+  beforeEach(async () => {
     __resetLastLoggedStateForTest();
-    clearEvents();
+    await clearEvents();
   });
 
   // state_changed events currently in the store.
   const stateEvents = async () => (await readEvents()).filter((e) => e.type === 'state_changed');
 
   // ------------------------------------------------- logStateTransition ---
+  // WARDEN-947: logStateTransition is now ASYNC (it AWAITS appendFn, so the prod
+  // writer's promise can no longer be dropped). These cases pass a SYNCHRONOUS
+  // recording appendFn — still valid (`await` on a non-promise is a no-op) — but the
+  // returned boolean now arrives as a promise, so every call is awaited.
   describe('logStateTransition — pure dedup', () => {
-    it('first observation logs a baseline (from:null) and returns true', () => {
+    it('first observation logs a baseline (from:null) and returns true', async () => {
       const map = new Map();
       const logged = [];
-      const out = logStateTransition(map, 'k', 'active', { id: 'c1' }, (e) => logged.push(e));
+      const out = await logStateTransition(map, 'k', 'active', { id: 'c1' }, (e) => logged.push(e));
       assert.strictEqual(out, true);
       assert.strictEqual(logged.length, 1);
       assert.strictEqual(logged[0].from, null, 'first observation is from:null (baseline)');
@@ -86,40 +92,55 @@ describe('WARDEN-788 — state-transition logging', () => {
       assert.strictEqual(map.get('k'), 'active', 'baseline stored in the map');
     });
 
-    it('a genuine transition logs exactly one event with correct from/to', () => {
+    it('a genuine transition logs exactly one event with correct from/to', async () => {
       const map = new Map([['k', 'active']]);
       const logged = [];
-      const out = logStateTransition(map, 'k', 'stuck', { id: 'c1' }, (e) => logged.push(e));
+      const out = await logStateTransition(map, 'k', 'stuck', { id: 'c1' }, (e) => logged.push(e));
       assert.strictEqual(out, true);
       assert.strictEqual(logged.length, 1);
       assert.strictEqual(logged[0].from, 'active');
       assert.strictEqual(logged[0].to, 'stuck');
     });
 
-    it('an unchanged tick (prev === state) logs NOTHING and returns false', () => {
+    it('an unchanged tick (prev === state) logs NOTHING and returns false', async () => {
       const map = new Map([['k', 'active']]);
       const logged = [];
-      const out = logStateTransition(map, 'k', 'active', { id: 'c1' }, (e) => logged.push(e));
+      const out = await logStateTransition(map, 'k', 'active', { id: 'c1' }, (e) => logged.push(e));
       assert.strictEqual(out, false);
       assert.strictEqual(logged.length, 0, 'no event on an unchanged tick (the dedup)');
     });
 
-    it('the map is keyed by agent key — a transition seen by "poller A" then "poller B" does not double-log', () => {
+    it('an ASYNC appendFn is AWAITED — the event is on disk before the call resolves (WARDEN-947)', async () => {
+      // The prod appendFn (appendStateEvent) is async. If logStateTransition dropped
+      // its promise, `logged` would still be EMPTY when the call resolves — the exact
+      // write-after-the-tick race that let a rejection escape into unhandledRejection.
+      const map = new Map();
+      const logged = [];
+      const asyncAppend = async (e) => {
+        await new Promise((r) => setTimeout(r, 5)); // the disk I/O
+        logged.push(e);
+      };
+      const out = await logStateTransition(map, 'k', 'active', { id: 'c1' }, asyncAppend);
+      assert.strictEqual(out, true);
+      assert.strictEqual(logged.length, 1, 'the async append RESOLVED before logStateTransition returned');
+    });
+
+    it('the map is keyed by agent key — a transition seen by "poller A" then "poller B" does not double-log', async () => {
       // Poller A observes k→stuck (a real transition from the active baseline).
       const map = new Map([['k', 'active']]);
       const logged = [];
-      logStateTransition(map, 'k', 'stuck', { id: 'c1' }, (e) => logged.push(e));
+      await logStateTransition(map, 'k', 'stuck', { id: 'c1' }, (e) => logged.push(e));
       assert.strictEqual(logged.length, 1, 'poller A logs the transition once');
       // Poller B sees the SAME agent (same key) in the SAME state on its next tick.
-      logStateTransition(map, 'k', 'stuck', { id: 'c1' }, (e) => logged.push(e));
+      await logStateTransition(map, 'k', 'stuck', { id: 'c1' }, (e) => logged.push(e));
       assert.strictEqual(logged.length, 1, 'poller B does NOT double-log (prev === state)');
     });
 
-    it('distinct agent keys are independent (same state on two keys both log)', () => {
+    it('distinct agent keys are independent (same state on two keys both log)', async () => {
       const map = new Map();
       const logged = [];
-      logStateTransition(map, 'k1', 'active', { id: 'c1' }, (e) => logged.push(e));
-      logStateTransition(map, 'k2', 'active', { id: 'c2' }, (e) => logged.push(e));
+      await logStateTransition(map, 'k1', 'active', { id: 'c1' }, (e) => logged.push(e));
+      await logStateTransition(map, 'k2', 'active', { id: 'c2' }, (e) => logged.push(e));
       assert.strictEqual(logged.length, 2, 'two distinct keys each establish their baseline');
     });
   });

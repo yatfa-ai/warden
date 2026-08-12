@@ -345,10 +345,24 @@ app.get('/api/agent-states/fleet', async (req, res) => {
 let lastLoggedState = new Map(); // key → state (the transition-diff baseline)
 
 // A failed state-changed write must NEVER break the poll (a disk hiccough shouldn't
-// 500 /api/agent-states or sink the attention rollup). Mirrors appendLifecycleEvent's
-// try/catch discipline. Exported so a test can drive the real appendEvent write path.
-export function appendStateEvent(event) {
-  try { appendEvent(event); } catch { /* ignore single-event write failures */ }
+// 500 /api/agent-states or sink the attention rollup). Genuinely mirrors
+// appendLifecycleEvent's discipline (server.js:~2418): `appendEvent` is ASYNC, so the
+// guard must be `await` + `catch` — a SYNCHRONOUS try/catch around an async call
+// catches NOTHING (it only sees a throw before the first await inside the callee), the
+// returned promise is dropped, and a rejection escapes as an `unhandledRejection`
+// which terminates the process on Node >= 15 — the exact crash this guard exists to
+// prevent (WARDEN-947; the sync shape shipped with WARDEN-788 before WARDEN-831 made
+// the append async).
+//
+// AWAITING (not fire-and-forget `.catch()`) also preserves the ordering guarantee
+// appendLifecycleEvent spells out: the event is on disk before the tick continues, so a
+// concurrent /api/activity reader (or a test) never observes the tick's state change
+// before the event lands. This is async I/O — it orders the tick behind its own append,
+// it does not block the event loop.
+//
+// Exported so a test can drive the real appendEvent write path.
+export async function appendStateEvent(event) {
+  try { await appendEvent(event); } catch { /* ignore single-event write failures */ }
 }
 
 /**
@@ -365,18 +379,25 @@ export function appendStateEvent(event) {
  * unit-testable WITHOUT SSH / capture / the activity store: a test passes its own
  * Map + recording appendFn and asserts exactly which transitions survive.
  *
+ * ASYNC (WARDEN-947): the production `appendFn` (appendStateEvent) is async, so the
+ * append is AWAITED here and the awaited chain is threaded all the way out to
+ * pollAgentStates / tickAttention. Dropping the promise here would re-open the
+ * escaping-rejection crash and the write-after-teardown race. A synchronous test
+ * appendFn still works unchanged (`await` on a non-promise is a no-op) — callers just
+ * have to await the returned boolean.
+ *
  * @param {Map<string, string>} map   The diff-baseline map (module-level lastLoggedState in prod).
  * @param {string} key               The agent key (stable across pollers).
  * @param {string} state             The newly-classified state.
  * @param {object} meta              Identity carried onto the event (id/host/container/role/…).
- * @param {(e: object) => void} appendFn  The store writer (appendStateEvent in prod).
- * @returns {boolean}
+ * @param {(e: object) => void|Promise<void>} appendFn  The store writer (appendStateEvent in prod).
+ * @returns {Promise<boolean>}
  */
-export function logStateTransition(map, key, state, meta, appendFn) {
+export async function logStateTransition(map, key, state, meta, appendFn) {
   const prev = map.get(key);
   if (prev === state) return false; // unchanged tick → NO event (the dedup)
   map.set(key, state);
-  appendFn({
+  await appendFn({
     type: 'state_changed',
     from: prev ?? null, // null marks the first-observation baseline segment start
     to: state,
@@ -388,10 +409,14 @@ export function logStateTransition(map, key, state, meta, appendFn) {
 // Thin wrapper pollAgentStates calls per classified chat: skips manual/tmux chats
 // (no container — their high-churn flapping would write events the container-keyed
 // reader drops, mirroring the heatmap's case-1 scope) and threads the module map +
-// the try/catch-guarded writer onto logStateTransition. Exported for the test reset.
-function logAgentState(c, state) {
+// the guarded writer onto logStateTransition. Exported for the test reset.
+//
+// ASYNC (WARDEN-947): returns the awaited append so every call site can order the tick
+// behind its own write. appendStateEvent swallows write failures, so this never
+// rejects — but it MUST still be awaited, or the promise is dropped again.
+async function logAgentState(c, state) {
   if (!c.container) return; // manual/tmux chats carry no timeline row (heatmap case 1)
-  logStateTransition(lastLoggedState, c.key, state, {
+  return logStateTransition(lastLoggedState, c.key, state, {
     id: c.container || c.session,
     host: c.host,
     container: c.container ?? null,
@@ -443,7 +468,14 @@ export async function pollAgentStates(chats, cfg = {}, deps = {}) {
   // earns its zero-RPC steady state because the real fn is what the gate tests).
   const capture = deps.capturePanes ?? capturePanes;
   const panes = await capture(chats, cfg, deps);
-  return chats.map((c) => {
+  // WARDEN-947: a sequential for-of (not `chats.map`) because logAgentState is now
+  // AWAITED — the state_changed write must land before the poll returns, so a
+  // concurrent /api/activity reader (or a test) never sees the returned state before
+  // its event. Sequential rather than Promise.all keeps the per-tick event order
+  // deterministic. The cost is ~0 in steady state: the dedup means an unchanged tick
+  // writes NOTHING, so only genuine transitions pay an append.
+  const out = [];
+  for (const c of chats) {
     const base = {
       id: c.container || c.session,
       key: c.key,
@@ -460,8 +492,9 @@ export async function pollAgentStates(chats, cfg = {}, deps = {}) {
       // unreachable) with historical value ("when was this host down?"), logged
       // for container-bearing yatfa agents so the timeline can render an
       // "unreachable" segment. The dedup map prevents flapping from spamming.
-      logAgentState(c, 'capture_failed');
-      return { ...base, state: 'capture_failed', captureError: true, signal: null };
+      await logAgentState(c, 'capture_failed');
+      out.push({ ...base, state: 'capture_failed', captureError: true, signal: null });
+      continue;
     }
     const clean = stripAnsi(panes[c.key] || '');
     const { state, signal } = classifyPane(clean, c);
@@ -478,9 +511,10 @@ export async function pollAgentStates(chats, cfg = {}, deps = {}) {
     // above and the classifyPane states here are the only states this site produces —
     // sweep_skipped lives in pollFleetStates (never reaches here), so it correctly
     // produces no state_changed event, consistent with the heatmap/attention.
-    logAgentState(c, state);
-    return { ...base, state, signal, captureError: false, ...(customMatch ? { customMatch } : {}) };
-  });
+    await logAgentState(c, state);
+    out.push({ ...base, state, signal, captureError: false, ...(customMatch ? { customMatch } : {}) });
+  }
+  return out;
 }
 
 // pollFleetStates is the slow "fleet sweep" classification mode (WARDEN-571). The 30s
@@ -2506,6 +2540,9 @@ let budgetTimer = null;
 // Re-entrancy guard, same rationale as lifecycleRunning: a sweep over slow hosts
 // can exceed the 120s beat, so an in-flight tick makes the next a no-op.
 let budgetRunning = false;
+// WARDEN-947: handle on the seed sweep kicked FIRE-AND-FORGET by startBudgetPoll /
+// restartBudgetPoll. Production never reads it; see __budgetSweepSettledForTest.
+let budgetInFlight = null;
 // Per-host fetch ceiling. Sessions are mtime-sorted descending and the window is
 // recent, so window-active sessions sit at the front; this caps transcript reads
 // (local) + the grep+awk SSH pass (remote) on a very active host. 100 is far
@@ -2587,8 +2624,33 @@ function startBudgetPoll() {
   // Always (re)seed the interval; tickBudget self-clears when disabled, so an
   // idle parked timer is harmless and lets a later enable (PUT /api/config) wake
   // it without a second start call.
-  if (!budgetTimer) budgetTimer = setInterval(tickBudget, BUDGET_INTERVAL_MS);
-  tickBudget(); // seed the cache immediately on enable
+  if (!budgetTimer) budgetTimer = setInterval(kickBudgetSweep, BUDGET_INTERVAL_MS);
+  kickBudgetSweep(); // seed the cache immediately on enable
+}
+
+// Kick a seed sweep without awaiting it (both callers are synchronous), keeping a
+// handle so __budgetSweepSettledForTest can await it. WARDEN-947 — the exact
+// counterpart of kickAttentionSweep below, for the exact same reason.
+function kickBudgetSweep() {
+  // The `.catch` is the same lesson as appendStateEvent above: a fire-and-forget async
+  // call needs a REAL rejection handler, or a future throw outside tickBudget's own
+  // try/catch escapes as an unhandledRejection and kills the process on Node >= 15.
+  const p = tickBudget()
+    .catch(() => { /* a seed sweep must never take the server down */ })
+    .finally(() => { if (budgetInFlight === p) budgetInFlight = null; });
+  budgetInFlight = p;
+}
+
+// Test seam: resolves once no budget sweep is in flight — the seed one kicked by
+// startBudgetPoll/restartBudgetPoll included. A test that enables the budget via PUT
+// /api/config and then drives its own tickBudget() sweeps MUST await this first: the
+// seed sweep advances prevBudgetState when it lands, and while it runs the
+// budgetRunning guard makes the test's own sweep a silent no-op — which turns the
+// test's priming sweep into a nothing and its breach sweep into the prime, so the
+// expected POST never fires.
+export async function __budgetSweepSettledForTest() {
+  await budgetInFlight;
+  while (budgetRunning) await new Promise((r) => setImmediate(r));
 }
 
 // React to a config change: enable → ensure the timer runs + recompute now;
@@ -2596,8 +2658,8 @@ function startBudgetPoll() {
 // threshold/window tweak → recompute now so the next read is fresh.
 function restartBudgetPoll() {
   if (cfg.tokenBudgetEnabled) {
-    if (!budgetTimer) budgetTimer = setInterval(tickBudget, BUDGET_INTERVAL_MS);
-    tickBudget();
+    if (!budgetTimer) budgetTimer = setInterval(kickBudgetSweep, BUDGET_INTERVAL_MS);
+    kickBudgetSweep();
   } else if (budgetTimer) {
     clearInterval(budgetTimer);
     budgetTimer = null;
@@ -2627,6 +2689,16 @@ let prevAttentionStates = new Map(); // key → state (the diff baseline)
 let attentionTimer = null;
 // Re-entrancy guard, same rationale as lifecycleRunning/budgetRunning.
 let attentionRunning = false;
+// WARDEN-947: a handle on the sweep kicked FIRE-AND-FORGET by startAttentionPoll /
+// restartAttentionPoll. Production never reads it — it exists so a test that drives
+// its OWN sweeps can await the kicked one instead of racing it. That race is real and
+// was flaking server-attention-webhook.test.js on main: PUT /api/config →
+// restartAttentionPoll() → bare tickAttention(); when that sweep lands it STOMPS
+// prevAttentionStates with its own (real-fleet, usually empty) map, so the test's
+// primed baseline vanishes and its next sweep re-primes instead of firing — and while
+// it is still running, the attentionRunning guard turns the test's sweep into a silent
+// no-op. Both manifest as "0 POSTs, expected 1".
+let attentionInFlight = null;
 
 // tickAttention — one server-side attention sweep. Exported so a test can drive
 // a single sweep deterministically (the running server drives it off a 60s
@@ -2702,7 +2774,12 @@ async function tickAttention(deps = {}) {
       // called bare with no deps.pollAgentStates) with canned panes + ZERO SSH.
       const capture = deps.capturePanes ?? capturePanes;
       const panes = await capture(chatList, cfg);
-      return chatList.map((c) => {
+      // WARDEN-947: sequential for-of, not `.map()` — logAgentState is awaited so the
+      // sweep's state_changed write lands before the sweep continues (same reasoning
+      // as pollAgentStates above). `classify` is already awaited at the call site, so
+      // returning the built array from this async fn is unchanged for callers.
+      const out = [];
+      for (const c of chatList) {
         const base = {
           id: c.container || c.session,
           key: c.key,
@@ -2712,13 +2789,15 @@ async function tickAttention(deps = {}) {
           name: c.name || c.key || (c.container || c.session),
         };
         if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
-          logAgentState(c, 'capture_failed');
-          return { ...base, state: 'capture_failed', signal: null };
+          await logAgentState(c, 'capture_failed');
+          out.push({ ...base, state: 'capture_failed', signal: null });
+          continue;
         }
         const { state, signal } = classifyPane(stripAnsi(panes[c.key] || ''), c);
-        logAgentState(c, state);
-        return { ...base, state, signal };
-      });
+        await logAgentState(c, state);
+        out.push({ ...base, state, signal });
+      }
+      return out;
     });
     const agents = await classify(chats);
     // WARDEN-575: the done diff shares the SAME classified `agents` + the SAME
@@ -2779,8 +2858,30 @@ function startAttentionPoll() {
   // Self-gates via tickAttention's first line, so a parked idle timer is harmless
   // and a later enable (PUT /api/config → restartAttentionPoll) wakes it without a
   // second start call.
-  if (!attentionTimer) attentionTimer = setInterval(tickAttention, ATTENTION_SWEEP_MS);
-  tickAttention();
+  if (!attentionTimer) attentionTimer = setInterval(kickAttentionSweep, ATTENTION_SWEEP_MS);
+  kickAttentionSweep();
+}
+
+// Kick a sweep without awaiting it (both callers are synchronous), keeping a handle
+// so __attentionSweepSettledForTest can await it. WARDEN-947.
+function kickAttentionSweep() {
+  // `.catch` for the same reason as kickBudgetSweep / appendStateEvent: fire-and-forget
+  // async must not be able to escape as an unhandledRejection.
+  const p = tickAttention()
+    .catch(() => { /* a kicked sweep must never take the server down */ })
+    .finally(() => { if (attentionInFlight === p) attentionInFlight = null; });
+  attentionInFlight = p;
+}
+
+// Test seam: resolves once no attention sweep is in flight — the kicked one from
+// startAttentionPoll/restartAttentionPoll included. A test that enables the channel
+// (PUT /api/config) and then drives its own tickAttention() sweeps MUST await this
+// first, or the kicked sweep lands mid-test and stomps the baseline. The
+// attentionRunning spin covers the re-entrant case (a kick that no-op'd because an
+// earlier sweep was still running), so this is deterministic — not a timed sleep.
+export async function __attentionSweepSettledForTest() {
+  await attentionInFlight;
+  while (attentionRunning) await new Promise((r) => setImmediate(r));
 }
 
 // React to a config change: enable → ensure the timer runs + sweep now; disable
@@ -2791,9 +2892,9 @@ function restartAttentionPoll() {
   // done) is enabled — mirrors tickAttention's gate so a Settings flip of either
   // routing takes effect on the next sweep.
   if (cfg.webhookEnabled && cfg.webhookUrl && (cfg.webhookAlertAttention || cfg.webhookAlertDone)) {
-    if (!attentionTimer) attentionTimer = setInterval(tickAttention, ATTENTION_SWEEP_MS);
+    if (!attentionTimer) attentionTimer = setInterval(kickAttentionSweep, ATTENTION_SWEEP_MS);
     prevAttentionStates = new Map(); // clean baseline prime on (re)enable
-    tickAttention();
+    kickAttentionSweep();
   } else if (attentionTimer) {
     clearInterval(attentionTimer);
     attentionTimer = null;
