@@ -18,7 +18,7 @@
     "scan": "node src/cli.js scan",
     "electron": "electron .",
     "electron:dev": "npm run build && electron .",
-    "dist": "npm run build && electron-builder",
+    "dist": "npm run build && electron-builder --publish never",
     "postinstall": "",
     "test": "node --test src",
     "dev:server": "node scripts/dev.mjs server",
