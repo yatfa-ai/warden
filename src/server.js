@@ -38,6 +38,7 @@ import {
   probeReceiverCapabilities,
 } from './telemetry-capabilities.js';
 import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep, getCompanionStatus, uninstallCompanion } from './companion.js';
+import { unescapeGitPath } from './gitStatus.js';
 import { createGitRouter, runLocalCapture, runInContext, gitCwd } from './gitRoutes.js';
 export { runGit, gitCwd, parseInProgressDetail, stripCommitSubject, diffNoIndex, getLocalGitDiff } from './gitRoutes.js';
 
@@ -1902,10 +1903,23 @@ const SEARCH_TRANSFER_LINE_LEN = 1000;
 // Parse one `<path>:<line>:<text>` line as emitted by `git grep -n` / `rg -n` /
 // `grep -rn`. The line number is the FIRST ':digits:' after the path (non-greedy
 // match), so a text body containing its own ':123:' isn't misread as the line.
+//
+// The path is C-unescaped: `git grep` (both producers — buildSearchScript's
+// remote script and searchLocalRaw's local stream) quotes any path holding a
+// non-ASCII byte, backslash or double-quote under the default core.quotePath=true,
+// exactly like `git ls-files`/`git show --name-status`. Without this the octal
+// form ("s\303\274b/caf\303\251.js") is what the dialog renders, copies, and
+// hands to the FileViewer — where it string-equals no real path, so the file
+// silently fails to open. unescapeGitPath is a no-op on paths that don't start
+// with `"`, so the rg/grep fallbacks (raw UTF-8) pass through unchanged.
+// See WARDEN-962; sibling fixes WARDEN-650/675/676.
+//
+// `text` (group 3) is raw matched line CONTENT, not a path — deliberately not
+// unescaped, or a literal `\n` in source code would be mangled into a newline.
 export function parseSearchLine(raw) {
   const m = raw.match(/^(.*?):(\d+):(.*)$/);
   if (!m) return null;
-  return { file: m[1], line: parseInt(m[2], 10), text: m[3] };
+  return { file: unescapeGitPath(m[1]), line: parseInt(m[2], 10), text: m[3] };
 }
 
 // Parse raw search stdout into capped, truncated { file, line, text } rows.

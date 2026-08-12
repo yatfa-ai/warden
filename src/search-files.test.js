@@ -152,6 +152,33 @@ describe('buildSearchScript under bash (real git repo)', () => {
     assert.match(hit.text, /function hello/);
   });
 
+  // WARDEN-962: git grep C-quotes any path with a non-ASCII byte under the
+  // default core.quotePath=true — the same producer format ls-files uses. The
+  // parser must C-unescape it, or the dialog renders (and the FileViewer is
+  // handed) the octal form `"s\303\274b/caf\303\251.js"`, which string-equals
+  // no real path, so "open in file viewer" silently fails.
+  it('unescapes a C-quoted non-ASCII path (WARDEN-962)', () => {
+    fs.mkdirSync(path.join(tmp, 'süb'));
+    fs.writeFileSync(path.join(tmp, 'süb', 'café.js'), 'const x = "needle";\n');
+    spawnSync('git', ['-C', tmp, 'add', '--', 'süb/café.js']);
+    // Premise guard: assert git really C-quoted it, so this test can never pass
+    // vacuously if git stops quoting (then it would prove nothing).
+    const r = runScript(tmp, 'needle');
+    assert.ok(
+      r.stdout.includes('s\\303\\274b/caf\\303\\251.js'),
+      `expected git to C-quote the path; raw stdout was:\n${r.stdout}`,
+    );
+    const files = parseSearchOutput(r.stdout).map((p) => p.file);
+    assert.ok(
+      files.includes('süb/café.js'),
+      `expected the real path, got ${JSON.stringify(files)}`,
+    );
+    assert.ok(
+      !files.some((f) => f.includes('\\303')),
+      'no octal-escaped path may survive into the parsed result',
+    );
+  });
+
   it('does not execute shell injection in the query', () => {
     // If quoting failed, `; echo PWNED` would run and PWNED would appear in stdout.
     const r = runScript(tmp, 'needle; echo PWNED');
@@ -365,6 +392,25 @@ describe('searchLocalRaw (local streamed path — parity with remote)', () => {
     assert.ok(hit, 'expected an app.js match');
     assert.equal(hit.line, 1);
     assert.match(hit.text, /function hello/);
+  });
+
+  // WARDEN-962 parity: the local streamed producer is the same `git grep -n -I -F`,
+  // so it C-quotes identically and must unescape identically. This is the path
+  // the WARDEN-589 fleet-wide grep and the WARDEN-801 deep-link ride on.
+  it('unescapes a C-quoted non-ASCII path (WARDEN-962)', async () => {
+    fs.mkdirSync(path.join(tmp, 'süb'));
+    fs.writeFileSync(path.join(tmp, 'süb', 'café.js'), 'const x = "needle";\n');
+    spawnSync('git', ['-C', tmp, 'add', '--', 'süb/café.js']);
+    const raw = await searchLocalRaw(tmp, 'needle');
+    // Premise guard — the fix is only meaningful if git actually C-quoted here.
+    assert.ok(
+      raw.includes('s\\303\\274b/caf\\303\\251.js'),
+      `expected git to C-quote the path; raw stdout was:\n${raw}`,
+    );
+    const hit = parseSearchOutput(raw).find((p) => p.file === 'süb/café.js');
+    assert.ok(hit, `expected the real path in ${JSON.stringify(parseSearchOutput(raw).map((p) => p.file))}`);
+    assert.equal(hit.line, 1);
+    assert.match(hit.text, /needle/);
   });
 
   it('has no shell surface locally: a metachar query is a literal argv element', async () => {
