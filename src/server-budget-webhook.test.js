@@ -30,6 +30,7 @@ let baseUrl;
 let originalHome;
 let tempHome;
 let tickBudget;
+let __budgetSweepSettledForTest;
 
 const URL = 'https://ntfy.example.selfhosted.net/warden-budget';
 const SECRET = 'sec_budgettoken42';
@@ -93,6 +94,7 @@ before(async () => {
 
   const server = await import('./server.js');
   tickBudget = server.tickBudget;
+  __budgetSweepSettledForTest = server.__budgetSweepSettledForTest;
   httpServer = server.app.listen(0, '127.0.0.1');
   await new Promise((resolve, reject) => {
     httpServer.once('listening', resolve);
@@ -129,6 +131,11 @@ async function put(body) {
     body: JSON.stringify(body),
   });
   assert.strictEqual(res.status, 200);
+  // WARDEN-947: the PUT's restartBudgetPoll kicks a seed tickBudget() fire-and-forget.
+  // Left unawaited it lands mid-test: its budgetRunning guard silently no-ops the
+  // priming sweep below (so the breach sweep becomes the prime and the expected POST
+  // never fires) — this file flaked exactly that way under full-suite load. Await it.
+  await __budgetSweepSettledForTest();
 }
 
 // fetch recorder — returns 2xx, records every call's { url, opts }.
