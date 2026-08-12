@@ -30,9 +30,11 @@ import type { WatchReason } from '@/lib/chatWatch';
 //   alertDirective → pending directives (aggregate count)
 //   alertError     → recent errors (aggregate count)
 // The WARDEN-344 pane-state buckets (stuck/erroring/waiting/blocked) are NOT gated
-// here — they pass through `applySeverityPrefs` unchanged so they still escalate to
-// the desktop channel exactly as WARDEN-344 intends; a pane state is silenced via
-// WARDEN-344's own `enabledStates` toggle (rollup-build level, badge + desktop).
+// by these four SEVERITY TOGGLES — they pass through that half of
+// `applySeverityPrefs` unchanged so they still escalate to the desktop channel
+// exactly as WARDEN-344 intends; a pane state is silenced fleet-wide via
+// WARDEN-344's own `enabledStates` toggle (rollup-build level, badge + desktop), or
+// PER AGENT via the mute/snooze set (WARDEN-953 — see applySeverityPrefs below).
 // Defaults all-`true` so the routing layer is behavior-preserving: master on +
 // every bucket on + no mutes → alerts fire bit-for-bit as before WARDEN-364.
 export interface AttentionSeverityPrefs {
@@ -105,9 +107,16 @@ export function shouldFireAlert(
  *
  *  - A bucket whose severity toggle is OFF is zeroed (its agents/counts survive
  *    in the raw rollup / in-app badge; only the desktop channel drops them).
- *  - A muted agent is dropped from the critical/warning HEALTH buckets only.
- *    directives/errors are aggregate windowed counts with NO per-agent identity,
- *    so per-agent mute cannot apply to them — only the severity toggle does.
+ *  - A muted/snoozed agent is dropped from EVERY per-agent bucket: the
+ *    critical/warning HEALTH buckets AND the WARDEN-344/540 pane-state buckets
+ *    (stuck/erroring/waiting/blocked/custom) — WARDEN-953. All seven carry a
+ *    per-agent identity (`alertAgentKey`), so the suppression the human asked for
+ *    applies wherever the agent surfaces. Before WARDEN-953 the pane states passed
+ *    through unfiltered, so muting/snoozing a chronically-stuck agent was a silent
+ *    no-op — the very case SnoozeDialog advertises ("this host is flapping; quiet
+ *    it for an hour"). directives/errors are aggregate windowed counts with NO
+ *    per-agent identity, so per-agent mute still cannot apply to them — only the
+ *    severity toggle does.
  *  - `total` is recomputed over the survivors so `shouldFireAlert`'s
  *    "fire on total increase" semantics compare apples to apples on the filtered
  *    view (an increase in ONLY a disabled/muted bucket leaves the routable total
@@ -129,22 +138,23 @@ export function applySeverityPrefs(
   const warning = prefs.alertWarning
     ? rollup.warning.filter((a) => !mutedKeys.has(alertAgentKey(a)))
     : [];
-  // The WARDEN-344 pane-state buckets (stuck/erroring/waiting/blocked) pass through
-  // UNCHANGED — neither muted nor gated by the four severity toggles above. Those
-  // toggles map 1:1 to the legacy health/directive/error buckets this ticket routes;
-  // a pane state is silenced via WARDEN-344's `enabledStates` (which drops it at the
-  // rollup-build level, so it never reaches here with content). Passing them through
-  // keeps the routable `total` consistent with the raw rollup under defaults, so a
-  // pane-state increase still escalates to the desktop channel exactly as WARDEN-344
-  // intends (behavior-preserving across the two tickets).
-  const stuck = rollup.stuck;
-  const erroring = rollup.erroring;
-  const waiting = rollup.waiting;
-  const blocked = rollup.blocked;
-  // WARDEN-540: custom-pattern matches pass through UNCHANGED, like the other pane
-  // states — they are silenced via the per-pattern `enabled` flag (which prevents the
-  // match at the source), not via a severity toggle here.
-  const custom = rollup.custom;
+  // The WARDEN-344 pane-state buckets (stuck/erroring/waiting/blocked) are not gated by
+  // the four SEVERITY TOGGLES above — those map 1:1 to the legacy health/directive/error
+  // buckets WARDEN-364 routes, and a pane state is silenced FLEET-WIDE via WARDEN-344's
+  // `enabledStates` (which drops it at the rollup-build level, so it never reaches here
+  // with content). But they ARE filtered by the per-agent suppressed set (WARDEN-953):
+  // each carries the same `alertAgentKey` identity the health buckets do, so a muted or
+  // snoozed agent is dropped here exactly as it is from critical/warning. Without this,
+  // per-agent mute/snooze was a silent no-op for the five pane-state buckets — the UI
+  // reported success while the next pane-state increase alerted anyway.
+  const stuck = rollup.stuck.filter((a) => !mutedKeys.has(alertAgentKey(a)));
+  const erroring = rollup.erroring.filter((a) => !mutedKeys.has(alertAgentKey(a)));
+  const waiting = rollup.waiting.filter((a) => !mutedKeys.has(alertAgentKey(a)));
+  const blocked = rollup.blocked.filter((a) => !mutedKeys.has(alertAgentKey(a)));
+  // WARDEN-540: custom-pattern matches are likewise ungated by the severity toggles —
+  // they are silenced fleet-wide via the per-pattern `enabled` flag (which prevents the
+  // match at the source) — and likewise suppressed per agent by the WARDEN-953 filter.
+  const custom = rollup.custom.filter((a) => !mutedKeys.has(alertAgentKey(a)));
   // WARDEN-575: the positive "finished" bucket passes through UNCHANGED — it never
   // participated in the problem `total` and is silenced via enabledStates.done (at
   // rollup-build), not a severity toggle here. Carried through (defaulting to [] for

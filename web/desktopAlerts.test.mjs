@@ -226,7 +226,7 @@ test('defaults → formatAlertMessage over routable == over raw', () => {
   assert.deepEqual(formatAlertMessage(applySeverityPrefs(r, ATTENTION_SEVERITY_DEFAULTS, new Set())), formatAlertMessage(r));
 });
 
-console.log('\napplySeverityPrefs: WARDEN-344 pane-state buckets pass through (integration with severity routing)');
+console.log('\napplySeverityPrefs: WARDEN-344 pane-state buckets pass through the four SEVERITY TOGGLES (integration with severity routing)');
 test('pane-state buckets survive applySeverityPrefs under defaults (lengths intact)', () => {
   const r = roll({ stuck: [agent('s1')], erroring: [agent('e1')], waiting: [agent('w1'), agent('w2')], blocked: [agent('b1')] });
   const out = applySeverityPrefs(r, ATTENTION_SEVERITY_DEFAULTS, new Set());
@@ -284,7 +284,7 @@ test('all buckets off → empty routable regardless of input', () => {
   assert.equal(out.total, 0);
 });
 
-console.log('\napplySeverityPrefs: per-agent mute filters ONLY the health buckets');
+console.log('\napplySeverityPrefs: per-agent mute filters the per-agent buckets, never the aggregate counts');
 test('a muted critical agent is dropped from routable.critical', () => {
   const out = applySeverityPrefs(roll({ critical: [agent('c1'), agent('c2')] }), ATTENTION_SEVERITY_DEFAULTS, new Set(['c1']));
   assert.equal(out.critical.length, 1);
@@ -311,6 +311,127 @@ test('alertAgentKey resolves key || id', () => {
   assert.equal(alertAgentKey({ id: 'i', key: 'k' }), 'k');
   assert.equal(alertAgentKey({ id: 'i' }), 'i');
   assert.equal(alertAgentKey({}), '');
+});
+
+// --- WARDEN-953: per-agent mute/snooze reaches the five pane-state buckets ------
+//
+// Before this, `mutedKeys` was subtracted from critical/warning ONLY — an agent whose
+// attention came from a PANE STATE (stuck / erroring / waiting / blocked / a custom
+// watch-pattern match) could not be individually silenced at all, while the UI toasted
+// "Snoozed 1 agent for 1 hour". The suppressed set the hook passes in is
+// mutedSet ∪ activeSnoozedKeys, so these cases cover BOTH the permanent mute (WARDEN-364)
+// and the time-boxed snooze (WARDEN-551) — the pure helper sees one merged set either way.
+console.log('\napplySeverityPrefs: per-agent mute/snooze suppresses the five pane-state buckets (WARDEN-953)');
+for (const bucket of ['stuck', 'erroring', 'waiting', 'blocked', 'custom']) {
+  test(`a suppressed agent is dropped from routable.${bucket}, and total falls`, () => {
+    const r = roll({ [bucket]: [agent('a1'), agent('a2')] });
+    const out = applySeverityPrefs(r, ATTENTION_SEVERITY_DEFAULTS, new Set(['a1']));
+    assert.equal(out[bucket].length, 1, 'the suppressed agent is gone');
+    assert.equal(out[bucket][0].id, 'a2', 'the un-suppressed agent survives');
+    assert.equal(out.total, 1, 'total reflects the reduction');
+    assert.equal(r.total, 2, 'the RAW rollup is untouched (badge still shows both)');
+  });
+}
+test('suppression keys on agent.key when present (a.key || a.id) for a pane state too', () => {
+  const keyed = { id: 'i1', key: 'k1', name: 'n1' };
+  const out = applySeverityPrefs(roll({ stuck: [keyed, agent('s2')] }), ATTENTION_SEVERITY_DEFAULTS, new Set(['k1']));
+  assert.equal(out.stuck.length, 1);
+  assert.equal(out.stuck[0].id, 's2');
+});
+test('one suppressed key is dropped from EVERY bucket it appears in at once', () => {
+  // The independent /api/health + /api/agent-states sources share one key space, so a
+  // single agent can be both critical-health AND stuck. One mute silences both.
+  const out = applySeverityPrefs(
+    roll({ critical: [agent('a')], stuck: [agent('a')], erroring: [agent('a')], waiting: [agent('a')], blocked: [agent('a')], custom: [agent('a')] }),
+    ATTENTION_SEVERITY_DEFAULTS,
+    new Set(['a']),
+  );
+  assert.equal(out.total, 0);
+  for (const b of ['critical', 'stuck', 'erroring', 'waiting', 'blocked', 'custom']) {
+    assert.equal(out[b].length, 0, `${b} suppressed`);
+  }
+});
+test('suppression is per-AGENT, not per-bucket: an unrelated stuck agent still routes', () => {
+  const out = applySeverityPrefs(roll({ stuck: [agent('quiet'), agent('loud')] }), ATTENTION_SEVERITY_DEFAULTS, new Set(['quiet']));
+  assert.equal(out.stuck.length, 1);
+  assert.equal(out.stuck[0].id, 'loud');
+});
+
+console.log('\napplySeverityPrefs: an EMPTY suppressed set is content-identical for every bucket (behavior-preserving)');
+test('empty suppressed set → same lengths + same total across all seven per-agent buckets', () => {
+  const r = roll({
+    critical: [agent('c1')], warning: [agent('w1')],
+    stuck: [agent('s1'), agent('s2')], erroring: [agent('e1')],
+    waiting: [agent('t1')], blocked: [agent('b1')], custom: [agent('m1')],
+    directives: 2, errors: 3,
+  });
+  const out = applySeverityPrefs(r, ATTENTION_SEVERITY_DEFAULTS, new Set());
+  for (const b of ['critical', 'warning', 'stuck', 'erroring', 'waiting', 'blocked', 'custom']) {
+    assert.deepEqual(out[b], r[b], `${b} unchanged`);
+  }
+  assert.equal(out.directives, r.directives);
+  assert.equal(out.errors, r.errors);
+  assert.equal(out.total, r.total);
+  assert.deepEqual(formatAlertMessage(out), formatAlertMessage(r), 'the OS toast wording is unchanged too');
+});
+test('a suppressed key that appears in NO bucket changes nothing', () => {
+  const r = roll({ stuck: [agent('s1')], waiting: [agent('t1')] });
+  const out = applySeverityPrefs(r, ATTENTION_SEVERITY_DEFAULTS, new Set(['nobody']));
+  assert.equal(out.total, r.total);
+  assert.equal(out.stuck.length, 1);
+  assert.equal(out.waiting.length, 1);
+});
+
+console.log('\nrouting end-to-end (WARDEN-953): a pane-state increase for a suppressed key fires nothing, and re-arms on expiry');
+test('an agent going stuck while suppressed does NOT fire (routable total flat at 0)', () => {
+  const muted = new Set(['flapper']);
+  const prev = applySeverityPrefs(roll(), ATTENTION_SEVERITY_DEFAULTS, muted);
+  const next = applySeverityPrefs(roll({ stuck: [agent('flapper')] }), ATTENTION_SEVERITY_DEFAULTS, muted);
+  assert.equal(next.total, 0, 'the suppressed stuck agent never reaches the routable view');
+  assert.equal(shouldFireAlert(prev, next), false, 'the snoozed hour is actually quiet');
+});
+test('a flapping suppressed agent (stuck → recovered → stuck) stays quiet across polls', () => {
+  const muted = new Set(['flapper']);
+  const p1 = applySeverityPrefs(roll({ stuck: [agent('flapper')] }), ATTENTION_SEVERITY_DEFAULTS, muted);
+  const p2 = applySeverityPrefs(roll(), ATTENTION_SEVERITY_DEFAULTS, muted);
+  const p3 = applySeverityPrefs(roll({ stuck: [agent('flapper')] }), ATTENTION_SEVERITY_DEFAULTS, muted);
+  assert.equal(shouldFireAlert(p1, p2), false);
+  assert.equal(shouldFireAlert(p2, p3), false);
+});
+test('a suppressed pane-state agent produces NO in-app entrant either (both delivery arms)', () => {
+  const muted = new Set(['flapper']);
+  const prev = applySeverityPrefs(roll(), ATTENTION_SEVERITY_DEFAULTS, muted);
+  const next = applySeverityPrefs(roll({ erroring: [agent('flapper')] }), ATTENTION_SEVERITY_DEFAULTS, muted);
+  assert.deepEqual(diffNewAttention(prev, next), [], 'no sonner toast for a suppressed agent');
+});
+test('AUTO-REARM: once the snooze expires the STILL-stuck agent fires again', () => {
+  // The hook rebuilds the suppressed set each poll from a FRESH clock, so an expired
+  // snooze simply drops out of the set — modeled here as the same rollup routed with
+  // the key present, then absent. The still-stuck agent re-enters the routable view →
+  // total 0 → 1 → shouldFireAlert fires. A snooze must never become a permanent mute.
+  const stillStuck = roll({ stuck: [agent('flapper')] });
+  const duringSnooze = applySeverityPrefs(stillStuck, ATTENTION_SEVERITY_DEFAULTS, new Set(['flapper']));
+  const afterExpiry = applySeverityPrefs(stillStuck, ATTENTION_SEVERITY_DEFAULTS, new Set());
+  assert.equal(duringSnooze.total, 0);
+  assert.equal(afterExpiry.total, 1);
+  assert.equal(shouldFireAlert(duringSnooze, afterExpiry), true, 'alerts resume on expiry');
+  assert.deepEqual(
+    diffNewAttention(duringSnooze, afterExpiry).map((e) => e.key),
+    ['flapper'],
+    'and the in-app channel re-arms too',
+  );
+});
+test('a non-suppressed agent going stuck STILL fires alongside a suppressed one', () => {
+  const muted = new Set(['quiet']);
+  const prev = applySeverityPrefs(roll({ stuck: [agent('quiet')] }), ATTENTION_SEVERITY_DEFAULTS, muted); // routable []
+  const next = applySeverityPrefs(roll({ stuck: [agent('quiet'), agent('loud')] }), ATTENTION_SEVERITY_DEFAULTS, muted); // routable [loud]
+  assert.equal(shouldFireAlert(prev, next), true, 'silencing one agent is not a fleet-wide mute');
+});
+test('the OS toast body/count omit the suppressed pane-state agent', () => {
+  const out = applySeverityPrefs(roll({ stuck: [agent('quiet'), agent('loud')], waiting: [agent('quiet2')] }), ATTENTION_SEVERITY_DEFAULTS, new Set(['quiet', 'quiet2']));
+  const { title, body } = formatAlertMessage(out);
+  assert.equal(title, 'Warden: 1 item needs attention');
+  assert.equal(body, '1 stuck');
 });
 
 console.log('\nrouting end-to-end: an increase in ONLY a disabled/muted bucket stays quiet');
