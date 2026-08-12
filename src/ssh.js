@@ -23,69 +23,9 @@ export const SSH_BIN = process.platform === 'win32' ? 'ssh.exe' : 'ssh';
 // better performance (no repeated SSH handshakes) and reliability (fewer
 // connection attempts = fewer transient failures).
 
-const connectionPool = new Map(); // host -> { conn: SSHClient, lastUsed: number, refs: number, healthy: boolean }
+const connectionPool = new Map(); // host -> { socketPath: string, lastUsed: number, refs: number, healthy: boolean, process: ChildProcess }
 const POOL_IDLE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 const POOL_HEALTH_CHECK_INTERVAL = 60 * 1000; // 1 minute
-
-// Simple SSH client wrapper for persistent connections.
-// NOTE: This class is currently unused. The implementation uses SSH ControlMaster
-// sockets instead (see ensureControlMaster below). This class is retained for
-// potential future implementation alternatives or reference.
-class SSHClient {
-  constructor(host, connectTimeout) {
-    this.host = host;
-    this.connectTimeout = connectTimeout;
-    this.destroyed = false;
-    this.pendingCommands = new Map(); // id -> { resolve, reject, timer }
-    this.commandId = 0;
-    this.process = null;
-    this.buffer = '';
-    this.currentCommand = null;
-  }
-
-  async connect() {
-    return new Promise((resolve, reject) => {
-      const args = [...SSH_BASE_OPTS, '-o', `ConnectTimeout=${this.connectTimeout}`, this.host];
-      const child = spawn(SSH_BIN, args, { windowsHide: true });
-      this.process = child;
-
-      let connected = false;
-      const connectTimer = setTimeout(() => {
-        if (!connected) {
-          this.destroy();
-          reject(new Error(`SSH connection timeout to ${this.host}`));
-        }
-      }, this.connectTimeout * 1000);
-
-      child.on('error', (err) => {
-        clearTimeout(connectTimer);
-        this.destroy();
-        reject(new Error(`SSH connection failed to ${this.host}: ${err.message}`));
-      });
-
-      // SSH master mode: we use multiplexing for persistent connections
-      // For now, we'll use a simpler approach: keep the process alive and use stdin for commands
-      // But SSH doesn't work that way - we need ControlMaster for real pooling
-
-      // For the initial implementation, we'll use SSH ControlMaster sockets
-      // This is the standard way to do SSH connection pooling
-    });
-  }
-
-  destroy() {
-    this.destroyed = true;
-    if (this.process) {
-      this.process.kill('SIGTERM');
-      this.process = null;
-    }
-    // Clear all pending commands
-    for (const { timer, reject } of this.pendingCommands.values()) {
-      clearTimeout(timer);
-      reject(new Error('SSH connection destroyed'));
-    }
-    this.pendingCommands.clear();
-  }
-}
 
 // SSH ControlMaster socket-based connection pooling
 // This uses SSH's built-in multiplexing feature for persistent connections
@@ -268,29 +208,6 @@ export function startConnectionPoolCleanup() {
       }
     }
   }, POOL_HEALTH_CHECK_INTERVAL);
-}
-
-// Pre-warm connection pool for configured hosts
-export async function preWarmConnectionPool(hosts, cfg) {
-  const remoteHosts = hosts.filter(h => h !== '(local)');
-  if (remoteHosts.length === 0) return;
-
-  console.log(`[SSH pool] Pre-warming connections for ${remoteHosts.length} hosts...`);
-  const results = await Promise.allSettled(
-    remoteHosts.map(async (host) => {
-      try {
-        await getConnection(host, cfg);
-        releaseConnection(host);
-        console.log(`[SSH pool] Pre-warmed connection to ${host}`);
-      } catch (e) {
-        console.warn(`[SSH pool] Failed to pre-warm ${host}:`, e.message);
-      }
-    })
-  );
-
-  const succeeded = results.filter(r => r.status === 'fulfilled').length;
-  const failed = results.filter(r => r.status === 'rejected').length;
-  console.log(`[SSH pool] Pre-warming complete: ${succeeded} succeeded, ${failed} failed`);
 }
 
 // ---------------- Enhanced Error Handling ----------------
