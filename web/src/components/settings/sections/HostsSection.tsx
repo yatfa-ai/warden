@@ -4,6 +4,15 @@
 // addHost/removeHost/setHostLabel handlers are relocated here verbatim from
 // SettingsPage (WARDEN-664) — each operates only on props this section already
 // receives, so behavior is unchanged.
+//
+// That MIXED split is now SURFACED in-section (WARDEN-951) using the same
+// per-block persistence-labeling pattern NotificationsSection established for
+// the other hybrid section (WARDEN-784): the "Display label per host" block —
+// the one instantly-persisted sub-block here — is wrapped in a titled bordered
+// container whose subtitle states it applies instantly, while every other field
+// stays Save-gated. The section-level footer verdict deliberately remains
+// `server` (sectionPersistence.ts), exactly as for `notifications`: Save/Cancel
+// genuinely do govern the /api/config fields above.
 import { useState } from 'react';
 import { Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -218,9 +227,27 @@ export function HostsSection({
           sent to the backend (it's a UiState pref, not config). Leave a
           host blank to show its raw name. Covers this machine plus every
           configured host; this machine is listed even though it isn't in
-          config.hosts (it's always implied). */}
-      <div className="flex flex-col gap-2">
-        <Label>Display label per host</Label>
+          config.hosts (it's always implied).
+
+          WARDEN-951 — the titled bordered container + instant-apply subtitle
+          are the WARDEN-784 pattern, carried over verbatim from the "Desktop
+          alerts" block in NotificationsSection so the two hybrid sections read
+          identically. Every OTHER signal in this section says Save ("Added
+          hosts take effect after Save.", the remove-host confirm, the global
+          footer) and they are all correct for the /api/config fields — this
+          block is the exception, and now says so. The title is a plain span
+          (not <Label>): it heads a GROUP of per-host inputs that each carry
+          their own <Label htmlFor>, matching the exemplar. The privacy line
+          below is retained — it answers WHERE the value lives, this subtitle
+          answers WHEN it takes effect, and the user needs both. */}
+      <div className="flex flex-col gap-3 rounded-md border border-border/60 p-3 mt-2">
+        <div className="flex flex-col gap-1">
+          <span className="text-sm font-medium">Display label per host</span>
+          <span className="text-xs text-muted-foreground">
+            Applied instantly and remembered locally on this device.
+          </span>
+        </div>
+
         <p className="text-xs text-muted-foreground">
           Give any host a friendly name (e.g. <code className="bg-muted px-1 rounded">CI runner</code>) shown wherever a host tag appears. Leave blank to show the raw host name. Local and remote alike. Stored on this machine only — never sent to the server.
         </p>

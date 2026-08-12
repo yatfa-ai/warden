@@ -42,7 +42,9 @@ const CLIENT_LABEL =
 // The SETTINGS_SECTIONS partition (see SettingsPage.tsx). Server-config ids all
 // pass `config`/`setConfig`; client-pref ids spread client-hook props only.
 const SERVER_SECTIONS = [
-  'hosts',
+  'hosts', // hybrid IN-section too (WARDEN-951 labels the instant per-host
+           // label block) but Save commits its hosts / poll interval / tmux
+           // session / connect timeout fields, so it resolves to server.
   'observer',
   'safety',
   'attention',
@@ -109,11 +111,27 @@ test('notifications resolves to server (Save commits its webhook/toast toggles)'
   assert.equal(p.label, SERVER_LABEL);
 });
 
+test('hosts resolves to server (Save commits its hosts / interval / tmux / timeout fields)', () => {
+  // The SECOND hybrid section, and the one the footer opens on by default.
+  // Hosts blends Save-gated /api/config fields with ONE instantly-persisted
+  // client localStorage pref (the per-host display labels, written through on
+  // every keystroke via setHostLabels). Per WARDEN-951 that instant sub-block
+  // is labeled IN-SECTION with the WARDEN-784 titled-container pattern, exactly
+  // as notifications does — the footer verdict deliberately stays `server`,
+  // because Save/Cancel really do govern the hosts list, poll interval, tmux
+  // session and connect timeout. Asserted explicitly here so `hosts` no longer
+  // rests on the "unknown section falls back to server" default below, which
+  // would keep the hybrid invisible to the next reader.
+  const p = sectionPersistence('hosts');
+  assert.equal(p.kind, 'server');
+  assert.equal(p.label, SERVER_LABEL);
+});
+
 test('an unknown section id falls back to server (safe default — Save commits)', () => {
-  // The default section ('hosts') and any future section that isn't explicitly
-  // client-pref must read as server so the footer never claims "instant" about a
-  // section that actually round-trips through PUT /api/config.
-  assert.equal(sectionPersistence('hosts').kind, 'server');
+  // Any future section that isn't explicitly client-pref must read as server so
+  // the footer never claims "instant" about a section that actually round-trips
+  // through PUT /api/config. ('hosts', the default section, has its own named
+  // assertion above.)
   assert.equal(sectionPersistence('something-new').kind, 'server');
   assert.equal(sectionPersistence('').kind, 'server');
 });
