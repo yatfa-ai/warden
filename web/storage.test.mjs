@@ -2087,6 +2087,35 @@ test('reset classification partitions every pref: RESET_PRESERVED_KEYS ⊎ reset
   assert.equal(resetUiPrefDefaults().fileViewerViewMode, 'rendered',
     'fileViewerViewMode resets to the DEFAULT_UI value');
 
+  // WARDEN-957: the copy anchor. ResetSection's blurb + confirm dialog promise,
+  // by name, that this reset "deletes your custom spawn presets", "reverts your
+  // instruction snippets to the four starters", and "clears your per-host
+  // display labels". All three are USER-AUTHORED content with no undo, so that
+  // enumeration is the safety mechanism (WARDEN-68 Rule 8) — not a wording nit.
+  // Pin each key to RESET (not preserved) and to its DEFAULT_UI value, so moving
+  // one to preserved fails loudly here instead of silently making the copy lie.
+  for (const k of ['customPresets', 'snippets', 'hostLabels']) {
+    assert.ok(resetKeys.includes(k),
+      `${k} is reset by "Reset appearance & UI preferences" — ResetSection copy names it as destroyed`);
+    assert.ok(!preserved.includes(k), `${k} is NOT preserved by the reset`);
+  }
+  assert.deepEqual(resetUiPrefDefaults().customPresets, [],
+    'customPresets resets to [] — every custom spawn preset is deleted');
+  assert.deepEqual(resetUiPrefDefaults().hostLabels, {},
+    'hostLabels resets to {} — every per-host display label is cleared');
+  // Snippets revert to the 4 seeded starters: authored snippets are lost, and
+  // deliberately-deleted starters come back (the one-time seed at STARTER_SNIPPETS
+  // never re-fires on its own, so only this reset can resurrect them).
+  assert.deepEqual(resetUiPrefDefaults().snippets, STARTER_SNIPPETS,
+    'snippets reverts to the STARTER_SNIPPETS set — authored snippets are lost');
+  assert.equal(resetUiPrefDefaults().snippets.length, 4,
+    'the confirm copy says "the four starters" — keep the count and the copy in sync');
+  // The revert must be a deep COPY, never an alias: a reset that handed out the
+  // module-level STARTER_SNIPPETS objects would let a later snippet edit mutate
+  // the seed for every subsequent reset.
+  assert.ok(resetUiPrefDefaults().snippets.every((s, i) => s !== STARTER_SNIPPETS[i]),
+    'reset snippets are fresh copies, not aliases of the STARTER_SNIPPETS objects');
+
   // Panel layout stays preserved — ResetSection promises "your open tabs, panes,
   // focus, and panel layout are preserved". (resetUiPrefsPreservingWorkspace
   // snaps the ratios to [], but it has no production call sites; the shipped
