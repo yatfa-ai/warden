@@ -162,7 +162,12 @@ export function HostsSection({
           place when there is nothing to pick, and both paths feed the same
           addHost/config.hosts array. */}
       <div className="flex flex-col gap-2">
-        <Label htmlFor="addHostName">Add Host</Label>
+        {/* No `htmlFor`: this Label heads a group of TWO controls (the gated
+            ssh-config picker and the always-present text field), so pointing it
+            at either one makes clicking it jump focus past the other. Each
+            control carries its own accessible name instead (the SelectTrigger's
+            and the Input's `aria-label`). */}
+        <Label>Add Host</Label>
         {availableHostsToAdd.length > 0 && (
           <Select
             value=""

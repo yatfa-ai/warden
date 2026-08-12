@@ -101,6 +101,34 @@ test('a tab/newline-only value is rejected as empty', () => {
   assert.equal(validateNewHost('\t\n ', CONFIGURED).issue, 'empty');
 });
 
+console.log('\na leading "-" → rejected (ssh would read it as an OPTION, not a host)');
+test('an ssh option masquerading as a host is rejected', () => {
+  // src/ssh.js pushes the host POSITIONALLY with no `--` separator
+  // (`args.push(host, remote)`), so `-oProxyCommand=…` is consumed by ssh as a
+  // flag and the run silently does something other than what was typed — the
+  // exact silent-swallow this screen exists to remove. Not a shell injection
+  // (spawn runs without a shell), but it must not reach config.hosts unseen.
+  const r = validateNewHost('-oProxyCommand=x', []);
+  assert.equal(r.ok, false);
+  assert.equal(r.issue, 'invalid');
+  assert.ok(r.error.length > 0, 'a rejection without a message is a silent no-op');
+});
+test('a short flag and a long flag are both rejected', () => {
+  assert.equal(validateNewHost('-4', CONFIGURED).issue, 'invalid');
+  assert.equal(validateNewHost('--help', CONFIGURED).issue, 'invalid');
+});
+test('padding does not smuggle a leading dash past the guard', () => {
+  // The dangerous direction: if the guard ran on `raw` instead of the trimmed
+  // value, '  -x  ' would sail through and land in config.hosts.
+  assert.equal(validateNewHost('  -oProxyCommand=x  ', []).issue, 'invalid');
+});
+test('a dash ELSEWHERE in the name is still accepted', () => {
+  // Guards against an over-broad includes('-'): dashes are ordinary in host
+  // names, and 'build-box' is already a configured one.
+  assert.equal(validateNewHost('ci-runner-02', []).ok, true);
+  assert.deepEqual(validateNewHost('web-1.example.com', []), { ok: true, host: 'web-1.example.com' });
+});
+
 console.log('\nduplicates → rejected (addHost would swallow these silently)');
 test('an exact existing host is rejected', () => {
   const r = validateNewHost('alpha', CONFIGURED);

@@ -16,7 +16,7 @@
 // Pure (no React, no DOM, no clock) so it is unit-testable. See web/hostInput.test.mjs.
 import { THIS_MACHINE } from './chatDisplay';
 
-export type HostInputIssue = 'empty' | 'this-machine' | 'duplicate';
+export type HostInputIssue = 'empty' | 'invalid' | 'this-machine' | 'duplicate';
 
 export type HostInputResult =
   | { ok: true; host: string }
@@ -26,6 +26,12 @@ export type HostInputResult =
  * Validate a typed host name against the hosts already in the draft config.
  *
  *   - empty / whitespace-only  → rejected ('empty')
+ *   - leading '-'              → rejected ('invalid'); ssh is invoked
+ *     positionally (`args.push(host, remote)` in src/ssh.js, with no `--`
+ *     separator), so a value like `-oProxyCommand=…` is read by ssh as an
+ *     OPTION rather than a host and silently does something other than what
+ *     the user typed. Not a shell injection — spawn() runs without a shell —
+ *     but exactly the silent-swallow this screen exists to eliminate.
  *   - '(local)' (THIS_MACHINE) → rejected ('this-machine'); this machine is
  *     always implied and is deliberately NOT a member of config.hosts (the
  *     display-label list prepends it separately), so adding it would create a
@@ -43,6 +49,13 @@ export function validateNewHost(raw: string, configuredHosts: readonly string[])
   const host = raw.trim();
   if (host === '') {
     return { ok: false, issue: 'empty', error: 'Enter a host name to add.' };
+  }
+  if (host.startsWith('-')) {
+    return {
+      ok: false,
+      issue: 'invalid',
+      error: `A host name can't start with "-" — ssh would read it as an option.`,
+    };
   }
   if (host.toLowerCase() === THIS_MACHINE.toLowerCase()) {
     return {
