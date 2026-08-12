@@ -1021,6 +1021,18 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
             style={{ backgroundColor: C.metadata?.color || '#6366f1' }}
           />
           <span className="text-xs font-medium flex-1 min-w-0 wrap-anywhere">{C.name}</span>
+          {/* WARDEN-949: the collection list APPLIES matchesAgentFilter + sortChats
+              (:1009) but offered no control, so a sticky agentFilter (WARDEN-442)
+              followed the user in here and silently narrowed the list — below the
+              card's own count, with no way to see or clear it without leaving the
+              view. No hideHostSort: a collection can span hosts, so "Host" is a
+              meaningful sort here (unlike the single-host view). */}
+          <AgentFilterSortControls
+            agentFilter={agentFilter}
+            agentSort={agentSort}
+            onFilterChange={onFilterChange}
+            onSortChange={onSortChange}
+          />
           {/* WARDEN-338: one-click broadcast to the whole collection. Resolves the
               collection's live membership (the same `agents` array the list renders,
               so the target set is byte-for-byte what the action bar's "All" button
@@ -1382,6 +1394,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
           agentSort={agentSort}
           onFilterChange={onFilterChange}
           onSortChange={onSortChange}
+          hideSort
         />
         {/* WARDEN-534: fleet-wide commit search. A sidebar-level affordance that
             fans the per-agent --grep (WARDEN-498) across EVERY active project
