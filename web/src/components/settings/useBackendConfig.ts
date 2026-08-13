@@ -28,7 +28,15 @@ import {
 import { type ConfigData } from './types';
 import { isBackendConfigDirty, type BackendConfigDraft } from './configDirty';
 
-/** The default `config` state, used before the GET /api/config load resolves. */
+/**
+ * The initial `config` state, held before the GET /api/config load resolves.
+ *
+ * WARDEN-976 — these values are never RENDERED: SettingsPage mounts the
+ * backend-config sections only once `configLoaded` is true, precisely so a
+ * never-loaded default can neither be displayed as if it were real nor PUT back
+ * over the real persisted configuration. This is the shape the state starts in,
+ * not a set of values the user can ever see or save.
+ */
 const DEFAULT_CONFIG: ConfigData = {
   hosts: [],
   pollIntervalMs: 1500,
@@ -107,14 +115,18 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
   // edits. null until the first successful load → not dirty (nothing to lose).
   const [baseline, setBaseline] = useState<BackendConfigDraft | null>(null);
   const reload = useCallback(() => setLoadToken((t) => t + 1), []);
-  // Silent reload — re-fetch config WITHOUT flipping `loading` to true. `loading`
-  // gates the WHOLE content pane (SettingsPage swaps to "Loading configuration…",
-  // unmounting the danger zone), so a plain `reload()` after the instant backend
-  // reset would flash the entire pane to a loader — a jarring response to a
-  // destructive confirm. Instead the form stays mounted showing the prior values
-  // while the GET silently swaps in the restored defaults. The ref is read+cleared
-  // at the top of the load effect, so it only affects the very next load (a later
-  // manual Retry still shows the loader). (WARDEN-889)
+  // Silent reload — re-fetch config WITHOUT flipping `loading` to true, so the
+  // post-reset refetch shows no loading affordance at all: the form stays
+  // mounted showing the prior values while the GET silently swaps in the
+  // restored defaults, rather than reacting to a destructive confirm with a
+  // spinner. The ref is read+cleared at the top of the load effect, so it only
+  // affects the very next load (a later manual Retry still shows its state).
+  // (WARDEN-889)
+  //
+  // WARDEN-976 note: `loading` no longer gates the whole content pane — the
+  // per-section gate keys off `configLoaded`, which stays true across a reset,
+  // so the sections could not flash to a loader here even without this flag.
+  // It is kept because it still expresses the right intent for this refetch.
   const silentNextLoadRef = useRef(false);
   const reloadSilent = useCallback(() => {
     silentNextLoadRef.current = true;
@@ -569,6 +581,18 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
     }
   };
 
+  // WARDEN-976 — "a GET /api/config has resolved successfully at least once".
+  // The baseline is captured ONLY in the GET success handler (and re-captured
+  // after a successful PUT), so it already IS that signal — deriving readiness
+  // from it rather than adding a parallel flag keeps the two from drifting.
+  //
+  // This is the readiness input for the per-section gate (sectionLoadGate.ts)
+  // and for Save. Note it is deliberately NOT `!loading`: the silent post-reset
+  // refetch (reloadSilent) never flips `loading`, and a failed load clears
+  // `loading` without ever producing values. "Did a GET ever succeed" is the
+  // only question both consumers actually want answered.
+  const configLoaded = baseline !== null;
+
   // WARDEN-906 — derived on every render from the live draft vs the baseline
   // snapshot. Cheap (a structural compare of one small config object) and
   // always in step with the state it describes.
@@ -591,6 +615,9 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
     availableHosts,
     loading,
     loadError,
+    // WARDEN-976 — per-section readiness + Save safety both key off this rather
+    // than off `loading`/`loadError`. See the derivation above.
+    configLoaded,
     reload,
     saving,
     handleSave,

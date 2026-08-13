@@ -16,6 +16,8 @@ import { type HostLabels } from '@/lib/chatDisplay';
 
 import { useBackendConfig } from '@/components/settings/useBackendConfig';
 import { sectionPersistence } from '@/components/settings/sectionPersistence';
+import { sectionGate, canSaveBackendConfig } from '@/components/settings/sectionLoadGate';
+import { SettingsSection } from '@/components/settings/SettingsSection';
 import {
   type AppearancePrefs,
   type NewChatsPrefs,
@@ -39,11 +41,10 @@ import { NotificationsSection } from '@/components/settings/sections/Notificatio
 import { ResetSection } from '@/components/settings/sections/ResetSection';
 
 // The settings section nav entries: a left rail on wide screens, a dropdown on
-// narrow ones. Order is the display order; the first entry is active by default.
-// The `id` doubles as the active-section discriminator — each section component
-// hides itself unless its id matches `activeSection`. (Reset is intentionally
-// absent here: it is always visible at the bottom of the content pane, outside
-// the activeSection gating.)
+// narrow ones. Order is the display order. The `id` doubles as the active-section
+// discriminator — each section component hides itself unless its id matches
+// `activeSection`. (Reset is intentionally absent here: it is always visible at
+// the bottom of the content pane, outside the activeSection gating.)
 const SETTINGS_SECTIONS = [
   { id: 'hosts', label: 'Hosts & Connection', description: 'Manage SSH hosts and connection settings for Warden.' },
   { id: 'observer', label: 'Observer Preferences', description: 'Control the observer meta-chat: directive confirmation, auto-start, idle auto-stop, and its model.' },
@@ -60,6 +61,14 @@ const SETTINGS_SECTIONS = [
   { id: 'notifications', label: 'Notifications', description: 'Control toast, desktop, and webhook notifications for agent events.' },
 ] as const;
 type SectionId = (typeof SETTINGS_SECTIONS)[number]['id'];
+
+// The section Settings opens on (WARDEN-976). Deliberately decoupled from the
+// rail ORDER — which is unchanged — because the landing section is now chosen
+// for how fast it is usable, not for where it sits in the list. Appearance is a
+// client-localStorage section: it needs no network, so it is fully interactive
+// on the first frame even while the `/api/config` GET is still in flight.
+const LANDING_SECTION: SectionId = 'appearance';
+
 
 interface Props {
   /** Return to the dashboard without saving backend config. */
@@ -103,7 +112,7 @@ export function SettingsPage({
   // write-only secrets, the live test/runtime status. onSaved fires after a
   // successful PUT (App's config refresh + close) — matching the prior behavior.
   const {
-    config, setConfig, availableHosts, loading, loadError, reload, saving, handleSave, isDirty,
+    config, setConfig, availableHosts, loading, loadError, configLoaded, reload, saving, handleSave, isDirty,
     resetting, resetBackendConfig,
     observerAuthTokenSet, observerAuthTokenTail, observerAuthTokenInput, setObserverAuthTokenInput,
     observerAuthTokenPendingClear, removeObserverAuthToken, undoRemoveObserverAuthToken,
@@ -115,10 +124,11 @@ export function SettingsPage({
     telemetryTestLoading, telemetryTestVerdict, setTelemetryTestVerdict, sendTestConnection, telemetryRuntimeStatus,
   } = useBackendConfig({ onSaved: () => { onConfigChange(); onClose(); }, onConfigChange });
 
-  // Active section in the master-detail nav. The first section is selected by
-  // default; switching shows only that section, so there's no cross-section
-  // page-level scroll. Persisting across visits is intentionally not done.
-  const [activeSection, setActiveSection] = useState<SectionId>('hosts');
+  // Active section in the master-detail nav. Switching shows only that section,
+  // so there's no cross-section page-level scroll. Persisting across visits is
+  // intentionally not done. Lands on LANDING_SECTION (Appearance) — usable with
+  // no network, so Settings is interactive on the first frame (WARDEN-976).
+  const [activeSection, setActiveSection] = useState<SectionId>(LANDING_SECTION);
 
   // WARDEN-906 — leaving with unsaved BACKEND edits used to drop them silently:
   // both exits (Back, Cancel) called `onClose` with no dirty check, so a typed
@@ -168,6 +178,15 @@ export function SettingsPage({
   // Snippets). See sectionPersistence.ts (WARDEN-870).
   const persistence = sectionPersistence(activeSection);
 
+  // WARDEN-976 — per-section readiness, replacing the old full-pane load gate.
+  // `gate` describes only what the ACTIVE section needs: a client-pref section
+  // is always 'ready' (its values are client localStorage, already on screen),
+  // a backend-config section is 'pending'/'failed' until the config GET
+  // resolves. Both keys come from sectionLoadGate.ts, which reads the same
+  // CLIENT_PREF_SECTIONS classification the footer label above uses.
+  const gate = sectionGate(activeSection, { configLoaded, loadFailed: !!loadError });
+  const activeMeta = SETTINGS_SECTIONS.find((s) => s.id === activeSection);
+
   return (
     <div className="flex flex-col flex-1 min-h-0">
       <header className="flex items-center gap-2 px-3 h-11 border-b shrink-0">
@@ -179,7 +198,7 @@ export function SettingsPage({
         <h1 className="text-sm font-semibold tracking-wide">Settings</h1>
         {!q && (
           <span className="min-w-0 truncate text-xs text-muted-foreground">
-            {SETTINGS_SECTIONS.find((s) => s.id === activeSection)?.description}
+            {activeMeta?.description}
           </span>
         )}
         {/* Section search — filters the wide-screen rail and the narrow-screen
@@ -245,23 +264,31 @@ export function SettingsPage({
               page scroll). Left-aligned with a readable cap so wide screens use
               the horizontal space via nav+pane, not a centered narrow column.
               All sections stay mounted (toggled via the `hidden` class) so their
-              local draft state survives a section switch. */}
+              local draft state survives a section switch.
+
+              WARDEN-976 — there is NO full-pane load gate here any more. The
+              client-pref sections (Appearance/NewChats/Snippets) and the danger
+              zone mount unconditionally and are fully operable while the config
+              GET is still in flight; only the backend-config sections wait, and
+              they wait IN PLACE via the pending/retry block below. */}
           <div className="flex-1 min-h-0 overflow-y-auto">
             <div className="flex max-w-4xl flex-col gap-6 px-4 py-6 md:px-6">
-              {loadError ? (
-                // WARDEN-828 — bounded load failure. The config GET exhausted its
-                // timeout + retry, so we surface a clear Retry instead of an
-                // infinite spinner. Save stays disabled (see footer) so a stale
-                // default config can never clobber the real one on a failed load.
-                <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
-                  <p className="max-w-sm text-sm text-muted-foreground">{loadError.message}</p>
-                  <Button variant="outline" onClick={reload} disabled={loading}>
-                    <RefreshCw className="h-4 w-4" /> Try again
-                  </Button>
-                </div>
-              ) : loading ? (
-                <div className="py-8 text-center text-sm text-muted-foreground">Loading configuration…</div>
-              ) : (
+              {/* Instant client-localStorage sections — never gated on the
+                  backend. These are the three ids in CLIENT_PREF_SECTIONS
+                  (sectionPersistence.ts), the same classification the footer
+                  label and sectionGate() read. `availableHosts` settles on its
+                  own decoupled fetch (WARDEN-828) and degrades to the configured
+                  hosts, so NewChats does not wait on it either. */}
+              <AppearanceSection {...appearance} hidden={activeSection !== 'appearance'} />
+              <NewChatsSection {...newChats} availableHosts={availableHosts} hidden={activeSection !== 'newchats'} />
+              <SnippetsSection {...snippets} hidden={activeSection !== 'snippets'} />
+
+              {/* Backend-config sections. Mounted only once a GET /api/config
+                  has succeeded — before that their values are unknown, and
+                  rendering them against DEFAULT_CONFIG would show wrong values
+                  and invite a Save that clobbers the real persisted config.
+                  Once mounted they stay mounted, so drafts survive a switch. */}
+              {configLoaded ? (
                 <>
                   <HostsSection
                     config={config}
@@ -305,9 +332,6 @@ export function SettingsPage({
                     hidden={activeSection !== 'telemetry'}
                   />
                   <DisplaySection config={config} setConfig={setConfig} hidden={activeSection !== 'display'} />
-                  <AppearanceSection {...appearance} hidden={activeSection !== 'appearance'} />
-                  <NewChatsSection {...newChats} availableHosts={availableHosts} hidden={activeSection !== 'newchats'} />
-                  <SnippetsSection {...snippets} hidden={activeSection !== 'snippets'} />
                   <PatternsSection config={config} setConfig={setConfig} hidden={activeSection !== 'patterns'} />
                   <NotificationsSection
                     {...alerts}
@@ -324,13 +348,43 @@ export function SettingsPage({
                     sendTestAlert={sendTestAlert}
                     hidden={activeSection !== 'notifications'}
                   />
-                  <ResetSection
-                    resetUiPrefsToDefaults={resetUiPrefsToDefaults}
-                    resettingBackend={resetting}
-                    onResetBackendConfig={resetBackendConfig}
-                  />
                 </>
+              ) : (
+                // The in-place stand-in for whichever backend-config section is
+                // active while its values are unknown. It carries that section's
+                // own title, so the page reads as "this section is still
+                // loading" rather than "Settings is loading" — the neighbouring
+                // sections stay usable behind it. Hidden outright when the
+                // active section is a client-pref one (gate === 'ready'), which
+                // is what keeps those three off the backend's critical path.
+                //
+                // WARDEN-828's bounded-failure contract is preserved verbatim:
+                // the retry affordance and its message still appear, and Retry
+                // still works — it is only scoped to the sections that need it.
+                <SettingsSection
+                  title={activeMeta?.label ?? 'Settings'}
+                  className={gate === 'ready' ? 'hidden' : undefined}
+                >
+                  {gate === 'failed' ? (
+                    <div className="flex flex-col items-start gap-3">
+                      <p className="max-w-sm text-sm text-muted-foreground">{loadError?.message}</p>
+                      <Button variant="outline" onClick={reload} disabled={loading}>
+                        <RefreshCw className="h-4 w-4" /> Try again
+                      </Button>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground" role="status" aria-busy>
+                      Loading configuration…
+                    </p>
+                  )}
+                </SettingsSection>
               )}
+
+              <ResetSection
+                resetUiPrefsToDefaults={resetUiPrefsToDefaults}
+                resettingBackend={resetting}
+                onResetBackendConfig={resetBackendConfig}
+              />
             </div>
           </div>
         </main>
@@ -340,13 +394,18 @@ export function SettingsPage({
         {/* Persistence indicator (WARDEN-870). States the active section's
             persistence model so Save/Cancel stop reading as undo/commit on the
             instant client-pref sections (Appearance/NewChats/Snippets), mirroring
-            the in-section labels WARDEN-784 added to NotificationsSection. Hidden
-            while config is loading/failed — a server-config section can't commit
-            during a failed load, and Save is already disabled then. `mr-auto`
-            parks the label left while the buttons stay right; `min-w-0 truncate`
-            keeps it from crowding the buttons on narrow screens (full text on
-            hover via title). */}
-        {!(loading || loadError) && (
+            the in-section labels WARDEN-784 added to NotificationsSection.
+            `mr-auto` parks the label left while the buttons stay right;
+            `min-w-0 truncate` keeps it from crowding the buttons on narrow
+            screens (full text on hover via title).
+
+            WARDEN-976 — shown whenever the ACTIVE section can actually act on
+            it. On a client-pref section that is immediately: the label is the
+            reassurance that this section needs no Save, which is most valuable
+            precisely while the backend is still loading. A server-config
+            section still hides it until the config is loaded — it cannot commit
+            what it has not loaded, and Save is disabled in that state. */}
+        {(configLoaded || persistence.kind === 'client') && (
           <span
             className="mr-auto min-w-0 truncate text-xs text-muted-foreground"
             title={persistence.label}
@@ -357,7 +416,11 @@ export function SettingsPage({
         <Button variant="outline" onClick={requestClose} disabled={saving}>
           Cancel
         </Button>
-        <Button onClick={handleSave} disabled={saving || loading || !!loadError}>
+        {/* Save PUTs the whole backend config, so it stays disabled until a GET
+            has actually succeeded — a never-loaded draft is DEFAULT_CONFIG, and
+            writing that would clobber the real persisted configuration. See
+            canSaveBackendConfig (sectionLoadGate.ts). */}
+        <Button onClick={handleSave} disabled={!canSaveBackendConfig({ configLoaded, saving })}>
           {saving ? 'Saving…' : 'Save'}
         </Button>
       </footer>
