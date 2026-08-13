@@ -14,7 +14,7 @@ import {
 } from '@/components/ui/context-menu';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { CreateCollectionDialog } from './CreateCollectionDialog';
-import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { countAgentsInCollection } from '@/lib/collections';
 import type { Collection, Chat } from '@/lib/types';
 
@@ -197,12 +197,6 @@ function CollectionCard({ collection, agentCount, onOpen, onRename, onDelete, on
     }
   };
 
-  const handleCopy = async (text: string) => {
-    const ok = await copyText(text);
-    if (ok) toast.success('Copied');
-    else toast.error('Copy failed');
-  };
-
   const handleDelete = async () => {
     setConfirmDelete(false);
     const res = await onDelete(collection.id);
@@ -259,8 +253,8 @@ function CollectionCard({ collection, agentCount, onOpen, onRename, onDelete, on
           <ContextMenuItem onSelect={startEdit}>Rename</ContextMenuItem>
           <ContextMenuItem onSelect={onEdit}>Edit…</ContextMenuItem>
           <ContextMenuSeparator />
-          <ContextMenuItem onSelect={() => handleCopy(collection.name)}>Copy name</ContextMenuItem>
-          <ContextMenuItem onSelect={() => handleCopy(JSON.stringify(collection.criteria ?? {}, null, 2))}>Copy criteria</ContextMenuItem>
+          <ContextMenuItem onSelect={() => copyWithToast(collection.name)}>Copy name</ContextMenuItem>
+          <ContextMenuItem onSelect={() => copyWithToast(JSON.stringify(collection.criteria ?? {}, null, 2))}>Copy criteria</ContextMenuItem>
           <ContextMenuSeparator />
           <ContextMenuItem variant="destructive" onSelect={() => setConfirmDelete(true)}>Delete</ContextMenuItem>
         </ContextMenuContent>

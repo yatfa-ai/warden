@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from 'react';
-import { toast } from 'sonner';
 import {
   Dialog,
   DialogContent,
@@ -17,7 +16,7 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { Loader2Icon, SearchIcon } from 'lucide-react';
 
 interface SearchResult {
@@ -46,14 +45,6 @@ interface Props {
 // Command/cmdk list primitive to reach for instead, so the raw element is
 // contained here in its own component rather than inlined in the results map.
 function SearchResultRow({ result, onSelect }: { result: SearchResult; onSelect: (file: string, line?: number) => void }) {
-  // Copy via the Electron-safe helper + a sonner success/error toast — the same
-  // pattern CollectionsSection/ActivityTimeline use for their copy actions.
-  const handleCopy = async (text: string) => {
-    const ok = await copyText(text);
-    if (ok) toast.success('Copied');
-    else toast.error('Copy failed');
-  };
-
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -71,9 +62,9 @@ function SearchResultRow({ result, onSelect }: { result: SearchResult; onSelect:
           Open in file viewer
         </ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuItem onSelect={() => handleCopy(result.text)}>Copy matched line</ContextMenuItem>
-        <ContextMenuItem onSelect={() => handleCopy(result.file)}>Copy file path</ContextMenuItem>
-        <ContextMenuItem onSelect={() => handleCopy(`${result.file}:${result.line}`)}>Copy file:line</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(result.text)}>Copy matched line</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(result.file)}>Copy file path</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(`${result.file}:${result.line}`)}>Copy file:line</ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
   );

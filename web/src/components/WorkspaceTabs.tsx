@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import { toast } from 'sonner';
 import { Plus, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -11,7 +10,7 @@ import {
 } from '@/components/ui/context-menu';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
-import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { PANE_DRAG_MIME } from '@/lib/dnd';
 import type { WorkspacePaneSet } from '@/lib/storage';
 
@@ -99,13 +98,6 @@ export function WorkspaceTabs({ workspaces, activeWorkspaceId, onSelect, onCreat
         const active = ws.id === activeWorkspaceId;
         const editing = editingId === ws.id;
         const over = dragOverId === ws.id;
-        // Copy the tab name via the shared Electron-safe clipboard util — never
-        // bare navigator.clipboard, which fails silently in Electron (see
-        // ActivityTimeline.tsx for the rationale). Mirrors CollectionsSection.
-        const handleCopyName = async () => {
-          const ok = await copyText(ws.name);
-          if (ok) toast.success('Copied'); else toast.error('Copy failed');
-        };
         return (
           <ContextMenu key={ws.id}>
             <ContextMenuTrigger asChild disabled={editing}>
@@ -176,7 +168,7 @@ export function WorkspaceTabs({ workspaces, activeWorkspaceId, onSelect, onCreat
             <ContextMenuContent>
               {/* Surfaces the double-click-only rename affordance; no new logic. */}
               <ContextMenuItem onSelect={() => startRename(ws)}>Rename</ContextMenuItem>
-              <ContextMenuItem onSelect={handleCopyName}>Copy name</ContextMenuItem>
+              <ContextMenuItem onSelect={() => copyWithToast(ws.name)}>Copy name</ContextMenuItem>
               <ContextMenuSeparator />
               {/* Mirrors the in-component invariant that hides the X for a single
                   workspace: the menu must not offer to close the last workspace. */}

@@ -30,7 +30,7 @@ import { MarkdownBody } from './MarkdownBody';
 import { tokenizeCode, languageFromPath, type Leaf } from '@/lib/highlight';
 import { Loader2Icon, FileIcon, FolderIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon, RotateCwIcon, CircleDotIcon, FilePenIcon, GitCompare } from 'lucide-react';
 import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
-import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { basename } from '@/lib/chatDisplay';
 // Pure breadcrumb geometry (splitPathSegments / ancestorDir) for the clickable
 // path-segment crumbs (WARDEN-740) — kept UI-free in src/lib so it is unit-
@@ -640,15 +640,6 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
   // `canOpenCoEditor`'s optional-degrades-safely shape.
   const canCompare = typeof onCompare === 'function';
 
-  // Copy text to the clipboard through the shared Electron-safe helper, surfacing
-  // the boolean result via toast — never bare navigator.clipboard, which rejects
-  // silently in Electron (WARDEN-285). Matches CollectionsSection / WorkspaceTabs.
-  const handleCopy = async (text: string) => {
-    const ok = await copyText(text);
-    if (ok) toast.success('Copied');
-    else toast.error('Copy failed');
-  };
-
   // Manual ↻ reload (WARDEN-749): a one-shot refresh independent of Follow —
   // today no refresh exists at all, so a stale file forces a close/reopen. Runs
   // as a background-style load (no loading flash; content updates in place) and
@@ -1059,15 +1050,15 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
         <ContextMenuContent>
           {/* Copies the FULL path regardless of the header's truncation
               (FileViewer.tsx span.truncate) — the most natural "copy path" target. */}
-          <ContextMenuItem onSelect={() => handleCopy(filePath)}>Copy file path</ContextMenuItem>
+          <ContextMenuItem onSelect={() => copyWithToast(filePath)}>Copy file path</ContextMenuItem>
           {/* Mirrors the "Copy name" vocabulary of the collection-card / workspace-tab siblings. */}
-          <ContextMenuItem onSelect={() => handleCopy(basename(filePath))}>Copy filename</ContextMenuItem>
+          <ContextMenuItem onSelect={() => copyWithToast(basename(filePath))}>Copy filename</ContextMenuItem>
           {/* Copies whatever is on screen: the live file, or — while viewing a
               historical snapshot (WARDEN-354) — that commit's blob. Disabled while
               nothing is loaded so it can never silently copy an empty string. */}
           <ContextMenuItem
             disabled={displayedContent === null}
-            onSelect={() => { if (displayedContent !== null) handleCopy(displayedContent); }}
+            onSelect={() => { if (displayedContent !== null) copyWithToast(displayedContent); }}
           >
             Copy file content
           </ContextMenuItem>

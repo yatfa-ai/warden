@@ -22,8 +22,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu';
-import { toast } from 'sonner';
-import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { GitCompare, FileIcon, Search, X, ExternalLink } from 'lucide-react';
 import { DiffBlock } from '@/components/DiffBlock';
 import { DiffViewer } from '@/components/DiffViewer';
@@ -128,18 +127,6 @@ function OpenFileAffordance({ path, onOpenFile, className }: { path: string; onO
       <FileIcon className="size-3" />
     </span>
   );
-}
-
-/** Copy via the Electron-safe helper + a sonner success/error toast — the same
- *  pattern every sibling Copy slice uses (FleetRecentCommits, DiffViewer,
- *  ConflictView). Never bare navigator.clipboard, which fails silently in
- *  Electron (WARDEN-68 Rule 3); the caller owns the toast per the copyText
- *  contract (lib/clipboard.ts). Module-level: GitChangedFile is rendered once
- *  per changed file, so there is no reason to re-create it per row. */
-async function copyWithToast(text: string) {
-  const ok = await copyText(text);
-  if (ok) toast.success('Copied');
-  else toast.error('Copy failed');
 }
 
 /** A single changed-file row: status indicator (M/A/D/??) + truncated path.

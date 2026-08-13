@@ -21,24 +21,14 @@
 // differs ("Recipients" for Broadcast, "Targets" for the other three) — so this
 // component renders only the bordered, scrollable list body. `targets` is a
 // Chat[] in display order, identical to the prop each dialog already receives.
-import { toast } from 'sonner';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { chatType, displayName, hostTagOf } from '@/lib/chatDisplay';
-import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { useHostLabels } from '@/lib/hostLabels';
 import type { Chat } from '@/lib/types';
 
 export function TargetAgentList({ targets }: { targets: Chat[] }) {
   const hostLabels = useHostLabels();
-  // Copy via the Electron-safe helper + a sonner success/error toast — the same
-  // pattern FleetRecentCommits' Copy items use. Never bare navigator.clipboard,
-  // which fails silently in Electron (WARDEN-68 Rule 3); the caller owns the
-  // toast per the copyText contract (lib/clipboard.ts).
-  const handleCopy = async (text: string) => {
-    const ok = await copyText(text);
-    if (ok) toast.success('Copied');
-    else toast.error('Copy failed');
-  };
   return (
     <div className="rounded-md border border-border max-h-44 overflow-auto">
       <ul className="divide-y divide-border">
@@ -72,12 +62,12 @@ export function TargetAgentList({ targets }: { targets: Chat[] }) {
                 </li>
               </ContextMenuTrigger>
               <ContextMenuContent>
-                <ContextMenuItem onSelect={() => handleCopy(name)}>Copy agent name</ContextMenuItem>
-                <ContextMenuItem onSelect={() => handleCopy(type)}>Copy type</ContextMenuItem>
-                <ContextMenuItem onSelect={() => handleCopy(host)}>Copy host</ContextMenuItem>
+                <ContextMenuItem onSelect={() => copyWithToast(name)}>Copy agent name</ContextMenuItem>
+                <ContextMenuItem onSelect={() => copyWithToast(type)}>Copy type</ContextMenuItem>
+                <ContextMenuItem onSelect={() => copyWithToast(host)}>Copy host</ContextMenuItem>
                 {/* Conditional, mirroring the role span above — no dead "Copy role"
                     item on a target that has no role. */}
-                {role && <ContextMenuItem onSelect={() => handleCopy(role)}>Copy role</ContextMenuItem>}
+                {role && <ContextMenuItem onSelect={() => copyWithToast(role)}>Copy role</ContextMenuItem>}
               </ContextMenuContent>
             </ContextMenu>
           );
