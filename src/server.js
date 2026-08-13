@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { load, save, loadCatalog, saveCatalog, allSshHosts, sameCatalogEntry } from './config.js';
@@ -40,6 +41,8 @@ import {
 import { isCompanionTransportEnabled, subscribePanes, unsubscribePanes, reconcilePaneSubscriptions, startPaneDeltaSweep, getCompanionStatus, uninstallCompanion } from './companion.js';
 import { unescapeGitPath } from './gitStatus.js';
 import { createGitRouter, runLocalCapture, runInContext, gitCwd } from './gitRoutes.js';
+import { loopMonitor, instrumentSyncIo, formatStallLine } from './loop-monitor.js';
+import { appendStall, readStalls, pruneStallLog, stallLogFile } from './stall-log.js';
 export { runGit, gitCwd, parseInProgressDetail, stripCommitSubject, diffNoIndex, getLocalGitDiff } from './gitRoutes.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -56,7 +59,34 @@ const companionEnvOverridden = process.env.WARDEN_COMPANION_TRANSPORT !== undefi
 applyCompanionToggle(cfg.companionTransportEnabled, { override: companionEnvOverridden });
 
 const app = express();
+
+// WARDEN-977 — label every request for the event-loop stall monitor. This is the
+// ATTRIBUTION half of the server's stall instrumentation: when the heartbeat in
+// src/loop-monitor.js sees the loop blocked for seconds, the spans open across
+// that window name the work that held it. Deliberately the FIRST middleware, so
+// static assets and unmatched paths are labeled too.
+//
+// Cost per request: one small object, one monotonic clock read, one 'close'
+// listener. No I/O and nothing synchronous is added to the request path — the
+// monitor exists precisely because synchronous work on this path is the suspect.
+// (`end` is idempotent, and node emits 'close' on a finished response AND on an
+// aborted one, so a span always closes.)
+app.use((req, res, next) => {
+  const span = loopMonitor.begin(`${req.method} ${requestLabelPath(req.path)}`);
+  res.on('close', () => loopMonitor.end(span));
+  next();
+});
 app.use(express.json({ limit: '1mb' }));
+
+// Curated label for a request path: warden's routes are static, but a label must
+// never become a channel for arbitrary text (it is written to the stall log and
+// printed to stderr), so anything outside a conservative charset is collapsed and
+// the whole thing is length-bounded.
+function requestLabelPath(p) {
+  const raw = typeof p === 'string' && p ? p : '/';
+  const safe = raw.replace(/[^A-Za-z0-9/._-]+/g, '*');
+  return safe.length > 48 ? safe.slice(0, 48) + '…' : safe;
+}
 
 const DIST = path.join(__dirname, '..', 'web', 'dist');
 if (fs.existsSync(DIST)) {
@@ -249,6 +279,72 @@ app.get('/api/health', (_req, res) => {
       groups,
       summary,
       timestamp: Date.now()
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---- Server event-loop stall instrumentation (WARDEN-977) ------------------
+//
+// The backend is a FORKED CHILD of the Electron main process, and the freeze
+// heartbeat that already existed (electron/telemetry-source.cjs) only ever
+// watched the main process — so a multi-second block of THIS process emitted
+// nothing anywhere, which is why the ~10s Settings hang survived three passes
+// (WARDEN-828 / WARDEN-831 / WARDEN-915). This wires the server-side heartbeat
+// to its three read channels, all of which are on by default and none of which
+// require a rebuild, a debugger or any unrelated opt-in:
+//
+//   1. ~/.yatfa-warden/stalls.jsonl — the durable record the owner reads.
+//   2. one `[warden:stall] …` line on stderr, which the Electron main process
+//      already relays to its console as `[server] …`.
+//   3. GET /api/diagnostics/stalls — the same file, in a browser.
+//
+// Telemetry is deliberately NOT the channel: it is opt-in and off by default, so
+// it cannot deliver a signal the owner needs to read on demand.
+function startLoopMonitor() {
+  loopMonitor.setOnStall((record) => {
+    // stderr first (synchronous, always available, survives a failed write), then
+    // the durable append. Both are on the stall path only — never on a request.
+    console.error(`${formatStallLine(record)} | recorded in ${stallLogFile()}`);
+    appendStall(record).catch((e) => {
+      console.warn(`[warden:stall] could not append to ${stallLogFile()}: ${e.message}`);
+    });
+  });
+  loopMonitor.start();
+  // Time the synchronous fs / child_process members so a stall can be attributed
+  // to the actual blocking call, not just to the request or sweep it happened
+  // inside. One patch covers every runtime sync site in src/ that calls through
+  // the module object (`import fs from 'node:fs'` → `fs.statSync(…)`), which is
+  // all of them — session, collection, companion, LLM, git and claude-session
+  // reads, including the hand-rolled fd-level windowed reads
+  // (openSync/readSync/closeSync) that carry the largest synchronous payloads.
+  // This MEASURES the sites WARDEN-831 deliberately left synchronous; it does
+  // not convert them (out of scope, and the point is to stop guessing).
+  // Calls at/above the monitor's floor (100ms) take a ring slot; ALL calls are
+  // aggregated per label, so a stall made of many cheap calls is still visible.
+  const requireCjs = createRequire(import.meta.url);
+  instrumentSyncIo(loopMonitor, { fs, childProcess: requireCjs('node:child_process') });
+  // Age out records older than 7 days, once, off the request path.
+  pruneStallLog().catch((e) => console.warn(`[warden:stall] prune failed: ${e.message}`));
+}
+
+// Recorded server stalls — the owner-facing read surface for the durable log.
+// Reads the FILE (not just the in-process ring) so the evidence survives a
+// restart; `session` additionally exposes this process's ring, which is the
+// fallback when the home dir is unwritable. Zero SSH, one async file read.
+app.get('/api/diagnostics/stalls', async (req, res) => {
+  try {
+    const limitRaw = parseInt(String(req.query.limit ?? ''), 10);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 50;
+    const stalls = await readStalls({ limit });
+    res.json({
+      logFile: stallLogFile(),
+      config: loopMonitor.config,
+      stats: loopMonitor.stats(),
+      stalls,
+      session: loopMonitor.stalls().slice(-limit).reverse(),
+      timestamp: Date.now(),
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -2232,7 +2328,11 @@ streamWss.on('connection', (ws) => {
       // appendEvent({ type: 'snapshot', id: k, host: chats.find(c => c.key === k)?.host, container: chats.find(c => c.key === k)?.container });
     }
   };
-  const startMonitor = () => { if (!monitorTimer) { monitorTimer = setInterval(tickMonitor, 2000); tickMonitor(); } };
+  // Traced for the stall monitor (WARDEN-977): the 2s pane-capture beat is the
+  // busiest always-on timer in the process, so a stall that lands inside it must
+  // say so rather than being attributed to whichever request it froze.
+  const tracedTickMonitor = () => loopMonitor.trace('ws:pane-monitor', tickMonitor);
+  const startMonitor = () => { if (!monitorTimer) { monitorTimer = setInterval(tracedTickMonitor, 2000); tracedTickMonitor(); } };
   const stopMonitorIfEmpty = () => { if (monitorTimer && !monitors.size) { clearInterval(monitorTimer); monitorTimer = null; } };
 
   // WARDEN-413: keep companion pane-push subscriptions in sync with the monitored
@@ -2527,8 +2627,13 @@ async function tickLifecycleBody(deps = {}) {
 
 function startLifecyclePoll() {
   if (lifecycleTimer) return;
-  lifecycleTimer = setInterval(tickLifecycle, LIFECYCLE_INTERVAL_MS);
-  tickLifecycle(); // seed the baseline immediately (fires once, emits nothing)
+  // Traced (WARDEN-977): an always-on sweep is the most plausible window for one
+  // of the remaining synchronous sites to land on a user-visible request, so the
+  // stall monitor must be able to name it. `trace` returns the tick's own promise
+  // (rejection identity preserved), so the sweep behaves exactly as untraced.
+  const kick = () => loopMonitor.trace('sweep:lifecycle', tickLifecycle);
+  lifecycleTimer = setInterval(kick, LIFECYCLE_INTERVAL_MS);
+  kick(); // seed the baseline immediately (fires once, emits nothing)
 }
 
 // ---- Token-spend budget slow-cadence accumulator (WARDEN-415) ---------------
@@ -2649,7 +2754,8 @@ function kickBudgetSweep() {
   // The `.catch` is the same lesson as appendStateEvent above: a fire-and-forget async
   // call needs a REAL rejection handler, or a future throw outside tickBudget's own
   // try/catch escapes as an unhandledRejection and kills the process on Node >= 15.
-  const p = tickBudget()
+  // Traced for the stall monitor (WARDEN-977) — see startLifecyclePoll.
+  const p = loopMonitor.trace('sweep:budget', tickBudget)
     .catch(() => { /* a seed sweep must never take the server down */ })
     .finally(() => { if (budgetInFlight === p) budgetInFlight = null; });
   budgetInFlight = p;
@@ -2881,7 +2987,8 @@ function startAttentionPoll() {
 function kickAttentionSweep() {
   // `.catch` for the same reason as kickBudgetSweep / appendStateEvent: fire-and-forget
   // async must not be able to escape as an unhandledRejection.
-  const p = tickAttention()
+  // Traced for the stall monitor (WARDEN-977) — see startLifecyclePoll.
+  const p = loopMonitor.trace('sweep:attention', tickAttention)
     .catch(() => { /* a kicked sweep must never take the server down */ })
     .finally(() => { if (attentionInFlight === p) attentionInFlight = null; });
   attentionInFlight = p;
@@ -2945,6 +3052,11 @@ export function startServer(port = 7421, host = '127.0.0.1') {
   server.listen(port, host, async () => {
     console.log(`warden ui → http://${host}:${port}`);
     console.log(`  hosts: ${cfg.hosts.join(', ')}   model: ${resolveModel()}   tmux: ${TMUX_BIN}`);
+    // Watch THIS process's event loop for multi-second blocks and record them
+    // durably with attribution (WARDEN-977). Started here — not at module import
+    // — so importing `app` (tests, tools, the CLI) runs no timer and patches no
+    // builtin; the server child is the only process that instruments itself.
+    startLoopMonitor();
     // Start connection pool cleanup task
     startConnectionPoolCleanup();
     // Start cross-host lifecycle polling (captures agent start/stop/error on

@@ -74,6 +74,31 @@ warden ui                      # launch the web dashboard
 warden observe                 # CLI observer (meta-chat)
 ```
 
+## Troubleshooting: the app felt frozen
+
+Warden's backend is a single-threaded process, so one slow blocking call stalls
+every request, WebSocket message and pane poll at once — which is what a hang
+"for no reason" (a spinner that sits for seconds) usually is. The backend watches
+its own event loop and records every multi-second block, always on, no setup:
+
+```bash
+cat ~/.yatfa-warden/stalls.jsonl        # newest last, one JSON line per stall
+curl localhost:7421/api/diagnostics/stalls   # same records, newest first
+```
+
+Each record says how long the loop was blocked (`lagMs`) and what was running
+while it was (`attribution` — the request, the background sweep, and the
+individual synchronous call, with the time each covered):
+
+```jsonc
+{ "type": "performance-stall", "runtime": "server", "lagMs": 3507,
+  "attribution": [{ "label": "fs.readFileSync", "overlapMs": 3506, "durationMs": 4004 }] }
+```
+
+An empty file means the backend has not stalled. Stalls are also printed as
+`[warden:stall] …` lines, and records older than 7 days are dropped at startup.
+This is local-only and unrelated to telemetry (which stays off by default).
+
 ## Development
 
 ```bash
