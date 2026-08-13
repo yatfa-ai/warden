@@ -48,7 +48,9 @@ const controlMasterPath = () => {
 // control diagnostics never spam the console.
 function sshControl(host, socketPath, sub, timeout = 5000) {
   return new Promise((resolve) => {
-    const child = spawn(SSH_BIN, ['-O', sub, '-S', socketPath, host], {
+    // `--` terminates ssh's option parsing so a `-`-leading host can never be
+    // read as an option (e.g. `-oProxyCommand=…`, which ssh runs LOCALLY).
+    const child = spawn(SSH_BIN, ['-O', sub, '-S', socketPath, '--', host], {
       windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
     });
     const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch { /* noop */ } }, timeout);
@@ -77,6 +79,7 @@ async function ensureControlMaster(host, cfg) {
     '-o', 'ControlPersist=10m',  // Keep alive for 10 minutes after last use
     '-o', `ConnectTimeout=${timeout}`,
     '-N',  // No remote command
+    '--',  // end of options — a `-`-leading host is a hostname, never an option
     host
   ];
 
@@ -290,7 +293,12 @@ export function run(host, cmd, opts = {}, cfg = {}) {
     args.push('-o', 'ControlPath=' + socketPath);
   }
 
-  args.push(host, remote);
+  // `--` ends ssh's option parsing: a host beginning with `-` is then treated as
+  // a (bogus) hostname instead of an option. Without it, `-oProxyCommand=<cmd>`
+  // arriving as a `host` makes ssh execute <cmd> on THIS machine. An argv array
+  // stops the shell, not the callee's own option parser — so terminate options
+  // here in the builder, where every caller is covered (WARDEN-140 Trap 5).
+  args.push('--', host, remote);
 
   return new Promise((resolve) => {
     const child = spawnFn(SSH_BIN, args, { windowsHide: true });
@@ -446,7 +454,7 @@ export async function runWithPool(host, cmd, opts = {}, cfg = {}, deps = {}) {
 // Attach with a PTY, inheriting stdio. Used by the CLI for `tmux attach` (remote).
 export function attach(host, cmd, _opts = {}) {
   const remote = `bash -lc ${shellQuote(cmd)}`;
-  const args = ['-tt', ...SSH_BASE_OPTS, host, remote];
+  const args = ['-tt', ...SSH_BASE_OPTS, '--', host, remote];
   const child = spawn(SSH_BIN, args, { stdio: 'inherit' });
   return new Promise((resolve) => child.on('exit', (c) => resolve(c ?? 0)));
 }
@@ -455,7 +463,7 @@ export function attach(host, cmd, _opts = {}) {
 // change → SIGWINCH → ssh → remote tmux. Returns a node-pty IPty.
 export function attachPty(host, cmd, { cols = 100, rows = 30 } = {}) {
   const remote = `export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8; bash -lc ${shellQuote(cmd)}`;
-  const args = ['-tt', ...SSH_BASE_OPTS, host, remote];
+  const args = ['-tt', ...SSH_BASE_OPTS, '--', host, remote];
   return nodePty.spawn(SSH_BIN, args, { cols, rows, useConpty: true });
 }
 
