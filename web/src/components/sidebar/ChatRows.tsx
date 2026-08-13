@@ -1,7 +1,14 @@
 // Chat-row rendering extracted from ChatSidebar.tsx (WARDEN-315).
-// Pure structural move — no behavior, props, classname, or DOM change.
 // Groups the loading skeletons and the two row components (fleet rows + the
 // primary opened-tabs working-set rows).
+//
+// WARDEN-975: these rows carry NO git. The branch badge, the ✦N "what's new since
+// your last visit" marker and the inline +N −M magnitude chip are gone, together
+// with the whole git prop bundle that fed them (gitInfo, the three commit caches +
+// fetchers, onOpenDiff / onOpenConflict / onOpenFile). Git now lives in exactly one
+// place — the sidebar's collapsible Source Control section — and describes only the
+// focused pane, so per-row git had no data to render: the fetch is focused-pane-only.
+// A row is now identity + liveness + the human's own annotations (pin, note, watch).
 
 import { useState } from 'react';
 import { WifiOff, Eye } from 'lucide-react';
@@ -17,33 +24,9 @@ import { chatType, displayName, hostTagOf, hostLabelFor } from '@/lib/chatDispla
 import { useHostLabels } from '@/lib/hostLabels';
 import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
 import type { Chat, AgentStateRow } from '@/lib/types';
-import type { GitCommit, GitFile, DiffStat } from './types';
-import { GitBranchBadge, WhatsNewMarker } from './GitBadges';
-import { DiffStatChip } from './DiffStatChip';
-import { getLastSeen, summarizeWhatsNew, hasUnreviewedProgress } from '@/lib/whatsNew';
 import { currentWatchNeed } from '@/lib/chatWatch';
 import { watchStateLabel } from '@/lib/desktopAlerts';
 
-// Compute the per-agent "What's new since your last visit" summary for a row
-// (WARDEN-356) from the git-log + git-status data the row already holds, plus
-// the client-side lastSeen timestamp App stamps on pane open/focus. Pure-ish
-// (reads localStorage + the clock, both cheap) and recomputed each render — so
-// it stays fresh as ChatSidebar refetches git-log/git-status on poll. Returns
-// the raw `since` (null when never visited, so hasUnreviewedProgress can gate)
-// alongside the summary. Shared by ChatRow + OpenedChatRow to avoid divergence.
-function computeWhatsNew(chatId: string, commits: GitCommit[] | undefined, gitInfo: { files?: GitFile[]; stashCount?: number | null } | undefined) {
-  const since = getLastSeen(chatId);
-  const summary = summarizeWhatsNew({
-    commits,
-    since: since ?? 0,
-    changedFileCount: gitInfo?.files?.length,
-    stashCount: gitInfo?.stashCount,
-    // `truncated` only needs the default WHATS_NEW_FETCH_LIMIT, which is also the
-    // limit the ChatSidebar what's-new fetch uses — so the truncation signal stays
-    // honest without threading a second number through the row props.
-  });
-  return { since, summary, show: hasUnreviewedProgress(since, summary) };
-}
 
 const TYPE_COLOR: Record<string, string> = {
   resume: 'text-cyan-400', claude: 'text-green-400', shell: 'text-yellow-400',
@@ -137,28 +120,13 @@ function WatchToggle({ isWatched, watchState, onToggle }: {
   );
 }
 
-export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, onOpenConflict, onOpenFile, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, isPinned, onTogglePin, selected, onToggleSelect, selectionActive, note, onSetNote, isWatched, watchState, onToggleWatch }: {
+export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, isPinned, onTogglePin, selected, onToggleSelect, selectionActive, note, onSetNote, isWatched, watchState, onToggleWatch }: {
   c: Chat; open: boolean; onOpen: () => void; onKill: () => void;
   onRename: (session: string, kind: string, name: string, host?: string) => void;
   dim?: boolean;
   // WARDEN-198: per-host reachability from the 30s /api/hosts/status poll.
   // 'offline' → the row renders a distinct "unreachable" state.
   hostStatus?: 'online' | 'offline' | 'unknown';
-  gitInfo?: { branch: string | null; detached?: boolean; headSha?: string | null; headDate?: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; upstream?: string | null; inProgress?: { operation: string | null; detail?: string | null }; stashCount?: number | null; diffstat?: DiffStat | null };
-  gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
-  // WARDEN-225: incoming (behind) commits + their own fetch/loader, threaded to
-  // GitBranchBadge the same way the local gitLog trio is.
-  incomingCommits?: GitCommit[]; incomingLoading?: boolean; onFetchIncoming?: () => void;
-  // WARDEN-252: outgoing (ahead/unpushed) commits + their own fetch/loader.
-  outgoingCommits?: GitCommit[]; outgoingLoading?: boolean; onFetchOutgoing?: () => void;
-  onOpenDiff?: (path: string, staged?: boolean) => void;
-  // WARDEN-428: opens the read-only ours-vs-theirs ConflictView for a conflicted
-  // file (UU/AA/UD/…) instead of the staged diff.
-  onOpenConflict?: (path: string) => void;
-  // WARDEN-478: opens the file's full content in the FileViewer (read + blame +
-  // history) from any file row in this agent's git panel — dirty files, the
-  // catch-up popover, and committed files inside GitBranchBadge's commit lists.
-  onOpenFile?: (path: string) => void;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
   isPinned?: boolean; onTogglePin?: () => void;
   // WARDEN-292: multi-select for broadcast. `selected` is this row's membership
@@ -196,9 +164,6 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
   // "unreachable" state instead of the ambiguous idle/undiscovered gray dot.
   // Driven by the shared 30s host-status poll, so it self-clears on recovery.
   const hostOffline = hostStatus === 'offline';
-  // WARDEN-356: per-agent "What's new since your last visit" marker — computed
-  // from the git-log + git-status this row already receives (+ App's lastSeen).
-  const whatsNew = computeWhatsNew(c.key || c.id, gitCommits, gitInfo);
   const commit = () => {
     const v = val.trim();
     if (v && v !== (c.name || c.key)) {
@@ -266,69 +231,19 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
       ) : (
         <span className="flex-1 min-w-0 wrap-anywhere" onDoubleClick={(e) => { if (canRename) { e.stopPropagation(); setVal(c.name || c.key || c.id); setEditing(true); } }} title={canRename ? 'double-click to rename' : undefined}>
           {c.name || c.key || c.id}
-          {(showTypeBadges !== false || showProjectBadges || gitInfo?.branch) && (
+          {(showTypeBadges !== false || showProjectBadges) && (
             <>
               {showTypeBadges !== false && <span className={`ml-1 text-[10px] ${typeColor}`}>{type}</span>}
               {c.role && !isUser && <span className="ml-1 text-[10px] text-muted-foreground">{c.role}</span>}
               {showProjectBadges && c.project && <span className="ml-1 text-[10px] text-muted-foreground">{c.project}</span>}
               {isUser && showHostTags !== false && hostTag && <span className="ml-1 text-[10px] text-muted-foreground">{hostTag}</span>}
-              {(gitInfo?.branch || gitInfo?.detached) && (
-                <GitBranchBadge
-                  branch={gitInfo.branch ?? ''}
-                  chatId={c.key || c.id}
-                  clean={gitInfo.clean}
-                  commits={gitCommits}
-                  loading={gitLogLoading}
-                  onFetch={onFetchGitLog}
-                  ahead={gitInfo.ahead}
-                  behind={gitInfo.behind}
-                  inProgress={gitInfo.inProgress}
-                  stashCount={gitInfo.stashCount}
-                  diffstat={gitInfo.diffstat}
-                  detached={gitInfo.detached}
-                  headSha={gitInfo.headSha}
-                  headDate={gitInfo.headDate}
-                  upstream={gitInfo.upstream}
-                  incomingCommits={incomingCommits}
-                  incomingLoading={incomingLoading}
-                  onFetchIncoming={onFetchIncoming}
-                  outgoingCommits={outgoingCommits}
-                  outgoingLoading={outgoingLoading}
-                  onFetchOutgoing={onFetchOutgoing}
-                  onOpenFile={onOpenFile}
-                  className="ml-1"
-                />
-              )}
-              {whatsNew.show && (
-                <WhatsNewMarker
-                  summary={whatsNew.summary}
-                  since={whatsNew.since}
-                  files={gitInfo?.files}
-                  diffstat={gitInfo?.diffstat}
-                  onOpenDiff={onOpenDiff}
-                  onOpenConflict={onOpenConflict}
-                  onOpenFile={onOpenFile}
-                />
-              )}
             </>
           )}
-          {gitInfo?.clean === false && gitInfo.files && gitInfo.files.length > 0 && (
-            <div className="ml-1 mt-0.5 flex flex-col gap-0.5">
-              {/* WARDEN-411: magnitude chip — how much WIP, not just whether there is any.
-                  WARDEN-431: the per-file changed-file rows that rendered here moved to the
-                  Source Control panel; the +N −M chip stays inline as a fleet-wide glanceable
-                  signal (the panel shows only the focused pane). Tracked-edits only
-                  (insertions+deletions > 0); an all-untracked WIP renders no misleading +0−0
-                  and speaks through the Source Control panel's file list. */}
-              {gitInfo.diffstat && gitInfo.diffstat.insertions + gitInfo.diffstat.deletions > 0 && (
-                <div className="px-0.5"><DiffStatChip diffstat={gitInfo.diffstat} /></div>
-              )}
-            </div>
-          )}
           {/* WARDEN-305: per-agent note — muted one-line subtext under the name,
-              or an inline editor when noteEditing. A block child of the truncate
-              span → renders on its own line. (WARDEN-431: the per-chat working-tree
-              file rows that used to render here moved to the Source Control panel.) */}
+              or an inline editor when noteEditing. A block child of the name span
+              → renders on its own line. (WARDEN-975: the branch badge, the ✦N
+              what's-new marker and the +N −M magnitude chip that used to render
+              here are gone — git describes the focused pane, in its own section.) */}
           {noteEditing ? (
             <Input autoFocus value={noteVal} onClick={(e) => e.stopPropagation()} onChange={(e) => setNoteVal(e.target.value)} onBlur={commitNote} onKeyDown={(e) => { if (e.key === 'Enter') commitNote(); if (e.key === 'Escape') setNoteEditing(false); }} placeholder="add a note…" maxLength={200} className="block mt-0.5 h-5 w-full text-[10px] px-1 text-muted-foreground" />
           ) : note ? (
@@ -344,8 +259,8 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
       {/* WARDEN-892: the action buttons are grouped so that at narrow sidebar widths
           (container query, ≤13rem) the whole group drops to its own line
           (@max-[13rem]:basis-full) instead of squeezing the name span into a
-          sub-readable column — which collapsed the GitBranchBadge branch token into a
-          one-character-wide, hundreds-of-px-tall column. Requires an @container
+          sub-readable column — which used to collapse the (now removed) branch-badge
+          token into a one-character-wide, tall column. Requires an @container
           ancestor (the host/collection view roots carry @container). */}
       {!editing && (
         <div className="flex items-center gap-0.5 @max-[13rem]:basis-full @max-[13rem]:justify-start @max-[13rem]:gap-1">
@@ -398,15 +313,16 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, gi
 
 // A row in the primary "open panes" list — the active workspace's openPanes,
 // mirroring pane-grid order (WARDEN-372). Table-like columns: status indicator ·
-// display name · last-activity time · type/host/project/git badges · rename ·
-// close. Rename works directly on the row for manual/spawned chats via the ✎
+// display name · last-activity time · type/host/project badges · rename ·
+// close. (WARDEN-975: no git badge — git lives only in the Source Control section.)
+// Rename works directly on the row for manual/spawned chats via the ✎
 // affordance only (single-click the row opens/focuses it; gating rename off
 // double-click avoids the two-fires-before-dblclick open-then-edit jank); yatfa
 // agents are not renameable. The old drag-reorder + hide affordances are gone:
 // the list mirrors the pane grid (no sidebar reorder) and hide/unhide is
 // abolished. Closing a row (× / "Close pane") is `onClose`, which removes the
 // pane and records it in the workspace's recently-closed recovery list.
-export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, gitInfo, gitCommits, gitLogLoading, onFetchGitLog, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, onOpenDiff, onOpenConflict, onOpenFile, onKill, note, onSetNote, timestampFormat, isWatched, watchState, onToggleWatch }: {
+export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, onKill, note, onSetNote, timestampFormat, isWatched, watchState, onToggleWatch }: {
   id: string;
   c?: Chat;
   isOpen: boolean;
@@ -414,17 +330,6 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
   onClose: () => void;
   onRename: (session: string, kind: string, name: string, host?: string) => void;
   showHostTags?: boolean; showTypeBadges?: boolean; showStatusIndicators?: boolean; showProjectBadges?: boolean;
-  gitInfo?: { branch: string | null; detached?: boolean; headSha?: string | null; headDate?: string | null; clean: boolean | null; files?: GitFile[]; ahead?: number | null; behind?: number | null; upstream?: string | null; inProgress?: { operation: string | null; detail?: string | null }; stashCount?: number | null; diffstat?: DiffStat | null };
-  gitCommits?: GitCommit[]; gitLogLoading?: boolean; onFetchGitLog?: () => void;
-  // WARDEN-225: incoming (behind) commits + their own fetch/loader.
-  incomingCommits?: GitCommit[]; incomingLoading?: boolean; onFetchIncoming?: () => void;
-  // WARDEN-252: outgoing (ahead/unpushed) commits + their own fetch/loader.
-  outgoingCommits?: GitCommit[]; outgoingLoading?: boolean; onFetchOutgoing?: () => void;
-  onOpenDiff?: (path: string, staged?: boolean) => void;
-  // WARDEN-428: opens the read-only ours-vs-theirs ConflictView for a conflicted file.
-  onOpenConflict?: (path: string) => void;
-  // WARDEN-478: opens the file's full content in the FileViewer (mirrors ChatRow).
-  onOpenFile?: (path: string) => void;
   onKill?: () => void;
   // WARDEN-305: per-agent note (mirrors pins; keyed by chat id).
   note?: string;
@@ -460,11 +365,6 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
     if (c && v && v !== displayName(c)) onRename(c.key || c.id, c.kind || 'tmux', v, c.host);
   };
 
-  const hasFiles = !dead && gitInfo?.clean === false && gitInfo.files && gitInfo.files.length > 0;
-  // WARDEN-356: per-agent "What's new since your last visit" marker — only
-  // meaningful for a live chat (a dead tab has no live git state to advance).
-  const whatsNew = !dead && c ? computeWhatsNew(c.key || c.id, gitCommits, gitInfo) : { since: null, summary: summarizeWhatsNew({ since: 0 }), show: false };
-
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -498,12 +398,6 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
         {!dead && !editing && showTypeBadges !== false && <span className={`text-[10px] ${TYPE_COLOR[type] || ''}`}>{type}</span>}
         {!dead && !editing && showHostTags !== false && hostTag && <span className="text-[10px] text-muted-foreground">{hostTag}</span>}
         {!dead && !editing && showProjectBadges && c?.project && <span className="text-[10px] text-muted-foreground">{c.project}</span>}
-        {!dead && !editing && (gitInfo?.branch || gitInfo?.detached) && (
-          <GitBranchBadge branch={gitInfo.branch ?? ''} chatId={id} clean={gitInfo.clean} commits={gitCommits} loading={gitLogLoading} onFetch={onFetchGitLog} ahead={gitInfo.ahead} behind={gitInfo.behind} inProgress={gitInfo.inProgress} stashCount={gitInfo.stashCount} diffstat={gitInfo.diffstat} detached={gitInfo.detached} headSha={gitInfo.headSha} headDate={gitInfo.headDate} upstream={gitInfo.upstream} incomingCommits={incomingCommits} incomingLoading={incomingLoading} onFetchIncoming={onFetchIncoming} outgoingCommits={outgoingCommits} outgoingLoading={outgoingLoading} onFetchOutgoing={onFetchOutgoing} onOpenFile={onOpenFile} />
-        )}
-        {!dead && !editing && whatsNew.show && (
-          <WhatsNewMarker summary={whatsNew.summary} since={whatsNew.since} files={gitInfo?.files} diffstat={gitInfo?.diffstat} onOpenDiff={onOpenDiff} onOpenConflict={onOpenConflict} onOpenFile={onOpenFile} />
-        )}
         {/* WARDEN-378/514: per-chat "watch" toggle (mirrors ChatRow's). Shown even for a
             dead pane so a watched-but-dead chat can be unwatched; the row's own dead-dim
             mutes it. When the watched chat CURRENTLY needs the human (WARDEN-514) the eye
@@ -516,17 +410,6 @@ export function OpenPaneRow({ id, c, isOpen, onOpen, onClose, onRename, showHost
         )}
         <IconTooltip label={dead ? 'remove dead pane' : 'close pane'}><button className={`px-1 text-sm active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded ${dead ? 'text-red-500 font-bold' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-red-500'}`} onClick={(e) => { e.stopPropagation(); onClose(); }}>×</button></IconTooltip>
       </div>
-      {hasFiles && gitInfo?.files && (
-        <div className="ml-6 flex flex-col gap-0.5">
-          {/* WARDEN-411: magnitude chip — how much WIP, not just which files.
-              WARDEN-431: the per-file changed-file rows moved to the Source Control panel;
-              the +N −M chip stays inline as a fleet-wide glanceable signal (the panel shows
-              only the focused pane). */}
-          {gitInfo.diffstat && gitInfo.diffstat.insertions + gitInfo.diffstat.deletions > 0 && (
-            <div className="px-0.5"><DiffStatChip diffstat={gitInfo.diffstat} /></div>
-          )}
-        </div>
-      )}
       {/* WARDEN-305: per-agent note — muted one-line subtext under the name, or an
           inline editor when noteEditing. Wrapping div is block-level so its
           auto-width accounts for ml-6 and the Input's w-full can't overflow. */}

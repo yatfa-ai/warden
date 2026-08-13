@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { toast } from 'sonner';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
@@ -45,27 +45,27 @@ import {
   type AgentFilter, type AgentSort,
 } from '@/lib/agentFilter';
 import { chatMatchesCriteria } from '@/lib/collections';
-import { getLastSeen, WHATS_NEW_FETCH_LIMIT } from '@/lib/whatsNew';
+import { WHATS_NEW_FETCH_LIMIT } from '@/lib/whatsNew';
 import type { SnoozeDuration } from '@/lib/snooze';
 import type { Chat, Collection, AgentStateRow } from '@/lib/types';
 import { StatusDot } from '@/components/StatusDot';
 import type { GitCommit, GitFile, ClaudeSession, DiffStat } from './sidebar/types';
 import { ChatRow, OpenPaneRow, ChatRowSkeleton, SessionRowSkeleton } from './sidebar/ChatRows';
 import { AgentFilterSortControls } from './sidebar/AgentFilterSortControls';
-import { FleetCommitSearch } from './sidebar/FleetCommitSearch';
-// WARDEN-565: re-homes the orphaned WARDEN-288 cross-agent file-collision ⚠ badge
-// into the fleet view headers (the surfaces that replaced the abolished project-
-// chip row, WARDEN-372). The badge is fully built; it was simply never rendered.
-// WARDEN-635: GitStateBadges (the ±N/↑N/↓N fleet WIP badges, orphaned by the same
-// WARDEN-372 abolition) is re-homed alongside it here, now extended with a 4th ⚑N
-// at-risk-repo-state axis — mounting it lights up all four axes at once.
-// WARDEN-639: detectProjectOutgoingCollisions feeds a 3rd cross-agent collision
-// sibling (committed×committed, both unpushed) alongside the live ⚠ and impending ⏱.
-import { GitCollisionBadge, GitStateBadges, GitTriageCallout } from './sidebar/GitBadges';
-import { detectProjectFileCollisions, detectProjectImpendingCollisions, detectProjectOutgoingCollisions, summarizeProjectGitState } from '@/lib/gitStateSummary';
 // Pure finder for the FileViewer co-editors chip (WARDEN-810): same-project sibling
-// agents also touching the open file (± dirty / ⚑ conflict / ↑ unpushed). Reuses the
-// cached gitStatus map the fleet collision memos below read — no new fetch.
+// agents also touching the open file (± dirty / ⚑ conflict / ↑ unpushed).
+//
+// ⚠️ WARDEN-975 made this chip UNREACHABLE, not merely degraded — read this before
+// debugging why it never appears. findFileCoEditors reads the cached gitStatus map and
+// EXCLUDES selfKey. That map is now narrowed to the FOCUSED pane's single entry, and
+// files are opened FROM the focused pane's git section, so selfKey === focused === the
+// only key in the map: the result is ALWAYS []. So the "{n} others" chip in
+// FileViewer.tsx can never render, and CollisionCompareDialog (reached only from that
+// chip) is consequently unreachable too. This is a direct consequence of the ticket's
+// mandated focused-pane-only fetch, not an oversight; FileViewer is out of WARDEN-975's
+// scope, so the call site is left intact rather than ripped out. Reviving the chip
+// needs a deliberate decision about where its cross-agent data comes from — the
+// pane-independent fleet git hook (useFleetGitStatus) is the obvious candidate.
 import { findFileCoEditors } from '@/lib/fileCoEditors';
 import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/SidebarBits';
 import { SourceControlPanel } from './sidebar/SourceControlPanel';
@@ -320,12 +320,39 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
     setLoadingHost(null);
   };
 
+  // WARDEN-975: git status is fetched for the FOCUSED pane only, and the map is
+  // REPLACED (not merged) on every fetch so it holds at most that one entry. The old
+  // behaviour fanned a fetch per open pane into a merge-by-key map with no delete
+  // path, so a pane the human closed — or merely stopped looking at — kept a frozen
+  // entry feeding the (now removed) fleet chip/collision/triage rollups forever.
+  // Keying by chat id is retained because every /api/git-* route addresses the repo
+  // by it, and because the FileViewer's co-editor finder still reads this shape.
+  //
+  // STALENESS GUARD (review fix): a whole-map replace is not order-safe the way the
+  // old merge-by-key was. Switching focus A → B issues fetch(A) then fetch(B) with no
+  // cancellation, and /api/git-status is an SSH round trip for a remote host, so A can
+  // resolve LAST. Without the guard that write leaves the map as `{A: statusA}` while
+  // the section reads gitStatus[focused === B] → undefined → SourceControlPanel returns
+  // null and the git section vanishes until the next catalog refresh — indistinguishable
+  // from "this pane has no repo". Sharper still on the branch-less path, where a late
+  // empty response wipes a good entry. So the LAST fetch issued wins: every response
+  // whose chatId is no longer the one we most recently requested is dropped before it
+  // touches state. A ref (not state) because it must be read/written synchronously
+  // across awaits without re-rendering or re-creating the callback.
+  const gitReqRef = useRef<string | null>(null);
   const fetchGitStatus = useCallback(async (chatId: string) => {
+    gitReqRef.current = chatId;
     try {
       const r = await fetch(`/api/git-status?id=${encodeURIComponent(chatId)}`);
       const j = await r.json();
+      if (gitReqRef.current !== chatId) return;  // a newer focus won the race — drop this response
       if (j.branch) {
-        setGitStatus((p) => ({ ...p, [chatId]: { branch: j.branch, detached: j.detached, headSha: j.headSha, headDate: j.headDate, clean: j.clean, cwd: j.cwd, files: j.files, ahead: j.ahead, behind: j.behind, upstream: j.upstream, inProgress: j.inProgress, stashCount: j.stashCount, diffstat: j.diffstat, outgoingFiles: j.outgoingFiles } }));
+        setGitStatus({ [chatId]: { branch: j.branch, detached: j.detached, headSha: j.headSha, headDate: j.headDate, clean: j.clean, cwd: j.cwd, files: j.files, ahead: j.ahead, behind: j.behind, upstream: j.upstream, inProgress: j.inProgress, stashCount: j.stashCount, diffstat: j.diffstat, outgoingFiles: j.outgoingFiles } });
+      } else {
+        // A non-git / branch-less focused pane clears the map rather than leaving the
+        // previously-focused repo's status on screen (the section reads gitStatus
+        // [focused], so a stale sibling entry would otherwise linger in memory).
+        setGitStatus({});
       }
     } catch (error) {
       // Git status is non-critical, so just log it without showing a toast
@@ -518,76 +545,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // source of truth the closure reads.
   const sessionPreview = showAllSessions ? visibleSessions : visibleSessions.slice(0, SESSION_PREVIEW);
   const hasMoreSessions = visibleSessions.length > SESSION_PREVIEW;
-
-  // WARDEN-565: cross-agent file-edit collision ⚠ badge for the fleet view headers.
-  // Re-homes the orphaned WARDEN-288 detection (detectProjectFileCollisions) into the
-  // surfaces that replaced the abolished project-chip row (WARDEN-372). The helper
-  // reads the cached gitStatus map (no new fetch, no backend change) and keys by
-  // project internally, so a per-view computation over that view's chats emits a
-  // cross-project total.paths union that maps to a single ⚠N badge — and the badge's
-  // showProject flag disambiguates the same path colliding in two projects.
-  //
-  // This memo MUST live at the top level (hooks can't be called conditionally — the
-  // host/collection branches are early returns), so it guards on view.kind and
-  // resolves the in-view population the same way each branch does: the host view's
-  // hostChats (a single host can run several projects, so it can span them), and the
-  // whole chats fleet for the root view (mirroring FleetCommitSearch, which reads the
-  // full chats fleet from that same header). The colliding paths are empty when no two
-  // active project agents share a dirty file, in which case the badge renders nothing.
-  const fleetCollisionPaths = useMemo(() => {
-    const viewChats = view.kind === 'host'
-      ? chats.filter((c) => c.host === view.host)
-      : chats;
-    return detectProjectFileCollisions(viewChats, gitStatus).total.paths;
-  }, [view, chats, gitStatus]);
-
-  // WARDEN-601: the IMPENDING counterpart to fleetCollisionPaths — cross-joins each
-  // agent's unpushed-commit file-set (outgoingFiles, now on /api/git-status) against
-  // the OTHER agents' working-tree WIP, so the rollup can surface a collision the
-  // working-tree×working-tree detector is blind to (one agent committed the file,
-  // clean tree, while another has it dirty). Same view population + cached gitStatus
-  // map as the live memo (no new fetch — outgoingFiles rides the existing per-tab
-  // /api/git-status poll). Empty when no committed-outgoing × working-tree overlap
-  // exists, in which case the ⏱ renders nothing (zero noise).
-  const fleetImpendingPaths = useMemo(() => {
-    const viewChats = view.kind === 'host'
-      ? chats.filter((c) => c.host === view.host)
-      : chats;
-    return detectProjectImpendingCollisions(viewChats, gitStatus).total.paths;
-  }, [view, chats, gitStatus]);
-
-  // WARDEN-639: the OUTGOING×OUTGOING counterpart to fleetImpendingPaths — finds paths
-  // ≥2 agents EACH have in their unpushed commits (outgoingFiles) with clean working
-  // trees, the one matrix cell neither the live ⚠ nor the impending ⏱ covers (both
-  // agents committed, neither dirty → invisible to the WIP join AND the impending
-  // editor side → surfaces only at push/merge/CI). Same view population + cached
-  // gitStatus map as the other two memos (no new fetch — outgoingFiles rides the
-  // existing per-tab /api/git-status poll). Empty when no two clean committers share an
-  // outgoing path, in which case the ⇄ renders nothing (zero noise).
-  const fleetOutgoingPaths = useMemo(() => {
-    const viewChats = view.kind === 'host'
-      ? chats.filter((c) => c.host === view.host)
-      : chats;
-    return detectProjectOutgoingCollisions(viewChats, gitStatus).total.paths;
-  }, [view, chats, gitStatus]);
-
-  // WARDEN-635 (per WARDEN-565): the ±N/↑N/↓N/⚑N project git-state badges were
-  // orphaned dead code — GitStateBadges was never imported (WARDEN-372 abolished the
-  // project-chip row that hosted it; WARDEN-565 re-wired the sibling GitCollisionBadge
-  // and explicitly deferred this one). This memo re-homes summarizeProjectGitState
-  // (the cached-map aggregator — no new fetch, no backend change) the same way, so
-  // mounting <GitStateBadges> below lights up all four axes at once: the existing ±N
-  // (dirty) / ↑N (unpushed) / ↓N (behind) fleet WIP totals AND the new ⚑N at-risk-
-  // repo-state chip rolling up detached HEAD / no-upstream / mid-merge agents — a
-  // non-routine state that needs a human's eye but was previously invisible at the
-  // fleet level. Same view population + cached gitStatus map as the collision memos
-  // above; .total carries the four counts + the contributing agents (in chats order).
-  const fleetGitState = useMemo(() => {
-    const viewChats = view.kind === 'host'
-      ? chats.filter((c) => c.host === view.host)
-      : chats;
-    return summarizeProjectGitState(viewChats, gitStatus).total;
-  }, [view, chats, gitStatus]);
 
   // WARDEN-810: the file-level complement to the fleet collision rollups above.
   // When a file is open in FileViewer (fileTarget set), find every OTHER same-project
@@ -812,46 +769,16 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
     fetchCollections();
   }, []);
 
-  // Fetch git status for open panes (lazy loading). WARDEN-372: this was keyed on
-  // the abolished activeTabs; it now follows the active workspace's open panes.
-  useEffect(() => {
-    openPanes.forEach((id) => {
-      const c = findChat(chats, id);
-      if (c) fetchGitStatus(id);
-    });
-  }, [chats, openPanes, fetchGitStatus]);
-
-  // WARDEN-431: keep the FOCUSED pane's git status fresh so the Source Control
-  // panel (the single place working-tree changes now show) reflects the focused
-  // repo immediately on focus switch, not just on the periodic catalog refresh.
-  // The per-open-panes effect above still feeds every pane's GitBranchBadge; this
-  // is a focused-only top-up so the panel is never stale right after switching
-  // panes. Read-only GET, and setGitStatus merges by key (no flicker). fetchGitStatus
-  // is stable, so this fires only when `focused` changes.
+  // WARDEN-975: git status is fetched for the FOCUSED pane ONLY — the single repo the
+  // git section describes. The former per-open-pane fan-out (one /api/git-status per
+  // pane, merged into a never-pruned map) is gone with the fleet surfaces it fed: it
+  // cost an SSH round trip per open pane on every catalog refresh to render badges
+  // that no longer exist, and its map kept closed panes' frozen entries alive. Re-runs
+  // on focus change AND on every catalog refresh (`chats`) so the section stays live
+  // while a pane stays focused. Read-only GET; fetchGitStatus replaces the map.
   useEffect(() => {
     if (focused) fetchGitStatus(focused);
-  }, [focused, fetchGitStatus]);
-
-  // WARDEN-356: keep recent git-log fresh for chats the human has VISITED so the
-  // per-agent "What's new since your last visit" marker reflects commits landed
-  // since the last open/focus. Bounded to visited chats only (getLastSeen !==
-  // null) — the marker is irrelevant for a never-visited chat, so unvisited
-  // agents pay no extra fetch (their git-log still loads lazily when the
-  // GitBranchBadge popover opens, as before). Reuses the existing fetchGitLog +
-  // /api/git-log endpoint (read-only) — no new endpoint. The fetch uses
-  // WHATS_NEW_FETCH_LIMIT (50, fetchGitLog's default) so the marker's count is
-  // accurate up to 50 and reports "✦50+" (truncated) beyond — the WARDEN-356
-  // review's "count silently capped at 5" fix. The re-fetch cadence mirrors
-  // fetchGitStatus (every catalog refresh) so the marker stays current; the
-  // documented future optimization is a server `since` param if this client-side
-  // filtering ever proves costly for large fleets.
-  useEffect(() => {
-    openPanes.forEach((id) => {
-      if (getLastSeen(id) === null) return;
-      const c = findChat(chats, id);
-      if (c) fetchGitLog(id);
-    });
-  }, [chats, openPanes, fetchGitLog]);
+  }, [focused, chats, fetchGitStatus]);
 
   const handleSpawned = (chat: Chat) => { onRefresh(); onOpenChat(chat.key || chat.id); setView({ kind: 'root' }); };
   const hosts = [THIS_MACHINE, ...sshHosts];
@@ -951,19 +878,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
         onKill={() => onKill(id)}
         onRename={onRename}
         dim={dim}
-        gitInfo={gitStatus[id]}
-        gitCommits={gitLog[id]}
-        gitLogLoading={gitLogLoading[id]}
-        onFetchGitLog={() => fetchGitLog(id)}
-        incomingCommits={gitLogIncoming[id]}
-        incomingLoading={gitLogIncomingLoading[id]}
-        onFetchIncoming={() => fetchGitLogIncoming(id)}
-        outgoingCommits={gitLogOutgoing[id]}
-        outgoingLoading={gitLogOutgoingLoading[id]}
-        onFetchOutgoing={() => fetchGitLogOutgoing(id)}
-        onOpenDiff={(path, staged) => setDiffTarget({ chatId: id, path, staged })}
-        onOpenConflict={(path) => setConflictTarget({ chatId: id, path })}
-        onOpenFile={(path) => setFileTarget({ chatId: id, path })}
         showHostTags={showHostTags}
         showTypeBadges={showTypeBadges}
         showStatusIndicators={showStatusIndicators}
@@ -1160,43 +1074,10 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
             onSortChange={onSortChange}
             hideHostSort
           />
-          {/* WARDEN-565: cross-agent file-collision ⚠ badge, re-homed into the fleet
-              header that replaced the abolished project-chip row (WARDEN-372). Computed
-              over this host's chats (hostChats) — a host can run several projects, so
-              showProject tags each colliding path with its project. Renders nothing when
-              no two active project agents share a dirty file (silent-when-clean). The
-              popover's jump rows + per-path "Compare edits" (WARDEN-321) live in the badge. */}
-          <GitCollisionBadge
-            collisions={fleetCollisionPaths}
-            impending={fleetImpendingPaths}
-            outgoing={fleetOutgoingPaths}
-            chats={hostChats}
-            gitStatus={gitStatus}
-            onOpenChat={onOpenChat}
-            showProject
-          />
-          {/* WARDEN-635 (per WARDEN-565): the ±N/↑N/↓N/⚑N/🗄N project git-state fleet
-              badges, re-homed into this host header the same way GitCollisionBadge
-              was. Computed over hostChats (== the memo's viewChats for this host — a
-              host can run several projects). The ⚑N axis rolls up detached-HEAD /
-              no-upstream / mid-merge agents — a non-routine repo state that needs a
-              human's eye but was previously invisible at the fleet level. The 🗄N
-              axis (WARDEN-667) rolls up agents with parked `git stash` WIP — the lone
-              current-state git signal that had no fleet chip. Renders nothing when
-              every axis is 0 (silent-when-clean); each popover lists the contributing
-              agents and deep-links to them. */}
-          <GitStateBadges
-            dirty={fleetGitState.dirty}
-            unpushed={fleetGitState.unpushed}
-            behind={fleetGitState.behind}
-            atRisk={fleetGitState.atRisk}
-            stashed={fleetGitState.stashed}
-            stalled={fleetGitState.stalled}
-            agents={fleetGitState.agents}
-            chats={hostChats}
-            gitStatus={gitStatus}
-            onOpenChat={onOpenChat}
-          />
+          {/* WARDEN-975: the per-host header's git chips (±N/↑N/↓N/⚑N/🗄N/💤N) and
+              collision badges (⚠/⏱/⇄) are gone. They described git OUTSIDE the focused
+              pane — which the product decision says has no value — and every one of
+              their popover rows opened a pane. The header keeps filter/sort + rescan. */}
           <IconTooltip label="rescan" disabled={loadingHost === H}><button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={() => fetchHostSessions(H)} disabled={loadingHost === H}>
             {loadingHost === H ? <Skeleton className="h-3 w-3" /> : '↻'}
           </button></IconTooltip>
@@ -1396,71 +1277,23 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
           onSortChange={onSortChange}
           hideSort
         />
-        {/* WARDEN-534: fleet-wide commit search. A sidebar-level affordance that
-            fans the per-agent --grep (WARDEN-498) across EVERY active project
-            agent from one box, grouped by agent (name · project · ↑unpushed), so
-            one query finds where a change landed across the fleet. Root-header
-            placement (alongside the filter/sort controls) per the ticket's
-            placement note; the popover owns its own input + debounce + fan-out. */}
-        <FleetCommitSearch
-          chats={chats}
-          onOpenChat={onOpenChat}
-          onOpenFile={(chatId, file, line) => setFileTarget({ chatId, path: file, line })}
-        />
-        {/* WARDEN-565: cross-agent file-collision ⚠ badge, re-homed into the root
-            fleet header alongside FleetCommitSearch (the surface that replaced the
-            abolished project-chip row, WARDEN-372). Computed over the whole chats
-            fleet — mirroring FleetCommitSearch, which also fans across the full fleet
-            from this header — so the ⚠ surfaces a fleet-wide divergence risk. The
-            fleet spans projects, so showProject tags each colliding path with its
-            project. Renders nothing when no two active project agents share a dirty
-            file (silent-when-clean). */}
-        <GitCollisionBadge
-          collisions={fleetCollisionPaths}
-          impending={fleetImpendingPaths}
-          outgoing={fleetOutgoingPaths}
-          chats={chats}
-          gitStatus={gitStatus}
-          onOpenChat={onOpenChat}
-          showProject
-        />
-        {/* WARDEN-635 (per WARDEN-565): the ±N/↑N/↓N/⚑N/🗄N project git-state fleet
-            badges, re-homed into the root fleet header alongside GitCollisionBadge
-            and FleetCommitSearch. Computed over the whole chats fleet (== the memo's
-            viewChats), mirroring those siblings which also fan across the full fleet
-            from this header. The ⚑N axis rolls up detached-HEAD / no-upstream /
-            mid-merge agents across the fleet; the 🗄N axis (WARDEN-667) rolls up
-            agents with parked `git stash` WIP across the fleet; renders nothing when
-            every axis is 0. */}
-        <GitStateBadges
-          dirty={fleetGitState.dirty}
-          unpushed={fleetGitState.unpushed}
-          behind={fleetGitState.behind}
-          atRisk={fleetGitState.atRisk}
-          stashed={fleetGitState.stashed}
-          stalled={fleetGitState.stalled}
-          agents={fleetGitState.agents}
-          chats={chats}
-          gitStatus={gitStatus}
-          onOpenChat={onOpenChat}
-        />
-        {/* WARDEN-745: the compositional capstone of the 6 git-state chips above.
-            Where those chips are a flat count a human must rank by hand across N
-            agents, this promotes the ONE composite-worst agent as "triage THIS
-            first, because X" — a verbatim mirror of WARDEN-384's AttentionBadge
-            callout (rankGitTriage + focus-excluded pickGitTriageTop + gitTriageReason
-            in gitStateSummary.ts). Pure composition: it assigns each agent its
-            highest-precedence present signal (atRisk > stalled > unpushed > behind >
-            dirty > stash) and orders within-tier by that axis's already-shipped
-            severity. The focused pane is NEVER promoted (WARDEN-482 guard via
-            pickGitTriageTop). Renders nothing when <2 agents carry a git signal, or
-            the whole fleet is clean/pushed/in-sync. Click → onOpenChat(top.key). */}
-        <GitTriageCallout
-          agents={fleetGitState.agents}
-          chats={chats}
-          focused={focused}
-          onOpenChat={onOpenChat}
-        />
+        {/* WARDEN-975: the root fleet header's git chips (±N/↑N/↓N/⚑N/🗄N/💤N), its
+            collision badges (⚠/⏱/⇄), its "triage first" callout and the fleet-wide
+            commit/code search (WARDEN-534/559/589) are all gone. Each described or
+            searched git OUTSIDE the focused pane, and each was a pane-opening control
+            — the callout terminally so (pickGitTriageTop deliberately EXCLUDED the
+            focused pane, so it always pointed at some other agent and its only action
+            was to open that agent's pane), and the fleet search barely less so: its
+            group headers and result rows both called onOpenChat, and its rows carried
+            per-agent ↑unpushed STATE, not just history. The ticket's binding
+            statements are absolute rather than comparative — "remove EVERY fleet-level
+            git surface", "nothing else renders git, and no git control navigates
+            anywhere", "the sidebar header and per-host headers ... keeping only
+            filter, count and refresh" — so the header now holds exactly filter, count,
+            updated-ago and refresh. Git lives only in the Source Control section
+            below, scoped to the focused pane. Fleet Health keeps its own pane-
+            independent fleet git fan-out (FleetRecentCommits / useFleetGitStatus),
+            which is explicitly out of scope. */}
         <Badge variant="secondary" className="text-xs @max-[18rem]:hidden">{filteredPanes.length}</Badge>
         <span className="@max-[20rem]:hidden"><UpdatedAgo at={lastRefreshAt} timestampFormat={timestampFormat} /></span>
         <button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={onRefresh} disabled={loading} title="refresh">
@@ -1470,13 +1303,30 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
       <NewChatForm onSpawned={handleSpawned} />
       <ScrollArea className="flex-1 min-h-0">
         <div className="p-1.5 flex flex-col gap-0.5">
-          {/* WARDEN-431: the Source Control panel — the single place a focused
-              pane's repo working-tree changes show, grouped like VS Code. Re-points
-              to whichever pane is focused; renders nothing when the focused pane
-              has no git repo. The inline per-chat changed-file rows are gone. */}
+          {/* WARDEN-431 + WARDEN-975: the git section — the ONLY place git appears in
+              the sidebar, describing ONLY the focused pane. It re-points to whichever
+              pane is focused and renders nothing when that pane has no git repo. It now
+              carries everything the per-row branch badge used to: the branch/detached +
+              ahead/behind/freshness/stash/magnitude summary on its header line, the
+              grouped working-tree buckets, and (expanded) the recent / unpushed /
+              incoming commit lists with their lazy fetch, per-commit diffs and
+              file-opening. Every handler is bound to `focused`, so no control here can
+              act on — or navigate to — any other pane. */}
           <SourceControlPanel
+            chatId={focused}
             gitInfo={focused ? gitStatus[focused] : undefined}
             onOpenDiff={(path, staged) => { if (focused) setDiffTarget({ chatId: focused, path, staged }); }}
+            onOpenConflict={(path) => { if (focused) setConflictTarget({ chatId: focused, path }); }}
+            onOpenFile={(path) => { if (focused) setFileTarget({ chatId: focused, path }); }}
+            commits={focused ? gitLog[focused] : undefined}
+            commitsLoading={focused ? gitLogLoading[focused] : undefined}
+            onFetchCommits={() => { if (focused) fetchGitLog(focused); }}
+            incomingCommits={focused ? gitLogIncoming[focused] : undefined}
+            incomingLoading={focused ? gitLogIncomingLoading[focused] : undefined}
+            onFetchIncoming={() => { if (focused) fetchGitLogIncoming(focused); }}
+            outgoingCommits={focused ? gitLogOutgoing[focused] : undefined}
+            outgoingLoading={focused ? gitLogOutgoingLoading[focused] : undefined}
+            onFetchOutgoing={() => { if (focused) fetchGitLogOutgoing(focused); }}
             collapsed={!!sourceControlCollapsed}
             onCollapsedChange={onSourceControlCollapsedChange ?? (() => {})}
           />
@@ -1505,19 +1355,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
                 showTypeBadges={showTypeBadges}
                 showStatusIndicators={showStatusIndicators}
                 showProjectBadges={showProjectBadges}
-                gitInfo={gitStatus[id]}
-                gitCommits={gitLog[id]}
-                gitLogLoading={gitLogLoading[id]}
-                onFetchGitLog={() => fetchGitLog(id)}
-                incomingCommits={gitLogIncoming[id]}
-                incomingLoading={gitLogIncomingLoading[id]}
-                onFetchIncoming={() => fetchGitLogIncoming(id)}
-                outgoingCommits={gitLogOutgoing[id]}
-                outgoingLoading={gitLogOutgoingLoading[id]}
-                onFetchOutgoing={() => fetchGitLogOutgoing(id)}
-                onOpenDiff={(path, staged) => setDiffTarget({ chatId: id, path, staged })}
-                onOpenConflict={(path) => setConflictTarget({ chatId: id, path })}
-                onOpenFile={(path) => setFileTarget({ chatId: id, path })}
                 note={c ? agentNotes[c.id] : undefined}
                 onSetNote={c ? (text: string) => setNote(c.id, text) : undefined}
                 timestampFormat={timestampFormat}

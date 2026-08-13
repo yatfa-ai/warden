@@ -1,9 +1,10 @@
 // Tests for the pure aggregation behind WARDEN-597's fleet-wide RECENT-commits
 // feed: mergeFleetCommitsByEpoch (the flat, time-sorted cross-fleet merge) +
-// buildFleetRecentCommitsUrl (the no-query /api/git-log?limit=N fetch URL). These
-// are the no-query "what the fleet just shipped" counterparts to
-// buildFleetCommitGroups (the query-driven, grouped-by-agent view) in the same
-// module.
+// buildFleetRecentCommitsUrl (the no-query /api/git-log?limit=N fetch URL) — the
+// "what the fleet just shipped" half of Fleet Health. (WARDEN-975 removed this
+// module's query-driven fleet SEARCH aggregation, which these two used to be
+// contrasted against; both helpers below are still live, consumed by
+// FleetRecentCommits.)
 //
 // There is no front-end test runner in this repo, so (like fleetCommitSearch.test.mjs)
 // this loads the REAL src/lib/gitStateSummary.ts (transpiled TS -> ESM via Vite's
@@ -194,8 +195,8 @@ test('within one agent, only the commits also in outgoing are unpushed (precise 
 test('a failed/empty outgoing set marks NOTHING unpushed (graceful degradation — no false ↑)', () => {
   // The critical correctness point (WARDEN-723): an ok agent whose outgoing fetch
   // failed (empty outgoingHashes) must NEVER wrongly mark a commit unpushed — every
-  // row reads unpushed:false. The no-false-positive contract ported verbatim from
-  // FleetCommitSearch: a missing outgoing set yields no marks, not all-marks.
+  // row reads unpushed:false. The no-false-positive contract: a missing outgoing
+  // set yields no marks, not all-marks.
   const r = mergeFleetCommitsByEpoch([okAgent('a1', 'warden', [commit('h1', 1000), commit('h2', 2000)], [])]);
   assert.deepEqual(r.rows.map((row) => row.unpushed), [false, false]);
 });
@@ -229,7 +230,7 @@ console.log('\nbuildFleetRecentCommitsUrl — the no-query /api/git-log?limit=N 
 test('builds an id + limit URL with NO query param (the unfiltered recent view)', () => {
   const url = buildFleetRecentCommitsUrl('a1', 25);
   assert.equal(url, '/api/git-log?id=a1&limit=25');
-  // The defining difference from buildFleetSearchBaseUrl: no grep= / pickaxe=.
+  // The defining property of the recent view: no grep= / pickaxe= query param.
   assert.ok(!url.includes('grep='), 'recent view must NOT splice a grep query');
   assert.ok(!url.includes('pickaxe='), 'recent view must NOT splice a pickaxe query');
 });
@@ -244,8 +245,8 @@ test('id is URL-encoded (a key with special chars stays one param value)', () =>
 });
 test('the URL has no range= so the component can append &range=outgoing for the ↑unpushed join', () => {
   // The ↑unpushed join (WARDEN-723) fires a SECOND fetch with &range=outgoing
-  // appended to this base IN THE COMPONENT — mirroring how FleetCommitSearch
-  // appends it to the range-free buildFleetSearchBaseUrl. Asserting range= is
+  // appended to this base IN THE COMPONENT, not spliced by the builder.
+  // Asserting range= is
   // absent here proves the pure URL builder stays single-purpose and the
   // component's `${base}&range=outgoing` concatenation yields a clean URL, not a
   // double range=.

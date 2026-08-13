@@ -47,7 +47,7 @@ export type CollisionAgentSource = 'outgoing' | 'wip';
  * read "file matches HEAD — already resolved." Extracted into the pure layer (not
  * inlined in the React component) so the outgoing⇄working-tree URL swap is unit-
  * testable without a React runner (this repo has none), mirroring
- * buildFleetSearchBaseUrl's extraction.
+ * the fleet URL builders' extraction.
  *
  * `path` and `key` are URL-encoded so special chars (spaces, query chars) are safe.
  */

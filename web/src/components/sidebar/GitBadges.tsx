@@ -1,10 +1,22 @@
 // Git-status UI subsystem extracted from ChatSidebar.tsx (WARDEN-315).
-// Pure structural move — no behavior, props, classname, or DOM change.
-// Groups: the changed-file row, the project-chip WIP/collision badges,
-// and the per-row branch badge (+ its expanded-commit file rows).
+//
+// WARDEN-975: git is now ONE collapsible sidebar section describing ONLY the
+// focused pane. Everything fleet-level that used to live here — the 6-axis
+// ±/↑/↓/⚑/🗄/💤 GitStateBadges chip row, the ⚠/⏱/⇄ GitCollisionBadge rollups, the
+// "triage first" GitTriageCallout, and the per-row ✦N WhatsNewMarker — is gone,
+// together with the per-row GitBranchBadge popover. Every one of those surfaces
+// deep-linked into a pane (onOpenChat), which the product decision forbids: a git
+// control acts inside the git section and never opens, focuses or switches a pane.
+//
+// What remains is the focused-pane vocabulary, split so the section can render it
+// INLINE instead of behind a popover trigger on a chat row:
+//   • GitChangedFile / CommitFile / CommitMessage — the shared file + commit rows.
+//   • GitRepoSummary — the one-line branch/state summary (the old badge trigger).
+//   • GitRepoDetails — the repo's full detail (the old badge popover BODY): commit
+//     search, recent/unpushed/incoming commit lists, stashes, reflog, branches,
+//     the origin row, and the aggregated range-diff affordances.
 
 import { useState, useEffect, useMemo } from 'react';
-import { Popover as RadixPopover } from 'radix-ui';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -15,24 +27,9 @@ import { copyText } from '@/lib/clipboard';
 import { GitCompare, FileIcon, Search, X, ExternalLink } from 'lucide-react';
 import { DiffBlock } from '@/components/DiffBlock';
 import { DiffViewer } from '@/components/DiffViewer';
-import { CollisionCompareDialog } from '../CollisionCompareDialog';
 import { cn } from '@/lib/utils';
-import { findChat } from '@/lib/agentFilter';
-import { displayName, basename } from '@/lib/chatDisplay';
-import {
-  type ProjectGitAgent,
-  type FileCollision,
-  sortByHeadAgeDesc,
-  sortGitAgentsByMagnitudeDesc,
-  sortByStashCountDesc,
-  sortGitAgentsByConflictFirst,
-  rankGitTriage,
-  pickGitTriageTop,
-  gitTriageReason,
-} from '@/lib/gitStateSummary';
-import { formatWhatsNewLine, type WhatsNewSummary } from '@/lib/whatsNew';
+import { basename } from '@/lib/chatDisplay';
 import { formatRelative, formatAbsoluteFull } from '@/lib/formatTimestamp';
-import type { Chat } from '@/lib/types';
 import type { GitCommit, GitFile, GitStash, GitReflogEntry, GitRemote, GitBranch, DiffStat } from './types';
 import { DiffStatChip } from './DiffStatChip';
 
@@ -243,643 +240,11 @@ export function GitChangedFile({ file, onOpen, onOpenConflict, onOpenFile }: { f
   );
 }
 
-// Compact uncommitted/unpushed WIP badges appended to the project filter chips
-// (WARDEN-201), now explorable (WARDEN-268). Renders nothing for a clean, pushed
-// project — so the chips stay quiet unless an agent actually has uncommitted
-// (yellow `±N`) or unpushed (amber `↑N`) work. Reuses GitBranchBadge's exact glyph
-// + color vocabulary so the chip totals read as part of the same visual system as
-// the per-row branch badge.
-//
-// Each badge is a popover listing exactly the agents behind the count (the `±N`
-// popover shows the dirty agents; the `↑N` popover shows the unpushed ones), and
-// every row is a jump-to: click → open that agent's chat and close the popover.
-// This makes a fleet WIP signal actionable — "±3" now tells you *which* 3 agents
-// are dirty without filtering the sidebar to the whole project and scanning it.
-// No new fetch: the contributing agents come from the cached gitStatus map via
-// summarizeProjectGitState; displayName/branch are joined here in the React layer.
-// Per-kind rendering config for GitStateBadge. Adding an axis (behind WARDEN-297,
-// at-risk WARDEN-635, stashed WARDEN-667, stalled WARDEN-682) is a row in this table
-// rather than another branch in every ternary. Each kind picks its glyph, color,
-// label, the predicate that matches its popover rows, and the per-row branch-line
-// suffix. Colors stay in the same visual system as the per-row GitBranchBadge: dirty
-// yellow ±, unpushed amber ↑, behind blue ↓, at-risk rose ⚑ (WARDEN-635), stashed
-// fuchsia 🗄 (WARDEN-667 — matching the per-row stash badge color, and distinct
-// from all four other chip hues AND from the red ⚠ collision glyph and the red ⚠
-// in-progress-op glyph, per WARDEN-68's distinct-vocabulary rule: a different hue
-// AND a different glyph so the chip axes never collide), stalled sky 💤 (WARDEN-682).
-// The stalled hue is sky, NOT the per-row stale amber tint (amber is already taken by
-// unpushed ↑ and the impending ⏱ collision glyph) and NOT indigo (taken by the
-// WhatsNewMarker ✦) — fleet/row agreement rides on the shared STALE_HEAD_AGE_MS 7d
-// threshold, not a shared color, so the chip and the per-row amber `· Nd` append can
-// differ in hue while agreeing on WHO is stalled.
-// WARDEN-669: the >7d HEAD-commit staleness threshold, SHARED between the per-row
-// GitBranchBadge (WARDEN-545), the fleet ↑N unpushed popover (WARDEN-669), and the
-// fleet 💤N stalled chip (WARDEN-682) so the row and both fleet surfaces agree by
-// construction — a HEAD the per-row badge tints amber is the SAME age the fleet
-// popover/chip act on, no second magic number to drift. Hoisted to module scope
-// (from GitBranchBadge's local const) so the unpushed popover + stalled chip reuse it
-// without redefining it. The age field on ProjectGitAgent (headAgeMs) is a threshold-
-// FREE rank; this const governs the unpushed label TINT here, and — via the reconciled
-// headAgeMs field — the stalled chip's membership test in gitStateSummary.ts.
+// WARDEN-669: the >7d HEAD-commit staleness threshold — the age at which a repo's
+// last commit is treated as STALE and its freshness label tints amber. Shared by the
+// repo summary line's `· Nd` append (WARDEN-545) and the branch-topology list below
+// (WARDEN-577), so both agree by construction rather than by a second magic number.
 const STALE_HEAD_AGE_MS = 7 * 86400_000;
-// atRisk reason → the per-row suffix label. 'op' is intentionally generic — the
-// agent's specific op (merge/rebase/cherry-pick/…) is not carried on ProjectGitAgent
-// (only the reason class); the per-row GitBranchBadge shows the op itself. 'conflict'
-// (WARDEN-701) is the base label for a merge-conflict-BLOCKED agent; the count of
-// unmerged paths is substituted per-agent in the atRisk suffix below (the static record
-// value alone has no N to read), so a blocked merge reads distinctly from a clean,
-// auto-completing rebase instead of both collapsing to "operation in progress".
-const AT_RISK_REASON_LABEL: Record<NonNullable<ProjectGitAgent['atRiskReason']>, string> = {
-  detached: 'detached HEAD',
-  noUpstream: 'no upstream',
-  op: 'operation in progress',
-  conflict: 'merge conflict',
-};
-const GIT_STATE_KIND = {
-  dirty:   {
-    glyph: '±',
-    color: 'text-yellow-400 hover:text-yellow-300',
-    label: 'uncommitted changes',
-    match: (a: ProjectGitAgent) => a.dirty,
-    // WARDEN-670: the per-agent +N −M WIP magnitude — the dirty-axis detail the other
-    // three axes already had (unpushed · ↑ N, behind · ↓ N, at-risk · reason) but dirty
-    // lacked. Reuses DiffStatChip EXACTLY as the per-row chip does (ChatRows.tsx:324/
-    // 516, GitBadges.tsx:1435) — do not reinvent the glyph/color language. DiffStatChip
-    // already no-ops on null / +0−0 (an all-untracked dirty agent whose shortstat counts
-    // no tracked edits), so the magnitude guard is built in for the CHIP; the leading
-    // ` · ` separator mirrors the three sibling suffixes so the four axes read as one
-    // system, gated on the SAME established magnitude guard (insertions + deletions > 0)
-    // so an all-untracked dirty agent renders no dangling separator (no ` · ` alone).
-    suffix: (a: ProjectGitAgent) => {
-      const ins = a.diffstat?.insertions ?? 0;
-      const del = a.diffstat?.deletions ?? 0;
-      if (ins + del === 0) return null;
-      return <> · <DiffStatChip diffstat={a.diffstat} /></>;
-    },
-    // WARDEN-670: rank the dirty popover heaviest-first (largest +N −M WIP on top) so a
-    // human triaging the fleet's uncommitted work prioritizes the highest-integration-
-    // effort change first. `'sort' in cfg` in GitStateBadge scopes this to the dirty
-    // popover ONLY — the unpushed/behind/atRisk popovers keep chats iteration order
-    // (deterministic deep-equality, asserted in gitStateSummary.test.mjs). A pure, NEW-
-    // array sort (does not mutate): summarizeProjectGitState's agents array stays in
-    // chats order; only this popover's filtered slice is reordered at render time.
-    sort: sortGitAgentsByMagnitudeDesc,
-  },
-  unpushed: { glyph: '↑', color: 'text-amber-400 hover:text-amber-300',  label: 'unpushed commits',    match: (a: ProjectGitAgent) => a.ahead > 0, suffix: (a: ProjectGitAgent) => (a.ahead > 0 ? ` · ↑ ${a.ahead}` : '') },
-  behind:   { glyph: '↓', color: 'text-blue-400 hover:text-blue-300',    label: 'behind upstream',     match: (a: ProjectGitAgent) => a.behind > 0, suffix: (a: ProjectGitAgent) => (a.behind > 0 ? ` · ↓ ${a.behind}` : '') },
-  atRisk:   {
-    glyph: '⚑',
-    color: 'text-rose-400 hover:text-rose-300',
-    label: 'at-risk repo state',
-    match: (a: ProjectGitAgent) => a.atRisk,
-    // WARDEN-701: for a 'conflict' agent substitute the unmerged-path count into the
-    // suffix ("merge conflict · N unmerged") so a BLOCKED merge reads distinctly from
-    // a clean, auto-completing rebase (the generic 'op' label) under the same ⚑ chip.
-    // The static AT_RISK_REASON_LABEL['conflict'] is the base ("merge conflict") with
-    // no count to read; the count lives on ProjectGitAgent.conflictCount, so it is
-    // substituted here per-row. Every other reason renders the static label verbatim.
-    suffix: (a: ProjectGitAgent) => {
-      if (!a.atRiskReason) return '';
-      if (a.atRiskReason === 'conflict') return ` · ${AT_RISK_REASON_LABEL.conflict} · ${a.conflictCount} unmerged`;
-      return ` · ${AT_RISK_REASON_LABEL[a.atRiskReason]}`;
-    },
-    // WARDEN-701: rank the ⚑ popover conflict-first so a merge-conflict-BLOCKED agent
-    // (the one repo state that cannot self-resolve and needs a human RIGHT NOW) sits
-    // above every clean auto-completing rebase / no-upstream parker / detached HEAD.
-    // `'sort' in cfg` in GitStateBadge scopes this to the atRisk popover ONLY. A pure,
-    // NEW-array sort (does not mutate): summarizeProjectGitState's agents array stays in
-    // chats order; only this popover's filtered slice is reordered at render time.
-    sort: sortGitAgentsByConflictFirst,
-  },
-  stash:    {
-    glyph: '🗄',
-    color: 'text-fuchsia-400 hover:text-fuchsia-300',
-    label: 'stashed WIP',
-    match: (a: ProjectGitAgent) => a.stashed,
-    // WARDEN-689: the per-agent parked-WIP COUNT — the stash-axis magnitude the
-    // other magnitude-bearing axes already rendered (unpushed · ↑ N, behind · ↓ N,
-    // at-risk · reason, dirty · +N −M) but stash lacked (its suffix was () => '').
-    // stashCount already ships on /api/git-status (WARDEN-211) and reaches this row
-    // via ProjectGitAgent.stashCount; rendering ` · 🗄 N` reuses the same ` · `
-    // branch-line suffix pattern the sibling rows render via cfg.suffix(a) below, so
-    // an agent that parked 12 stashes reads distinctly from one that parked 1.
-    // Gated on `stashCount > 0` (⇔ `stashed`, which the popover's match already
-    // filters on) so the suffix is never noise; a 0/absent count renders nothing.
-    suffix: (a: ProjectGitAgent) => (a.stashCount > 0 ? ` · 🗄 ${a.stashCount}` : ''),
-    // WARDEN-689: rank the stash popover heaviest-parker-first (most parked WIP on
-    // top) so a human triaging the fleet integrates the biggest stash first (a
-    // 12-stash agent holds far more easily-forgotten, drift-prone work than a
-    // 1-stash one). `'sort' in cfg` in GitStateBadge scopes this to the stash popover
-    // the SAME way dirty's `sort` is scoped — a pure, NEW-array sort (does not
-    // mutate): summarizeProjectGitState's agents array stays in chats order; only
-    // this popover's filtered slice is reordered at render time.
-    sort: sortByStashCountDesc,
-  },
-  stalled:  {
-    glyph: '💤',
-    color: 'text-sky-400 hover:text-sky-300',
-    label: 'stalled (>7d)',
-    match: (a: ProjectGitAgent) => a.stalled,
-    suffix: (a: ProjectGitAgent) => (a.stalled && a.headAgeMs != null ? ` · 💤 ${formatRelative(Date.now() - a.headAgeMs)}` : ''),
-    // WARDEN-710: rank the 💤 popover oldest-HEAD-first (largest headAgeMs on top) so a
-    // human triaging the fleet's rotting/abandoned work surfaces the longest-stalled agent
-    // FIRST — a 30-day-stalled agent no longer gets buried under one 8 days stale (which
-    // chats iteration order alone would do, defeating the chip's whole point: find rotting
-    // work first). Reuses the SAME sortByHeadAgeDesc the unpushed popover (WARDEN-669) ranks
-    // oldest-first off the SAME kind-agnostic headAgeMs field — no new helper, no new fetch;
-    // headAgeMs is already on ProjectGitAgent (gitStateSummary.ts) and already rendered per-
-    // row by this suffix. `'sort' in cfg` in GitStateBadge scopes this to the stalled popover
-    // the SAME way dirty/atRisk/stash's `sort` is scoped — a pure, NEW-array sort (does not
-    // mutate): summarizeProjectGitState's agents array stays in chats order; only this
-    // popover's filtered slice is reordered at render time.
-    sort: sortByHeadAgeDesc,
-  },
-} as const;
-
-function GitStateBadge({ kind, count, agents, chats, gitStatus, onOpenChat }: {
-  kind: 'dirty' | 'unpushed' | 'behind' | 'atRisk' | 'stash' | 'stalled';
-  count: number;
-  // Already scoped to this chip (a project's subset, or `total.agents` for the
-  // "All Projects" chip); filtered below by `kind`.
-  agents: ProjectGitAgent[];
-  chats: Chat[];
-  // Minimal slice the popover rows read (just the branch label) — the full
-  // gitStatus map ChatSidebar holds is structurally compatible.
-  gitStatus: Record<string, { branch: string | null }>;
-  onOpenChat: (id: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  if (count <= 0) return null;
-  const cfg = GIT_STATE_KIND[kind];
-  // WARDEN-669 + WARDEN-670 + WARDEN-689 + WARDEN-701 + WARDEN-710: per-kind render-time sort of
-  // THIS popover's filtered slice only. The summarizer's own `agents` array is NEVER
-  // reordered here -- its deterministic chats-iteration-order invariant is asserted
-  // throughout gitStateSummary.test.mjs and shared by the behind popover, which stays
-  // unsorted. The unpushed popover ranks oldest-HEAD-first (WARDEN-669: surface the most
-  // rot-prone commits on top so a human integrates them first); the dirty popover ranks
-  // heaviest-WIP-first (WARDEN-670: largest insertions+deletions magnitude on top); the
-  // stash popover ranks heaviest-parker-first (WARDEN-689: most parked WIP on top); the
-  // atRisk popover ranks conflict-first (WARDEN-701: a merge-conflict-BLOCKED agent on top
-  // of every clean auto-completing rebase); the stalled popover ranks oldest-HEAD-first
-  // (WARDEN-710: the longest-stalled agent on top so rotting/abandoned work surfaces first
-  // — a 30-day-stalled repo is no longer buried under one 8 days stale) — each via the
-  // table's `sort`. `'sort' in cfg` narrows to the dirty + stalled + atRisk + stash entries
-  // (the kinds carrying a `sort`), so this never reorders behind. All sort helpers return
-  // NEW arrays (no mutation of `agents`). `now` is captured once so the reconstructed HEAD
-  // epoch (now - headAgeMs) is consistent between a row's relative label and its absolute
-  // title (WARDEN-669).
-  const matched = agents.filter(cfg.match);
-  const shown =
-    kind === 'unpushed' ? sortByHeadAgeDesc(matched)
-      : 'sort' in cfg && cfg.sort ? cfg.sort(matched)
-      : matched;
-  const now = Date.now();
-  const title = `${count} agent${count === 1 ? '' : 's'} with ${cfg.label} — click to list`;
-  return (
-    <RadixPopover.Root open={open} onOpenChange={setOpen}>
-      <RadixPopover.Trigger asChild>
-        {/* The chip is a real <button>, so the trigger is a role="button" <span>
-            — NEVER a nested <button> (invalid HTML; browsers misbehave). The
-            span needs its own keydown (Enter/Space) since a non-button doesn't
-            synthesize a click from the keyboard. stopPropagation is mandatory so
-            opening the popover does not also flip the project filter (the badge
-            sits inside the chip's onClick=setProjectFilter button). Mirrors
-            GitBranchBadge's trigger, just on a span instead of a button. */}
-        <span
-          role="button"
-          tabIndex={0}
-          aria-label={title}
-          onClick={(e) => e.stopPropagation()}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              e.stopPropagation();
-              setOpen((o) => !o);
-            }
-          }}
-          title={title}
-          className={cn('ml-0.5 inline-flex items-center text-[10px] cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary', cfg.color)}
-        >
-          {cfg.glyph}{count}
-        </span>
-      </RadixPopover.Trigger>
-      <RadixPopover.Portal>
-        <RadixPopover.Content
-          sideOffset={4}
-          align="start"
-          onClick={(e) => e.stopPropagation()}
-          className="z-50 min-w-56 max-w-80 rounded-md border border-border bg-popover p-1.5 text-popover-foreground shadow-lg outline-none data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0"
-        >
-          <div className="mb-1 px-0.5">
-            <span className={cn('text-[10px] font-medium', cfg.color)}>
-              {cfg.label} · {count} agent{count === 1 ? '' : 's'}
-            </span>
-          </div>
-          <ul className="max-h-72 overflow-auto">
-            {shown.map((a) => {
-              const c = findChat(chats, a.key);
-              const name = displayName(c);
-              const branch = gitStatus[a.key]?.branch ?? null;
-              return (
-                <li key={a.key} className="rounded">
-                  {/* role="button" div (not a <button>) so the row is keyboard-
-                      operable without nesting interactive buttons inside the
-                      portaled popover content. The CommitFile row uses the same
-                      pattern. Click → jump to the agent + close the popover. */}
-                  <div
-                    role="button"
-                    tabIndex={0}
-                    aria-label={`open ${name}`}
-                    onClick={(e) => { e.stopPropagation(); setOpen(false); onOpenChat(a.key); }}
-                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setOpen(false); onOpenChat(a.key); } }}
-                    title={`open ${name}`}
-                    className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
-                  >
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[10px] text-foreground" title={name}>{name}</span>
-                      {branch && (
-                        <span className="block truncate text-[10px] text-cyan-400/80" title={branch}>
-                          ⎇ {branch}{cfg.suffix(a)}
-                          {/* WARDEN-669: relative AGE label on each unpushed row, so the
-                              ranked-oldest-first popover also says HOW long the WIP has sat.
-                              headAgeMs is an AGE; formatRelative/formatAbsoluteFull take an
-                              EPOCH, so reconstruct it (now - headAgeMs) — `now` is captured
-                              once above, so the label and the absolute title agree exactly.
-                              The >7d amber tint reuses the per-row badge's STALE_HEAD_AGE_MS
-                              (shared module const) so fleet and row agree by construction —
-                              no new threshold. null age (no commits / non-git cwd) renders
-                              nothing, mirroring headFresh. Unpushed-only (minimal slice). */}
-                          {kind === 'unpushed' && a.headAgeMs != null && (
-                            <span className={a.headAgeMs > STALE_HEAD_AGE_MS ? 'text-amber-400' : 'text-muted-foreground'} title={`last commit ${formatAbsoluteFull(now - a.headAgeMs)}`}>
-                              {` · ${formatRelative(now - a.headAgeMs)}`}
-                            </span>
-                          )}
-                        </span>
-                      )}
-                    </span>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        </RadixPopover.Content>
-      </RadixPopover.Portal>
-    </RadixPopover.Root>
-  );
-}
-
-export function GitStateBadges({ dirty, unpushed, behind, atRisk, stashed, stalled, agents, chats, gitStatus, onOpenChat }: {
-  dirty: number;
-  unpushed: number;
-  behind: number;
-  atRisk: number;
-  stashed: number;
-  stalled: number;
-  agents: ProjectGitAgent[];
-  chats: Chat[];
-  gitStatus: Record<string, { branch: string | null }>;
-  onOpenChat: (id: string) => void;
-}) {
-  return (
-    <>
-      <GitStateBadge kind="dirty" count={dirty} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
-      <GitStateBadge kind="unpushed" count={unpushed} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
-      <GitStateBadge kind="behind" count={behind} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
-      <GitStateBadge kind="atRisk" count={atRisk} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
-      <GitStateBadge kind="stash" count={stashed} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
-      <GitStateBadge kind="stalled" count={stalled} agents={agents} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} />
-    </>
-  );
-}
-
-/**
- * Directed triage callout for the fleet git-state chips (WARDEN-745) — the
- * compositional capstone of the 6-axis git-state chip vein, rendered in the fleet
- * header alongside <GitStateBadges>. Where the 6 chips (±N/↑N/↓N/⚑N/🗄N/💤N) are a
- * flat count a human must rank by hand across N agents, this promotes the ONE
- * composite-worst agent as "triage THIS first, because X" — a verbatim mirror of
- * WARDEN-384's AttentionBadge callout (rankGitTriage + pickGitTriageTop +
- * gitTriageReason in gitStateSummary.ts), applied to git state.
- *
- * Renders nothing when fewer than 2 agents carry a git signal (the `>= 2` gate,
- * mirroring AttentionBadge's `ranked.length >= 2`: with 0 or 1 triageable agents
- * there is no ranking decision to promote), OR when focus exclusion leaves no
- * eligible target (WARDEN-482: never promote the pane the human is staring at — the
- * "trains them to ignore it" product-killer). Clicking deep-links into the agent's
- * pane via onOpenChat — no new routing.
- *
- * The glyph + tone reuse the GIT_STATE_KIND table entry for the promoted item's tier
- * (the tier strings ARE the kind keys), so the callout's glyph matches the chip whose
- * axis it is promoting — one visual system, no second mapping table. Styled as a
- * distinct bordered pill (mirroring the AttentionBadge Callout's `border bg-muted/40`
- * fill) so it reads as the directed answer, not another chip.
- */
-export function GitTriageCallout({ agents, chats, focused, onOpenChat }: {
-  agents: ProjectGitAgent[];
-  chats: Chat[];
-  focused?: string | null;
-  onOpenChat: (id: string) => void;
-}) {
-  const { ranked } = useMemo(() => rankGitTriage(agents), [agents]);
-  const top = useMemo(() => pickGitTriageTop(ranked, focused), [ranked, focused]);
-  // Gate mirrors AttentionBadge: a promoted callout only when there are ≥2 triageable
-  // agents AND focus exclusion leaves an eligible target. <2 → silent (the lone chip
-  // already IS the answer); all-eligible-is-focused → silent (no one to promote).
-  if (!top || ranked.length < 2) return null;
-  const cfg = GIT_STATE_KIND[top.tier];
-  const name = displayName(findChat(chats, top.key));
-  const reason = gitTriageReason(top);
-  return (
-    <Button
-      variant="ghost"
-      size="sm"
-      onClick={() => onOpenChat(top.key)}
-      title={`Triage ${name} first — ${reason}`}
-      aria-label={`Triage ${name} first: ${reason}`}
-      className="max-w-full gap-1 rounded-md border border-border bg-muted/40 px-2 py-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-    >
-      <span className={cn('text-xs shrink-0', cfg.color)} aria-hidden>{cfg.glyph}</span>
-      <span className="min-w-0 flex-1 flex flex-wrap items-baseline gap-x-1 gap-y-0">
-        <span className="text-[10px] shrink-0">triage first:</span>
-        <span className="min-w-0 shrink wrap-anywhere whitespace-normal text-xs font-medium text-foreground">{name}</span>
-        <span className="min-w-0 shrink wrap-anywhere whitespace-normal text-[10px]">· {reason}</span>
-      </span>
-    </Button>
-  );
-}
-
-// ⚠ badge for cross-agent file-edit collisions (WARDEN-288). Surfaces on a project
-// chip (and the "All Projects" chip) when ≥2 active agents in that project each
-// have the SAME file path in their uncommitted working tree — a divergence
-// waiting to become a merge conflict. The proactive complement to WARDEN-185,
-// which surfaces a conflict AFTER an agent is already blocked; this warns before
-// either agent commits. A glance at the chip's ⚠N then tells a human which paths
-// two agents are racing on, so they can coordinate before the collision lands.
-//
-// Mirrors GitStateBadge's explorable-popover structure exactly (so the two badges
-// read as one system): a role="button" <span> trigger — NEVER a nested <button>,
-// since the chip is itself a <button> (invalid HTML; browsers misbehave);
-// stopPropagation on click/keydown so opening the popover does not also flip the
-// project filter; a RadixPopover whose rows are role="button" <div>s that call
-// onOpenChat(key) and close. The popover lists each colliding path as a header
-// with its contributing agents beneath — a human can jump to either agent.
-// No new fetch: the collisions come from the cached gitStatus map via
-// detectProjectFileCollisions (which reads the per-chat `files` already cached).
-// One trigger + popover + compare-dialog for a SINGLE collision class — `live`
-// (the working-tree×working-tree ⚠, WARDEN-288), `impending` (the committed-
-// outgoing×working-tree ⏱, WARDEN-601), or `outgoing` (the committed-outgoing×
-// committed-outgoing ⇄, WARDEN-639). Extracted from GitCollisionBadge so the
-// badge renders the three classes as visually-distinct siblings (⚠ red, ⏱ amber,
-// ⇄ violet) without duplicating the popover/dialog JSX. Each class has its own popover
-// `open` state and its own `compareTarget` so opening one never interferes with
-// another. The agent rows tag each contributor's side — 'committed' for an outgoing
-// contributor (source 'outgoing', the committer side of an impending collision OR
-// every side of an outgoing collision) vs 'editing' for a working-tree contributor
-// (source 'wip', the live side) — so a human sees who is the source of the conflict;
-// a live collision's rows carry no tag (both sides are "editing").
-// Per-kind visual identity + copy for the collision popover. The rollup renders three
-// collision classes as visually-distinct siblings (⚠ red live, ⏱ amber impending, ⇄
-// violet outgoing), each silent when its list is empty. Colors stay in the same visual
-// system as the per-row GitBranchBadge; the violet outgoing glyph ⇄ reads as two-way
-// divergence — "both agents committed (unpushed), will collide on push." Each kind's
-// copy names the risk precisely so a human glancing at the chip knows which class
-// fired before opening the popover. Adding a fourth class would be a row here rather
-// than another branch in every ternary, mirroring GIT_STATE_KIND's table pattern.
-const COLLISION_KIND = {
-  live: {
-    glyph: '⚠',
-    text: 'text-red-400 hover:text-red-300',
-    header: 'text-red-400',
-    title: (n: number) => `${n} file${n === 1 ? '' : 's'} edited by 2+ agents — click to list`,
-    headerLabel: (n: number) => `same file · 2+ agents · ${n} path${n === 1 ? '' : 's'}`,
-    compareLabel: (path: string) => `compare each agent's uncommitted edits to ${path}`,
-  },
-  impending: {
-    glyph: '⏱︎',
-    text: 'text-amber-400 hover:text-amber-300',
-    header: 'text-amber-400',
-    title: (n: number) => `${n} file${n === 1 ? '' : 's'} about to collide — one agent committed (unpushed), another is editing — click to list`,
-    headerLabel: (n: number) => `impending · committed × editing · ${n} path${n === 1 ? '' : 's'}`,
-    compareLabel: (path: string) => `compare the committed vs in-progress edits to ${path}`,
-  },
-  outgoing: {
-    glyph: '⇄',
-    text: 'text-violet-400 hover:text-violet-300',
-    header: 'text-violet-400',
-    title: (n: number) => `${n} file${n === 1 ? '' : 's'} committed by 2+ agents, both unpushed — will collide on push — click to list`,
-    headerLabel: (n: number) => `outgoing · committed × committed · ${n} path${n === 1 ? '' : 's'}`,
-    compareLabel: (path: string) => `compare each agent's unpushed (committed) edits to ${path}`,
-  },
-} as const;
-
-function CollisionPopoverGroup({ kind, collisions, chats, gitStatus, onOpenChat, showProject }: {
-  kind: 'live' | 'impending' | 'outgoing';
-  // Already scoped to this chip (a project's paths, or `total.paths` for the
-  // "All Projects" chip). Empty ⇒ the group is not rendered at all.
-  collisions: FileCollision[];
-  chats: Chat[];
-  // Minimal slice the popover rows read (just the branch label) — the full
-  // gitStatus map ChatSidebar holds is structurally compatible.
-  gitStatus: Record<string, { branch: string | null }>;
-  onOpenChat: (id: string) => void;
-  // Show a project tag on each path header (the "All Projects" chip, where the
-  // same path can collide in two different projects and needs disambiguation).
-  // Looked up from the first contributor's chat in the React layer — the helper
-  // stays display-field-free, exactly like ProjectGitAgent.
-  showProject?: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  // The path + contributors scoped to the "Compare edits" dialog (WARDEN-321): set
-  // by the per-path Compare action below, null while the dialog is closed. Lives in
-  // the group (not its parent) so the badge stays minimal — the group already owns
-  // its popover `open` state and has collisions/chats/gitStatus/onOpenChat in hand,
-  // which is everything the dialog needs.
-  const [compareTarget, setCompareTarget] = useState<{ path: string; agents: FileCollision['agents'] } | null>(null);
-  const count = collisions.length;
-  if (count <= 0) return null;
-
-  // Per-class visual identity, looked up from the COLLISION_KIND table. Live ⚠ (red) =
-  // two agents editing the same file RIGHT NOW. Impending ⏱ (amber) = one agent already
-  // committed (unpushed) while another is editing. Outgoing ⇄ (violet) = two agents each
-  // committed the file, both unpushed — will collide on push. The stopwatch/⇄ glyphs are
-  // text-presented (⏱ via the VS15 selector) so they read as text, matching the ⚠/±/↑
-  // vocabulary, not emoji.
-  const cfg = COLLISION_KIND[kind];
-  const glyph = cfg.glyph;
-  const accentText = cfg.text;
-  const accentHeader = cfg.header;
-  const title = cfg.title(count);
-  const headerLabel = cfg.headerLabel(count);
-
-  return (
-    <>
-    <RadixPopover.Root open={open} onOpenChange={setOpen}>
-      <RadixPopover.Trigger asChild>
-        {/* role="button" <span> (not a nested <button>): the chip is already a
-            <button>, so the trigger must not be one. The span needs its own
-            keydown (Enter/Space) since a non-button doesn't synthesize a click
-            from the keyboard, and stopPropagation so opening the popover doesn't
-            flip the project filter. Mirrors GitStateBadge's trigger. */}
-        <span
-          role="button"
-          tabIndex={0}
-          aria-label={title}
-          onClick={(e) => e.stopPropagation()}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              e.stopPropagation();
-              setOpen((o) => !o);
-            }
-          }}
-          title={title}
-          className={`ml-0.5 inline-flex items-center text-[10px] cursor-pointer rounded-sm ${accentText} focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary`}
-        >
-          {glyph}{count}
-        </span>
-      </RadixPopover.Trigger>
-      <RadixPopover.Portal>
-        <RadixPopover.Content
-          sideOffset={4}
-          align="start"
-          onClick={(e) => e.stopPropagation()}
-          className="z-50 min-w-56 max-w-80 rounded-md border border-border bg-popover p-1.5 text-popover-foreground shadow-lg outline-none data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0"
-        >
-          <div className="mb-1 px-0.5">
-            <span className={`text-[10px] font-medium ${accentHeader}`}>
-              {headerLabel}
-            </span>
-          </div>
-          <div className="max-h-72 overflow-auto flex flex-col gap-1">
-            {collisions.map((col) => {
-              // The project the first contributor belongs to — disambiguates the
-              // same path colliding in two different projects on the "All Projects" chip.
-              const project = showProject ? findChat(chats, col.agents[0]?.key)?.project : undefined;
-              const compareLabel = cfg.compareLabel(col.path);
-              return (
-                <div key={`${col.path}·${col.agents.map((a) => a.key).join(',')}`} className="rounded">
-                  <div className="flex items-center gap-1 px-1 py-0.5" title={col.path}>
-                    <span className="truncate text-[10px] text-foreground">{col.path}</span>
-                    {project && (
-                      <span className="ml-auto shrink-0 text-[10px] text-muted-foreground" title={project}>{project}</span>
-                    )}
-                  </div>
-                  {/* The resolution layer (WARDEN-321): open the per-path compare
-                      dialog showing each agent's diff stacked. For an impending
-                      collision the committer's panel is sourced from its OUTGOING
-                      change (WARDEN-601, via the agent `source` tag the dialog
-                      reads). A real shadcn <Button> — the header row above is plain,
-                      so there's no nested-interactive issue (the chip and the popover
-                      trigger are the only buttons/role=button in play) — per WARDEN-68.
-                      stopPropagation + close the popover so the dialog takes focus,
-                      mirroring the per-agent rows' setOpen(false) + jump discipline. */}
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    onClick={(e) => { e.stopPropagation(); setOpen(false); setCompareTarget({ path: col.path, agents: col.agents }); }}
-                    className="ml-1 mb-0.5 text-muted-foreground hover:text-foreground"
-                    aria-label={compareLabel}
-                    title={compareLabel}
-                  >
-                    <GitCompare />
-                    Compare edits
-                  </Button>
-                  <ul>
-                    {col.agents.map((a) => {
-                      const c = findChat(chats, a.key);
-                      const name = displayName(c);
-                      const branch = gitStatus[a.key]?.branch ?? null;
-                      // Impending-collision side tag (WARDEN-601): 'committed' = this
-                      // agent's change is in an unpushed commit (clean tree, the
-                      // conflict source); 'editing' = working-tree WIP. Omitted for a
-                      // live collision (both sides are "editing").
-                      const sideTag = a.source === 'outgoing' ? 'committed' : a.source === 'wip' ? 'editing' : null;
-                      return (
-                        <li key={a.key} className="rounded">
-                          {/* role="button" div (not a <button>) so the row is keyboard-
-                              operable without nesting interactive buttons inside the
-                              portaled popover content. Mirrors GitStateBadge's rows.
-                              Click → jump to the agent + close the popover. */}
-                          <div
-                            role="button"
-                            tabIndex={0}
-                            aria-label={`open ${name}`}
-                            onClick={(e) => { e.stopPropagation(); setOpen(false); onOpenChat(a.key); }}
-                            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setOpen(false); onOpenChat(a.key); } }}
-                            title={`open ${name}`}
-                            className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
-                          >
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate text-[10px] text-foreground" title={name}>{name}</span>
-                              {branch && (
-                                <span className="block truncate text-[10px] text-cyan-400/80" title={branch}>
-                                  ⎇ {branch}
-                                </span>
-                              )}
-                            </span>
-                            {sideTag && (
-                              <span className={`shrink-0 text-[9px] uppercase tracking-wide ${a.source === 'outgoing' ? 'text-amber-400/80' : 'text-muted-foreground'}`} title={sideTag}>{sideTag}</span>
-                            )}
-                          </div>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </div>
-              );
-            })}
-          </div>
-        </RadixPopover.Content>
-      </RadixPopover.Portal>
-    </RadixPopover.Root>
-      {/* Scoped to the path + contributors selected by the Compare action above.
-          Rendered as a sibling of the popover (not inside it) so Radix's Dialog
-          portal stacks cleanly above the already-dismissed popover. */}
-      <CollisionCompareDialog
-        open={!!compareTarget}
-        onOpenChange={(o) => { if (!o) setCompareTarget(null); }}
-        path={compareTarget?.path ?? ''}
-        agents={compareTarget?.agents ?? []}
-        chats={chats}
-        gitStatus={gitStatus}
-        onOpenChat={onOpenChat}
-      />
-    </>
-  );
-}
-
-export function GitCollisionBadge({ collisions, impending, outgoing, chats, gitStatus, onOpenChat, showProject }: {
-  // Live working-tree×working-tree collisions (WARDEN-288). Empty ⇒ no ⚠.
-  collisions: FileCollision[];
-  // Impending committed-outgoing×working-tree collisions (WARDEN-601). Optional —
-  // a caller with no impending signal omits it and the ⏱ never renders. Empty ⇒ no ⏱.
-  impending?: FileCollision[];
-  // Outgoing committed-outgoing×committed-outgoing collisions (WARDEN-639). Optional —
-  // a caller with no outgoing signal omits it and the ⇄ never renders. Empty ⇒ no ⇄.
-  outgoing?: FileCollision[];
-  chats: Chat[];
-  // Minimal slice the popover rows read (just the branch label) — the full
-  // gitStatus map ChatSidebar holds is structurally compatible.
-  gitStatus: Record<string, { branch: string | null }>;
-  onOpenChat: (id: string) => void;
-  // Show a project tag on each path header (the "All Projects" chip, where the
-  // same path can collide in two different projects and needs disambiguation).
-  // Looked up from the first contributor's chat in the React layer — the helper
-  // stays display-field-free, exactly like ProjectGitAgent.
-  showProject?: boolean;
-}) {
-  // Render the live ⚠, impending ⏱, and outgoing ⇄ as siblings in the same rollup.
-  // Each renders nothing when its list is empty (silent-when-clean), so a chip with no
-  // collisions of any class shows no glyph. The live group stays exactly the
-  // pre-WARDEN-601 ⚠ behavior when `impending`/`outgoing` are absent or empty.
-  return (
-    <>
-      <CollisionPopoverGroup kind="live" collisions={collisions} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} showProject={showProject} />
-      <CollisionPopoverGroup kind="impending" collisions={impending ?? []} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} showProject={showProject} />
-      <CollisionPopoverGroup kind="outgoing" collisions={outgoing ?? []} chats={chats} gitStatus={gitStatus} onOpenChat={onOpenChat} showProject={showProject} />
-    </>
-  );
-}
 
 /** Shared body for the two byte-mirrored "click a touched file → lazily fetch its
  *  diff → reveal it inline via <DiffBlock>" rows: CommitFile (committed) and StashFile
@@ -1000,70 +365,34 @@ export function CommitMessage({ message }: { message?: string }) {
   );
 }
 
-// The cyan branch badge (+ yellow ±). Made interactive: click opens a popover showing
-// the last few commits (git log) for the chat's repo. Commits are lazily fetched on
-// first open and cached by chatId; the ↻ affordance re-fetches. The popover is portaled
-// to document.body via Radix Popover so it isn't clipped by the `truncate` name span
-// this badge sits inside (in ChatRow). stopPropagation on clicks keeps it from also
-// opening the chat pane (mirrors the other inline buttons in these rows).
-export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, inProgress, stashCount, diffstat, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, detached, headSha, headDate, upstream, onOpenFile, className }: {
+/**
+ * The one-line repo summary for the focused pane (WARDEN-975) — the content the
+ * per-row GitBranchBadge trigger used to render, now a NON-INTERACTIVE <span> that
+ * lives on the git section's header line so it reads whether the section is
+ * expanded or collapsed. Nothing here is clickable: the section's own collapse
+ * <Button> owns the header's interaction, and a git control must never navigate.
+ *
+ * Carries every always-on signal the badge carried, so nothing readable before is
+ * unreachable after: the mid-operation ⚠ (WARDEN-186/511), branch name OR the
+ * detached-HEAD ⎇ + short SHA (WARDEN-239), last-commit freshness with its >7d
+ * amber stale tint (WARDEN-545), the yellow ± dirty glyph with its +N −M magnitude
+ * (WARDEN-411/670 — on-surface here rather than tooltip-only, since the section has
+ * the room a chat row did not), the 🔒 no-remote durability marker (WARDEN-243),
+ * ↑N unpushed (WARDEN-153), ↓N behind (WARDEN-225) and 🗄N stashed (WARDEN-211).
+ * The full hover keeps the badge's titleParts vocabulary verbatim.
+ */
+export function GitRepoSummary({ branch, clean, ahead, behind, inProgress, stashCount, diffstat, detached, headSha, headDate, upstream, className }: {
   branch: string;
   clean: boolean | null;
-  commits?: GitCommit[];
-  loading?: boolean;
-  onFetch?: () => void;
   ahead?: number | null;
   behind?: number | null;
-  chatId: string;
   inProgress?: { operation: string | null; detail?: string | null };
   stashCount?: number | null;
-  // WARDEN-411: net insertions/deletions of the working-tree edits vs HEAD, or
-  // null when clean/unavailable. Surfaced in the badge tooltip so a hover shows
-  // the magnitude alongside the ± dirty glyph; the on-surface glyph stays a bare
-  // ± to avoid cluttering the already-dense badge (the chip lives in the file list).
   diffstat?: DiffStat | null;
-  // WARDEN-225: the "behind" half — commits @{u} has that HEAD doesn't. Lazily
-  // fetched on open when behindCount > 0, with its own cache/loader so it refreshes
-  // independently of the local recent-commits list. Explorable (WARDEN-348): each row
-  // expands to its changed files + per-file diff via /api/git-show — these are local
-  // objects reachable from the upstream remote-tracking ref (@{u}), so git show serves
-  // them without a pull.
-  incomingCommits?: GitCommit[];
-  incomingLoading?: boolean;
-  onFetchIncoming?: () => void;
-  // WARDEN-252: the "ahead/unpushed" half — commits HEAD has that @{u} doesn't. The
-  // symmetric counterpart to incomingCommits. Lazily fetched on open when aheadCount
-  // > 0, with its own cache/loader. Explorable (WARDEN-303): each row expands to its
-  // changed files + per-file diff via /api/git-show. Both halves are explorable —
-  // outgoing commits are reachable from HEAD, incoming from @{u} (WARDEN-348).
-  outgoingCommits?: GitCommit[];
-  outgoingLoading?: boolean;
-  onFetchOutgoing?: () => void;
-  // WARDEN-239: HEAD is not on a branch (an agent checked out a specific commit).
-  // Rendered as a distinct amber glyph + the short SHA instead of the misleading
-  // literal "HEAD" branch label. ahead/behind are null on detached (no @{u}).
   detached?: boolean;
   headSha?: string | null;
-  // WARDEN-545: the strict ISO-8601 committer date of HEAD (git %cI) — the last-
-  // commit FRESHNESS, threaded end-to-end from /api/git-status. Rendered as an
-  // always-on `· Nd` append on the un-expanded badge so a human scanning the
-  // sidebar can pick out a synced-but-stalled agent (committed days ago, silent
-  // since) without expanding its commit list; ahead/behind measure divergence
-  // from upstream, never recency. Stale (>7d) gets a warning tint. null when the
-  // repo has no commits / is non-git, or for a branch-less cwd.
   headDate?: string | null;
-  // WARDEN-243: the short upstream tracking branch (e.g. origin/feature), or null
-  // when HEAD has no upstream — a named branch never `push -u`'d. ahead/behind are
-  // null either way (no @{u}), so without this a non-tracking branch is a bare
-  // cyan label indistinguishable from a synced 0/0 branch. When null (and not
-  // detached) the badge renders a distinct muted "no remote" marker so the
-  // durability risk (local-only work, no remote backup) is visible at a glance.
   upstream?: string | null;
-  // WARDEN-478: open a touched file's full content in the FileViewer from inside
-  // this badge's commit popovers. Threaded down to each CommitFile row (recent,
-  // outgoing, incoming) so a committed file is readable — with blame/history one
-  // click away — not just diffable. Optional: omitted call sites render unchanged.
-  onOpenFile?: (path: string) => void;
   className?: string;
 }) {
   const aheadCount = typeof ahead === 'number' ? ahead : 0;
@@ -1073,7 +402,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   const stashN = typeof stashCount === 'number' ? stashCount : 0;
   // The operation an agent is blocked mid-way through (merge/rebase/cherry-pick/
   // revert/bisect), or null when none is in progress. This is the highest-value
-  // signal in the badge: a blocked agent produces nothing until noticed (WARDEN-186).
+  // signal in the summary: a blocked agent produces nothing until noticed (WARDEN-186).
   const operation = inProgress?.operation || null;
   // WARDEN-511: the operation's progress detail — rebase "N/M · onto <sha> ·
   // stopped at <sha>", or the SHA being applied for merge/cherry-pick/revert.
@@ -1094,23 +423,21 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   const sha = typeof headSha === 'string' ? headSha.trim() : '';
   // WARDEN-545: last-commit freshness derived from headDate (strict ISO-8601 from
   // git %cI). Date.parse → NaN when headDate is missing/invalid, so headFresh is
-  // false and no marker renders (a repo with no commits / non-git cwd). The marker
-  // is always-on for BOTH branch AND detached agents: headDate is fetched
-  // unconditionally server-side (gated on `branch`, which is the literal 'HEAD'
-  // for detached), so this proves the unconditional fetch reaches detached agents
-  // too — the whole point of the Refinement-1 fix. Stale (>7d) gets an amber tint
-  // so quiet agents pop; fresh stays muted so active ones recede into the row.
-  // STALE_HEAD_AGE_MS is the module-level const shared with the fleet popover (WARDEN-669).
+  // false and no marker renders (a repo with no commits / non-git cwd). Rendered for
+  // BOTH branch AND detached repos: headDate is fetched unconditionally server-side
+  // (gated on `branch`, which is the literal 'HEAD' for detached). Stale (>7d) gets
+  // an amber tint so a quiet repo pops; fresh stays muted.
   const headMs = typeof headDate === 'string' && headDate ? Date.parse(headDate) : NaN;
   const headFresh = Number.isFinite(headMs);
   const headStale = headFresh && Date.now() - headMs > STALE_HEAD_AGE_MS;
   // WARDEN-243: a named branch with NO upstream tracking (never `push -u`'d) is
   // local-only work with no remote backup — a durability risk a human glancing at
-  // the badge needs to see. Distinct from a synced 0/0 branch (which HAS an
+  // the summary needs to see. Distinct from a synced 0/0 branch (which HAS an
   // upstream): ahead/behind are null in BOTH cases, so the upstream name is the
   // only signal. Excluded for detached HEAD (branch === 'HEAD', rendered as its
   // own amber glyph by WARDEN-239 — a detached HEAD has no @{u} by definition).
   const noUpstream = !isDetached && !!branch && branch !== 'HEAD' && !upstream;
+  const hasMagnitude = !!diffstat && diffstat.insertions + diffstat.deletions > 0;
   const titleParts = isDetached
     ? [`detached HEAD${sha ? ` @ ${sha}` : ''}`, 'commits not on a branch; at risk if reflog expires']
     : [branch];
@@ -1125,16 +452,123 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   if (clean === false) {
     // WARDEN-411: fold the magnitude into the dirty tooltip so a hover distinguishes
     // a 4-line WIP from a 1000-line rewrite without expanding the file list.
-    const mag = diffstat && diffstat.insertions + diffstat.deletions > 0 ? ` (+${diffstat.insertions} −${diffstat.deletions})` : '';
+    const mag = hasMagnitude ? ` (+${diffstat!.insertions} −${diffstat!.deletions})` : '';
     titleParts.push(`uncommitted changes${mag}`);
   }
   if (stashN > 0) titleParts.push(`${stashN} stashed`);
   if (!isDetached && aheadCount > 0) titleParts.push(`${aheadCount} unpushed`);
   if (!isDetached && behindCount > 0) titleParts.push(`${behindCount} behind remote`);
 
+  return (
+    <span
+      className={cn('inline-flex flex-wrap items-center gap-x-1 gap-y-0 min-w-0 max-w-full text-[10px] normal-case tracking-normal', isDetached ? 'text-amber-400' : 'text-cyan-400', className)}
+      title={titleParts.join(' · ')}
+    >
+      {operation && <span className="shrink-0 text-red-400 font-medium" title={inProgressTitle || `${operation} in progress`}>⚠ {operation}</span>}
+      {isDetached ? (
+        <>
+          <span className="shrink-0" title="detached HEAD — commits not on a branch; at risk if reflog expires">⎇</span>
+          {sha && <span className="min-w-0 wrap-anywhere font-mono">{sha}</span>}
+        </>
+      ) : (
+        <span className="min-w-0 wrap-anywhere">⎇ {branch}</span>
+      )}
+      {headFresh && (
+        <span className={cn('shrink-0', headStale ? 'text-amber-400' : 'text-muted-foreground')}>· {formatRelative(headMs)}</span>
+      )}
+      {clean === false && (
+        <span className="inline-flex shrink-0 items-center gap-0.5">
+          <span className="text-yellow-400">±</span>
+          {/* WARDEN-670: the working-tree MAGNITUDE, not just the fact of WIP.
+              DiffStatChip owns its own null / +0−0 guard, so an all-untracked WIP
+              renders the bare ± with no misleading +0−0. */}
+          {hasMagnitude && <DiffStatChip diffstat={diffstat} />}
+        </span>
+      )}
+      {noUpstream && <span className="shrink-0 text-muted-foreground" title="no remote tracking — local-only work, not backed up remotely">🔒</span>}
+      {upstream && <span className="shrink-0 text-muted-foreground/80" title={`tracking ${upstream}`}>→ {upstream}</span>}
+      {aheadCount > 0 && <span className="shrink-0 text-amber-400">↑{aheadCount}</span>}
+      {behindCount > 0 && <span className="shrink-0 text-blue-400">↓{behindCount}</span>}
+      {stashN > 0 && <span className="shrink-0 text-fuchsia-400" title={`${stashN} stashed`}>🗄{stashN}</span>}
+    </span>
+  );
+}
+
+/**
+ * The focused repo's FULL detail, rendered INLINE inside the git section
+ * (WARDEN-975). This is the per-row GitBranchBadge's popover BODY, verbatim in
+ * content and behaviour — commit search, the recent / unpushed / incoming commit
+ * lists with their per-commit changed-files + inline diffs, the aggregated
+ * "full diff" range affordances, stashes, the reflog, the branch topology and the
+ * origin row — minus the popover shell and its chat-row trigger.
+ *
+ * Lazy-fetch discipline is unchanged, only re-anchored: everything the popover
+ * fetched on first OPEN is fetched when the section is first EXPANDED, each guarded
+ * so a re-expand reuses the cache. The component stays mounted while collapsed (only
+ * its body is hidden) so those caches — and any expanded commit — survive a
+ * collapse/expand round trip exactly as they survived a popover close/reopen. The
+ * caller keys it by chat id, so switching the focused pane remounts it with a clean
+ * cache rather than showing the previous repo's commits.
+ *
+ * Nothing here navigates: every control opens a diff, expands a list, or opens a
+ * file — never a pane.
+ */
+export function GitRepoDetails({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, stashCount, diffstat, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, detached, headSha, upstream, onOpenFile, expanded }: {
+  branch: string;
+  clean: boolean | null;
+  commits?: GitCommit[];
+  loading?: boolean;
+  onFetch?: () => void;
+  ahead?: number | null;
+  behind?: number | null;
+  chatId: string;
+  stashCount?: number | null;
+  // WARDEN-411: net insertions/deletions of the working-tree edits vs HEAD, or null
+  // when clean/unavailable. Rendered as the uncommitted section's +N −M chip and
+  // threaded to the aggregated worktree DiffViewer so the chip and the diff agree.
+  diffstat?: DiffStat | null;
+  // WARDEN-225: the "behind" half — commits @{u} has that HEAD doesn't. Lazily
+  // fetched on expand when behindCount > 0, with its own cache/loader so it refreshes
+  // independently of the local recent-commits list. Explorable (WARDEN-348): each row
+  // expands to its changed files + per-file diff via /api/git-show — these are local
+  // objects reachable from the upstream remote-tracking ref (@{u}), so git show serves
+  // them without a pull.
+  incomingCommits?: GitCommit[];
+  incomingLoading?: boolean;
+  onFetchIncoming?: () => void;
+  // WARDEN-252: the "ahead/unpushed" half — commits HEAD has that @{u} doesn't. The
+  // symmetric counterpart to incomingCommits. Lazily fetched on expand when aheadCount
+  // > 0, with its own cache/loader. Explorable (WARDEN-303): each row expands to its
+  // changed files + per-file diff via /api/git-show. Both halves are explorable —
+  // outgoing commits are reachable from HEAD, incoming from @{u} (WARDEN-348).
+  outgoingCommits?: GitCommit[];
+  outgoingLoading?: boolean;
+  onFetchOutgoing?: () => void;
+  // WARDEN-239: HEAD is not on a branch (an agent checked out a specific commit).
+  // Rendered as the detached short SHA (+ its commit deep-link) instead of the
+  // misleading literal "HEAD" branch label. ahead/behind are null on detached.
+  detached?: boolean;
+  headSha?: string | null;
+  // WARDEN-243: the short upstream tracking branch (e.g. origin/feature), or null
+  // when HEAD has no upstream. Selects the primary remote for the deep-links below.
+  upstream?: string | null;
+  // WARDEN-478: open a touched file's full content in the FileViewer from inside the
+  // commit lists. Threaded to each CommitFile row (recent, outgoing, incoming) so a
+  // committed file is readable — with blame/history one click away — not just diffable.
+  onOpenFile?: (path: string) => void;
+  // Whether the git section is expanded. Drives BOTH the body's visibility and the
+  // lazy fetches (the popover's onOpenChange, re-anchored).
+  expanded: boolean;
+}) {
+  const aheadCount = typeof ahead === 'number' ? ahead : 0;
+  const behindCount = typeof behind === 'number' ? behind : 0;
+  const stashN = typeof stashCount === 'number' ? stashCount : 0;
+  const isDetached = detached === true;
+  const sha = typeof headSha === 'string' ? headSha.trim() : '';
+
   // Per-commit expand state + the /api/git-show files cache (keyed by hash) so a
-  // repeat expansion is instant. The popover owns the interaction, so this state
-  // lives here rather than being prop-drilled through ChatRow/ChatSidebar.
+  // repeat expansion is instant. This component owns the interaction, so the state
+  // lives here rather than being prop-drilled through the section/ChatSidebar.
   const [expandedHash, setExpandedHash] = useState<string | null>(null);
   const [showCache, setShowCache] = useState<Record<string, { files?: GitFile[]; message?: string; error?: string | null }>>({});
   const [showLoading, setShowLoading] = useState<Record<string, boolean>>({});
@@ -1188,12 +622,8 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
   // affordance in the outgoing (↑N) or incoming (↓N) section; null while closed.
   // WARDEN-449: extended to the ± (worktree) axis — `git diff HEAD`, no count (the
   // magnitude is the in-scope `diffstat` prop, not a commit count). Rendered by the
-  // generalized DiffViewer (range mode) as a sibling of this popover.
+  // generalized DiffViewer (range mode) as a sibling of this section body.
   const [rangeDiff, setRangeDiff] = useState<{ kind: 'outgoing' | 'incoming' | 'worktree'; count?: number } | null>(null);
-  // Controlled open so the "View full diff" affordance can dismiss this popover
-  // before the DiffViewer modal opens on top (mirrors GitStateBadge's /
-  // GitCollisionBadge's setOpen(false) + open-dialog discipline).
-  const [popoverOpen, setPopoverOpen] = useState(false);
 
   // WARDEN-498: commit-message search across the per-agent lists. A small debounced
   // input above the lists fetches /api/git-log?grep= for each VISIBLE range (recent
@@ -1374,7 +804,40 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
     }
   };
 
-  // WARDEN-528: resolve the ONE remote this badge speaks for + the deep-link URLs.
+  // WARDEN-975: the lazy-fetch trigger, re-anchored from the popover's onOpenChange
+  // to the SECTION's expand. Identical policy, identical guards: fetch the local
+  // recent commits, the incoming list (only when behind upstream), the outgoing list
+  // (only when ahead), and shelved stashes (only when some are parked) on first
+  // expand; fetch the reflog / remote / branch topology unconditionally (they are the
+  // diagnostics for a repo that LOOKS clean, so they carry no count gate). Every call
+  // is guarded on its cache being undefined, so a re-expand reuses it rather than
+  // re-hitting the endpoint. Collapsing drops any active commit-message search so a
+  // re-expand starts from the unfiltered browse lists (the popover did the same on
+  // close — a stale term surviving would be confusing).
+  //
+  // Deps are the gate values only: the fetchers close over the freshest state and the
+  // `=== undefined` guards make a repeat run a no-op, so re-running on a count change
+  // (e.g. ahead 0 → 1 after a commit lands) is exactly the desired top-up.
+  useEffect(() => {
+    if (!expanded) {
+      setGrepInput('');
+      return;
+    }
+    if (commits === undefined && !loading) onFetch?.();
+    if (behindCount > 0 && incomingCommits === undefined && !incomingLoading) onFetchIncoming?.();
+    if (aheadCount > 0 && outgoingCommits === undefined && !outgoingLoading) onFetchOutgoing?.();
+    if (stashN > 0 && stashList === undefined && !stashLoading) fetchStash();
+    if (reflogList === undefined && !reflogLoading) fetchReflog();
+    if (remoteList === undefined && !remoteLoading) fetchRemote();
+    if (branchList === undefined && !branchLoading) fetchBranches();
+    // Deps are the gate values only — NOT the fetchers. The parent's onFetch* props are
+    // fresh arrows each render, so depending on them would re-run this every render;
+    // the loading flags they'd bring are read inside the guards anyway. (oxlint's
+    // exhaustive-deps warning here is deliberate, matching the several other
+    // intentionally-narrow effect dep lists in this codebase.)
+  }, [expanded, aheadCount, behindCount, stashN, commits, incomingCommits, outgoingCommits, stashList, reflogList, remoteList, branchList]);
+
+  // WARDEN-528: resolve the ONE remote this section speaks for + the deep-link URLs.
   // A repo can have several remotes (origin, upstream, fork); the branch HEAD is on
   // tracks a specific one (`origin/feature` → the `origin` remote), so prefer that —
   // else the first remote with a web URL (conventionally `origin` in `git remote -v`
@@ -1446,73 +909,14 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
     }
   };
 
+  // Collapsed ⇒ render no body (the section header alone speaks), but stay MOUNTED so
+  // the caches above survive a collapse/expand round trip exactly as they survived a
+  // popover close/reopen. The range-diff DiffViewer is a sibling of the body for the
+  // same reason it was a sibling of the popover: it must outlive whatever opened it.
   return (
     <>
-    <RadixPopover.Root open={popoverOpen} onOpenChange={(open) => {
-      setPopoverOpen(open);
-      if (!open) {
-        // WARDEN-498: drop any active commit-message search on close so a reopen starts
-        // from the unfiltered browse list (a stale term persisting across opens would be
-        // confusing — and the search effect's clear-on-empty path drops its results).
-        setGrepInput('');
-        return;
-      }
-      // Lazy-fetch ALL signals on first open: the local recent commits, the incoming
-      // list (only when behind upstream), and shelved stashes (only when some are
-      // parked). Each fetch is guarded so a repeat open reuses the cache instead of
-      // re-hitting the endpoint.
-      if (commits === undefined && !loading) onFetch?.();
-      if (behindCount > 0 && incomingCommits === undefined && !incomingLoading) onFetchIncoming?.();
-      if (aheadCount > 0 && outgoingCommits === undefined && !outgoingLoading) onFetchOutgoing?.();
-      if (stashN > 0 && stashList === undefined && !stashLoading) fetchStash();
-      // WARDEN-460: the reflog (operation history) is the diagnostic for a repo
-      // that looks clean but has done something surprising, so it has no count
-      // gate — fetch it on every first open (guarded so repeat opens reuse cache).
-      if (reflogList === undefined && !reflogLoading) fetchReflog();
-      // WARDEN-528: the remote identity (which repo host this maps to) is relevant
-      // for every repo — not just a dirty one — so it has no count gate either.
-      if (remoteList === undefined && !remoteLoading) fetchRemote();
-      // WARDEN-577: the local branch topology is relevant for every repo too (not
-      // just a dirty one), so it has no count gate — fetch on every first open
-      // (guarded so repeat opens reuse the cache), alongside reflog/remote.
-      if (branchList === undefined && !branchLoading) fetchBranches();
-    }}>
-      <RadixPopover.Trigger asChild>
-        <button
-          type="button"
-          onClick={(e) => e.stopPropagation()}
-          className={cn('inline-flex items-center gap-0.5 text-[10px] cursor-pointer min-w-0 max-w-full', isDetached ? 'text-amber-400 hover:text-amber-300' : 'text-cyan-400 hover:text-cyan-300', className)}
-          title={`${titleParts.join(' · ')} — click for recent commits`}
-        >
-          {operation && <span className="shrink-0 text-red-400 font-medium" title={inProgressTitle || `${operation} in progress`}>⚠ {operation}</span>}
-          {isDetached ? (
-            <>
-              <span className="shrink-0" title="detached HEAD — commits not on a branch; at risk if reflog expires">⎇</span>
-              {sha && <span className="min-w-0 wrap-anywhere font-mono">{sha}</span>}
-            </>
-          ) : <span className="min-w-0 wrap-anywhere">{branch}</span>}
-          {headFresh && (
-            // WARDEN-545: always-on `· Nd` last-commit freshness append. Stale
-            // (>7d) tints amber so a quiet agent pops while fresh ones stay muted.
-            // Rendered for branch AND detached agents (headDate is fetched
-            // unconditionally server-side), so a human scanning the un-expanded
-            // sidebar can pick out stalled agents without expanding a commit list.
-            <span className={cn('shrink-0', headStale ? 'text-amber-400' : 'text-muted-foreground')}>· {formatRelative(headMs)}</span>
-          )}
-          {clean === false && <span className="shrink-0 text-yellow-400">±</span>}
-          {noUpstream && <span className="shrink-0 text-muted-foreground" title="no remote tracking — local-only work, not backed up remotely">🔒</span>}
-          {aheadCount > 0 && <span className="shrink-0 text-amber-400">↑{aheadCount}</span>}
-          {behindCount > 0 && <span className="shrink-0 text-blue-400">↓{behindCount}</span>}
-          {stashN > 0 && <span className="shrink-0 text-fuchsia-400" title={`${stashN} stashed`}>🗄{stashN}</span>}
-        </button>
-      </RadixPopover.Trigger>
-      <RadixPopover.Portal>
-        <RadixPopover.Content
-          sideOffset={4}
-          align="start"
-          onClick={(e) => e.stopPropagation()}
-          className="z-50 min-w-64 max-w-80 rounded-md border border-border bg-popover p-1.5 text-popover-foreground shadow-lg outline-none data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0"
-        >
+      {expanded && (
+        <div className="flex flex-col px-1 pb-1 text-[10px]">
           <div className="mb-1 flex items-center justify-between gap-2 px-0.5">
             <span className="truncate text-[10px] font-medium text-muted-foreground">
               recent commits ·{' '}
@@ -1698,7 +1102,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
                 <Button
                   variant="ghost"
                   size="xs"
-                  onClick={(e) => { e.stopPropagation(); setPopoverOpen(false); setRangeDiff({ kind: 'worktree' }); }}
+                  onClick={(e) => { e.stopPropagation(); setRangeDiff({ kind: 'worktree' }); }}
                   className="text-muted-foreground hover:text-yellow-300"
                   aria-label="view the full uncommitted diff"
                   title="view the aggregated uncommitted diff — net git diff HEAD"
@@ -1723,7 +1127,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
                 <Button
                   variant="ghost"
                   size="xs"
-                  onClick={(e) => { e.stopPropagation(); setPopoverOpen(false); setRangeDiff({ kind: 'outgoing', count: aheadCount }); }}
+                  onClick={(e) => { e.stopPropagation(); setRangeDiff({ kind: 'outgoing', count: aheadCount }); }}
                   className="text-muted-foreground hover:text-amber-300"
                   aria-label={`view the full unpushed diff (${aheadCount} commit${aheadCount === 1 ? '' : 's'})`}
                   title={`view the aggregated unpushed diff (${aheadCount} commit${aheadCount === 1 ? '' : 's'}) — net git diff @{u}..HEAD`}
@@ -1801,7 +1205,7 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
                 <Button
                   variant="ghost"
                   size="xs"
-                  onClick={(e) => { e.stopPropagation(); setPopoverOpen(false); setRangeDiff({ kind: 'incoming', count: behindCount }); }}
+                  onClick={(e) => { e.stopPropagation(); setRangeDiff({ kind: 'incoming', count: behindCount }); }}
                   className="text-muted-foreground hover:text-blue-300"
                   aria-label={`view the full incoming diff (${behindCount} commit${behindCount === 1 ? '' : 's'})`}
                   title={`view the aggregated incoming diff (${behindCount} commit${behindCount === 1 ? '' : 's'}) — net git diff HEAD..@{u}`}
@@ -2069,13 +1473,12 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
               )}
             </div>
           )}
-        </RadixPopover.Content>
-      </RadixPopover.Portal>
-    </RadixPopover.Root>
+        </div>
+      )}
       {/* WARDEN-398: the aggregated range-diff modal. Rendered as a sibling of the
-          popover (not inside it) so Radix's Dialog portal stacks cleanly above the
-          already-dismissed popover — the same sibling discipline CollisionCompareDialog
-          uses. Range mode fetches /api/git-range-diff; filePath is unused here. */}
+          section body (not inside it) so it survives a collapse and Radix's Dialog
+          portal stacks cleanly — the same sibling discipline it had beside the
+          popover. Range mode fetches /api/git-range-diff; filePath is unused here. */}
       <DiffViewer
         chatId={chatId}
         filePath=""
@@ -2086,157 +1489,5 @@ export function GitBranchBadge({ branch, clean, commits, loading, onFetch, ahead
         onOpenChange={(o) => { if (!o) setRangeDiff(null); }}
       />
     </>
-  );
-}
-
-// ---- Per-agent "What's new since you last looked" (WARDEN-356) --------------
-//
-// The marker + catch-up popover for the rare-visitor human: a glanceable indigo
-// pill on a sidebar row when commits have landed on THIS agent since the human
-// last visited it — the one-glance answer to "which of my agents shipped work I
-// haven't seen?" Clicking opens the "What's new since your last visit" popover
-// (the catch-up view) listing the new commits + current working-tree changes +
-// stash, with a one-glance summary line ("3 new commits · 7 changed files ·
-// 1 stash"). No new fetch — it renders from the git-log + git-status data the
-// row already holds.
-//
-// Visually DISTINCT from the other sidebar signals by design (AC #2):
-//   • stuck / erroring (WARDEN-343) → red ⚠ op in GitBranchBadge
-//   • new terminal output            → cyan "new" pill in PaneTile
-//   • currently dirty / unpushed     → the ± ↑ ↓ badges (current state)
-// This is a SINCE-signal ("commits landed since YOUR last visit"), not a state-
-// signal, so it clears the moment the pane is opened/focused again (App re-stamps
-// lastSeen). Indigo is unused by any git badge, so the marker can't be mistaken
-// for one of them.
-
-/**
- * The catch-up popover: the new commits + current working-tree changes + stash,
- * behind a one-glance summary line. Reuses GitChangedFile so each changed-file
- * row opens the per-file DiffViewer exactly like the inline list does. Rendered
- * portaled via Radix so it isn't clipped by the row's `truncate` name span.
- */
-function WhatsNewPopoverContent({ summary, files, diffstat, onOpenDiff, onOpenConflict, onOpenFile }: {
-  summary: WhatsNewSummary;
-  files?: GitFile[];
-  // WARDEN-411: working-tree edit magnitude (insertions/deletions), rendered as a
-  // +N −M chip in the working-tree header. null/zero (clean or all-untracked WIP)
-  // → DiffStatChip renders nothing.
-  diffstat?: DiffStat | null;
-  onOpenDiff?: (path: string, staged?: boolean) => void;
-  onOpenConflict?: (path: string) => void;
-  // WARDEN-478: open a catch-up-view dirty file in the FileViewer (mirrors onOpenDiff).
-  onOpenFile?: (path: string) => void;
-}) {
-  const line = formatWhatsNewLine(summary);
-  const hasFiles = (files?.length ?? 0) > 0;
-  return (
-    <RadixPopover.Content
-      sideOffset={4}
-      align="start"
-      onClick={(e) => e.stopPropagation()}
-      className="z-50 min-w-64 max-w-80 rounded-md border border-border bg-popover p-1.5 text-popover-foreground shadow-lg outline-none data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0"
-    >
-      <div className="mb-1 px-0.5">
-        <span className="text-[10px] font-medium text-indigo-400">What's new since your last visit</span>
-        {line && <div className="text-[10px] text-muted-foreground">{line}</div>}
-      </div>
-      {summary.newCommits.length > 0 && (
-        <div className="mb-1">
-          <div className="px-0.5 pb-0.5 text-[10px] uppercase tracking-wider text-muted-foreground/70">
-            ● new commits · {summary.newCommits.length}{summary.truncated ? '+' : ''}
-          </div>
-          <ul className="max-h-60 overflow-auto">
-            {summary.newCommits.map((cm) => (
-              // Display-only (like the incoming list in GitBranchBadge): the
-              // commit is already in HEAD, but the per-commit /api/git-show expand
-              // is intentionally omitted from the catch-up view to keep it a
-              // one-glance summary — the GitBranchBadge popover remains the place
-              // to drill into a commit's files.
-              <li key={cm.hash} className="rounded px-1 py-0.5 text-left">
-                <div className="flex items-center gap-1.5">
-                  <span className="shrink-0 font-mono text-[10px] text-indigo-400/80">{cm.hash}</span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[10px] text-foreground" title={cm.subject}>{cm.subject}</span>
-                    <span className="block text-[10px] text-muted-foreground">{cm.date}{cm.author ? ` · ${cm.author}` : ''}</span>
-                  </span>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {hasFiles && files && (
-        <div className={summary.newCommits.length > 0 ? 'mt-1 border-t border-border pt-1' : ''}>
-          <div className="px-0.5 pb-0.5 flex items-center gap-1 text-[10px] uppercase tracking-wider text-muted-foreground/70">
-            <span>± working-tree changes · {files.length}</span>
-            {/* WARDEN-411: the "and how much" extension — magnitude chip alongside
-                the file count. tracking-normal/normal-case shed the header's
-                uppercase+wide-tracking so the +N −M reads as a clean diffstat. */}
-            <DiffStatChip diffstat={diffstat} className="tracking-normal normal-case" />
-          </div>
-          <div className="flex flex-col gap-0.5">
-            {files.map((file, i) => (
-              <GitChangedFile key={file.path + '-' + i} file={file} onOpen={onOpenDiff} onOpenConflict={onOpenConflict} onOpenFile={onOpenFile} />
-            ))}
-          </div>
-        </div>
-      )}
-      {summary.stashCount > 0 && (
-        <div className="mt-1 border-t border-border pt-1 px-0.5">
-          <span className="text-[10px] text-fuchsia-400">🗄 {summary.stashCount} stash{summary.stashCount === 1 ? '' : 'es'} shelved</span>
-        </div>
-      )}
-    </RadixPopover.Content>
-  );
-}
-
-/**
- * The per-agent unreviewed-progress marker. A subtle indigo "✦N" pill; clicking
- * opens the WhatsNewPopoverContent catch-up view. Renders nothing when there's
- * no progress since the last visit (the caller passes the precomputed summary +
- * `since`; this double-checks the gate so a stale call site can't paint a "0").
- */
-export function WhatsNewMarker({ summary, since, files, diffstat, onOpenDiff, onOpenConflict, onOpenFile }: {
-  summary: WhatsNewSummary;
-  // The raw lastSeen epoch (null = never visited). Used both to gate visibility
-  // and to anchor the tooltip's "since your last visit" framing.
-  since: number | null;
-  files?: GitFile[];
-  // WARDEN-411: working-tree edit magnitude, passed through to the catch-up
-  // popover's working-tree header chip.
-  diffstat?: DiffStat | null;
-  onOpenDiff?: (path: string, staged?: boolean) => void;
-  onOpenConflict?: (path: string) => void;
-  // WARDEN-478: open a catch-up-view dirty file in the FileViewer.
-  onOpenFile?: (path: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const count = summary.newCommits.length;
-  // Gate: never visited, or visited but nothing new → render nothing.
-  if (since === null || count === 0) return null;
-  // "+" when truncated: the fetch hit its cap with all-new commits, so there may
-  // be more beyond the window — never silently understate "what you missed."
-  const plus = summary.truncated ? '+' : '';
-  const title = `${count}${plus} commit${count === 1 && !summary.truncated ? '' : 's'} since your last visit — click to review`;
-  return (
-    <RadixPopover.Root open={open} onOpenChange={setOpen}>
-      <RadixPopover.Trigger asChild>
-        {/* A real <button> (the row is role="button"); stopPropagation so opening
-            the popover does not also open the chat pane — mirrors GitBranchBadge. */}
-        <button
-          type="button"
-          onClick={(e) => e.stopPropagation()}
-          onKeyDown={(e) => e.stopPropagation()}
-          aria-label={title}
-          title={title}
-          className="ml-1 inline-flex items-center text-[10px] text-indigo-400 hover:text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 px-1 rounded cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary transition-colors duration-150"
-        >
-          ✦{count}{plus}
-        </button>
-      </RadixPopover.Trigger>
-      <RadixPopover.Portal>
-        <WhatsNewPopoverContent summary={summary} files={files} diffstat={diffstat} onOpenDiff={onOpenDiff} onOpenConflict={onOpenConflict} onOpenFile={onOpenFile} />
-      </RadixPopover.Portal>
-    </RadixPopover.Root>
   );
 }
