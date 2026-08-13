@@ -51,8 +51,8 @@ import type { GitFile } from './sidebar/types';
  * silently poll at 60s across N agents (a steady N requests every minute). The
  * human pulls a fresh "what just shipped" on demand. ↑unpushed join (WARDEN-723):
  * each agent fires its recent + outgoing (range=outgoing, @{u}..HEAD) fetches
- * concurrently (2N) so each row can carry the precise per-hash ↑ mark — ported from
- * FleetCommitSearch. Decision #1 still bounds the 2N: it fires only on mount /
+ * concurrently (2N) so each row can carry the precise per-hash ↑ mark.
+ * Decision #1 still bounds the 2N: it fires only on mount /
  * membership change / manual ↻, never on a steady auto-poll cadence.
  */
 
@@ -156,18 +156,18 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
     let cancelled = false;
     (async () => {
       // Promise.allSettled (the fleet convention, ChatSidebar.tsx handleBroadcast /
-      // handleKillSelected + FleetCommitSearch): one unreachable / non-git agent never
+      // handleKillSelected + useFleetGitStatus): one unreachable / non-git agent never
       // rejects the whole; a per-agent failure is counted and surfaced as an honest
       // "(N unreachable)" note (WARDEN-89 — never let a failure masquerade as a barren
       // history). Each agent fires TWO concurrent fetches — recent + outgoing
       // (range=outgoing, @{u}..HEAD) — so each row can carry the precise per-hash
-      // ↑unpushed mark (WARDEN-723, ported from FleetCommitSearch). 2N, but decision
+      // ↑unpushed mark (WARDEN-723). 2N, but decision
       // #1 bounds it to mount / membership change / manual ↻ (no auto-poll).
       const settled = await Promise.allSettled(
         cur.map(async ({ key, project }) => {
           // buildFleetRecentCommitsUrl stays range-free; &range=outgoing is appended
-          // HERE (mirroring how FleetCommitSearch appends it to the range-free
-          // buildFleetSearchBaseUrl) so the pure URL builder stays single-purpose.
+          // HERE, not inside buildFleetRecentCommitsUrl, so the pure URL builder
+          // stays single-purpose.
           const base = buildFleetRecentCommitsUrl(key, FLEET_RECENT_LIMIT);
           const [recentR, outgoingR] = await Promise.all([fetch(base), fetch(`${base}&range=outgoing`)]);
           // WARDEN-89: fetch() resolves (does NOT reject) on a 4xx/5xx — gate on
@@ -180,7 +180,7 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
           // The outgoing fetch may 404 / non-ok too, but if `recent` resolved the agent
           // is reachable; a failed outgoing fetch just yields no unpushed marks — a
           // commit is never WRONGLY marked unpushed by a missing outgoing set (the
-          // graceful-degradation contract, ported verbatim from FleetCommitSearch).
+          // graceful-degradation contract).
           const outgoingHashes = new Set<string>();
           if (outgoingR.ok) {
             const oj = await outgoingR.json();
@@ -347,7 +347,7 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
                   // cross-fleet differentiator is the AGENT name (the per-agent lists
                   // each carry only their own), so it leads. role="button" div (not a
                   // nested <button>) so it is keyboard-operable and can host the
-                  // expanded file list as a sibling — the FleetCommitSearch / GitBadges
+                  // expanded file list as a sibling — the sidebar git section's
                   // pattern. Click → expand to that commit's /api/git-show diff.
                   <li key={cacheKey} className="rounded">
                     <ContextMenu>
@@ -372,8 +372,8 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
                             </span>
                             {/* hash (cyan mono, mirrors GitBadges) · amber ↑ when the commit is
                                 still unpushed (local-only — HEAD has it, @{u} doesn't; the
-                                outgoing (@{u}..HEAD) hash-join WARDEN-723 ported from
-                                FleetCommitSearch) · subject (truncated). */}
+                                outgoing (@{u}..HEAD) hash-join from WARDEN-723) ·
+                                subject (truncated). */}
                             <span className="flex items-center gap-1">
                               <span className="shrink-0 font-mono text-[10px] text-cyan-400/80">{row.commit.hash}</span>
                               {row.unpushed && <span className="shrink-0 text-[10px] text-amber-400" title="unpushed (local, not yet pushed)">↑</span>}

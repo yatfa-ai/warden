@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { toast } from 'sonner';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
@@ -52,11 +52,20 @@ import { StatusDot } from '@/components/StatusDot';
 import type { GitCommit, GitFile, ClaudeSession, DiffStat } from './sidebar/types';
 import { ChatRow, OpenPaneRow, ChatRowSkeleton, SessionRowSkeleton } from './sidebar/ChatRows';
 import { AgentFilterSortControls } from './sidebar/AgentFilterSortControls';
-import { FleetCommitSearch } from './sidebar/FleetCommitSearch';
 // Pure finder for the FileViewer co-editors chip (WARDEN-810): same-project sibling
-// agents also touching the open file (± dirty / ⚑ conflict / ↑ unpushed). Reads the
-// cached gitStatus map — which WARDEN-975 narrowed to the FOCUSED pane only, so this
-// degrades to "no co-editors" rather than reporting stale data from closed panes.
+// agents also touching the open file (± dirty / ⚑ conflict / ↑ unpushed).
+//
+// ⚠️ WARDEN-975 made this chip UNREACHABLE, not merely degraded — read this before
+// debugging why it never appears. findFileCoEditors reads the cached gitStatus map and
+// EXCLUDES selfKey. That map is now narrowed to the FOCUSED pane's single entry, and
+// files are opened FROM the focused pane's git section, so selfKey === focused === the
+// only key in the map: the result is ALWAYS []. So the "{n} others" chip in
+// FileViewer.tsx can never render, and CollisionCompareDialog (reached only from that
+// chip) is consequently unreachable too. This is a direct consequence of the ticket's
+// mandated focused-pane-only fetch, not an oversight; FileViewer is out of WARDEN-975's
+// scope, so the call site is left intact rather than ripped out. Reviving the chip
+// needs a deliberate decision about where its cross-agent data comes from — the
+// pane-independent fleet git hook (useFleetGitStatus) is the obvious candidate.
 import { findFileCoEditors } from '@/lib/fileCoEditors';
 import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/SidebarBits';
 import { SourceControlPanel } from './sidebar/SourceControlPanel';
@@ -318,10 +327,25 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // entry feeding the (now removed) fleet chip/collision/triage rollups forever.
   // Keying by chat id is retained because every /api/git-* route addresses the repo
   // by it, and because the FileViewer's co-editor finder still reads this shape.
+  //
+  // STALENESS GUARD (review fix): a whole-map replace is not order-safe the way the
+  // old merge-by-key was. Switching focus A → B issues fetch(A) then fetch(B) with no
+  // cancellation, and /api/git-status is an SSH round trip for a remote host, so A can
+  // resolve LAST. Without the guard that write leaves the map as `{A: statusA}` while
+  // the section reads gitStatus[focused === B] → undefined → SourceControlPanel returns
+  // null and the git section vanishes until the next catalog refresh — indistinguishable
+  // from "this pane has no repo". Sharper still on the branch-less path, where a late
+  // empty response wipes a good entry. So the LAST fetch issued wins: every response
+  // whose chatId is no longer the one we most recently requested is dropped before it
+  // touches state. A ref (not state) because it must be read/written synchronously
+  // across awaits without re-rendering or re-creating the callback.
+  const gitReqRef = useRef<string | null>(null);
   const fetchGitStatus = useCallback(async (chatId: string) => {
+    gitReqRef.current = chatId;
     try {
       const r = await fetch(`/api/git-status?id=${encodeURIComponent(chatId)}`);
       const j = await r.json();
+      if (gitReqRef.current !== chatId) return;  // a newer focus won the race — drop this response
       if (j.branch) {
         setGitStatus({ [chatId]: { branch: j.branch, detached: j.detached, headSha: j.headSha, headDate: j.headDate, clean: j.clean, cwd: j.cwd, files: j.files, ahead: j.ahead, behind: j.behind, upstream: j.upstream, inProgress: j.inProgress, stashCount: j.stashCount, diffstat: j.diffstat, outgoingFiles: j.outgoingFiles } });
       } else {
@@ -1253,38 +1277,23 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
           onSortChange={onSortChange}
           hideSort
         />
-        {/* WARDEN-534: fleet-wide commit search. A sidebar-level affordance that
-            fans the per-agent --grep (WARDEN-498) across EVERY active project
-            agent from one box, grouped by agent (name · project · ↑unpushed), so
-            one query finds where a change landed across the fleet. Root-header
-            placement (alongside the filter/sort controls) per the ticket's
-            placement note; the popover owns its own input + debounce + fan-out.
-
-            WARDEN-975 SCOPE CALL (flagged for review): this is deliberately KEPT.
-            The ticket enumerates the five git surfaces it removes — the Source
-            Control section it widens, the per-row branch badge, the 6-axis fleet
-            chip row, the collision badges and the triage callout — and names the
-            aggregation/ranking/collision helpers to delete with them; the commit
-            search is in none of those lists. It is also a search over HISTORY
-            rather than a display of git STATE outside the focused pane, which is
-            what the owner's "no value looking at git state outside the current
-            pane" decision speaks to. It does still jump-to-agent on a result row,
-            so if the intent was the wider reading — remove it too — that is a
-            small follow-up (drop this mount, the component, and the four
-            buildFleetCommitGroups/buildFleetCodeGroups helpers + their tests). */}
-        <FleetCommitSearch
-          chats={chats}
-          onOpenChat={onOpenChat}
-          onOpenFile={(chatId, file, line) => setFileTarget({ chatId, path: file, line })}
-        />
         {/* WARDEN-975: the root fleet header's git chips (±N/↑N/↓N/⚑N/🗄N/💤N), its
-            collision badges (⚠/⏱/⇄) and the "triage first" callout are gone. Each
-            described git OUTSIDE the focused pane, and each was a pane-opening
-            control — the callout terminally so: pickGitTriageTop deliberately EXCLUDES
-            the focused pane, so it always pointed at some other agent and its only
-            action was to open that agent's pane. The header keeps filter, count and
-            refresh; git now lives in the Source Control section below, scoped to the
-            focused pane. */}
+            collision badges (⚠/⏱/⇄), its "triage first" callout and the fleet-wide
+            commit/code search (WARDEN-534/559/589) are all gone. Each described or
+            searched git OUTSIDE the focused pane, and each was a pane-opening control
+            — the callout terminally so (pickGitTriageTop deliberately EXCLUDED the
+            focused pane, so it always pointed at some other agent and its only action
+            was to open that agent's pane), and the fleet search barely less so: its
+            group headers and result rows both called onOpenChat, and its rows carried
+            per-agent ↑unpushed STATE, not just history. The ticket's binding
+            statements are absolute rather than comparative — "remove EVERY fleet-level
+            git surface", "nothing else renders git, and no git control navigates
+            anywhere", "the sidebar header and per-host headers ... keeping only
+            filter, count and refresh" — so the header now holds exactly filter, count,
+            updated-ago and refresh. Git lives only in the Source Control section
+            below, scoped to the focused pane. Fleet Health keeps its own pane-
+            independent fleet git fan-out (FleetRecentCommits / useFleetGitStatus),
+            which is explicitly out of scope. */}
         <Badge variant="secondary" className="text-xs @max-[18rem]:hidden">{filteredPanes.length}</Badge>
         <span className="@max-[20rem]:hidden"><UpdatedAgo at={lastRefreshAt} timestampFormat={timestampFormat} /></span>
         <button className="text-xs text-muted-foreground hover:text-foreground rounded px-1 active:scale-95 transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:bg-accent/50" onClick={onRefresh} disabled={loading} title="refresh">

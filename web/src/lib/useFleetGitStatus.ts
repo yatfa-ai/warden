@@ -1,6 +1,6 @@
 // useFleetGitStatus — the lifted hook behind Fleet Health's missing repository-state
 // axis (WARDEN-766). Fans /api/git-status across every active project agent (the SAME
-// eligible fleet FleetRecentCommits / FleetCommitSearch fan over) and returns a
+// eligible fleet FleetRecentCommits fans over) and returns a
 // per-agent { clean, diffstat } map + a fleet-wide dirty count + an honest error
 // count — so HealthDashboard can surface, per agent, whether it has uncommitted WIP
 // and its magnitude (±N via DiffStatChip), plus a "N dirty" count in the summary bar,
@@ -77,7 +77,7 @@ const EMPTY_RESULT: FleetGitStatusResult = { statusByKey: {}, dirtyCount: 0, err
 export function useFleetGitStatus(agents: readonly Chat[]): FleetGitStatusState {
   // The eligible fleet: active project agents, keyed & deduped by key || id, in
   // catalog order. Memoized on `agents` — a CHEAP filter, fine to recompute. This
-  // GATES on `project` (reused from FleetRecentCommits / FleetCommitSearch for
+  // GATES on `project` (reused from FleetRecentCommits for
   // consistency with the sibling fleet fans): an agent with a cwd but no `project`
   // is NOT fanned. Acceptable for v1 — matches those siblings, and the WARDEN-89
   // errorCount discipline below already surfaces any no-cwd miss honestly.
@@ -126,7 +126,7 @@ export function useFleetGitStatus(agents: readonly Chat[]): FleetGitStatusState 
     let cancelled = false;
     (async () => {
       // Promise.allSettled (the fleet convention — ChatSidebar's handleBroadcast /
-      // handleKillSelected + FleetRecentCommits / FleetCommitSearch): one unreachable
+      // handleKillSelected + FleetRecentCommits): one unreachable
       // / non-git agent never rejects the whole; a per-agent failure is counted and
       // surfaced as an honest "· N unreachable" note (WARDEN-89 — never let a failure
       // masquerade as a clean/empty status). One fetch per agent (N, not 2N —

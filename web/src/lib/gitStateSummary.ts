@@ -1,24 +1,40 @@
 // Fleet-wide git aggregation for the surfaces that fan a per-agent /api/git-* call
-// across the whole fleet: Fleet Health's per-agent status strip (buildFleetGitStatus),
-// its recent-commits feed (mergeFleetCommitsByEpoch), and the sidebar's fleet commit /
-// code search (buildFleetCommitGroups / buildFleetCodeGroups).
+// across the whole fleet. Every remaining consumer is FLEET HEALTH (HealthDashboard):
+// its per-agent status strip (buildFleetGitStatus) and its recent-commits feed
+// (mergeFleetCommitsByEpoch), plus the population gate both share
+// (fleetCommitSearchEligible).
 //
-// WARDEN-975 removed the OTHER half of this module — the cached-map aggregators that
-// fed the sidebar's fleet git chips, cross-agent collision badges and "triage first"
-// callout (summarizeProjectGitState + its ProjectGitAgent shape, the four popover rank
-// helpers sortByHeadAgeDesc / sortGitAgentsByMagnitudeDesc / sortByStashCountDesc /
-// sortGitAgentsByConflictFirst, the triage trio rankGitTriage / pickGitTriageTop /
-// gitTriageReason, and detectProjectFileCollisions / …Impending / …Outgoing) — together
-// with gitStateSummary.test.mjs, which covered exactly those. Git in the sidebar is now
-// one collapsible section scoped to the FOCUSED pane, so nothing computes fleet-wide
-// git state from the per-pane status map any more; the map itself is now focused-only.
-// The FileCollision types below survive because CollisionCompareDialog still types its
-// props against them (it is reached from the FileViewer's co-editor Compare action).
+// WARDEN-975 removed everything in this module that fed a SIDEBAR git surface, because
+// the sidebar's git is now ONE collapsible section scoped to the FOCUSED pane:
+//   · the cached-map aggregators behind the fleet git chips, cross-agent collision
+//     badges and "triage first" callout — summarizeProjectGitState + its ProjectGitAgent
+//     shape, the four popover rank helpers (sortByHeadAgeDesc /
+//     sortGitAgentsByMagnitudeDesc / sortByStashCountDesc / sortGitAgentsByConflictFirst),
+//     the triage trio (rankGitTriage / pickGitTriageTop / gitTriageReason) and
+//     detectProjectFileCollisions / …Impending / …Outgoing — with gitStateSummary.test.mjs,
+//     which covered exactly those;
+//   · the fleet commit/code SEARCH aggregation (WARDEN-534/559/589) —
+//     buildFleetSearchBaseUrl + FleetCommitSearchMode, buildFleetCommitGroups + its
+//     outcome/hit/group/result shapes, and buildFleetCodeGroups + fleetCodeFetchRequest
+//     + their shapes — with fleetCodeSearch.test.mjs and the grouping half of
+//     fleetCommitSearch.test.mjs. Its FleetCommitSearch popover was a fleet-level git
+//     surface that rendered per-agent ↑unpushed state in the sidebar header and opened
+//     panes from its group headers and result rows, which the ticket forbids outright.
+// Nothing computes fleet-wide git state from the per-pane status map any more; the map
+// itself is now focused-pane-only.
+//
+// fleetCommitSearchEligible SURVIVES the search removal despite its name: it is the
+// mode-agnostic population gate (active + project, keyed by key || id, deduped) that
+// FleetRecentCommits and useFleetGitStatus — both Fleet Health, explicitly out of
+// scope — still call. Renaming it is left alone to keep this diff to the removal.
+// The FileCollision types below likewise survive because CollisionCompareDialog still
+// types its props against them (it is reached from the FileViewer's co-editor Compare
+// action — see the reachability note at ChatSidebar.tsx's findFileCoEditors import).
 //
 // Pure (no React import) so it is unit-testable directly via node, mirroring diff.ts
 // (extracted in WARDEN-151 "so it's testable without a React runner"). The surviving
-// fleet helpers are covered by fleetGitStatus / fleetRecentCommits / fleetCommitSearch /
-// fleetCodeSearch .test.mjs.
+// fleet helpers are covered by fleetGitStatus / fleetRecentCommits / fleetCommitSearch
+// .test.mjs.
 
 // ---- Cross-agent file-collision shapes (WARDEN-288 / 601 / 639) -------------
 //
@@ -107,48 +123,6 @@ export function fleetCommitSearchEligible(chats: readonly FleetSearchChat[]): Fl
   return out;
 }
 
-// The fleet commit-search axes (WARDEN-534 = message, WARDEN-559 = content) PLUS the
-// WARDEN-589 working-tree CODE axis. The AGGREGATION for message/content is
-// mode-agnostic — a hit is just another FleetCommitLike and buildFleetCommitGroups
-// groups it identically — so those two modes live with the FETCH (which param to
-// splice), not with the grouping. The Code axis is grouped by its OWN fn
-// (buildFleetCodeGroups) because its result shape is fundamentally different
-// (file:line:text hits, not commits) — see the Code-search section below. Kept as a
-// string union (not a const enum) so it survives the TS→ESM test transform without
-// runtime support. The name says "Commit" but it now also covers the Code axis;
-// renaming is out of scope (the population gate it selects is shared).
-export type FleetCommitSearchMode = 'message' | 'content' | 'code';
-
-/**
- * Build the per-agent fetch base URL for the fleet commit search (message/content axes).
- * `mode` selects the param: 'message' → `grep=` (`git log --grep`, WARDEN-498 — searches
- * commit messages); 'content' → `pickaxe=` (`git log -S`/`-G`, WARDEN-559 — searches
- * commit-history diffs to find the commit that ADDED or REMOVED a code string). When
- * `pickaxeRegex` is set in content mode, appends `pickaxeRegex=1` (the broader `-G`
- * diff-text match over the default `-S` count-change match). The component appends
- * `&range=outgoing` to this base for the second (↑unpushed join) fetch. Extracted into
- * the pure layer — not inlined in the React component — so the message⇄content URL swap
- * is unit-testable without a React runner (this repo has none).
- *
- * NOT used by the Code axis: /api/search-files is a POST with a JSON body (not a GET URL),
- * so WARDEN-589's Code mode has its own seam — fleetCodeFetchRequest — rather than
- * overloading this GET-URL helper. The component's fan-out branches to Code before ever
- * reaching this call, so 'code' is never passed here in practice; if it were, it would
- * fall through to the grep= branch (harmless, but unreachable).
- */
-export function buildFleetSearchBaseUrl(
-  key: string,
-  query: string,
-  mode: FleetCommitSearchMode,
-  pickaxeRegex = false,
-): string {
-  const id = `id=${encodeURIComponent(key)}`;
-  if (mode === 'content') {
-    return `/api/git-log?${id}&pickaxe=${encodeURIComponent(query)}${pickaxeRegex ? '&pickaxeRegex=1' : ''}`;
-  }
-  return `/api/git-log?${id}&grep=${encodeURIComponent(query)}`;
-}
-
 // Minimal slice of a /api/git-log commit row (the shape GIT_LOG_PRETTY parses to:
 // { hash, subject, author, date, epoch }). Defined locally so this module stays
 // decoupled from the React-layer GitCommit type and is testable with plain
@@ -161,77 +135,12 @@ export interface FleetCommitLike {
   epoch?: number;
 }
 
-// One agent's fan-out outcome. `ok: false` = that agent's fetch failed (host
-// unreachable / non-ok HTTP / network) — counted as an error but never dropped
-// silently, and never blanking the other agents' results (the Promise.allSettled
-// contract). `ok: true` carries the agent's grep matches (recent / HEAD-reachable)
-// plus the SET of hashes its outgoing (range=outgoing, @{u}..HEAD) grep matched —
-// the join key for ↑unpushed.
-export type FleetCommitOutcome =
-  | { ok: true; key: string; project: string; matches: FleetCommitLike[]; outgoingHashes: Set<string> }
-  | { ok: false; key: string; project: string };
-
-// One matched commit, marked with whether it is still ↑unpushed (local-only —
-// HEAD has it but @{u} doesn't).
-export type FleetCommitHit = FleetCommitLike & { unpushed: boolean };
-
-// One agent's matched commits (the rows under its group header). key + project
-// ride along so the React layer can join key → displayName / project without a
-// second lookup: each row carries the key it was fanned for.
-export interface FleetCommitGroup {
-  key: string;
-  project: string;
-  commits: FleetCommitHit[];
-}
-
-export interface FleetCommitSearchResult {
-  // Matched agents in chats iteration order (empties dropped). Each group's
-  // commits stay in the order /api/git-log returned them (newest first).
-  groups: FleetCommitGroup[];
-  // # of agents whose fetch failed — surfaced as a "(N unreachable)" note so a
-  // partial failure is honest, never a silent false-empty (WARDEN-89).
-  errorCount: number;
-}
-
-/**
- * Turn N per-agent grep outcomes into the grouped-by-agent fleet view. Drops
- * `ok` agents with no matches (no group for a barren repo); counts `ok: false`
- * agents into `errorCount` without dropping the successful groups; and marks each
- * hit ↑unpushed when its hash also appears in that agent's outgoing set — the
- * precise per-commit join (a match present in BOTH the recent grep and the
- * outgoing @{u}..HEAD grep is a commit HEAD has that @{u} doesn't = unpushed),
- * preferred over the coarse aheadCount>0 signal because it works for agents whose
- * git status isn't cached (every agent in the fleet, not just open panes).
- *
- * Outcomes are processed in caller (chats) order, so the returned groups are
- * deterministic and tests assert deep equality — the convention the rest of this
- * module follows.
- */
-export function buildFleetCommitGroups(outcomes: FleetCommitOutcome[]): FleetCommitSearchResult {
-  const groups: FleetCommitGroup[] = [];
-  let errorCount = 0;
-  for (const o of outcomes) {
-    if (!o.ok) {
-      errorCount += 1;
-      continue;
-    }
-    if (o.matches.length === 0) continue;  // drop empties — no group for a barren repo
-    groups.push({
-      key: o.key,
-      project: o.project,
-      commits: o.matches.map((m) => ({ ...m, unpushed: o.outgoingHashes.has(m.hash) })),
-    });
-  }
-  return { groups, errorCount };
-}
-
 // ---- Fleet-wide RECENT-commits feed (WARDEN-597) -----------------------------
 //
 // The no-query "what the fleet just shipped" rollup — the cross-fleet counterpart
-// to the per-agent recent-commit list (the GitBadges popover). Where the commit
-// search above (WARDEN-534/559) is QUERY-DRIVEN (a typed term fans out to find
-// WHERE a change landed), this is the unfiltered TIME-SORTED merge: fan
-// /api/git-log?limit=N across every active project agent, flatten every returned
+// to the per-agent recent-commit list (the sidebar git section's commit lists). It
+// is the unfiltered TIME-SORTED merge: fan /api/git-log?limit=N across every active
+// project agent, flatten every returned
 // commit into ONE list, and sort the whole by committer epoch (newest first). The
 // result is a glanceable cross-fleet feed — "who just shipped / who went quiet /
 // two agents committing the same area" — patterns the independent per-agent lists
@@ -239,22 +148,20 @@ export function buildFleetCommitGroups(outcomes: FleetCommitOutcome[]): FleetCom
 // FleetActivityHeatmap (WARDEN-532), which did the same promotion for activity
 // volume; the identical gap existed for commits.
 //
-// Three load-bearing divergences from buildFleetCommitGroups (each called out in
-// WARDEN-597), which is why this gets its OWN aggregation rather than a flag:
+// Three properties of this aggregation were originally recorded (WARDEN-597) as
+// divergences from the query-driven fleet commit SEARCH that used to live above it
+// (buildFleetCommitGroups, removed in WARDEN-975). They still define the fn:
 //
-//  1. FLAT, not grouped. buildFleetCommitGroups groups by agent (preserving
-//     per-agent order, dropping empties) — a "matches per agent" view. The recent
-//     feed needs every agent's commits in ONE stream, sorted by epoch across the
-//     whole fleet, so the newest commit anywhere is on top regardless of who
-//     shipped it. That cross-agent time-merge is a different aggregation → a new
-//     pure fn (mergeFleetCommitsByEpoch).
+//  1. FLAT, not grouped. Every agent's commits land in ONE stream, sorted by epoch
+//     across the whole fleet, so the newest commit anywhere is on top regardless of
+//     who shipped it — not a per-agent "matches under an agent header" view.
 //
 //  2. NO query, but ↑unpushed IS joined (WARDEN-723 lifted the original recent-only
 //     MVP cap). Decision #2 originally bundled "no query AND no outgoing join" to
 //     keep the MVP fan-out at N; the no-query half still holds (this is the
 //     unfiltered recent view — no grep=/pickaxe=), but each agent now fires its
-//     recent + outgoing (range=outgoing, @{u}..HEAD) fetches concurrently (2N, the
-//     same 2N the query-driven search pays) so each row can carry the precise
+//     recent + outgoing (range=outgoing, @{u}..HEAD) fetches concurrently (2N) so
+//     each row can carry the precise
 //     per-hash ↑unpushed mark. Decision #1 still bounds the cost: fetch-on-mount +
 //     manual ↻ only — never a steady 2N cadence.
 //
@@ -263,8 +170,8 @@ export function buildFleetCommitGroups(outcomes: FleetCommitOutcome[]): FleetCom
 //     point. A degraded line with `epoch == null` (parseGitLogLine's null path,
 //     src/server.js:2294 — only partial/test inputs) is placed LAST, stably.
 //
-// Pure (no React import, no fetch) so it is unit-testable directly via node,
-// mirroring buildFleetCommitGroups. The population gate
+// Pure (no React import, no fetch) so it is unit-testable directly via node. The
+// population gate
 // is REUSED (fleetCommitSearchEligible — mode-agnostic: active + project, keyed,
 // deduped); the fan-out lives in the React component (its own Promise.allSettled,
 // the fleet convention). Outcomes are flattened in caller (chats) order BEFORE the
@@ -276,13 +183,12 @@ export function buildFleetCommitGroups(outcomes: FleetCommitOutcome[]): FleetCom
 // never dropped silently, and never blanking the other agents' commits (the
 // Promise.allSettled contract). `ok: true` carries the agent's recent commits in the
 // order /api/git-log returned them (newest first) PLUS the SET of hashes its outgoing
-// (range=outgoing, @{u}..HEAD) fetch returned — the join key for ↑unpushed. Mirrors
-// FleetCommitOutcome (the query-driven search's per-agent outcome), including the
+// (range=outgoing, @{u}..HEAD) fetch returned — the join key for ↑unpushed, with a
 // graceful-degradation contract: a failed outgoing fetch yields an EMPTY
 // outgoingHashes (never throws, never false-positives a commit as unpushed). key +
 // project ride along so the merged rows can join key → displayName / project without
-// a second lookup, mirroring FleetCommitGroup. (WARDEN-723 ported the ↑unpushed join
-// from buildFleetCommitGroups; the recent feed now fires 2 fetches per agent — recent
+// a second lookup. (WARDEN-723 added the ↑unpushed join; the recent feed fires 2
+// fetches per agent — recent
 // + outgoing — but decision #1 still bounds the cost: fetch-on-mount + manual ↻ only.)
 export type FleetRecentOutcome =
   | { ok: true; key: string; project: string; commits: FleetCommitLike[]; outgoingHashes: Set<string> }
@@ -294,8 +200,7 @@ export type FleetRecentOutcome =
 // per-agent lists can't compose into on their own. `commit` is the full FleetCommitLike
 // so the React layer has hash/subject/author/date/epoch for the row without a second
 // lookup. `unpushed` is the precise per-hash join against the agent's outgoing
-// (@{u}..HEAD) set — mirrors FleetCommitHit.unpushed (WARDEN-723 — ported from
-// buildFleetCommitGroups' line-1039 join `o.outgoingHashes.has(m.hash)`); it is NEVER
+// (@{u}..HEAD) set (WARDEN-723); it is NEVER
 // coarse per-agent (a commit is unpushed iff ITS hash is in that agent's outgoing set).
 export interface FleetRecentCommitRow {
   key: string;
@@ -315,20 +220,19 @@ export interface FleetRecentCommitsResult {
 
 /**
  * Turn N per-agent recent-commits outcomes into ONE flat, time-sorted list — the
- * no-query "what the fleet just shipped" feed (WARDEN-597). Unlike
- * buildFleetCommitGroups (which groups by agent and preserves per-agent order),
- * this FLATTENS every agent's commits into one stream and sorts the whole by
+ * no-query "what the fleet just shipped" feed (WARDEN-597). It FLATTENS every
+ * agent's commits into one stream and sorts the whole by
  * committer `epoch` desc, so the newest commit anywhere in the fleet is on top
- * regardless of which agent shipped it.
+ * regardless of which agent shipped it — not a per-agent grouping.
  *
- * ↑unpushed join (ported from buildFleetCommitGroups, WARDEN-723): each ok outcome
+ * ↑unpushed join (WARDEN-723): each ok outcome
  * now carries its outgoing (@{u}..HEAD) hash set as well as its recent commits, and
- * each row is marked `unpushed: outgoingHashes.has(c.hash)` — the exact per-hash join
- * buildFleetCommitGroups does at its line 1039, preferred over a coarse aheadCount>0
+ * each row is marked `unpushed: outgoingHashes.has(c.hash)` — an exact per-hash join,
+ * preferred over a coarse aheadCount>0
  * signal because it works for agents whose git status isn't cached (every agent in
- * the fleet, not just open panes). The feed is still NO-QUERY (decision #2's
- * "unfiltered recent view" half is intact — no grep=/pickaxe=), but it now pays the
- * 2N the query-driven search pays (recent + outgoing per agent); decision #1 still
+ * the fleet, not just the focused pane). The feed is still NO-QUERY (decision #2's
+ * "unfiltered recent view" half is intact — no grep=/pickaxe=), but it now pays
+ * 2N (recent + outgoing per agent); decision #1 still
  * bounds that cost — fetch-on-mount + manual ↻ only, never an auto-poll cadence. A
  * failed outgoing fetch yields an EMPTY outgoingHashes (graceful degradation — a
  * commit is never WRONGLY marked unpushed by a missing outgoing set).
@@ -370,15 +274,16 @@ export function mergeFleetCommitsByEpoch(outcomes: FleetRecentOutcome[]): FleetR
 
 /**
  * Build the per-agent fetch URL for the fleet recent-commits feed (WARDEN-597):
- * `/api/git-log?id=<key>&limit=<limit>` — the NO-QUERY recent view. This is the
- * recent-commits analog of buildFleetSearchBaseUrl, but WITHOUT a grep= / pickaxe=
- * query param (those two always splice a query; the recent view shows the newest
+ * `/api/git-log?id=<key>&limit=<limit>` — the NO-QUERY recent view: no grep= /
+ * pickaxe=
+ * query param (the removed fleet SEARCH always spliced one; the recent view shows
+ * the newest
  * commits unfiltered). The `limit` reaches /api/git-log, which clamps it to [1,50]
  * (src/server.js:2398); the component passes a bounded constant (top 20–30 across
  * the fleet) so the merged feed stays a glance, not a firehose.
  *
- * Pure (no fetch) so it is unit-testable without a React runner, mirroring
- * buildFleetSearchBaseUrl — the URL is the only mode-dependent line in the recent
+ * Pure (no fetch) so it is unit-testable without a React runner — the URL is the
+ * only fetch-shaped line in the recent
  * view's fan-out.
  */
 export function buildFleetRecentCommitsUrl(key: string, limit: number): string {
@@ -793,138 +698,4 @@ export function buildFleetGitStatus(outcomes: FleetGitStatusOutcome[], now: numb
  */
 export function buildFleetGitStatusUrl(key: string): string {
   return `/api/git-status?id=${encodeURIComponent(key)}`;
-}
-
-// ---- Fleet-wide working-tree CODE search aggregation (WARDEN-589) ------------
-//
-// The cross-agent WORKING-TREE layer — the fleet-wide counterpart to the per-agent
-// workspace grep shipped in WARDEN-145 (POST /api/search-files, read-only `git grep`
-// over tracked files). Where the commit search above (WARDEN-534 message / WARDEN-559
-// content) finds WHERE a change LANDED in HISTORY, this finds WHERE a string lives
-// RIGHT NOW across the fleet's CURRENT tracked code — answering "which agent is
-// editing auth.js?", "who already has a cancelToken helper?", "which repos still
-// reference the old API name?". One query greps every active project agent's working
-// tree, grouped by agent (file:line:text snippets, not commits).
-//
-// Three load-bearing divergences from the commit axes (message/content), each called
-// out in WARDEN-589, which is why this gets its OWN grouping fn + types rather than a
-// third branch on buildFleetCommitGroups:
-//
-//  1. RESULT SHAPE is fundamentally different — file:line:text hits, NOT commits.
-//     /api/search-files → { results: [{ file, line, text }] }, grouped as
-//     FleetCodeGroup { hits: FleetCodeHit[] } and rendered as file:line:text rows
-//     (mirroring WorkspaceSearchDialog's SearchResultRow), NOT commit rows.
-//
-//  2. ONE FETCH PER AGENT (N, not 2N) — a working-tree grep match has no hash and no
-//     concept of "unpushed"; there is no outgoing join. The group header shows only
-//     the match count (no · ↑N).
-//
-//  3. HTTP-200 ERRORS — /api/search-files returns transport/runtime failures
-//     ('search failed', 'no cwd') at HTTP 200 with an `error` field (mirroring
-//     /api/git-status), so the fan-out must check `data.error` (NOT just r.ok) and
-//     treat an error response as that agent's FAILURE outcome (counted into
-//     errorCount), NEVER as a false-empty match list — the WARDEN-89 false-empty
-//     contract the rest of this codebase fights. That gate lives in the component
-//     (the fetch); this pure layer just counts whatever the component hands it.
-//
-// Pure (no React import, no fetch) so it is unit-testable directly via node, mirroring
-// the commit-search seam. The population gate is REUSED (fleetCommitSearchEligible —
-// mode-agnostic: active + project, keyed, deduped); this layer then groups + counts
-// the per-agent outcomes in chats iteration order (deterministic, so tests assert
-// deep equality).
-
-// One matched working-tree line, exactly as /api/search-files returns it: file path,
-// line number, and the matched text. Deliberately carries NO `unpushed` field — a
-// working-tree grep match has no hash and no concept of "unpushed" (the commit axes'
-// ↑unpushed join does not apply here). buildFleetCodeGroups emits EXACTLY these three
-// fields; asserting `unpushed`'s absence in tests catches an accidental copy-paste
-// from the commit path.
-export interface FleetCodeHit {
-  file: string;
-  line: number;
-  text: string;
-}
-
-// One agent's fan-out outcome for the code axis. `ok: false` = that agent's
-// /api/search-files fetch failed OR returned an HTTP-200 `error` body (the component
-// maps both to this before calling buildFleetCodeGroups) — counted as an error but
-// never dropped silently, and never blanking the other agents' results (the
-// Promise.allSettled contract). `ok: true` carries the agent's grep hits
-// (file:line:text), in git-grep order.
-export type FleetCodeOutcome =
-  | { ok: true; key: string; project: string; hits: FleetCodeHit[] }
-  | { ok: false; key: string; project: string };
-
-// One agent's matched working-tree lines (the rows under its group header). key +
-// project ride along so the React layer can join key → displayName / project without
-// a second lookup, mirroring FleetCommitGroup.
-export interface FleetCodeGroup {
-  key: string;
-  project: string;
-  hits: FleetCodeHit[];
-}
-
-export interface FleetCodeSearchResult {
-  // Matched agents in chats iteration order (empties dropped). Each group's hits stay
-  // in the order /api/search-files returned them (git grep order).
-  groups: FleetCodeGroup[];
-  // # of agents whose fetch failed (transport error, non-ok HTTP, OR an HTTP-200
-  // `error` body) — surfaced as a "(N unreachable)" note so a partial failure is
-  // honest, never a silent false-empty (WARDEN-89).
-  errorCount: number;
-}
-
-/**
- * Turn N per-agent working-tree grep outcomes into the grouped-by-agent fleet view
- * for the Code axis. Drops `ok` agents with no hits (no group for a clean repo);
- * counts `ok: false` agents into `errorCount` without dropping the successful groups;
- * and emits each hit as EXACTLY { file, line, text } — stripping any stray fields so
- * a working-tree match never carries the commit axes' `unpushed` marker (the Code
- * axis has no such concept). No outgoing join, no ↑unpushed.
- *
- * Outcomes are processed in caller (chats) order, so the returned groups are
- * deterministic and tests assert deep equality — the convention the rest of this
- * module follows.
- */
-export function buildFleetCodeGroups(outcomes: FleetCodeOutcome[]): FleetCodeSearchResult {
-  const groups: FleetCodeGroup[] = [];
-  let errorCount = 0;
-  for (const o of outcomes) {
-    if (!o.ok) {
-      errorCount += 1;
-      continue;
-    }
-    if (o.hits.length === 0) continue;  // drop empties — no group for a clean repo
-    groups.push({
-      key: o.key,
-      project: o.project,
-      // Emit EXACTLY { file, line, text } so the Code axis never inherits the commit
-      // path's `unpushed` field (and any stray field the raw API row carried is
-      // dropped). The contract tests assert this exact shape.
-      hits: o.hits.map((h) => ({ file: h.file, line: h.line, text: h.text })),
-    });
-  }
-  return { groups, errorCount };
-}
-
-/**
- * Build the per-agent POST request for the fleet Code search (WARDEN-589).
- * /api/search-files is a POST with a JSON body `{ id, query }` — UNLIKE the commit
- * axes' GET + URL params — so it gets its OWN seam rather than overloading
- * buildFleetSearchBaseUrl (whose GET URL-string contract is exhaustively tested).
- * The query rides in a JSON body, so special chars are safe WITHOUT the URL-encoding
- * the GET commit path needs: `id`/`query` are passed through verbatim via
- * JSON.stringify. Returns the fetch() args (`url` + `init`) so the component's Code
- * fan-out stays a thin Promise.allSettled over ONE fetch per agent (N, not the 2N
- * the commit axes pay for the ↑unpushed join).
- */
-export function fleetCodeFetchRequest(key: string, query: string): { url: string; init: RequestInit } {
-  return {
-    url: '/api/search-files',
-    init: {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: key, query }),
-    },
-  };
 }
