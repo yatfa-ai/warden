@@ -30,6 +30,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { run as defaultRun, SSH_BASE_OPTS, SSH_BIN, shellQuote } from './ssh.js';
 import { buildChat, sortChats, parseActivityTimestamp } from './chatMeta.js';
+import { loopMonitor } from './loop-monitor.js';
 
 const LOCAL = '(local)';
 const COMPANION_DIR = '$HOME/.warden'; // expands on the remote host
@@ -1428,7 +1429,11 @@ export function startPaneDeltaSweep(cfg = {}, opts = {}, deps = {}) {
   if (paneDeltaSweepTimer) return paneDeltaSweepTimer;
   if (!isCompanionTransportEnabled()) return null;
   const interval = opts.interval ?? AGENT_STATE_TTL_MS;
-  const tick = () => { reconcilePaneSubscriptions([], cfg, {}, deps).catch(() => {}); };
+  // Traced for the server stall monitor (WARDEN-977): an always-on background
+  // sweep that blocks the loop must be nameable in the stall record instead of
+  // being blamed on whichever request it froze. `trace` hands back the tick's own
+  // value, so the fire-and-forget shape below is unchanged.
+  const tick = () => { loopMonitor.trace('sweep:pane-delta', () => reconcilePaneSubscriptions([], cfg, {}, deps)).catch(() => {}); };
   paneDeltaSweepTimer = setInterval(tick, interval);
   if (typeof paneDeltaSweepTimer.unref === 'function') paneDeltaSweepTimer.unref();
   return paneDeltaSweepTimer;
