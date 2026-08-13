@@ -20,6 +20,11 @@ import { toast } from 'sonner';
 import { putJson, fetchJson, postJson } from '@/lib/api';
 import { type TelemetryTestVerdict } from '@/lib/telemetry/testConnection';
 import {
+  describeWebhookTestVerdict,
+  webhookTestRequestFailedVerdict,
+  type WebhookTestVerdict,
+} from '@/lib/webhook/testAlert';
+import {
   getTelemetryRuntimeStatus,
   onTelemetryRuntimeStatus,
   clearTelemetryRuntimeDrift,
@@ -183,6 +188,14 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
     setWebhookSecretPendingClear(false);
   }, []);
   const [testingWebhook, setTestingWebhook] = useState(false);
+  // "Send test alert" verdict (WARDEN-970) — the precise, persistent in-section
+  // read of the LAST probe, replacing the transient raw-status toast. Same
+  // discipline as the telemetry probe below: component state only, NEVER
+  // persisted (a cached "Delivered" goes stale the moment the receiver goes down
+  // or the secret is rotated, and would become a false trust signal). null
+  // before the first click, and cleared whenever the URL/secret it was derived
+  // from is edited.
+  const [webhookTestVerdict, setWebhookTestVerdict] = useState<WebhookTestVerdict | null>(null);
 
   // Telemetry receiver auth token (WARDEN-569) — write-only, identical discipline
   // to the webhook secret above: GET returns only a set + tail indicator, so the
@@ -490,10 +503,19 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
   // the BODY so the user can test a typo'd URL BEFORE saving — parity with
   // "Test connection" (sendTestConnection) below. A draft secret is sent only
   // when the human typed a new one; an empty field is omitted so the backend
-  // reuses the persisted secret (no-clobber). The button is disabled until both
-  // enabled + a URL are set; the response tells us sent / dropped / not-configured.
+  // reuses the persisted secret (no-clobber).
+  //
+  // WARDEN-970: the button is gated on a non-empty URL ONLY — no enable gate.
+  // The backend already forces `webhookEnabled: true` for this one sanctioned
+  // explicit-send path (src/server.js), so requiring the human to enable + Save
+  // before verifying was a UI-only obstacle to pre-commit verification. The
+  // outcome is now rendered as a precise in-section verdict (delivered / auth
+  // rejected / no receiver / throttled / could not reach) derived from the raw
+  // { ok, dropped, attempts, status } result, instead of a toast carrying a raw
+  // HTTP code the user has to interpret. Never persisted.
   const sendTestAlert = async () => {
     setTestingWebhook(true);
+    setWebhookTestVerdict(null);
     try {
       const draftUrl = config.webhookUrl.trim();
       const draftSecret = webhookSecretInput.trim();
@@ -506,17 +528,13 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
         }),
       });
       const body = await res.json();
-      if (body.ok) {
-        toast.success('Test alert sent — check your webhook destination.');
-      } else if (body.attempts === 0) {
-        toast.error('Enable the webhook and set a URL first.');
-      } else if (body.dropped) {
-        toast.error(`Could not deliver (last status ${body.status ?? 'n/a'}). Check the URL and try again.`);
-      } else {
-        toast.error('Test alert did not succeed.');
-      }
+      setWebhookTestVerdict(describeWebhookTestVerdict(body));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to send test alert');
+      // The /api/webhook-test call itself failed — nothing is known about the
+      // user's receiver, so the copy must not blame it.
+      setWebhookTestVerdict(
+        webhookTestRequestFailedVerdict(err instanceof Error ? err.message : String(err))
+      );
     } finally {
       setTestingWebhook(false);
     }
@@ -648,6 +666,8 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
     undoRemoveWebhookSecret,
     testingWebhook,
     sendTestAlert,
+    webhookTestVerdict,
+    setWebhookTestVerdict,
     // Telemetry write-only auth token + test-connection probe + runtime drift.
     telemetryAuthTokenSet,
     telemetryAuthTokenTail,
