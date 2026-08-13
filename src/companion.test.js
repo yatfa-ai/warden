@@ -1474,6 +1474,80 @@ describe('getChannel / bootstrap orchestration', () => {
     assert.strictEqual(runCalls + spawnCalls, 4, 'total == Part 1 projection (probe + upload + channel + reap = 4)');
   });
 
+  describe("'--' terminates ssh options before the host positional (WARDEN-979)", () => {
+    /**
+     * Option injection, NOT shell injection. Both companion spawns are argv-safe
+     * (`spawnFn(SSH_BIN, args)`, no `shell: true`), which stops the SHELL — it does
+     * nothing about ssh's OWN option parser. A `host` beginning with '-' lands in a
+     * bare positional slot and ssh reads it as an option; `-oProxyCommand=<cmd>`
+     * then makes ssh execute <cmd> on the LOCAL machine.
+     *
+     * WARDEN-969 closed the 5 builders in ssh.js, but these two spawn DIRECTLY via
+     * the injected spawnFn instead of routing through run(), so that builder-level
+     * fix never reached them.
+     *
+     * Harness note: spawnPersistentChannel/streamFileToHost are not exported and
+     * the ubiquitous fakeDeps() helper stubs BOTH of them (deps.upload +
+     * deps.spawnChannel), so a guard built on fakeDeps would assert on a stub and
+     * pass regardless of the fix. We inject deps.spawn ONLY — leaving upload and
+     * spawnChannel at their defaults — so the real builders run. deps.run stays
+     * faked: it serves the probe + reap legs, which go through ssh.js run() and are
+     * already covered by WARDEN-969's guard. One bootstrap with HAVE=0 exercises
+     * both builders (upload leg + channel leg).
+     */
+    const bootstrapRecordingArgv = async (host) => {
+      const calls = [];
+      const inner = fakeSpawnChildFactory(TEST_VER);
+      const ch = await getChannel(host, {}, {
+        manifest: TEST_MANIFEST,
+        run: async () => ({ ok: true, stdout: 'OS=Linux\nARCH=x86_64\nHAVE=0\n' }),
+        spawn: (bin, args, opts) => { calls.push({ bin, args }); return inner(bin, args, opts); },
+      });
+      assert.ok(ch instanceof CompanionChannel, 'bootstrap must succeed for the argv to be meaningful');
+      const isUpload = (c) => String(c.args[c.args.length - 1]).startsWith('bash -lc');
+      const upload = calls.find(isUpload);
+      const channel = calls.find((c) => !isUpload(c));
+      assert.ok(upload, 'streamFileToHost (upload leg) must have spawned');
+      assert.ok(channel, 'spawnPersistentChannel (channel leg) must have spawned');
+      return { upload, channel };
+    };
+
+    // Adjacency, NOT ordering. During WARDEN-969's review a mutation inserting
+    // `'--', '-o', 'X=1', host` went red only because the adjacency form was used;
+    // `indexOf('--') < indexOf(host)` would have stayed green. SSH_BASE_OPTS is
+    // four -o pairs and carries no '--', so indexOf('--') is unambiguous.
+    const assertSeparatorHugsHost = (args, host, leg) => {
+      assert.ok(args.includes('--'), `${leg}: ssh argv must carry an end-of-options '--'`);
+      assert.strictEqual(
+        args[args.indexOf('--') + 1], host,
+        `${leg}: nothing may sneak between the separator and the host positional`,
+      );
+    };
+
+    it("passes '--' immediately before the host at BOTH companion builders", async () => {
+      const host = 'prod-sep';
+      const { upload, channel } = await bootstrapRecordingArgv(host);
+      assertSeparatorHugsHost(upload.args, host, 'streamFileToHost');
+      assertSeparatorHugsHost(channel.args, host, 'spawnPersistentChannel');
+    });
+
+    it('confines a hostile -oProxyCommand host to the positional slot after the separator', async () => {
+      // The exact shape that turns a host string into local code execution. After
+      // '--' ssh parses it as a (bogus) hostname and never as an option.
+      const host = '-oProxyCommand=touch /tmp/pwned';
+      const { upload, channel } = await bootstrapRecordingArgv(host);
+      assertSeparatorHugsHost(upload.args, host, 'streamFileToHost');
+      assertSeparatorHugsHost(channel.args, host, 'spawnPersistentChannel');
+      // And it must not have leaked into an option slot ahead of the separator.
+      for (const { args, leg } of [{ args: upload.args, leg: 'streamFileToHost' }, { args: channel.args, leg: 'spawnPersistentChannel' }]) {
+        assert.strictEqual(
+          args.slice(0, args.indexOf('--')).includes(host), false,
+          `${leg}: hostile host must not appear before the end-of-options separator`,
+        );
+      }
+    });
+  });
+
   it('concurrent getChannel for the SAME host shares one bootstrap (no leaked ssh)', async () => {
     // Two concurrent calls for one host (e.g. the 2s monitor tick landing on a 60s
     // lifecycle poll) must coalesce onto ONE in-flight bootstrap, not each start

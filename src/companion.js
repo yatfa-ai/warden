@@ -395,7 +395,10 @@ export class CompanionChannel {
 // Spawn the persistent ssh-to-companion process and return a Transport
 // ({write,onLine,onExit,kill}). One process per host; reused for every RPC.
 function spawnPersistentChannel(host, remotePath, cfg, spawnFn) {
-  const args = [...SSH_BASE_OPTS, '-o', `ConnectTimeout=${cfg.connectTimeout ?? 10}`, host, remotePath];
+  // `--` ends ssh's option parsing so a host beginning with `-` is treated as a
+  // (bogus) hostname instead of an option. This spawns directly rather than via
+  // ssh.js run(), so WARDEN-969's builder-level fix does not reach it (WARDEN-979).
+  const args = [...SSH_BASE_OPTS, '-o', `ConnectTimeout=${cfg.connectTimeout ?? 10}`, '--', host, remotePath];
   let child;
   try {
     child = spawnFn(SSH_BIN, args, { windowsHide: true });
@@ -439,7 +442,8 @@ function makeDeadTransport(err) {
 // REMOTE host after this upload, never locally.
 function streamFileToHost(host, localBinaryPath, remotePath, cfg, spawnFn) {
   const cmd = buildUploadScript(remotePath);
-  const args = [...SSH_BASE_OPTS, '-o', `ConnectTimeout=${cfg.connectTimeout ?? 10}`, host, `bash -lc ${shellQuote(cmd)}`];
+  // `--` before the host positional — see spawnPersistentChannel above (WARDEN-979).
+  const args = [...SSH_BASE_OPTS, '-o', `ConnectTimeout=${cfg.connectTimeout ?? 10}`, '--', host, `bash -lc ${shellQuote(cmd)}`];
   return new Promise((resolve) => {
     let child;
     try {
