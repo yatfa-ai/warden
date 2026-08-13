@@ -1442,12 +1442,17 @@ const OBS_VERSION = 1;
 // concrete type/container/host) round-trip verbatim — no encoding. Optional
 // with all-'all' defaults so an existing localStorage payload upgrades with no
 // migration; consumers read each field with `?? 'all'`.
+// WARDEN-971: the Attention tab (added as a peer tab in WARDEN-880) is the third
+// filterable observer view — `attentionFilters` is its host/agent pair, identical
+// in shape and lifecycle to `directiveFilters`. Same no-migration rule: a payload
+// written before this field existed simply loads it as undefined.
 export interface ObsUi {
   openIds: string[];
   activeId: string | null;
   viewMode?: 'sessions' | 'activity' | 'directives' | 'attention';
   activityFilters?: { type: string; agent: string; host: string };
   directiveFilters?: { agent: string; host: string };
+  attentionFilters?: { agent: string; host: string };
 }
 export function loadObs(): ObsUi {
   try {
@@ -1459,6 +1464,7 @@ export function loadObs(): ObsUi {
         viewMode: v.viewMode || 'sessions',
         activityFilters: v.activityFilters,
         directiveFilters: v.directiveFilters,
+        attentionFilters: v.attentionFilters,
       };
     }
   } catch (e) {
