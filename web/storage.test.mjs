@@ -1050,6 +1050,59 @@ test('the full observer payload — sessions + viewMode + both filter shapes —
   assert.deepEqual(obs.directiveFilters, { agent: 'reviewer-1', host: 'ci-host' });
 });
 
+console.log('\nobserver Attention tab filters round-trip through loadObs/saveObs — WARDEN-971');
+// WARDEN-971: the Attention tab (WARDEN-880) is the third filterable observer view;
+// `attentionFilters` brings it to persistence parity with its Activity/Directives
+// siblings. These pin the storage half: the shape survives the round-trip, is absent
+// (consumer `?? 'all'` governs) when never saved, a LEGACY payload written before the
+// field existed still loads with no error, and the three tabs never collide.
+test('attentionFilters is absent when nothing is stored (consumer ?? \'all\' governs)', () => {
+  reset();
+  const obs = loadObs();
+  assert.equal(obs.attentionFilters, undefined);
+  assert.equal(obs.attentionFilters?.agent ?? 'all', 'all');
+  assert.equal(obs.attentionFilters?.host ?? 'all', 'all');
+});
+test('a pre-WARDEN-971 payload (openIds + the two sibling filter shapes, no attentionFilters) loads without throwing and defaults to all/all', () => {
+  reset();
+  mem.set('warden:observer:v1', JSON.stringify({
+    openIds: ['s1'], activeId: 's1', viewMode: 'attention',
+    activityFilters: { type: 'error', agent: 'worker-1', host: 'prod-box' },
+    directiveFilters: { agent: 'reviewer-1', host: 'ci-host' },
+  }));
+  const obs = loadObs();
+  assert.equal(obs.viewMode, 'attention');
+  assert.deepEqual(obs.directiveFilters, { agent: 'reviewer-1', host: 'ci-host' });
+  assert.equal(obs.attentionFilters, undefined);
+  assert.equal(obs.attentionFilters?.host ?? 'all', 'all');
+});
+test('Attention tab filters (agent/host) round-trip — the headline fix', () => {
+  reset();
+  saveObs({ openIds: [], activeId: null, viewMode: 'attention', attentionFilters: { agent: 'worker-3', host: 'gpu-box' } });
+  assert.deepEqual(loadObs().attentionFilters, { agent: 'worker-3', host: 'gpu-box' });
+});
+test('clearing the Attention filters back to \'all\' persists (a cleared filter survives reload too)', () => {
+  reset();
+  saveObs({ openIds: [], activeId: null, viewMode: 'attention', attentionFilters: { agent: 'worker-3', host: 'gpu-box' } });
+  assert.equal(loadObs().attentionFilters.host, 'gpu-box');
+  saveObs({ openIds: [], activeId: null, viewMode: 'attention', attentionFilters: { agent: 'all', host: 'all' } });
+  assert.deepEqual(loadObs().attentionFilters, { agent: 'all', host: 'all' });
+});
+test('all three tabs\' filters are independent (same-named agent/host across tabs do not collide)', () => {
+  reset();
+  saveObs({
+    openIds: ['s1'], activeId: 's1', viewMode: 'attention',
+    activityFilters: { type: 'all', agent: 'planner-1', host: 'host-a' },
+    directiveFilters: { agent: 'worker-1', host: 'host-b' },
+    attentionFilters: { agent: 'worker-3', host: 'host-c' },
+  });
+  const obs = loadObs();
+  assert.equal(obs.activityFilters.agent, 'planner-1');
+  assert.equal(obs.directiveFilters.agent, 'worker-1');
+  assert.equal(obs.attentionFilters.agent, 'worker-3');
+  assert.equal(obs.attentionFilters.host, 'host-c');
+});
+
 console.log('\ndefaultShell (the unified shell for new-chat shell preset + ＋ split) round-trips through loadUi/saveUi — WARDEN-429');
 test('defaults to "" (auto-detect host login shell) when nothing is stored', () => {
   reset();

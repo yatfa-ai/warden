@@ -78,6 +78,11 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, foc
   const [actHostFilter, setActHostFilter] = useState<string>(() => loadObs().activityFilters?.host ?? 'all');
   const [dirAgentFilter, setDirAgentFilter] = useState<string>(() => loadObs().directiveFilters?.agent ?? 'all');
   const [dirHostFilter, setDirHostFilter] = useState<string>(() => loadObs().directiveFilters?.host ?? 'all');
+  // WARDEN-971: `attn*` = Attention tab (agent/host) — the third peer tab brought to
+  // filter parity with its two siblings, on the identical own-it-here + persist-via-
+  // saveObs path.
+  const [attnAgentFilter, setAttnAgentFilter] = useState<string>(() => loadObs().attentionFilters?.agent ?? 'all');
+  const [attnHostFilter, setAttnHostFilter] = useState<string>(() => loadObs().attentionFilters?.host ?? 'all');
   const [booted, setBooted] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingTimeout, setLoadingTimeout] = useState(false);
@@ -223,10 +228,12 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, foc
       openIds, activeId, viewMode,
       // WARDEN-879: persist the Activity + Directives tab filters into the
       // activityFilters/directiveFilters shapes loadObs() reads back.
+      // WARDEN-971: and the Attention tab's pair alongside them.
       activityFilters: { type: actTypeFilter, agent: actAgentFilter, host: actHostFilter },
       directiveFilters: { agent: dirAgentFilter, host: dirHostFilter },
+      attentionFilters: { agent: attnAgentFilter, host: attnHostFilter },
     });
-  }, [openIds, activeId, viewMode, booted, actTypeFilter, actAgentFilter, actHostFilter, dirAgentFilter, dirHostFilter]);
+  }, [openIds, activeId, viewMode, booted, actTypeFilter, actAgentFilter, actHostFilter, dirAgentFilter, dirHostFilter, attnAgentFilter, attnHostFilter]);
 
   // Seamless resume: when a session bound to an agent chat becomes active,
   // reconnect to that chat (open its pane on the right host) exactly once. This
@@ -464,10 +471,16 @@ export function ObserverTabs({ externalViewMode, onExternalViewModeConsumed, foc
           popover (which dismisses on every pane switch), this stays mounted while the
           human opens/switches agent panes — the core Job #2 triage workflow. Consumes
           App's lifted attentionRollup via the shared AttentionList, so it is bit-for-bit
-          identical to the badge. */}
+          identical to the badge. WARDEN-971: plus the host/agent filters its Activity and
+          Directives peers already had — owned here and persisted, so a reload reopens the
+          triage list scoped exactly as the human left it. */}
       {viewMode === 'attention' && attention && (
         <div className="flex-1 min-h-0">
-          <AttentionView {...attention} />
+          <AttentionView
+            {...attention}
+            agentFilter={attnAgentFilter} setAgentFilter={setAttnAgentFilter}
+            hostFilter={attnHostFilter} setHostFilter={setAttnHostFilter}
+          />
         </div>
       )}
     </div>
