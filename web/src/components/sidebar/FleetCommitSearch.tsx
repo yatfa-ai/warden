@@ -72,10 +72,10 @@ import type { Chat } from '@/lib/types';
 
 export function FleetCommitSearch({ chats, onOpenChat, onOpenFile }: {
   chats: Chat[];
-  // Clicking a group header or a commit row jumps to the owning agent. Like the
-  // GitStateBadge / GitCollisionBadge jump rows, this opens the agent's pane
-  // (where its GitBranchBadge → the per-agent git panel lives); there is no
-  // deeper deep-link API, so this mirrors the established jump-to-agent pattern.
+  // Clicking a group header or a commit row jumps to the owning agent — the one
+  // pane-opening control the sidebar's git vocabulary still has (WARDEN-975 kept
+  // this surface; see the mount site in ChatSidebar for that scope call). There is
+  // no deeper deep-link API for a commit, so this stays the jump-to-agent pattern.
   onOpenChat: (id: string) => void;
   // WARDEN-801: deep-link a CODE-grep match (file:line) straight into the FileViewer
   // scrolled to + highlighting that row, in place. Only the CODE axis carries a

@@ -1,5 +1,17 @@
 // Per-agent "What's new since you last looked" catch-up (WARDEN-356).
 //
+// ⚠️ WARDEN-975 removed this feature's only UI. The ✦N marker + catch-up popover
+// lived on the sidebar's agent rows, and rows carry no git any more (git is one
+// collapsible section describing the FOCUSED pane, and the per-pane git fetch was
+// narrowed to that pane, so a row has no commit data to summarize). What is still
+// live here: WHATS_NEW_FETCH_LIMIT (the git-log fetch limit ChatSidebar uses) and
+// stampLastSeen (App still stamps on pane open/focus). The summary/gate helpers
+// below — getLastSeen, summarizeWhatsNew, hasUnreviewedProgress, formatWhatsNewLine
+// — currently have no reader. They are kept, pure and still covered by
+// whatsNew.test.mjs, because re-homing the catch-up view somewhere focused-pane-
+// scoped is a coherent follow-up; deleting them (and App's stamping) is outside
+// WARDEN-975's "the sidebar's git surfaces" boundary.
+//
 // WARDEN's rare-visitor human needs a one-glance answer to "what did THIS agent
 // change since I was last here?" — per-agent, not fleet-wide. The only existing
 // "since" concept is app-close-tied and aggregate (the "While you were away"

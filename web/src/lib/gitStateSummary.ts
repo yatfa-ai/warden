@@ -1,1165 +1,77 @@
-// Aggregate per-chat git status into per-project + global WIP counts, for the
-// project filter chips in ChatSidebar (WARDEN-201). A glance at the chips then
-// surfaces — per project and globally — how many open agents have uncommitted,
-// unpushed, or behind-upstream work, without opening each chat to read its branch
-// badge.
+// Fleet-wide git aggregation for the surfaces that fan a per-agent /api/git-* call
+// across the whole fleet: Fleet Health's per-agent status strip (buildFleetGitStatus),
+// its recent-commits feed (mergeFleetCommitsByEpoch), and the sidebar's fleet commit /
+// code search (buildFleetCommitGroups / buildFleetCodeGroups).
 //
-// This reuses the cached `gitStatus` map (populated per open tab by fetchGitStatus
-// on mount) — no new fetch, no backend change. A chat absent from the map counts
-// as neither (status unknown / still loading), so loading or non-git chats never
-// add noise. The vocabulary mirrors the per-row GitBranchBadge: dirty ⇒ yellow
-// `±` (clean === false), unpushed ⇒ amber `↑N` (ahead > 0), behind ⇒ blue `↓N`
-// (behind > 0). `↓N` is the symmetric counterpart to `↑N`: hasn't pushed vs.
-// hasn't pulled (WARDEN-297). A 4th axis, at-risk ⇒ rose `⚑N` (WARDEN-635), folds
-// the three non-routine repo states the per-row badge renders individually but the
-// fleet rollup previously dropped: detached HEAD, no-upstream (local-only work),
-// and a mid merge/rebase/cherry-pick/revert/bisect op. A 5th axis, stashed ⇒
-// fuchsia `🗄N` (WARDEN-667), carries the parked-WIP count `stashCount` the backend
-// already ships and the per-row badge already renders — the lone current-state
-// git signal that had no fleet rollup chip. A 6th axis, stalled ⇒ sky `💤N`
-// (WARDEN-682), carries the last-commit freshness signal `headDate` (shipped by
-// WARDEN-545) the per-row badge already renders as `· Nd` — a clean, pushed,
-// up-to-date, routine-state, stash-free agent whose HEAD is >7d old reads ZERO on
-// every other axis and was previously invisible at the fleet level; this surfaces it.
+// WARDEN-975 removed the OTHER half of this module — the cached-map aggregators that
+// fed the sidebar's fleet git chips, cross-agent collision badges and "triage first"
+// callout (summarizeProjectGitState + its ProjectGitAgent shape, the four popover rank
+// helpers sortByHeadAgeDesc / sortGitAgentsByMagnitudeDesc / sortByStashCountDesc /
+// sortGitAgentsByConflictFirst, the triage trio rankGitTriage / pickGitTriageTop /
+// gitTriageReason, and detectProjectFileCollisions / …Impending / …Outgoing) — together
+// with gitStateSummary.test.mjs, which covered exactly those. Git in the sidebar is now
+// one collapsible section scoped to the FOCUSED pane, so nothing computes fleet-wide
+// git state from the per-pane status map any more; the map itself is now focused-only.
+// The FileCollision types below survive because CollisionCompareDialog still types its
+// props against them (it is reached from the FileViewer's co-editor Compare action).
 //
-// Pure (no React import) so it is unit-testable directly via node, mirroring
-// diff.ts (extracted in WARDEN-151 "so it's testable without a React runner").
+// Pure (no React import) so it is unit-testable directly via node, mirroring diff.ts
+// (extracted in WARDEN-151 "so it's testable without a React runner"). The surviving
+// fleet helpers are covered by fleetGitStatus / fleetRecentCommits / fleetCommitSearch /
+// fleetCodeSearch .test.mjs.
 
-// Minimal slice of Chat this aggregator reads. Defined locally rather than
-// imported from the React-layer types so the helper stays decoupled and is
-// testable with plain objects — the same decoupling classifyDiffLine relies on.
-export interface GitStateChat {
-  id: string;
-  key?: string;       // looked up first: gitStatus[c.key || c.id] (matches the per-row key)
-  project?: string;
-  active?: boolean | null;  // null = undiscovered; only active chats have live status
-}
-
-// Minimal slice of a per-chat git status (matches the value shape ChatSidebar's
-// useState<Record<string, …>> map stores via fetchGitStatus). clean === false ⇒
-// uncommitted changes; ahead (a number > 0) ⇒ unpushed commits; behind (a number
-// > 0) ⇒ commits on upstream not yet pulled. files is the changed-file list
-// /api/git-status already returns per chat (parsed from `git status --porcelain`)
-// — the join key detectProjectFileCollisions compares across agents. null for a
-// detached/no-branch chat (contributes nothing).
+// ---- Cross-agent file-collision shapes (WARDEN-288 / 601 / 639) -------------
 //
-// outgoingFiles (WARDEN-601) is the UNPUSHED-COMMIT changed-file list (parsed from
-// `git diff --name-only @{u}..HEAD`) — the join key for the IMPENDING cross-agent
-// collision detector. Where `files` is the working-tree WIP set, this is the
-// committed-but-not-pushed set: agent A can have F here with a CLEAN tree (F ∉
-// files), which is exactly the case the working-tree×working-tree detector is blind
-// to (A contributes nothing to the `files` join) yet B's next pull collides on F.
-// null for a detached/no-branch/in-sync (ahead 0) chat. A bare `string[]` (no status
-// codes — `--name-only` carries none), unlike `files`' porcelain objects.
-export interface GitStateStatus {
-  clean?: boolean | null;
-  ahead?: number | null;
-  behind?: number | null;
-  // The changed-file list /api/git-status already returns per chat (parsed from
-  // `git status --porcelain`) — the join key detectProjectFileCollisions compares
-  // across agents, AND (WARDEN-701) each file object carries the porcelain `conflict`
-  // flag (parsed in src/gitStatus.js via isConflictStatus for the unmerged status codes
-  // DD/AU/UD/UA/DU/AA/UU) so summarizeProjectGitState can count unmerged paths and
-  // surface a blocked merge distinctly under ⚑. null for a detached/no-branch chat.
-  files?: { path: string; conflict?: boolean }[] | null;
-  outgoingFiles?: string[] | null;
-  // WARDEN-635: the at-risk repo-state signals `/api/git-status` already returns
-  // top-level — `detached` (WARDEN-239), `upstream` (WARDEN-243, null when none),
-  // `inProgress: { operation, detail }` (WARDEN-511, merge/rebase/cherry-pick/revert/
-  // bisect) — PLUS `branch`, the field that disambiguates no-upstream from detached /
-  // non-git. All four already live in the cached gitStatus map ChatSidebar's useState
-  // holds, so extending this slice is structurally compatible — no fetch, no backend
-  // change. null/absent ⇒ that signal is unknown (treated as not-at-risk, never noise).
-  branch?: string | null;
-  detached?: boolean | null;
-  upstream?: string | null;
-  inProgress?: { operation: string | null; detail?: string | null } | null;
-  // WARDEN-667: the parked-WIP count `/api/git-status` already returns top-level
-  // — `stashCount` (shipped by WARDEN-211, parsed from `git stash list`) — which the
-  // per-row GitBranchBadge already renders as 🗄N but the fleet rollup previously
-  // dropped. Already lives in the cached gitStatus map ChatSidebar's useState holds,
-  // so extending this slice is structurally compatible — no fetch, no backend change.
-  // A number > 0 ⇒ stashed WIP; null/absent ⇒ unknown (treated as not-stashed, never
-  // noise), the same null-is-quiet discipline ahead/behind follow.
-  stashCount?: number | null;
-  // WARDEN-669 + WARDEN-682: the strict ISO-8601 committer date of HEAD
-  // (`git log -1 --format=%cI HEAD`, normalized by normalizeHeadDate in
-  // src/gitStatus.js). It ALREADY ships on /api/git-status (WARDEN-545) and is
-  // cached in the fleet gitStatus map ChatSidebar holds (ChatSidebar.tsx stores
-  // `headDate: j.headDate`), but this GitStateStatus slice previously dropped it —
-  // so the fleet summarizer had no temporal signal. Carried here as a STRING (not
-  // pre-parsed to epoch) to mirror normalizeHeadDate's strict ISO-8601 contract and
-  // avoid the epoch `*1000` footgun src/gitStatus.js documents — exactly as the
-  // cached map stores it, so extending this slice is structurally compatible (no
-  // fetch, no backend change). TWO fleet rollups read off it, derived as ONE
-  // `headAgeMs` field on ProjectGitAgent (below): the ↑N unpushed-popover oldest-
-  // first rank (WARDEN-669), and the 6th 💤N stalled axis — a HEAD older than
-  // STALE_HEAD_AGE_MS (7d) (WARDEN-682). null/absent/invalid for a repo with no
-  // commits / a non-git cwd / a branch-less cwd (mirrors headFresh); the derivations
-  // treat that as age-unknown + not-stalled, never noise.
-  headDate?: string | null;
-  // WARDEN-670: the per-agent uncommitted-WIP magnitude — insertions/deletions from
-  // `git diff HEAD --shortstat` (parsed by parseDiffStat in src/gitStatus.js and
-  // served at /api/git-status as `diffstat: branch ? diffstat : null`). It ALREADY
-  // ships on /api/git-status and is cached in the fleet gitStatus map ChatSidebar
-  // holds (ChatSidebar.tsx stores `diffstat: j.diffstat`), but this GitStateStatus
-  // slice previously dropped it — so the fleet summarizer had no per-agent magnitude,
-  // and the ±N dirty popover was the only chip axis whose rows carried no per-agent
-  // detail. Defined INLINE (the SAME shape /api/git-status serves), NOT imported from
-  // sidebar/types — this module deliberately stays decoupled from React-layer types so
-  // it remains unit-testable with plain objects (the decoupling GitStateChat relies
-  // on). null for a detached/no-branch chat (the server serves null when there is no
-  // branch) and +0−0 for an all-untracked WIP (shortstat counts tracked edits only);
-  // both stay quiet downstream (DiffStatChip's own +0−0/null guard).
-  diffstat?: { files: number; insertions: number; deletions: number } | null;
-}
-
-// One contributing agent for a project's WIP breakdown (WARDEN-268). The project
-// chip's ±N / ↑N badges are now explorable: each popover lists exactly these
-// agents so a human can jump straight to the dirty/unpushed one instead of
-// scanning the whole project row by row. Kept deliberately minimal — no title,
-// no branch — so the helper stays pure and testable with plain objects (the same
-// decoupling the rest of this module relies on). The React layer joins
-// `key → displayName(findChat(chats, key))` and `gitStatus[key].branch`, both of
-// which are already in scope in ChatSidebar; display fields do NOT belong here.
-export interface ProjectGitAgent {
-  key: string;       // c.key || c.id — the same lookup the per-row GitBranchBadge uses
-  dirty: boolean;    // clean === false (the yellow ± signal)
-  ahead: number;     // status.ahead ?? 0 — the amber ↑N signal (> 0 ⇒ unpushed)
-  behind: number;    // status.behind ?? 0 — the blue ↓N signal (> 0 ⇒ behind upstream)
-  // WARDEN-635: at-risk repo state — a non-routine state a human scanning the fleet
-  // should eyeball, surfaced as a 4th project chip (⚑N). Folded into one axis are the
-  // three signals the per-row GitBranchBadge renders individually but the fleet rollup
-  // previously dropped: detached HEAD (commits not on a branch; at risk if reflog
-  // expires), no-upstream (a named branch never `push -u`'d — local-only, unbacked
-  // work), or a mid merge/rebase/cherry-pick/revert/bisect op. `atRiskReason`
-  // disambiguates WHICH of those it is so the popover can label the specific risk;
-  // null when the agent is not at-risk. Mirrors the per-row discriminator at
-  // GitBadges.tsx (the `noUpstream` line) so the chip and the row agree by construction.
-  // WARDEN-701: a 4th reason class, `'conflict'` (unmerged UU/AA/UD/… paths), slots
-  // BEFORE `'op'` in the precedence (conflict ⟹ op — conflicts only arise mid-merge/
-  // rebase/cherry-pick ⇒ inProgress.operation is truthy in practice — but a blocked
-  // merge cannot self-resolve, so it is the MORE specific/urgent at-risk signal and the
-  // one a human must act on RIGHT NOW). Distinct from `'op'` (a clean, auto-completing
-  // rebase) so a blocked merge no longer reads identically to it under ⚑'s generic
-  // "operation in progress" label.
-  atRisk: boolean;
-  atRiskReason: 'detached' | 'noUpstream' | 'op' | 'conflict' | null;
-  // WARDEN-701: the # of unmerged (conflicted) paths this agent carries — the count
-  // behind the `'conflict'` atRiskReason, surfaced as the per-row ⚑ suffix
-  // "merge conflict · N unmerged". Derived by counting files with the porcelain
-  // `conflict` flag in the cached status.files array (no new fetch, no backend change
-  // — the flag already ships on /api/git-status). 0 for every non-conflict reason
-  // (detached/noUpstream/op) so the field reads truthy-count-equivalent to "is a
-  // blocked merge", mirroring how stashCount/diffstat/headAgeMs were carried onto
-  // ProjectGitAgent (WARDEN-667/670/669): a present, deep-equal field on every entry.
-  conflictCount: number;
-  // WARDEN-667: parked WIP — `stashCount > 0`, surfaced as the 5th project chip
-  // (🗄N). `git stash` parks uncommitted work off the tree (porcelain status reads
-  // clean while real WIP sits in the reflog), so a clean, pushed, up-to-date,
-  // routine-state agent that holds parked WIP — the canonical stash case — was
-  // previously invisible at the fleet level: it read ZERO across every chip. This
-  // axis surfaces it. Mirrors the per-row GitBranchBadge's 🗄N badge (GitBadges.tsx)
-  // so the chip and the row agree by construction.
-  stashed: boolean;
-  // WARDEN-689: the MAGNITUDE of this agent's parked WIP — `stashCount` (> 0 ⇔
-  // `stashed`), the count `git stash list` returns that /api/git-status already
-  // ships (WARDEN-211) and the summarizer already READS (the `stashCount` local
-  // below) but previously DISCARDED to the `stashed` boolean before it reached the
-  // popover. Mirrors how `ahead`/`behind` carry their counts alongside their > 0
-  // booleans (the ↑N/↓N popovers render `a.ahead`/`a.behind`), so the 🗄N popover
-  // can render ` · 🗄 N` per agent and rank heaviest-parker-first — an agent that
-  // parked 12 stashes reads distinctly from one that parked 1. 0 when `stashCount`
-  // is absent/null on the status (null ⇒ unknown ⇒ 0, never noise), the same
-  // null-is-quiet discipline ahead/behind/stashed follow.
-  stashCount: number;
-  // WARDEN-669 + WARDEN-682: the age of this agent's HEAD commit — `now - headMs`
-  // (ms) — the fleet-level TEMPORAL signal. WARDEN-669 ranks the ↑N unpushed popover
-  // oldest-first off it (longest-sitting WIP on top = highest rot/collision risk);
-  // WARDEN-682 derives the 6th 💤N stalled axis off the SAME field (headAgeMs >
-  // STALE_HEAD_AGE_MS). Named `headAgeMs` (kind-agnostic), NOT `unpushedAgeMs`/
-  // `stalledAgeMs`: a HEAD-committer age is a property of the agent's HEAD, so the
-  // field reads correctly when any later slice reuses it to rank the dirty/behind/
-  // atRisk popovers too. Derived from headDate (strict ISO-8601 from git %cI) via
-  // `Number.isFinite(Date.parse(...))`, mirroring the per-row GitBranchBadge's headMs
-  // derivation. WARDEN-682's coordination note planned ONE head-time field reused by
-  // both the unpushed-axis rank and the stalled-axis membership test — this is it
-  // (no parallel `headMs` field on the agent). null when headDate is missing/invalid/
-  // empty (a repo with no commits / non-git cwd) so the unpushed popover renders no
-  // age label + sorts the row last (mirrors headFresh / mergeFleetCommitsByEpoch's
-  // null-epoch-last convention), and the stalled axis treats it as not-stalled.
-  headAgeMs: number | null;
-  // WARDEN-682: stalled ⇒ headAgeMs is a finite age older than STALE_HEAD_AGE_MS
-  // (7d) — a clean, pushed, up-to-date, routine-state, stash-free agent whose HEAD
-  // is >7d old reads ZERO on every other axis and was previously invisible at the
-  // fleet level; this 6th axis (💤N) surfaces it. The 💤N popover filters
-  // `agents.filter(a => a.stalled)`; the branch-line suffix reads headAgeMs. Mirrors
-  // the per-row GitBranchBadge's `headStale` computation (GitBadges.tsx) so the chip
-  // and the row agree on the SAME 7d threshold.
-  stalled: boolean;
-  // WARDEN-670: this agent's uncommitted-WIP magnitude (+N −M) — the dirty-axis
-  // per-agent detail the ±N popover renders via DiffStatChip and ranks heaviest-first
-  // (sortGitAgentsByMagnitudeDesc). Carried as the full split { insertions, deletions }
-  // (NOT a scalar magnitude) because DiffStatChip needs insertions and deletions
-  // SEPARATELY to render `+N −M` (DiffStatChip.tsx); a scalar would suffice for
-  // SORTING but could not render the split chip. Read from status.diffstat (already
-  // cached at the ChatSidebar call site — no new fetch, no backend change). null for a
-  // detached/no-branch agent (the server serves diffstat: null when there is no
-  // branch) and +0−0 for an all-untracked WIP; DiffStatChip's own +0−0/null guard
-  // renders nothing then, so a dirty agent with no tracked edits shows no false
-  // magnitude (not a lie). Mirrors the per-row DiffStatChip the row already renders
-  // (ChatRows.tsx, GitBadges.tsx) — the fleet popover now speaks the same +N −M
-  // language as the row, completing the dirty axis the way unpushed/behind/atRisk
-  // already complete theirs.
-  diffstat: { files: number; insertions: number; deletions: number } | null;
-}
-
-export interface ProjectGitState {
-  dirty: number;     // # of the project's active agents with uncommitted changes
-  unpushed: number;  // # of the project's active agents with unpushed commits
-  behind: number;    // # of the project's active agents behind their upstream
-  atRisk: number;    // # of the project's active agents in a non-routine repo state (WARDEN-635)
-  stashed: number;   // # of the project's active agents with parked WIP (stashCount > 0, WARDEN-667)
-  stalled: number;   // # of the project's active agents whose last commit is >7d old (headDate, WARDEN-682)
-  // The contributing agents behind those counts, in `chats` iteration order
-  // (deterministic, so tests assert deep equality). The ±N popover filters
-  // `agents.filter(a => a.dirty)`; the ↑N popover filters `agents.filter(a =>
-  // a.ahead > 0)`; the ↓N popover filters `agents.filter(a => a.behind > 0)`; the
-  // ⚑N popover filters `agents.filter(a => a.atRisk)` (WARDEN-635); the 🗄N popover
-  // filters `agents.filter(a => a.stashed)` (WARDEN-667); the 💤N popover filters
-  // `agents.filter(a => a.stalled)` (WARDEN-682). An agent dirty AND
-  // unpushed AND behind AND at-risk AND stashed AND stalled appears ONCE with all
-  // signals. `dirty`/`unpushed`/`behind`/`atRisk`/`stashed`/`stalled` are retained
-  // (the chip still reads them) even though they're now derivable — avoids churn at
-  // the two call sites.
-  agents: ProjectGitAgent[];
-}
-
-export interface ProjectGitSummary {
-  // Sparse "needs attention" map: only projects with at least one dirty,
-  // unpushed, behind, at-risk, stashed, OR stalled agent get an entry, so a clean
-  // project yields no key (the chip's sub-badges hide on absence exactly as they
-  // hide on a 0 count).
-  perProject: Record<string, ProjectGitState>;
-  total: ProjectGitState;  // the sum across all projects
-}
-
-// WARDEN-682: the last-commit freshness threshold — a HEAD commit older than this
-// marks an agent "stalled" (💤). ⚠️ This MUST mirror `STALE_HEAD_AGE_MS` in
-// web/src/components/sidebar/GitBadges.tsx so the fleet chip and the per-row `· Nd`
-// append agree on EXACTLY who is stalled (fleet/row agreement rides on this shared
-// 7d threshold, not on a shared color — the per-row stale tint is amber, the chip is
-// sky). Kept as a LOCAL copy (NOT imported from the .tsx) so this pure module stays
-// unit-testable directly via node (gitStateSummary.test.mjs imports the transpiled
-// module); a runtime import of GitBadges.tsx would pull React/radix-ui/lucide and
-// break every test in that file. The per-row badge keeps its own copy; this is the
-// summarizer's own, comment-linked so the two stay in sync.
-const STALE_HEAD_AGE_MS = 7 * 86400_000;
-
-/**
- * Summarize uncommitted (`dirty`), unpushed (`unpushed`), behind-upstream
- * (`behind`), at-risk-repo-state (`atRisk`, WARDEN-635), parked-WIP (`stashed`,
- * WARDEN-667), and last-commit-freshness (`stalled`, WARDEN-682) agent counts per
- * project and globally, over the cached per-chat `gitStatus` map.
- *
- * Only active chats with a project are considered (the same population the chips'
- * `projectCounts` are drawn from). A chat missing from `gitStatus` — still
- * loading, or a non-git cwd — is treated as neither (no guess). `total` is the
- * sum of the per-project counts. Each `ProjectGitState` also carries the
- * contributing `agents` (in `chats` iteration order) so the chip badges can list
- * exactly who is dirty/unpushed/behind/at-risk/stashed/stalled — `total.agents` is
- * the union across projects.
- *
- * `now` (defaulting to `Date.now()`) is the staleness reference: an agent is
- * `stalled` when its `headDate` parses to a finite ms older than `now -
- * STALE_HEAD_AGE_MS`. The default keeps the lone production call site
- * (ChatSidebar.tsx) unchanged; tests pass a fixed `now` so assertions are
- * deterministic (the module stays pure — no `Date.now()` read inside the body).
- */
-export function summarizeProjectGitState(
-  chats: GitStateChat[],
-  gitStatus: Record<string, GitStateStatus>,
-  now: number = Date.now(),
-): ProjectGitSummary {
-  const perProject: Record<string, ProjectGitState> = {};
-  const total: ProjectGitState = { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [] };
-
-  for (const c of chats) {
-    // Match projectCounts' population exactly (active && has a project) so the
-    // summary is over the same chats the chips represent.
-    if (!c.active || !c.project) continue;
-
-    const status = gitStatus[c.key || c.id];
-    // Unknown status (not yet fetched / non-git) ⇒ neither, by design: never
-    // surface noise for a chat whose repo state we don't actually know.
-    if (!status) continue;
-
-    const dirty = status.clean === false;
-    const ahead = typeof status.ahead === 'number' ? status.ahead : 0;
-    const unpushed = ahead > 0;
-    const behindCount = typeof status.behind === 'number' ? status.behind : 0;
-    const behind = behindCount > 0;
-    // WARDEN-635: at-risk repo state — a non-routine state a human should eyeball,
-    // surfaced as the 4th chip axis (⚑N). Mirrors the per-row GitBranchBadge
-    // discriminator (GitBadges.tsx's `noUpstream` line) so fleet and row agree:
-    //   detached === true              ⇒ 'detached'   (commits not on a branch)
-    //   named branch with NO upstream  ⇒ 'noUpstream' (local-only, unbacked work)
-    //   inProgress.operation truthy    ⇒ 'op'         (mid merge/rebase/cherry-pick/…)
-    // The `branch` gate is load-bearing: without it, upstream:null is ambiguous
-    // across detached / no-upstream / non-git-unborn (all read upstream:null).
-    // server.js gates inProgress.operation on `branch` (null for detached), so a
-    // detached agent surfaces via 'detached', never also 'op' — folded into one axis.
-    //
-    // WARDEN-701: a 4th reason class, `'conflict'` (unmerged UU/AA/UD/… paths), slots
-    // BEFORE `'op'`. conflict ⟹ op — conflicts only arise mid-merge/rebase/cherry-pick
-    // ⇒ inProgress.operation is truthy in practice — but a blocked merge CANNOT self-
-    // resolve (unlike a clean, auto-completing rebase), so it is the more specific/
-    // urgent at-risk signal and the one a human must act on RIGHT NOW. Counting the
-    // porcelain `conflict` flags already on the cached status.files array (no new
-    // fetch, no backend change). hasConflict reads truthy even if inProgress.operation
-    // is somehow absent (porcelain conflict markers without a recorded op) — a
-    // conflicted tree is at-risk regardless, so the branch never falls through to null.
-    const isDetached = status.detached === true;
-    const branch = status.branch ?? null;
-    const upstream = status.upstream ?? null;
-    const op = status.inProgress?.operation || null;
-    const conflictCount = (status.files ?? []).filter((f) => f?.conflict).length;
-    const hasConflict = conflictCount > 0;
-    const atRiskReason: ProjectGitAgent['atRiskReason'] = isDetached
-      ? 'detached'
-      : (!isDetached && !!branch && branch !== 'HEAD' && !upstream)
-        ? 'noUpstream'
-        : hasConflict
-          ? 'conflict'
-          : op
-            ? 'op'
-            : null;
-    const atRisk = atRiskReason !== null;
-    // WARDEN-667: parked WIP — `git stash` parks uncommitted work off the tree, so
-    // the stashCount signal is INDEPENDENT of the dirty/ahead/behind/atRisk axes
-    // (a stash can sit alongside a clean, pushed, up-to-date, routine-state tree).
-    // `stashCount: number > 0` ⇒ stashed; null/absent ⇒ unknown, treated as
-    // not-stashed (the same null-is-quiet discipline ahead/behind follow). Mirrors
-    // the per-row GitBranchBadge's `stashN` computation (GitBadges.tsx).
-    const stashCount = typeof status.stashCount === 'number' ? status.stashCount : 0;
-    const stashed = stashCount > 0;
-    // WARDEN-669 + WARDEN-682: HEAD-commit time → age, derived from headDate (the
-    // strict ISO-8601 last-commit time /api/git-status already ships via WARDEN-545
-    // and the cached gitStatus map holds). Date.parse → NaN for a missing/invalid/
-    // empty headDate (a repo with no commits / non-git cwd). The age is computed
-    // against the fixed `now` arg (NOT Date.now()) so the module stays pure/
-    // deterministic and tests are stable — a strict improvement over WARDEN-669's
-    // original Date.now()-based derivation, and it keeps the two consumers (the
-    // unpushed-popover age rank, WARDEN-669; the stalled-axis membership test,
-    // WARDEN-682) reading off ONE `headAgeMs` field, reconciled per WARDEN-682's
-    // coordination note so the agent carries a single head-time field, not two.
-    const headMs = typeof status.headDate === 'string' && status.headDate ? Date.parse(status.headDate) : NaN;
-    const headAgeMs = Number.isFinite(headMs) ? now - headMs : null;
-    // WARDEN-682: stalled ⇒ headAgeMs is a finite age older than STALE_HEAD_AGE_MS
-    // (7d) — a clean/pushed/in-sync/routine/stash-free agent whose HEAD is >7d old
-    // previously read ZERO across every chip; this 6th axis surfaces it. Fleet/row
-    // agreement rides on this shared 7d threshold (the per-row GitBranchBadge's own
-    // headStale uses the same constant).
-    const stalled = headAgeMs != null && headAgeMs > STALE_HEAD_AGE_MS;
-    // A clean, pushed, up-to-date, routine-state, stash-free agent contributes
-    // nothing — skip it so clean projects stay absent from the sparse map (and off
-    // the chips). An at-risk-only agent is KEPT here (WARDEN-635) — the mirror of
-    // WARDEN-297's "a behind-only agent now surfaces" change, for that axis. A
-    // stashed-only agent is KEPT here too (WARDEN-667) — the same mirror for this
-    // 5th axis: a clean, pushed, up-to-date, routine-state agent that holds parked
-    // WIP (the canonical stash case) previously read ZERO across every chip and was
-    // invisible at the fleet level. A stalled-only agent is KEPT here too (WARDEN-682)
-    // — the same mirror for this 6th axis: a clean, pushed, up-to-date,
-    // routine-state, stash-free agent whose HEAD is >7d old previously read ZERO
-    // across every chip and was invisible at the fleet level.
-    if (!dirty && !unpushed && !behind && !atRisk && !stashed && !stalled) continue;
-
-    // WARDEN-670: carry this agent's uncommitted-WIP magnitude (status.diffstat,
-    // already cached — no new fetch) onto ProjectGitAgent so the ±N popover can render
-    // +N −M per row (via DiffStatChip) and rank heaviest-first. `?? null` coerces an
-    // absent field to null so EVERY agent carries the field — the deep-equality shape
-    // the test suite asserts — matching how the server serves null when there is no
-    // branch. null/+0−0 stay quiet downstream via DiffStatChip's own guard.
-    const diffstat = status.diffstat ?? null;
-
-    // The agent entry shared by the per-project list and the global union. One
-    // entry per contributing agent, so a both-dirty-and-at-risk agent appears a
-    // single time with all signals (never duplicated).
-    const agent: ProjectGitAgent = { key: c.key || c.id, dirty, ahead, behind: behindCount, atRisk, atRiskReason, stashed, stashCount, headAgeMs, stalled, diffstat, conflictCount };
-
-    const entry = perProject[c.project] ?? { dirty: 0, unpushed: 0, behind: 0, atRisk: 0, stashed: 0, stalled: 0, agents: [] };
-    if (dirty) entry.dirty += 1;
-    if (unpushed) entry.unpushed += 1;
-    if (behind) entry.behind += 1;
-    if (atRisk) entry.atRisk += 1;
-    if (stashed) entry.stashed += 1;
-    if (stalled) entry.stalled += 1;
-    entry.agents.push(agent);
-    perProject[c.project] = entry;
-
-    if (dirty) total.dirty += 1;
-    if (unpushed) total.unpushed += 1;
-    if (behind) total.behind += 1;
-    if (atRisk) total.atRisk += 1;
-    if (stashed) total.stashed += 1;
-    if (stalled) total.stalled += 1;
-    total.agents.push(agent);
-  }
-
-  return { perProject, total };
-}
-
-/**
- * Rank agents oldest-HEAD-first so the ↑N unpushed popover surfaces the
- * longest-sitting WIP on top — a human clicking the fleet chip integrates the
- * commits most at risk of rot/collision first (WARDEN-669). Largest `headAgeMs`
- * first; null-age rows (a repo with no commits / non-git cwd — headDate missing/
- * invalid/empty) sort LAST, stably, mirroring `mergeFleetCommitsByEpoch`'s null-
- * epoch-last convention.
- *
- * Pure + returns a NEW array (does NOT mutate its input) so it is unit-testable
- * without a React runner, matching the module's `diff.ts` philosophy. Critically,
- * the SUMMARIZER's own `agents` array is NOT reordered by this helper: that array
- * MUST stay in `chats` iteration order (its deterministic-order invariant, asserted
- * throughout the test suite and shared by the dirty/behind/atRisk popovers). The
- * sort is a per-kind RENDER-TIME concern — the React layer applies it ONLY to the
- * unpushed popover's filtered slice. `Array.prototype.sort` is stable on Node ≥12 /
- * V8, so null-age and equal-age ties preserve the pre-sort (chats) input order.
- */
-export function sortByHeadAgeDesc(agents: ProjectGitAgent[]): ProjectGitAgent[] {
-  return [...agents].sort((a, b) => {
-    const aa = a.headAgeMs;
-    const bb = b.headAgeMs;
-    if (aa == null && bb == null) return 0;  // both null → keep input order
-    if (aa == null) return 1;                 // null sorts after every real age
-    if (bb == null) return -1;
-    return bb - aa;                           // largest age first (oldest WIP on top)
-  });
-}
-
-/**
- * Rank dirty agents heaviest-WIP-first so the ±N popover surfaces the largest
- * uncommitted change on top — a human clicking the fleet chip triages the highest-
- * integration-effort WIP first (a 2-line tweak no longer crowds out a +847 −203
- * mid-refactor) (WARDEN-670). Largest magnitude (`diffstat.insertions + deletions`)
- * first; a magnitude-0 row (an all-untracked dirty agent whose shortstat is +0−0) and
- * a null-diffstat row (detached, no branch) sort LAST, stably — magnitude 0 is simply
- * the smallest value, so the descending comparator places it under every real WIP,
- * and `Array.prototype.sort` is stable on Node ≥12 / V8 so magnitude-0 / equal-
- * magnitude ties preserve the pre-sort (chats) input order.
- *
- * Pure + returns a NEW array (does NOT mutate its input) so it is unit-testable
- * without a React runner, matching the module's `diff.ts` philosophy. Critically,
- * the SUMMARIZER's own `agents` array is NOT reordered by this helper: that array
- * MUST stay in `chats` iteration order (its deterministic-order invariant, asserted
- * throughout the test suite and shared by the unpushed/behind/atRisk popovers, which
- * must NOT be reordered). The sort is a per-kind RENDER-TIME concern — the React
- * layer (GitBadges.tsx's GIT_STATE_KIND.dirty.sort) applies it ONLY to the dirty
- * popover's filtered slice, never inside summarizeProjectGitState.
- */
-export function sortGitAgentsByMagnitudeDesc(agents: ProjectGitAgent[]): ProjectGitAgent[] {
-  const magnitude = (a: ProjectGitAgent): number =>
-    (a.diffstat?.insertions ?? 0) + (a.diffstat?.deletions ?? 0);
-  return [...agents].sort((a, b) => magnitude(b) - magnitude(a));
-}
-
-/**
- * Rank agents heaviest-parker-first so the 🗄N stash popover surfaces the agent
- * with the MOST parked WIP on top — a human clicking the fleet chip integrates the
- * biggest stash first (highest drift/loss risk: a 12-stash agent holds far more
- * parked, easily-forgotten work than a 1-stash one) (WARDEN-689). Largest
- * `stashCount` first; `0` (a stash-free agent — which never appears in the stash
- * popover's `.stashed`-filtered slice anyway) sorts last, stably, mirroring
- * sortByHeadAgeDesc's null/zero-last convention.
- *
- * Pure + returns a NEW array (does NOT mutate its input) so it is unit-testable
- * without a React runner, matching sortByHeadAgeDesc / sortGitAgentsByMagnitudeDesc
- * / the module's diff.ts philosophy. Critically, the SUMMARIZER's own `agents`
- * array is NOT reordered by this helper: that array MUST stay in `chats` iteration
- * order (its deterministic-order invariant, asserted throughout the test suite and
- * shared by the dirty/behind/atRisk/stalled popovers). The sort is a per-kind
- * RENDER-TIME concern — the React layer (GitBadges.tsx's GIT_STATE_KIND.stash.sort)
- * applies it ONLY to the stash popover's filtered slice, never inside
- * summarizeProjectGitState. Array.prototype.sort is stable on Node ≥12 / V8, so
- * equal-count (and all-0) ties preserve the pre-sort (chats) input order.
- */
-export function sortByStashCountDesc(agents: ProjectGitAgent[]): ProjectGitAgent[] {
-  return [...agents].sort((a, b) => b.stashCount - a.stashCount);  // largest count first
-}
-
-/**
- * Rank the ⚑ atRisk popover conflict-first so a merge-conflict-BLOCKED agent sits on
- * top — a human clicking the fleet chip triages the one repo state that CANNOT self-
- * resolve and needs a human RIGHT NOW before every clean auto-completing rebase,
- * no-upstream parker, or detached HEAD (WARDEN-701). Conflict-reason agents
- * (`atRiskReason === 'conflict'`) sort above every other atRiskReason; ties (both
- * conflict, or both not) preserve the pre-sort (chats) input order, so the
- * remainder stays in chats iteration order and conflict agents keep their relative
- * order among themselves.
- *
- * Pure + returns a NEW array (does NOT mutate its input) so it is unit-testable
- * without a React runner, matching the module's `diff.ts` philosophy and the three
- * sibling sorts. Critically, the SUMMARIZER's own `agents` array is NOT reordered by
- * this helper: that array MUST stay in `chats` iteration order (its deterministic-order
- * invariant, asserted throughout the test suite and shared by the dirty/behind/stash/
- * stalled popovers). The sort is a per-kind RENDER-TIME concern — the React layer
- * (GitBadges.tsx's GIT_STATE_KIND.atRisk.sort) applies it ONLY to the atRisk popover's
- * filtered slice, never inside summarizeProjectGitState. `Array.prototype.sort` is
- * stable on Node ≥12 / V8, so conflict/non-conflict ties preserve the input order.
- */
-export function sortGitAgentsByConflictFirst(agents: ProjectGitAgent[]): ProjectGitAgent[] {
-  const rank = (a: ProjectGitAgent): number => (a.atRiskReason === 'conflict' ? 1 : 0);
-  return [...agents].sort((a, b) => rank(b) - rank(a));  // conflict (1) above the rest (0)
-}
-
-// ─── Directed triage composition (WARDEN-745) ────────────────────────────────
-//
-// The COMPOSITIONAL capstone of the 6-axis git-state chip vein. The 6 per-axis
-// fleet chips (±N dirty / ↑N unpushed / ↓N behind / ⚑N atRisk / 🗄N stashed / 💤N
-// stalled) are each a flat count; with N agents carrying signals the human must
-// mentally rank 6 axes × N agents to decide what to triage FIRST. rankGitTriage
-// composes them into ONE directed answer ("triage THIS first, because X") — a
-// verbatim mirror of WARDEN-384's rankAttention + pickCalloutTop + attentionReason
-// pattern (attentionRollup.ts), applied to git state.
-//
-// This is pure COMPOSITION, not a 7th axis (the vein is COMPLETE — the cross-cycle
-// guidance is explicit: compose, don't extend). It assigns each agent its HIGHEST-
-// precedence present signal (lexicographic tier assignment) then orders within-tier
-// by that axis's already-shipped severity. Every severity field is ALREADY on
-// ProjectGitAgent — headAgeMs/stalled (WARDEN-669/682), diffstat (WARDEN-670),
-// stashCount (WARDEN-689), conflictCount/atRiskReason (WARDEN-701) — so this fn
-// takes `agents` ALONE: no gitStatus map join, no `now`, no new fetch. That makes
-// it a cleaner mirror of rankAttention(rollup) than the proposal's two-arg "Path B"
-// seam, which was recommended ONLY because (at proposal time) those fields had not
-// yet reached ProjectGitAgent. They have now, so the join the proposal wanted to do
-// inside rankGitTriage is already done by summarizeProjectGitState — and
-// ProjectGitAgent stays UNCHANGED, so the existing summarizer deep-equality tests
-// stay green untouched (the proposal's Path B "no mutation" goal, met trivially).
-//
-// Note on "stalled (>7d)": the proposal called for a new STALLED_MS constant + a
-// `Date.now() - headMs` derivation here. Neither is needed — WARDEN-682 already
-// shipped `STALE_HEAD_AGE_MS` (7d) AND the derived `stalled` boolean on every
-// ProjectGitAgent (computed by the summarizer against its own `now`). This fn just
-// reads `agent.stalled`. No new threshold, no clock read — the module stays pure.
-//
-// Pure + dependency-free (ProjectGitAgent is defined in this same file, so there is
-// not even an `import type`), so gitStateSummary.test.mjs exercises it standalone
-// alongside the summarizer + sort cases.
-
-/**
- * The 6 triage tiers, in PRECEDENCE order. An agent is assigned its highest-
- * precedence PRESENT signal; the tier strings are intentionally IDENTICAL to the
- * GIT_STATE_KIND keys in GitBadges.tsx (dirty/unpushed/behind/atRisk/stash/stalled)
- * so the callout can reuse that table's glyph + color for the promoted tier with no
- * second mapping table. Each tier is anchored in a SHIPPED per-axis rationale:
- *
- *  1. atRisk   — WARDEN-635/701: the repo state that cannot self-resolve (a blocked
- *                merge / mid op / detached / no-upstream). Needs a human RIGHT NOW.
- *  2. stalled  — WARDEN-682/710: rotting/abandoned work at risk of loss (>7d).
- *  3. unpushed — WARDEN-669: the most rot-prone unpushed work.
- *  4. behind   — most merge debt.
- *  5. dirty    — WARDEN-670: most integration effort.
- *  6. stash    — WARDEN-689: deliberately parked OFF the tree — the LEAST urgent.
- */
-export type GitTriageTier = 'atRisk' | 'stalled' | 'unpushed' | 'behind' | 'dirty' | 'stash';
-
-// Tier → precedence weight (lower sorts earlier = triaged first). Local const
-// mirroring ATTENTION_RANK in attentionRollup.ts.
-const GIT_TRIAGE_TIER_ORDER: Record<GitTriageTier, number> = {
-  atRisk: 0,
-  stalled: 1,
-  unpushed: 2,
-  behind: 3,
-  dirty: 4,
-  stash: 5,
-};
-
-/**
- * One ranked triage item: the agent key (the deep-link target), the precedence
- * `tier` it was assigned, and the source `agent` (carrying every field the reason
- * line + the React render join read). The agent reference is carried verbatim (not
- * flattened) because the reason line needs DIFFERENT fields per tier (conflictCount
- * for atRisk, headAgeMs for stalled/unpushed, diffstat for dirty, stashCount for
- * stash) — flattening all of them onto every item would waste each one; the agent
- * is pure data, so carrying it keeps the item self-contained without extra coupling.
- * Mirrors AttentionItem's role (the minimal shape the directed callout needs),
- * adapted to git state's multi-field-per-tier reason.
- */
-export interface GitTriageItem {
-  key: string;
-  tier: GitTriageTier;
-  agent: ProjectGitAgent;
-}
-
-/**
- * Assign an agent its highest-precedence PRESENT signal, or `null` when it carries
- * NO git signal at all (clean tree, pushed, in-sync, routine state, stash-free,
- * fresh HEAD). The lexicographic tier assignment the ticket specifies — first match
- * wins. Internal to rankGitTriage (not exported); a pure step over one agent.
- */
-function triageTierFor(a: ProjectGitAgent): GitTriageTier | null {
-  if (a.atRisk) return 'atRisk';
-  if (a.stalled) return 'stalled';
-  if (a.ahead > 0) return 'unpushed';
-  if (a.behind > 0) return 'behind';
-  if (a.dirty) return 'dirty';
-  if (a.stashed) return 'stash';
-  return null;
-}
-
-/**
- * atRiskReason → within-tier precedence (higher = triaged earlier within the atRisk
- * tier). A blocked merge (conflict) is the ONE repo state that cannot self-resolve
- * and needs a human RIGHT NOW, so it leads; a clean auto-completing rebase (op)
- * follows; local-only unbacked work (noUpstream) and a detached HEAD round it out.
- * Mirrors the per-axis sortGitAgentsByConflictFirst rationale (WARDEN-701),
- * generalized across all four reason classes.
- */
-function atRiskReasonRank(reason: ProjectGitAgent['atRiskReason']): number {
-  switch (reason) {
-    case 'conflict': return 3;
-    case 'op': return 2;
-    case 'noUpstream': return 1;
-    case 'detached': return 0;
-    default: return 0;
-  }
-}
-
-/**
- * Within-tier severity: a NUMBER per agent for its assigned tier, where LARGER =
- * triaged earlier within the tier. Each branch reuses the SAME severity the
- * corresponding per-axis sort fn ranks by (headAgeMs for stalled/unpushed, behind
- * for behind, diffstat magnitude for dirty, stashCount for stash) — composed into
- * one comparator so the within-tier order is never free-form taste. -1 (sorts last)
- * guards a null/missing severity the tier should not have produced (defensive — a
- * stalled/unpushed agent always carries a finite headAgeMs by construction).
- */
-function tierSeverity(a: ProjectGitAgent, tier: GitTriageTier): number {
-  switch (tier) {
-    case 'atRisk':
-      // conflict (most unmerged) > op > noUpstream > detached. The * 1e6 offset
-      // makes reason-rank dominate, with conflictCount as the within-conflict
-      // tiebreak (a 5-unmerged blocked merge ranks above a 1-unmerged one).
-      return atRiskReasonRank(a.atRiskReason) * 1_000_000 + a.conflictCount;
-    case 'stalled':
-      return a.headAgeMs ?? -1;  // oldest HEAD first (longest-stalled on top)
-    case 'unpushed':
-      return a.headAgeMs ?? -1;  // oldest HEAD first (most rot-prone on top)
-    case 'behind':
-      return a.behind;           // most-behind first
-    case 'dirty':
-      return (a.diffstat?.insertions ?? 0) + (a.diffstat?.deletions ?? 0);  // heaviest first
-    case 'stash':
-      return a.stashCount;       // heaviest-parker first
-  }
-}
-
-/**
- * Compose the 6 git-state chip axes into ONE urgency-ordered triage list + promoted
- * top — the compositional capstone of the git-state chip vein (WARDEN-745).
- *
- * Returns `{ top, ranked }`:
- *  - `top`    — the single composite-worst triageable agent (the callout target),
- *               or `null` when no agent carries any git signal.
- *  - `ranked` — every triageable agent, worst-first, for a fallback rundown.
- *
- * Tier assignment is lexicographic (`triageTierFor`): each agent is tagged with its
- * highest-precedence present signal. The list is then stable-sorted by tier
- * precedence asc, then within-tier severity desc (`tierSeverity`). Items are pushed
- * in input (chats) order, so equal-tier equal-severity ties preserve that order
- * (Array.prototype.sort is stable on Node ≥12 / V8) — the same determinism
- * convention the rest of this module follows, so tests assert deep equality.
- *
- * `top` is computed regardless of list length (a lone triageable agent is still
- * `top`); the React layer's `>= 2` gate decides whether to show the callout, NOT
- * this fn — mirroring rankAttention, which returns its top/ranked whatever the
- * count and lets AttentionBadge gate the callout to `ranked.length >= 2`.
- *
- * Pure + dependency-free (reads only the ProjectGitAgent entries summarizeProjectGitState
- * already enriched), so gitStateSummary.test.mjs exercises it standalone.
- */
-export function rankGitTriage(agents: ProjectGitAgent[]): {
-  top: GitTriageItem | null;
-  ranked: GitTriageItem[];
-} {
-  const items: GitTriageItem[] = [];
-  for (const a of agents) {
-    const tier = triageTierFor(a);
-    if (tier === null) continue;  // no signal → not triageable (also drops a clean agent a caller passed by mistake)
-    items.push({ key: a.key, tier, agent: a });
-  }
-  items.sort((x, y) => {
-    const byTier = GIT_TRIAGE_TIER_ORDER[x.tier] - GIT_TRIAGE_TIER_ORDER[y.tier];
-    if (byTier !== 0) return byTier;
-    return tierSeverity(y.agent, y.tier) - tierSeverity(x.agent, x.tier);  // severity desc
-  });
-  return { top: items.length > 0 ? items[0] : null, ranked: items };
-}
-
-/**
- * Pure: pick the triage-callout target from a `rankGitTriage` result, EXCLUDING the
- * pane the human is already focused on (WARDEN-482). The "triage THIS first" callout
- * must never PROMOTE the pane the human is staring at — the roadmap's named
- * product-killer ("it trains the human to ignore it"). The ranked rundown (`ranked`,
- * rendered unchanged) still lists every triageable agent including the focused pane,
- * so this loses NO information — it only chooses what the promoted callout names.
- *
- * Verbatim mirror of `pickCalloutTop` (attentionRollup.ts): the first ranked item
- * whose `key` is not the focused pane, or `null` when focus exclusion (or an empty
- * list) leaves no eligible item. Kept a SIBLING, NOT folded into rankGitTriage, for
- * the SAME reason pickCalloutTop is a sibling of rankAttention: rankGitTriage's
- * `top` is the ungated composite-worst (useful for any future surface that must NOT
- * focus-exclude), while THIS fn applies the focus gate locally so the two concerns
- * stay separable + independently testable.
- *
- * `focused == null` (no focus context) → behaves as `ranked[0] ?? null`, i.e. bit-
- * for-bit the ungated `top`. Pure + dependency-free so it is unit-tested directly.
- */
-export function pickGitTriageTop(
-  ranked: GitTriageItem[],
-  focused?: string | null,
-): GitTriageItem | null {
-  return ranked.find((r) => r.key !== focused) ?? null;
-}
-
-// Tier → "because X" reason when the agent's own fields do not yield a more specific
-// phrase (defensive — e.g. a dirty agent whose diffstat is null). The preferred path
-// is the concrete per-tier phrase built from the agent's severity fields in
-// gitTriageReason, mirroring attentionReason's concrete-signal-first shape.
-const GIT_TRIAGE_REASON_FALLBACK: Record<GitTriageTier, string> = {
-  atRisk: 'non-routine repo state',
-  stalled: 'stalled',
-  unpushed: 'unpushed commits',
-  behind: 'behind upstream',
-  dirty: 'uncommitted changes',
-  stash: 'parked stashes',
-};
-
-/**
- * The "because X" reason line for a ranked triage item: a concrete phrase built from
- * the agent's severity fields, mirroring attentionReason's concrete-then-fallback
- * shape. Each tier phrases its specific signal so the callout reads as a complete,
- * actionable reason:
- *   - atRisk  → "merge-conflict blocked · N unmerged" / "merge/rebase in progress" /
- *               "local-only branch (no upstream)" / "detached HEAD"
- *   - stalled → "stalled Nd" (+ " + ↑N unpushed" when the stalled agent is ALSO
- *               unpushed — the multi-signal case, doubly at risk: rotting AND unbacked)
- *   - unpushed→ "↑N unpushed"
- *   - behind  → "↓N behind upstream"
- *   - dirty   → "+N −M uncommitted"
- *   - stash   → "🗄N parked stash(es)"
- *
- * Pure + dependency-free (reads only the carried agent fields), so it is unit-tested
- * directly alongside rankGitTriage / pickGitTriageTop.
- */
-export function gitTriageReason(item: GitTriageItem): string {
-  const a = item.agent;
-  switch (item.tier) {
-    case 'atRisk': {
-      if (a.atRiskReason === 'conflict') return `merge-conflict blocked · ${a.conflictCount} unmerged`;
-      if (a.atRiskReason === 'op') return 'merge/rebase in progress';
-      if (a.atRiskReason === 'noUpstream') return 'local-only branch (no upstream)';
-      if (a.atRiskReason === 'detached') return 'detached HEAD';
-      return GIT_TRIAGE_REASON_FALLBACK.atRisk;
-    }
-    case 'stalled': {
-      const days = a.headAgeMs != null ? Math.max(1, Math.round(a.headAgeMs / 86_400_000)) : 0;
-      const stalledLabel = days > 0 ? `stalled ${days}d` : GIT_TRIAGE_REASON_FALLBACK.stalled;
-      // Multi-signal: a stalled agent that is ALSO unpushed is doubly at risk (rotting
-      // AND unbacked) — surface both so the human sees the compounding risk.
-      return a.ahead > 0 ? `${stalledLabel} + ↑${a.ahead} unpushed` : stalledLabel;
-    }
-    case 'unpushed':
-      return `↑${a.ahead} unpushed`;
-    case 'behind':
-      return `↓${a.behind} behind upstream`;
-    case 'dirty': {
-      const ins = a.diffstat?.insertions ?? 0;
-      const del = a.diffstat?.deletions ?? 0;
-      return `+${ins} −${del} uncommitted`;
-    }
-    case 'stash':
-      return `🗄${a.stashCount} parked stash${a.stashCount === 1 ? '' : 'es'}`;
-  }
-}
-
-// A changed-file path that ≥2 distinct active agents in the SAME project both
-// have in their uncommitted working tree — a cross-agent file-edit collision
-// (WARDEN-288). The proactive complement to WARDEN-185, which surfaces a
-// merge/rebase/cherry-pick conflict AFTER an agent is already blocked; this
-// surfaces a collision BEFORE either agent commits and diverges. `agents` lists
-// the contributors (≥2 distinct keys) in `chats` iteration order so tests assert
-// deep equality; the React layer joins key → displayName/project, exactly as the
-// ±N/↑N popovers do for ProjectGitAgent. Only `path` is the join key —
-// status/conflict fields are intentionally NOT part of it (two agents creating
-// the same new file path collide on `git add`/commit, so untracked `??` paths
-// count too).
-//
-// `kind` discriminates the three collision classes the rollup surfaces:
-//   - omitted (≡ 'live') — WARDEN-288's working-tree×working-tree collision (both
-//     agents have the path dirty right now). Existing live collisions omit it so
-//     this shape stays deep-equal to pre-601 tests.
-//   - 'impending' — WARDEN-601's committed-outgoing × working-tree-WIP collision:
-//     one agent committed the path (clean tree) and another has it dirty; the
-//     collision lands on the next push/pull. Visually distinct in the rollup.
-//   - 'outgoing' — WARDEN-639's committed-outgoing × committed-outgoing collision:
-//     ≥2 agents each committed the path (both clean trees, both unpushed). The
-//     class the live AND impending detectors are BOTH blind to (neither agent has
-//     the path dirty, so neither contributes to the WIP join or the impending
-//     editor side); it surfaces only at push/merge/CI. Every agent sources
-//     'outgoing', so the compare dialog fetches each panel from its @{u}..HEAD range.
+// The detectors that PRODUCED these are gone with the sidebar's collision badges
+// (WARDEN-975). The shapes remain as the prop contract of CollisionCompareDialog,
+// which the FileViewer's co-editor "Compare edits" action still fills in directly
+// (its `agents` come from findFileCoEditors, not from a fleet detector).
 export interface FileCollisionAgent {
-  key: string;  // c.key || c.id — the same lookup the per-row GitBranchBadge uses
-  // source (WARDEN-601) marks WHICH side an agent brings to an 'impending' OR
-  // 'outgoing' collision:
+  key: string;  // c.key || c.id — the same lookup a per-agent git surface uses
+  // `source` marks WHICH side an agent brings to a collision:
   //   'outgoing' — this agent's change to the path lives in an unpushed COMMIT (its
-  //     working tree is clean for this path), so the compare dialog must fetch the
+  //     working tree is clean for this path), so the compare dialog fetches the
   //     path's diff from the outgoing range (@{u}..HEAD), NOT the (empty) working tree.
-  //     Set for every agent in an 'outgoing' collision (both sides committed) and
-  //     for the committer side of an 'impending' collision.
   //   'wip'      — this agent has the path dirty in its working tree (the live side).
-  // Omitted for the working-tree×working-tree 'live' collision — those always fetch
-  // the working-tree diff, so the compare dialog treats a missing source as 'wip'.
+  // Omitted ⇒ the compare dialog treats the agent as 'wip' (the working-tree diff).
   source?: 'outgoing' | 'wip';
 }
 
 export interface FileCollision {
   path: string;
-  agents: FileCollisionAgent[];  // ≥2 distinct agent keys, in chats iteration order
+  agents: FileCollisionAgent[];  // ≥2 distinct agent keys
   kind?: 'live' | 'impending' | 'outgoing';
 }
 
-export interface FileCollisions {
-  // The colliding paths, in `chats` iteration order (deterministic, so tests
-  // assert deep equality). length = the ⚠ count shown on the chip.
-  paths: FileCollision[];
-}
-
-export interface FileCollisionSummary {
-  // Sparse "needs attention" map: only projects with ≥1 colliding path get an
-  // entry, so a clean project yields no key (the chip renders no ⚠), exactly as
-  // summarizeProjectGitState omits clean projects.
-  perProject: Record<string, FileCollisions>;
-  total: FileCollisions;  // union of colliding paths across all projects (for the "All Projects" chip)
-}
-
-/**
- * Detect cross-agent file-edit collisions: changed-file paths that ≥2 distinct
- * active agents in the SAME project both have in their uncommitted working tree
- * (WARDEN-288). A glance at a project chip's ⚠ badge then warns a human — before
- * either agent commits — that two agents are editing the same file and are about
- * to diverge into a merge conflict. The proactive complement to WARDEN-185's
- * post-block conflict surfacing.
- *
- * Population mirrors summarizeProjectGitState exactly (active chats with a
- * project, status looked up by `key || id`). The changed-file `path`s come from
- * the SAME cached gitStatus map — `/api/git-status` already returns per-chat
- * `files` parsed from `git status --porcelain` — so there is no new fetch. A
- * chat with `files: null` (detached/no-branch) or missing from the map (still
- * loading / non-git) contributes nothing, exactly like a not-yet-fetched chat.
- *
- * Join key is `path` ONLY — status/conflict fields are not compared, and
- * untracked (`??`) paths count (two agents creating the same new file collide on
- * `git add`/commit). A path appearing twice in ONE agent's `files` does not
- * self-collide: a collision requires ≥2 DISTINCT agent keys. `perProject` is
- * sparse (a project with no collision has no entry → no ⚠); `total` is the union
- * of colliding paths across all projects (for the "All Projects" chip). Paths
- * and agents are emitted in `chats` iteration order so tests assert deep equality.
- */
-export function detectProjectFileCollisions(
-  chats: GitStateChat[],
-  gitStatus: Record<string, GitStateStatus>,
-): FileCollisionSummary {
-  // project -> (path -> ordered distinct agent keys touching it). Maps preserve
-  // insertion order, so iterating them yields projects, paths, and agents all in
-  // first-seen (= chats iteration) order — the deterministic ordering tests rely on.
-  const byProject = new Map<string, Map<string, string[]>>();
-
-  for (const c of chats) {
-    // Same population gate as summarizeProjectGitState: only active chats with a
-    // project are represented by the chips.
-    if (!c.active || !c.project) continue;
-
-    const status = gitStatus[c.key || c.id];
-    // Unknown status (not yet fetched / non-git) ⇒ contributes nothing. A
-    // detached/no-branch chat has files: null and is skipped the same way — never
-    // a false collision from a chat whose files we don't actually know.
-    if (!status) continue;
-    const files = status.files;
-    if (!files || files.length === 0) continue;
-
-    const key = c.key || c.id;
-    let paths = byProject.get(c.project);
-    if (!paths) { paths = new Map(); byProject.set(c.project, paths); }
-
-    // Dedupe paths WITHIN this single agent: a path listed twice for one agent
-    // must not self-collide (a collision needs ≥2 distinct agent keys). Each chat
-    // is visited once, so distinct chats contribute distinct keys per path.
-    const seen = new Set<string>();
-    for (const f of files) {
-      const path = f?.path;
-      if (!path || seen.has(path)) continue;
-      seen.add(path);
-
-      let agents = paths.get(path);
-      if (!agents) { agents = []; paths.set(path, agents); }
-      agents.push(key);
-    }
-  }
-
-  const perProject: Record<string, FileCollisions> = {};
-  const total: FileCollisions = { paths: [] };
-
-  for (const [project, paths] of byProject) {
-    const colliding: FileCollision[] = [];
-    for (const [path, agents] of paths) {
-      // A collision needs ≥2 distinct agent keys — a single agent on a path is
-      // just ordinary WIP (already shown by the ±N badge), not a cross-agent risk.
-      if (agents.length >= 2) {
-        colliding.push({ path, agents: agents.map((k) => ({ key: k })) });
-      }
-    }
-    // Sparse: only projects with at least one colliding path get an entry, so a
-    // clean chip shows no ⚠.
-    if (colliding.length > 0) {
-      perProject[project] = { paths: colliding };
-      total.paths.push(...colliding);
-    }
-  }
-
-  return { perProject, total };
-}
-
-/**
- * Detect cross-agent IMPENDING file collisions (WARDEN-601): a changed-file path that
- * one active agent has in its UNPUSHED commits (outgoingFiles) while ANOTHER active
- * agent in the SAME project has dirty in its working tree (files). The collision
- * class the working-tree×working-tree detector (`detectProjectFileCollisions`,
- * WARDEN-288) is structurally blind to: agent A committed F (A's tree is clean → F
- * ∉ A.files → A contributes nothing to the WIP join) while agent B has F dirty — so
- * today NO collision is flagged, yet B's next pull (after A pushes) collides on F.
- * It only becomes visible at pull/push time, too late to coordinate; this surfaces it
- * now, as a forward-looking sibling of the live ⚠.
- *
- * Population mirrors detectProjectFileCollisions exactly (active chats with a
- * project, status by `key || id`). For each project, per path, it cross-joins:
- *   committers (source 'outgoing') — agents with the path in outgoingFiles; AND
- *   editors    (source 'wip')      — agents with the path in files (working tree).
- * A path with ≥1 committer AND ≥1 editor (distinct agents — which they are by
- * construction) is an impending collision. The committer-clean rule keeps this
- * orthogonal and noise-free with the live detector: an agent that has the path BOTH
- * outgoing AND dirty is NOT counted as a committer (its dirty copy already makes it a
- * live-collision contributor alongside any other dirty agent), so a path already
- * surfaced by the live ⚠ is NOT re-surfaced here as impending. `outgoingFiles` null
- * (detached/no-branch/in-sync) or missing contributes no committer; `files` null/
- * empty contributes no editor — both exactly like a not-yet-fetched chat.
- *
- * Returns the SAME sparse `{ perProject, total }` shape as detectProjectFileCollisions
- * so the rollup renders both through one badge, each entry tagged `kind: 'impending'`
- * with agents tagged `source: 'outgoing' | 'wip'` (committers first, then editors) so
- * the compare dialog can source the committer's panel from its outgoing change.
- * Paths/agents emit in `chats` iteration order so tests assert deep equality — the
- * convention the rest of this module follows.
- */
-export function detectProjectImpendingCollisions(
-  chats: GitStateChat[],
-  gitStatus: Record<string, GitStateStatus>,
-): FileCollisionSummary {
-  // project -> (path -> { committers, editors }) where each list holds distinct agent
-  // keys in chats iteration order. Maps preserve insertion order, so iterating yields
-  // projects, paths, and agents all in first-seen (= chats iteration) order.
-  const byProject = new Map<string, Map<string, { committers: string[]; editors: string[] }>>();
-
-  for (const c of chats) {
-    if (!c.active || !c.project) continue;
-    const status = gitStatus[c.key || c.id];
-    if (!status) continue;
-    const key = c.key || c.id;
-
-    // The working-tree WIP path set (the editor side) — distinct paths only.
-    const wipPaths = new Set<string>();
-    for (const f of status.files ?? []) {
-      const p = f?.path;
-      if (p) wipPaths.add(p);
-    }
-    const outgoing = status.outgoingFiles ?? [];
-
-    let paths = byProject.get(c.project);
-    if (!paths) { paths = new Map(); byProject.set(c.project, paths); }
-
-    // Committers: path in outgoing AND NOT in wip (clean tree for that path — the
-    // exact case the live WIP join is blind to). An agent with the path BOTH
-    // outgoing and dirty is skipped here (it stays an editor below) so the live
-    // detector owns that overlap and this one adds no noise on top of it.
-    for (const p of outgoing) {
-      if (!p || wipPaths.has(p)) continue;
-      let entry = paths.get(p);
-      if (!entry) { entry = { committers: [], editors: [] }; paths.set(p, entry); }
-      if (!entry.committers.includes(key)) entry.committers.push(key);
-    }
-    // Editors: path in wip (dirty tree). Distinct keys only.
-    for (const p of wipPaths) {
-      let entry = paths.get(p);
-      if (!entry) { entry = { committers: [], editors: [] }; paths.set(p, entry); }
-      if (!entry.editors.includes(key)) entry.editors.push(key);
-    }
-  }
-
-  const perProject: Record<string, FileCollisions> = {};
-  const total: FileCollisions = { paths: [] };
-
-  for (const [project, paths] of byProject) {
-    const colliding: FileCollision[] = [];
-    for (const [path, entry] of paths) {
-      // An impending collision needs ≥1 committer AND ≥1 editor (distinct agents —
-      // guaranteed, since a committer is clean for the path and an editor is dirty).
-      // Committers first (the impending-conflict source), then editors, in chats order.
-      if (entry.committers.length > 0 && entry.editors.length > 0) {
-        colliding.push({
-          path,
-          kind: 'impending',
-          agents: [
-            ...entry.committers.map((k) => ({ key: k, source: 'outgoing' as const })),
-            ...entry.editors.map((k) => ({ key: k, source: 'wip' as const })),
-          ],
-        });
-      }
-    }
-    // Sparse: only projects with at least one impending path get an entry.
-    if (colliding.length > 0) {
-      perProject[project] = { paths: colliding };
-      total.paths.push(...colliding);
-    }
-  }
-
-  return { perProject, total };
-}
-
-/**
- * Detect cross-agent OUTGOING×OUTGOING file collisions (WARDEN-639): a changed-file
- * path that ≥2 distinct active agents in the SAME project EACH have in their UNPUSHED
- * commits (outgoingFiles) with CLEAN working trees for that path. The collision class
- * BOTH other detectors are structurally blind to: agent A committed F (A's tree is
- * clean → F ∉ A.files → A contributes nothing to the WIP join) AND agent C committed F
- * (C's tree is clean → C is not an editor either). The live ⚠ needs two dirty agents;
- * the impending ⏱ needs a committer AND an editor — neither fires when BOTH agents are
- * clean committers. So today NO collision is flagged, yet the two divergent unpushed
- * commits collide at push/merge/CI — the exact too-late failure WARDEN-601 was built to
- * preempt, for its symmetric case. This surfaces it now, as a third sibling of the live
- * ⚠ and impending ⏱.
- *
- * Population mirrors detectProjectImpendingCollisions exactly (active chats with a
- * project, status by `key || id`). For each project, per path, it collects COMMITTERS
- * only — agents with the path in outgoingFiles AND a clean tree for that path (REUSES
- * the exact committer-clean rule from detectProjectImpendingCollisions, so a path
- * already surfaced by the live ⚠ or the impending ⏱ is NOT re-surfaced here). A path
- * with ≥2 DISTINCT committer agent keys is an outgoing×outgoing collision.
- *
- * Kept INDEPENDENT/ORTHOGONAL to its siblings BY DESIGN: if A and B are both clean
- * committers and C is an editor, the path is BOTH an outgoing×outgoing collision
- * (A+B) AND an impending collision (A+C / B+C) — two distinct risks, both correctly
- * surfaced. There is no cross-class dedupe; each detector owns its own matrix cell.
- *
- * Returns the SAME sparse `{ perProject, total }` shape as the other two detectors so
- * the rollup renders all three through one badge, each entry tagged `kind: 'outgoing'`
- * with every agent tagged `source: 'outgoing'` (so the compare dialog fetches each
- * panel from its @{u}..HEAD outgoing range, not an empty working-tree diff). Paths/
- * agents emit in `chats` iteration order so tests assert deep equality — the convention
- * the rest of this module follows.
- */
-export function detectProjectOutgoingCollisions(
-  chats: GitStateChat[],
-  gitStatus: Record<string, GitStateStatus>,
-): FileCollisionSummary {
-  // project -> (path -> ordered distinct committer keys). Maps preserve insertion
-  // order, so iterating yields projects, paths, and agents all in first-seen
-  // (= chats iteration) order — the deterministic ordering tests rely on.
-  const byProject = new Map<string, Map<string, string[]>>();
-
-  for (const c of chats) {
-    if (!c.active || !c.project) continue;
-    const status = gitStatus[c.key || c.id];
-    if (!status) continue;
-    const key = c.key || c.id;
-
-    // The working-tree WIP path set — the committer-clean gate, REUSED VERBATIM from
-    // detectProjectImpendingCollisions so the two detectors agree on who counts as a
-    // clean committer. An agent with the path BOTH outgoing AND dirty is excluded here
-    // (its dirty copy already makes it a live-collision contributor alongside any other
-    // dirty agent, and an editor for the impending detector), so this detector adds no
-    // noise on top of its siblings.
-    const wipPaths = new Set<string>();
-    for (const f of status.files ?? []) {
-      const p = f?.path;
-      if (p) wipPaths.add(p);
-    }
-    const outgoing = status.outgoingFiles ?? [];
-
-    let paths = byProject.get(c.project);
-    if (!paths) { paths = new Map(); byProject.set(c.project, paths); }
-
-    // Committers: path in outgoing AND NOT in wip (clean tree for that path — the
-    // exact case both other detectors are blind to). Distinct keys only, deduped per
-    // path so one agent appearing twice (a path listed twice in its outgoingFiles)
-    // never self-collides — a collision needs ≥2 DISTINCT agent keys.
-    for (const p of outgoing) {
-      if (!p || wipPaths.has(p)) continue;
-      let committers = paths.get(p);
-      if (!committers) { committers = []; paths.set(p, committers); }
-      if (!committers.includes(key)) committers.push(key);
-    }
-  }
-
-  const perProject: Record<string, FileCollisions> = {};
-  const total: FileCollisions = { paths: [] };
-
-  for (const [project, paths] of byProject) {
-    const colliding: FileCollision[] = [];
-    for (const [path, committers] of paths) {
-      // An outgoing×outgoing collision needs ≥2 DISTINCT committer keys — a single
-      // agent with the path outgoing is just ordinary unpushed work (already shown by
-      // the ↑N badge), not a cross-agent risk. The committer-clean rule above
-      // guarantees each key is a different agent with a CLEAN tree for the path.
-      if (committers.length >= 2) {
-        colliding.push({
-          path,
-          kind: 'outgoing',
-          agents: committers.map((k) => ({ key: k, source: 'outgoing' as const })),
-        });
-      }
-    }
-    // Sparse: only projects with at least one outgoing×outgoing path get an entry.
-    if (colliding.length > 0) {
-      perProject[project] = { paths: colliding };
-      total.paths.push(...colliding);
-    }
-  }
-
-  return { perProject, total };
-}
+// WARDEN-682: the last-commit freshness threshold — a HEAD commit older than this
+// marks an agent "stalled" (💤) in Fleet Health's per-agent strip. ⚠️ This MUST mirror
+// `STALE_HEAD_AGE_MS` in web/src/components/sidebar/GitBadges.tsx so Fleet Health and
+// the sidebar's git section agree on EXACTLY who is stalled. Kept as a LOCAL copy (NOT
+// imported from the .tsx) so this pure module stays unit-testable directly via node
+// (the fleet*.test.mjs harnesses import the transpiled module); a runtime import of
+// GitBadges.tsx would pull React/radix-ui/lucide and break every test in those files.
+const STALE_HEAD_AGE_MS = 7 * 86400_000;
 
 // ---- Fleet-wide commit search aggregation (WARDEN-534) ----------------------
 //
 // The cross-agent HISTORY layer — the fleet-wide counterpart to the per-agent
-// commit-message grep shipped in WARDEN-498. Where summarizeProjectGitState +
-// detectProjectFileCollisions aggregate STATUS and COLLISIONS across the fleet,
-// this aggregates matched COMMITS: it turns N per-agent grep results into one
-// grouped-by-agent view (each group carrying the agent key + project, each row
+// commit-message grep shipped in WARDEN-498. Where buildFleetGitStatus aggregates
+// per-agent STATUS across the fleet, this aggregates matched COMMITS: it turns N
+// per-agent grep results into one grouped-by-agent view (each group carrying the agent key + project, each row
 // carrying whether the commit is ↑unpushed) so a single sidebar-level query
 // finds WHERE a change landed across the fleet instead of N manual per-agent
 // greps.
 //
 // Pure (no React import, no fetch) so it is unit-testable directly via node,
-// mirroring summarizeProjectGitState / diff.ts. The fan-out (the actual fetches)
-// lives in the React component; this resolves the searchable population, then
+// mirroring diff.ts. The fan-out (the actual fetches) lives in the React component; this resolves the searchable population, then
 // joins + groups + counts. Ordering follows the same convention as the rest of
 // this module: outcomes are processed in the caller's iteration order
 // (= chats order), so the returned groups are deterministic and tests assert
 // deep equality.
 
-// Minimal slice of Chat the searchable-population gate reads. Defined locally
-// (like GitStateChat) so the helper stays decoupled and testable with plain
-// objects rather than the React-layer Chat type.
+// Minimal slice of Chat the searchable-population gate reads. Defined locally so the
+// helper stays decoupled and testable with plain objects rather than the React-layer
+// Chat type.
 export interface FleetSearchChat {
   id: string;
   key?: string;        // resolved first: searchable agents are keyed by key || id
@@ -1175,8 +87,8 @@ export interface FleetSearchAgent {
 }
 
 /**
- * Resolve the searchable fleet: active chats WITH a project (the same population
- * summarizeProjectGitState aggregates over), keyed by `key || id`, deduped by key
+ * Resolve the searchable fleet: active chats WITH a project (the population every
+ * fleet-wide git fan-out shares), keyed by `key || id`, deduped by key
  * so the same repo is never grepped twice. Non-active / project-less chats are
  * skipped — they are not represented by the fleet UI and grepping them would just
  * produce N error rows (the WARDEN-89 population gate the ticket calls out).
@@ -1240,7 +152,7 @@ export function buildFleetSearchBaseUrl(
 // Minimal slice of a /api/git-log commit row (the shape GIT_LOG_PRETTY parses to:
 // { hash, subject, author, date, epoch }). Defined locally so this module stays
 // decoupled from the React-layer GitCommit type and is testable with plain
-// objects — the same decoupling GitStateChat / GitStateStatus rely on.
+// objects — the same decoupling every other helper in this module relies on.
 export interface FleetCommitLike {
   hash: string;
   subject: string;
@@ -1265,7 +177,7 @@ export type FleetCommitHit = FleetCommitLike & { unpushed: boolean };
 
 // One agent's matched commits (the rows under its group header). key + project
 // ride along so the React layer can join key → displayName / project without a
-// second lookup, mirroring how ProjectGitAgent carries key for the chip popovers.
+// second lookup: each row carries the key it was fanned for.
 export interface FleetCommitGroup {
   key: string;
   project: string;
@@ -1352,7 +264,7 @@ export function buildFleetCommitGroups(outcomes: FleetCommitOutcome[]): FleetCom
 //     src/server.js:2294 — only partial/test inputs) is placed LAST, stably.
 //
 // Pure (no React import, no fetch) so it is unit-testable directly via node,
-// mirroring buildFleetCommitGroups / summarizeProjectGitState. The population gate
+// mirroring buildFleetCommitGroups. The population gate
 // is REUSED (fleetCommitSearchEligible — mode-agnostic: active + project, keyed,
 // deduped); the fan-out lives in the React component (its own Promise.allSettled,
 // the fleet convention). Outcomes are flattened in caller (chats) order BEFORE the
@@ -1504,7 +416,7 @@ export function bindFleetRowOpenFile(
 // The cross-fleet WORKING-TREE-STATE layer — the missing repository-state axis in
 // Fleet Health (HealthDashboard.tsx). Where FleetRecentCommits (WARDEN-597) fans
 // /api/git-log across the fleet for the COMMIT-HISTORY axis and
-// summarizeProjectGitState (above) rolls the per-pane CACHED status for the sidebar's
+// The removed sidebar summarizer (WARDEN-975) rolled the per-pane CACHED status for the sidebar's
 // project chips, this fans /api/git-status across every active project agent so Fleet
 // Health can surface — per agent — whether it has uncommitted WIP and its magnitude
 // (±N), plus a fleet-wide "N dirty" count in the summary bar. A coordinator scanning
@@ -1543,8 +455,8 @@ export function bindFleetRowOpenFile(
 // there too AND for a clean tree / an all-untracked WIP; behind is null there too AND
 // for a no-upstream cwd (parseAheadBehind returns `{ behind: null }`). Defined INLINE
 // (the SAME shape /api/git-status serves) — deliberately NOT imported from the
-// React-layer GitStateStatus type — so this pure module stays decoupled and is
-// unit-testable with plain objects, the same decoupling GitStateChat / GitStateStatus
+// React-layer status type — so this pure module stays decoupled and is
+// unit-testable with plain objects, the same decoupling every other helper here
 // / FleetSearchChat rely on. (conflictCount below is the lone DERIVED field — counted
 // at the fetch seam from the porcelain `files[]`, not a direct pass-through.)
 export interface FleetGitStatusSlice {
@@ -1599,14 +511,14 @@ export interface FleetGitStatusSlice {
   // gates on `branch`, the SAME null-is-quiet discipline `clean` follows) and for a
   // repo with no commits. This is the RAW input field — clock-dependent derivation
   // (headAgeMs + stalled below) happens in buildFleetGitStatus(now), the verbatim
-  // mirror of summarizeProjectGitState:356-363, so the pure module owns the clock and
+  // mirror of the removed sidebar summarizer (WARDEN-975), so the pure module owns the clock and
   // tests pass a fixed `now`; the hook seam sets this from `j.headDate` and sets
   // headAgeMs/stalled to provisional null/false (enriched before the chip reads them).
   headDate: string | null;
   // headAgeMs is THIS agent's HEAD-commit AGE in ms (WARDEN-847) — `now - headMs`
   // where headMs = Date.parse(headDate). Derived in buildFleetGitStatus against the
   // threaded `now` (NOT Date.now()) so the module stays pure/deterministic — the
-  // verbatim mirror of summarizeProjectGitState's headAgeMs at :357. null when headDate
+  // verbatim mirror of the removed sidebar summarizer's headAgeMs (WARDEN-975). null when headDate
   // is missing/invalid/empty (a repo with no commits / non-git cwd — Date.parse → NaN),
   // the same null-is-quiet discipline `clean` follows: a null-age agent is NOT stalled.
   // Provisional null at the fetch-seam literal; buildFleetGitStatus(now) enriches it
@@ -1616,7 +528,7 @@ export interface FleetGitStatusSlice {
   headAgeMs: number | null;
   // stalled is THIS agent's "HEAD >7d old" boolean (WARDEN-847) — true iff headAgeMs is
   // a finite age older than STALE_HEAD_AGE_MS (7d, the shared constant at :257). Derived
-  // in buildFleetGitStatus(now) — the verbatim mirror of summarizeProjectGitState's
+  // in buildFleetGitStatus(now) — the verbatim mirror of the removed sidebar summarizer's
   // stalled test at :363 — so fleet/row agree on EXACTLY who is stalled (fleet/row
   // agreement rides on this shared 7d threshold, established WARDEN-682). The canonical
   // case: a clean, pushed, in-sync, routine-state, stash-free agent whose HEAD is >7d
@@ -1713,7 +625,7 @@ export interface FleetGitStatusResult {
   // axis (clean tree, no conflict, in sync, all pushed, but HEAD >7d old). This counts
   // stalled AGENTS (the direct mirror of dirtyCount/conflictCount/behindCount/
   // aheadCount — agent tallies, never a sum) and reuses the SAME STALE_HEAD_AGE_MS (7d)
-  // threshold the sidebar's summarizeProjectGitState uses (:257), so Fleet Health and
+  // threshold the sidebar's git section uses, so Fleet Health and
   // the sidebar agree on EXACTLY who is stalled (fleet/row agreement, WARDEN-682). An
   // error / loading agent is NOT stalled (counted in errorCount / absent), and an ok
   // agent whose headDate is missing/invalid/empty (a repo with no commits / non-git cwd
@@ -1772,7 +684,7 @@ export interface FleetGitStatusResult {
  *
  * `now` (defaulting to `Date.now()`) is the staleness reference: an ok agent is `stalled`
  * when its `headDate` parses to a finite ms older than `now - STALE_HEAD_AGE_MS`, derived
- * HERE (the verbatim mirror of summarizeProjectGitState:356-363) so the pure module owns
+ * HERE (the verbatim mirror of the removed sidebar summarizer (WARDEN-975)) so the pure module owns
  * the clock and tests pass a fixed `now`. The hook seam passes `Date.now()` at fan-out
  * time; the slice it builds carries the raw `headDate` + provisional headAgeMs/stalled,
  * which THIS fn enriches before storing into statusByKey (so the per-row chip always
@@ -1799,7 +711,7 @@ export function buildFleetGitStatus(outcomes: FleetGitStatusOutcome[], now: numb
       continue;
     }
     // WARDEN-847: derive THIS agent's HEAD-commit age + stalled flag against the threaded
-    // `now` — the verbatim mirror of summarizeProjectGitState:356-363 (Date.parse(headDate)
+    // `now` — the verbatim mirror of the removed sidebar summarizer (WARDEN-975) (Date.parse(headDate)
     // → now - headMs; stalled ⇔ headAgeMs > STALE_HEAD_AGE_MS). Done HERE (not at the fetch
     // seam) so the pure module owns the clock: the hook seam passes the raw headDate +
     // provisional headAgeMs/stalled, and THIS fn enriches the slice before storing it, so
@@ -1807,7 +719,7 @@ export function buildFleetGitStatus(outcomes: FleetGitStatusOutcome[], now: numb
     // missing/invalid/empty headDate (a repo with no commits / non-git cwd — the server
     // serves headDate:null there) ⇒ headAgeMs null ⇒ NOT stalled, the same null-is-quiet
     // discipline `clean` follows. STALE_HEAD_AGE_MS (7d, :257) is the SAME threshold the
-    // sidebar's summarizeProjectGitState uses, so Fleet Health and the sidebar agree on
+    // sidebar's git section uses, so Fleet Health and the sidebar agree on
     // EXACTLY who is stalled (fleet/row agreement, WARDEN-682).
     const headMs = typeof o.status.headDate === 'string' && o.status.headDate ? Date.parse(o.status.headDate) : NaN;
     const headAgeMs = Number.isFinite(headMs) ? now - headMs : null;
