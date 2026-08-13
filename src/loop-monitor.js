@@ -25,7 +25,11 @@
 //     heartbeat detects a stall, `attributeStall` reports the spans that OVERLAP
 //     the blocked window, longest overlap first. Cost per marked unit of work:
 //     one object, one clock read, one array slot. No I/O, nothing synchronous
-//     added to any request path.
+//     added to any request path. Alongside it, a per-label AGGREGATE of every
+//     measured synchronous call in the window (`summarizeSyncTotals`) catches
+//     the shape a ring cannot: a stall built from thousands of individually
+//     cheap calls, which would otherwise report zero sync spans and read as
+//     "synchronous I/O was not involved".
 //
 // The blocked window is [now - lagMs, now]: a synchronous block ends when the
 // loop is released, which is when the late tick runs, so the block occupied
@@ -33,14 +37,21 @@
 // open across that window — or a sync op measured inside it — is the lead.
 //
 // SYNC-I/O PROBE: `instrumentSyncIo` wraps the sync members of the `fs` and
-// `child_process` module objects with a timer, recording ONLY calls at or above
-// a floor (default 100ms) as spans. Every runtime sync site in src/ calls these
-// through the module object (`import fs from 'node:fs'` → `fs.statSync(...)`),
-// so one patch covers session, collection, companion, LLM, git and
-// claude-session reads without touching those call sites — this ticket MEASURES
-// the remaining synchronous sites (WARDEN-831 left them deliberately), it does
-// not convert them (WARDEN-832 is the decision of record for that, and the
-// conversion is explicitly out of scope here).
+// `child_process` module objects with a timer. Every call is aggregated; only
+// calls at or above a floor (default 100ms) additionally take a ring slot.
+// Every runtime sync site in src/ calls these through the module object
+// (`import fs from 'node:fs'` → `fs.statSync(...)`), so one patch covers
+// session, collection, companion, LLM, git and claude-session reads without
+// touching those call sites — INCLUDING the hand-rolled fd-level windowed reads
+// (openSync/readSync/closeSync), which the first cut of SYNC_FS_METHODS missed
+// and which are the largest synchronous reads in the codebase. The one shape
+// out of reach is a NAMED import (`import { spawnSync } from …`), which binds
+// the function before the patch; src/ssh.js:492 is the only such site and it is
+// a load-time win32 one-shot, not a runtime path.
+//
+// This ticket MEASURES the remaining synchronous sites (WARDEN-831 left them
+// deliberately); it does not convert them (WARDEN-832 is the decision of record
+// for that, and the conversion is explicitly out of scope here).
 //
 // This module is deliberately dependency-free (no src/ imports, no node
 // builtins beyond a default clock) so it is unit-testable in isolation and can
@@ -75,7 +86,21 @@ export const DEFAULT_STALL_RING_SIZE = 50;
 
 // A synchronous op faster than this is not a plausible multi-second culprit and
 // is not worth a ring slot. Keeps the attribution ring signal, not noise.
+//
+// It does NOT mean sub-floor calls go unmeasured: a stall assembled from
+// thousands of cheap calls (server.js's archive scan does a statSync per row;
+// observer.js does a readdirSync per project then a statSync per file) is a
+// dominant shape on a machine with real history, and it would report zero ring
+// spans. Every call — floor or no floor — is therefore folded into the per-label
+// aggregate below, which costs two integer adds and no allocation.
 export const DEFAULT_SYNC_FLOOR_MS = 100;
+
+// Per-label sync aggregate: bounded label count so a caller passing dynamic
+// labels can never grow the map, with the overflow folded into one bucket
+// rather than silently dropped (a dropped call is the false-negative this
+// aggregate exists to prevent).
+export const MAX_SYNC_AGGREGATE_LABELS = 32;
+export const SYNC_AGGREGATE_OVERFLOW_LABEL = '(other)';
 
 // Attribution is a lead list, not a log: the top few overlapping spans.
 export const MAX_ATTRIBUTION_ENTRIES = 6;
@@ -88,10 +113,38 @@ export const MAX_LABEL_LENGTH = 80;
 // The sync members worth timing. `fs` covers the reads/writes WARDEN-831 left
 // synchronous; `child_process` covers the spawnSync/execSync family (a remote
 // tmux probe is the multi-second shape this ticket is hunting).
+//
+// COVER THE WHOLE FAMILY, NOT JUST TODAY'S CALL SITES. A method missing from
+// this list is not a small gap — it is a FALSE NEGATIVE that reads as
+// exoneration: the enclosing request span still names the route, but the record
+// carries no `fs.*` entry, so the owner reads "synchronous I/O was not
+// involved" and the follow-up ticket is written away from the real cause. That
+// is strictly worse than a bare duration. The first cut of this list omitted the
+// file-DESCRIPTOR primitives, which is precisely where the largest synchronous
+// reads in src/ live (see the fd group below), so the list is now maintained as
+// the fs sync family rather than as a transcript of current callers — and
+// src/loop-monitor-coverage.test.js fails the build if a runtime call site in
+// src/ ever uses a sync member this list does not name.
 export const SYNC_FS_METHODS = Object.freeze([
+  // Whole-file and path-level operations.
   'readFileSync', 'writeFileSync', 'appendFileSync', 'readdirSync',
   'statSync', 'lstatSync', 'existsSync', 'realpathSync',
   'mkdirSync', 'renameSync', 'unlinkSync', 'rmSync', 'readlinkSync',
+  // FILE-DESCRIPTOR level — the windowed-read primitives. Every hand-rolled
+  // bounded read in src/ is built from these: claudeSessions.js's transcript
+  // window (one readSync of up to SESSION_VIEW_MAX_BYTES = 400KB, the single
+  // largest sync read in the codebase and on a per-REQUEST route), server.js's
+  // archive header scan (open/read/close per hit, in a loop) and observer.js's
+  // transcript tail. Their only path-level call is a `statSync` that is
+  // microseconds, so without these the whole path recorded nothing at all.
+  'openSync', 'closeSync', 'readSync', 'writeSync', 'readvSync', 'writevSync',
+  'fstatSync', 'ftruncateSync', 'truncateSync', 'fsyncSync', 'fdatasyncSync',
+  // Directory, temp and copy primitives — each a syscall that can block for
+  // seconds on a slow, full or network filesystem.
+  'mkdtempSync', 'opendirSync', 'rmdirSync', 'copyFileSync', 'cpSync',
+  'accessSync', 'globSync',
+  // Metadata mutations. Cheap on a healthy disk, unbounded on a sick one.
+  'chmodSync', 'chownSync', 'utimesSync', 'symlinkSync', 'linkSync',
 ]);
 export const SYNC_CHILD_PROCESS_METHODS = Object.freeze([
   'execSync', 'execFileSync', 'spawnSync',
@@ -146,7 +199,38 @@ export function attributeStall(spans, windowStart, windowEnd) {
       durationMs: Math.round(spanEnd - span.start),
     });
   }
+  // Longest overlap wins. TIEBREAK CAVEAT: an open span that started long before
+  // the window clamps to the FULL window overlap, so it ties with a real culprit
+  // and then wins on durationMs — sorting the long-lived span first. This is
+  // currently unreachable (server.js has no SSE or long-poll route, and
+  // `res.on('close')` closes every request span), and that is the invariant it
+  // depends on: the first streaming endpoint added would leave one span open for
+  // its whole lifetime and poison the head of every stall record. If one is
+  // added, either leave it unspanned or rank open spans below closed ones.
   out.sort((a, b) => b.overlapMs - a.overlapMs || b.durationMs - a.durationMs);
+  return out.slice(0, MAX_ATTRIBUTION_ENTRIES);
+}
+
+/**
+ * Collapse a window's per-label sync aggregate into a ranked lead list.
+ *
+ * This is the answer to the stall shape the ring alone cannot show: 4000 calls
+ * of 2ms each are individually below the floor and take no ring slot, but they
+ * are 8 seconds of blocked loop. "fs.statSync ×4012 = 7901ms" is stronger
+ * evidence than any single span — and unlike the ring it cannot report zero
+ * while synchronous I/O is the thing holding the loop.
+ *
+ * @param {Map<string, {calls: number, totalMs: number}>} agg
+ * @returns {Array<{label: string, calls: number, totalMs: number}>} costliest first
+ */
+export function summarizeSyncTotals(agg) {
+  if (!agg || typeof agg.entries !== 'function') return [];
+  const out = [];
+  for (const [label, e] of agg.entries()) {
+    if (!e || !e.calls) continue;
+    out.push({ label, calls: e.calls, totalMs: Math.round(e.totalMs) });
+  }
+  out.sort((a, b) => b.totalMs - a.totalMs || b.calls - a.calls);
   return out.slice(0, MAX_ATTRIBUTION_ENTRIES);
 }
 
@@ -155,7 +239,7 @@ export function attributeStall(spans, windowStart, windowEnd) {
  * (type / lagMs / source / timestamp) and adds the server runtime tag plus the
  * attribution block that makes a duration actionable.
  */
-export function buildStallRecord({ lagMs, attribution, timestamp, heartbeatMs, thresholdMs, uptimeMs, pid }) {
+export function buildStallRecord({ lagMs, attribution, syncTotals, timestamp, heartbeatMs, thresholdMs, uptimeMs, pid }) {
   const record = {
     type: STALL_TYPE,
     runtime: STALL_RUNTIME,
@@ -165,6 +249,11 @@ export function buildStallRecord({ lagMs, attribution, timestamp, heartbeatMs, t
     heartbeatMs,
     thresholdMs,
     attribution: Array.isArray(attribution) ? attribution : [],
+    // Every synchronous op measured in this window, aggregated per label —
+    // including the ones below the ring floor. Sits beside `attribution` because
+    // the two answer different questions: which work was open across the block,
+    // and how much synchronous time that work actually spent.
+    syncTotals: Array.isArray(syncTotals) ? syncTotals : [],
   };
   if (typeof uptimeMs === 'number') record.uptimeMs = Math.round(uptimeMs);
   if (typeof pid === 'number') record.pid = pid;
@@ -179,7 +268,13 @@ export function formatStallLine(record) {
   const who = (record.attribution || [])
     .map((a) => `${a.label} (${a.overlapMs}ms${a.open ? ', still open' : ''})`)
     .join(', ');
-  return `[warden:stall] server event loop blocked ${record.lagMs}ms — during: ${who || 'nothing instrumented was running'}`;
+  const line = `[warden:stall] server event loop blocked ${record.lagMs}ms — during: ${who || 'nothing instrumented was running'}`;
+  // The aggregate is what makes a death-by-a-thousand-statSync stall legible on
+  // the console line, so it belongs here and not only in the JSON.
+  const sync = (record.syncTotals || [])
+    .map((s) => `${s.label} ×${s.calls} ${s.totalMs}ms`)
+    .join(', ');
+  return sync ? `${line} | sync: ${sync}` : line;
 }
 
 // ---------------------------------------------------------------------------
@@ -226,10 +321,20 @@ export function createLoopMonitor(opts = {}) {
 
   const stallRing = [];
 
+  // Per-label sync aggregate for the CURRENT heartbeat window, replaced (not
+  // cleared in place) on every tick so a stall reports only the window it
+  // covers. `syncOpsSeen`/`syncMsSeen` are the cumulative counterparts: an
+  // owner reading `syncOpsRecorded: 0` must not conclude "no synchronous I/O"
+  // when the truth is "none of it individually crossed the ring floor".
+  let syncAgg = new Map();
+
   let timer = null;
   let lastTickAt = 0;
   let startedAtWall = 0;
-  const stats = { ticks: 0, stalls: 0, worstLagMs: 0, spansRecorded: 0, syncOpsRecorded: 0 };
+  const stats = {
+    ticks: 0, stalls: 0, worstLagMs: 0, spansRecorded: 0,
+    syncOpsRecorded: 0, syncOpsSeen: 0, syncMsSeen: 0,
+  };
 
   function pushSpan(span) {
     spanRing[spanCursor] = span;
@@ -253,15 +358,42 @@ export function createLoopMonitor(opts = {}) {
   }
 
   /**
-   * Record an already-completed synchronous op of known duration. Below the
-   * floor it is dropped (not a plausible multi-second culprit, not worth a ring
-   * slot). Placed in the ring as the span it actually was: [t-duration, t].
+   * Fold one measured synchronous call into the current window's aggregate.
+   * Two integer adds and no allocation on the hot path (the label's entry
+   * already exists after its first call in the window).
+   */
+  function bumpSyncAggregate(label, durationMs) {
+    let entry = syncAgg.get(label);
+    if (!entry) {
+      // Bounded label count: past the cap everything folds into one bucket, so
+      // the total stays truthful even if the labels stop being distinct.
+      const key = syncAgg.size >= MAX_SYNC_AGGREGATE_LABELS ? SYNC_AGGREGATE_OVERFLOW_LABEL : label;
+      entry = syncAgg.get(key);
+      if (!entry) { entry = { calls: 0, totalMs: 0 }; syncAgg.set(key, entry); }
+    }
+    entry.calls++;
+    entry.totalMs += durationMs;
+  }
+
+  /**
+   * Record a completed synchronous op of known duration.
+   *
+   * EVERY call is aggregated (that is what makes a stall built from thousands of
+   * cheap calls visible at all). Only calls at or above the floor additionally
+   * take a ring slot — below it, an op is not a plausible standalone
+   * multi-second culprit and is not worth the slot. Placed in the ring as the
+   * span it actually was: [t-duration, t].
    */
   function recordSyncOp(label, durationMs) {
+    if (typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs < 0) return null;
+    const name = normalizeLabel(label);
+    bumpSyncAggregate(name, durationMs);
+    stats.syncOpsSeen++;
+    stats.syncMsSeen += durationMs;
     if (!(durationMs >= syncFloorMs)) return null;
     const t = now();
     stats.syncOpsRecorded++;
-    return pushSpan({ label: normalizeLabel(label), start: t - durationMs, end: t });
+    return pushSpan({ label: name, start: t - durationMs, end: t });
   }
 
   /**
@@ -295,6 +427,11 @@ export function createLoopMonitor(opts = {}) {
     const prev = lastTickAt;
     lastTickAt = t;
     stats.ticks++;
+    // Take this window's sync aggregate and start a fresh one, on EVERY tick —
+    // so a stall reports the synchronous work of the window it actually covers,
+    // and a quiet window's counts never carry into a later stall.
+    const syncWindow = syncAgg;
+    syncAgg = new Map();
     // Only reachable while inert (tick() called without start(), or after stop()):
     // there is no baseline interval to judge, so nothing is reported.
     if (!prev) return null;
@@ -308,6 +445,7 @@ export function createLoopMonitor(opts = {}) {
     const record = buildStallRecord({
       lagMs,
       attribution: attributeStall(spanRing, windowStart, t),
+      syncTotals: summarizeSyncTotals(syncWindow),
       timestamp: wallClock(),
       heartbeatMs,
       thresholdMs,
@@ -341,6 +479,7 @@ export function createLoopMonitor(opts = {}) {
   function stop() {
     if (timer) { clearInterval(timer); timer = null; }
     lastTickAt = 0;
+    syncAgg = new Map();
   }
 
   return {
@@ -349,9 +488,11 @@ export function createLoopMonitor(opts = {}) {
     get started() { return timer != null; },
     config: Object.freeze({ heartbeatMs, thresholdMs, syncFloorMs, spanRingSize, stallRingSize }),
     stalls() { return stallRing.slice(); },
-    stats() { return { ...stats, started: timer != null }; },
+    stats() { return { ...stats, syncMsSeen: Math.round(stats.syncMsSeen), started: timer != null }; },
     // Test seam: the raw ring (with holes) the attributor reads.
     _spans() { return spanRing.filter(Boolean); },
+    // Test seam: the current (not yet ticked) per-label sync aggregate.
+    _syncTotals() { return summarizeSyncTotals(syncAgg); },
   };
 }
 

@@ -9,10 +9,13 @@ import {
   buildStallRecord,
   formatStallLine,
   normalizeLabel,
+  summarizeSyncTotals,
   DEFAULT_HEARTBEAT_INTERVAL_MS,
   DEFAULT_STALL_THRESHOLD_MS,
   MAX_ATTRIBUTION_ENTRIES,
   MAX_LABEL_LENGTH,
+  MAX_SYNC_AGGREGATE_LABELS,
+  SYNC_AGGREGATE_OVERFLOW_LABEL,
   STALL_TYPE,
   STALL_SOURCE,
   STALL_RUNTIME,
@@ -326,12 +329,16 @@ describe('createLoopMonitor — silence (the false-positive direction)', () => {
     monitor.stop();
   });
 
-  it('drops sub-floor synchronous ops (the ring stays signal, not noise)', () => {
+  it('drops sub-floor synchronous ops from the RING (the ring stays signal, not noise)', () => {
     const { monitor } = makeMonitor({ syncFloorMs: 100 });
     assert.equal(monitor.recordSyncOp('fs.existsSync', 0.2), null);
     assert.equal(monitor.recordSyncOp('fs.existsSync', 99), null);
     assert.ok(monitor.recordSyncOp('fs.readFileSync', 100), 'at the floor is recorded');
     assert.equal(monitor.stats().syncOpsRecorded, 1);
+    // ...but it still SAW all three. `syncOpsRecorded: 0` must never be the only
+    // number an owner has, or "nothing crossed the floor" reads as "no sync I/O".
+    assert.equal(monitor.stats().syncOpsSeen, 3);
+    assert.equal(monitor.stats().syncMsSeen, 199);
   });
 
   it('a sink that throws cannot take the server down', () => {
@@ -342,6 +349,115 @@ describe('createLoopMonitor — silence (the false-positive direction)', () => {
     assert.doesNotThrow(() => monitor.tick());
     assert.equal(monitor.stats().stalls, 1, 'the stall is still counted and ringed');
     monitor.stop();
+  });
+});
+
+describe('sync aggregate — the stall built from many cheap calls', () => {
+  it('reports "N calls totalling Xms" for a stall no single op could explain', () => {
+    // THE SHAPE THIS EXISTS FOR: server.js's archive scan does a statSync per
+    // row and observer.js does a statSync per file, so on a machine with real
+    // history an 8-second block is thousands of 2ms calls. Every one of them is
+    // below the ring floor, so the ring shows zero sync spans and the record
+    // would read as "synchronous I/O was not involved" — the same false
+    // exoneration a missing method in SYNC_FS_METHODS produces.
+    const { monitor, clock, stalls } = makeMonitor({ syncFloorMs: 100 });
+    monitor.start();
+    clock.advance(1000);
+    monitor.tick();
+
+    const sweep = monitor.begin('sweep:attention');
+    for (let i = 0; i < 4000; i++) monitor.recordSyncOp('fs.statSync', 2);
+    monitor.recordSyncOp('fs.openSync', 3);
+    clock.advance(8000);
+    monitor.end(sweep);
+    monitor.tick();
+
+    assert.equal(stalls.length, 1);
+    const [record] = stalls;
+    assert.equal(record.attribution.length, 1, 'no sync op crossed the ring floor');
+    assert.deepEqual(record.attribution.map((a) => a.label), ['sweep:attention']);
+    // ...and yet the synchronous cost is fully accounted for.
+    assert.deepEqual(record.syncTotals, [
+      { label: 'fs.statSync', calls: 4000, totalMs: 8000 },
+      { label: 'fs.openSync', calls: 1, totalMs: 3 },
+    ]);
+    assert.equal(monitor.stats().syncOpsRecorded, 0, 'the ring is untouched — this is the aggregate half');
+    monitor.stop();
+  });
+
+  it('covers the window it reports on: a tick resets the aggregate', () => {
+    const { monitor, clock, stalls } = makeMonitor({ syncFloorMs: 100 });
+    monitor.start();
+    // Quiet window: real sync work, no stall. It must not be charged to a LATER
+    // stall, or every record inherits the noise of the seconds before it.
+    monitor.recordSyncOp('fs.readdirSync', 40);
+    clock.advance(1000);
+    monitor.tick();
+    assert.equal(stalls.length, 0);
+
+    monitor.recordSyncOp('fs.statSync', 12);
+    clock.advance(5000);
+    monitor.tick();
+
+    assert.deepEqual(stalls[0].syncTotals, [{ label: 'fs.statSync', calls: 1, totalMs: 12 }]);
+    monitor.stop();
+  });
+
+  it('emits an empty aggregate — not a fabricated one — when no sync op ran', () => {
+    const { monitor, clock, stalls } = makeMonitor();
+    monitor.start();
+    clock.advance(1000); monitor.tick();
+    clock.advance(5000); monitor.tick();
+    assert.deepEqual(stalls[0].syncTotals, [], 'a CPU-bound block must not name a file operation');
+    monitor.stop();
+  });
+
+  it('bounds the label count so a dynamic label cannot grow the map', () => {
+    const { monitor } = makeMonitor({ syncFloorMs: 100 });
+    for (let i = 0; i < MAX_SYNC_AGGREGATE_LABELS + 20; i++) monitor.recordSyncOp(`op-${i}`, 5);
+    const totals = monitor._syncTotals();
+    // The overflow is FOLDED, not dropped: the calls still add up.
+    const seen = totals.reduce((n, t) => n + t.calls, 0);
+    assert.ok(totals.some((t) => t.label === SYNC_AGGREGATE_OVERFLOW_LABEL), 'overflow bucket exists');
+    assert.ok(seen <= MAX_SYNC_AGGREGATE_LABELS + 20);
+    assert.equal(monitor.stats().syncOpsSeen, MAX_SYNC_AGGREGATE_LABELS + 20, 'every call is counted');
+  });
+
+  it('ignores a nonsense duration instead of poisoning the totals', () => {
+    const { monitor } = makeMonitor({ syncFloorMs: 0 });
+    assert.equal(monitor.recordSyncOp('fs.statSync', NaN), null);
+    assert.equal(monitor.recordSyncOp('fs.statSync', -5), null);
+    assert.equal(monitor.recordSyncOp('fs.statSync', '900'), null);
+    assert.deepEqual(monitor._syncTotals(), []);
+    assert.equal(monitor.stats().syncOpsSeen, 0);
+  });
+
+  it('summarizeSyncTotals ranks by total cost and caps the list', () => {
+    const agg = new Map([
+      ['fs.existsSync', { calls: 900, totalMs: 90 }],
+      ['fs.statSync', { calls: 4000, totalMs: 7901.4 }],
+      ['fs.readFileSync', { calls: 2, totalMs: 400 }],
+      ['never-called', { calls: 0, totalMs: 0 }],
+    ]);
+    assert.deepEqual(summarizeSyncTotals(agg), [
+      { label: 'fs.statSync', calls: 4000, totalMs: 7901 },
+      { label: 'fs.readFileSync', calls: 2, totalMs: 400 },
+      { label: 'fs.existsSync', calls: 900, totalMs: 90 },
+    ]);
+    assert.deepEqual(summarizeSyncTotals(null), []);
+    const many = new Map(Array.from({ length: 20 }, (_, i) => [`op-${i}`, { calls: 1, totalMs: i }]));
+    assert.equal(summarizeSyncTotals(many).length, MAX_ATTRIBUTION_ENTRIES);
+  });
+
+  it('puts the aggregate on the stderr line the owner actually reads', () => {
+    const line = formatStallLine({
+      lagMs: 7950,
+      attribution: [{ label: 'GET /api/claude-sessions', overlapMs: 7900, open: true }],
+      syncTotals: [{ label: 'fs.statSync', calls: 4000, totalMs: 7901 }],
+    });
+    assert.match(line, /sync: fs\.statSync ×4000 7901ms/);
+    // A record without an aggregate keeps the original one-line shape.
+    assert.equal(formatStallLine({ lagMs: 3000, attribution: [] }).includes('| sync:'), false);
   });
 });
 

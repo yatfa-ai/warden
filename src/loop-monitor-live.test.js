@@ -162,4 +162,51 @@ describe('live: the sync-I/O probe attributes a stall to the real blocking call'
     fs.readFileSync(bigFile);
     assert.equal(monitor._spans().length, spansBefore, 'restore() left no instrumentation behind');
   });
+
+  it('names the fd-level primitives (openSync/readSync/closeSync) a windowed read is built from', async () => {
+    // REGRESSION GUARD. The first cut of SYNC_FS_METHODS covered only path-level
+    // members, so the hand-rolled windowed reads — claudeSessions.js reading up
+    // to 400KB of transcript with openSync+readSync on a per-REQUEST route,
+    // server.js's archive header scan, observer.js's transcript tail — recorded
+    // NOTHING. Their one instrumented call was a microsecond `statSync`, so a
+    // stall on those paths produced an attribution with no `fs.*` entry and read
+    // as "synchronous I/O was not involved" on the ticket's own named leads.
+    // This exercises the exact call shape against the REAL fs module object.
+    const stalls = [];
+    const monitor = createLoopMonitor({
+      heartbeatMs: 100, thresholdMs: 200, syncFloorMs: 0,
+      onStall: (r) => stalls.push(r),
+    });
+    const restore = instrumentSyncIo(monitor, { fs });
+    monitor.start();
+    try {
+      const span = monitor.begin('GET /api/claude-sessions/transcript');
+      // The claudeSessions.js shape, verbatim: stat for size, then open, a
+      // bounded positional read, close.
+      const size = fs.statSync(bigFile).size;
+      const fd = fs.openSync(bigFile, 'r');
+      const buf = Buffer.alloc(400_000);
+      fs.readSync(fd, buf, 0, 400_000, Math.max(0, size - 400_000));
+      fs.closeSync(fd);
+      assert.equal(buf[0], 7, 'the instrumented positional read returns real bytes');
+      blockLoop(900);
+      monitor.end(span);
+      await sleep(250);
+
+      assert.ok(stalls.length >= 1, 'the blocked window must be reported');
+      const recorded = monitor._spans().map((s) => s.label);
+      for (const label of ['fs.openSync', 'fs.readSync', 'fs.closeSync']) {
+        assert.ok(recorded.includes(label), `${label} must be timed; ring holds ${JSON.stringify(recorded)}`);
+      }
+      // And the aggregate names them too, with real call counts — this is the
+      // half that survives when each individual call is under the ring floor.
+      const totals = stalls[0].syncTotals.map((s) => s.label);
+      for (const label of ['fs.openSync', 'fs.readSync', 'fs.closeSync']) {
+        assert.ok(totals.includes(label), `${label} missing from syncTotals ${JSON.stringify(totals)}`);
+      }
+    } finally {
+      monitor.stop();
+      restore();
+    }
+  });
 });

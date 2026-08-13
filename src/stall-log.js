@@ -31,8 +31,13 @@ const fsp = fs.promises;
 export const STALL_LOG_BASENAME = 'stalls.jsonl';
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
-// Hard cap on retained lines, so a pathological run (a machine stalling every
-// second for a day) cannot grow the file without bound between rotations.
+// Cap on retained lines, applied by pruneStallLog() — which runs ONCE AT BOOT,
+// not on append. So this bounds the file at each start, not continuously: a
+// long-running session on a persistently stalling machine can grow past it until
+// the next restart. That is deliberate — enforcing the cap on append would make
+// the append path O(n) in the file, on the very path that must never block — and
+// it is bounded in practice by the >=1s stall threshold, which rate-limits
+// writes to at most one line per heartbeat.
 const MAX_RETAINED_STALLS = 2000;
 
 // Resolved LAZILY (not at module load) so a test that sets HOME after importing

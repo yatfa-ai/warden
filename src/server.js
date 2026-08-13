@@ -317,9 +317,12 @@ function startLoopMonitor() {
   // inside. One patch covers every runtime sync site in src/ that calls through
   // the module object (`import fs from 'node:fs'` → `fs.statSync(…)`), which is
   // all of them — session, collection, companion, LLM, git and claude-session
-  // reads. This MEASURES the sites WARDEN-831 deliberately left synchronous; it
-  // does not convert them (out of scope, and the point is to stop guessing).
-  // Only calls at/above the monitor's floor (100ms) take a ring slot.
+  // reads, including the hand-rolled fd-level windowed reads
+  // (openSync/readSync/closeSync) that carry the largest synchronous payloads.
+  // This MEASURES the sites WARDEN-831 deliberately left synchronous; it does
+  // not convert them (out of scope, and the point is to stop guessing).
+  // Calls at/above the monitor's floor (100ms) take a ring slot; ALL calls are
+  // aggregated per label, so a stall made of many cheap calls is still visible.
   const requireCjs = createRequire(import.meta.url);
   instrumentSyncIo(loopMonitor, { fs, childProcess: requireCjs('node:child_process') });
   // Age out records older than 7 days, once, off the request path.
