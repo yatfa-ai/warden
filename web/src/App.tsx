@@ -46,6 +46,7 @@ import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { useConfigPersistence, type PersistedPrefSnapshot } from '@/lib/useConfigPersistence';
 import { resolvePollIntervalMs, WEB_POLL_DEFAULT_MS } from '@/lib/pollInterval';
 import { swapPanes } from '@/lib/paneGrid';
+import { reconcileMainOwnedPref } from '@/lib/mainOwnedPref';
 import { toast } from 'sonner';
 
 // WARDEN-436: the return banner may FIRST appear only within this window after the
@@ -747,32 +748,33 @@ function App() {
     refreshConfigPrefs,
   });
 
-  // Write-through setter for the main-owned "remember window bounds" flag: update
-  // the display mirror AND persist to main via IPC. A stable callback so the
-  // SettingsPage prop identity doesn't churn on every poll tick (matching the
-  // other stable setters passed down). No-op in a browser (persist call resolves
-  // without the bridge). WARDEN-263.
+  // Write-through setters for the three main-owned prefs: update the display
+  // mirror optimistically, persist to main via IPC, then RECONCILE the mirror
+  // with what main actually did. Main's set handlers return what happened, not
+  // what was asked (it refuses close-to-tray with no working tray, and re-reads
+  // the OS for launch-at-login), so a discarded return left the switch reading
+  // ON while the feature was OFF — see lib/mainOwnedPref.ts and WARDEN-973.
+  // In a browser the bridge is absent and lib/electron.ts echoes the passed
+  // value, so the refusal branch is unreachable there (no spurious toast); the
+  // switches are `disabled={!hasWindowBridge()}` besides. All three keep empty
+  // deps so the SettingsPage prop identity doesn't churn on every poll tick
+  // (matching the other stable setters passed down). WARDEN-263/278/330.
   const setRememberWindowBounds = useCallback((v: boolean) => {
-    setRememberWindowBoundsState(v);
-    void persistRememberWindowBounds(v);
+    void reconcileMainOwnedPref(v, persistRememberWindowBounds, setRememberWindowBoundsState, () => {
+      toast.error("Couldn't save that preference.");
+    });
   }, []);
 
-  // Mirror setter for launch-at-login: update the display state and write the OS
-  // login item through the IPC bridge. Stable identity for the same reason as
-  // setRememberWindowBounds. No-op in a browser (persist call resolves without
-  // the bridge). WARDEN-278.
   const setLaunchAtLogin = useCallback((v: boolean) => {
-    setLaunchAtLoginState(v);
-    void persistLaunchAtLogin(v);
+    void reconcileMainOwnedPref(v, persistLaunchAtLogin, setLaunchAtLoginState, () => {
+      toast.error("Couldn't set Launch at login — your OS didn't accept the change. On Linux this depends on your desktop environment.");
+    });
   }, []);
 
-  // Mirror setter for close-to-tray: update the display state and write the
-  // persisted flag (plus attach/detach the tray) through the IPC bridge. Stable
-  // identity for the same reason as setLaunchAtLogin. No-op in a browser.
-  // WARDEN-330.
   const setCloseToTray = useCallback((v: boolean) => {
-    setCloseToTrayState(v);
-    void persistCloseToTray(v);
+    void reconcileMainOwnedPref(v, persistCloseToTray, setCloseToTrayState, () => {
+      toast.error("Couldn't enable Close to tray — this desktop has no working system tray, so closing the window would leave Warden with no way to reopen it.");
+    });
   }, []);
 
   // Reset every UI PREF to its effective default value (the value loadUi()
