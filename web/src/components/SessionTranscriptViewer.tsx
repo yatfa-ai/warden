@@ -23,8 +23,7 @@ import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { EyeIcon, AlertCircleIcon, Loader2Icon, SearchIcon, ChevronUpIcon, ChevronDownIcon, XIcon } from 'lucide-react';
 import { ObserverMarkdown } from './ObserverMarkdown';
 import { cn } from '@/lib/utils';
-import { copyText } from '@/lib/clipboard';
-import { toast } from 'sonner';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTokens } from '@/lib/formatTokens';
 import { findTranscriptMatches, stepMatchIndex, activeMatchMessageIndex } from '@/lib/transcriptSearch';
@@ -574,27 +573,16 @@ function MessageBubble({
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <ContextMenuItem onSelect={() => handleCopy(message.text)}>Copy message</ContextMenuItem>
-        <ContextMenuItem onSelect={() => handleCopy(roleLabel)}>Copy role</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(message.text)}>Copy message</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(roleLabel)}>Copy role</ContextMenuItem>
         {/* Only offered when the message carries a timestamp — mirrors the header's
             `tsLabel &&` guard, so copy never targets a value that isn't shown. */}
         {tsLabel && (
-          <ContextMenuItem onSelect={() => handleCopy(tsLabel)}>Copy timestamp</ContextMenuItem>
+          <ContextMenuItem onSelect={() => copyWithToast(tsLabel)}>Copy timestamp</ContextMenuItem>
         )}
       </ContextMenuContent>
     </ContextMenu>
   );
-}
-
-// Copy through the shared Electron-safe helper, surfacing the boolean result via
-// toast — never bare navigator.clipboard, which rejects silently in the webview
-// (WARDEN-285). Module-level: it closes over no per-bubble state, so 500+ bubbles
-// share one instance instead of allocating a closure per render. Matches the
-// handleCopy in ConflictView / FileViewer / DiffViewer.
-async function handleCopy(text: string) {
-  const ok = await copyText(text);
-  if (ok) toast.success('Copied');
-  else toast.error('Copy failed');
 }
 
 // Token breakdown shown on hover of a turn's token chip (WARDEN-474). Reuses the

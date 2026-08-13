@@ -11,7 +11,6 @@
  *
  *  Extracted verbatim from SettingsPage (WARDEN-664); behavior is unchanged. */
 import { useState, useEffect } from 'react';
-import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
@@ -31,7 +30,7 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
-import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
 import {
   type WatchPattern,
   WATCH_PATTERN_NAME_MAX,
@@ -83,17 +82,11 @@ export function PatternRow({
   const regexInvalid = pattern.mode === 'regex' && exprDraft.trim().length > 0 && !isValidRegex(exprDraft);
 
   // Themed right-click menu (WARDEN-898): Copy name · Copy expression · Duplicate ·
-  // Delete. Mirrors the established copyText+toast pattern (DiffViewer/FileViewer/
-  // WorkspaceTabs) so the expression payload — which right-click used to fall through
-  // to the native webview menu for — is finally copyable. Right-click moves focus to
+  // Delete. Copy goes through the shared copyWithToast helper (lib/clipboardToast)
+  // so the expression payload — which right-click used to fall through to the
+  // native webview menu for — is finally copyable. Right-click moves focus to
   // the menu the same way clicking elsewhere does, so an in-flight name/expression
   // edit still commits on blur (commitName/commitExpr above).
-  const handleCopy = async (text: string) => {
-    const ok = await copyText(text);
-    if (ok) toast.success('Copied');
-    else toast.error('Copy failed');
-  };
-
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -162,8 +155,8 @@ export function PatternRow({
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <ContextMenuItem onSelect={() => handleCopy(pattern.name)}>Copy name</ContextMenuItem>
-        <ContextMenuItem onSelect={() => handleCopy(pattern.expression)}>Copy expression</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(pattern.name)}>Copy name</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(pattern.expression)}>Copy expression</ContextMenuItem>
         <ContextMenuItem onSelect={() => onDuplicate(pattern.id)}>Duplicate</ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem variant="destructive" onSelect={() => onDelete(pattern.id)}>Delete</ContextMenuItem>

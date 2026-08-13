@@ -1,12 +1,11 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { RotateCw } from 'lucide-react';
-import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { cn } from '@/lib/utils';
 import { displayName } from '@/lib/chatDisplay';
-import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
 import {
   fleetCommitSearchEligible,
   mergeFleetCommitsByEpoch,
@@ -246,16 +245,6 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
     setRefreshTick((t) => t + 1);
   };
 
-  // Copy via the Electron-safe helper + a sonner success/error toast — the same
-  // pattern WorkspaceSearchDialog / GlobalSearchDialog Copy items use. Never bare
-  // navigator.clipboard, which fails silently in Electron (WARDEN-68 Rule 3); the
-  // caller owns the toast per the copyText contract (lib/clipboard.ts).
-  const handleCopy = async (text: string) => {
-    const ok = await copyText(text);
-    if (ok) toast.success('Copied');
-    else toast.error('Copy failed');
-  };
-
   // The glance: slice the merged, epoch-sorted rows to the bound (top FLEET_RECENT_LIMIT
   // across the fleet). Slice AFTER the sort so the newest N survive regardless of how
   // many each agent contributed.
@@ -391,9 +380,9 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
                           sibling Copy slice. asChild only adds onContextMenu — left-click
                           still toggles, Enter·Space still expand. */}
                       <ContextMenuContent>
-                        <ContextMenuItem onSelect={() => handleCopy(row.commit.hash)}>Copy commit hash</ContextMenuItem>
-                        <ContextMenuItem onSelect={() => handleCopy(row.commit.subject)}>Copy commit subject</ContextMenuItem>
-                        <ContextMenuItem onSelect={() => handleCopy(name)}>Copy agent name</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => copyWithToast(row.commit.hash)}>Copy commit hash</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => copyWithToast(row.commit.subject)}>Copy commit subject</ContextMenuItem>
+                        <ContextMenuItem onSelect={() => copyWithToast(name)}>Copy agent name</ContextMenuItem>
                       </ContextMenuContent>
                     </ContextMenu>
                     {isExpanded && (

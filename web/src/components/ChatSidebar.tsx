@@ -25,7 +25,7 @@ import { summarizeBroadcast, formatBroadcastToast } from '@/lib/broadcast';
 import { formatKillToast, runKillFanout } from '@/lib/kill';
 import { formatKeySendToast, runKeySendFanout } from '@/lib/keysend';
 import { showFanoutToast } from '@/lib/fanoutToast';
-import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { DiffViewer } from './DiffViewer';
 import { ConflictView } from './ConflictView';
 import { FileViewer } from './FileViewer';
@@ -801,16 +801,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // summary so the two stay identical — expanding the summary reveals the exact
   // same rows (the WARDEN-178 colorblind-safe StatusDot, incl. offline=square,
   // + retry/inspect still works via enterHost).
-  // WARDEN-419: clipboard helper for the host-row context menu. Mirrors the
-  // handleCopy pattern shipped in CollectionsSection (WARDEN-396): the
-  // Electron-safe copyText() (Clipboard API + execCommand fallback) + a toast
-  // so the user sees the copy landed.
-  const handleCopy = async (text: string) => {
-    const ok = await copyText(text);
-    if (ok) toast.success('Copied');
-    else toast.error('Copy failed');
-  };
-
   const renderHost = (h: string) => {
     const n = chats.filter((c) => c.host === h && c.active).length;
     const hostStatus = hostStatuses[h];
@@ -850,9 +840,9 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
           <ContextMenuItem onSelect={() => enterHost(h)}>Open</ContextMenuItem>
           <ContextMenuItem onSelect={() => onDiscoverHost(h)}>Discover</ContextMenuItem>
           <ContextMenuSeparator />
-          <ContextMenuItem onSelect={() => handleCopy(hostLabelFor(h, hostLabels) || LABEL[h] || h)}>Copy host name</ContextMenuItem>
+          <ContextMenuItem onSelect={() => copyWithToast(hostLabelFor(h, hostLabels) || LABEL[h] || h)}>Copy host name</ContextMenuItem>
           {!isLocal && (
-            <ContextMenuItem onSelect={() => handleCopy(`ssh ${h}`)}>Copy SSH address</ContextMenuItem>
+            <ContextMenuItem onSelect={() => copyWithToast(`ssh ${h}`)}>Copy SSH address</ContextMenuItem>
           )}
         </ContextMenuContent>
       </ContextMenu>
@@ -1171,9 +1161,9 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
                       Resume
                     </ContextMenuItem>
                     <ContextMenuSeparator />
-                    <ContextMenuItem onSelect={() => handleCopy(s.id)}>Copy session ID</ContextMenuItem>
-                    <ContextMenuItem onSelect={() => handleCopy(s.cwd)}>Copy working directory</ContextMenuItem>
-                    <ContextMenuItem onSelect={() => handleCopy(s.summary)}>Copy summary</ContextMenuItem>
+                    <ContextMenuItem onSelect={() => copyWithToast(s.id)}>Copy session ID</ContextMenuItem>
+                    <ContextMenuItem onSelect={() => copyWithToast(s.cwd)}>Copy working directory</ContextMenuItem>
+                    <ContextMenuItem onSelect={() => copyWithToast(s.summary)}>Copy summary</ContextMenuItem>
                   </ContextMenuContent>
                 </ContextMenu>
               );

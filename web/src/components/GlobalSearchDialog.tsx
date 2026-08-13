@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import { toast } from 'sonner';
 import {
   Dialog,
   DialogContent,
@@ -19,7 +18,7 @@ import {
 } from '@/components/ui/context-menu';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
-import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { Loader2Icon, SearchIcon } from 'lucide-react';
 
@@ -79,14 +78,6 @@ interface Props {
 // WorkspaceSearchDialog's SearchResultRow is — the kit has no Command/cmdk list
 // primitive to reach for instead.
 function GlobalSearchResultRow({ result, onOpen }: { result: PaneSearchResult; onOpen: (r: PaneSearchResult) => void }) {
-  // Copy via the Electron-safe helper + a sonner success/error toast — the same
-  // pattern WorkspaceSearchDialog's SearchResultRow uses for its copy items.
-  const handleCopy = async (text: string) => {
-    const ok = await copyText(text);
-    if (ok) toast.success('Copied');
-    else toast.error('Copy failed');
-  };
-
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -108,9 +99,9 @@ function GlobalSearchResultRow({ result, onOpen }: { result: PaneSearchResult; o
       <ContextMenuContent>
         <ContextMenuItem onSelect={() => onOpen(result)}>Open</ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuItem onSelect={() => handleCopy(result.text)}>Copy matched line</ContextMenuItem>
-        <ContextMenuItem onSelect={() => handleCopy(result.name)}>Copy pane name</ContextMenuItem>
-        <ContextMenuItem onSelect={() => handleCopy(result.host)}>Copy host</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(result.text)}>Copy matched line</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(result.name)}>Copy pane name</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(result.host)}>Copy host</ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
   );
@@ -125,11 +116,6 @@ function GlobalSearchResultRow({ result, onOpen }: { result: PaneSearchResult; o
 // dropped. Its own component (not inlined) for the same single-child/asChild
 // reason the pane row is.
 function GlobalSearchSessionRow({ result, onOpen, timestampFormat }: { result: SessionSearchResult; onOpen: (r: SessionSearchResult) => void; timestampFormat: TimestampFormat }) {
-  const handleCopy = async (text: string) => {
-    const ok = await copyText(text);
-    if (ok) toast.success('Copied');
-    else toast.error('Copy failed');
-  };
   // Mirror OpenChatBrowserPage's history-row label fallback: summary, else
   // "cwd · host", else a generic "session" so a row is never blank.
   const label = result.summary || result.cwd || 'session';
@@ -155,8 +141,8 @@ function GlobalSearchSessionRow({ result, onOpen, timestampFormat }: { result: S
       <ContextMenuContent>
         <ContextMenuItem onSelect={() => onOpen(result)}>Open transcript</ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuItem onSelect={() => handleCopy(result.snippet)}>Copy snippet</ContextMenuItem>
-        <ContextMenuItem onSelect={() => handleCopy(result.host)}>Copy host</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(result.snippet)}>Copy snippet</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(result.host)}>Copy host</ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
   );

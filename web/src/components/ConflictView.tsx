@@ -34,9 +34,8 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { Loader2Icon, FileIcon, AlertCircleIcon, GitBranch } from 'lucide-react';
-import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { basename } from '@/lib/chatDisplay';
-import { toast } from 'sonner';
 
 interface ConflictViewProps {
   chatId: string;
@@ -102,15 +101,6 @@ export function ConflictView({ chatId, filePath, open, onOpenChange }: ConflictV
   const bothEmpty = !loading && !error && ours === null && theirs === null;
   const ready = !loading && !error && !bothEmpty && (ours !== null || theirs !== null);
 
-  // Copy text to the clipboard through the shared Electron-safe helper, surfacing
-  // the boolean result via toast — never bare navigator.clipboard, which rejects
-  // silently in Electron (WARDEN-285). Matches FileViewer / DiffViewer.
-  const handleCopy = async (text: string) => {
-    const ok = await copyText(text);
-    if (ok) toast.success('Copied');
-    else toast.error('Copy failed');
-  };
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <ContextMenu>
@@ -171,16 +161,16 @@ export function ConflictView({ chatId, filePath, open, onOpenChange }: ConflictV
           {/* Copies the FULL path regardless of the header's truncation
               (ConflictView.tsx span.truncate at the title) — the most natural
               "copy path" target. Always enabled; a conflict always has a path. */}
-          <ContextMenuItem onSelect={() => handleCopy(filePath)}>Copy file path</ContextMenuItem>
+          <ContextMenuItem onSelect={() => copyWithToast(filePath)}>Copy file path</ContextMenuItem>
           {/* Mirrors the "Copy filename" vocabulary of the DiffViewer / FileViewer siblings. */}
-          <ContextMenuItem onSelect={() => handleCopy(basename(filePath))}>Copy filename</ContextMenuItem>
+          <ContextMenuItem onSelect={() => copyWithToast(basename(filePath))}>Copy filename</ContextMenuItem>
           {/* Copies the `ours` (HEAD / stage blob `:2:`) content. Disabled when that
               side is null (modify/delete or add/add where one side lacks a version) —
               mirroring the visible "absent" pane, so copy never silently copies
               nothing. Faithful mirror of DiffViewer's `diff === null` guard. */}
           <ContextMenuItem
             disabled={ours === null}
-            onSelect={() => { if (ours !== null) handleCopy(ours); }}
+            onSelect={() => { if (ours !== null) copyWithToast(ours); }}
           >
             Copy "ours"
           </ContextMenuItem>
@@ -188,7 +178,7 @@ export function ConflictView({ chatId, filePath, open, onOpenChange }: ConflictV
               guard as ours. */}
           <ContextMenuItem
             disabled={theirs === null}
-            onSelect={() => { if (theirs !== null) handleCopy(theirs); }}
+            onSelect={() => { if (theirs !== null) copyWithToast(theirs); }}
           >
             Copy "theirs"
           </ContextMenuItem>

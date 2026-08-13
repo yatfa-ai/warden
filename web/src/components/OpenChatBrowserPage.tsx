@@ -11,7 +11,6 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { ArrowLeft, EyeIcon } from 'lucide-react';
-import { toast } from 'sonner';
 import { SessionTranscriptViewer } from './SessionTranscriptViewer';
 import { StatusDot } from '@/components/StatusDot';
 import type { Chat } from '@/lib/types';
@@ -21,7 +20,7 @@ import { THIS_MACHINE, basename, displayName, hostTagOf, hostLabelFor } from '@/
 import { useHostLabels } from '@/lib/hostLabels';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTokens } from '@/lib/formatTokens';
-import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { budgetProgress, budgetOverPercent, type BudgetState } from '@/lib/tokenBudget';
 import type { ClaudeSession, SessionSearchResult, TokenUsage } from './ChatSidebar';
 
@@ -66,16 +65,6 @@ interface DiscoverItem {
 }
 
 function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFormat, showHostTags, isBudgetOffender }: { it: DiscoverItem; resumingId: string | null; onOpen: () => void; onResume: () => void; onView: () => void; timestampFormat: TimestampFormat; showHostTags?: boolean; isBudgetOffender?: boolean; }) {
-  // Copy via the Electron-safe helper + a sonner success/error toast — the same
-  // handleCopy the GlobalSearchDialog rows (GlobalSearchResultRow /
-  // GlobalSearchSessionRow) use for their right-click Copy items. copyText has a
-  // textarea+execCommand fallback (never call navigator.clipboard directly).
-  const handleCopy = async (text: string) => {
-    const ok = await copyText(text);
-    if (ok) toast.success('Copied');
-    else toast.error('Copy failed');
-  };
-
   if (it.kind === 'live') {
     return (
       <ContextMenu>
@@ -91,9 +80,9 @@ function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFo
         <ContextMenuContent>
           <ContextMenuItem onSelect={onOpen}>Open</ContextMenuItem>
           <ContextMenuSeparator />
-          <ContextMenuItem onSelect={() => handleCopy(it.label)}>Copy summary</ContextMenuItem>
-          <ContextMenuItem onSelect={() => handleCopy(it.hostTag)}>Copy host</ContextMenuItem>
-          <ContextMenuItem onSelect={() => handleCopy(it.openId ?? '')}>Copy session id</ContextMenuItem>
+          <ContextMenuItem onSelect={() => copyWithToast(it.label)}>Copy summary</ContextMenuItem>
+          <ContextMenuItem onSelect={() => copyWithToast(it.hostTag)}>Copy host</ContextMenuItem>
+          <ContextMenuItem onSelect={() => copyWithToast(it.openId ?? '')}>Copy session id</ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
     );
@@ -136,11 +125,11 @@ function DiscoverItemRow({ it, resumingId, onOpen, onResume, onView, timestampFo
         <ContextMenuItem onSelect={onView}>View transcript</ContextMenuItem>
         <ContextMenuItem onSelect={onResume} disabled={isLoading}>Resume</ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuItem onSelect={() => handleCopy(it.label)}>Copy summary</ContextMenuItem>
-        <ContextMenuItem onSelect={() => handleCopy(it.resume?.cwd ?? '')}>Copy cwd</ContextMenuItem>
-        <ContextMenuItem onSelect={() => handleCopy(it.resume?.host ?? '')}>Copy host</ContextMenuItem>
-        <ContextMenuItem onSelect={() => handleCopy(it.resume?.id ?? '')}>Copy session id</ContextMenuItem>
-        {it.snippet ? <ContextMenuItem onSelect={() => handleCopy(it.snippet ?? '')}>Copy snippet</ContextMenuItem> : null}
+        <ContextMenuItem onSelect={() => copyWithToast(it.label)}>Copy summary</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(it.resume?.cwd ?? '')}>Copy cwd</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(it.resume?.host ?? '')}>Copy host</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(it.resume?.id ?? '')}>Copy session id</ContextMenuItem>
+        {it.snippet ? <ContextMenuItem onSelect={() => copyWithToast(it.snippet ?? '')}>Copy snippet</ContextMenuItem> : null}
       </ContextMenuContent>
     </ContextMenu>
   );

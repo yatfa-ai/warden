@@ -30,7 +30,7 @@ import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem } from '@/components/ui/context-menu';
-import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { KillDialog } from './KillDialog';
 import { KeySendDialog } from './KeySendDialog';
@@ -766,14 +766,6 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
     const id = agentIdOf(agent);
     const isSelected = selectedIds.has(id);
     const selectionActive = selectedIds.size > 0;
-    // Copy + toast — the canonical FileViewer shape. `copyText` (clipboard.ts)
-    // is Electron-safe and returns a boolean so a failure toasts instead of
-    // dying silently (bare navigator.clipboard rejects in non-secure contexts).
-    const copyAndToast = async (text: string) => {
-      const ok = await copyText(text);
-      if (ok) toast.success('Copied');
-      else toast.error('Copy failed');
-    };
     return (
     <ContextMenu key={agent.id}>
       <ContextMenuTrigger asChild>
@@ -906,12 +898,12 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
             menu is the ergonomic way to copy them. Host copies the RAW SSH /
             docker-exec identifier (agent.host) — what a human pastes into a
             command — not the display label. */}
-        <ContextMenuItem onSelect={() => copyAndToast(agent.name || agent.key || agent.id)}>Copy agent name</ContextMenuItem>
-        <ContextMenuItem onSelect={() => copyAndToast(agent.host)}>Copy host</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(agent.name || agent.key || agent.id)}>Copy agent name</ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyWithToast(agent.host)}>Copy host</ContextMenuItem>
         {/* Role appears only for yatfa agents that carry one — mirrors the row's
             `agent.isAgent && agent.role` badge; manual/tmux chats show no role. */}
         {agent.isAgent && agent.role && (
-          <ContextMenuItem onSelect={() => copyAndToast(agent.role!)}>Copy role</ContextMenuItem>
+          <ContextMenuItem onSelect={() => copyWithToast(agent.role!)}>Copy role</ContextMenuItem>
         )}
       </ContextMenuContent>
     </ContextMenu>

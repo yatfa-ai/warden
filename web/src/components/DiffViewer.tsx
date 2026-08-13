@@ -17,9 +17,8 @@ import {
 } from '@/components/ui/context-menu';
 import { Loader2Icon, FileIcon, GitCompare, AlertCircleIcon, ChevronUp, ChevronDown } from 'lucide-react';
 import { classifyDiffLine, DIFF_LINE_CLASS, collectChangeRegions } from '@/lib/diff';
-import { copyText } from '@/lib/clipboard';
+import { copyWithToast } from '@/lib/clipboardToast';
 import { basename } from '@/lib/chatDisplay';
-import { toast } from 'sonner';
 import { DiffStatChip } from '@/components/sidebar/DiffStatChip';
 import type { DiffStat } from '@/components/sidebar/types';
 
@@ -143,15 +142,6 @@ export function DiffViewer({ chatId, filePath, staged, range, count, diffstat, o
       : 'Uncommitted changes')
     : filePath;
 
-  // Copy text to the clipboard through the shared Electron-safe helper, surfacing
-  // the boolean result via toast — never bare navigator.clipboard, which rejects
-  // silently in Electron (WARDEN-285). Matches FileViewer / CollectionsSection.
-  const handleCopy = async (text: string) => {
-    const ok = await copyText(text);
-    if (ok) toast.success('Copied');
-    else toast.error('Copy failed');
-  };
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <ContextMenu>
@@ -272,15 +262,15 @@ export function DiffViewer({ chatId, filePath, staged, range, count, diffstat, o
               (DiffViewer.tsx span.truncate) — the most natural "copy path" target.
               Disabled in range mode (unpushed / incoming / worktree), where the modal
               title is a change-set label, not a single file path. */}
-          <ContextMenuItem disabled={isRange} onSelect={() => handleCopy(filePath)}>Copy file path</ContextMenuItem>
+          <ContextMenuItem disabled={isRange} onSelect={() => copyWithToast(filePath)}>Copy file path</ContextMenuItem>
           {/* Mirrors the "Copy name" vocabulary of the collection-card / workspace-tab siblings. */}
-          <ContextMenuItem disabled={isRange} onSelect={() => handleCopy(basename(filePath))}>Copy filename</ContextMenuItem>
+          <ContextMenuItem disabled={isRange} onSelect={() => copyWithToast(basename(filePath))}>Copy filename</ContextMenuItem>
           {/* Copies the net unified diff on screen. Disabled while diff === null
               (loading / error / before fetch) so it can never silently copy nothing —
               a faithful mirror of FileViewer's displayedContent === null guard. */}
           <ContextMenuItem
             disabled={diff === null}
-            onSelect={() => { if (diff !== null) handleCopy(diff); }}
+            onSelect={() => { if (diff !== null) copyWithToast(diff); }}
           >
             Copy diff
           </ContextMenuItem>
