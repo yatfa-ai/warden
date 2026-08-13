@@ -63,6 +63,19 @@ const {
   onTelemetryRuntimeStatus,
   clearTelemetryRuntimeDrift,
 } = await import(file);
+
+// --- Load the REAL mainOwnedPref.ts (the CONSUMER of the setters above) -----
+// Same transform harness: mainOwnedPref.ts is deliberately dependency-free (no
+// React, no `sonner` — the caller injects the state setter and the refusal
+// notifier), so it loads with no specifier rewriting either. Testing it HERE,
+// beside the seam it consumes, is the point: electron.ts proves the setters can
+// return a value differing from the request; this proves the renderer now
+// honors that instead of discarding it (WARDEN-973).
+const reconcileSrc = readFileSync(join(libDir, 'mainOwnedPref.ts'), 'utf8');
+const reconcileOut = await transformWithOxc(reconcileSrc, join(libDir, 'mainOwnedPref.ts'), {});
+const reconcileFile = join(tmpDir, 'mainOwnedPref.mjs');
+writeFileSync(reconcileFile, reconcileOut.code);
+const { reconcileMainOwnedPref } = await import(reconcileFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -408,6 +421,128 @@ test('returns a no-op unsubscribe (never throws into the caller) when onRuntimeS
   assert.doesNotThrow(() => { unsub = onTelemetryRuntimeStatus(() => {}); }, 'must not throw into the caller');
   assert.equal(typeof unsub, 'function');
   assert.doesNotThrow(() => unsub());
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nreconcileMainOwnedPref — the renderer HONORS a refusal instead of discarding it (WARDEN-973)');
+// The three main-owned switches used to run `void persist…(v)`: optimistic
+// setState, authoritative answer thrown away. When main REFUSED (no working
+// tray; an OS that won't honor launch-at-login) the switch kept reading ON
+// while the feature was OFF, then silently flipped back on next launch. These
+// cases drive the REAL reconciler against the REAL setters above, so they pin
+// the whole consumer chain, not a re-implementation of it.
+// ---------------------------------------------------------------------------
+
+// A fake React state setter: records every value it is handed, in order, so a
+// case can assert BOTH the final display value and that the optimistic write
+// happened first (the Switch must stay responsive).
+const mirror = () => {
+  const seen = [];
+  const set = (v) => seen.push(v);
+  set.seen = seen;
+  set.last = () => seen[seen.length - 1];
+  return set;
+};
+
+await testAsync('close-to-tray: requesting ON against a refusing bridge leaves the display OFF', async () => {
+  // The headline case — a Linux desktop with no working tray. main persists OFF
+  // and returns false for a requested true (electron/main.cjs createTray()).
+  windowBridge({ setCloseToTray: async () => false });
+  const display = mirror();
+  let refusedWith;
+  const resolved = await reconcileMainOwnedPref(true, setCloseToTray, display, (actual) => { refusedWith = actual; });
+  assert.equal(resolved, false, 'resolves to what main actually did, not what was asked');
+  assert.equal(display.last(), false, 'the Switch reverts to the truth (was: stuck reading ON)');
+  assert.deepEqual(display.seen, [true, false], 'optimistic ON first (responsive), then reverted to OFF');
+  assert.equal(refusedWith, false, 'the refusal notifier fired with the authoritative value');
+});
+
+await testAsync('close-to-tray: an ACCEPTED toggle causes no revert, no refusal and no extra render', async () => {
+  // The normal case must stay byte-identical to the pre-fix behavior.
+  windowBridge({ setCloseToTray: async (v) => v });
+  const display = mirror();
+  let refused = false;
+  const resolved = await reconcileMainOwnedPref(true, setCloseToTray, display, () => { refused = true; });
+  assert.equal(resolved, true);
+  assert.equal(refused, false, 'no toast when main honored the request');
+  assert.deepEqual(display.seen, [true], 'exactly ONE setState — no extra render churn');
+});
+
+await testAsync('launch-at-login: the OS reporting a different value wins over the request', async () => {
+  // main re-reads app.getLoginItemSettings() after writing, so a requested true
+  // resolves false on a platform that doesn't honor it ("limited on Linux").
+  let received;
+  windowBridge({ setLaunchAtLogin: async (v) => { received = v; return false; } });
+  const display = mirror();
+  let refused = false;
+  const resolved = await reconcileMainOwnedPref(true, setLaunchAtLogin, display, () => { refused = true; });
+  assert.equal(received, true, 'the request was still forwarded to the OS');
+  assert.equal(resolved, false, 'the OS-reported value wins');
+  assert.equal(display.last(), false, 'the Switch shows what the OS actually did');
+  assert.equal(refused, true, 'the user is told why, instead of failing silently');
+});
+
+await testAsync('launch-at-login: turning OFF against a bridge still reporting ON reverts to ON', async () => {
+  // The refusal is direction-agnostic — a stuck-ON login item must read ON.
+  windowBridge({ setLaunchAtLogin: async () => true });
+  const display = mirror();
+  let refused = false;
+  const resolved = await reconcileMainOwnedPref(false, setLaunchAtLogin, display, () => { refused = true; });
+  assert.equal(resolved, true);
+  assert.deepEqual(display.seen, [false, true], 'optimistic OFF, then reconciled back to the OS truth');
+  assert.equal(refused, true);
+});
+
+await testAsync('remember-bounds: the authoritative return is honored here too', async () => {
+  windowBridge({ setRememberWindowBounds: async () => true });
+  const display = mirror();
+  let refused = false;
+  await reconcileMainOwnedPref(false, setRememberWindowBounds, display, () => { refused = true; });
+  assert.equal(display.last(), true);
+  assert.equal(refused, true);
+});
+
+await testAsync('NO false positives in a browser: the bridge-absent echo never trips a refusal', async () => {
+  // lib/electron.ts echoes the passed value when the bridge is absent, so
+  // `actual !== requested` is unreachable outside Electron — no spurious toast,
+  // no spurious revert. (The Switches are `disabled={!hasWindowBridge()}`
+  // besides, but this pins the seam directly rather than relying on that.)
+  noBridge();
+  for (const [persist, requested] of [
+    [setCloseToTray, true], [setCloseToTray, false],
+    [setLaunchAtLogin, true], [setLaunchAtLogin, false],
+    [setRememberWindowBounds, true], [setRememberWindowBounds, false],
+  ]) {
+    const display = mirror();
+    let refused = false;
+    const resolved = await reconcileMainOwnedPref(requested, persist, display, () => { refused = true; });
+    assert.equal(resolved, requested, 'the browser echo resolves to the requested value');
+    assert.deepEqual(display.seen, [requested], 'no revert');
+    assert.equal(refused, false, 'no spurious refusal toast in a browser');
+  }
+});
+
+await testAsync('a REJECTING bridge keeps the optimistic value and invents no refusal', async () => {
+  // The accessors document "never rejects" and degrade to the passed value, so
+  // this is belt-and-braces: an unknown outcome must not be reported as a
+  // refusal the user never suffered.
+  const display = mirror();
+  let refused = false;
+  const resolved = await reconcileMainOwnedPref(true, async () => { throw new Error('bridge exploded'); }, display, () => { refused = true; });
+  assert.equal(resolved, true);
+  assert.deepEqual(display.seen, [true], 'the optimistic value is left untouched');
+  assert.equal(refused, false, 'no refusal claimed for an outcome we never observed');
+});
+
+await testAsync('the optimistic write lands BEFORE the persist call settles (the Switch stays responsive)', async () => {
+  let release;
+  const pending = new Promise((r) => { release = r; });
+  const display = mirror();
+  const done = reconcileMainOwnedPref(true, () => pending, display, () => {});
+  assert.deepEqual(display.seen, [true], 'display updated synchronously, without waiting on main');
+  release(false);
+  await done;
+  assert.deepEqual(display.seen, [true, false], 'and reconciled once main answered');
 });
 
 console.log(`\n✓ ELECTRON BRIDGE TESTS PASS (${passed})`);
