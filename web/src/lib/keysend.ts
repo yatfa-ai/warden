@@ -16,8 +16,9 @@
 // and batch-kill via summarizeFanout (the allSettled→summary reducer); only the
 // keysend-specific copy + the "key send failed" fallback live here.
 //
-// The IMPURE seam (runKeySendFanout) is the shared fan-out itself: Promise.allSettled
-// over /api/key per selected agent. It lives here (mirroring runKillFanout in
+// The IMPURE seam (runKeySendFanout) is the shared fan-out itself: one POST to
+// /api/key per selected agent, via the shared runFanout request loop (./fanout,
+// WARDEN-974). It lives here (mirroring runKillFanout in
 // kill.ts) because interrupt — like kill — is a TWO-surface operation (sidebar
 // WARDEN-492, Fleet Health WARDEN-492), so the fetch-and-reduce shape lives once
 // instead of being duplicated inline in each component. Unlike kill, interrupt is
@@ -26,11 +27,11 @@
 // `classifyPane` / health poll tick, not via an eager reconcile — hence no
 // `onSettled` hook.
 //
-// `import type` only below (besides summarizeFanout) — erased by OXC, so this
-// module loads under the same transpile-to-temp-`.mjs` + dynamic-`import()`
-// harness as broadcast.ts / kill.ts (see keysend.test.mjs).
+// `import type` only below (besides runFanout + summarizeFanout) — erased by
+// OXC, so this module loads under the same transpile-to-temp-`.mjs` +
+// dynamic-`import()` harness as broadcast.ts / kill.ts (see keysend.test.mjs).
 
-import { summarizeFanout, type FanoutToast, type FanoutToastVariant } from './fanout';
+import { runFanout, summarizeFanout, type FanoutToast, type FanoutToastVariant } from './fanout';
 
 /** Outcome of one agent's /api/key: either ok, or not-ok with a reason. */
 export interface KeySendOutcome { ok: boolean; error?: string }
@@ -152,18 +153,6 @@ export async function runKeySendFanout(
   key: string,
   nameOf: (id: string) => string,
 ): Promise<KeySendSummary> {
-  const results = await Promise.allSettled(
-    ids.map((id) =>
-      fetch('/api/key', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, key }),
-      }).then(async (r) =>
-        r.ok
-          ? { ok: true }
-          : { ok: false, error: (await r.json().catch(() => ({}))).error || `HTTP ${r.status}` },
-      ),
-    ),
-  );
+  const results = await runFanout('/api/key', ids, (id) => ({ id, key }));
   return summarizeKeySend(results, ids, nameOf);
 }

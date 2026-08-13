@@ -1,4 +1,8 @@
-// Tests for the shared pure fan-out reducer in src/lib/fanout.ts (WARDEN-964).
+// Tests for the shared fan-out helpers in src/lib/fanout.ts (WARDEN-964,
+// WARDEN-974) — both halves of every fleet-wide operation:
+//
+//   runFanout       — the impure POST-per-agent request loop (WARDEN-974)
+//   summarizeFanout — the pure reducer over its Promise.allSettled output
 //
 // summarizeFanout is the SINGLE reducer behind all three fleet-wide operations —
 // broadcast Send (summarizeBroadcast), batch Kill (summarizeKill) and batch
@@ -44,7 +48,7 @@ const { code } = await transformWithOxc(fanoutSrc, join(libDir, 'fanout.ts'), {}
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-fanout-test-'));
 const tmpFile = join(tmpDir, 'fanout.mjs');
 writeFileSync(tmpFile, code);
-const { summarizeFanout } = await import(tmpFile);
+const { summarizeFanout, runFanout } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -255,5 +259,184 @@ test('nameOf is not consulted at all when everything succeeds', () => {
   assert.equal(calls, 0);
   assert.equal(s.succeeded, 2);
 });
+
+// ---------------------------------------------------------------------------
+console.log('\nrunFanout — shared impure request loop (mocked fetch)');
+// ---------------------------------------------------------------------------
+// runFanout is the impure half of the fan-out (WARDEN-974): the POST-per-agent
+// loop that PRODUCES the allSettled array summarizeFanout reduces. All three
+// fleet actions (Send /api/send, Kill /api/kill, Interrupt /api/key) had a
+// byte-identical copy; it now lives here once, so its branches are pinned here
+// — url/payload threading, the ok/{ok:false}/`HTTP {status}` outcome mapping,
+// and (load-bearing) the fact that a NETWORK failure REJECTS rather than
+// fulfilling, because summarizeFanout reads those two through different
+// branches (reason.message vs value.error).
+//
+// Same globalThis.fetch mock the wrapper suites use (kill.test.mjs:196) —
+// records {url, method, headers, body} per call and drives each outcome. The
+// real fetch is restored after the block so nothing leaks to later tests.
+
+const realFetch = globalThis.fetch;
+// outcomes: {ok:true} | {ok:false,error,status} | {reject:'msg'} (a thrown
+// fetch) | {noJson:true} (a non-ok response whose body isn't JSON) | {delay:ms}.
+const mockFetch = (outcomes) => {
+  let i = 0;
+  const calls = [];
+  globalThis.fetch = async (url, opts) => {
+    calls.push({
+      url,
+      method: opts?.method,
+      headers: opts?.headers,
+      body: JSON.parse(opts?.body ?? '{}'),
+    });
+    const o = outcomes[i++] ?? { ok: true };
+    if (o.delay) await new Promise((r) => setTimeout(r, o.delay));
+    if (o.reject) throw new Error(o.reject);
+    return {
+      ok: !!o.ok,
+      status: o.ok ? 200 : (o.status ?? 500),
+      json: async () => {
+        if (o.noJson) throw new SyntaxError('Unexpected token < in JSON');
+        return { error: o.error };
+      },
+    };
+  };
+  return calls;
+};
+
+const testAsync = async (name, fn) => {
+  await fn();
+  passed += 1;
+  console.log('  ok -', name);
+};
+
+await testAsync('POSTs the given url once per id, in id order', async () => {
+  const calls = mockFetch([{ ok: true }, { ok: true }, { ok: true }]);
+  const results = await runFanout('/api/send', ['a', 'b', 'c'], (id) => ({ id }));
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls.map((c) => c.url), ['/api/send', '/api/send', '/api/send']);
+  assert.deepEqual(calls.map((c) => c.body.id), ['a', 'b', 'c']);
+  assert.equal(results.length, 3);
+});
+
+await testAsync('payloadOf builds each body from its id (multi-field payloads thread through)', async () => {
+  // The keysend/broadcast shape: a per-id field PLUS an operation-wide one. A
+  // dropped `key`/`text` would be a silent regression — the request would
+  // succeed and do the wrong thing — so assert the exact body.
+  const calls = mockFetch([{ ok: true }, { ok: true }]);
+  await runFanout('/api/key', ['a', 'b'], (id) => ({ id, key: 'C-c' }));
+  assert.deepEqual(calls.map((c) => c.body), [
+    { id: 'a', key: 'C-c' },
+    { id: 'b', key: 'C-c' },
+  ]);
+});
+
+await testAsync('payloadOf is called once per id, with that id', async () => {
+  mockFetch([{ ok: true }, { ok: true }]);
+  const seen = [];
+  await runFanout('/api/send', ['a', 'b'], (id) => { seen.push(id); return { id }; });
+  assert.deepEqual(seen, ['a', 'b']);
+});
+
+await testAsync('each request is a JSON POST (the shape all three routes require)', async () => {
+  const calls = mockFetch([{ ok: true }]);
+  await runFanout('/api/kill', ['a'], (id) => ({ id }));
+  assert.equal(calls[0].method, 'POST');
+  assert.deepEqual(calls[0].headers, { 'Content-Type': 'application/json' });
+});
+
+await testAsync('an ok response fulfills as {ok:true} (the success summarizeFanout counts)', async () => {
+  mockFetch([{ ok: true }]);
+  const [res] = await runFanout('/api/send', ['a'], (id) => ({ id }));
+  assert.equal(res.status, 'fulfilled');
+  assert.deepEqual(res.value, { ok: true });
+});
+
+await testAsync('a non-ok response fulfills as {ok:false} carrying the body error', async () => {
+  mockFetch([{ ok: false, error: 'session not found' }]);
+  const [res] = await runFanout('/api/kill', ['a'], (id) => ({ id }));
+  assert.equal(res.status, 'fulfilled');
+  assert.deepEqual(res.value, { ok: false, error: 'session not found' });
+});
+
+await testAsync('a non-ok response with no body error falls back to `HTTP {status}`', async () => {
+  mockFetch([{ ok: false, status: 503 }]);
+  const [res] = await runFanout('/api/kill', ['a'], (id) => ({ id }));
+  assert.deepEqual(res.value, { ok: false, error: 'HTTP 503' });
+});
+
+await testAsync('an EMPTY body error also falls back to `HTTP {status}` (never a blank reason)', async () => {
+  mockFetch([{ ok: false, status: 500, error: '' }]);
+  const [res] = await runFanout('/api/kill', ['a'], (id) => ({ id }));
+  assert.deepEqual(res.value, { ok: false, error: 'HTTP 500' });
+});
+
+await testAsync('a non-ok response whose body is NOT JSON still yields `HTTP {status}`', async () => {
+  // The `.catch(() => ({}))` branch: an HTML error page / proxy 502 makes
+  // r.json() throw. Without the catch the whole per-agent promise would reject
+  // with a JSON parse error, reporting "Unexpected token <" as the agent's
+  // failure reason instead of the status.
+  mockFetch([{ ok: false, status: 502, noJson: true }]);
+  const [res] = await runFanout('/api/send', ['a'], (id) => ({ id }));
+  assert.equal(res.status, 'fulfilled');
+  assert.deepEqual(res.value, { ok: false, error: 'HTTP 502' });
+});
+
+await testAsync('a network failure REJECTS — it does not fulfill as {ok:false}', async () => {
+  // Load-bearing (WARDEN-974 constraint): summarizeFanout reads a rejected
+  // result via reason.message and a fulfilled one via value.error. Rerouting
+  // this loop through api.ts's postJson would convert this rejection into a
+  // fulfilled {ok:false} and silently move every network failure onto the other
+  // branch, so pin the settle KIND, not just the resulting string.
+  mockFetch([{ reject: 'network down' }]);
+  const [res] = await runFanout('/api/send', ['a'], (id) => ({ id }));
+  assert.equal(res.status, 'rejected');
+  assert.equal(res.reason.message, 'network down');
+});
+
+await testAsync('partial failure does not abort siblings — every id is attempted', async () => {
+  const calls = mockFetch([{ reject: 'down' }, { ok: false, error: 'timeout' }, { ok: true }]);
+  const results = await runFanout('/api/kill', ['a', 'b', 'c'], (id) => ({ id }));
+  assert.equal(calls.length, 3, 'all three were attempted (allSettled, not all)');
+  assert.deepEqual(results.map((r) => r.status), ['rejected', 'fulfilled', 'fulfilled']);
+});
+
+await testAsync('results[i] pairs with ids[i] even when responses settle out of order', async () => {
+  // summarizeFanout attributes failures POSITIONALLY, so a reordered result
+  // array would blame the wrong agent. allSettled preserves input order
+  // regardless of completion order — pin that with a slow FIRST request.
+  mockFetch([{ ok: false, error: 'slow-a', delay: 20 }, { ok: false, error: 'fast-b' }]);
+  const results = await runFanout('/api/send', ['a', 'b'], (id) => ({ id }));
+  assert.deepEqual(results.map((r) => r.value.error), ['slow-a', 'fast-b']);
+});
+
+await testAsync('empty ids → no request at all, empty results (nothing selected)', async () => {
+  const calls = mockFetch([]);
+  const results = await runFanout('/api/send', [], (id) => ({ id }));
+  assert.equal(calls.length, 0);
+  assert.deepEqual(results, []);
+});
+
+await testAsync('never throws: total failure is encoded in the settled array', async () => {
+  mockFetch([{ reject: 'down' }, { reject: 'down' }]);
+  const results = await runFanout('/api/kill', ['a', 'b'], (id) => ({ id }));
+  assert.deepEqual(results.map((r) => r.status), ['rejected', 'rejected']);
+});
+
+await testAsync('runFanout output feeds summarizeFanout directly (the two halves compose)', async () => {
+  // The end-to-end seam this module exists to own: the loop's output IS the
+  // reducer's input, with no adapter in between.
+  mockFetch([{ ok: true }, { ok: false, error: 'session not found' }, { reject: 'network down' }]);
+  const results = await runFanout('/api/kill', ['a', 'b', 'c'], (id) => ({ id }));
+  const s = summarizeFanout(results, ['a', 'b', 'c'], nameOf, 'kill failed');
+  assert.equal(s.total, 3);
+  assert.equal(s.succeeded, 1);
+  assert.deepEqual(s.failed, [
+    { id: 'b', name: 'agent-b', error: 'session not found' },
+    { id: 'c', name: 'agent-c', error: 'network down' },
+  ]);
+});
+
+globalThis.fetch = realFetch;
 
 console.log(`\n✓ FANOUT TESTS PASS (${passed})`);

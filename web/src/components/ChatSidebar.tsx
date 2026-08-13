@@ -26,6 +26,7 @@ import { formatKillToast, runKillFanout } from '@/lib/kill';
 import { formatKeySendToast, runKeySendFanout } from '@/lib/keysend';
 import { showFanoutToast } from '@/lib/fanoutToast';
 import { copyWithToast } from '@/lib/clipboardToast';
+import { runFanout } from '@/lib/fanout';
 import { DiffViewer } from './DiffViewer';
 import { ConflictView } from './ConflictView';
 import { FileViewer } from './FileViewer';
@@ -576,25 +577,16 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
 
   // Fan the message out to every selected agent via the existing per-target
   // /api/send path (server.js:182 → sendPane → tmux send-keys), then summarize.
-  // Promise.allSettled (not Promise.all) so a partial failure — one host
-  // unreachable, one session dead — is reported per-agent and does NOT abort the
-  // other sends. Never throws: failure is encoded in the summary. Returns the
-  // summary so the BroadcastDialog can close on completion.
+  // The request loop itself is the shared runFanout (@/lib/fanout, WARDEN-974) —
+  // the same one batch Kill and batch Interrupt use — so the allSettled-over-fetch
+  // shape is no longer re-typed here. Promise.allSettled (not Promise.all) so a
+  // partial failure — one host unreachable, one session dead — is reported
+  // per-agent and does NOT abort the other sends. Never throws: failure is
+  // encoded in the summary. Returns the summary so the BroadcastDialog can close
+  // on completion.
   const handleBroadcastSend = async (text: string) => {
     const ids = Array.from(selectedIds);
-    const results = await Promise.allSettled(
-      ids.map((id) =>
-        fetch('/api/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id, text }),
-        }).then(async (r) =>
-          r.ok
-            ? { ok: true }
-            : { ok: false, error: (await r.json().catch(() => ({}))).error || `HTTP ${r.status}` },
-        ),
-      ),
-    );
+    const results = await runFanout('/api/send', ids, (id) => ({ id, text }));
     const nameOf = (id: string) => {
       const c = findChat(chats, id);
       return c ? displayName(c) : id;

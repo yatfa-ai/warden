@@ -7,18 +7,19 @@
 // via summarizeFanout (the allSettled→summary reducer); only the kill-specific
 // copy + the "kill failed" fallback live here.
 //
-// The IMPURE seam (runKillFanout) is the shared fan-out itself: Promise.allSettled
-// over /api/kill per selected agent. It used to live inline in ChatSidebar; it now
+// The IMPURE seam (runKillFanout) is the shared fan-out itself: one POST to
+// /api/kill per selected agent, via the shared runFanout request loop
+// (./fanout, WARDEN-974). It used to live inline in ChatSidebar; it now
 // lives here so every multi-select kill surface (sidebar, Fleet Health) shares ONE
 // copy of the fiddly fetch-and-reduce shape. Each surface passes its own
 // `onSettled` reconciliation (the two surfaces reconcile differently) and keeps
 // its view concerns (toast, selection clear) in the component.
 //
-// `import type` only below (besides summarizeFanout) — erased by OXC, so this
-// module loads under the same transpile-to-temp-`.mjs` + dynamic-`import()`
-// harness as broadcast.ts (see kill.test.mjs).
+// `import type` only below (besides runFanout + summarizeFanout) — erased by
+// OXC, so this module loads under the same transpile-to-temp-`.mjs` +
+// dynamic-`import()` harness as broadcast.ts (see kill.test.mjs).
 
-import { summarizeFanout, type FanoutToast, type FanoutToastVariant } from './fanout';
+import { runFanout, summarizeFanout, type FanoutToast, type FanoutToastVariant } from './fanout';
 
 /** Outcome of one agent's /api/kill: either ok, or not-ok with a reason. */
 export interface KillOutcome { ok: boolean; error?: string }
@@ -121,19 +122,7 @@ export async function runKillFanout(
   nameOf: (id: string) => string,
   onSettled?: () => void | Promise<void>,
 ): Promise<KillSummary> {
-  const results = await Promise.allSettled(
-    ids.map((id) =>
-      fetch('/api/kill', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id }),
-      }).then(async (r) =>
-        r.ok
-          ? { ok: true }
-          : { ok: false, error: (await r.json().catch(() => ({}))).error || `HTTP ${r.status}` },
-      ),
-    ),
-  );
+  const results = await runFanout('/api/kill', ids, (id) => ({ id }));
   const summary = summarizeKill(results, ids, nameOf);
   if (onSettled) await onSettled();
   return summary;
