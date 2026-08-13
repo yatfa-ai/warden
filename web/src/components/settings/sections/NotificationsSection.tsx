@@ -16,6 +16,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { cn } from '@/lib/utils';
 import { requestAlertPermission } from '@/lib/desktopAlerts';
 import { SettingsSection } from '../SettingsSection';
+import { type WebhookTestVerdict } from '@/lib/webhook/testAlert';
 import { type ConfigData, type SetConfig, type DesktopAlertPrefs } from '../types';
 
 export type NotificationsSectionProps = DesktopAlertPrefs & {
@@ -35,6 +36,12 @@ export type NotificationsSectionProps = DesktopAlertPrefs & {
   undoRemoveWebhookSecret: () => void;
   testingWebhook: boolean;
   sendTestAlert: () => void;
+  // WARDEN-970 — the last "Send test alert" outcome, rendered as a precise
+  // in-section verdict block (the same shape TelemetrySection uses). Transient
+  // by design: never persisted, and cleared when the URL/secret it describes is
+  // edited.
+  webhookTestVerdict: WebhookTestVerdict | null;
+  setWebhookTestVerdict: (v: WebhookTestVerdict | null) => void;
   hidden: boolean;
 };
 
@@ -50,6 +57,7 @@ export function NotificationsSection(props: NotificationsSectionProps) {
     webhookSecretSet, webhookSecretTail, webhookSecretInput, setWebhookSecretInput,
     webhookSecretPendingClear, removeWebhookSecret, undoRemoveWebhookSecret,
     testingWebhook, sendTestAlert,
+    webhookTestVerdict, setWebhookTestVerdict,
     hidden,
   } = props;
 
@@ -265,7 +273,11 @@ export function NotificationsSection(props: NotificationsSectionProps) {
           <Input
             id="webhookUrl"
             value={config.webhookUrl}
-            onChange={(e) => setConfig({ ...config, webhookUrl: e.target.value })}
+            onChange={(e) => {
+              setConfig({ ...config, webhookUrl: e.target.value });
+              // An edited URL invalidates any prior test result (WARDEN-970).
+              setWebhookTestVerdict(null);
+            }}
             placeholder="https://ntfy.sh/your-topic"
           />
           <p className="text-xs text-muted-foreground">
@@ -281,7 +293,11 @@ export function NotificationsSection(props: NotificationsSectionProps) {
               type="password"
               className="flex-1"
               value={webhookSecretInput}
-              onChange={(e) => setWebhookSecretInput(e.target.value)}
+              onChange={(e) => {
+                setWebhookSecretInput(e.target.value);
+                // An edited secret invalidates any prior test result (WARDEN-970).
+                setWebhookTestVerdict(null);
+              }}
               placeholder={
                 webhookSecretPendingClear
                   ? 'Will be removed on Save'
@@ -370,18 +386,43 @@ export function NotificationsSection(props: NotificationsSectionProps) {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={sendTestAlert}
-            disabled={testingWebhook || !config.webhookEnabled || !config.webhookUrl.trim()}
-          >
-            {testingWebhook ? 'Sending…' : 'Send test alert'}
-          </Button>
-          <span className="text-xs text-muted-foreground">
-            Verify your topic receives it. Fires only when enabled with a URL set.
-          </span>
+        {/* WARDEN-970 — config-time verification, mirroring the Telemetry
+            "Test connection" probe. No enable-gate: the backend already forces
+            webhookEnabled for this one sanctioned explicit-send path (the click
+            IS the human's opt-in to send), so a typo'd URL or a wrong secret can
+            be verified BEFORE enabling and saving. The outcome renders below as
+            a precise, persistent verdict naming the failure mode in plain
+            language — not a transient toast with a raw HTTP code. Never
+            persisted: it recomputes on every click and clears when the URL or
+            secret it describes is edited. */}
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={sendTestAlert}
+              disabled={testingWebhook || !config.webhookUrl.trim()}
+            >
+              {testingWebhook ? 'Sending…' : 'Send test alert'}
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              Verifies your topic receives it. Uses the URL and secret above — no Save required.
+            </span>
+          </div>
+          {webhookTestVerdict && (
+            <div
+              className={
+                webhookTestVerdict.tone === 'positive'
+                  ? 'rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-400'
+                  : 'rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400'
+              }
+              data-webhook-test-verdict={webhookTestVerdict.kind}
+              role={webhookTestVerdict.tone === 'positive' ? 'status' : 'alert'}
+            >
+              <p className="font-medium">{webhookTestVerdict.label}</p>
+              <p>{webhookTestVerdict.message}</p>
+            </div>
+          )}
         </div>
       </div>
     </SettingsSection>

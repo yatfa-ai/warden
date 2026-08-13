@@ -118,7 +118,7 @@ export function SettingsPage({
     observerAuthTokenPendingClear, removeObserverAuthToken, undoRemoveObserverAuthToken,
     webhookSecretSet, webhookSecretTail, webhookSecretInput, setWebhookSecretInput,
     webhookSecretPendingClear, removeWebhookSecret, undoRemoveWebhookSecret,
-    testingWebhook, sendTestAlert,
+    testingWebhook, sendTestAlert, webhookTestVerdict, setWebhookTestVerdict,
     telemetryAuthTokenSet, telemetryAuthTokenTail, telemetryAuthTokenInput, setTelemetryAuthTokenInput,
     telemetryAuthTokenPendingClear, removeTelemetryAuthToken, undoRemoveTelemetryAuthToken,
     telemetryTestLoading, telemetryTestVerdict, setTelemetryTestVerdict, sendTestConnection, telemetryRuntimeStatus,
@@ -346,6 +346,8 @@ export function SettingsPage({
                     undoRemoveWebhookSecret={undoRemoveWebhookSecret}
                     testingWebhook={testingWebhook}
                     sendTestAlert={sendTestAlert}
+                    webhookTestVerdict={webhookTestVerdict}
+                    setWebhookTestVerdict={setWebhookTestVerdict}
                     hidden={activeSection !== 'notifications'}
                   />
                 </>
