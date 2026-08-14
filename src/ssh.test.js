@@ -1,6 +1,6 @@
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert';
-import { isTransportFailure, runWithPool, detectClaude } from './ssh.js';
+import { isTransportFailure, runWithPool, detectClaude, whereWindows } from './ssh.js';
 
 /**
  * Tests for the SSH connection-pool self-healing layer (WARDEN-129):
@@ -336,5 +336,88 @@ describe('detectClaude (remote) — concurrent, priority-preserving (WARDEN-440)
     const result = await detectClaude('remote-host', { runWithPool });
 
     assert.strictEqual(result, '/usr/bin/claude', 'survived the rejecting zsh probe via the fallback bash/path probe');
+  });
+});
+
+/**
+ * WARDEN-922 — Claude resolution on local Windows must use the WINDOWS PATH.
+ *
+ * The old local probe was `spawn('claude', ['--version'])`, which on Windows can
+ * never succeed for an npm-installed claude: it lands as a `claude.cmd` shim, and
+ * CreateProcess (child_process.spawn without a shell, and ConPTY) cannot execute
+ * a .cmd at all — so a machine WITH claude installed reported "not found" and
+ * `claude --resume <id>` was unreachable. `where` resolves through PATHEXT and
+ * hands back the full path, which is also what ConPTY needs to launch it — but
+ * NOT simply `where`'s first line, which for an npm CLI is the extensionless
+ * POSIX shim. The launchable entry has to be chosen explicitly.
+ *
+ * The `deps.spawn` seam lets the Windows-only branch be driven from any runner.
+ */
+describe('whereWindows (Windows PATH resolution — WARDEN-922)', () => {
+  // Minimal child_process.spawn stand-in: emits `stdout`, then closes with `code`.
+  function fakeSpawn({ stdout = '', code = 0, error = null, throws = false } = {}) {
+    return mock.fn((_file, _args) => {
+      if (throws) throw new Error('spawn threw');
+      const outCbs = [];
+      const child = {
+        stdout: { on: (_e, cb) => outCbs.push(cb) },
+        on(event, cb) {
+          if (event === 'error' && error) setImmediate(() => cb(error));
+          if (event === 'close' && !error) {
+            setImmediate(() => {
+              for (const c of outCbs) c(stdout);
+              cb(code);
+            });
+          }
+          return child;
+        },
+      };
+      return child;
+    });
+  }
+
+  it('prefers the LAUNCHABLE hit over `where`\'s first line (the npm shim shape)', async () => {
+    // This is what `where claude` actually prints for the overwhelmingly common
+    // npm install: npm drops THREE files in its prefix dir — `claude`,
+    // `claude.cmd`, `claude.ps1` — and `where` lists the exact-name match first.
+    // (Same shape as the familiar `where npm` → `…\nodejs\npm`, `…\nodejs\npm.cmd`.)
+    // Line 1 is the extensionless POSIX shim, which CreateProcess/ConPTY cannot
+    // launch — taking it would leave the resume path relying on cmd.exe's implicit
+    // PATHEXT search rather than on buildLaunch's chosen `.cmd` → %ComSpec% branch.
+    const dir = 'C:\\Users\\u\\AppData\\Roaming\\npm\\';
+    const spawn = fakeSpawn({ stdout: `${dir}claude\r\n${dir}claude.cmd\r\n${dir}claude.ps1\r\n` });
+    const r = await whereWindows('claude', { spawn });
+    assert.strictEqual(r, `${dir}claude.cmd`);
+    assert.deepStrictEqual(spawn.mock.calls[0].arguments.slice(0, 2), ['where', ['claude']]);
+  });
+
+  it('takes the first launchable hit in `where` order when several are launchable', async () => {
+    const r = await whereWindows('claude', {
+      spawn: fakeSpawn({ stdout: 'C:\\Users\\u\\AppData\\Roaming\\npm\\claude.cmd\r\nC:\\other\\claude.exe\r\n' }),
+    });
+    assert.strictEqual(r, 'C:\\Users\\u\\AppData\\Roaming\\npm\\claude.cmd');
+  });
+
+  it('falls back to the first line when NOTHING `where` returned is launchable', async () => {
+    // Not a shape npm produces, but the fallback must still yield a path rather
+    // than null — a caller with a genuinely extensionless executable is better
+    // served by cmd's PATHEXT search than by "claude not found".
+    const r = await whereWindows('claude', { spawn: fakeSpawn({ stdout: 'C:\\tools\\claude\r\nC:\\tools\\claude.ps1\r\n' }) });
+    assert.strictEqual(r, 'C:\\tools\\claude');
+  });
+
+  it('returns null when `where` reports not found (non-zero exit)', async () => {
+    const r = await whereWindows('claude', { spawn: fakeSpawn({ stdout: '', code: 1 }) });
+    assert.strictEqual(r, null);
+  });
+
+  it('returns null (never throws) when the probe itself fails', async () => {
+    assert.strictEqual(await whereWindows('claude', { spawn: fakeSpawn({ error: new Error('ENOENT') }) }), null);
+    assert.strictEqual(await whereWindows('claude', { spawn: fakeSpawn({ throws: true }) }), null);
+  });
+
+  it('ignores blank lines rather than returning an empty string as a path', async () => {
+    const r = await whereWindows('claude', { spawn: fakeSpawn({ stdout: '\r\n\r\nC:\\tools\\claude.exe\r\n' }) });
+    assert.strictEqual(r, 'C:\\tools\\claude.exe');
   });
 });

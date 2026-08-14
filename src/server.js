@@ -17,7 +17,7 @@ import { applyCompanionToggle } from './companion.js';
 import * as collections from './collections.js';
 import { capturePanes, resolveChatWithRefresh, catalogChats, discoverHost, discoverAll } from './chats.js';
 import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream, probeSession } from './tmux.js';
-import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude, startConnectionPoolCleanup, validateHost } from './ssh.js';
+import { run, runLocalTmux, shellQuote, splitCmd, TMUX_BIN, detectClaude, startConnectionPoolCleanup, validateHost } from './ssh.js';
 import {
   parseJsonlHead, snippetFromLine,
   localClaudeSessions, remoteClaudeSessions,
@@ -168,13 +168,15 @@ async function resolve(id) {
   return { error: `no chat matches "${id}"` };
 }
 
-// Verify tmux is available (local exec or remote host). Returns null or an error string.
+// Verify the local transport / remote tmux is available. Returns null or an error
+// string. On local Windows the native ConPTY transport needs no install at all
+// (WARDEN-922), so `-V` always succeeds there and this is a pass-through.
 async function preflightTmux(host) {
   if (host === LOCAL) {
     // runLocalTmux is async (WARDEN-440) so this `tmux -V` probe never blocks the
     // event loop while serving the spawn/resume request that triggered preflight.
     const r = await runLocalTmux(['-V']);
-    return r.ok ? null : 'tmux not found on this machine. Install it (Linux/macOS: tmux; Windows: MSYS2 tmux).';
+    return r.ok ? null : 'tmux not found on this machine. Install it (Linux/macOS: tmux).';
   }
   const r = await run(host, 'command -v tmux >/dev/null 2>&1 && echo OK || echo MISSING', { timeout: 8000 });
   return r.stdout.includes('OK') ? null : `tmux is required on ${host}. install:  ssh ${host} 'sudo apt-get install -y tmux'  (or: brew install tmux)`;
@@ -1524,12 +1526,17 @@ app.use(createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, isBinaryBl
 
 
 // If cmd invokes bare `claude`, replace it with the full path found on the host —
-// claude is often in a .zshrc-only PATH that tmux's shell (bash) can't see.
+// claude is often in a .zshrc-only PATH that tmux's shell (bash) can't see, and on
+// Windows it is an npm `.cmd` shim that only a full path can launch (WARDEN-922).
 async function resolveClaudeCmd(host, cmd) {
   if (!/^claude(\s|$)/.test(cmd)) return { cmd };
   const claudePath = await detectClaude(host);
   if (!claudePath) return { error: `\`claude\` not found on ${host}. Install it or add its dir to PATH (e.g. ~/.local/bin).` };
-  return { cmd: cmd.replace(/^claude(\s|$)/, (_m, sp) => `${claudePath}${sp}`) };
+  // A resolved path containing a space (routine on Windows: C:\Program Files\…)
+  // must be quoted, or the argv split downstream would tear it into two args.
+  // Unspaced paths — every Unix case — are emitted verbatim as before.
+  const quoted = /\s/.test(claudePath) ? `"${claudePath}"` : claudePath;
+  return { cmd: cmd.replace(/^claude(\s|$)/, (_m, sp) => `${quoted}${sp}`) };
 }
 
 app.post('/api/rename', async (req, res) => {
@@ -1560,8 +1567,8 @@ async function buildAndSpawn({ host, session, name, cwd, cmd }) {
   // The session must actually be alive — `new-session -d` returns ok even when the
   // command inside fails to start, leaving no session.
   if (!(await hasSession(chat, cfg))) {
-    const bin = String(finalCmd || '').split(/\s+/)[0] || 'the command';
-    return { error: `\`${bin}\` failed to start on ${host} — tmux session died immediately. Is it installed and on PATH there?`, status: 500 };
+    const bin = splitCmd(finalCmd || '')[0] || 'the command';
+    return { error: `\`${bin}\` failed to start on ${host} — the session died immediately. Is it installed and on PATH there?`, status: 500 };
   }
   return { chat: { id: `${host}:${session}`, key: session, kind: 'tmux', host, container: null, session, project: 'manual', role: 'claude', name: chat.name, cwd, cmd: finalCmd, active: true } };
 }
@@ -1692,8 +1699,8 @@ app.post('/api/respawn', async (req, res) => {
   // `new-session -d` returns ok even when the inner command fails to start, so
   // verify the session actually came up — mirroring /api/spawn's check.
   if (!(await hasSession(spawnChat, cfg))) {
-    const bin = String(resolved.cmd).split(/\s+/)[0] || 'the command';
-    return res.status(500).json({ error: `\`${bin}\` failed to start on ${chat.host} — tmux session died immediately. Is it installed and on PATH there?` });
+    const bin = splitCmd(resolved.cmd)[0] || 'the command';
+    return res.status(500).json({ error: `\`${bin}\` failed to start on ${chat.host} — the session died immediately. Is it installed and on PATH there?` });
   }
   res.json({ ok: true });
 });
