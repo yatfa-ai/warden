@@ -1,7 +1,9 @@
 // Pure helpers for the multi-select broadcast-send feature (WARDEN-292).
 //
-// The fan-out itself (Promise.allSettled over /api/send per selected agent) lives
-// in the ChatSidebar component because it touches fetch + toast + selection state.
+// The request loop (one POST /api/send per selected agent) is the shared
+// runFanout in ./fanout (WARDEN-974) — the same loop batch Kill and batch
+// Interrupt use. ChatSidebar calls it and keeps only its view concerns (toast,
+// selection clear); the loop is no longer re-typed in the component.
 // These helpers are the TESTABLE pure seam: reducing the allSettled outcomes into
 // a per-agent summary, and shaping the result toast line. Extracted so the fiddly
 // sent/failed accounting and the failure-list copy have real tests instead of

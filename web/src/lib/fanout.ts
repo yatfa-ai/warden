@@ -1,18 +1,27 @@
-// Generic pure helper for a Promise.allSettled fan-out over a per-agent API
+// Generic helpers for a Promise.allSettled fan-out over a per-agent API
 // (WARDEN-328). The broadcast-send reducer (WARDEN-292) and the batch-kill
 // reducer share the EXACT same accounting — a result counts as a success only
 // when its promise fulfilled AND carried `{ok:true}`; anything else (a rejected
 // promise, or a fulfilled `{ok:false}` carrying an error) is a per-agent
 // failure — so the logic lives once here instead of being duplicated.
 //
+// Both halves of the fan-out live here: the PURE reducer (summarizeFanout) and
+// its IMPURE sibling (runFanout, the request loop that produces the results it
+// reduces). This module was originally described as "pure", and that word is why
+// the request half never landed here — each new fleet action (Send WARDEN-292,
+// Kill WARDEN-328, Interrupt WARDEN-492) re-typed the identical
+// allSettled-over-fetch block instead (WARDEN-974).
+//
 // Operation-specific concerns stay with the caller: the result-toast COPY
 // (formatBroadcastToast / formatKillToast) and the fallback string for a
 // fulfilled-{ok:false}-with-no-error ("send failed" vs "kill failed") are passed
 // in, because those are the only places broadcast and kill legitimately differ.
 //
-// `import type` only below — erased by OXC, so this module loads under the same
-// transpile-to-temp-`.mjs` + dynamic-`import()` harness as broadcast.ts (see
-// broadcast.test.mjs / kill.test.mjs).
+// NO runtime imports below — only erased `import type`s plus the global `fetch`.
+// Three test harnesses transpile this file standalone via OXC into a temp dir and
+// import it directly with NO dependency-specifier rewrite (fanout.test.mjs,
+// kill.test.mjs, keysend.test.mjs), so adding a runtime import here (e.g.
+// `postJson` from ./api) would break all three. Keep it import-free.
 
 /** Outcome of one agent's API call: either ok, or not-ok with a reason. */
 export interface FanoutOutcome { ok: boolean; error?: string }
@@ -84,4 +93,46 @@ export function summarizeFanout(
     }
   });
   return { total: results.length, succeeded, failed };
+}
+
+/**
+ * POST one request per agent and settle them all — the impure half of a fleet
+ * fan-out, whose output feeds straight into summarizeFanout.
+ *
+ * Every fleet action (Send /api/send, Kill /api/kill, Interrupt /api/key) had
+ * its own byte-identical copy of this loop; `url` and `payloadOf` were the ONLY
+ * divergences, so they are the only parameters (WARDEN-974).
+ *
+ * `Promise.allSettled` (NOT Promise.all) is load-bearing: a partial failure —
+ * one host unreachable, one session already dead — must be reported per agent
+ * and must NOT abort the sibling requests. Order is preserved, so `results[i]`
+ * is the outcome for `ids[i]`, which is the positional pairing summarizeFanout
+ * relies on for per-agent attribution.
+ *
+ * A non-ok response reads its body's `error` string, falling back to
+ * `HTTP {status}` when the body carries none (or isn't JSON at all — hence the
+ * `.catch`). A network-level failure REJECTS rather than fulfilling, which is
+ * deliberate: summarizeFanout reads a rejection via `reason.message` and a
+ * fulfilled failure via `value.error`. Routing this through api.ts's `postJson`
+ * would convert those rejections into fulfilled `{ok:false}`s and silently move
+ * every network failure onto the other reducer branch, so the raw `fetch` stays.
+ */
+export function runFanout(
+  url: string,
+  ids: string[],
+  payloadOf: (id: string) => unknown,
+): Promise<PromiseSettledResult<FanoutOutcome>[]> {
+  return Promise.allSettled(
+    ids.map((id) =>
+      fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payloadOf(id)),
+      }).then(async (r): Promise<FanoutOutcome> =>
+        r.ok
+          ? { ok: true }
+          : { ok: false, error: (await r.json().catch(() => ({}))).error || `HTTP ${r.status}` },
+      ),
+    ),
+  );
 }
