@@ -165,6 +165,21 @@ describe('host-aware chat catalog (host+session composite identity) — WARDEN-2
     seedCatalog([]);
   });
 
+  // Serializing /api/rename through mutateCatalog moved the "absent entry" decision
+  // INSIDE the mutation callback (it returns undefined to skip the write, and the
+  // handler 404s on that falsy result). Pin the 404 so that refactor can't silently
+  // become a 200 — and pin that a miss writes nothing (WARDEN-991).
+  it('/api/rename 404s for an unknown host+session and leaves the catalog untouched', async () => {
+    seedCatalog([{ kind: 'tmux', host: 'host-b', session: SEED_SESSION, name: 'remote', cwd: '/tmp', cmd: 'claude' }]);
+    const before = readCatalog();
+    // Right session, wrong host — the composite identity must miss.
+    const res = await fetch(`${baseUrl}/api/rename`, json({ host: '(local)', session: SEED_SESSION, name: 'new' }));
+    assert.strictEqual(res.status, 404);
+    assert.deepStrictEqual(await res.json(), { error: 'not a renameable chat' });
+    assert.deepStrictEqual(readCatalog(), before, 'a missed rename must not rewrite the catalog');
+    seedCatalog([]);
+  });
+
   it('(b) /api/kill of host A leaves host B same-named catalog entry intact', async () => {
     seedCatalog([
       { kind: 'tmux', host: '(local)', session: SEED_SESSION, name: 'local', cwd: '/tmp', cmd: 'claude' },
