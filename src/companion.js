@@ -28,7 +28,8 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { run as defaultRun, SSH_BASE_OPTS, SSH_BIN, shellQuote } from './ssh.js';
+// SSH_BASE_OPTS is no longer imported here: buildSshArgv applies it (WARDEN-989).
+import { run as defaultRun, SSH_BIN, buildSshArgv, shellQuote } from './ssh.js';
 import { buildChat, sortChats, parseActivityTimestamp } from './chatMeta.js';
 import { loopMonitor } from './loop-monitor.js';
 
@@ -400,10 +401,15 @@ export class CompanionChannel {
 // mid-write EPIPE race in WARDEN-983 is unreachable through the fakeDeps()
 // bootstrap harness, which stubs both legs out.
 export function spawnPersistentChannel(host, remotePath, cfg, spawnFn) {
-  // `--` ends ssh's option parsing so a host beginning with `-` is treated as a
-  // (bogus) hostname instead of an option. This spawns directly rather than via
-  // ssh.js run(), so WARDEN-969's builder-level fix does not reach it (WARDEN-979).
-  const args = [...SSH_BASE_OPTS, '-o', `ConnectTimeout=${cfg.connectTimeout ?? 10}`, '--', host, remotePath];
+  // argv (including the `--` separator before the host) comes from ssh.js's
+  // buildSshArgv, so this site is covered by the same invariant as every other
+  // ssh transport even though it spawns directly rather than via run()
+  // (WARDEN-969 could not reach it; WARDEN-979 patched it by hand; WARDEN-989
+  // routed it through the builder).
+  const args = buildSshArgv(host, {
+    opts: ['-o', `ConnectTimeout=${cfg.connectTimeout ?? 10}`],
+    command: remotePath,
+  });
   let child;
   try {
     child = spawnFn(SSH_BIN, args, { windowsHide: true });
@@ -457,8 +463,11 @@ function makeDeadTransport(err) {
 // Exported for the WARDEN-983 stdin-EPIPE guard — see spawnPersistentChannel.
 export function streamFileToHost(host, localBinaryPath, remotePath, cfg, spawnFn) {
   const cmd = buildUploadScript(remotePath);
-  // `--` before the host positional — see spawnPersistentChannel above (WARDEN-979).
-  const args = [...SSH_BASE_OPTS, '-o', `ConnectTimeout=${cfg.connectTimeout ?? 10}`, '--', host, `bash -lc ${shellQuote(cmd)}`];
+  // argv from ssh.js's buildSshArgv — see spawnPersistentChannel above.
+  const args = buildSshArgv(host, {
+    opts: ['-o', `ConnectTimeout=${cfg.connectTimeout ?? 10}`],
+    command: `bash -lc ${shellQuote(cmd)}`,
+  });
   return new Promise((resolve) => {
     let child;
     try {

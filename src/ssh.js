@@ -18,6 +18,37 @@ export const SSH_BASE_OPTS = [
 ];
 export const SSH_BIN = process.platform === 'win32' ? 'ssh.exe' : 'ssh';
 
+// Build ssh argv with the end-of-options separator structurally guaranteed.
+//
+// `--` ends ssh's option parsing: a host beginning with `-` is then treated as a
+// (bogus) hostname instead of an option. Without it, `-oProxyCommand=<cmd>`
+// arriving as a `host` makes ssh execute <cmd> on THIS machine. An argv array
+// stops the shell, not the callee's own option parser — so the separator has to
+// be terminated here, in the builder, where every caller is covered
+// (WARDEN-140 Trap 5). Hand-assembling it per call site leaked twice: WARDEN-969
+// fixed "all 5" ssh.js sites and still left the 2 companion.js sites exposed for
+// another ticket cycle (WARDEN-979). `--` is unconditional and always
+// immediately precedes the host, so a caller CANNOT forget it.
+//
+// Pure (just builds an array) so every transport is unit-testable without ssh —
+// same argument as buildDockerGitArgv in gitStatus.js.
+//
+// `baseOpts: false` is a NAMED decision, not an omission: sshControl and
+// ensureControlMaster genuinely do not carry SSH_BASE_OPTS today (no BatchMode,
+// no StrictHostKeyChecking), and passing `false` preserves that argv exactly
+// while making the divergence greppable instead of invisible. Whether that
+// divergence should exist at all is a separate, deliberately out-of-scope
+// question — changing it here would be a behavior change, not a refactor.
+export function buildSshArgv(host, { tty = false, baseOpts = true, opts = [], command } = {}) {
+  const args = [];
+  if (tty) args.push('-tt');
+  if (baseOpts) args.push(...SSH_BASE_OPTS);
+  args.push(...opts);
+  args.push('--', host);                       // the invariant, in exactly one place
+  if (command !== undefined) args.push(command);
+  return args;
+}
+
 // ---------------- Connection Pool ----------------
 // Persistent SSH connections to remote hosts. Reused across operations for
 // better performance (no repeated SSH handshakes) and reliability (fewer
@@ -48,9 +79,9 @@ const controlMasterPath = () => {
 // control diagnostics never spam the console.
 function sshControl(host, socketPath, sub, timeout = 5000) {
   return new Promise((resolve) => {
-    // `--` terminates ssh's option parsing so a `-`-leading host can never be
-    // read as an option (e.g. `-oProxyCommand=…`, which ssh runs LOCALLY).
-    const child = spawn(SSH_BIN, ['-O', sub, '-S', socketPath, '--', host], {
+    // baseOpts:false — this probe has never carried SSH_BASE_OPTS (see buildSshArgv).
+    const argv = buildSshArgv(host, { baseOpts: false, opts: ['-O', sub, '-S', socketPath] });
+    const child = spawn(SSH_BIN, argv, {
       windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
     });
     const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch { /* noop */ } }, timeout);
@@ -72,16 +103,20 @@ async function ensureControlMaster(host, cfg) {
     return { socketPath, existing: true };
   }
 
-  // Start new control master
-  const args = [
-    '-o', 'ControlMaster=yes',
-    '-o', 'ControlPath=' + socketPath,
-    '-o', 'ControlPersist=10m',  // Keep alive for 10 minutes after last use
-    '-o', `ConnectTimeout=${timeout}`,
-    '-N',  // No remote command
-    '--',  // end of options — a `-`-leading host is a hostname, never an option
-    host
-  ];
+  // Start new control master.
+  // baseOpts:false preserves this argv EXACTLY as it has always been — this is
+  // the one connection every pooled request multiplexes over, and it does not
+  // carry SSH_BASE_OPTS. Named rather than silent; see buildSshArgv.
+  const args = buildSshArgv(host, {
+    baseOpts: false,
+    opts: [
+      '-o', 'ControlMaster=yes',
+      '-o', 'ControlPath=' + socketPath,
+      '-o', 'ControlPersist=10m',  // Keep alive for 10 minutes after last use
+      '-o', `ConnectTimeout=${timeout}`,
+      '-N',  // No remote command
+    ],
+  });
 
   return new Promise((resolve, reject) => {
     const child = spawn(SSH_BIN, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -284,21 +319,17 @@ export function run(host, cmd, opts = {}, cfg = {}) {
   const connectTimeout = Math.min(20, Math.max(3, Math.ceil(timeout / 1000)));
   const remote = `bash -lc ${shellQuote(cmd)}`;
 
-  // Build args with optional ControlMaster for connection pooling
-  const args = [...SSH_BASE_OPTS, '-o', `ConnectTimeout=${connectTimeout}`];
-
-  // Add ControlPath if we have a pooled connection
+  // Build args with optional ControlMaster for connection pooling.
+  // The `--` separator before the host comes from buildSshArgv — see there.
   const socketPath = opts.socketPath;
-  if (socketPath) {
-    args.push('-o', 'ControlPath=' + socketPath);
-  }
-
-  // `--` ends ssh's option parsing: a host beginning with `-` is then treated as
-  // a (bogus) hostname instead of an option. Without it, `-oProxyCommand=<cmd>`
-  // arriving as a `host` makes ssh execute <cmd> on THIS machine. An argv array
-  // stops the shell, not the callee's own option parser — so terminate options
-  // here in the builder, where every caller is covered (WARDEN-140 Trap 5).
-  args.push('--', host, remote);
+  const args = buildSshArgv(host, {
+    opts: [
+      '-o', `ConnectTimeout=${connectTimeout}`,
+      // Add ControlPath if we have a pooled connection
+      ...(socketPath ? ['-o', 'ControlPath=' + socketPath] : []),
+    ],
+    command: remote,
+  });
 
   return new Promise((resolve) => {
     const child = spawnFn(SSH_BIN, args, { windowsHide: true });
@@ -454,7 +485,7 @@ export async function runWithPool(host, cmd, opts = {}, cfg = {}, deps = {}) {
 // Attach with a PTY, inheriting stdio. Used by the CLI for `tmux attach` (remote).
 export function attach(host, cmd, _opts = {}) {
   const remote = `bash -lc ${shellQuote(cmd)}`;
-  const args = ['-tt', ...SSH_BASE_OPTS, '--', host, remote];
+  const args = buildSshArgv(host, { tty: true, command: remote });
   const child = spawn(SSH_BIN, args, { stdio: 'inherit' });
   return new Promise((resolve) => child.on('exit', (c) => resolve(c ?? 0)));
 }
@@ -463,7 +494,7 @@ export function attach(host, cmd, _opts = {}) {
 // change → SIGWINCH → ssh → remote tmux. Returns a node-pty IPty.
 export function attachPty(host, cmd, { cols = 100, rows = 30 } = {}) {
   const remote = `export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8; bash -lc ${shellQuote(cmd)}`;
-  const args = ['-tt', ...SSH_BASE_OPTS, '--', host, remote];
+  const args = buildSshArgv(host, { tty: true, command: remote });
   return nodePty.spawn(SSH_BIN, args, { cols, rows, useConpty: true });
 }
 

@@ -1,6 +1,6 @@
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert';
-import { isTransportFailure, runWithPool, detectClaude } from './ssh.js';
+import { isTransportFailure, runWithPool, detectClaude, buildSshArgv, SSH_BASE_OPTS } from './ssh.js';
 
 /**
  * Tests for the SSH connection-pool self-healing layer (WARDEN-129):
@@ -336,5 +336,176 @@ describe('detectClaude (remote) — concurrent, priority-preserving (WARDEN-440)
     const result = await detectClaude('remote-host', { runWithPool });
 
     assert.strictEqual(result, '/usr/bin/claude', 'survived the rejecting zsh probe via the fallback bash/path probe');
+  });
+});
+
+/**
+ * buildSshArgv — the ONE place the ssh `--` option-terminator invariant lives
+ * (WARDEN-989).
+ *
+ * Before this builder, ssh argv was hand-assembled at 7 sites across ssh.js and
+ * companion.js, each re-typing `'--', host` from memory. That leaked in exactly
+ * the way a per-call-site invariant always does: WARDEN-969 shipped "`--` at all
+ * 5 ssh argv builders", and WARDEN-979 then had to ship the SAME commit subject
+ * again for the 2 companion.js sites the first fix could not reach.
+ *
+ * The existing locking specs (sshRun.test.js:148-209, companion.test.js:1477-1520)
+ * assert the separator through recording fake spawns at the PUBLIC seam — they
+ * are unchanged by this extraction and now transitively cover all 7 sites through
+ * one function. These tests assert the builder DIRECTLY: it is pure, so the whole
+ * invariant is checkable with no ssh process, no spawn seam and no stub
+ * archaeology (the same argument as buildDockerGitArgv in gitStatus.js).
+ */
+describe('buildSshArgv — the `--` separator invariant, in one place', () => {
+  // The attack shape: a "host" that is really a local-command-executing ssh
+  // option. After `--`, ssh must read it as a (bogus) hostname instead.
+  const EVIL_HOST = '-oProxyCommand=touch /tmp/pwned';
+
+  const sepIndex = (argv) => argv.indexOf('--');
+
+  // The property every case below must hold: `--` is present exactly once, and
+  // the host is the element IMMEDIATELY after it. Adjacency, not mere ordering —
+  // during WARDEN-969's review a mutation inserting `'--', '-o', 'X=1', host`
+  // went red only because the adjacency form was used.
+  const assertSeparatorGuardsHost = (argv, host) => {
+    const i = sepIndex(argv);
+    assert.notStrictEqual(i, -1, '`--` present');
+    assert.strictEqual(argv.filter((a) => a === '--').length, 1, '`--` appears exactly once');
+    assert.strictEqual(argv[i + 1], host, 'host is ADJACENT to `--`, not merely after it');
+  };
+
+  it('emits `--` immediately before the host for the bare default', () => {
+    const argv = buildSshArgv('example.com');
+
+    assert.deepStrictEqual(argv, [...SSH_BASE_OPTS, '--', 'example.com']);
+    assertSeparatorGuardsHost(argv, 'example.com');
+  });
+
+  it('a `-`-leading host lands AFTER the separator, so ssh cannot read it as an option', () => {
+    const argv = buildSshArgv(EVIL_HOST);
+
+    assertSeparatorGuardsHost(argv, EVIL_HOST);
+    assert.ok(sepIndex(argv) < argv.indexOf(EVIL_HOST), 'attack string sits after the terminator');
+  });
+
+  it('holds the invariant for every option combination', () => {
+    // The cartesian product of the flags, including the `-`-leading host, so no
+    // future flag combination can quietly drop the separator or unglue it from
+    // the host.
+    for (const host of ['example.com', EVIL_HOST]) {
+      for (const tty of [true, false]) {
+        for (const baseOpts of [true, false]) {
+          for (const opts of [[], ['-o', 'ConnectTimeout=10'], ['-N']]) {
+            for (const command of [undefined, 'bash -lc true']) {
+              const argv = buildSshArgv(host, { tty, baseOpts, opts, command });
+              assertSeparatorGuardsHost(argv, host);
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it('`tty` prepends `-tt` BEFORE the base opts', () => {
+    const argv = buildSshArgv('example.com', { tty: true });
+
+    assert.strictEqual(argv[0], '-tt', '-tt is the first element');
+    assert.deepStrictEqual(argv, ['-tt', ...SSH_BASE_OPTS, '--', 'example.com']);
+  });
+
+  it('omits `-tt` by default', () => {
+    assert.ok(!buildSshArgv('example.com').includes('-tt'));
+  });
+
+  it('`baseOpts: false` emits no SSH_BASE_OPTS at all', () => {
+    const argv = buildSshArgv('example.com', { baseOpts: false, opts: ['-N'] });
+
+    assert.deepStrictEqual(argv, ['-N', '--', 'example.com']);
+    for (const opt of SSH_BASE_OPTS) {
+      // BatchMode / StrictHostKeyChecking / ServerAlive* must be absent — this is
+      // what preserves sshControl's and ensureControlMaster's existing argv
+      // exactly. (That divergence is deliberately NOT fixed here; the builder
+      // only makes it a named, greppable decision instead of silent drift.)
+      assert.ok(!argv.includes(opt), `${opt} absent under baseOpts:false`);
+    }
+  });
+
+  it('`opts` land after the base opts and before the separator', () => {
+    const argv = buildSshArgv('example.com', { opts: ['-o', 'ConnectTimeout=10'] });
+
+    assert.deepStrictEqual(argv, [...SSH_BASE_OPTS, '-o', 'ConnectTimeout=10', '--', 'example.com']);
+  });
+
+  it('with no `command`, the host is the LAST element', () => {
+    const argv = buildSshArgv('example.com', { opts: ['-N'] });
+
+    assert.strictEqual(argv[argv.length - 1], 'example.com', 'nothing trails the host');
+  });
+
+  it('`command` is appended last, immediately after the host', () => {
+    const argv = buildSshArgv('example.com', { command: 'bash -lc true' });
+
+    assert.deepStrictEqual(argv.slice(-3), ['--', 'example.com', 'bash -lc true']);
+  });
+
+  it('an empty-string command is still appended (only `undefined` omits it)', () => {
+    // `command: ''` must not be swallowed by a truthiness check — an empty remote
+    // command is a different argv from no remote command at all (ssh opens a
+    // login shell for the latter).
+    assert.deepStrictEqual(buildSshArgv('h', { baseOpts: false, command: '' }), ['--', 'h', '']);
+    assert.deepStrictEqual(buildSshArgv('h', { baseOpts: false }), ['--', 'h']);
+  });
+
+  it('is pure: repeated calls do not accumulate, and SSH_BASE_OPTS is not mutated', () => {
+    const before = [...SSH_BASE_OPTS];
+    const first = buildSshArgv('example.com', { opts: ['-N'] });
+    const second = buildSshArgv('example.com', { opts: ['-N'] });
+
+    assert.deepStrictEqual(first, second, 'same input → same argv');
+    assert.notStrictEqual(first, second, 'a fresh array each call');
+    assert.deepStrictEqual(SSH_BASE_OPTS, before, 'the shared base-opts array is never spread-into');
+  });
+
+  it('reproduces each of the 7 call sites element-for-element', () => {
+    // Byte-identity guard for the WARDEN-989 extraction: if a future edit to the
+    // builder changes any site's argv, this goes red naming the site.
+    const H = EVIL_HOST;
+    const SOCK = '/tmp/ssh-ctrl-1-host';
+    const REMOTE = "bash -lc 'echo hi'";
+
+    assert.deepStrictEqual(
+      buildSshArgv(H, { baseOpts: false, opts: ['-O', 'check', '-S', SOCK] }),
+      ['-O', 'check', '-S', SOCK, '--', H],
+      'site 1/7 — sshControl');
+
+    assert.deepStrictEqual(
+      buildSshArgv(H, { baseOpts: false, opts: ['-o', 'ControlMaster=yes', '-o', 'ControlPath=' + SOCK, '-o', 'ControlPersist=10m', '-o', 'ConnectTimeout=10', '-N'] }),
+      ['-o', 'ControlMaster=yes', '-o', 'ControlPath=' + SOCK, '-o', 'ControlPersist=10m', '-o', 'ConnectTimeout=10', '-N', '--', H],
+      'site 2/7 — ensureControlMaster (still NO SSH_BASE_OPTS)');
+
+    assert.deepStrictEqual(
+      buildSshArgv(H, { opts: ['-o', 'ConnectTimeout=20', '-o', 'ControlPath=' + SOCK], command: REMOTE }),
+      [...SSH_BASE_OPTS, '-o', 'ConnectTimeout=20', '-o', 'ControlPath=' + SOCK, '--', H, REMOTE],
+      'site 3/7 — run(), pooled branch');
+
+    assert.deepStrictEqual(
+      buildSshArgv(H, { opts: ['-o', 'ConnectTimeout=20'], command: REMOTE }),
+      [...SSH_BASE_OPTS, '-o', 'ConnectTimeout=20', '--', H, REMOTE],
+      'site 3/7 — run(), unpooled branch');
+
+    assert.deepStrictEqual(
+      buildSshArgv(H, { tty: true, command: REMOTE }),
+      ['-tt', ...SSH_BASE_OPTS, '--', H, REMOTE],
+      'sites 4+5/7 — attach / attachPty (identical argv literal)');
+
+    assert.deepStrictEqual(
+      buildSshArgv(H, { opts: ['-o', 'ConnectTimeout=10'], command: '/tmp/companion' }),
+      [...SSH_BASE_OPTS, '-o', 'ConnectTimeout=10', '--', H, '/tmp/companion'],
+      'site 6/7 — spawnPersistentChannel');
+
+    assert.deepStrictEqual(
+      buildSshArgv(H, { opts: ['-o', 'ConnectTimeout=10'], command: REMOTE }),
+      [...SSH_BASE_OPTS, '-o', 'ConnectTimeout=10', '--', H, REMOTE],
+      'site 7/7 — streamFileToHost');
   });
 });
