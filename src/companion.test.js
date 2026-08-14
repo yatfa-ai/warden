@@ -1753,11 +1753,24 @@ setTimeout(() => { console.log('RESULT ' + JSON.stringify(out)); process.exit(0)
     assert.strictEqual(r.result.nextIsTransportError, true, `subsequent calls must reject with CompanionTransportError — got ${r.result.nextMessage}`);
   });
 
-  it('control: the IMMEDIATE-exit shape is green on UNFIXED code — it is NOT a guard for this defect', skipWin, () => {
+  it('control: the IMMEDIATE-exit shape does not reliably reach the stdin path — it is NOT a guard for this defect', skipWin, () => {
     // Pinned deliberately (memory 5f23f67e). This is the shape a reviewer will be
     // offered as "the regression test"; it must be visible here as the NEGATIVE
-    // control so nobody mistakes it for coverage. It exercises the exit path, not
-    // the stdin path — note the absence of any 'upload stdin failed' below.
+    // control so nobody mistakes it for coverage.
+    //
+    // ⚠ Its OUTCOME IS RACED, so this test must not assert a fixed value for it.
+    // Measured on Node v20.20.2: the exit path wins ~80-93% of the time
+    // ({ok:false, code:255} — stream.destroy() beat the write to the closed
+    // pipe), but under parallel load (`npm test` is `node --test src`) the stdin
+    // path wins the rest ({ok:false, code:-1, 'upload stdin failed: write EPIPE'}).
+    // Asserting `code === 255` here would commit the very error the block comment
+    // above warns about — the safe and dangerous inputs differ only by TIMING,
+    // not by value — and would red the suite ~1 run in 5 to 1 in 10 (WARDEN-983 QA).
+    //
+    // What IS invariant, and all this control needs to make its point: the shape
+    // settles as a failed upload without ever guaranteeing an EPIPE is reached.
+    // A guard whose crash exposure is a coin flip is not a guard — the two tests
+    // above force the race deterministically, which is why they are the coverage.
     const r = runInChild('immediate-exit-control', `
 import { spawn } from 'node:child_process';
 import { streamFileToHost } from ${COMPANION_URL};
@@ -1767,8 +1780,15 @@ setTimeout(() => { console.log('RESULT ' + JSON.stringify(res)); process.exit(0)
 `);
     assertSurvived(r);
     assert.strictEqual(r.result.ok, false);
-    assert.strictEqual(r.result.code, 255, 'the child exit code wins — stream.destroy() beat the write to the closed pipe');
-    assert.doesNotMatch(r.result.stderr, /upload stdin failed:/, 'no stdin error is ever observed on this shape — which is exactly why it cannot guard the defect');
+    // Either side of the race is a legitimate observation of this shape; only the
+    // disjunction is invariant. (Whichever lands, the process survived — that is
+    // what assertSurvived above already proved, and it is the whole point: this
+    // input cannot be relied on to exercise the stdin path at all.)
+    assert.ok(
+      r.result.code === 255 || (r.result.code === -1 && /upload stdin failed:/.test(r.result.stderr)),
+      `expected either the exit path (code 255) or the stdin path (code -1 + 'upload stdin failed'), `
+      + `i.e. exactly the nondeterminism that disqualifies this shape as a guard — got ${JSON.stringify(r.result)}`,
+    );
   });
 });
 
