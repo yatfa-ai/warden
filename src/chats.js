@@ -301,7 +301,7 @@ export async function discover(host, cfg, opts = {}, deps = {}) {
 //
 // `opts.activity === false` is the lean path (the 60s lifecycle sweep): it skips
 // the second-pass capture below exactly as discover() (:272) and discoverAll()'s
-// LOCAL catalog branch (:387) already do. The lifecycle diff needs only
+// LOCAL catalog branch (:418) already do. The lifecycle diff needs only
 // alive/dead transitions, and this block costs one NON-pooled ssh capture-pane
 // plus a chats.json read-modify-write per active session. (WARDEN-994; the
 // omission was drift — WARDEN-245 added the stamp a day after WARDEN-147 added
@@ -367,14 +367,24 @@ export async function discoverManual(host, entries, cfg, opts = {}, deps = {}) {
   return result;
 }
 
-export async function discoverAll(hosts, cfg, opts = {}) {
-  const results = await Promise.all(hosts.map((h) => discover(h, cfg, { activity: opts.activity })));
+// `deps` is a test seam mirroring discover()'s at :197 and discoverManual()'s at
+// :314. It exists so the lean flag's ARRIVAL at the remote catalog branch is
+// observable behaviorally — a guard inside discoverManual is dead code unless
+// this function forwards the flag, and that forward is otherwise unreachable
+// from a test (this function does its own loadCatalog + real ssh). Defaults are
+// the real ones and no caller passes a 4th argument, so production behavior is
+// unchanged. (WARDEN-994)
+export async function discoverAll(hosts, cfg, opts = {}, deps = {}) {
+  const discoverFn = deps.discover ?? discover;
+  const discoverManualFn = deps.discoverManual ?? discoverManual;
+  const loadCatalogFn = deps.loadCatalog ?? loadCatalog;
+  const results = await Promise.all(hosts.map((h) => discoverFn(h, cfg, { activity: opts.activity })));
   let all = [];
   const errors = results.filter((r) => !r.ok).map((r) => ({ host: r.host, error: r.error }));
   for (const r of results) if (r.ok) all = all.concat(r.chats);
 
   // catalog chats (all kind:'tmux' now): local host → local tmux; remote → ssh.
-  const catalog = await loadCatalog();
+  const catalog = await loadCatalogFn();
   if (catalog.length) {
     const byHost = {};
     for (const e of catalog) (byHost[e.host || LOCAL] ||= []).push(e);
@@ -387,7 +397,7 @@ export async function discoverAll(hosts, cfg, opts = {}) {
         const alive = await localAliveSessions();
         actives = entries.map((e) => ({ e, active: alive.has(e.session) }));
       } else {
-        actives = (await discoverManual(host, entries, cfg, { activity: opts.activity })).map((e) => ({ e, active: e.active }));
+        actives = (await discoverManualFn(host, entries, cfg, { activity: opts.activity })).map((e) => ({ e, active: e.active }));
       }
 
       // Create result objects first. Inactive catalog chats hydrate lastActivity

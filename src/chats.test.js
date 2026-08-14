@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { resolveChat, resolveChatWithRefresh, comparePinned, parseDiscoverRow, parseDockerStats, splitDiscoverOutput, discover, discoverManual, capturePanes, DISCOVER_SCRIPT } from './chats.js';
+import { resolveChat, resolveChatWithRefresh, comparePinned, parseDiscoverRow, parseDockerStats, splitDiscoverOutput, discover, discoverManual, discoverAll, capturePanes, DISCOVER_SCRIPT } from './chats.js';
 import { applyPaneDelta, hasFreshPaneDelta, readPaneDeltas, _resetPaneDeltaStateForTests } from './companion.js';
 import { buildChat, parseActivityTimestamp } from './chatMeta.js';
 
@@ -1062,10 +1062,14 @@ describe('discoverManual() honors the lean activity flag (WARDEN-994)', () => {
       'the persisted value survives the lean tick (WARDEN-245 recency ordering)');
   });
 
-  it('non-lean (activity omitted): still captures AND still stamps — WARDEN-245 untouched', async () => {
+  // `opts` genuinely OMITTED (undefined → the `opts = {}` default fires). This is
+  // byte-for-byte discoverHost's call shape (`discoverManual(host, entries, cfg)`,
+  // chats.js:529), which WARDEN-994 deliberately leaves un-gated — so this is the
+  // behavioral proof of criterion 3: /api/discover still captures and stamps.
+  it('opts omitted (discoverHost\'s call shape): still captures AND still stamps — WARDEN-245 untouched', async () => {
     let runCalls = 0;
     const stamped = [];
-    const res = await discoverManual('prod', ENTRIES, {}, {}, {
+    const res = await discoverManual('prod', ENTRIES, {}, undefined, {
       runWithPool: async () => alive,
       run: async () => { runCalls++; return { ok: true, stdout: PANE }; },
       stampCatalogActivity: async (host, session, ts) => { stamped.push([host, session, ts]); },
@@ -1101,25 +1105,32 @@ describe('discoverManual() honors the lean activity flag (WARDEN-994)', () => {
 
 // The guard above lives in discoverManual, but the BUG was the caller: discoverAll
 // dropped the flag on the floor (`discoverManual(host, entries, cfg)`), so a guard
-// alone would still be dead on the lean sweep. discoverAll has no DI seam (it does
-// its own loadCatalog + real ssh) and Node 20 lacks mock.module (WARDEN-130), so the
-// wiring is asserted against the source text — the same technique llm.test.js:19
-// uses for otherwise-unreachable wiring. This is deliberately narrow: it pins the
-// forward at the ONE call site that receives a lean opts, and pins discoverHost's
-// deliberate omission (it has no `opts` param and no caller passes one, so the
-// `opts = {}` default keeps /api/discover capturing — WARDEN-994 scope note).
+// alone would still be dead on the lean sweep. discoverAll gets the same `deps`
+// seam discover() and discoverManual() already carry, so the flag's ARRIVAL is
+// observed rather than its spelling pinned — this survives renames and reformats
+// and goes red only on the actual regression.
 describe('discoverAll forwards the lean flag to discoverManual (WARDEN-994 wiring)', () => {
-  const SRC = fs.readFileSync(new URL('./chats.js', import.meta.url), 'utf8');
+  const CATALOG = [{ host: 'prod', session: 'sess-a', name: 'A', cwd: '/w', cmd: 'claude' }];
 
-  it('the remote-catalog call site passes { activity: opts.activity }', () => {
-    assert.match(SRC, /discoverManual\(host, entries, cfg, \{ activity: opts\.activity \}\)/,
-      'discoverAll must forward the flag, else the guard is unreachable on the lean sweep');
-    assert.doesNotMatch(SRC, /discoverManual\(host, entries, cfg\)\s*\)/,
-      'no un-forwarded discoverManual call may remain inside discoverAll');
+  it('the remote-catalog branch receives { activity: false } on a lean sweep', async () => {
+    let seen;
+    await discoverAll(['prod'], {}, { activity: false }, {
+      loadCatalog: async () => CATALOG,
+      discover: async () => ({ host: 'prod', ok: true, chats: [] }),
+      discoverManual: async (h, e, c, o) => { seen = o; return e.map((x) => ({ ...x, active: true })); },
+    });
+    assert.strictEqual(seen?.activity, false,
+      'the guard inside discoverManual is dead unless discoverAll forwards the flag');
   });
 
-  it('discoverHost still calls discoverManual without opts (capture preserved on /api/discover)', () => {
-    assert.match(SRC, /const manual = await discoverManual\(host, entries, cfg\);/,
-      'discoverHost is intentionally left un-gated: the opts default keeps it capturing');
+  it('a non-lean sweep does NOT suppress the capture (activity stays undefined, not false)', async () => {
+    let seen;
+    await discoverAll(['prod'], {}, {}, {
+      loadCatalog: async () => CATALOG,
+      discover: async () => ({ host: 'prod', ok: true, chats: [] }),
+      discoverManual: async (h, e, c, o) => { seen = o; return e.map((x) => ({ ...x, active: true })); },
+    });
+    assert.notStrictEqual(seen?.activity, false,
+      'only an explicit false is lean — a blanket `{ activity: false }` forward would kill WARDEN-245');
   });
 });
