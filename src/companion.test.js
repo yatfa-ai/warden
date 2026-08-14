@@ -1486,10 +1486,10 @@ describe('getChannel / bootstrap orchestration', () => {
      * the injected spawnFn instead of routing through run(), so that builder-level
      * fix never reached them.
      *
-     * Harness note: spawnPersistentChannel/streamFileToHost are not exported and
-     * the ubiquitous fakeDeps() helper stubs BOTH of them (deps.upload +
-     * deps.spawnChannel), so a guard built on fakeDeps would assert on a stub and
-     * pass regardless of the fix. We inject deps.spawn ONLY — leaving upload and
+     * Harness note: the ubiquitous fakeDeps() helper stubs BOTH builders
+     * (deps.upload + deps.spawnChannel), so a guard built on fakeDeps would
+     * assert on a stub and pass regardless of the fix. We inject deps.spawn ONLY
+     * — leaving upload and
      * spawnChannel at their defaults — so the real builders run. deps.run stays
      * faked: it serves the probe + reap legs, which go through ssh.js run() and are
      * already covered by WARDEN-969's guard. One bootstrap with HAVE=0 exercises
@@ -1627,6 +1627,168 @@ describe('getChannel / bootstrap orchestration', () => {
     await getChannel('prod-reap-samever', {}, deps);
     assert.strictEqual(runScripts.length, 1, 'only the probe ran (no reap on a same-version re-bootstrap)');
     assert.strictEqual(runScripts[0], buildProbeScript(remoteBinaryPath(TEST_VER)), 'the single runFn call is the probe');
+  });
+});
+
+describe("child.stdin 'error' is handled at BOTH stdin write sites (WARDEN-983)", () => {
+  /**
+   * `child.stdin` is its OWN Socket emitter. An 'error' event on an emitter with
+   * no listener THROWS, and there is no live uncaughtException handler anywhere
+   * in non-test src/ — so an ssh death mid-write killed the whole warden server,
+   * mid-request. Two write sites: streamFileToHost's `stream.pipe(child.stdin)`
+   * and spawnPersistentChannel's transport `write()`.
+   *
+   * ⚠ THE TRAP — the intuitive test is tautological. The obvious shape ("ssh
+   * exits immediately while a large stdin write is in flight") is GREEN WITHOUT
+   * THE FIX: `child.on('exit')`'s `stream.destroy()` wins the race before any
+   * write reaches a closed pipe, so the process never sees an EPIPE at all.
+   * Measured on Node v20.20.2 against the unfixed handler set:
+   *
+   *   `sh -c 'exit 255'`                                    -> resolves, exit 0  (USELESS as a guard)
+   *   `sh -c 'head -c 65536 >/dev/null; sleep .15; exit 255'` -> Unhandled 'error', exit 1  (the real crash)
+   *
+   * The safe input and the dangerous input differ only by TIMING, not by value.
+   * The child must consume a little, THEN die while writes are in flight and
+   * backpressured. A guard built on the immediate-exit shape does not cover this.
+   *
+   * Harness: the crash is process death, so it cannot be caught in-process — an
+   * unhandled 'error' would take the whole test runner down with it. Each case
+   * therefore runs in a CHILD node process that drives the real (exported)
+   * builder with an injected spawnFn, prints a RESULT line, and exits 0. Red on
+   * unfixed code is `status: 1` + "Unhandled 'error' event" on stderr; green is
+   * status 0 with a RESULT proving the EPIPE was observed AND absorbed.
+   *
+   * Each assertion checks the EPIPE actually fired (stderr/message mentions it),
+   * not merely that the call settled — otherwise a future timing shift could
+   * silently degenerate this back into the immediate-exit shape and keep passing.
+   */
+  const HERE = path.dirname(fileURLToPath(import.meta.url));
+  const COMPANION_URL = JSON.stringify(new URL('./companion.js', import.meta.url).href);
+  let tmpDir;
+  let bigFile;
+
+  before(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-stdin-epipe-'));
+    // ~2.1MB — the real HAVE=0 bootstrap upload size, and big enough that the
+    // pipe stays backpressured for the whole window the child is alive.
+    bigFile = path.join(tmpDir, 'big.bin');
+    fs.writeFileSync(bigFile, Buffer.alloc(2_200_000, 0x61));
+  });
+
+  after(() => { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* noop */ } });
+
+  // Run `source` as a module in a fresh node process. Returns { status, stdout,
+  // stderr, result } where `result` is the parsed RESULT line (null if it never
+  // got there — i.e. the process died).
+  const runInChild = (name, source) => {
+    const file = path.join(tmpDir, `${name}.mjs`);
+    fs.writeFileSync(file, source);
+    const r = spawnSync(process.execPath, [file], { encoding: 'utf8', timeout: 30000, cwd: HERE });
+    const line = (r.stdout || '').split('\n').find((l) => l.startsWith('RESULT '));
+    return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '', result: line ? JSON.parse(line.slice(7)) : null };
+  };
+
+  const assertSurvived = (r) => {
+    assert.strictEqual(
+      r.status, 0,
+      `the process must SURVIVE the mid-write EPIPE. exit=${r.status}\n--- stderr ---\n${r.stderr}\n--- stdout ---\n${r.stdout}`,
+    );
+    assert.ok(!/Unhandled 'error' event/.test(r.stderr), `no unhandled 'error' event:\n${r.stderr}`);
+    assert.ok(r.result, `child must reach its RESULT line\n${r.stdout}\n${r.stderr}`);
+  };
+
+  // Both cases spawn `sh`; skip on Windows rather than fail on shell shape.
+  const skipWin = { skip: process.platform === 'win32' ? 'POSIX sh harness' : false };
+
+  it('site 1 — streamFileToHost: a mid-upload EPIPE resolves a failed upload instead of killing the process', skipWin, () => {
+    const r = runInChild('upload', `
+import { spawn } from 'node:child_process';
+import { streamFileToHost } from ${COMPANION_URL};
+// Consume 64KB, then die while the remaining ~2.1MB is still backpressured.
+const spawnFn = () => spawn('sh', ['-c', 'head -c 65536 >/dev/null; sleep 0.15; exit 255'], { windowsHide: true });
+const res = await streamFileToHost('h', ${JSON.stringify(bigFile)}, '/remote/p', {}, spawnFn);
+// Hold the loop open past the resolve: a LATE async 'error' still crashes an
+// unguarded process, and exiting immediately would hide exactly that.
+setTimeout(() => { console.log('RESULT ' + JSON.stringify(res)); process.exit(0); }, 300);
+`);
+    assertSurvived(r);
+    // Success criterion 1: it resolves as a FAILED upload...
+    assert.strictEqual(r.result.ok, false, `upload must resolve ok:false — got ${JSON.stringify(r.result)}`);
+    assert.strictEqual(r.result.code, -1, `stdin failure is code -1 (not the child's exit code) — got ${JSON.stringify(r.result)}`);
+    // ...and the stderr proves the stdin listener is what absorbed it. Without
+    // this the test would still pass if the race degenerated to the immediate-
+    // exit shape (which resolves {ok:false, code:255} on UNFIXED code too).
+    assert.match(r.result.stderr, /upload stdin failed:/, 'the stdin-error path, not the exit path, must have produced the result');
+    assert.match(r.result.stderr, /EPIPE/, 'the mid-write race must actually have produced an EPIPE');
+  });
+
+  it('site 2 — spawnPersistentChannel: a mid-RPC EPIPE surfaces as a transport error instead of killing the process', skipWin, () => {
+    const r = runInChild('channel', `
+import { spawn } from 'node:child_process';
+import { CompanionChannel, CompanionTransportError, spawnPersistentChannel } from ${COMPANION_URL};
+const spawnFn = () => spawn('sh', ['-c', 'head -c 4096 >/dev/null; sleep 0.15; exit 255'], { windowsHide: true });
+const ch = new CompanionChannel('h', spawnPersistentChannel('h', '/remote/p', {}, spawnFn));
+const out = {};
+// A backpressured request (a large send()) still in flight when ssh dies. The
+// transport's try/catch around child.stdin.write() does NOT see this: EPIPE is
+// delivered asynchronously as an 'error' event, outside that try block.
+try { await ch.call('send', { text: 'x'.repeat(300000) }, { timeout: 8000 }); out.rejected = false; }
+catch (e) { out.rejected = true; out.message = e.message; }
+out.dead = ch.dead;
+// And the channel is now dead for every SUBSEQUENT caller, the ordinary
+// CompanionTransportError path that discover()/capturePanes()/send() handle.
+try { await ch.call('ping', {}, { timeout: 1000 }); out.nextRejected = false; }
+catch (e) { out.nextRejected = true; out.nextIsTransportError = e instanceof CompanionTransportError; out.nextMessage = e.message; }
+setTimeout(() => { console.log('RESULT ' + JSON.stringify(out)); process.exit(0); }, 300);
+`);
+    assertSurvived(r);
+    // Success criterion 2: the in-flight RPC rejects rather than the process dying.
+    assert.strictEqual(r.result.rejected, true, `the in-flight RPC must reject — got ${JSON.stringify(r.result)}`);
+    assert.match(r.result.message, /stdin write failed:/, 'the stdin-error listener, not the exit handler, must have torn the channel down');
+    assert.match(r.result.message, /EPIPE/, 'the mid-write race must actually have produced an EPIPE');
+    // ...and it is a transport death, so the channel is dead and later callers
+    // get the CompanionTransportError they already handle.
+    assert.strictEqual(r.result.dead, true, 'the channel must be marked dead');
+    assert.strictEqual(r.result.nextRejected, true, 'a subsequent call on the dead channel must reject');
+    assert.strictEqual(r.result.nextIsTransportError, true, `subsequent calls must reject with CompanionTransportError — got ${r.result.nextMessage}`);
+  });
+
+  it('control: the IMMEDIATE-exit shape does not reliably reach the stdin path — it is NOT a guard for this defect', skipWin, () => {
+    // Pinned deliberately (memory 5f23f67e). This is the shape a reviewer will be
+    // offered as "the regression test"; it must be visible here as the NEGATIVE
+    // control so nobody mistakes it for coverage.
+    //
+    // ⚠ Its OUTCOME IS RACED, so this test must not assert a fixed value for it.
+    // Measured on Node v20.20.2: the exit path wins ~80-93% of the time
+    // ({ok:false, code:255} — stream.destroy() beat the write to the closed
+    // pipe), but under parallel load (`npm test` is `node --test src`) the stdin
+    // path wins the rest ({ok:false, code:-1, 'upload stdin failed: write EPIPE'}).
+    // Asserting `code === 255` here would commit the very error the block comment
+    // above warns about — the safe and dangerous inputs differ only by TIMING,
+    // not by value — and would red the suite ~1 run in 5 to 1 in 10 (WARDEN-983 QA).
+    //
+    // What IS invariant, and all this control needs to make its point: the shape
+    // settles as a failed upload without ever guaranteeing an EPIPE is reached.
+    // A guard whose crash exposure is a coin flip is not a guard — the two tests
+    // above force the race deterministically, which is why they are the coverage.
+    const r = runInChild('immediate-exit-control', `
+import { spawn } from 'node:child_process';
+import { streamFileToHost } from ${COMPANION_URL};
+const spawnFn = () => spawn('sh', ['-c', 'exit 255'], { windowsHide: true });
+const res = await streamFileToHost('h', ${JSON.stringify(bigFile)}, '/remote/p', {}, spawnFn);
+setTimeout(() => { console.log('RESULT ' + JSON.stringify(res)); process.exit(0); }, 300);
+`);
+    assertSurvived(r);
+    assert.strictEqual(r.result.ok, false);
+    // Either side of the race is a legitimate observation of this shape; only the
+    // disjunction is invariant. (Whichever lands, the process survived — that is
+    // what assertSurvived above already proved, and it is the whole point: this
+    // input cannot be relied on to exercise the stdin path at all.)
+    assert.ok(
+      r.result.code === 255 || (r.result.code === -1 && /upload stdin failed:/.test(r.result.stderr)),
+      `expected either the exit path (code 255) or the stdin path (code -1 + 'upload stdin failed'), `
+      + `i.e. exactly the nondeterminism that disqualifies this shape as a guard — got ${JSON.stringify(r.result)}`,
+    );
   });
 });
 

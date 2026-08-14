@@ -395,7 +395,11 @@ export class CompanionChannel {
 
 // Spawn the persistent ssh-to-companion process and return a Transport
 // ({write,onLine,onExit,kill}). One process per host; reused for every RPC.
-function spawnPersistentChannel(host, remotePath, cfg, spawnFn) {
+// Exported (alongside streamFileToHost below) so the two `child.stdin` write
+// sites can be driven directly by a test with an injected `spawnFn` — the
+// mid-write EPIPE race in WARDEN-983 is unreachable through the fakeDeps()
+// bootstrap harness, which stubs both legs out.
+export function spawnPersistentChannel(host, remotePath, cfg, spawnFn) {
   // `--` ends ssh's option parsing so a host beginning with `-` is treated as a
   // (bogus) hostname instead of an option. This spawns directly rather than via
   // ssh.js run(), so WARDEN-969's builder-level fix does not reach it (WARDEN-979).
@@ -413,6 +417,15 @@ function spawnPersistentChannel(host, remotePath, cfg, spawnFn) {
   const onExit = (err) => { if (exitCb) exitCb(err); };
   child.on('exit', (code) => onExit(new Error(`companion ssh exited with code ${code}`)));
   child.on('error', (e) => onExit(e));
+  // `child.stdin` is its OWN Socket emitter, and an 'error' event with no listener
+  // THROWS — killing the whole warden server, mid-request. The try/catch in write()
+  // below does NOT cover this: it catches only a *synchronous* throw (e.g.
+  // ERR_STREAM_DESTROYED). An EPIPE from ssh dying while a write is in flight
+  // surfaces ASYNCHRONOUSLY as an 'error' event here, outside that try block
+  // entirely. Route it through onExit so it tears the channel down as an ordinary
+  // transport death (CompanionTransportError, which every caller already handles).
+  // Both guards are needed — sync and async are different paths. (WARDEN-983.)
+  child.stdin.on('error', (e) => onExit(new Error(`stdin write failed: ${e.message}`)));
   return {
     write(line) {
       try { child.stdin.write(line + '\n'); }
@@ -441,7 +454,8 @@ function makeDeadTransport(err) {
 // Stream the bundled binary to the host over ssh stdin (the VS Code Remote-SSH
 // model). Returns { ok, code, stderr }. The binary is only ever exec'd on the
 // REMOTE host after this upload, never locally.
-function streamFileToHost(host, localBinaryPath, remotePath, cfg, spawnFn) {
+// Exported for the WARDEN-983 stdin-EPIPE guard — see spawnPersistentChannel.
+export function streamFileToHost(host, localBinaryPath, remotePath, cfg, spawnFn) {
   const cmd = buildUploadScript(remotePath);
   // `--` before the host positional — see spawnPersistentChannel above (WARDEN-979).
   const args = [...SSH_BASE_OPTS, '-o', `ConnectTimeout=${cfg.connectTimeout ?? 10}`, '--', host, `bash -lc ${shellQuote(cmd)}`];
@@ -466,6 +480,18 @@ function streamFileToHost(host, localBinaryPath, remotePath, cfg, spawnFn) {
     child.on('exit', (code) => {
       stream.destroy();
       done({ ok: code === 0, code: code ?? -1, stderr });
+    });
+    // `child.stdin` is its own Socket emitter and an unlistened 'error' THROWS —
+    // process death, taking the warden server with it. The pipe below streams
+    // ~2.1MB, so the window where ssh can die mid-write (EPIPE, delivered
+    // ASYNCHRONOUSLY as this event) is wide. `child.on('error')` above does NOT
+    // cover it: that fires for spawn failures, not for writes to the child's pipe.
+    // Route it through the idempotent done() so the upload resolves as a failed
+    // upload; whichever of stdin-error / exit lands first wins, the other no-ops.
+    // (WARDEN-983.)
+    child.stdin.on('error', (e) => {
+      stream.destroy();
+      done({ ok: false, code: -1, stderr: `upload stdin failed: ${e.message}` });
     });
     stream.pipe(child.stdin);
   });
