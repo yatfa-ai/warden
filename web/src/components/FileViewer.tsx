@@ -612,7 +612,7 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
     <Dialog open={open} onOpenChange={onOpenChange}>
       <ContextMenu>
         <ContextMenuTrigger asChild>
-          <DialogContent className="max-w-4xl max-h-[80vh]">
+          <DialogContent className="sm:max-w-4xl max-h-[80vh]">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2 pr-8">
                 <FileIcon className="w-4 h-4 shrink-0" />
