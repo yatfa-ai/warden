@@ -10,9 +10,9 @@
 //     badges and "triage first" callout — summarizeProjectGitState + its ProjectGitAgent
 //     shape, the four popover rank helpers (sortByHeadAgeDesc /
 //     sortGitAgentsByMagnitudeDesc / sortByStashCountDesc / sortGitAgentsByConflictFirst),
-//     the triage trio (rankGitTriage / pickGitTriageTop / gitTriageReason) and
-//     detectProjectFileCollisions / …Impending / …Outgoing — with gitStateSummary.test.mjs,
-//     which covered exactly those;
+//     the triage trio (rankGitTriage / pickGitTriageTop / gitTriageReason) and the
+//     three cross-agent file-collision detectors (live / impending / outgoing) —
+//     with gitStateSummary.test.mjs, which covered exactly those;
 //   · the fleet commit/code SEARCH aggregation (WARDEN-534/559/589) —
 //     buildFleetSearchBaseUrl + FleetCommitSearchMode, buildFleetCommitGroups + its
 //     outcome/hit/group/result shapes, and buildFleetCodeGroups + fleetCodeFetchRequest
@@ -27,37 +27,17 @@
 // mode-agnostic population gate (active + project, keyed by key || id, deduped) that
 // FleetRecentCommits and useFleetGitStatus — both Fleet Health, explicitly out of
 // scope — still call. Renaming it is left alone to keep this diff to the removal.
-// The FileCollision types below likewise survive because CollisionCompareDialog still
-// types its props against them (it is reached from the FileViewer's co-editor Compare
-// action — see the reachability note at ChatSidebar.tsx's findFileCoEditors import).
+//
+// WARDEN-990 finished the job for the file-level half: the FileViewer's cross-agent
+// "↗ N others" co-editors chip, its pure finder, and the two-side compare dialog it
+// opened were provably unreachable once the git map narrowed to the focused pane
+// (the finder excludes the reader, and the reader is the map's only key), so all
+// three were deleted along with the collision prop-shapes only that dialog used.
 //
 // Pure (no React import) so it is unit-testable directly via node, mirroring diff.ts
 // (extracted in WARDEN-151 "so it's testable without a React runner"). The surviving
 // fleet helpers are covered by fleetGitStatus / fleetRecentCommits / fleetCommitSearch
 // .test.mjs.
-
-// ---- Cross-agent file-collision shapes (WARDEN-288 / 601 / 639) -------------
-//
-// The detectors that PRODUCED these are gone with the sidebar's collision badges
-// (WARDEN-975). The shapes remain as the prop contract of CollisionCompareDialog,
-// which the FileViewer's co-editor "Compare edits" action still fills in directly
-// (its `agents` come from findFileCoEditors, not from a fleet detector).
-export interface FileCollisionAgent {
-  key: string;  // c.key || c.id — the same lookup a per-agent git surface uses
-  // `source` marks WHICH side an agent brings to a collision:
-  //   'outgoing' — this agent's change to the path lives in an unpushed COMMIT (its
-  //     working tree is clean for this path), so the compare dialog fetches the
-  //     path's diff from the outgoing range (@{u}..HEAD), NOT the (empty) working tree.
-  //   'wip'      — this agent has the path dirty in its working tree (the live side).
-  // Omitted ⇒ the compare dialog treats the agent as 'wip' (the working-tree diff).
-  source?: 'outgoing' | 'wip';
-}
-
-export interface FileCollision {
-  path: string;
-  agents: FileCollisionAgent[];  // ≥2 distinct agent keys
-  kind?: 'live' | 'impending' | 'outgoing';
-}
 
 // WARDEN-682: the last-commit freshness threshold — a HEAD commit older than this
 // marks an agent "stalled" (💤) in Fleet Health's per-agent strip. ⚠️ This MUST mirror

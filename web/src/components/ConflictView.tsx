@@ -10,8 +10,8 @@
 //
 // Strictly a VIEW: no 3-way/base merge editor, no `git checkout --ours/--theirs`,
 // no `git add` (the WARDEN-199 read-only line). Modeled on DiffViewer (the Dialog
-// shell + loading/error/empty/ready states) and CollisionCompareDialog (a two-side
-// compare with a header per side). Raw stage-blob content carries NO `+`/`-`
+// shell + loading/error/empty/ready states) and the same two-side compare layout
+// (a header per side). Raw stage-blob content carries NO `+`/`-`
 // markers, so the panes are a plain code view — an honest baseline, not a diff
 // (classifyDiffLine would tag every line `context`; a computed ours-vs-theirs diff
 // is an optional enhancement, out of scope here).
@@ -195,8 +195,7 @@ export function ConflictView({ chatId, filePath, open, onOpenChange }: ConflictV
 /** One read-only side of the conflict: a labeled header over the stage-blob content.
  *  `content === null` means that side has no version of the file (modify/delete, or
  *  add/add where one side lacks it) — rendered as an explicit "absent" note so a
- *  missing side reads as a real signal, not a broken empty pane. Mirrors the
- *  per-panel empty/error vocabulary of CollisionCompareDialog's PanelBody. */
+ *  missing side reads as a real signal, not a broken empty pane. */
 function ConflictPane({ label, sublabel, content, tone }: {
   label: string;
   sublabel: string;
