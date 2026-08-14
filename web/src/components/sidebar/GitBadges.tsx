@@ -16,7 +16,7 @@
 //     search, recent/unpushed/incoming commit lists, stashes, reflog, branches,
 //     the origin row, and the aggregated range-diff affordances.
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -481,6 +481,43 @@ export function GitRepoSummary({ branch, clean, ahead, behind, inProgress, stash
   );
 }
 
+// Shared skeleton for GitRepoDetails' four lazy list-fetchers (stash / reflog /
+// remote / branch), which were the same twelve lines written four times, differing
+// ONLY in route, response key and state pair — the "mirrors fetchStash" / "mirrors
+// fetchReflog" comments documented that duplication instead of factoring it. Same DRY
+// move as useGitLogFetcher in ChatSidebar (:177) and DiffInspectRow here (WARDEN-1003).
+// GET /api/git-<axis>?id=…, store `j.<responseKey>` (or [] when it isn't an array),
+// toggle the loading flag. Always fetches — dedup is at the call site (the expand
+// effect guards on `list === undefined`; each refresh button is disabled while
+// loading). All four routes are read-only. `onBeforeFetch` runs after the loading flag
+// is raised and before the request, for an axis that must reset companion state first
+// (stash's WARDEN-340 cache drop — see its call site). Behaviour matches the inline
+// copies exactly: `j.error` is still discarded and a failure still caches [] so a
+// re-expand doesn't loop — fixing that is a banked follow-up, now a change at THIS one
+// seam rather than four. Deps are all stable, so the fetcher's identity is too.
+function useGitListFetcher<T>({ chatId, route, responseKey, setList, setLoading, onBeforeFetch }: {
+  chatId: string;
+  route: string;
+  responseKey: string;
+  setList: (items: T[]) => void;
+  setLoading: (value: boolean) => void;
+  onBeforeFetch?: () => void;
+}) {
+  return useCallback(async () => {
+    setLoading(true);
+    onBeforeFetch?.();
+    try {
+      const r = await fetch(`${route}?id=${encodeURIComponent(chatId)}`);
+      const j = await r.json();
+      setList(Array.isArray(j[responseKey]) ? j[responseKey] : []);
+    } catch {
+      setList([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [chatId, route, responseKey, setList, setLoading, onBeforeFetch]);
+}
+
 /**
  * The focused repo's FULL detail, rendered INLINE inside the git section
  * (WARDEN-975). This is the per-row GitBranchBadge's popover BODY, verbatim in
@@ -717,79 +754,38 @@ export function GitRepoDetails({ branch, clean, commits, loading, onFetch, ahead
     }
   };
 
-  // Always fetch (like fetchGitLog); dedup is handled at the call site (onOpenChange
-  // guards on stashList === undefined, and the refresh button is disabled while loading).
-  const fetchStash = async () => {
-    setStashLoading(true);
-    // A refresh is an explicit request for FRESH data, so drop the per-stash caches
-    // and collapse any expanded stash row. Stash refs (`stash@{n}`) are reflog
-    // selectors, NOT immutable keys like commit hashes — `stash@{0}` shifts to a
-    // DIFFERENT stash whenever one is popped or created above it. Without this reset,
-    // after the agent adds/pops a stash the refreshed subject (e.g. "WIP: B") would
-    // render under a stale file list cached for the PREVIOUS stash@{0} (e.g. "WIP: A")
-    // — subject and files would disagree, and toggleStash's dedup guard would keep
-    // serving the stale entry on re-collapse. CommitFile's cache-by-hash pattern
-    // doesn't have this problem because a hash always names the same commit (WARDEN-340).
+  // A refresh is an explicit request for FRESH data, so drop the per-stash caches
+  // and collapse any expanded stash row BEFORE the fetch. Stash refs (`stash@{n}`) are
+  // reflog selectors, NOT immutable keys like commit hashes — `stash@{0}` shifts to a
+  // DIFFERENT stash whenever one is popped or created above it. Without this reset,
+  // after the agent adds/pops a stash the refreshed subject (e.g. "WIP: B") would
+  // render under a stale file list cached for the PREVIOUS stash@{0} (e.g. "WIP: A")
+  // — subject and files would disagree, and toggleStash's dedup guard would keep
+  // serving the stale entry on re-collapse. CommitFile's cache-by-hash pattern
+  // doesn't have this problem because a hash always names the same commit (WARDEN-340).
+  // This is the one axis with a prologue, so it rides in as the hook's onBeforeFetch
+  // rather than being inlined into the shared skeleton.
+  const resetStashDetail = useCallback(() => {
     setStashShowCache({});
     setExpandedStashRef(null);
-    try {
-      const r = await fetch(`/api/git-stash?id=${encodeURIComponent(chatId)}`);
-      const j = await r.json();
-      setStashList(Array.isArray(j.stashes) ? j.stashes : []);
-    } catch {
-      setStashList([]);
-    } finally {
-      setStashLoading(false);
-    }
-  };
+  }, []);
 
-  // Always fetch (mirrors fetchStash); dedup is at the call site (onOpenChange
-  // guards on reflogList === undefined, and the refresh button is disabled while
-  // loading). Read-only — /api/git-reflog never mutates the repo.
-  const fetchReflog = async () => {
-    setReflogLoading(true);
-    try {
-      const r = await fetch(`/api/git-reflog?id=${encodeURIComponent(chatId)}`);
-      const j = await r.json();
-      setReflogList(Array.isArray(j.entries) ? j.entries : []);
-    } catch {
-      setReflogList([]);
-    } finally {
-      setReflogLoading(false);
-    }
-  };
-
-  // Always fetch (mirrors fetchReflog); dedup is at the call site (onOpenChange
-  // guards on remoteList === undefined). Read-only — /api/git-remote runs
-  // `git remote -v`, which never mutates the repo.
-  const fetchRemote = async () => {
-    setRemoteLoading(true);
-    try {
-      const r = await fetch(`/api/git-remote?id=${encodeURIComponent(chatId)}`);
-      const j = await r.json();
-      setRemoteList(Array.isArray(j.remotes) ? j.remotes : []);
-    } catch {
-      setRemoteList([]);
-    } finally {
-      setRemoteLoading(false);
-    }
-  };
-
-  // Always fetch (mirrors fetchReflog/fetchRemote); dedup is at the call site
-  // (onOpenChange guards on branchList === undefined). Read-only — /api/git-branch
-  // runs `git for-each-ref`, which never mutates the repo.
-  const fetchBranches = async () => {
-    setBranchLoading(true);
-    try {
-      const r = await fetch(`/api/git-branch?id=${encodeURIComponent(chatId)}`);
-      const j = await r.json();
-      setBranchList(Array.isArray(j.branches) ? j.branches : []);
-    } catch {
-      setBranchList([]);
-    } finally {
-      setBranchLoading(false);
-    }
-  };
+  const fetchStash = useGitListFetcher<GitStash>({
+    chatId, route: '/api/git-stash', responseKey: 'stashes',
+    setList: setStashList, setLoading: setStashLoading, onBeforeFetch: resetStashDetail,
+  });
+  const fetchReflog = useGitListFetcher<GitReflogEntry>({
+    chatId, route: '/api/git-reflog', responseKey: 'entries',
+    setList: setReflogList, setLoading: setReflogLoading,
+  });
+  const fetchRemote = useGitListFetcher<GitRemote>({
+    chatId, route: '/api/git-remote', responseKey: 'remotes',
+    setList: setRemoteList, setLoading: setRemoteLoading,
+  });
+  const fetchBranches = useGitListFetcher<GitBranch>({
+    chatId, route: '/api/git-branch', responseKey: 'branches',
+    setList: setBranchList, setLoading: setBranchLoading,
+  });
 
   // WARDEN-975: the lazy-fetch trigger, re-anchored from the popover's onOpenChange
   // to the SECTION's expand. Identical policy, identical guards: fetch the local
