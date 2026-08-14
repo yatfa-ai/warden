@@ -30,11 +30,6 @@ import { runFanout } from '@/lib/fanout';
 import { DiffViewer } from './DiffViewer';
 import { ConflictView } from './ConflictView';
 import { FileViewer } from './FileViewer';
-// The cross-agent file-edit compare dialog (WARDEN-321): mounted as a sibling of
-// FileViewer so a coordinator reading a file can diff a co-editor's version A↔B
-// without leaving the FileViewer (WARDEN-868). Self-contained — fans /api/git-diff
-// + /api/cross-agent-diff per agent itself; the parent only supplies path + agents.
-import { CollisionCompareDialog } from './CollisionCompareDialog';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { RECENTLY_CLOSED_PREVIEW, type Snippet, type RecentlyClosedEntry } from '@/lib/storage';
 import { THIS_MACHINE, basename, chatType, displayName, hostLabelFor } from '@/lib/chatDisplay';
@@ -53,21 +48,6 @@ import { StatusDot } from '@/components/StatusDot';
 import type { GitCommit, GitFile, ClaudeSession, DiffStat } from './sidebar/types';
 import { ChatRow, OpenPaneRow, ChatRowSkeleton, SessionRowSkeleton } from './sidebar/ChatRows';
 import { AgentFilterSortControls } from './sidebar/AgentFilterSortControls';
-// Pure finder for the FileViewer co-editors chip (WARDEN-810): same-project sibling
-// agents also touching the open file (± dirty / ⚑ conflict / ↑ unpushed).
-//
-// ⚠️ WARDEN-975 made this chip UNREACHABLE, not merely degraded — read this before
-// debugging why it never appears. findFileCoEditors reads the cached gitStatus map and
-// EXCLUDES selfKey. That map is now narrowed to the FOCUSED pane's single entry, and
-// files are opened FROM the focused pane's git section, so selfKey === focused === the
-// only key in the map: the result is ALWAYS []. So the "{n} others" chip in
-// FileViewer.tsx can never render, and CollisionCompareDialog (reached only from that
-// chip) is consequently unreachable too. This is a direct consequence of the ticket's
-// mandated focused-pane-only fetch, not an oversight; FileViewer is out of WARDEN-975's
-// scope, so the call site is left intact rather than ripped out. Reviving the chip
-// needs a deliberate decision about where its cross-agent data comes from — the
-// pane-independent fleet git hook (useFleetGitStatus) is the obvious candidate.
-import { findFileCoEditors } from '@/lib/fileCoEditors';
 import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/SidebarBits';
 import { SourceControlPanel } from './sidebar/SourceControlPanel';
 import { SessionTagChips, SessionTagFilterRow } from './sidebar/SessionTags';
@@ -282,13 +262,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // line (open at top); onNavigate resets it on a path change so a stale highlight
   // never survives a breadcrumb/dir-click navigation (mirrors PaneGrid WARDEN-334).
   const [fileTarget, setFileTarget] = useState<{ chatId: string; path: string; line?: number } | null>(null);
-  // The co-editor Compare target (WARDEN-868): set by FileViewer's onCompare, the
-  // reader's open path + the two agents to diff — the reader (no source → treated
-  // as 'wip' by the dialog) and the picked sibling (source 'outgoing' when its
-  // change is an unpushed commit, else 'wip'). Shaped like GitBadges' compareTarget
-  // (the sidebar fleet mount) so the same CollisionCompareDialog reads either. null
-  // while closed; onOpenChange clears it so a re-open re-fetches fresh state.
-  const [compareTarget, setCompareTarget] = useState<{ path: string; agents: { key: string; source?: 'outgoing' | 'wip' }[] } | null>(null);
   const { prefs } = useNotificationPrefs();
 
   // Multi-select broadcast (WARDEN-292): the set of selected agent ids, held at
@@ -327,7 +300,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // path, so a pane the human closed — or merely stopped looking at — kept a frozen
   // entry feeding the (now removed) fleet chip/collision/triage rollups forever.
   // Keying by chat id is retained because every /api/git-* route addresses the repo
-  // by it, and because the FileViewer's co-editor finder still reads this shape.
+  // by it. (WARDEN-990 removed the second consumer, the FileViewer's co-editor finder.)
   //
   // STALENESS GUARD (review fix): a whole-map replace is not order-safe the way the
   // old merge-by-key was. Switching focus A → B issues fetch(A) then fetch(B) with no
@@ -546,34 +519,6 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // source of truth the closure reads.
   const sessionPreview = showAllSessions ? visibleSessions : visibleSessions.slice(0, SESSION_PREVIEW);
   const hasMoreSessions = visibleSessions.length > SESSION_PREVIEW;
-
-  // WARDEN-810: the file-level complement to the fleet collision rollups above.
-  // When a file is open in FileViewer (fileTarget set), find every OTHER same-project
-  // agent whose cached gitStatus shows that path dirty (±) / in conflict (⚑) / in an
-  // unpushed commit (↑), so the FileViewer header chip can surface cross-agent file
-  // contention at the reading moment — inside the dialog, where the sidebar's fleet ⚠
-  // badge below is out of view. Reuses the SAME cached gitStatus map the fleet memos
-  // read (no new fetch, no backend route). Narrowed to the reader's OWN project first
-  // (a same-project collision is what's actionable for THIS reader); the finder then
-  // applies the active gate + self-exclusion + status-known gate internally.
-  // labelFor joins key → displayName(findChat(chats, key)) — the same React-layer
-  // join GitBadges' popover rows perform, kept out of the pure finder so it stays
-  // import-free for its OXC test harness. undefined when no file is open or the
-  // reader has no resolvable project → FileViewer renders no chip (graceful).
-  const fileCoEditors = useMemo(() => {
-    if (!fileTarget) return undefined;
-    const selfChat = findChat(chats, fileTarget.chatId);
-    const project = selfChat?.project;
-    if (!project) return undefined;
-    const projectChats = chats.filter((c) => c.project === project);
-    return findFileCoEditors({
-      filePath: fileTarget.path,
-      selfKey: fileTarget.chatId,
-      projectChats,
-      gitStatus,
-      labelFor: (key) => displayName(findChat(chats, key)),
-    });
-  }, [fileTarget, chats, gitStatus]);
 
   // Fan the message out to every selected agent via the existing per-target
   // /api/send path (server.js:182 → sendPane → tmux send-keys), then summarize.
@@ -1442,44 +1387,8 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
         viewMode={fileViewerViewMode}
         onViewModeChange={onFileViewerViewModeChange}
         onNavigate={(p) => setFileTarget((prev) => (prev ? { ...prev, path: p, line: undefined } : prev))}
-        coEditors={fileCoEditors}
-        onOpenCoEditor={(key) => setFileTarget((prev) => (prev ? { ...prev, chatId: key } : prev))}
-        // WARDEN-868: open CollisionCompareDialog on the reader's version vs the
-        // picked sibling's. The reader (fileTarget.chatId) contributes no source →
-        // the dialog treats it as 'wip' (working tree), which is correct: a CLEAN
-        // reader renders the dialog's 'empty' panel note rather than misreading as
-        // resolved. The sibling's `unpushed` flag (its ↑ glyph) selects the diff
-        // range — an unpushed sibling's change lives in a committed range (source
-        // 'outgoing' → &range=outgoing); a dirty-working-tree sibling is 'wip'.
-        // fileTarget is guaranteed set at call time (onCompare only fires from a row
-        // inside an OPEN FileViewer), but guard anyway for TS + safety.
-        onCompare={(siblingKey) => {
-          if (!fileTarget) return;
-          const ce = fileCoEditors?.find((c) => c.key === siblingKey);
-          setCompareTarget({
-            path: fileTarget.path,
-            agents: [
-              { key: fileTarget.chatId },
-              { key: siblingKey, source: ce?.unpushed ? 'outgoing' : 'wip' },
-            ],
-          });
-        }}
         pollIntervalMs={pollIntervalMs}
         onOpenChange={(o) => { if (!o) setFileTarget(null); }}
-      />
-      {/* Scoped to the path + two agents selected by the co-editor Compare action
-          above. Rendered as a sibling of FileViewer (not inside it) so Radix's
-          Dialog portal stacks cleanly above the already-dismissed FileViewer /
-          popover — the same sibling-mount discipline GitBadges uses for its fleet
-          Compare-edits dialog. */}
-      <CollisionCompareDialog
-        open={!!compareTarget}
-        onOpenChange={(o) => { if (!o) setCompareTarget(null); }}
-        path={compareTarget?.path ?? ''}
-        agents={compareTarget?.agents ?? []}
-        chats={chats}
-        gitStatus={gitStatus}
-        onOpenChat={onOpenChat}
       />
       <BroadcastDialog
         open={broadcastOpen}

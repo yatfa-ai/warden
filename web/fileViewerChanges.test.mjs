@@ -3,7 +3,7 @@
 // The Changes view adds a fourth file-understanding surface to FileViewer — the
 // open file's uncommitted working-tree diff vs HEAD (fetched via the existing
 // GET /api/git-diff?id=&path=). There is no front-end DOM test runner in this
-// repo, so (like breadcrumbs.test.mjs and collisionCompare.test.mjs) this loads
+// repo, so (like breadcrumbs.test.mjs) this loads
 // the REAL src/lib/fileViewerChanges.ts (transpiled TS -> ESM via Vite's OXC
 // transform) and drives the two pure seams the component's behavior hinges on:
 //
@@ -55,7 +55,7 @@ const test = (name, fn) => {
 };
 
 // /api/git-diff response builder — mirrors the route contract (src/gitRoutes.js
-// /api/git-diff) and the `gitDiff` fixture in collisionCompare.test.mjs:
+// /api/git-diff) — the `gitDiff` shape the component consumes:
 // { diff, untracked, error }. diff is string|null, error is string|null.
 const resp = (diff, untracked = false, error = null) => ({ diff, untracked, error });
 
