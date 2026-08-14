@@ -319,7 +319,7 @@ export function SessionTranscriptViewer({ open, onOpenChange, session, timestamp
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[80vh]">
+      <DialogContent className="sm:max-w-4xl max-h-[80vh]">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <EyeIcon className="size-4 shrink-0" />

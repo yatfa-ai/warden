@@ -146,7 +146,7 @@ export function DiffViewer({ chatId, filePath, staged, range, count, diffstat, o
     <Dialog open={open} onOpenChange={onOpenChange}>
       <ContextMenu>
         <ContextMenuTrigger asChild>
-          <DialogContent className="max-w-4xl max-h-[80vh]">
+          <DialogContent className="sm:max-w-4xl max-h-[80vh]">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
                 {isRange ? <GitCompare className="w-4 h-4 shrink-0" /> : <FileIcon className="w-4 h-4 shrink-0" />}
