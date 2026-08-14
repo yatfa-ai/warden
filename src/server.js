@@ -11,7 +11,11 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import express from 'express';
 import { WebSocketServer } from 'ws';
-import { load, save, loadCatalog, saveCatalog, allSshHosts, sameCatalogEntry } from './config.js';
+// NOTE: `saveCatalog` is deliberately NOT imported here. Every catalog write in
+// this file goes through `mutateCatalog`, which owns the read-modify-write critical
+// section (WARDEN-991); the two remaining `loadCatalog` calls are read-only. Keeping
+// saveCatalog out of scope makes that invariant structural rather than a convention.
+import { load, save, loadCatalog, mutateCatalog, allSshHosts, sameCatalogEntry } from './config.js';
 import { buildGetResponse, applyConfigPut, afterSave, resetConfig } from './config-schema.js';
 import { applyCompanionToggle } from './companion.js';
 import * as collections from './collections.js';
@@ -1537,13 +1541,17 @@ app.post('/api/rename', async (req, res) => {
   const host = String(req.body?.host || LOCAL).trim() || LOCAL;
   const name = String(req.body?.name || '').trim().slice(0, 60);
   if (!session || !name) return res.status(400).json({ error: 'session and name required' });
-  const catalog = await loadCatalog();
-  // Composite identity: a session name can repeat across hosts, so scope the find
-  // to host+session (host defaults to local for callers that don't send it).
-  const entry = catalog.find((c) => sameCatalogEntry(c, host, session));
-  if (!entry) return res.status(404).json({ error: 'not a renameable chat' });
-  entry.name = name;
-  await saveCatalog(catalog);
+  // Serialized read-modify-write (WARDEN-991). Composite identity: a session name
+  // can repeat across hosts, so scope the find to host+session (host defaults to
+  // local for callers that don't send it). Returning undefined when the entry is
+  // absent skips the write and preserves the 404.
+  const updated = await mutateCatalog((catalog) => {
+    const entry = catalog.find((c) => sameCatalogEntry(c, host, session));
+    if (!entry) return undefined;
+    entry.name = name;
+    return catalog;
+  });
+  if (!updated) return res.status(404).json({ error: 'not a renameable chat' });
   res.json({ ok: true });
 });
 
@@ -1579,13 +1587,23 @@ app.post('/api/spawn', async (req, res) => {
   const cmd = (cmdRaw === undefined ? 'claude --dangerously-skip-permissions' : String(cmdRaw)).trim();
   if (!session) return res.status(400).json({ error: 'session name is required' });
   if (!NAME_RE.test(session)) return res.status(400).json({ error: 'invalid session name (letters/digits/_-.)' });
-  const catalog = await loadCatalog();
-  // Composite identity: the same session name may exist on a DIFFERENT host (each
-  // host's tmux server is independent), so only a same-host collision blocks spawn.
-  if (catalog.some((c) => sameCatalogEntry(c, host, session))) return res.status(409).json({ error: `"${session}" already exists` });
+  // Pre-flight duplicate check: fail fast with a 409 BEFORE paying for a real
+  // tmux/ssh spawn. Composite identity: the same session name may exist on a
+  // DIFFERENT host (each host's tmux server is independent), so only a same-host
+  // collision blocks spawn. This snapshot is deliberately NOT reused for the append
+  // below — buildAndSpawn awaits a full spawn, and appending against a stale
+  // snapshot across that window is exactly the lost-update bug (WARDEN-991).
+  if ((await loadCatalog()).some((c) => sameCatalogEntry(c, host, session))) return res.status(409).json({ error: `"${session}" already exists` });
   const r = await buildAndSpawn({ host, session, name: req.body?.name || session, cwd, cmd });
   if (r.error) return res.status(r.status).json({ error: r.error });
-  await saveCatalog([...catalog, { kind: 'tmux', host, session, name: r.chat.name, cwd, cmd }]);
+  // Append under serialization with a FRESH read, and re-check the collision here:
+  // a concurrent spawn of the same host+session may have landed between the
+  // pre-check and now. Same 409 body/status as the pre-flight rejection.
+  const appended = await mutateCatalog((catalog) => {
+    if (catalog.some((c) => sameCatalogEntry(c, host, session))) return undefined;
+    return [...catalog, { kind: 'tmux', host, session, name: r.chat.name, cwd, cmd }];
+  });
+  if (!appended) return res.status(409).json({ error: `"${session}" already exists` });
   // Record the human's own spawn action so a returning human can see the agents
   // they brought up (WARDEN-484). Mirrors the existing attached/ended row shape.
   await appendEvent({ type: 'spawned', id: r.chat.id, host, container: r.chat.container ?? null, role: r.chat.role, name: r.chat.name });
@@ -1618,10 +1636,14 @@ app.post('/api/resume', async (req, res) => {
       return res.status(500).json({ error: `\`claude\` failed to start on ${host} — tmux session died immediately. Is \`claude\` installed and on PATH there?` });
     }
   }
-  // Composite identity: only replace THIS host's same-named resume entry; a
-  // different host may legitimately carry the same resume-<sid> session name.
-  const catalog = (await loadCatalog()).filter((c) => !sameCatalogEntry(c, host, session));
-  await saveCatalog([...catalog, { kind: 'tmux', host, session, name, cwd, cmd: chat.cmd }]);
+  // Serialized filter-then-append in ONE mutation (WARDEN-991) — split across two
+  // catalog writes it would race a concurrent kill/spawn. Composite identity: only
+  // replace THIS host's same-named resume entry; a different host may legitimately
+  // carry the same resume-<sid> session name.
+  await mutateCatalog((catalog) => [
+    ...catalog.filter((c) => !sameCatalogEntry(c, host, session)),
+    { kind: 'tmux', host, session, name, cwd, cmd: chat.cmd },
+  ]);
   // Record the human's own resume action (WARDEN-484). container is always null
   // here (resume spawns a bare-tmux session), matching the existing row shape.
   await appendEvent({ type: 'resumed', id: out.id, host, container: null, role: out.role, name });
@@ -1636,9 +1658,12 @@ app.post('/api/kill', async (req, res) => {
   // kills the agent's tmux session inside the container (container keeps running).
   try { await killTmux(chat, cfg); } catch { /* noop */ }
   // Remove from catalog (spawned chats only; yatfa are auto-discovered).
+  // Serialized (WARDEN-991): a fleet batch-kill fires N concurrent POSTs, and
+  // unserialized only ONE removal survived — every tmux session died but the
+  // catalog kept ghosts that re-rendered in the sidebar until killed one at a time.
   // Composite identity: only drop the killed chat's own host+session entry — a
   // different host may carry the same session name and must be left intact.
-  if (chat.kind === 'tmux') await saveCatalog((await loadCatalog()).filter((c) => !sameCatalogEntry(c, chat.host, chat.session)));
+  if (chat.kind === 'tmux') await mutateCatalog((c) => c.filter((x) => !sameCatalogEntry(x, chat.host, chat.session)));
   // Record the human's deliberate kill — the authoritative signal that lets a
   // returning human tell an agent THEY stopped apart from one that crashed. Emitted
   // here rather than via the attach-PTY onExit handler, which stays silent for
