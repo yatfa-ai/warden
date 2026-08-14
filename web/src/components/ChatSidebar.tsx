@@ -300,7 +300,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // path, so a pane the human closed — or merely stopped looking at — kept a frozen
   // entry feeding the (now removed) fleet chip/collision/triage rollups forever.
   // Keying by chat id is retained because every /api/git-* route addresses the repo
-  // by it, and because the FileViewer's co-editor finder still reads this shape.
+  // by it. (WARDEN-990 removed the second consumer, the FileViewer's co-editor finder.)
   //
   // STALENESS GUARD (review fix): a whole-map replace is not order-safe the way the
   // old merge-by-key was. Switching focus A → B issues fetch(A) then fetch(B) with no
