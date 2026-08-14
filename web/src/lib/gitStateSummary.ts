@@ -30,9 +30,21 @@
 //
 // WARDEN-990 finished the job for the file-level half: the FileViewer's cross-agent
 // "↗ N others" co-editors chip, its pure finder, and the two-side compare dialog it
-// opened were provably unreachable once the git map narrowed to the focused pane
-// (the finder excludes the reader, and the reader is the map's only key), so all
-// three were deleted along with the collision prop-shapes only that dialog used.
+// opened were reduced to a DEGENERATE surface once the git map narrowed to the focused
+// pane. The map holds a single entry, so the chip could at most name ONE agent — and
+// never the cross-agent contention it was built to show. It was not strictly dead
+// code: the finder excludes the reader and the reader is normally the map's only key,
+// but that alignment is pinned only at open time (the chip's selfKey is frozen when
+// the file opens, while `focused` keeps moving), so PaneGrid's window-level
+// Alt+1-9 / Alt+0 / Ctrl+Tab pane-switch handler — which has no dialog-open guard, and
+// which a Radix modal does not stop from bubbling — could refocus a sibling and make
+// the chip name whichever pane the user had just switched to. That reading implies
+// file contention "discovered" by moving focus, and omits the reader's own status; it
+// is worse than nothing. Deleting rather than reviving is WARDEN-975's owner decision
+// ("no value in looking at git state outside the current pane"; "do not repoint the
+// sidebar at [the fleet git hook]"), so all three went, along with the collision
+// prop-shapes only that dialog used. Reviving cross-agent file contention needs a new
+// design-gated ticket that picks a data source deliberately.
 //
 // Pure (no React import) so it is unit-testable directly via node, mirroring diff.ts
 // (extracted in WARDEN-151 "so it's testable without a React runner"). The surviving
