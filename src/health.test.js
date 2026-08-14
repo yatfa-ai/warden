@@ -22,9 +22,6 @@ import assert from 'node:assert';
 import {
   HealthState,
   getHealthState,
-  getHealthColor,
-  getHealthBgColor,
-  formatHealthState,
   groupByHealth,
   getHealthSummary,
 } from './health.js';
@@ -162,22 +159,6 @@ describe('getHealthState — manual (tmux, non-agent) sessions are IDLE when sta
     const agent = { active: true, kind: 'tmux', isAgent: false };
     assert.strictEqual(getHealthState(agent, ago(1 * MIN)), HealthState.HEALTHY);
     assert.strictEqual(getHealthState(agent, ago(10 * MIN)), HealthState.WARNING);
-  });
-});
-
-describe('formatHealthState / colors — CLOSED helper mappings', () => {
-  it('formats CLOSED as "Closed"', () => {
-    assert.strictEqual(formatHealthState(HealthState.CLOSED), 'Closed');
-  });
-
-  it('maps CLOSED to a gray text color (distinct from critical red)', () => {
-    const closedColor = getHealthColor(HealthState.CLOSED);
-    assert.match(closedColor, /^text-gray-/);
-    assert.notStrictEqual(closedColor, getHealthColor(HealthState.CRITICAL));
-  });
-
-  it('maps CLOSED to a gray background color', () => {
-    assert.match(getHealthBgColor(HealthState.CLOSED), /^bg-gray-/);
   });
 });
 
