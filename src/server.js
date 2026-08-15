@@ -534,6 +534,71 @@ export function __resetLastLoggedStateForTest() {
   lastLoggedState = new Map();
 }
 
+// The 6 identity keys every classified agent row carries, regardless of which
+// classifier produced it (pollAgentStates, tickAttention's sweep, or the
+// sweep_skipped rows pollFleetStates synthesizes without ever probing). Pure
+// projection of a chat — no I/O, no state.
+function agentRowBase(c) {
+  return {
+    id: c.container || c.session,
+    key: c.key,
+    host: c.host,
+    project: c.project,
+    role: c.role,
+    name: c.name || c.key || (c.container || c.session),
+  };
+}
+
+// The shared classify→log loop (WARDEN-1010). Takes chats plus their ALREADY-captured
+// panes and returns the classified rows; it deliberately does NOT capture, because the
+// two callers' capture calls genuinely diverge (pollAgentStates reconciles first and
+// passes `deps`; tickAttention's 60s sweep skips the reconcile so it can't fight the
+// dashboard's subscription). Each caller keeps its own capture; only the loop body —
+// which drifted for a month and cost a fail_audit — is shared.
+//
+// WARDEN-947: a sequential for-of (not `chats.map`) because logAgentState is AWAITED —
+// the state_changed write must land before the caller returns, so a concurrent
+// /api/activity reader (or a test) never sees the returned state before its event.
+// Sequential rather than Promise.all keeps the per-tick event order deterministic. The
+// cost is ~0 in steady state: the dedup means an unchanged tick writes NOTHING, so only
+// genuine transitions pay an append.
+async function classifyCapturedPanes(chats, panes, cfg = {}) {
+  const out = [];
+  for (const c of chats) {
+    const base = agentRowBase(c);
+    // A MISSING key means capturePanes silently dropped this chat (host SSH
+    // failed → `if (!res.ok) return;` per host). Surface it as capture_failed so
+    // the badge can still name the agent instead of omitting it (WARDEN-89).
+    if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
+      // WARDEN-788: capture_failed is a genuine state change (reachable →
+      // unreachable) with historical value ("when was this host down?"), logged
+      // for container-bearing yatfa agents so the timeline can render an
+      // "unreachable" segment. The dedup map prevents flapping from spamming.
+      await logAgentState(c, 'capture_failed');
+      out.push({ ...base, state: 'capture_failed', captureError: true, signal: null });
+      continue;
+    }
+    const clean = stripAnsi(panes[c.key] || '');
+    const { state, signal } = classifyPane(clean, c);
+    // WARDEN-540: user-authored output-pattern alerts. Run the matcher over the SAME
+    // already-cleaned text classifyPane read (a sibling pure function — zero new SSH
+    // capture; rides the caller's existing capturePanes). When a watched chat's output
+    // matches an enabled pattern, attach customMatch { pattern, line } — an ADDITIVE
+    // signal independent of `state` (an agent can be both erroring AND match a custom
+    // pattern). The frontend's watch diff fires a 'custom' ping on the new-match
+    // transition; the attention rollup surfaces it as its own row. Null/absent when no
+    // pattern matches → identical to today.
+    const customMatch = matchWatchPatterns(clean, cfg.watchPatterns);
+    // WARDEN-788: persist the transition (no-op on an unchanged tick). capture_failed
+    // above and the classifyPane states here are the only states this loop produces —
+    // sweep_skipped lives in pollFleetStates (never reaches here), so it correctly
+    // produces no state_changed event, consistent with the heatmap/attention.
+    await logAgentState(c, state);
+    out.push({ ...base, state, signal, captureError: false, ...(customMatch ? { customMatch } : {}) });
+  }
+  return out;
+}
+
 // pollAgentStates is the /api/agent-states poll core: it reconciles the companion
 // pane-push subscriptions for the polled hosts, captures their pane content, and
 // classifies each. Exported (and deps-injected) so the WARDEN-413 success gate is
@@ -569,53 +634,9 @@ export async function pollAgentStates(chats, cfg = {}, deps = {}) {
   // earns its zero-RPC steady state because the real fn is what the gate tests).
   const capture = deps.capturePanes ?? capturePanes;
   const panes = await capture(chats, cfg, deps);
-  // WARDEN-947: a sequential for-of (not `chats.map`) because logAgentState is now
-  // AWAITED — the state_changed write must land before the poll returns, so a
-  // concurrent /api/activity reader (or a test) never sees the returned state before
-  // its event. Sequential rather than Promise.all keeps the per-tick event order
-  // deterministic. The cost is ~0 in steady state: the dedup means an unchanged tick
-  // writes NOTHING, so only genuine transitions pay an append.
-  const out = [];
-  for (const c of chats) {
-    const base = {
-      id: c.container || c.session,
-      key: c.key,
-      host: c.host,
-      project: c.project,
-      role: c.role,
-      name: c.name || c.key || (c.container || c.session),
-    };
-    // A MISSING key means capturePanes silently dropped this chat (host SSH
-    // failed → `if (!res.ok) return;` per host). Surface it as capture_failed so
-    // the badge can still name the agent instead of omitting it (WARDEN-89).
-    if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
-      // WARDEN-788: capture_failed is a genuine state change (reachable →
-      // unreachable) with historical value ("when was this host down?"), logged
-      // for container-bearing yatfa agents so the timeline can render an
-      // "unreachable" segment. The dedup map prevents flapping from spamming.
-      await logAgentState(c, 'capture_failed');
-      out.push({ ...base, state: 'capture_failed', captureError: true, signal: null });
-      continue;
-    }
-    const clean = stripAnsi(panes[c.key] || '');
-    const { state, signal } = classifyPane(clean, c);
-    // WARDEN-540: user-authored output-pattern alerts. Run the matcher over the SAME
-    // already-cleaned text classifyPane read (a sibling pure function — zero new SSH
-    // capture; rides this poll's existing capturePanes). When a watched chat's output
-    // matches an enabled pattern, attach customMatch { pattern, line } — an ADDITIVE
-    // signal independent of `state` (an agent can be both erroring AND match a custom
-    // pattern). The frontend's watch diff fires a 'custom' ping on the new-match
-    // transition; the attention rollup surfaces it as its own row. Null/absent when no
-    // pattern matches → identical to today.
-    const customMatch = matchWatchPatterns(clean, cfg.watchPatterns);
-    // WARDEN-788: persist the transition (no-op on an unchanged tick). capture_failed
-    // above and the classifyPane states here are the only states this site produces —
-    // sweep_skipped lives in pollFleetStates (never reaches here), so it correctly
-    // produces no state_changed event, consistent with the heatmap/attention.
-    await logAgentState(c, state);
-    out.push({ ...base, state, signal, captureError: false, ...(customMatch ? { customMatch } : {}) });
-  }
-  return out;
+  // WARDEN-1010: the classify→log loop lives in classifyCapturedPanes above, shared
+  // with tickAttention's 60s sweep. The row shape produced here is unchanged.
+  return classifyCapturedPanes(chats, panes, cfg);
 }
 
 // pollFleetStates is the slow "fleet sweep" classification mode (WARDEN-571). The 30s
@@ -683,12 +704,7 @@ export async function pollFleetStates(chats, cfg = {}, deps = {}, opts = {}) {
   // dropped" spirit: it is the explicit "didn't look here" state, kept distinct from
   // capture_failed (tried + failed via the companion path).
   const skippedRows = skipped.map((c) => ({
-    id: c.container || c.session,
-    key: c.key,
-    host: c.host,
-    project: c.project,
-    role: c.role,
-    name: c.name || c.key || (c.container || c.session),
+    ...agentRowBase(c),
     state: 'sweep_skipped',
     sweepSkipped: true,
     signal: null,
@@ -2919,30 +2935,13 @@ async function tickAttention(deps = {}) {
       // called bare with no deps.pollAgentStates) with canned panes + ZERO SSH.
       const capture = deps.capturePanes ?? capturePanes;
       const panes = await capture(chatList, cfg);
-      // WARDEN-947: sequential for-of, not `.map()` — logAgentState is awaited so the
-      // sweep's state_changed write lands before the sweep continues (same reasoning
-      // as pollAgentStates above). `classify` is already awaited at the call site, so
-      // returning the built array from this async fn is unchanged for callers.
-      const out = [];
-      for (const c of chatList) {
-        const base = {
-          id: c.container || c.session,
-          key: c.key,
-          host: c.host,
-          project: c.project,
-          role: c.role,
-          name: c.name || c.key || (c.container || c.session),
-        };
-        if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
-          await logAgentState(c, 'capture_failed');
-          out.push({ ...base, state: 'capture_failed', signal: null });
-          continue;
-        }
-        const { state, signal } = classifyPane(stripAnsi(panes[c.key] || ''), c);
-        await logAgentState(c, state);
-        out.push({ ...base, state, signal });
-      }
-      return out;
+      // WARDEN-1010: the classify→log loop is classifyCapturedPanes, shared with
+      // pollAgentStates — the drift that made this copy miss captureError and
+      // customMatch is structurally impossible now. `classify` is already awaited at
+      // the call site, so returning this promise is unchanged for callers. The two
+      // added keys are inert on the webhook path (notify.js's two diffs read only
+      // key/state/signal/name/host, and the baseline advance builds a key→state Map).
+      return classifyCapturedPanes(chatList, panes, cfg);
     });
     const agents = await classify(chats);
     // WARDEN-575: the done diff shares the SAME classified `agents` + the SAME
