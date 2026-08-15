@@ -16,7 +16,6 @@
 // toast logic in the parent matches where the other chat-op fetches live
 // (kill/resume/rename in App.tsx); keeping the spinner state here keeps it out
 // of ChatSidebar's already-large state surface.
-import { useState, useEffect } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -28,6 +27,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Loader2 } from 'lucide-react';
 import { TargetAgentList } from '@/components/TargetAgentList';
+import { useAsyncConfirm } from '@/lib/useAsyncConfirm';
 import type { Chat } from '@/lib/types';
 import type { KillSummary } from '@/lib/kill';
 
@@ -43,31 +43,19 @@ interface Props {
 }
 
 export function KillDialog({ open, onOpenChange, targets, onKill }: Props) {
-  const [killing, setKilling] = useState(false);
-
-  // Reset on every open so a previous attempt's spinner can't linger.
-  useEffect(() => {
-    if (open) setKilling(false);
-  }, [open]);
+  // The shared async-confirm machine (WARDEN-1017): `killing`, the reset-on-open
+  // for it, the guarded try/finally confirm, and the mid-flight dismissal guard.
+  const { busy: killing, run, guardOpenChange } = useAsyncConfirm(open, onOpenChange);
 
   const count = targets.length;
   const canKill = count > 0 && !killing;
 
-  const handleKill = async () => {
-    if (!canKill) return;
-    setKilling(true);
-    try {
-      // onKill resolves (never rejects) once every per-target kill has settled —
-      // close on resolve; the parent has already surfaced the result toast.
-      await onKill();
-      onOpenChange(false);
-    } finally {
-      setKilling(false);
-    }
-  };
+  // onKill resolves (never rejects) once every per-target kill has settled — the
+  // hook closes on resolve; the parent has already surfaced the result toast.
+  const handleKill = () => run(onKill, canKill);
 
   return (
-    <Dialog open={open} onOpenChange={(o) => { if (!killing) onOpenChange(o); }}>
+    <Dialog open={open} onOpenChange={guardOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Stop {count} agent{count === 1 ? '' : 's'}?</DialogTitle>

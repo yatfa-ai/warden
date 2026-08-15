@@ -40,6 +40,7 @@ import {
 } from '@/components/ui/select';
 import { Loader2 } from 'lucide-react';
 import { TargetAgentList } from '@/components/TargetAgentList';
+import { useAsyncConfirm } from '@/lib/useAsyncConfirm';
 import type { Chat } from '@/lib/types';
 import type { KeySendSummary } from '@/lib/keysend';
 
@@ -70,37 +71,30 @@ export function KeySendDialog({ open, onOpenChange, targets, onSend }: Props) {
   // them now without losing their work"). Reset to it on every open so a previous
   // pick can't linger to be re-sent by accident on the next selection.
   const [key, setKey] = useState('C-c');
-  const [sending, setSending] = useState(false);
+  // The shared async-confirm machine (WARDEN-1017): `sending`, the reset-on-open
+  // for it, the guarded try/finally confirm, and the mid-flight dismissal guard.
+  const { busy: sending, run, guardOpenChange } = useAsyncConfirm(open, onOpenChange);
 
+  // (`sending` is reset by the hook; this effect owns the key pick only.)
   useEffect(() => {
     if (open) {
       setKey('C-c');
-      setSending(false);
     }
   }, [open]);
 
   const count = targets.length;
   const canSend = count > 0 && !sending;
 
-  const handleSend = async () => {
-    if (!canSend) return;
-    setSending(true);
-    try {
-      // onSend resolves (never rejects) once every per-target send has settled —
-      // close on resolve; the parent has already surfaced the result toast.
-      await onSend(key);
-      onOpenChange(false);
-    } finally {
-      setSending(false);
-    }
-  };
+  // onSend resolves (never rejects) once every per-target send has settled — the
+  // hook closes on resolve; the parent has already surfaced the result toast.
+  const handleSend = () => run(() => onSend(key), canSend);
 
   // The verb in the title/button tracks the key, matching the result-toast copy
   // in formatKeySendToast: "Interrupt N" for C-c, "Send Esc to N" for Escape.
   const verb = key === 'C-c' ? 'Interrupt' : 'Send Esc to';
 
   return (
-    <Dialog open={open} onOpenChange={(o) => { if (!sending) onOpenChange(o); }}>
+    <Dialog open={open} onOpenChange={guardOpenChange}>
       <DialogContent
         className="sm:max-w-md"
         // ⌘/Ctrl+Enter confirms — matches BroadcastDialog's confirm intent (a
