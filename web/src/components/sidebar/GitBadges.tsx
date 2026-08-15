@@ -31,6 +31,7 @@ import { basename } from '@/lib/chatDisplay';
 import { formatRelative, formatAbsoluteFull } from '@/lib/formatTimestamp';
 import type { GitCommit, GitFile, GitStash, GitReflogEntry, GitRemote, GitBranch, DiffStat } from './types';
 import { DiffStatChip } from './DiffStatChip';
+import { readListBody, readListResponse } from '@/lib/api';
 
 /**
  * Color the porcelain X/Y columns for one changed file (WARDEN-369). Working-tree
@@ -481,41 +482,102 @@ export function GitRepoSummary({ branch, clean, ahead, behind, inProgress, stash
   );
 }
 
+// A list section's failure as reported by its DATA source — never pre-phrased. The
+// two kinds are genuinely different events and only one of them carries a message, so
+// the kind (not a composed string) is what crosses the data→render boundary
+// (WARDEN-1014 review: `listFor` was composing user-facing copy inside a helper whose
+// job is choosing between the search and browse sources).
+type ListFailure =
+  /** The commit-grep RPC failed. It reports no message of its own. */
+  | { kind: 'search' }
+  /** A list fetch failed; `reason` is the raw text readListResponse produced. */
+  | { kind: 'fetch'; reason: string };
+
+// The ONE home for a failed git-list fetch: both the phrasing AND the colour. Every
+// surface that reports a list failure goes through here — the stash / reflog / branch
+// terminal rows, the three commit lists, and the origin row — so the same semantic
+// event cannot render as amber in one half of a popover and destructive-red in the
+// other, and the `failed to load: …` copy has exactly one definition (WARDEN-1014
+// review found it built in two places and coloured two ways in a single diff).
+//
+// `truncate` + `title` keep a long git message from blowing out the narrow sidebar
+// column. `noun` names WHICH list when the row sits outside its own section (the origin
+// row reports the *remote* fetch from inside the branch header). `className` is merged
+// through `cn`/tailwind-merge, so a caller can restate spacing without forking colour.
+function ListErrorRow({ failure, noun, className }: { failure: ListFailure; noun?: string; className?: string }) {
+  const text = failure.kind === 'search'
+    ? 'search failed — try again'
+    : `failed to load${noun ? ` ${noun}` : ''}: ${failure.reason}`;
+  return (
+    <div className={cn('truncate px-1 py-1 text-[10px] text-amber-400', className)} title={text}>
+      {text}
+    </div>
+  );
+}
+
+// One lazy list section's terminal row: the FAILURE state when the fetch reported an
+// error, else the plain empty state. Before WARDEN-1014 every one of these sections
+// rendered only the empty state, so a 200 carrying {error} (an unreachable SSH host, a
+// cwd-less chat) was indistinguishable from a genuinely clean repo — "no stashes" for
+// both. The amber failure row makes the two visually distinguishable. Mirrors the
+// in-file positive control at the commit-inspect sites (`?.error ? 'failed to load'
+// : 'no files'`), which fetchShow/fetchStashShow have always fed correctly.
+function ListStateRow({ error, empty }: { error: string | null; empty: string }) {
+  if (error) return <ListErrorRow failure={{ kind: 'fetch', reason: error }} />;
+  return <div className="px-1 py-1 text-[10px] text-muted-foreground">{empty}</div>;
+}
+
 // Shared skeleton for GitRepoDetails' four lazy list-fetchers (stash / reflog /
 // remote / branch), which were the same twelve lines written four times, differing
 // ONLY in route, response key and state pair — the "mirrors fetchStash" / "mirrors
 // fetchReflog" comments documented that duplication instead of factoring it. Same DRY
 // move as useGitLogFetcher in ChatSidebar (:177) and DiffInspectRow here (WARDEN-1003).
-// GET /api/git-<axis>?id=…, store `j.<responseKey>` (or [] when it isn't an array),
-// toggle the loading flag. Always fetches — dedup is at the call site (the expand
-// effect guards on `list === undefined`; each refresh button is disabled while
-// loading). All four routes are read-only. `onBeforeFetch` runs after the loading flag
-// is raised and before the request, for an axis that must reset companion state first
-// (stash's WARDEN-340 cache drop — see its call site). Behaviour matches the inline
-// copies exactly: `j.error` is still discarded and a failure still caches [] so a
-// re-expand doesn't loop — fixing that is a banked follow-up, now a change at THIS one
-// seam rather than four. Deps are all stable, so the fetcher's identity is too.
-function useGitListFetcher<T>({ chatId, route, responseKey, setList, setLoading, onBeforeFetch }: {
+// GET /api/git-<axis>?id=…, store the list, toggle the loading flag. Always fetches —
+// dedup is at the call site (the expand effect guards on `list === undefined`; each
+// refresh button is disabled while loading). All four routes are read-only.
+// `onBeforeFetch` runs after the loading flag is raised and before the request, for an
+// axis that must reset companion state first (stash's WARDEN-340 cache drop — see its
+// call site). Deps are all stable, so the fetcher's identity is too.
+//
+// WARDEN-1014 closes the banked follow-up this comment used to concede ("`j.error` is
+// still discarded"): the read now goes through the shared `readListResponse`, which
+// honours BOTH halves of the backend convention — a non-2xx AND a 200 whose body
+// carries `{error}` alongside the `gitDefaults` empty array (src/gitRoutes.js:490,
+// :494). `setError` is the channel added alongside `setList`, mirroring how showCache
+// stores `{ files, error }`. A failure STILL caches `[]` so the expand effect's
+// `=== undefined` guard doesn't loop on re-expand — the difference is that the error
+// now rides alongside it, so the render distinguishes "failed" from "empty" instead of
+// silently showing "no stashes" for an unreachable host (the WARDEN-89 false-empty).
+function useGitListFetcher<T>({ chatId, route, responseKey, label, setList, setError, setLoading, onBeforeFetch }: {
   chatId: string;
   route: string;
   responseKey: string;
+  /** Human-readable noun for the failure copy ('stashes', 'branches', …). */
+  label: string;
   setList: (items: T[]) => void;
+  setError: (error: string | null) => void;
   setLoading: (value: boolean) => void;
   onBeforeFetch?: () => void;
 }) {
   return useCallback(async () => {
     setLoading(true);
+    setError(null);
     onBeforeFetch?.();
     try {
       const r = await fetch(`${route}?id=${encodeURIComponent(chatId)}`);
-      const j = await r.json();
-      setList(Array.isArray(j[responseKey]) ? j[responseKey] : []);
-    } catch {
+      // Tolerant on !ok, STRICT on 2xx — a 2xx body that fails to parse reaches the
+      // catch instead of becoming an empty list with no error (WARDEN-1014 review).
+      const j = await readListBody(r);
+      const { items, error } = readListResponse<T>(r, j, responseKey, label);
+      setList(items);
+      setError(error);
+    } catch (e) {
       setList([]);
+      setError(e instanceof Error ? e.message : `Failed to load ${label}`);
     } finally {
       setLoading(false);
     }
-  }, [chatId, route, responseKey, setList, setLoading, onBeforeFetch]);
+  }, [chatId, route, responseKey, label, setList, setError, setLoading, onBeforeFetch]);
 }
 
 /**
@@ -537,10 +599,15 @@ function useGitListFetcher<T>({ chatId, route, responseKey, setList, setLoading,
  * Nothing here navigates: every control opens a diff, expands a list, or opens a
  * file — never a pane.
  */
-export function GitRepoDetails({ branch, clean, commits, loading, onFetch, ahead, behind, chatId, stashCount, diffstat, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, detached, headSha, upstream, onOpenFile, expanded }: {
+export function GitRepoDetails({ branch, clean, commits, commitsError, loading, onFetch, ahead, behind, chatId, stashCount, diffstat, incomingCommits, incomingError, incomingLoading, onFetchIncoming, outgoingCommits, outgoingError, outgoingLoading, onFetchOutgoing, detached, headSha, upstream, onOpenFile, expanded }: {
   branch: string;
   clean: boolean | null;
   commits?: GitCommit[];
+  // WARDEN-1014: the failure reason for the recent-commits fetch, or null/undefined
+  // when it succeeded. Owned by ChatSidebar alongside the cache itself (that is where
+  // useGitLogFetcher writes it) and forwarded through SourceControlPanel, exactly like
+  // the `commits` / `loading` pair it rides with.
+  commitsError?: string | null;
   loading?: boolean;
   onFetch?: () => void;
   ahead?: number | null;
@@ -558,6 +625,8 @@ export function GitRepoDetails({ branch, clean, commits, loading, onFetch, ahead
   // objects reachable from the upstream remote-tracking ref (@{u}), so git show serves
   // them without a pull.
   incomingCommits?: GitCommit[];
+  /** WARDEN-1014: incoming fetch failure reason, or null. Mirrors commitsError. */
+  incomingError?: string | null;
   incomingLoading?: boolean;
   onFetchIncoming?: () => void;
   // WARDEN-252: the "ahead/unpushed" half — commits HEAD has that @{u} doesn't. The
@@ -566,6 +635,8 @@ export function GitRepoDetails({ branch, clean, commits, loading, onFetch, ahead
   // changed files + per-file diff via /api/git-show. Both halves are explorable —
   // outgoing commits are reachable from HEAD, incoming from @{u} (WARDEN-348).
   outgoingCommits?: GitCommit[];
+  /** WARDEN-1014: outgoing fetch failure reason, or null. Mirrors commitsError. */
+  outgoingError?: string | null;
   outgoingLoading?: boolean;
   onFetchOutgoing?: () => void;
   // WARDEN-239: HEAD is not on a branch (an agent checked out a specific commit).
@@ -602,6 +673,10 @@ export function GitRepoDetails({ branch, clean, commits, loading, onFetch, ahead
   // so we don't refetch forever on a legitimately-empty result.
   const [stashList, setStashList] = useState<GitStash[] | undefined>(undefined);
   const [stashLoading, setStashLoading] = useState(false);
+  // WARDEN-1014: the error channel added alongside each list. null = no failure.
+  // Set by useGitListFetcher from readListResponse, so it is non-null for BOTH a
+  // non-2xx AND a 200 carrying {error} beside the gitDefaults empty array.
+  const [stashError, setStashError] = useState<string | null>(null);
 
   // Lazy reflog detail (WARDEN-460): the agent's operation history — resets,
   // checkouts, abandoned rebases, force-pushes (the non-commit ops that leave no
@@ -612,6 +687,7 @@ export function GitRepoDetails({ branch, clean, commits, loading, onFetch, ahead
   // but-empty (a fresh repo with no commits, or a non-git cwd soft-fail).
   const [reflogList, setReflogList] = useState<GitReflogEntry[] | undefined>(undefined);
   const [reflogLoading, setReflogLoading] = useState(false);
+  const [reflogError, setReflogError] = useState<string | null>(null);
 
   // WARDEN-528: which remote repo this checkout maps to + its web host URL — the one
   // coordination fact every OTHER git facet omits. Lazily fetched on first open
@@ -621,6 +697,7 @@ export function GitRepoDetails({ branch, clean, commits, loading, onFetch, ahead
   // for EVERY repo (the deep-links + origin row render from it), not just a dirty one.
   const [remoteList, setRemoteList] = useState<GitRemote[] | undefined>(undefined);
   const [remoteLoading, setRemoteLoading] = useState(false);
+  const [remoteError, setRemoteError] = useState<string | null>(null);
 
   // WARDEN-577: the agent's local branches — the topology the badge's single
   // current-branch name only gestures at (which OTHER branches exist, whether
@@ -632,6 +709,7 @@ export function GitRepoDetails({ branch, clean, commits, loading, onFetch, ahead
   // least one branch.
   const [branchList, setBranchList] = useState<GitBranch[] | undefined>(undefined);
   const [branchLoading, setBranchLoading] = useState(false);
+  const [branchError, setBranchError] = useState<string | null>(null);
 
   // Per-stash expand state + the /api/git-stash-show files cache (keyed by ref), a
   // parallel of expandedHash/showCache/showLoading for commits — so expanding a
@@ -724,21 +802,34 @@ export function GitRepoDetails({ branch, clean, commits, loading, onFetch, ahead
   // a search is active, else its cached browse list. Returns the items (possibly
   // undefined while pending) and whether the section is in a loading state. Used below
   // to swap each list's data source without touching its row markup.
-  const listFor = (range: '' | 'outgoing' | 'incoming', browse: GitCommit[] | undefined, browseLoading: boolean) => {
+  // WARDEN-1014: `error` was a boolean meaning "the SEARCH failed"; it is now the
+  // failure itself, so the BROWSE leg can report its own fetch failure through the
+  // same channel. The browse error arrives as a prop — ChatSidebar's useGitLogFetcher
+  // owns these three caches and now reads /api/git-log through readListResponse, so a
+  // 200 carrying {error} no longer renders as "no commits". The value handed back is
+  // the RAW failure, never user-facing copy: phrasing and colour live in ListErrorRow
+  // (WARDEN-1014 review — composing strings here put presentation inside a helper that
+  // only picks a data source, and duplicated the copy the row already owned).
+  const listFor = (
+    range: '' | 'outgoing' | 'incoming',
+    browse: GitCommit[] | undefined,
+    browseLoading: boolean,
+    browseError?: string | null,
+  ): { items: GitCommit[] | undefined; loading: boolean; error: ListFailure | null } => {
     if (searching) {
       const hit = searchResults[range];
-      if (hit === undefined) return { items: undefined, loading: true, error: false };
-      if (hit.status === 'error') return { items: undefined, loading: false, error: true };
-      return { items: hit.commits, loading: false, error: false };
+      if (hit === undefined) return { items: undefined, loading: true, error: null };
+      if (hit.status === 'error') return { items: undefined, loading: false, error: { kind: 'search' } };
+      return { items: hit.commits, loading: false, error: null };
     }
-    return { items: browse, loading: !!browseLoading, error: false };
+    return { items: browse, loading: !!browseLoading, error: browseError ? { kind: 'fetch', reason: browseError } : null };
   };
 
   // Resolve each section's render source once (browse cache vs grep results) so the JSX
   // below reads the same whether or not a search is active.
-  const recent = listFor('', commits, !!loading);
-  const outList = listFor('outgoing', outgoingCommits, !!outgoingLoading);
-  const incList = listFor('incoming', incomingCommits, !!incomingLoading);
+  const recent = listFor('', commits, !!loading, commitsError);
+  const outList = listFor('outgoing', outgoingCommits, !!outgoingLoading, outgoingError);
+  const incList = listFor('incoming', incomingCommits, !!incomingLoading, incomingError);
 
   const fetchShow = async (hash: string) => {
     if (showCache[hash] || showLoading[hash]) return;
@@ -771,20 +862,20 @@ export function GitRepoDetails({ branch, clean, commits, loading, onFetch, ahead
   }, []);
 
   const fetchStash = useGitListFetcher<GitStash>({
-    chatId, route: '/api/git-stash', responseKey: 'stashes',
-    setList: setStashList, setLoading: setStashLoading, onBeforeFetch: resetStashDetail,
+    chatId, route: '/api/git-stash', responseKey: 'stashes', label: 'stashes',
+    setList: setStashList, setError: setStashError, setLoading: setStashLoading, onBeforeFetch: resetStashDetail,
   });
   const fetchReflog = useGitListFetcher<GitReflogEntry>({
-    chatId, route: '/api/git-reflog', responseKey: 'entries',
-    setList: setReflogList, setLoading: setReflogLoading,
+    chatId, route: '/api/git-reflog', responseKey: 'entries', label: 'recent operations',
+    setList: setReflogList, setError: setReflogError, setLoading: setReflogLoading,
   });
   const fetchRemote = useGitListFetcher<GitRemote>({
-    chatId, route: '/api/git-remote', responseKey: 'remotes',
-    setList: setRemoteList, setLoading: setRemoteLoading,
+    chatId, route: '/api/git-remote', responseKey: 'remotes', label: 'remotes',
+    setList: setRemoteList, setError: setRemoteError, setLoading: setRemoteLoading,
   });
   const fetchBranches = useGitListFetcher<GitBranch>({
-    chatId, route: '/api/git-branch', responseKey: 'branches',
-    setList: setBranchList, setLoading: setBranchLoading,
+    chatId, route: '/api/git-branch', responseKey: 'branches', label: 'branches',
+    setList: setBranchList, setError: setBranchError, setLoading: setBranchLoading,
   });
 
   // WARDEN-975: the lazy-fetch trigger, re-anchored from the popover's onOpenChange
@@ -938,6 +1029,12 @@ export function GitRepoDetails({ branch, clean, commits, loading, onFetch, ahead
               web home; when HEAD tracks an upstream, that ref links to its branch too.
               stopPropagation on each anchor keeps a click from toggling the popover —
               target="_blank" opens the system browser (mirrors MarkdownBody.tsx's <a>). */}
+          {/* WARDEN-1014: a failed /api/git-remote leaves primaryRemote null, so the
+              origin row (and every deep link derived from it) silently vanished —
+              identical to a repo with no web-resolvable remote. Say so instead. */}
+          {!primaryRemote && remoteError && (
+            <ListErrorRow failure={{ kind: 'fetch', reason: remoteError }} noun="remotes" className="mb-1 px-0.5 py-0" />
+          )}
           {primaryRemote && (
             <div className="mb-1 flex flex-wrap items-center gap-x-1 gap-y-0.5 px-0.5 text-[10px] text-muted-foreground">
               {originWeb ? (
@@ -1016,7 +1113,7 @@ export function GitRepoDetails({ branch, clean, commits, loading, onFetch, ahead
             )}
           </div>
           {recent.error ? (
-            <div className="px-1 py-1 text-[10px] text-destructive">search failed — try again</div>
+            <ListErrorRow failure={recent.error} />
           ) : recent.loading && (!recent.items || recent.items.length === 0) ? (
             <div className="flex items-center gap-1.5 px-1 py-1">
               <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">{searching ? 'searching…' : 'loading…'}</span>
@@ -1120,7 +1217,7 @@ export function GitRepoDetails({ branch, clean, commits, loading, onFetch, ahead
                 </Button>
               </div>
               {outList.error ? (
-                <div className="px-1 py-1 text-[10px] text-destructive">search failed — try again</div>
+                <ListErrorRow failure={outList.error} />
               ) : outList.loading && (!outList.items || outList.items.length === 0) ? (
                 <div className="flex items-center gap-1.5 px-1 py-1">
                   <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">{searching ? 'searching…' : 'loading…'}</span>
@@ -1198,7 +1295,7 @@ export function GitRepoDetails({ branch, clean, commits, loading, onFetch, ahead
                 </Button>
               </div>
               {incList.error ? (
-                <div className="px-1 py-1 text-[10px] text-destructive">search failed — try again</div>
+                <ListErrorRow failure={incList.error} />
               ) : incList.loading && (!incList.items || incList.items.length === 0) ? (
                 <div className="flex items-center gap-1.5 px-1 py-1">
                   <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">{searching ? 'searching…' : 'loading…'}</span>
@@ -1316,7 +1413,7 @@ export function GitRepoDetails({ branch, clean, commits, loading, onFetch, ahead
                   ))}
                 </ul>
               ) : (
-                <div className="px-1 py-1 text-[10px] text-muted-foreground">no stashes</div>
+                <ListStateRow error={stashError} empty="no stashes" />
               )}
             </div>
           )}
@@ -1361,7 +1458,7 @@ export function GitRepoDetails({ branch, clean, commits, loading, onFetch, ahead
                   ))}
                 </ul>
               ) : (
-                <div className="px-1 py-1 text-[10px] text-muted-foreground">no operations</div>
+                <ListStateRow error={reflogError} empty="no operations" />
               )}
             </div>
           )}
@@ -1452,7 +1549,7 @@ export function GitRepoDetails({ branch, clean, commits, loading, onFetch, ahead
                   })}
                 </ul>
               ) : (
-                <div className="px-1 py-1 text-[10px] text-muted-foreground">no branches</div>
+                <ListStateRow error={branchError} empty="no branches" />
               )}
             </div>
           )}

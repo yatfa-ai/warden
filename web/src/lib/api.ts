@@ -143,3 +143,94 @@ export async function fetchJson<T = unknown>(
   }
   return { ok: false, error: lastError };
 }
+
+/** What `readListResponse` extracts: the list (never undefined) + a failure string, or null. */
+export interface ListResponse<T> {
+  /** `body[field]` when it is an array, else `[]`. Never undefined. */
+  items: T[];
+  /** Non-null whenever the response failed — by EITHER half of the convention. */
+  error: string | null;
+}
+
+/**
+ * Read a git list response the way warden's backend actually answers, honouring
+ * BOTH halves of its error convention (WARDEN-1014).
+ *
+ * `withGitRepo` (src/gitRoutes.js:473, 15 routes) has TWO failure paths that answer
+ * **HTTP 200** — the no-cwd guard (:490) and the catch-all (:494) — and both spread
+ * `gitDefaults` into the body, so the empty array arrives *alongside* `error`:
+ *
+ *     200 { stashes: [], error: 'no cwd' }
+ *
+ * That is why the usual-looking `Array.isArray(j[field]) ? j[field] : []` guard is
+ * the bug rather than the defence: it accepts the server's placeholder as data, and
+ * an unreachable SSH host renders "no stashes" — indistinguishable from a clean repo
+ * (the WARDEN-89 false-empty disease). Gating on `res.ok` alone is the *incomplete*
+ * remedy: it catches the 404 half (:477) and misses the 200 half entirely.
+ *
+ * This reader is deliberately SEPARATE from `fetchJson` rather than a flag on it:
+ * `fetchJson` returns `ok:true` for ANY 2xx (:135) and sits behind the Settings load,
+ * so widening its 2xx contract would relocate this bug into a shared primitive and
+ * churn its 12 existing specs. Additive here, nothing else moves.
+ *
+ * Error precedence — a non-2xx reports its STATUS, not the body string, preserving
+ * FileViewer's existing `Failed to load blame (404)` copy verbatim:
+ *   1. `!res.ok`                      → `Failed to load <label> (<status>)`
+ *   2. 2xx + non-empty `body.error`   → that string
+ *   3. otherwise                      → `null`
+ *
+ * `items` is populated on every leg (the caller decides whether to apply it — on a
+ * hard HTTP failure it is the server's placeholder, not data).
+ *
+ * @param res   the Response (only `ok`/`status` are read, so a plain object works in tests)
+ * @param body  the parsed JSON body, or `undefined` when it did not parse
+ * @param field the response key holding the list (`stashes`, `commits`, `entries`, …)
+ * @param label human-readable noun for the status message (`blame`, `stashes`, …)
+ */
+export function readListResponse<T = unknown>(
+  res: Pick<Response, 'ok' | 'status'>,
+  body: unknown,
+  field: string,
+  label: string,
+): ListResponse<T> {
+  // `body` is `unknown` (it may be undefined for a non-JSON response), so read the
+  // two keys through one narrowed view rather than casting at each use.
+  const record = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+  const raw = record[field];
+  const items = Array.isArray(raw) ? (raw as T[]) : [];
+  if (!res.ok) return { items, error: `Failed to load ${label} (${res.status})` };
+  // An empty string is not an error — only a non-empty one is, so a route that
+  // spreads `error: ''` (or omits it) still reads as success.
+  const bodyError = typeof record.error === 'string' && record.error ? record.error : null;
+  return { items, error: bodyError };
+}
+
+/**
+ * Parse a git list response's body with the tolerance each leg actually deserves —
+ * the caller-side companion to {@link readListResponse} (WARDEN-1014 review).
+ *
+ * The two legs are NOT symmetric, and collapsing them is how a refactor re-creates
+ * the very false-empty this reader exists to remove:
+ *
+ * - **`!ok`** — the body is OPTIONAL. The STATUS carries the message, and the body
+ *   is routinely an HTML error page that will never parse. Swallow the rejection to
+ *   `undefined`; `readListResponse` still reports `Failed to load <label> (<status>)`.
+ * - **`ok`** — the body IS the answer. A parse failure is a REAL failure, so let it
+ *   reject and reach the caller's `catch`. `fetch` resolves `ok: true` as soon as the
+ *   HEADERS arrive, so a body truncated mid-stream — a dropped SSH tunnel to a remote
+ *   host, warden's normal deployment shape — rejects here rather than at `fetch`.
+ *   Swallowing that would hand `readListResponse` an empty record, which it can only
+ *   read as `{ items: [], error: null }` (it cannot know a parse failed), and the
+ *   surface would render a confident empty list for a network failure.
+ *
+ * `readListResponse` itself stays deliberately PERMISSIVE about a junk body — it is a
+ * pure reader over an already-obtained value with no way to distinguish "absent
+ * because unparseable" from "absent because the route omitted it". The strictness
+ * belongs HERE, at the seam that still knows a rejection happened.
+ */
+export async function readListBody(
+  res: Pick<Response, 'ok'> & { json: () => Promise<unknown> },
+): Promise<unknown> {
+  if (res.ok) return res.json();
+  return res.json().catch(() => undefined);
+}
