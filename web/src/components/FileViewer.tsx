@@ -617,36 +617,48 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
               <DialogTitle className="flex items-center gap-2 pr-8">
                 <FileIcon className="w-4 h-4 shrink-0" />
                 {navigable && crumbs.length > 0 ? (
-                  <nav aria-label="File path" className="flex min-w-0 items-center gap-0.5">
-                    {crumbs.map((c) => (
-                      <Fragment key={c.dir || '__root'}>
-                        <Popover open={openCrumb === c.dir} onOpenChange={(o) => setOpenCrumb(o ? c.dir : null)}>
-                          <PopoverTrigger asChild>
-                            <button
-                              type="button"
-                              className="shrink-0 rounded px-1 py-0.5 text-sm text-muted-foreground hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                              title={c.isRoot ? 'Browse repository root' : `Browse ${c.dir}`}
+                  <nav aria-label="File path" className="flex min-w-0 items-center gap-0.5 overflow-hidden">
+                    {/* The directory crumbs are fixed-size click targets (`shrink-0`),
+                        so a deep path's min-content width exceeds the title row. Give
+                        them their own shrinkable, clipping box (WARDEN-1006): the crumb
+                        run yields space to the `ml-auto` toolbar and clips at its own
+                        edge instead of painting over the toolbar buttons, while the
+                        FILENAME — the part that identifies what you're looking at —
+                        stays outside that box and keeps its own truncation. Before
+                        WARDEN-1006 no clipping was needed because the whole dialog
+                        stretched to fit the header; now that DialogContent's children
+                        are held to the panel, the header has to divide a finite row. */}
+                    <span className="flex min-w-0 items-center gap-0.5 overflow-hidden">
+                      {crumbs.map((c) => (
+                        <Fragment key={c.dir || '__root'}>
+                          <Popover open={openCrumb === c.dir} onOpenChange={(o) => setOpenCrumb(o ? c.dir : null)}>
+                            <PopoverTrigger asChild>
+                              <button
+                                type="button"
+                                className="shrink-0 rounded px-1 py-0.5 text-sm text-muted-foreground hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                title={c.isRoot ? 'Browse repository root' : `Browse ${c.dir}`}
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                {c.isRoot ? <FolderIcon className="h-3.5 w-3.5" /> : c.label}
+                              </button>
+                            </PopoverTrigger>
+                            <PopoverContent
+                              align="start"
+                              sideOffset={4}
+                              className="w-64 p-1 text-xs"
                               onClick={(e) => e.stopPropagation()}
                             >
-                              {c.isRoot ? <FolderIcon className="h-3.5 w-3.5" /> : c.label}
-                            </button>
-                          </PopoverTrigger>
-                          <PopoverContent
-                            align="start"
-                            sideOffset={4}
-                            className="w-64 p-1 text-xs"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <DirListing
-                              chatId={chatId}
-                              dir={c.dir}
-                              onPick={(p) => { setOpenCrumb(null); onNavigate?.(p); }}
-                            />
-                          </PopoverContent>
-                        </Popover>
-                        <span className="shrink-0 text-muted-foreground/50" aria-hidden="true">/</span>
-                      </Fragment>
-                    ))}
+                              <DirListing
+                                chatId={chatId}
+                                dir={c.dir}
+                                onPick={(p) => { setOpenCrumb(null); onNavigate?.(p); }}
+                              />
+                            </PopoverContent>
+                          </Popover>
+                          <span className="shrink-0 text-muted-foreground/50" aria-hidden="true">/</span>
+                        </Fragment>
+                      ))}
+                    </span>
                     <span className="min-w-0 truncate text-foreground" title={filePath}>{fileName}</span>
                   </nav>
                 ) : (

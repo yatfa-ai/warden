@@ -59,7 +59,27 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          // `*:min-w-0` is load-bearing, not cosmetic (WARDEN-1006). A grid item
+          // — and a flex item on its main axis — defaults to `min-width: auto`,
+          // which refuses to shrink below its content's min-content size. One
+          // wide descendant (FileViewer's breadcrumb toolbar, or the Radix
+          // ScrollArea viewport whose inner wrapper is `display: table`) therefore
+          // expands the implicit column track, and because every item stretches to
+          // that track, EVERY sibling row grows with it — the toolbar slides right,
+          // out from under the panel and beneath the `absolute top-2 right-2` close
+          // button below, which is positioned against the correct (unexpanded) box.
+          // Realized consequence: clicking FileViewer's "Changes" button landed on
+          // the close X and shut the viewer.
+          //
+          // Applied at the direct-child boundary rather than at each call site
+          // because the shrink has to happen at the grid/flex ITEM, above any
+          // overflow container a child sets up — a `min-w-0` on the inner `<pre>`
+          // is a no-op. `*:` covers both display modes: `ConflictView` overrides
+          // the base `grid` with `flex flex-col`, so a grid-only fix (e.g.
+          // `grid-cols-[minmax(0,1fr)]`) would not reach it. It only REMOVES a
+          // minimum — nothing is forced narrower, so no dialog's declared width
+          // changes and the `max-w-[calc(100%-2rem)]` mobile clamp is untouched.
+          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none *:min-w-0 sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className
         )}
         {...props}

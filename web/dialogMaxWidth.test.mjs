@@ -85,6 +85,20 @@ function unprefixedMaxWidths(tag) {
   return [...tag.matchAll(/(^|[\s"'`{])(max-w-[^\s"'`}]+)/g)].map((m) => m[2]);
 }
 
+/**
+ * The base component's own class string — the text inside the `cn(...)` call in
+ * `DialogContent`. Anchored on `fixed top-1/2`, the one stable prefix of that
+ * string; if the anchor ever stops matching the read throws rather than silently
+ * returning '' and turning the invariants below into tests that pass by finding
+ * nothing.
+ */
+function baseDialogContentClasses() {
+  const text = fs.readFileSync(path.join(SRC_DIR, 'components', 'ui', 'dialog.tsx'), 'utf8');
+  const match = text.match(/"(fixed top-1\/2[^"]*)"/);
+  if (!match) throw new Error('could not locate the base DialogContent class string in dialog.tsx');
+  return match[1];
+}
+
 describe('DialogContent width overrides survive tailwind-merge (WARDEN-1001)', () => {
   it('never passes an unprefixed max-w-* to DialogContent', () => {
     const offenders = [];
@@ -142,3 +156,93 @@ describe('DialogContent width overrides survive tailwind-merge (WARDEN-1001)', (
     assert.deepEqual(unprefixedMaxWidths(tags[0]), []);
   });
 });
+
+/**
+ * SECOND CLASS-WIDE INVARIANT over the same component (WARDEN-1006).
+ *
+ * Fixing the max-w bug above gave FileViewer the 896px panel it declared — and the
+ * close X still covered the right ~30% of its "Changes" button, because the panel's
+ * WIDTH was never the whole cause. `DialogContent` lays its children out as a grid,
+ * and a grid item defaults to `min-width: auto`: it refuses to shrink below its
+ * content's min-content size. One wide descendant therefore expands the implicit
+ * column track, every sibling stretches to that expanded track, and the toolbar
+ * slides out from under the panel — while the `absolute top-2 right-2` close button
+ * stays positioned against the correct, unexpanded box. Measured live at 1280px
+ * before the fix: dialog right=1088, children right=1506.
+ *
+ * The same source-scan-vs-unit-test argument as above applies, only harder: this
+ * defect is a relationship between a shared component's display mode and the CSS
+ * initial value of a property nobody wrote down. There is no module whose logic is
+ * wrong, and no front-end DOM runner in this repo to catch the geometry — both
+ * guards in this suite were green while the button was unclickable.
+ *
+ * So, in the same spirit as the invariant above: assert the class-wide enabler is
+ * present on the BASE and not removable by a caller. It pins no call site's markup
+ * and no individual dialog's spelling.
+ */
+describe('DialogContent children can shrink below their content (WARDEN-1006)', () => {
+  it('the base enables direct-child shrink, covering every call site at once', () => {
+    assert.match(
+      baseDialogContentClasses(),
+      /(^|\s)\*:min-w-0(\s|$)/,
+      'the base DialogContent must neutralise its children\'s default `min-width: auto`. '
+      + 'Without it one wide descendant expands the layout track, every sibling row '
+      + 'stretches with it, and the toolbar slides under the absolutely-positioned '
+      + 'close button — clicking a toolbar button closes the dialog instead.',
+    );
+  });
+
+  it('applies it at the direct-child boundary, so it reaches the flex call site too', () => {
+    // ConflictView passes `flex flex-col`, REPLACING the base's `grid`. A track-level
+    // grid fix (`grid-cols-[minmax(0,1fr)]`) is inert on a flex container, so a
+    // grid-only spelling would leave that call site on `min-width: auto`. The `*:`
+    // variant targets the items themselves and is therefore display-mode agnostic.
+    const base = baseDialogContentClasses();
+    const overridesDisplay = sourceFiles().flatMap(({ file, text }) =>
+      file === path.join('components', 'ui', 'dialog.tsx') ? [] : dialogContentTags(text))
+      .filter((tag) => /(^|[\s"'`{])(flex|block|inline-\w+|table|contents)([\s"'`}])/.test(tag));
+    assert.ok(
+      overridesDisplay.length > 0,
+      'expected at least one call site to override the base `grid` display — if none '
+      + 'does any more, this invariant is over-strict and can be relaxed, but do not '
+      + 'delete it without checking',
+    );
+    assert.match(
+      base,
+      /(^|\s)\*:min-w-0(\s|$)/,
+      `${overridesDisplay.length} call site(s) override the base display mode, so the `
+      + 'shrink must be expressed on the CHILDREN (`*:min-w-0`), not on a grid track.',
+    );
+  });
+
+  it('no caller can silently take it back', () => {
+    // tailwind-merge dedupes a caller's class against the base's within the same
+    // group and modifier, so a call site passing its own `*:min-w-*` would REPLACE
+    // the base's `*:min-w-0` and reinstate the defect for that dialog only.
+    const offenders = [];
+    for (const { file, text } of sourceFiles()) {
+      if (file === path.join('components', 'ui', 'dialog.tsx')) continue;
+      for (const tag of dialogContentTags(text)) {
+        for (const m of tag.matchAll(/(^|[\s"'`{])(\*:min-w-[^\s"'`}]+)/g)) {
+          offenders.push(`${file}: ${m[2]}`);
+        }
+      }
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      'a `*:min-w-*` on a DialogContent call site replaces the base component\'s '
+      + '`*:min-w-0` via tailwind-merge, restoring `min-width: auto` on that dialog\'s '
+      + 'children and reintroducing the overflow the base fix exists to prevent.',
+    );
+  });
+
+  it('is actually reading the base class string (guards a silently-empty scan)', () => {
+    // Without this, a refactor that moves or reformats the base class string turns
+    // every assertion above into a check against '' — reporting safety it never read.
+    const base = baseDialogContentClasses();
+    assert.match(base, /\bgrid\b/, 'expected the base string to still carry its display mode');
+    assert.match(base, /\bsm:max-w-sm\b/, 'expected the base string to still carry its default width');
+  });
+});
+
