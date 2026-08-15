@@ -457,10 +457,26 @@ function makeDeadTransport(err) {
   };
 }
 
+// How long streamFileToHost's 'exit' waits for 'close' before settling on its
+// own. See the hang guard in that function for why this exists and why it is
+// generous. Exported so its test asserts against the real value rather than
+// hard-coding a sleep.
+export const UPLOAD_CLOSE_GRACE_MS = 1000;
+
 // Stream the bundled binary to the host over ssh stdin (the VS Code Remote-SSH
 // model). Returns { ok, code, stderr }. The binary is only ever exec'd on the
 // REMOTE host after this upload, never locally.
 // Exported for the WARDEN-983 stdin-EPIPE guard — see spawnPersistentChannel.
+//
+// Known, deliberate exception to the WARDEN-464 'close'-not-'exit' discipline
+// this function now follows: `ensureControlMaster` (src/ssh.js:139) also
+// accumulates stderr and returns it through the same degrading
+// `${stderr || `exit ${code}`}` idiom, but it must STAY on 'exit'. It starts a
+// persistent `-N` ControlMaster with ControlPersist=10m and resolves
+// `{ ..., process: child }` on success; the backgrounded master can hold its
+// stdio open indefinitely, so 'close' may never fire and converting it would
+// risk wedging the whole connection pool — far worse than a degraded message on
+// its failure leg.
 export function streamFileToHost(host, localBinaryPath, remotePath, cfg, spawnFn) {
   const cmd = buildUploadScript(remotePath);
   // argv from ssh.js's buildSshArgv — see spawnPersistentChannel above.
@@ -478,7 +494,11 @@ export function streamFileToHost(host, localBinaryPath, remotePath, cfg, spawnFn
     }
     let stderr = '';
     let resolved = false;
-    const done = (r) => { if (!resolved) { resolved = true; resolve(r); } };
+    let graceTimer = null;
+    const done = (r) => {
+      if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
+      if (!resolved) { resolved = true; resolve(r); }
+    };
     const stream = fs.createReadStream(localBinaryPath);
     stream.on('error', (e) => {
       try { child.kill('SIGKILL'); } catch { /* noop */ }
@@ -486,9 +506,44 @@ export function streamFileToHost(host, localBinaryPath, remotePath, cfg, spawnFn
     });
     child.on('error', (e) => done({ ok: false, code: -1, stderr: String(e) }));
     child.stderr.on('data', (d) => { stderr += d; });
-    child.on('exit', (code) => {
+    // Drain stdout. 'close' waits for ALL stdio to close, and this function never
+    // reads child.stdout — an unconsumed pipe fills its buffer and stalls the
+    // child (and therefore the close we now resolve on). Same reason sshControl
+    // resumes the streams it ignores (src/ssh.js:90-91).
+    if (child.stdout) child.stdout.resume();
+    // 'close' (NOT 'exit') — this resolver ACCUMULATES stderr and RETURNS it, and
+    // that stderr is the ONLY diagnostic a user gets when a host fails to provision
+    // (bootstrapChannel's `upload failed: ${stderr || `ssh exited ${code}`}` — the
+    // `||` means a truncated stderr does not error, it silently degrades the real
+    // cause, e.g. "No space left on device", to a bare "ssh exited 1"). 'exit'
+    // fires BEFORE the stdio pipes drain, so it can capture a truncated or empty
+    // tail; 'close' fires only after they drain. The race is wide here because we
+    // pipe ~2.1MB through child.stdin, saturating the loop in exactly the window
+    // the child exits and its stderr tail must drain. Same class as WARDEN-464/766
+    // (ssh.js run(), runLocalCapture, gitRoutes) — 'close' passes the same `code`,
+    // so the {ok, code, stderr} contract is unchanged; only stderr gets completer.
+    child.on('close', (code) => {
       stream.destroy();
       done({ ok: code === 0, code: code ?? -1, stderr });
+    });
+    // Hang guard. 'close' requires every stdio stream to close; a child whose
+    // stdio is held open (inherited by a grandchild, a wedged pipe) would leave a
+    // promise that resolves TODAY pending forever. So 'exit' — which we no longer
+    // resolve on — arms a bounded grace instead: if 'close' has not landed within
+    // it, settle with whatever stderr drained. 'close' clears the timer, and both
+    // paths funnel through the idempotent done(), so whichever lands first wins
+    // and the other no-ops. The grace is ~1000x a real drain (microseconds), so in
+    // practice 'close' always wins; when it doesn't, the result is today's
+    // possibly-truncated stderr — never worse than the status quo, never a hang.
+    // NOT unref'd: this timer is the only thing keeping the promise alive on that
+    // path, and an unref'd one would let node exit with the upload unsettled.
+    child.on('exit', (code) => {
+      if (resolved) return;
+      stream.destroy();
+      graceTimer = setTimeout(() => {
+        graceTimer = null;
+        done({ ok: code === 0, code: code ?? -1, stderr });
+      }, UPLOAD_CLOSE_GRACE_MS);
     });
     // `child.stdin` is its own Socket emitter and an unlistened 'error' THROWS —
     // process death, taking the warden server with it. The pipe below streams

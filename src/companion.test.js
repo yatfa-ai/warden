@@ -42,6 +42,7 @@ import {
   reconcilePaneSubscriptions, _getAgentStateWatchedForTests,
   _resetPaneDeltaStateForTests, _getPaneSubscriptionsForTests,
   startPaneDeltaSweep, _stopPaneDeltaSweepForTests,
+  streamFileToHost, UPLOAD_CLOSE_GRACE_MS,
 } from './companion.js';
 import { probeSession, hasSession as tmuxHasSession, resize as tmuxResize, send as tmuxSend, sendKey as tmuxSendKey } from './tmux.js';
 import { classifyProbe } from './sessionRecovery.js';
@@ -1627,6 +1628,148 @@ describe('getChannel / bootstrap orchestration', () => {
     await getChannel('prod-reap-samever', {}, deps);
     assert.strictEqual(runScripts.length, 1, 'only the probe ran (no reap on a same-version re-bootstrap)');
     assert.strictEqual(runScripts[0], buildProbeScript(remoteBinaryPath(TEST_VER)), 'the single runFn call is the probe');
+  });
+});
+
+describe("streamFileToHost — close, not exit (WARDEN-464/766 class, WARDEN-1007)", () => {
+  /**
+   * streamFileToHost ACCUMULATES stderr and RETURNS it, which is the WARDEN-464
+   * discriminator for "must resolve on 'close'". 'exit' fires before the stdio
+   * pipes drain, so the returned stderr can be truncated or empty — and that
+   * stderr is the ONLY diagnostic a user gets when a host fails to provision:
+   *
+   *   // src/companion.js, bootstrapChannel upload leg
+   *   `bootstrap upload failed: ${(up.stderr || '').trim() || `ssh exited ${up.code}`}`
+   *
+   * The `||` makes the failure SILENT BY CONSTRUCTION (WARDEN-89): a truncated
+   * stderr does not error, it quietly degrades "No space left on device" into a
+   * bare "ssh exited 1". The probe leg ~19 lines above uses the identical idiom
+   * but sources its result from run() (src/ssh.js), which already resolves on
+   * 'close' — the asymmetry this locks shut.
+   *
+   * Deterministic by injection, exactly as src/sshRun.test.js does it: a fake
+   * child emitting the adversarial 'exit'-before-final-'data' order reproduces
+   * on every machine what a saturated loop produces only sometimes. The window
+   * is genuinely wide in production because this function pipes ~2.1MB through
+   * child.stdin, saturating the loop in exactly the interval the child exits and
+   * its stderr tail must drain.
+   */
+  let tmpDir, tinyFile;
+
+  before(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-upload-close-'));
+    // Small on purpose: these cases drive the RESOLVE ordering by hand, so the
+    // pipe must not still be the thing keeping the child busy. The 2.1MB
+    // backpressure shape is the WARDEN-983 block's job, not this one's.
+    tinyFile = path.join(tmpDir, 'tiny.bin');
+    fs.writeFileSync(tinyFile, Buffer.alloc(64, 0x61));
+  });
+
+  after(() => { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* noop */ } });
+
+  // A minimal ChildProcess stand-in for the upload leg. stdout is a real Readable
+  // because production calls .resume() on it; stderr is a plain EventEmitter so a
+  // 'data' can be emitted SYNCHRONOUSLY at a chosen point in the ordering (a
+  // Readable's push() defers, which is exactly the determinism these tests need
+  // to control). stdin swallows the piped bytes.
+  const fakeUploadChild = () => {
+    const c = new EventEmitter();
+    c.stdout = new Readable({ read() {} });
+    c.stderr = new EventEmitter();
+    c.stdin = new Writable({ write(_chunk, _enc, cb) { cb(); } });
+    c.kill = () => {};
+    return c;
+  };
+
+  it('gate 1 (deterministic): a non-zero exit whose stderr drains AFTER exit resolves with the COMPLETE stderr', async () => {
+    let child;
+    const started = Date.now();
+    const p = streamFileToHost('h', tinyFile, '/remote/p', {}, () => { child = fakeUploadChild(); return child; });
+
+    child.emit('exit', 1);                     // old 'exit' code resolved HERE → stderr === ''
+    child.stderr.emit('data', 'bash: line 3: /tmp/.warden-companion: No space left on device\n');
+    child.emit('close', 1);                    // 'close' resolves here → stderr complete
+
+    const r = await p;
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.code, 1);
+    // The load-bearing assertion. Inverted to an 'exit' resolve in the production
+    // source during development: this went red with stderr === '' (i.e. the caller
+    // would have printed the degraded "ssh exited 1"); restored → green.
+    assert.strictEqual(
+      r.stderr,
+      'bash: line 3: /tmp/.warden-companion: No space left on device\n',
+      "stderr must be fully drained — resolve on 'close', not 'exit'",
+    );
+    // ...and it was 'close' that settled it, not the hang-guard grace timer
+    // firing with the same values. (Proves 'close' clears the timer.)
+    assert.ok(
+      Date.now() - started < UPLOAD_CLOSE_GRACE_MS,
+      `'close' must resolve immediately, not via the ${UPLOAD_CLOSE_GRACE_MS}ms grace fallback`,
+    );
+  });
+
+  it('gate 2: child.stdout is drained, so an unconsumed pipe cannot stall the child and delay close', () => {
+    // This function never READS stdout, but 'close' waits for ALL stdio to close.
+    // Left paused, a real ssh writing anything to stdout fills its pipe buffer and
+    // blocks — turning the fix into a hang. sshControl (src/ssh.js:90-91) resumes
+    // the streams it ignores for the same reason.
+    let child;
+    const p = streamFileToHost('h', tinyFile, '/remote/p', {}, () => { child = fakeUploadChild(); return child; });
+
+    assert.strictEqual(child.stdout.readableFlowing, true, 'child.stdout must be put in flowing mode (resumed)');
+
+    child.emit('exit', 0);
+    child.emit('close', 0);
+    return p;
+  });
+
+  it("gate 3 (hang guard): an 'exit' that is never followed by 'close' still settles, via the bounded grace", async () => {
+    // 'close' requires every stdio stream to close. A child whose stdio is held
+    // open (inherited by a grandchild, a wedged pipe) would leave a promise that
+    // resolves TODAY pending forever — so moving to 'close' ALONE would trade a
+    // degraded message for a hang. 'exit' arms a bounded grace through the same
+    // idempotent done().
+    //
+    // This is also what keeps the existing fakes green WITHOUT fixture surgery:
+    // fakeSpawnChildFactory's upload branch (this file, ~:1293) emits ONLY 'exit',
+    // never 'close', and is injected as deps.spawn by the bootstrap tests below.
+    // The production hang risk is the real reason for the fallback; the fakes
+    // surviving unmodified is the corroborating evidence, not the motive.
+    let child;
+    const p = streamFileToHost('h', tinyFile, '/remote/p', {}, () => { child = fakeUploadChild(); return child; });
+
+    child.stderr.emit('data', 'Permission denied (publickey).\n');
+    child.emit('exit', 255);
+    // deliberately NO 'close'
+
+    const r = await p;
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.code, 255, 'the grace fallback reports the real exit code');
+    assert.strictEqual(r.stderr, 'Permission denied (publickey).\n', 'whatever drained before the grace elapsed');
+  });
+
+  it('gate 4: a null exit code (signal-killed) still reports ok:false through close', async () => {
+    let child;
+    const p = streamFileToHost('h', tinyFile, '/remote/p', {}, () => { child = fakeUploadChild(); return child; });
+
+    child.emit('exit', null, 'SIGKILL');
+    child.emit('close', null, 'SIGKILL');
+
+    const r = await p;
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.code, -1, '`code ?? -1` must survive the move to close');
+  });
+
+  it('gate 5: the happy path still resolves ok:true with code 0', async () => {
+    let child;
+    const p = streamFileToHost('h', tinyFile, '/remote/p', {}, () => { child = fakeUploadChild(); return child; });
+
+    child.emit('exit', 0);
+    child.emit('close', 0);
+
+    const r = await p;
+    assert.deepStrictEqual(r, { ok: true, code: 0, stderr: '' });
   });
 });
 
