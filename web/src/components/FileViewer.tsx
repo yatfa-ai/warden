@@ -1506,8 +1506,9 @@ function PathCrumb({ crumb, chatId, open, onOpenChange, onPick }: {
 // and the `…` itself is the on-screen affordance saying the path was collapsed.
 //
 // Two levels inside one Popover: the hidden ancestors, then (on pick) that dir's
-// DirListing with a back link. Radix unmounts PopoverContent on close, so the
-// drill-in resets explicitly when the menu closes rather than reopening deep.
+// DirListing with a back link. The drill-in resets whenever the menu is not
+// open — see the note on the reset below for why that has to key off `open`
+// rather than off the dismiss callback — so it never reopens deep.
 function CollapsedCrumbs({ crumbs, chatId, open, onOpenChange, onPick }: {
   crumbs: Crumb[];
   chatId: string;
@@ -1517,11 +1518,21 @@ function CollapsedCrumbs({ crumbs, chatId, open, onOpenChange, onPick }: {
 }) {
   const [browsing, setBrowsing] = useState<string | null>(null);
   const labels = crumbs.map((c) => c.label).join(' / ');
+  // The drill-in resets on `open` itself, NOT in the dismiss callback. Radix
+  // does not fire `onOpenChange` when a CONTROLLED `open` is flipped false by
+  // the parent — and that is exactly what a successful pick does (`onPick` →
+  // `setOpenCrumb(null)`), so a reset that hangs off the dismiss callback is
+  // skipped on the one path that matters: after using the menu, it reopened
+  // into the stale directory instead of the hidden ancestors. Depending on
+  // `open` covers both close paths (dismiss and parent-controlled) with one
+  // reset. `hiddenKey` is in the deps as well so navigating by a VISIBLE crumb,
+  // which changes the hidden set without ever closing the menu, cannot leave a
+  // dir behind that is no longer hidden either. Reopening therefore always
+  // lands on level 1, which is the only level guaranteed to match `crumbs`.
+  const hiddenKey = crumbs.map((c) => c.dir).join('\u0000');
+  useEffect(() => { setBrowsing(null); }, [open, hiddenKey]);
   return (
-    <Popover
-      open={open}
-      onOpenChange={(o) => { if (!o) setBrowsing(null); onOpenChange(o); }}
-    >
+    <Popover open={open} onOpenChange={onOpenChange}>
       <PopoverTrigger asChild>
         <button
           type="button"
