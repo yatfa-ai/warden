@@ -553,9 +553,30 @@ export function streamFileToHost(host, localBinaryPath, remotePath, cfg, spawnFn
     // Route it through the idempotent done() so the upload resolves as a failed
     // upload; whichever of stdin-error / exit lands first wins, the other no-ops.
     // (WARDEN-983.)
+    // APPEND the accumulated remote stderr, never replace it (WARDEN-1018). When
+    // the remote dies mid-upload (disk full, mkdir/auth failure) it stops reading
+    // while ~2.1MB is still piped, so the write EPIPEs — and because child.stdin
+    // is one of the stdio streams 'close' waits on, THIS handler necessarily runs
+    // before 'close' and wins deterministically. Reporting only the local symptom
+    // ("write EPIPE") would therefore discard the remote cause on the DOMINANT
+    // failure leg, exactly the diagnostic the 'close' comment above calls "the
+    // ONLY diagnostic a user gets when a host fails to provision".
+    // Additive by construction: with an empty accumulator the message is
+    // byte-identical to the pre-WARDEN-1018 one, so no path can regress.
+    // NOT solved by arming the UPLOAD_CLOSE_GRACE_MS timer here so 'close' wins
+    // with complete stderr — that reds companion.test.js:1864, which requires the
+    // stdin path (not the exit path) to produce this result.
+    // Caveat, deliberately not oversold: stdin's 'error' precedes the stderr
+    // pipe's full drain, so this recovers what has DRAINED SO FAR, not a
+    // guaranteed-complete remote message. Strictly better than discarding it.
     child.stdin.on('error', (e) => {
       stream.destroy();
-      done({ ok: false, code: -1, stderr: `upload stdin failed: ${e.message}` });
+      const remote = stderr.trim();
+      done({
+        ok: false,
+        code: -1,
+        stderr: `upload stdin failed: ${e.message}${remote ? ` — remote said: ${remote}` : ''}`,
+      });
     });
     stream.pipe(child.stdin);
   });

@@ -1865,6 +1865,38 @@ setTimeout(() => { console.log('RESULT ' + JSON.stringify(res)); process.exit(0)
     assert.match(r.result.stderr, /EPIPE/, 'the mid-write race must actually have produced an EPIPE');
   });
 
+  it('site 1b — streamFileToHost: the stdin-error result PRESERVES the accumulated remote stderr (WARDEN-1018)', skipWin, () => {
+    // The dominant real-world leg: the remote dies mid-upload (disk full, mkdir
+    // or auth failure) having ALREADY said why on stderr, and stops reading while
+    // ~2.1MB is still backpressured. child.stdin is one of the stdio streams
+    // 'close' waits on, so the stdin 'error' handler wins deterministically — if
+    // it REPLACES the accumulated stderr, the actionable remote cause is gone and
+    // the user is told only "write EPIPE".
+    //
+    // The remote text is emitted EARLY (before the 150ms sleep) on purpose: the
+    // stdin 'error' fires before the stderr pipe's full drain, so this asserts on
+    // what has drained, not on a complete-stderr guarantee the fix cannot make.
+    const r = runInChild('upload-stderr', `
+import { spawn } from 'node:child_process';
+import { streamFileToHost } from ${COMPANION_URL};
+// Consume 64KB, SAY WHY on stderr, then die with ~2.1MB still backpressured.
+const spawnFn = () => spawn('sh', ['-c', 'head -c 65536 >/dev/null; echo "No space left on device" >&2; sleep 0.15; exit 255'], { windowsHide: true });
+const res = await streamFileToHost('h', ${JSON.stringify(bigFile)}, '/remote/p', {}, spawnFn);
+setTimeout(() => { console.log('RESULT ' + JSON.stringify(res)); process.exit(0); }, 300);
+`);
+    assertSurvived(r);
+    // Same contract as site 1 — the fix is additive, ok/code/prefix all unchanged.
+    assert.strictEqual(r.result.ok, false, `upload must resolve ok:false — got ${JSON.stringify(r.result)}`);
+    assert.strictEqual(r.result.code, -1, `stdin failure is code -1 (not the child's exit code) — got ${JSON.stringify(r.result)}`);
+    assert.match(r.result.stderr, /upload stdin failed:/, 'the stdin-error path, not the exit path, must have produced the result');
+    assert.match(r.result.stderr, /EPIPE/, 'the mid-write race must actually have produced an EPIPE');
+    // The point of this case: the remote cause survives alongside the local symptom.
+    assert.match(
+      r.result.stderr, /No space left on device/,
+      `the accumulated remote stderr must be PRESERVED, not replaced by the local EPIPE symptom — got ${JSON.stringify(r.result)}`,
+    );
+  });
+
   it('site 2 — spawnPersistentChannel: a mid-RPC EPIPE surfaces as a transport error instead of killing the process', skipWin, () => {
     const r = runInChild('channel', `
 import { spawn } from 'node:child_process';
