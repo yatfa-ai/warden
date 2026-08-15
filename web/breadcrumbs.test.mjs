@@ -33,7 +33,7 @@ const { code } = await transformWithOxc(src, libPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-breadcrumbs-test-'));
 const tmpFile = join(tmpDir, 'pathBreadcrumbs.mjs');
 writeFileSync(tmpFile, code);
-const { splitPathSegments, ancestorDir, parentDir, collapseCrumbs, MAX_VISIBLE_CRUMBS } = await import(tmpFile);
+const { splitPathSegments, ancestorDir, parentDir, collapseCrumbs, MAX_VISIBLE_CRUMBS, crumbRunNeedsFloor, CRUMB_FLOOR_LABEL_CHARS } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -224,6 +224,53 @@ test('collapseCrumbs does not mutate the array it is given', () => {
   const before = JSON.stringify(crumbs);
   collapseCrumbs(crumbs);
   assert.equal(JSON.stringify(crumbs), before, 'input crumbs are untouched');
+});
+
+
+// ---------------------------------------------------------------------------
+// crumbRunNeedsFloor — when the crumb run gets its minimum width (WARDEN-1006)
+//
+// WHY THIS EXISTS: the run yields the title row's shrink before the filename
+// does, so without a floor a long path squeezes its crumbs to 8px stubs —
+// present and clickable, showing nothing (measured live: a 63-character single
+// directory rendered at 9px). A CSS `min-width` fixes that but beats content
+// width, so applying it unconditionally INFLATES a short run and leaves a gap
+// before the filename. Both failures are invisible to a geometry assertion that
+// only checks containment, which is exactly how the first attempt at this ticket
+// passed its own checks; this pins the decision itself.
+const labels = (...ls) => ls.map((label) => ({ label }));
+
+console.log('\ncrumbRunNeedsFloor — a collapsed path always floors');
+test('a collapsed path floors regardless of how short its visible labels are', () => {
+  assert.equal(crumbRunNeedsFloor(labels('e', 'f'), true), true);
+});
+
+console.log('\ncrumbRunNeedsFloor — an uncollapsed path floors only when it is long');
+test('a short ordinary path does NOT floor (this is the inflation guard)', () => {
+  // src/ui/Foo.tsx — the run is ~96px wide; a 12rem floor would leave ~96px of
+  // empty space between the crumbs and the filename.
+  assert.equal(crumbRunNeedsFloor(labels('src', 'ui'), false), false);
+});
+test('a long single directory floors (the case that measured a 9px crumb)', () => {
+  assert.equal(
+    crumbRunNeedsFloor(labels('an-extremely-long-single-directory-name-for-the-worst-case-check'), false),
+    true,
+  );
+});
+test('the threshold is on TOTAL label length, not crumb count', () => {
+  const many = labels('a', 'b', 'c', 'd');               // 4 crumbs, 4 chars
+  const few = labels('componentsexperimental', 'x');      // 2 crumbs, 23 chars
+  assert.equal(crumbRunNeedsFloor(many, false), false, 'many tiny crumbs stay unfloored');
+  assert.equal(crumbRunNeedsFloor(few, false), true, 'few long crumbs floor');
+});
+test('the boundary is exactly CRUMB_FLOOR_LABEL_CHARS, inclusive', () => {
+  const at = labels('x'.repeat(CRUMB_FLOOR_LABEL_CHARS));
+  const under = labels('x'.repeat(CRUMB_FLOOR_LABEL_CHARS - 1));
+  assert.equal(crumbRunNeedsFloor(at, false), true, 'at the threshold: floors');
+  assert.equal(crumbRunNeedsFloor(under, false), false, 'one char under: does not');
+});
+test('no crumbs at all never floors', () => {
+  assert.equal(crumbRunNeedsFloor([], false), false);
 });
 
 console.log(`\n✓ BREADCRUMBS TESTS PASS (${passed})`);

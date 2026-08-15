@@ -91,3 +91,31 @@ export function collapseCrumbs<T>(
     tail: crumbs.slice(crumbs.length - tailCount),
   };
 }
+
+/** Total characters of visible crumb labels above which the crumb run is given
+ *  its minimum width (WARDEN-1006). ~20 characters of `text-sm` is roughly the
+ *  12rem the floor reserves, so this is the point past which the run would be
+ *  squeezed rather than inflated. */
+export const CRUMB_FLOOR_LABEL_CHARS = 20;
+
+/** Whether the crumb run should be given its minimum width (WARDEN-1006).
+ *
+ *  THE PROBLEM THIS SOLVES: the crumb run yields the title row's shrink before
+ *  the filename does, which is right — but taken to its limit it shrinks the
+ *  crumbs to empty 8px stubs: present and clickable, showing nothing. A CSS
+ *  `min-width` fixes that, and introduces the opposite failure: `min-width` beats
+ *  content width, so a SHORT path (`src/ui/Foo.tsx`) would be inflated to the
+ *  floor and leave a gap before the filename. What CSS wants here is
+ *  "min(content, 12rem)" — which `min-width` cannot express and `fit-content()`
+ *  cannot either, since neither shrinks with the row.
+ *
+ *  So decide it in JS, from the only signal available without measuring the DOM:
+ *  a collapsed path always has a run wide enough to floor, and an uncollapsed one
+ *  is judged by its label length. Being wrong is cheap and bounded in BOTH
+ *  directions — a floor applied too early costs some empty space before the
+ *  filename, applied too late it costs a squeezed crumb. Neither breaks the
+ *  layout, which is why this is a character count and not a ResizeObserver. */
+export function crumbRunNeedsFloor(visible: { label: string }[], collapsed: boolean): boolean {
+  if (collapsed) return true;
+  return visible.reduce((n, c) => n + c.label.length, 0) >= CRUMB_FLOOR_LABEL_CHARS;
+}

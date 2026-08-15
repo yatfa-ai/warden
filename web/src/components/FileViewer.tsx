@@ -30,7 +30,7 @@ import { basename } from '@/lib/chatDisplay';
 // Pure breadcrumb geometry (splitPathSegments / ancestorDir) for the clickable
 // path-segment crumbs (WARDEN-740) — kept UI-free in src/lib so it is unit-
 // tested directly (see web/breadcrumbs.test.mjs).
-import { splitPathSegments, ancestorDir, collapseCrumbs } from '@/lib/pathBreadcrumbs';
+import { splitPathSegments, ancestorDir, collapseCrumbs, crumbRunNeedsFloor } from '@/lib/pathBreadcrumbs';
 // joinPath + the Entry shape are shared with FileBrowserDialog so a navigated
 // sibling path is built identically to the browse dialog's selection.
 import { joinPath, type Entry } from '@/lib/fileBrowserTree';
@@ -603,6 +603,13 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
   // in breadcrumbs.test.mjs — `lead + hidden + tail` is always the whole list,
   // so collapsing hides crumbs from the row but never from the UI.
   const { lead, hidden, tail } = useMemo(() => collapseCrumbs(crumbs), [crumbs]);
+  // Whether the crumb run gets its minimum width — see crumbRunNeedsFloor for why
+  // this is decided here rather than in CSS (a `min-width` that always applied
+  // would inflate a short path's crumb run).
+  const floorCrumbRun = useMemo(
+    () => crumbRunNeedsFloor([...lead, ...tail], hidden.length > 0),
+    [lead, hidden, tail],
+  );
   // Degrade to the plain non-clickable path when no navigation callback is wired
   // (all three render sites wire it, but the prop is optional for safety).
   const navigable = typeof onNavigate === 'function';
@@ -648,19 +655,18 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
                         before the FILENAME — the part that says what you are
                         looking at — gives up a pixel.
 
-                        FLOOR — but not ALL of it: once a path is deep enough to
-                        be collapsed, `lg:min-w-48` stops the run being squeezed to
-                        nothing, which is how the crumbs would otherwise "survive"
-                        a deep path (present, 8px wide, empty). Under the floor the
-                        crumbs `truncate` — a squeezed crumb reads as a word with
-                        an ellipsis and stays a real click target — instead of being
-                        sliced mid-glyph. The floor is applied ONLY when the path
-                        actually collapsed and ONLY at `lg`, for two reasons a
-                        `min-width` makes easy to get wrong: it would otherwise
-                        INFLATE a short crumb run (min-width beats content width,
-                        leaving a gap before the filename on an ordinary path), and
-                        below `lg` the dialog is narrow enough that reserving 12rem
-                        for the path would starve the filename instead.
+                        FLOOR — but not ALL of it: `lg:min-w-48` stops the run
+                        being squeezed to nothing, which is how the crumbs would
+                        otherwise "survive" a long path (present, 8px wide, empty).
+                        Under the floor the crumbs `truncate` — a squeezed crumb
+                        reads as a word with an ellipsis and stays a real click
+                        target — instead of being sliced mid-glyph. The floor is
+                        applied only to a run wide enough to need it (see
+                        `crumbRunNeedsFloor`: a `min-width` beats content width, so
+                        an unconditional one would INFLATE a short crumb run and
+                        leave a gap before the filename) and only at `lg`, below
+                        which the dialog is narrow enough that reserving 12rem for
+                        the path would starve the filename instead.
 
                         `overflow-hidden` here is the outer guarantee that makes
                         the floor safe: if the row is narrower than the floor the
@@ -672,7 +678,7 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
                         the whole dialog stretched to fit the header; now that
                         DialogContent's children are held to the panel, the header
                         has to divide a finite row. */}
-                    <span className={`flex min-w-0 shrink-[9999] items-center gap-0.5 overflow-hidden${hidden.length > 0 ? ' lg:min-w-48' : ''}`}>
+                    <span className={`flex min-w-0 shrink-[9999] items-center gap-0.5 overflow-hidden${floorCrumbRun ? ' lg:min-w-48' : ''}`}>
                       {lead.map((c) => (
                         <Fragment key={c.dir || '__root'}>
                           <PathCrumb
