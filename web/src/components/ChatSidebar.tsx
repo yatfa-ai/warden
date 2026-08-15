@@ -52,6 +52,7 @@ import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/Sidebar
 import { SourceControlPanel } from './sidebar/SourceControlPanel';
 import { SessionTagChips, SessionTagFilterRow } from './sidebar/SessionTags';
 import { computeTagsInUse, filterSessionsByTags, addTag, removeTag } from '@/lib/sessionTags';
+import { readListResponse } from '@/lib/api';
 
 // Back-compat re-export: OpenChatBrowserPage.tsx imports these types from
 // './ChatSidebar' — keep that path stable so it needs no change (WARDEN-315).
@@ -170,30 +171,51 @@ const buildOutgoingParams = () => `limit=50&range=outgoing`;
 
 // Shared skeleton for fetchGitLog / fetchGitLogIncoming / fetchGitLogOutgoing: GET
 // /api/git-log?id=…&<buildParams(limit)>, cache commits per chatId (re-expand is
-// instant), toggle a per-chatId loading flag, and cache [] on transient failure so
-// a re-expand won't loop. Zero behavior change vs. the inline copies (WARDEN-620).
+// instant), toggle a per-chatId loading flag, and cache [] on failure so a re-expand
+// won't loop (WARDEN-620).
+//
+// WARDEN-1014: the response-READING step is the shared `readListResponse` from
+// lib/api.ts, so BOTH halves of the backend's error convention are honoured — a
+// non-2xx AND a 200 whose body carries `{error}` beside the `gitDefaults` empty array
+// (src/gitRoutes.js:490 no-cwd, :494 catch-all). Previously `j.error` was dropped and
+// `Array.isArray(j.commits)` accepted the server's placeholder as data, so a cwd-less
+// chat or an unreachable SSH host rendered "no commits" — indistinguishable from a
+// fresh repo (the WARDEN-89 false-empty). `setError` is the channel added alongside
+// `setCommits`; the caching-[]-on-failure policy is deliberately UNCHANGED, so the
+// re-expand guard still can't loop — the error simply now rides with it.
+//
 // Deps are all stable (useState setters, a string literal, module consts) so the
 // callback keeps a stable identity, matching the original useCallback(fn, []).
-function useGitLogFetcher({ setCommits, setLoading, errorLabel, buildParams }: {
+function useGitLogFetcher({ setCommits, setError, setLoading, errorLabel, label, buildParams }: {
   setCommits: (updater: (prev: Record<string, GitCommit[]>) => Record<string, GitCommit[]>) => void;
+  setError: (updater: (prev: Record<string, string | null>) => Record<string, string | null>) => void;
   setLoading: (updater: (prev: Record<string, boolean>) => Record<string, boolean>) => void;
   errorLabel: string;
+  /** Human-readable noun for the failure copy ('commits', 'incoming commits', …). */
+  label: string;
   buildParams: (limit: number) => string;
 }) {
   return useCallback(async (chatId: string, limit: number = WHATS_NEW_FETCH_LIMIT) => {
     setLoading((p) => ({ ...p, [chatId]: true }));
+    setError((p) => ({ ...p, [chatId]: null }));
     try {
       const r = await fetch(`/api/git-log?id=${encodeURIComponent(chatId)}&${buildParams(limit)}`);
-      const j = await r.json();
-      setCommits((p) => ({ ...p, [chatId]: Array.isArray(j.commits) ? j.commits : [] }));
+      // A non-JSON body parses to undefined rather than throwing; readListResponse
+      // tolerates that and still reports the status.
+      const j = await r.json().catch(() => undefined);
+      const { items, error } = readListResponse<GitCommit>(r, j, 'commits', label);
+      setCommits((p) => ({ ...p, [chatId]: items }));
+      setError((p) => ({ ...p, [chatId]: error }));
     } catch (error) {
-      // Non-critical: cache an empty list so a transient failure doesn't loop on re-expand.
+      // Cache an empty list so a transient failure doesn't loop on re-expand — but
+      // record WHY, so the section renders a failure rather than a false empty.
       console.error(errorLabel, error);
       setCommits((p) => ({ ...p, [chatId]: [] }));
+      setError((p) => ({ ...p, [chatId]: error instanceof Error ? error.message : `Failed to load ${label}` }));
     } finally {
       setLoading((p) => ({ ...p, [chatId]: false }));
     }
-  }, [setCommits, setLoading, errorLabel, buildParams]);
+  }, [setCommits, setError, setLoading, errorLabel, label, buildParams]);
 }
 
 export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focused, onOpenChat, onClosePane, onReopenClosed, onKill, onRename, onResume, onRefresh, onDiscoverHost, loading, lastRefreshAt, showHostTags, showTypeBadges, showStatusIndicators, showProjectBadges, hideOfflineHosts, onOpenChatBrowser, hostStatuses, timestampFormat, fileViewerViewMode, onFileViewerViewModeChange, pollIntervalMs, snippets, watchedChats, watchedStates, onToggleWatch, onSnoozeMany, onToggleWatchMany, agentFilter, agentSort, onFilterChange, onSortChange, sourceControlCollapsed, onSourceControlCollapsedChange }: Props) {
@@ -226,6 +248,11 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // recent commit history (git log) per chatId — cached so re-expanding the badge is instant
   const [gitLog, setGitLog] = useState<Record<string, GitCommit[]>>({});
   const [gitLogLoading, setGitLogLoading] = useState<Record<string, boolean>>({});
+  // WARDEN-1014: the failure reason per chatId for each of the three git-log caches
+  // (null = the last fetch succeeded). Written by useGitLogFetcher from
+  // readListResponse, so it is non-null for BOTH a non-2xx AND a 200 carrying
+  // {error}. Forwarded to SourceControlPanel beside the cache it describes.
+  const [gitLogError, setGitLogError] = useState<Record<string, string | null>>({});
   // incoming (behind) commit history per chatId — the commits @{u} has that HEAD
   // doesn't (the "↓N behind" half of WARDEN-153's count). A separate cache from the
   // local gitLog so each half refreshes independently and the popover shows both.
@@ -234,6 +261,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // section — but the call is harmless on a non-behind repo (returns []).
   const [gitLogIncoming, setGitLogIncoming] = useState<Record<string, GitCommit[]>>({});
   const [gitLogIncomingLoading, setGitLogIncomingLoading] = useState<Record<string, boolean>>({});
+  const [gitLogIncomingError, setGitLogIncomingError] = useState<Record<string, string | null>>({});
   // outgoing (ahead/unpushed) commit history per chatId — the commits HEAD has that
   // @{u} doesn't (the "↑N unpushed" half of WARDEN-153's count, explorable per
   // WARDEN-252). A separate cache from gitLog/gitLogIncoming so each third refreshes
@@ -243,6 +271,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // harmless on a non-ahead repo (returns []).
   const [gitLogOutgoing, setGitLogOutgoing] = useState<Record<string, GitCommit[]>>({});
   const [gitLogOutgoingLoading, setGitLogOutgoingLoading] = useState<Record<string, boolean>>({});
+  const [gitLogOutgoingError, setGitLogOutgoingError] = useState<Record<string, string | null>>({});
   // Per-file diff dialog (WARDEN-151): which chatId + path is shown in the DiffViewer.
   // `staged` (WARDEN-369): when true the DiffViewer fetches `git diff --cached` (what
   // will be committed) instead of the combined worktree-vs-HEAD diff — set by clicking
@@ -338,11 +367,11 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // "What's new since your last visit" marker counts every commit since the last
   // visit (a rare visitor can have dozens); showing up to 50 (vs the old 5) is a
   // benign superset, not a regression (WARDEN-356 review: "count capped at 5").
-  const fetchGitLog = useGitLogFetcher({ setCommits: setGitLog, setLoading: setGitLogLoading, errorLabel: 'Failed to fetch git log:', buildParams: buildGitLogParams });
+  const fetchGitLog = useGitLogFetcher({ setCommits: setGitLog, setError: setGitLogError, setLoading: setGitLogLoading, errorLabel: 'Failed to fetch git log:', label: 'commits', buildParams: buildGitLogParams });
   // Incoming (behind, HEAD..@{u}) via range=incoming (WARDEN-225); limit hardcoded at 50.
-  const fetchGitLogIncoming = useGitLogFetcher({ setCommits: setGitLogIncoming, setLoading: setGitLogIncomingLoading, errorLabel: 'Failed to fetch incoming git log:', buildParams: buildIncomingParams });
+  const fetchGitLogIncoming = useGitLogFetcher({ setCommits: setGitLogIncoming, setError: setGitLogIncomingError, setLoading: setGitLogIncomingLoading, errorLabel: 'Failed to fetch incoming git log:', label: 'incoming commits', buildParams: buildIncomingParams });
   // Outgoing (ahead/unpushed, @{u}..HEAD) via range=outgoing (WARDEN-252); limit hardcoded at 50.
-  const fetchGitLogOutgoing = useGitLogFetcher({ setCommits: setGitLogOutgoing, setLoading: setGitLogOutgoingLoading, errorLabel: 'Failed to fetch outgoing git log:', buildParams: buildOutgoingParams });
+  const fetchGitLogOutgoing = useGitLogFetcher({ setCommits: setGitLogOutgoing, setError: setGitLogOutgoingError, setLoading: setGitLogOutgoingLoading, errorLabel: 'Failed to fetch outgoing git log:', label: 'outgoing commits', buildParams: buildOutgoingParams });
 
   // Load pinned chat ids + per-agent notes from the backend on mount
   useEffect(() => {
@@ -1247,12 +1276,15 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
             onOpenFile={(path) => { if (focused) setFileTarget({ chatId: focused, path }); }}
             commits={focused ? gitLog[focused] : undefined}
             commitsLoading={focused ? gitLogLoading[focused] : undefined}
+            commitsError={focused ? gitLogError[focused] : undefined}
             onFetchCommits={() => { if (focused) fetchGitLog(focused); }}
             incomingCommits={focused ? gitLogIncoming[focused] : undefined}
             incomingLoading={focused ? gitLogIncomingLoading[focused] : undefined}
+            incomingError={focused ? gitLogIncomingError[focused] : undefined}
             onFetchIncoming={() => { if (focused) fetchGitLogIncoming(focused); }}
             outgoingCommits={focused ? gitLogOutgoing[focused] : undefined}
             outgoingLoading={focused ? gitLogOutgoingLoading[focused] : undefined}
+            outgoingError={focused ? gitLogOutgoingError[focused] : undefined}
             onFetchOutgoing={() => { if (focused) fetchGitLogOutgoing(focused); }}
             collapsed={!!sourceControlCollapsed}
             onCollapsedChange={onSourceControlCollapsedChange ?? (() => {})}

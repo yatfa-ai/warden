@@ -37,6 +37,7 @@ import { joinPath, type Entry } from '@/lib/fileBrowserTree';
 import { toast } from 'sonner';
 import { useStickToBottom } from '@/lib/useStickToBottom';
 import { WEB_POLL_DEFAULT_MS } from '@/lib/pollInterval';
+import { readListResponse } from '@/lib/api';
 
 interface FileViewerProps {
   chatId: string;
@@ -97,16 +98,18 @@ const OVERFLOW_CRUMB_KEY = '\u0000overflow';
 
 // Shared gated-fetch for a git-data slice shown only while a view-mode is on
 // (blame / history). Collapses two byte-mirrored effects into one envelope: the
-// cancelled guard, the loading/error reset, the try → fetch → `!r.ok` early-return
-// → json → cancelled-check → `Array.isArray(j[field]) ? j[field] : []` →
-// `j.error || null` → catch → `finally { setLoading(false) }` body, and the
-// `return () => { cancelled = true }` cleanup. Gates the success path on
-// response.ok so a 4xx/5xx (e.g. unknown chat → 404) surfaces as an error, not a
-// silent success (WARDEN-89). The six per-slice differences are the parameters;
-// the two call sites below are byte-equivalent to the effects they replaced
-// (WARDEN-884; same DRY move as useGitLogFetcher in ChatSidebar + DiffInspectRow
-// in GitBadges). `j` from r.json() is `any`, so `Array.isArray(j[field]) ? j[field]
-// : []` stays `any` and onData typechecks against any typed setter — no cast.
+// cancelled guard, the loading/error reset, the try → fetch → read → catch body,
+// and the `return () => { cancelled = true }` cleanup. The six per-slice
+// differences are the parameters (WARDEN-884; same DRY move as useGitLogFetcher in
+// ChatSidebar + DiffInspectRow in GitBadges).
+//
+// WARDEN-1014: the response-READING step is now the shared `readListResponse` from
+// lib/api.ts rather than an inline `!r.ok` early-return + `Array.isArray(j[field])`
+// + `j.error || null`. Behaviour here is unchanged — this hook was already the only
+// correct copy of the two-halves read, so it is the template the other two hooks
+// adopt, not a site being fixed. A 4xx still reports `Failed to load <label>
+// (<status>)` and still leaves the previously-loaded list untouched; a 2xx carrying
+// `{error}` still surfaces that string.
 function useGatedFetch<T>(opts: {
   gate: boolean;
   buildUrl: () => string;
@@ -126,14 +129,20 @@ function useGatedFetch<T>(opts: {
       onError(null);
       try {
         const r = await fetch(buildUrl());
+        // A non-JSON body (an HTML error page) parses to undefined rather than
+        // throwing; readListResponse tolerates that and still reports the status.
+        const j = await r.json().catch(() => undefined);
+        if (cancelled) return;
+        const { items, error } = readListResponse<T>(r, j, field, label);
+        // On a hard HTTP failure `items` is the server's placeholder, not data —
+        // report the error and leave whatever was already loaded on screen (the
+        // pre-refactor early-return did exactly this).
         if (!r.ok) {
-          if (!cancelled) onError(`Failed to load ${label} (${r.status})`);
+          onError(error);
           return;
         }
-        const j = await r.json();
-        if (cancelled) return;
-        onData(Array.isArray(j[field]) ? j[field] : []);
-        onError(j.error || null);
+        onData(items);
+        onError(error);
       } catch (e) {
         if (!cancelled) onError(e instanceof Error ? e.message : `Failed to load ${label}`);
       } finally {

@@ -81,7 +81,7 @@ function FileSection({ label, files, onOpenDiff, onOpenConflict, onOpenFile, ton
  * empty/hidden, never an error. A clean repo shows "Working tree clean". Collapse
  * state is owned by the caller (persisted across reload like the other sidebar panels).
  */
-export function SourceControlPanel({ chatId, gitInfo, onOpenDiff, onOpenConflict, onOpenFile, commits, commitsLoading, onFetchCommits, incomingCommits, incomingLoading, onFetchIncoming, outgoingCommits, outgoingLoading, onFetchOutgoing, collapsed, onCollapsedChange }: {
+export function SourceControlPanel({ chatId, gitInfo, onOpenDiff, onOpenConflict, onOpenFile, commits, commitsLoading, commitsError, onFetchCommits, incomingCommits, incomingLoading, incomingError, onFetchIncoming, outgoingCommits, outgoingLoading, outgoingError, onFetchOutgoing, collapsed, onCollapsedChange }: {
   // The focused pane's id — the `id` every /api/git-* route resolves the repo by.
   // Empty/undefined when nothing is focused (the section renders nothing anyway).
   chatId?: string | null;
@@ -99,12 +99,17 @@ export function SourceControlPanel({ chatId, gitInfo, onOpenDiff, onOpenConflict
   // chat id there; this section forwards the FOCUSED pane's slice to GitRepoDetails.
   commits?: GitCommit[];
   commitsLoading?: boolean;
+  // WARDEN-1014: each cache's failure reason rides alongside it, so a /api/git-log
+  // failure renders as a failure instead of an empty commit list.
+  commitsError?: string | null;
   onFetchCommits?: () => void;
   incomingCommits?: GitCommit[];
   incomingLoading?: boolean;
+  incomingError?: string | null;
   onFetchIncoming?: () => void;
   outgoingCommits?: GitCommit[];
   outgoingLoading?: boolean;
+  outgoingError?: string | null;
   onFetchOutgoing?: () => void;
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
@@ -197,12 +202,15 @@ export function SourceControlPanel({ chatId, gitInfo, onOpenDiff, onOpenConflict
         upstream={gitInfo.upstream}
         commits={commits}
         loading={commitsLoading}
+        commitsError={commitsError}
         onFetch={onFetchCommits}
         incomingCommits={incomingCommits}
         incomingLoading={incomingLoading}
+        incomingError={incomingError}
         onFetchIncoming={onFetchIncoming}
         outgoingCommits={outgoingCommits}
         outgoingLoading={outgoingLoading}
+        outgoingError={outgoingError}
         onFetchOutgoing={onFetchOutgoing}
         onOpenFile={onOpenFile}
       />
