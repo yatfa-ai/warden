@@ -47,3 +47,47 @@ export function parentDir(filePath: string): string {
   const segs = splitPathSegments(filePath);
   return segs.slice(0, -1).join('/');
 }
+
+/** How many crumb boxes the breadcrumb run renders before it collapses the
+ *  middle of the path behind an overflow menu (WARDEN-1006). Four is the
+ *  collapsed total: the root crumb, the `…` trigger, and the two crumbs
+ *  nearest the open file. */
+export const MAX_VISIBLE_CRUMBS = 4;
+
+/** Split the crumb list into the run that stays on screen and the run that
+ *  moves into the `…` overflow menu (WARDEN-1006).
+ *
+ *  WHY THIS EXISTS: the crumbs are fixed-size click targets, so a deep path's
+ *  min-content width exceeds the dialog title row. Before this, a deep path
+ *  either painted over the toolbar buttons or — once the row was made to clip —
+ *  had its tail crumbs silently sliced off past the clip edge: invisible AND
+ *  unclickable, with nothing on screen saying they existed. Collapsing is the
+ *  structural half of the fix (CSS shrink alone cannot choose WHICH crumbs to
+ *  drop): the middle of the path moves into a menu that still lists it, so the
+ *  navigation those crumbs provide survives the collapse, and the `…` says the
+ *  collapse happened.
+ *
+ *  Keeps the ROOT crumb and the crumbs NEAREST THE FILE — the two ends a human
+ *  orients by — and hides the middle, which is the conventional breadcrumb
+ *  collapse and the opposite of clipping the deep end off.
+ *
+ *  Pure and total: `[...lead, ...hidden, ...tail]` always reconstructs the input
+ *  in order, so no crumb can be lost by collapsing (pinned in breadcrumbs.test.mjs).
+ *
+ *  @param maxVisible total crumb BOXES to render when collapsed (the `…` counts
+ *  as one). Clamped to >= 3 so a collapse always leaves a lead crumb, the
+ *  trigger, and at least one tail crumb. */
+export function collapseCrumbs<T>(
+  crumbs: T[],
+  maxVisible: number = MAX_VISIBLE_CRUMBS,
+): { lead: T[]; hidden: T[]; tail: T[] } {
+  const cap = Math.max(3, Math.floor(maxVisible));
+  // Short enough to render whole — nothing hidden, so no `…` is shown either.
+  if (crumbs.length <= cap) return { lead: crumbs, hidden: [], tail: [] };
+  const tailCount = cap - 2; // one box for the root crumb, one for the `…` trigger
+  return {
+    lead: crumbs.slice(0, 1),
+    hidden: crumbs.slice(1, crumbs.length - tailCount),
+    tail: crumbs.slice(crumbs.length - tailCount),
+  };
+}

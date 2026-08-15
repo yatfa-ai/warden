@@ -79,6 +79,13 @@ function DialogContent({
           // `grid-cols-[minmax(0,1fr)]`) would not reach it. It only REMOVES a
           // minimum — nothing is forced narrower, so no dialog's declared width
           // changes and the `max-w-[calc(100%-2rem)]` mobile clamp is untouched.
+          //
+          // One footgun to know about: `*:min-w-0` and a plain `min-w-*` on a
+          // DIRECT child have equal specificity (0,1,0), and this variant is
+          // emitted later in the stylesheet — so it wins, and a direct child that
+          // sets its own `min-w-*` silently gets 0 instead. Put such a child's
+          // minimum on a wrapper (or an inner element) rather than on the grid/
+          // flex item itself. No call site does this today.
           "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none *:min-w-0 sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className
         )}

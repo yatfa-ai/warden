@@ -23,14 +23,14 @@ import { DiffBlock } from './DiffBlock';
 import { classifyChangesView, resolveViewToggles } from '@/lib/fileViewerChanges';
 import { MarkdownBody } from './MarkdownBody';
 import { tokenizeCode, languageFromPath, type Leaf } from '@/lib/highlight';
-import { Loader2Icon, FileIcon, FolderIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon, RotateCwIcon, CircleDotIcon, FilePenIcon } from 'lucide-react';
+import { Loader2Icon, FileIcon, FolderIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon, RotateCwIcon, CircleDotIcon, FilePenIcon, ChevronLeftIcon } from 'lucide-react';
 import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { basename } from '@/lib/chatDisplay';
 // Pure breadcrumb geometry (splitPathSegments / ancestorDir) for the clickable
 // path-segment crumbs (WARDEN-740) — kept UI-free in src/lib so it is unit-
 // tested directly (see web/breadcrumbs.test.mjs).
-import { splitPathSegments, ancestorDir } from '@/lib/pathBreadcrumbs';
+import { splitPathSegments, ancestorDir, collapseCrumbs } from '@/lib/pathBreadcrumbs';
 // joinPath + the Entry shape are shared with FileBrowserDialog so a navigated
 // sibling path is built identically to the browse dialog's selection.
 import { joinPath, type Entry } from '@/lib/fileBrowserTree';
@@ -84,6 +84,16 @@ type BlameLine = { line: number; hash: string; author: string; date: string; sum
 // ChatSidebar (the only other consumer of this route). `hash` is %h (abbreviated);
 // git-show accepts abbreviated hashes, so it resolves unambiguously on click.
 type HistoryCommit = { hash: string; subject: string; author: string; date: string };
+
+// One clickable ancestor in the path breadcrumb (WARDEN-740): `dir` is the
+// cwd-relative directory /api/git-ls lists when the crumb is clicked, `label` is
+// the segment name shown (empty for the root crumb, which renders a folder icon).
+type Crumb = { label: string; dir: string; isRoot: boolean };
+
+// Identifies the `…` overflow menu in the single `openCrumb` popover slot
+// (WARDEN-1006). A NUL byte cannot occur in a path segment, so this can never
+// collide with a real crumb's `dir` — including the root crumb's `''`.
+const OVERFLOW_CRUMB_KEY = '\u0000overflow';
 
 // Shared gated-fetch for a git-data slice shown only while a view-mode is on
 // (blame / history). Collapses two byte-mirrored effects into one envelope: the
@@ -578,7 +588,7 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
   // is the open file (not clickable). Each crumb carries the dir /api/git-ls
   // lists when clicked (ancestorDir = slice(0, i), exactly the ticket's contract).
   const segments = useMemo(() => splitPathSegments(filePath), [filePath]);
-  const crumbs = useMemo<{ label: string; dir: string; isRoot: boolean }[]>(() => {
+  const crumbs = useMemo<Crumb[]>(() => {
     // A root-level file has a single segment and no proper ancestors — render no
     // crumbs (the file name stands alone), matching the WARDEN-740 segmentation pin.
     if (segments.length <= 1) return [];
@@ -588,6 +598,11 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
     ];
   }, [segments]);
   const fileName = segments[segments.length - 1] ?? filePath;
+  // A deep path's crumbs cannot all fit the title row, so the middle of the run
+  // collapses behind the `…` overflow menu (WARDEN-1006). Pure, and unit-tested
+  // in breadcrumbs.test.mjs — `lead + hidden + tail` is always the whole list,
+  // so collapsing hides crumbs from the row but never from the UI.
+  const { lead, hidden, tail } = useMemo(() => collapseCrumbs(crumbs), [crumbs]);
   // Degrade to the plain non-clickable path when no navigation callback is wired
   // (all three render sites wire it, but the prop is optional for safety).
   const navigable = typeof onNavigate === 'function';
@@ -618,44 +633,80 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
                 <FileIcon className="w-4 h-4 shrink-0" />
                 {navigable && crumbs.length > 0 ? (
                   <nav aria-label="File path" className="flex min-w-0 items-center gap-0.5 overflow-hidden">
-                    {/* The directory crumbs are fixed-size click targets (`shrink-0`),
-                        so a deep path's min-content width exceeds the title row. Give
-                        them their own shrinkable, clipping box (WARDEN-1006): the crumb
-                        run yields space to the `ml-auto` toolbar and clips at its own
-                        edge instead of painting over the toolbar buttons, while the
-                        FILENAME — the part that identifies what you're looking at —
-                        stays outside that box and keeps its own truncation. Before
-                        WARDEN-1006 no clipping was needed because the whole dialog
-                        stretched to fit the header; now that DialogContent's children
-                        are held to the panel, the header has to divide a finite row. */}
-                    <span className="flex min-w-0 items-center gap-0.5 overflow-hidden">
-                      {crumbs.map((c) => (
+                    {/* The crumbs are fixed-size click targets, so a deep path's
+                        min-content width exceeds the title row. Three parts to the
+                        fix (WARDEN-1006):
+
+                        STRUCTURAL — `collapseCrumbs` hides the MIDDLE of a deep
+                        path behind the `…` menu, which still lists those dirs, so
+                        the collapse is visible and none of the navigation it
+                        represents is lost. CSS alone cannot choose which crumbs
+                        to drop; it can only slice whatever runs past the edge.
+
+                        PRIORITY — the crumb run is the heavily-weighted flex item
+                        (`shrink-[9999]`), so it yields the row's shrink long
+                        before the FILENAME — the part that says what you are
+                        looking at — gives up a pixel.
+
+                        FLOOR — but not ALL of it: once a path is deep enough to
+                        be collapsed, `lg:min-w-48` stops the run being squeezed to
+                        nothing, which is how the crumbs would otherwise "survive"
+                        a deep path (present, 8px wide, empty). Under the floor the
+                        crumbs `truncate` — a squeezed crumb reads as a word with
+                        an ellipsis and stays a real click target — instead of being
+                        sliced mid-glyph. The floor is applied ONLY when the path
+                        actually collapsed and ONLY at `lg`, for two reasons a
+                        `min-width` makes easy to get wrong: it would otherwise
+                        INFLATE a short crumb run (min-width beats content width,
+                        leaving a gap before the filename on an ordinary path), and
+                        below `lg` the dialog is narrow enough that reserving 12rem
+                        for the path would starve the filename instead.
+
+                        `overflow-hidden` here is the outer guarantee that makes
+                        the floor safe: if the row is narrower than the floor the
+                        crumb run is clipped at the nav's edge rather than painting
+                        over the toolbar and the close X — the WARDEN-1006 defect
+                        itself. The crumb buttons use `ring-inset` so a focus ring
+                        at the boundary is drawn inside the button and survives the
+                        clip. Before WARDEN-1006 none of this was needed because
+                        the whole dialog stretched to fit the header; now that
+                        DialogContent's children are held to the panel, the header
+                        has to divide a finite row. */}
+                    <span className={`flex min-w-0 shrink-[9999] items-center gap-0.5 overflow-hidden${hidden.length > 0 ? ' lg:min-w-48' : ''}`}>
+                      {lead.map((c) => (
                         <Fragment key={c.dir || '__root'}>
-                          <Popover open={openCrumb === c.dir} onOpenChange={(o) => setOpenCrumb(o ? c.dir : null)}>
-                            <PopoverTrigger asChild>
-                              <button
-                                type="button"
-                                className="shrink-0 rounded px-1 py-0.5 text-sm text-muted-foreground hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                                title={c.isRoot ? 'Browse repository root' : `Browse ${c.dir}`}
-                                onClick={(e) => e.stopPropagation()}
-                              >
-                                {c.isRoot ? <FolderIcon className="h-3.5 w-3.5" /> : c.label}
-                              </button>
-                            </PopoverTrigger>
-                            <PopoverContent
-                              align="start"
-                              sideOffset={4}
-                              className="w-64 p-1 text-xs"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <DirListing
-                                chatId={chatId}
-                                dir={c.dir}
-                                onPick={(p) => { setOpenCrumb(null); onNavigate?.(p); }}
-                              />
-                            </PopoverContent>
-                          </Popover>
-                          <span className="shrink-0 text-muted-foreground/50" aria-hidden="true">/</span>
+                          <PathCrumb
+                            crumb={c}
+                            chatId={chatId}
+                            open={openCrumb === c.dir}
+                            onOpenChange={(o) => setOpenCrumb(o ? c.dir : null)}
+                            onPick={(p) => { setOpenCrumb(null); onNavigate?.(p); }}
+                          />
+                          <CrumbSeparator />
+                        </Fragment>
+                      ))}
+                      {hidden.length > 0 && (
+                        <Fragment key={OVERFLOW_CRUMB_KEY}>
+                          <CollapsedCrumbs
+                            crumbs={hidden}
+                            chatId={chatId}
+                            open={openCrumb === OVERFLOW_CRUMB_KEY}
+                            onOpenChange={(o) => setOpenCrumb(o ? OVERFLOW_CRUMB_KEY : null)}
+                            onPick={(p) => { setOpenCrumb(null); onNavigate?.(p); }}
+                          />
+                          <CrumbSeparator />
+                        </Fragment>
+                      )}
+                      {tail.map((c) => (
+                        <Fragment key={c.dir || '__root'}>
+                          <PathCrumb
+                            crumb={c}
+                            chatId={chatId}
+                            open={openCrumb === c.dir}
+                            onOpenChange={(o) => setOpenCrumb(o ? c.dir : null)}
+                            onPick={(p) => { setOpenCrumb(null); onNavigate?.(p); }}
+                          />
+                          <CrumbSeparator />
                         </Fragment>
                       ))}
                     </span>
@@ -1397,6 +1448,132 @@ function CommitBlobView({ commit, filePath, content, loading, error, viewMode, i
       )}
     </div>
   );
+}
+
+// One clickable ancestor crumb in the FileViewer's path breadcrumb (WARDEN-740):
+// a Popover trigger whose content lists that directory, so a human can browse a
+// sibling/parent and open it in place.
+//
+// Extracted from the header in WARDEN-1006 because the run now renders crumbs in
+// two groups (before and after the `…` overflow menu) — one component keeps both
+// groups byte-identical instead of two drifting copies.
+//
+// A non-root crumb is `min-w-0 truncate`, NOT `shrink-0`: when the row is tight
+// the label ellipsizes inside the crumb and stays a legible, clickable word,
+// where a fixed-size crumb could only be sliced mid-glyph by the run's clip box.
+// The root crumb is an icon, so it has nothing to truncate and stays `shrink-0`.
+function PathCrumb({ crumb, chatId, open, onOpenChange, onPick }: {
+  crumb: Crumb;
+  chatId: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onPick: (path: string) => void;
+}) {
+  return (
+    <Popover open={open} onOpenChange={onOpenChange}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className={`rounded px-1 py-0.5 text-sm text-muted-foreground hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset ${crumb.isRoot ? 'shrink-0' : 'min-w-0 truncate'}`}
+          title={crumb.isRoot ? 'Browse repository root' : `Browse ${crumb.dir}`}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {crumb.isRoot ? <FolderIcon className="h-3.5 w-3.5" /> : crumb.label}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        sideOffset={4}
+        className="w-64 p-1 text-xs"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <DirListing chatId={chatId} dir={crumb.dir} onPick={onPick} />
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+// The `…` overflow menu holding the crumbs a deep path collapsed out of the row
+// (WARDEN-1006). This is what makes the collapse non-destructive: every hidden
+// ancestor is still listed here and still opens its own directory listing, so
+// the browse-an-ancestor capability the crumbs exist for survives at any depth —
+// and the `…` itself is the on-screen affordance saying the path was collapsed.
+//
+// Two levels inside one Popover: the hidden ancestors, then (on pick) that dir's
+// DirListing with a back link. Radix unmounts PopoverContent on close, so the
+// drill-in resets explicitly when the menu closes rather than reopening deep.
+function CollapsedCrumbs({ crumbs, chatId, open, onOpenChange, onPick }: {
+  crumbs: Crumb[];
+  chatId: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onPick: (path: string) => void;
+}) {
+  const [browsing, setBrowsing] = useState<string | null>(null);
+  const labels = crumbs.map((c) => c.label).join(' / ');
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(o) => { if (!o) setBrowsing(null); onOpenChange(o); }}
+    >
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="shrink-0 rounded px-1 py-0.5 text-sm text-muted-foreground hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset"
+          title={`Browse ${crumbs.length} hidden folders: ${labels}`}
+          aria-label={`Show ${crumbs.length} hidden folders`}
+          onClick={(e) => e.stopPropagation()}
+        >
+          …
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        sideOffset={4}
+        className="w-64 p-1 text-xs"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {browsing === null ? (
+          <div className="flex flex-col">
+            <div className="px-1.5 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              Hidden folders
+            </div>
+            {crumbs.map((c) => (
+              <button
+                key={c.dir}
+                type="button"
+                title={`Browse ${c.dir}`}
+                onClick={(e) => { e.stopPropagation(); setBrowsing(c.dir); }}
+                className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs hover:bg-accent"
+              >
+                <FolderIcon className="h-3 w-3 shrink-0 text-muted-foreground" />
+                <span className="truncate">{c.label}</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="flex flex-col">
+            <button
+              type="button"
+              title="Back to the hidden folders"
+              onClick={(e) => { e.stopPropagation(); setBrowsing(null); }}
+              className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs text-muted-foreground hover:bg-accent"
+            >
+              <ChevronLeftIcon className="h-3 w-3 shrink-0" />
+              <span className="truncate">{browsing}</span>
+            </button>
+            <DirListing chatId={chatId} dir={browsing} onPick={onPick} />
+          </div>
+        )}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+// The `/` between two crumbs. Decorative only — the path is already announced by
+// the crumb buttons' own labels, so it is aria-hidden.
+function CrumbSeparator() {
+  return <span className="shrink-0 text-muted-foreground/50" aria-hidden="true">/</span>;
 }
 
 // The directory listing shown inside a breadcrumb crumb's Popover (WARDEN-740).

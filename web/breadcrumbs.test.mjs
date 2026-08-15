@@ -33,7 +33,7 @@ const { code } = await transformWithOxc(src, libPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-breadcrumbs-test-'));
 const tmpFile = join(tmpDir, 'pathBreadcrumbs.mjs');
 writeFileSync(tmpFile, code);
-const { splitPathSegments, ancestorDir, parentDir } = await import(tmpFile);
+const { splitPathSegments, ancestorDir, parentDir, collapseCrumbs, MAX_VISIBLE_CRUMBS } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -132,6 +132,98 @@ test('for src/components/FileViewer.tsx the crumbs list root, src, src/component
   assert.deepEqual(listedDirs, ['src', 'src/components']);
   // the file itself is the last segment, never listed as a dir
   assert.equal(segs[segs.length - 1], 'FileViewer.tsx');
+});
+
+
+// ---------------------------------------------------------------------------
+// collapseCrumbs — the deep-path collapse (WARDEN-1006)
+//
+// WHY THESE EXIST: the crumbs are fixed-size click targets, so a deep path's
+// crumb run does not fit the dialog title row. The FIRST attempt at WARDEN-1006
+// let CSS handle it — the run got a clip box — and the tail crumbs were sliced
+// off past the edge: invisible AND unclickable, with nothing saying they were
+// there. CSS cannot choose WHICH crumbs to drop; only this function can, and the
+// property that makes the collapse non-destructive is that it drops none of them
+// (`lead + hidden + tail` is always the whole input, and `hidden` is exactly what
+// the `…` menu re-offers). A geometry test cannot see that; this can.
+const crumbList = (n) => Array.from({ length: n }, (_, i) => ({ dir: `d${i}`, label: `l${i}` }));
+const roundTrip = (r) => [...r.lead, ...r.hidden, ...r.tail];
+
+console.log('\ncollapseCrumbs — short paths render whole');
+test('a path at the cap renders every crumb, with nothing hidden', () => {
+  const crumbs = crumbList(MAX_VISIBLE_CRUMBS);
+  const r = collapseCrumbs(crumbs);
+  assert.deepEqual(r.lead, crumbs, 'all crumbs stay in the visible lead run');
+  assert.deepEqual(r.hidden, [], 'nothing hidden → the UI shows no … trigger');
+  assert.deepEqual(r.tail, []);
+});
+test('a single crumb (one-dir-deep file) is never collapsed', () => {
+  const r = collapseCrumbs(crumbList(1));
+  assert.equal(r.lead.length, 1);
+  assert.deepEqual(r.hidden, []);
+});
+test('an empty crumb list collapses to nothing rather than throwing', () => {
+  const r = collapseCrumbs([]);
+  assert.deepEqual(roundTrip(r), []);
+  assert.deepEqual(r.hidden, []);
+});
+
+console.log('\ncollapseCrumbs — deep paths collapse the MIDDLE, keeping both ends');
+test('the reviewer deep path (7 crumbs) keeps the root and the 2 nearest the file', () => {
+  const crumbs = crumbList(7);
+  const r = collapseCrumbs(crumbs);
+  assert.deepEqual(r.lead.map((c) => c.dir), ['d0'], 'the repo root crumb survives');
+  assert.deepEqual(r.tail.map((c) => c.dir), ['d5', 'd6'], 'the crumbs NEAREST the file survive');
+  assert.deepEqual(r.hidden.map((c) => c.dir), ['d1', 'd2', 'd3', 'd4'], 'the middle collapses');
+});
+test('the collapsed row renders exactly MAX_VISIBLE_CRUMBS boxes (… counts as one)', () => {
+  for (const n of [5, 7, 12, 40]) {
+    const r = collapseCrumbs(crumbList(n));
+    const boxes = r.lead.length + 1 /* the … trigger */ + r.tail.length;
+    assert.equal(boxes, MAX_VISIBLE_CRUMBS, `${n} crumbs → ${MAX_VISIBLE_CRUMBS} boxes`);
+  }
+});
+test('collapsing never drops a crumb — lead+hidden+tail rebuilds the input in order', () => {
+  // THE load-bearing property: every hidden crumb is handed to the … menu, which
+  // lists it and opens its directory. If a crumb could fall out here it would be
+  // unreachable in the UI — exactly the defect this rework exists to fix.
+  for (const n of [0, 1, 3, 4, 5, 6, 7, 25]) {
+    const crumbs = crumbList(n);
+    assert.deepEqual(roundTrip(collapseCrumbs(crumbs)), crumbs, `${n} crumbs round-trip`);
+  }
+});
+test('a deep path always hides at least one crumb (the … is never an empty menu)', () => {
+  for (const n of [5, 6, 7, 30]) {
+    assert.ok(collapseCrumbs(crumbList(n)).hidden.length > 0, `${n} crumbs hide something`);
+  }
+});
+test('the first crumb past the cap collapses (the boundary is not off-by-one)', () => {
+  assert.deepEqual(collapseCrumbs(crumbList(MAX_VISIBLE_CRUMBS)).hidden, [], 'at the cap: whole');
+  assert.equal(collapseCrumbs(crumbList(MAX_VISIBLE_CRUMBS + 1)).hidden.length, 2, 'one past: collapsed');
+});
+
+console.log('\ncollapseCrumbs — the cap is clamped so a collapse always leaves both ends');
+test('a cap below 3 still leaves a lead crumb, the … trigger, and one tail crumb', () => {
+  for (const cap of [-5, 0, 1, 2]) {
+    const r = collapseCrumbs(crumbList(6), cap);
+    assert.equal(r.lead.length, 1, `cap ${cap}: keeps the root crumb`);
+    assert.equal(r.tail.length, 1, `cap ${cap}: keeps the crumb nearest the file`);
+    assert.ok(r.hidden.length > 0);
+    assert.deepEqual(roundTrip(r), crumbList(6));
+  }
+});
+test('a larger cap collapses less, and still round-trips', () => {
+  const crumbs = crumbList(8);
+  const r = collapseCrumbs(crumbs, 6);
+  assert.equal(r.lead.length + 1 + r.tail.length, 6);
+  assert.deepEqual(r.tail.map((c) => c.dir), ['d4', 'd5', 'd6', 'd7']);
+  assert.deepEqual(roundTrip(r), crumbs);
+});
+test('collapseCrumbs does not mutate the array it is given', () => {
+  const crumbs = crumbList(9);
+  const before = JSON.stringify(crumbs);
+  collapseCrumbs(crumbs);
+  assert.equal(JSON.stringify(crumbs), before, 'input crumbs are untouched');
 });
 
 console.log(`\n✓ BREADCRUMBS TESTS PASS (${passed})`);
