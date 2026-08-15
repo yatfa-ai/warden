@@ -52,7 +52,7 @@ import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/Sidebar
 import { SourceControlPanel } from './sidebar/SourceControlPanel';
 import { SessionTagChips, SessionTagFilterRow } from './sidebar/SessionTags';
 import { computeTagsInUse, filterSessionsByTags, addTag, removeTag } from '@/lib/sessionTags';
-import { readListResponse } from '@/lib/api';
+import { readListBody, readListResponse } from '@/lib/api';
 
 // Back-compat re-export: OpenChatBrowserPage.tsx imports these types from
 // './ChatSidebar' — keep that path stable so it needs no change (WARDEN-315).
@@ -200,9 +200,9 @@ function useGitLogFetcher({ setCommits, setError, setLoading, errorLabel, label,
     setError((p) => ({ ...p, [chatId]: null }));
     try {
       const r = await fetch(`/api/git-log?id=${encodeURIComponent(chatId)}&${buildParams(limit)}`);
-      // A non-JSON body parses to undefined rather than throwing; readListResponse
-      // tolerates that and still reports the status.
-      const j = await r.json().catch(() => undefined);
+      // Tolerant on !ok, STRICT on 2xx — a 2xx body that fails to parse reaches the
+      // catch instead of becoming an empty list with no error (WARDEN-1014 review).
+      const j = await readListBody(r);
       const { items, error } = readListResponse<GitCommit>(r, j, 'commits', label);
       setCommits((p) => ({ ...p, [chatId]: items }));
       setError((p) => ({ ...p, [chatId]: error }));

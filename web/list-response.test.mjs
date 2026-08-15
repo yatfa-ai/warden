@@ -55,7 +55,7 @@ const { code } = await transformWithOxc(src, modPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-list-response-'));
 const tmpFile = join(tmpDir, 'api.mjs');
 writeFileSync(tmpFile, code);
-const { readListResponse, fetchJson } = await import(tmpFile);
+const { readListResponse, readListBody, fetchJson } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 // `readListResponse` reads only `ok` and `status`, so a plain object stands in for a
@@ -167,9 +167,61 @@ await test('items is [] when the field is absent, null, or not an array', async 
 });
 
 await test('a non-object body (string/number) is tolerated rather than throwing', async () => {
+  // The reader is PERMISSIVE about a junk body on purpose, and that is deliberately
+  // NOT the whole story: it is a pure function over an already-obtained value, so it
+  // cannot distinguish "no error key because the route omitted it" from "no error key
+  // because the body never parsed". Reporting a failure here would invent one.
+  //
+  // The strictness therefore lives one layer out, at `readListBody` — the seam that
+  // still knows a parse REJECTED (see the caller-contract tests below). Loosening
+  // that seam is exactly how the first cut of WARDEN-1014 re-created a false-empty:
+  // every hook did `await r.json().catch(() => undefined)`, so a truncated 2xx body
+  // arrived here as `undefined` and rendered a confident empty list.
   const r = readListResponse(res(200), 'not json at all', 'commits', 'commits');
   assert.deepEqual(r.items, []);
   assert.equal(r.error, null);
+});
+
+// === The caller contract: readListBody's asymmetric tolerance ===============
+//
+// The two legs are NOT symmetric, and collapsing them is a false-empty generator:
+//   • !ok  → the body is OPTIONAL (an HTML error page never parses) and the STATUS
+//            carries the message, so a rejection is swallowed to `undefined`.
+//   • ok   → the body IS the answer, so a rejection is a REAL failure and must
+//            propagate to the caller's catch.
+// `fetch` resolves ok:true as soon as the HEADERS arrive, so a body truncated
+// mid-stream (a dropped SSH tunnel — warden's normal deployment shape) rejects at
+// r.json(), not at fetch. That is the reachable path these three tests pin.
+
+/** A Response stand-in whose body fails to parse, as a truncated stream does. */
+const badBody = (status) => ({
+  ok: status >= 200 && status < 300,
+  status,
+  json: async () => { throw new SyntaxError('Unexpected end of JSON input'); },
+});
+
+await test('CALLER — a 2xx whose body fails to parse REJECTS (never a silent empty list)', async () => {
+  await assert.rejects(
+    () => readListBody(badBody(200)),
+    /Unexpected end of JSON input/,
+    'a truncated 2xx body must reach the hook catch, not become {items: [], error: null}',
+  );
+});
+
+await test('CALLER — a non-2xx whose body fails to parse yields undefined, and the status still reports', async () => {
+  const j = await readListBody(badBody(404));
+  assert.equal(j, undefined, 'the body is optional on the !ok leg');
+  // …and the reader still names the failure from the status alone.
+  assert.equal(readListResponse(res(404), j, 'blame', 'blame').error, 'Failed to load blame (404)');
+});
+
+await test('CALLER — a parseable body is returned unchanged on both legs', async () => {
+  const body = { stashes: [], error: 'no cwd' };
+  const ok = await readListBody({ ok: true, status: 200, json: async () => body });
+  assert.deepEqual(ok, body);
+  assert.equal(readListResponse(res(200), ok, 'stashes', 'stashes').error, 'no cwd');
+  const notOk = await readListBody({ ok: false, status: 500, json: async () => body });
+  assert.deepEqual(notOk, body, 'a body that DOES parse on the !ok leg is still handed back');
 });
 
 // === Non-interference with fetchJson ======================================

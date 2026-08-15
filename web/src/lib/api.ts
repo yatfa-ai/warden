@@ -204,3 +204,33 @@ export function readListResponse<T = unknown>(
   const bodyError = typeof record.error === 'string' && record.error ? record.error : null;
   return { items, error: bodyError };
 }
+
+/**
+ * Parse a git list response's body with the tolerance each leg actually deserves —
+ * the caller-side companion to {@link readListResponse} (WARDEN-1014 review).
+ *
+ * The two legs are NOT symmetric, and collapsing them is how a refactor re-creates
+ * the very false-empty this reader exists to remove:
+ *
+ * - **`!ok`** — the body is OPTIONAL. The STATUS carries the message, and the body
+ *   is routinely an HTML error page that will never parse. Swallow the rejection to
+ *   `undefined`; `readListResponse` still reports `Failed to load <label> (<status>)`.
+ * - **`ok`** — the body IS the answer. A parse failure is a REAL failure, so let it
+ *   reject and reach the caller's `catch`. `fetch` resolves `ok: true` as soon as the
+ *   HEADERS arrive, so a body truncated mid-stream — a dropped SSH tunnel to a remote
+ *   host, warden's normal deployment shape — rejects here rather than at `fetch`.
+ *   Swallowing that would hand `readListResponse` an empty record, which it can only
+ *   read as `{ items: [], error: null }` (it cannot know a parse failed), and the
+ *   surface would render a confident empty list for a network failure.
+ *
+ * `readListResponse` itself stays deliberately PERMISSIVE about a junk body — it is a
+ * pure reader over an already-obtained value with no way to distinguish "absent
+ * because unparseable" from "absent because the route omitted it". The strictness
+ * belongs HERE, at the seam that still knows a rejection happened.
+ */
+export async function readListBody(
+  res: Pick<Response, 'ok'> & { json: () => Promise<unknown> },
+): Promise<unknown> {
+  if (res.ok) return res.json();
+  return res.json().catch(() => undefined);
+}

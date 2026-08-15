@@ -31,7 +31,7 @@ import { basename } from '@/lib/chatDisplay';
 import { formatRelative, formatAbsoluteFull } from '@/lib/formatTimestamp';
 import type { GitCommit, GitFile, GitStash, GitReflogEntry, GitRemote, GitBranch, DiffStat } from './types';
 import { DiffStatChip } from './DiffStatChip';
-import { readListResponse } from '@/lib/api';
+import { readListBody, readListResponse } from '@/lib/api';
 
 /**
  * Color the porcelain X/Y columns for one changed file (WARDEN-369). Working-tree
@@ -482,22 +482,48 @@ export function GitRepoSummary({ branch, clean, ahead, behind, inProgress, stash
   );
 }
 
+// A list section's failure as reported by its DATA source — never pre-phrased. The
+// two kinds are genuinely different events and only one of them carries a message, so
+// the kind (not a composed string) is what crosses the data→render boundary
+// (WARDEN-1014 review: `listFor` was composing user-facing copy inside a helper whose
+// job is choosing between the search and browse sources).
+type ListFailure =
+  /** The commit-grep RPC failed. It reports no message of its own. */
+  | { kind: 'search' }
+  /** A list fetch failed; `reason` is the raw text readListResponse produced. */
+  | { kind: 'fetch'; reason: string };
+
+// The ONE home for a failed git-list fetch: both the phrasing AND the colour. Every
+// surface that reports a list failure goes through here — the stash / reflog / branch
+// terminal rows, the three commit lists, and the origin row — so the same semantic
+// event cannot render as amber in one half of a popover and destructive-red in the
+// other, and the `failed to load: …` copy has exactly one definition (WARDEN-1014
+// review found it built in two places and coloured two ways in a single diff).
+//
+// `truncate` + `title` keep a long git message from blowing out the narrow sidebar
+// column. `noun` names WHICH list when the row sits outside its own section (the origin
+// row reports the *remote* fetch from inside the branch header). `className` is merged
+// through `cn`/tailwind-merge, so a caller can restate spacing without forking colour.
+function ListErrorRow({ failure, noun, className }: { failure: ListFailure; noun?: string; className?: string }) {
+  const text = failure.kind === 'search'
+    ? 'search failed — try again'
+    : `failed to load${noun ? ` ${noun}` : ''}: ${failure.reason}`;
+  return (
+    <div className={cn('truncate px-1 py-1 text-[10px] text-amber-400', className)} title={text}>
+      {text}
+    </div>
+  );
+}
+
 // One lazy list section's terminal row: the FAILURE state when the fetch reported an
 // error, else the plain empty state. Before WARDEN-1014 every one of these sections
 // rendered only the empty state, so a 200 carrying {error} (an unreachable SSH host, a
 // cwd-less chat) was indistinguishable from a genuinely clean repo — "no stashes" for
-// both. The amber tint + the reason make the two visually distinguishable; `truncate`
-// + `title` keep a long git message from blowing out the narrow sidebar column. Mirrors
-// the in-file positive control at the commit-inspect sites (`?.error ? 'failed to load'
+// both. The amber failure row makes the two visually distinguishable. Mirrors the
+// in-file positive control at the commit-inspect sites (`?.error ? 'failed to load'
 // : 'no files'`), which fetchShow/fetchStashShow have always fed correctly.
 function ListStateRow({ error, empty }: { error: string | null; empty: string }) {
-  if (error) {
-    return (
-      <div className="truncate px-1 py-1 text-[10px] text-amber-400" title={`failed to load: ${error}`}>
-        failed to load: {error}
-      </div>
-    );
-  }
+  if (error) return <ListErrorRow failure={{ kind: 'fetch', reason: error }} />;
   return <div className="px-1 py-1 text-[10px] text-muted-foreground">{empty}</div>;
 }
 
@@ -539,9 +565,9 @@ function useGitListFetcher<T>({ chatId, route, responseKey, label, setList, setE
     onBeforeFetch?.();
     try {
       const r = await fetch(`${route}?id=${encodeURIComponent(chatId)}`);
-      // A non-JSON body parses to undefined rather than throwing; readListResponse
-      // tolerates that and still reports the status.
-      const j = await r.json().catch(() => undefined);
+      // Tolerant on !ok, STRICT on 2xx — a 2xx body that fails to parse reaches the
+      // catch instead of becoming an empty list with no error (WARDEN-1014 review).
+      const j = await readListBody(r);
       const { items, error } = readListResponse<T>(r, j, responseKey, label);
       setList(items);
       setError(error);
@@ -777,23 +803,26 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
   // undefined while pending) and whether the section is in a loading state. Used below
   // to swap each list's data source without touching its row markup.
   // WARDEN-1014: `error` was a boolean meaning "the SEARCH failed"; it is now the
-  // message to render, so the BROWSE leg can report its own fetch failure through the
+  // failure itself, so the BROWSE leg can report its own fetch failure through the
   // same channel. The browse error arrives as a prop — ChatSidebar's useGitLogFetcher
   // owns these three caches and now reads /api/git-log through readListResponse, so a
-  // 200 carrying {error} no longer renders as "no commits".
+  // 200 carrying {error} no longer renders as "no commits". The value handed back is
+  // the RAW failure, never user-facing copy: phrasing and colour live in ListErrorRow
+  // (WARDEN-1014 review — composing strings here put presentation inside a helper that
+  // only picks a data source, and duplicated the copy the row already owned).
   const listFor = (
     range: '' | 'outgoing' | 'incoming',
     browse: GitCommit[] | undefined,
     browseLoading: boolean,
     browseError?: string | null,
-  ): { items: GitCommit[] | undefined; loading: boolean; error: string | null } => {
+  ): { items: GitCommit[] | undefined; loading: boolean; error: ListFailure | null } => {
     if (searching) {
       const hit = searchResults[range];
       if (hit === undefined) return { items: undefined, loading: true, error: null };
-      if (hit.status === 'error') return { items: undefined, loading: false, error: 'search failed — try again' };
+      if (hit.status === 'error') return { items: undefined, loading: false, error: { kind: 'search' } };
       return { items: hit.commits, loading: false, error: null };
     }
-    return { items: browse, loading: !!browseLoading, error: browseError ? `failed to load: ${browseError}` : null };
+    return { items: browse, loading: !!browseLoading, error: browseError ? { kind: 'fetch', reason: browseError } : null };
   };
 
   // Resolve each section's render source once (browse cache vs grep results) so the JSX
@@ -1004,9 +1033,7 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
               origin row (and every deep link derived from it) silently vanished —
               identical to a repo with no web-resolvable remote. Say so instead. */}
           {!primaryRemote && remoteError && (
-            <div className="mb-1 truncate px-0.5 text-[10px] text-amber-400" title={`failed to load remotes: ${remoteError}`}>
-              failed to load remotes: {remoteError}
-            </div>
+            <ListErrorRow failure={{ kind: 'fetch', reason: remoteError }} noun="remotes" className="mb-1 px-0.5 py-0" />
           )}
           {primaryRemote && (
             <div className="mb-1 flex flex-wrap items-center gap-x-1 gap-y-0.5 px-0.5 text-[10px] text-muted-foreground">
@@ -1086,7 +1113,7 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
             )}
           </div>
           {recent.error ? (
-            <div className="truncate px-1 py-1 text-[10px] text-destructive" title={recent.error}>{recent.error}</div>
+            <ListErrorRow failure={recent.error} />
           ) : recent.loading && (!recent.items || recent.items.length === 0) ? (
             <div className="flex items-center gap-1.5 px-1 py-1">
               <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">{searching ? 'searching…' : 'loading…'}</span>
@@ -1190,7 +1217,7 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
                 </Button>
               </div>
               {outList.error ? (
-                <div className="truncate px-1 py-1 text-[10px] text-destructive" title={outList.error}>{outList.error}</div>
+                <ListErrorRow failure={outList.error} />
               ) : outList.loading && (!outList.items || outList.items.length === 0) ? (
                 <div className="flex items-center gap-1.5 px-1 py-1">
                   <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">{searching ? 'searching…' : 'loading…'}</span>
@@ -1268,7 +1295,7 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
                 </Button>
               </div>
               {incList.error ? (
-                <div className="truncate px-1 py-1 text-[10px] text-destructive" title={incList.error}>{incList.error}</div>
+                <ListErrorRow failure={incList.error} />
               ) : incList.loading && (!incList.items || incList.items.length === 0) ? (
                 <div className="flex items-center gap-1.5 px-1 py-1">
                   <Skeleton className="size-2 rounded-full" /><span className="text-[10px] text-muted-foreground">{searching ? 'searching…' : 'loading…'}</span>

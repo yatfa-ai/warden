@@ -37,7 +37,7 @@ import { joinPath, type Entry } from '@/lib/fileBrowserTree';
 import { toast } from 'sonner';
 import { useStickToBottom } from '@/lib/useStickToBottom';
 import { WEB_POLL_DEFAULT_MS } from '@/lib/pollInterval';
-import { readListResponse } from '@/lib/api';
+import { readListBody, readListResponse } from '@/lib/api';
 
 interface FileViewerProps {
   chatId: string;
@@ -129,9 +129,10 @@ function useGatedFetch<T>(opts: {
       onError(null);
       try {
         const r = await fetch(buildUrl());
-        // A non-JSON body (an HTML error page) parses to undefined rather than
-        // throwing; readListResponse tolerates that and still reports the status.
-        const j = await r.json().catch(() => undefined);
+        // Tolerant on !ok (the status carries the message), STRICT on 2xx — a body
+        // that fails to parse on a 2xx is a real failure and must reach the catch
+        // below rather than becoming a confident empty list (WARDEN-1014 review).
+        const j = await readListBody(r);
         if (cancelled) return;
         const { items, error } = readListResponse<T>(r, j, field, label);
         // On a hard HTTP failure `items` is the server's placeholder, not data —
