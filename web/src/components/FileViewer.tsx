@@ -9,6 +9,13 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { Badge } from '@/components/ui/badge';
 import {
   ContextMenu,
@@ -1518,14 +1525,23 @@ function ToolbarActionButton({ action, meta }: { action: ToolbarAction; meta: To
 }
 
 // The `⋯` menu holding the toolbar controls that do not fit a narrow row
-// (WARDEN-1019) — the toolbar analog of CollapsedCrumbs, and built on the same
-// Popover pattern so a collapse stays non-destructive: every collapsed control is
-// still listed, still reachable, and still SHOWS its state.
+// (WARDEN-1019) — the toolbar analog of CollapsedCrumbs, so a collapse stays
+// non-destructive: every collapsed control is still listed, still reachable, and
+// still SHOWS its state.
 //
-// That last part is why the rows carry an explicit ON/OFF pill rather than the
-// usual "check mark when active": four of the five are toggles, and a check that
-// simply vanishes when off reads as "this action is unavailable" instead of "this
-// view is currently off". `aria-pressed` carries the same fact to assistive tech.
+// It is a real MENU, not a Popover of buttons (WARDEN-1028). Below `md` this is
+// the SOLE path to History/Annotate/Reload/Follow (+ Rendered⇄Source on a
+// markdown file), so the affordance it replaces must not be downgraded: Radix's
+// DropdownMenu gives the content `role="menu"`, each row
+// `role="menuitemcheckbox"` (or `role="menuitem"` for the one non-toggle),
+// roving focus, arrow-key navigation, typeahead, and Escape-returns-focus —
+// none of which a generic popover of N sequential tab stops has.
+//
+// The rows keep their explicit ON/OFF pill rather than the menu-standard "check
+// mark when active" (hence `indicator={false}`): four of the five are toggles,
+// and a check that simply vanishes when off reads as "this action is
+// unavailable" instead of "this view is currently off". `aria-checked` — set by
+// Radix from `checked` — carries the same fact to assistive tech.
 //
 // Rendered only below `md` (the caller passes `md:hidden`). Above it the controls
 // are on the row and this trigger would be a second, redundant path to them.
@@ -1537,9 +1553,21 @@ function ToolbarOverflowMenu({ actions, metas, open, onOpenChange, className }: 
   className?: string;
 }) {
   const on = actions.filter((a) => a.pressed).map((a) => a.label);
+  // Every one of these swaps what the viewer is SHOWING, so the menu must not
+  // stay open over the result. Radix closes on select by default — this makes
+  // the close explicit and orders it before the state change, matching the
+  // behavior the Popover version shipped with. (Never `onSelect: preventDefault`
+  // to keep a CheckboxItem open, which is the usual multi-toggle idiom.)
+  const select = (meta: ToolbarActionMeta) => {
+    onOpenChange(false);
+    meta.onSelect();
+  };
   return (
-    <Popover open={open} onOpenChange={onOpenChange}>
-      <PopoverTrigger asChild>
+    // Non-modal, matching the Popover it replaces: this menu lives inside the
+    // FileViewer's own modal Dialog, which already owns the outside-interaction
+    // and scroll-lock contract.
+    <DropdownMenu open={open} onOpenChange={onOpenChange} modal={false}>
+      <DropdownMenuTrigger asChild>
         <Button
           type="button"
           variant="outline"
@@ -1553,50 +1581,58 @@ function ToolbarOverflowMenu({ actions, metas, open, onOpenChange, className }: 
         >
           <EllipsisIcon className="h-3.5 w-3.5" />
         </Button>
-      </PopoverTrigger>
-      <PopoverContent
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
         align="end"
         sideOffset={4}
         className="w-56 p-1 text-xs"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex flex-col">
-          {actions.map((a) => {
-            const meta = metas[a.key];
-            return (
-              <Button
-                key={a.key}
-                type="button"
-                variant="ghost"
-                size="sm"
-                title={a.title}
-                aria-pressed={a.pressed ?? undefined}
-                disabled={meta.disabled}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  // Close first: every one of these swaps what the viewer is
-                  // showing, so leaving the menu open would cover the result.
-                  onOpenChange(false);
-                  meta.onSelect();
-                }}
-                className="h-auto w-full justify-start gap-2 py-1.5 text-xs"
-              >
-                <span className="shrink-0 text-muted-foreground">{meta.icon}</span>
-                <span className="truncate">{a.label}</span>
-                {a.pressed !== null && (
-                  <Badge
-                    variant={a.pressed ? 'default' : 'secondary'}
-                    className="ml-auto uppercase"
-                  >
-                    {a.pressed ? 'on' : 'off'}
-                  </Badge>
-                )}
-              </Button>
-            );
-          })}
-        </div>
-      </PopoverContent>
-    </Popover>
+        {actions.map((a) => {
+          const meta = metas[a.key];
+          const body = (
+            <>
+              <span className="shrink-0 text-muted-foreground">{meta.icon}</span>
+              <span className="truncate">{a.label}</span>
+              {a.pressed !== null && (
+                <Badge
+                  variant={a.pressed ? 'default' : 'secondary'}
+                  className="ml-auto uppercase"
+                >
+                  {a.pressed ? 'on' : 'off'}
+                </Badge>
+              )}
+            </>
+          );
+          // `pressed: null` is the one plain action (↻ Reload file) — a
+          // `menuitem`, not a `menuitemcheckbox`. It keeps its disabled +
+          // spinner state while a manual reload is in flight; Radix keeps a
+          // disabled item in the roving-focus ring via `aria-disabled`, which
+          // is correct and deliberate.
+          return a.pressed === null ? (
+            <DropdownMenuItem
+              key={a.key}
+              title={a.title}
+              disabled={meta.disabled}
+              onSelect={() => select(meta)}
+            >
+              {body}
+            </DropdownMenuItem>
+          ) : (
+            <DropdownMenuCheckboxItem
+              key={a.key}
+              title={a.title}
+              checked={a.pressed}
+              indicator={false}
+              disabled={meta.disabled}
+              onSelect={() => select(meta)}
+            >
+              {body}
+            </DropdownMenuCheckboxItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
