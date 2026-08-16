@@ -794,7 +794,18 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
           args.push(`-${searchLimit}`, `--pretty=format:${GIT_LOG_PRETTY}`);
         }
         const r = await runGit(chat, args, cwd);
-        const raw = r.ok ? r.stdout.trim() : '';
+        // A non-zero exit is a REAL failure (non-git cwd, deleted cwd, dropped SSH
+        // transport, unborn HEAD) — surface it as an explicit error rather than
+        // manufacturing `{ commits: [], error: null }`, which renders as a confident
+        // "no commits" for a broken repo (the git-ls anti-masking rationale at
+        // /api/git-ls). The string is a FIXED non-empty literal, not `r.stderr`:
+        // runGit pipes `2>/dev/null` on BOTH remote branches, so stderr is empty on
+        // every container-remote and manual-remote chat, and readListResponse
+        // (web/src/lib/api.ts) treats an empty string as "not an error" — a stderr
+        // passthrough would be a silent no-op on exactly the shape warden deploys in.
+        // `r.ok` with empty stdout stays a legitimate empty list (fresh repo).
+        if (!r.ok) return res.json({ commits: [], error: 'git log failed' });
+        const raw = r.stdout.trim();
 
         const commits = raw ? raw.split('\n').map(parseGitLogLine) : [];
         res.json({ commits, error: null });
@@ -1291,7 +1302,13 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
         // inside the container (WARDEN-235).
         const pretty = '%gd|%s|%cr';
         const r = await runGit(chat, ['stash', 'list', `--pretty=format:${pretty}`], cwd);
-        const raw = r.ok ? r.stdout.trim() : '';
+        // Non-zero exit → an explicit error, never a manufactured empty list. See the
+        // /api/git-log leg for the full rationale: the string is a FIXED non-empty
+        // literal because runGit's `2>/dev/null` remote branches leave r.stderr empty,
+        // and readListResponse treats an empty error string as no error at all. A
+        // successful `stash list` with empty stdout is a real "no stashes" — error null.
+        if (!r.ok) return res.json({ stashes: [], error: 'git stash list failed' });
+        const raw = r.stdout.trim();
 
         const stashes = raw ? parseStashList(raw) : [];
         res.json({ stashes, error: null });
@@ -1330,7 +1347,13 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
         // human needs to answer "what did this agent just do to its repo?".
         const pretty = '%h|%gs|%cr';
         const r = await runGit(chat, ['reflog', '-n', '50', `--pretty=format:${pretty}`], cwd);
-        const raw = r.ok ? r.stdout.trim() : '';
+        // Non-zero exit → an explicit error, never a manufactured empty list. See the
+        // /api/git-log leg for the full rationale (FIXED literal, because the
+        // `2>/dev/null` remote branches make r.stderr empty and an empty error string
+        // reads as "no error" to readListResponse). A successful reflog with empty
+        // stdout is a real "no operations recorded" — error null.
+        if (!r.ok) return res.json({ entries: [], error: 'git reflog failed' });
+        const raw = r.stdout.trim();
 
         const entries = raw ? parseReflog(raw) : [];
         res.json({ entries, error: null });
@@ -1367,7 +1390,14 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
         // (WARDEN-235).
         const fmt = '%(refname:short)|%(objectname:short)|%(committerdate:iso-strict)|%(upstream:short)|%(upstream:track)';
         const r = await runGit(chat, ['for-each-ref', `--format=${fmt}`, 'refs/heads/'], cwd);
-        const raw = r.ok ? r.stdout.trim() : '';
+        // PRIMARY command only: a non-zero exit → an explicit error, never a
+        // manufactured empty list. See the /api/git-log leg for the full rationale
+        // (FIXED literal, because the `2>/dev/null` remote branches make r.stderr
+        // empty and an empty error string reads as "no error" to readListResponse). A
+        // successful for-each-ref with empty stdout is a real branch-less checkout —
+        // error null. The two SECONDARY calls below keep their documented degradation.
+        if (!r.ok) return res.json({ branches: [], error: 'git branch listing failed' });
+        const raw = r.stdout.trim();
         const branches = raw ? parseGitBranches(raw) : [];
 
         // Current branch: re-resolve HEAD so the matching branch is flagged current

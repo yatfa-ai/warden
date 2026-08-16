@@ -165,6 +165,9 @@ describe('/api/git-stash detail endpoint (real Express app from server.js)', () 
   });
 
   it('returns [] for a repo with no stashes (200, not 500)', async () => {
+    // WARDEN-1021 no-false-positive guard: `git stash list` on a stash-less repo exits
+    // ZERO with empty stdout. That is a legitimate empty, NOT a failure — error stays
+    // null, so the non-git case above is genuinely distinguishable from this one.
     const res = await fetch(`${baseUrl}/api/git-stash?id=warden-clean`);
     assert.strictEqual(res.status, 200);
     const body = await res.json();
@@ -172,12 +175,20 @@ describe('/api/git-stash detail endpoint (real Express app from server.js)', () 
     assert.deepStrictEqual(body.stashes, []);
   });
 
-  it('returns [] (200, not 500) for a non-git cwd', async () => {
+  it('returns [] with a NON-EMPTY error (200, not 500) for a non-git cwd (WARDEN-1021)', async () => {
+    // `git stash list` exits non-zero on a non-git cwd. Before WARDEN-1021 the route
+    // discarded that exit status and answered `error: null`, so the dialog rendered a
+    // confident "no stashes" for a broken repo / deleted cwd / dropped SSH transport.
+    // The error must be non-empty: runGit pipes `2>/dev/null` on BOTH remote branches,
+    // so an `r.stderr` passthrough would be an empty string here — and
+    // readListResponse (web/src/lib/api.ts) treats an empty string as "no error",
+    // making the fix a silent no-op on exactly the transports warden deploys over.
     const res = await fetch(`${baseUrl}/api/git-stash?id=warden-nongit`);
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     assert.deepStrictEqual(body.stashes, []);
-    assert.strictEqual(body.error, null);
+    assert.strictEqual(typeof body.error, 'string');
+    assert.ok(body.error.length > 0, 'a failing git command must yield a NON-EMPTY error string');
   });
 
   it('returns 404 for an unknown chat id', async () => {

@@ -385,12 +385,18 @@ describe('/api/git-log HTTP endpoint (real Express app from server.js)', () => {
     assert.strictEqual(body.commits.length, 3);
   });
 
-  it('returns { commits: [], error: null } (200, not 500) for a non-git cwd', async () => {
+  it('returns { commits: [], error: <non-empty> } (200, not 500) for a non-git cwd (WARDEN-1021)', async () => {
+    // `git log` exits non-zero on a non-git cwd. Before WARDEN-1021 the route
+    // discarded that exit status and answered `error: null` — a confident "no
+    // commits" for a broken repo. The failure must now be VISIBLE, and the string
+    // must be non-empty even though runGit pipes `2>/dev/null` on the remote
+    // transports (an empty error string reads as "no error" to readListResponse).
     const res = await fetch(`${baseUrl}/api/git-log?id=warden-nongit`);
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     assert.deepStrictEqual(body.commits, []);
-    assert.strictEqual(body.error, null);
+    assert.strictEqual(typeof body.error, 'string');
+    assert.ok(body.error.length > 0, 'a failing git command must yield a NON-EMPTY error string');
   });
 
   it('returns 404 for an unknown chat id', async () => {
@@ -447,15 +453,16 @@ describe('/api/git-log range=incoming (behind commits — WARDEN-225)', () => {
     assert.strictEqual(body.error, null);
   });
 
-  it('returns { commits: [], error: null } (200, not 500) when there is no upstream', async () => {
+  it('returns { commits: [], error: <non-empty> } (200, not 500) when there is no upstream (WARDEN-1021)', async () => {
     // gitRepo has commits but NO upstream configured → @{u} is unset → git exits
-    // non-zero with empty stdout → empty list. Mirrors parseAheadBehind's null
-    // tolerance; the badge must never see a 500 here.
+    // non-zero. The badge must never see a 500 — but since WARDEN-1021 the failure
+    // is no longer masked as an empty success either (mirrors /api/git-diff, which
+    // has always surfaced its own no-upstream non-zero exit as an error string).
     const res = await fetch(`${baseUrl}/api/git-log?id=warden-gitlog&range=incoming`);
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     assert.deepStrictEqual(body.commits, []);
-    assert.strictEqual(body.error, null);
+    assert.ok(typeof body.error === 'string' && body.error.length > 0, 'non-empty error expected');
   });
 });
 
@@ -507,15 +514,15 @@ describe('/api/git-log range=outgoing (ahead commits — WARDEN-252)', () => {
     assert.strictEqual(body.error, null);
   });
 
-  it('returns { commits: [], error: null } (200, not 500) when there is no upstream', async () => {
+  it('returns { commits: [], error: <non-empty> } (200, not 500) when there is no upstream (WARDEN-1021)', async () => {
     // gitRepo has commits but NO upstream configured → @{u} is unset → git exits
-    // non-zero with empty stdout → empty list. Mirrors the incoming no-upstream case;
-    // the badge must never see a 500 here.
+    // non-zero. Mirrors the incoming no-upstream case; never a 500, and since
+    // WARDEN-1021 never a silently-empty success either.
     const res = await fetch(`${baseUrl}/api/git-log?id=warden-gitlog&range=outgoing`);
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     assert.deepStrictEqual(body.commits, []);
-    assert.strictEqual(body.error, null);
+    assert.ok(typeof body.error === 'string' && body.error.length > 0, 'non-empty error expected');
   });
 });
 
@@ -548,12 +555,12 @@ describe('/api/git-log path filter (file history — WARDEN-319)', () => {
     assert.strictEqual(body.error, 'invalid path');
   });
 
-  it('returns { commits: [], error: null } (200, not 500) for a non-git cwd', async () => {
+  it('returns { commits: [], error: <non-empty> } (200, not 500) for a non-git cwd (WARDEN-1021)', async () => {
     const res = await fetch(`${baseUrl}/api/git-log?id=warden-nongit&path=readme.txt`);
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     assert.deepStrictEqual(body.commits, []);
-    assert.strictEqual(body.error, null);
+    assert.ok(typeof body.error === 'string' && body.error.length > 0, 'non-empty error expected');
   });
 
   it('ignores range when a path is present (file history is full, not incoming/outgoing)', async () => {
@@ -622,6 +629,9 @@ describe('/api/git-log grep filter (commit-message search — WARDEN-498)', () =
   });
 
   it('returns an empty list (200, not 500) when no message matches', async () => {
+    // WARDEN-1021 no-false-positive guard: `git log --grep=<no match>` exits ZERO with
+    // empty stdout. A legitimate empty result must keep `error: null` — only a
+    // NON-ZERO exit becomes an error string.
     const res = await fetch(`${baseUrl}/api/git-log?id=warden-grep&grep=this-match-nothing`);
     assert.strictEqual(res.status, 200);
     const body = await res.json();
@@ -648,12 +658,12 @@ describe('/api/git-log grep filter (commit-message search — WARDEN-498)', () =
     assert.strictEqual(body.commits[0].subject, 'outgoing: add feature Z');
   });
 
-  it('returns { commits: [], error: null } (200, not 500) for a non-git cwd', async () => {
+  it('returns { commits: [], error: <non-empty> } (200, not 500) for a non-git cwd (WARDEN-1021)', async () => {
     const res = await fetch(`${baseUrl}/api/git-log?id=warden-nongit&grep=anything`);
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     assert.deepStrictEqual(body.commits, []);
-    assert.strictEqual(body.error, null);
+    assert.ok(typeof body.error === 'string' && body.error.length > 0, 'non-empty error expected');
   });
 
   it('absent grep stays byte-for-byte today\'s behavior (all commits, unchanged)', async () => {
@@ -767,12 +777,12 @@ describe('/api/git-log pickaxe filter (content-history search — WARDEN-559)', 
     assert.strictEqual(body.commits[1].subject, 'feat: add billingTotal');
   });
 
-  it('returns { commits: [], error: null } (200, not 500) for a non-git cwd', async () => {
+  it('returns { commits: [], error: <non-empty> } (200, not 500) for a non-git cwd (WARDEN-1021)', async () => {
     const res = await fetch(`${baseUrl}/api/git-log?id=warden-nongit&pickaxe=${PICKAXE_TERM}`);
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     assert.deepStrictEqual(body.commits, []);
-    assert.strictEqual(body.error, null);
+    assert.ok(typeof body.error === 'string' && body.error.length > 0, 'non-empty error expected');
   });
 
   it('absent pickaxe stays byte-for-byte today\'s behavior (all commits, unchanged)', async () => {

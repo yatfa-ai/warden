@@ -158,12 +158,27 @@ describe('/api/git-reflog detail endpoint (real Express app from server.js)', ()
     assert.ok(body.entries.some((e) => e.subject.startsWith('commit')), 'reflog must include the commit op');
   });
 
-  it('returns [] (200, not 500) for a non-git cwd', async () => {
+  it('returns [] with a NON-EMPTY error (200, not 500) for a non-git cwd (WARDEN-1021)', async () => {
+    // `git reflog` exits non-zero on a non-git cwd. Before WARDEN-1021 the route
+    // discarded that exit status and answered `error: null`, masking a broken repo /
+    // deleted cwd / dropped SSH transport as "no operations recorded". The error must
+    // be non-empty even though runGit pipes `2>/dev/null` on both remote branches (an
+    // empty string reads as "no error" to readListResponse in web/src/lib/api.ts).
     const res = await fetch(`${baseUrl}/api/git-reflog?id=warden-nongit`);
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     assert.deepStrictEqual(body.entries, []);
+    assert.strictEqual(typeof body.error, 'string');
+    assert.ok(body.error.length > 0, 'a failing git command must yield a NON-EMPTY error string');
+  });
+
+  it('keeps error null for a successful reflog read (no false positives) (WARDEN-1021)', async () => {
+    // The other direction of the guard: a ZERO exit must never be reported as an
+    // error, whatever the entry count. warden-plain reads successfully, so error is
+    // null — which is what makes the non-git case above a real signal.
+    const body = await (await fetch(`${baseUrl}/api/git-reflog?id=warden-plain`)).json();
     assert.strictEqual(body.error, null);
+    assert.ok(Array.isArray(body.entries));
   });
 
   it('returns 404 for an unknown chat id', async () => {
