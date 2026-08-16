@@ -161,6 +161,36 @@ export async function runGit(chat, args, cwd) {
 }
 
 
+// Is this a HEALTHY repo whose HEAD simply has no commits yet? (WARDEN-1021)
+//
+// `git log` and `git reflog` exit NON-ZERO on a freshly `git init`'d repo before
+// its first commit — unlike `git stash list` / `git for-each-ref`, which exit zero
+// and so need no probe. An agent sitting in a brand-new repo is an entirely normal
+// state, NOT a broken one, so those two routes must not report "git log failed"
+// for it (that is the false positive the empty-list-with-error convention exists to
+// avoid, in the opposite direction). Called ONLY on an already-failing leg, so the
+// extra round-trips never touch the hot path.
+//
+// Two probes, because neither bit is sufficient alone:
+//   1. `rev-parse --git-dir` — succeeds in ANY valid repo (unborn and detached
+//      included), fails for a non-git cwd, a deleted cwd, or a dropped SSH
+//      transport. This is what keeps a genuinely broken repo from being excused.
+//   2. `rev-parse --verify -q HEAD` — resolves HEAD to a commit. Fails ONLY when
+//      HEAD points at a ref with no commit behind it, i.e. an unborn HEAD.
+//
+// Deliberately NOT done by exit-code sniffing (`code === 1` vs `128`): the remote
+// branches run `cd <cwd> && git …`, and a deleted cwd makes *bash* exit 1 — exactly
+// the code an unborn HEAD produces. That shortcut would re-introduce the false
+// empty on the deployment shape this ticket is about. Nor can `r.stderr` be read:
+// both remote branches pipe `2>/dev/null` (see runGit above).
+async function hasUnbornHead(chat, cwd) {
+  const dir = await runGit(chat, ['rev-parse', '--git-dir'], cwd);
+  if (!dir.ok) return false; // not a repo / deleted cwd / dead transport → a REAL failure
+  const head = await runGit(chat, ['rev-parse', '--verify', '-q', 'HEAD'], cwd);
+  return !head.ok; // valid repo + HEAD resolves to nothing → unborn, a benign empty
+}
+
+
 // Deliver a SHELL SCRIPT to the chat's execution context (WARDEN-235). Used by
 // git operations that need in-context shell features the argv `runGit` path
 // can't express — chiefly the in-progress-operation marker `test` (MERGE_HEAD
@@ -795,16 +825,36 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
         }
         const r = await runGit(chat, args, cwd);
         // A non-zero exit is a REAL failure (non-git cwd, deleted cwd, dropped SSH
-        // transport, unborn HEAD) — surface it as an explicit error rather than
-        // manufacturing `{ commits: [], error: null }`, which renders as a confident
-        // "no commits" for a broken repo (the git-ls anti-masking rationale at
-        // /api/git-ls). The string is a FIXED non-empty literal, not `r.stderr`:
-        // runGit pipes `2>/dev/null` on BOTH remote branches, so stderr is empty on
-        // every container-remote and manual-remote chat, and readListResponse
+        // transport) — surface it as an explicit error rather than manufacturing
+        // `{ commits: [], error: null }`, which renders as a confident "no commits"
+        // for a broken repo (the git-ls anti-masking rationale at /api/git-ls). The
+        // string is a FIXED non-empty literal, not `r.stderr`: runGit pipes
+        // `2>/dev/null` on BOTH remote branches, so stderr is empty on every
+        // container-remote and manual-remote chat, and readListResponse
         // (web/src/lib/api.ts) treats an empty string as "not an error" — a stderr
         // passthrough would be a silent no-op on exactly the shape warden deploys in.
-        // `r.ok` with empty stdout stays a legitimate empty list (fresh repo).
-        if (!r.ok) return res.json({ commits: [], error: 'git log failed' });
+        //
+        // But TWO benign conditions also exit non-zero here, and neither is a
+        // failure to report (the sibling /api/git-range-diff — which reuses this
+        // route's range map verbatim — splits its own non-zero leg for exactly this
+        // reason, so its error names the condition rather than misleadingly
+        // claiming "no upstream"):
+        //   • unborn HEAD — a fresh `git init` with no commits yet. A healthy repo
+        //     with genuinely zero commits, so it is the empty list with error null.
+        //     (The diff sibling must word this as an error because `diff: null` has
+        //     no way to say "empty"; a LIST route says it precisely by being empty.)
+        //   • no upstream — `HEAD..@{u}` / `@{u}..HEAD` on a branch that tracks
+        //     nothing. Named accurately, in the SAME words /api/git-range-diff uses
+        //     for the identical state, so the two panes a human sees side by side
+        //     can't disagree about one repo.
+        // `r.ok` with empty stdout likewise stays a legitimate empty list.
+        if (!r.ok) {
+          if (await hasUnbornHead(chat, cwd)) return res.json({ commits: [], error: null });
+          return res.json({
+            commits: [],
+            error: rangeRev ? 'no upstream configured' : 'git log failed',
+          });
+        }
         const raw = r.stdout.trim();
 
         const commits = raw ? raw.split('\n').map(parseGitLogLine) : [];
@@ -1306,7 +1356,10 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
         // /api/git-log leg for the full rationale: the string is a FIXED non-empty
         // literal because runGit's `2>/dev/null` remote branches leave r.stderr empty,
         // and readListResponse treats an empty error string as no error at all. A
-        // successful `stash list` with empty stdout is a real "no stashes" — error null.
+        // successful `stash list` with empty stdout is a real "no stashes" — error
+        // null. No unborn-HEAD probe here (unlike /api/git-log and /api/git-reflog):
+        // `git stash list` exits ZERO on a fresh `git init`, so a brand-new repo
+        // already lands on the legitimate-empty path.
         if (!r.ok) return res.json({ stashes: [], error: 'git stash list failed' });
         const raw = r.stdout.trim();
 
@@ -1350,9 +1403,15 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
         // Non-zero exit → an explicit error, never a manufactured empty list. See the
         // /api/git-log leg for the full rationale (FIXED literal, because the
         // `2>/dev/null` remote branches make r.stderr empty and an empty error string
-        // reads as "no error" to readListResponse). A successful reflog with empty
-        // stdout is a real "no operations recorded" — error null.
-        if (!r.ok) return res.json({ entries: [], error: 'git reflog failed' });
+        // reads as "no error" to readListResponse). `git reflog` shares git-log's
+        // unborn-HEAD quirk — it exits non-zero on a fresh `git init` with no commits
+        // — and that is a healthy repo with genuinely no operations recorded, not a
+        // failure, so it takes the same probe and answers error null. A successful
+        // reflog with empty stdout is likewise a real "no operations recorded".
+        if (!r.ok) {
+          if (await hasUnbornHead(chat, cwd)) return res.json({ entries: [], error: null });
+          return res.json({ entries: [], error: 'git reflog failed' });
+        }
         const raw = r.stdout.trim();
 
         const entries = raw ? parseReflog(raw) : [];
@@ -1395,7 +1454,10 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
         // (FIXED literal, because the `2>/dev/null` remote branches make r.stderr
         // empty and an empty error string reads as "no error" to readListResponse). A
         // successful for-each-ref with empty stdout is a real branch-less checkout —
-        // error null. The two SECONDARY calls below keep their documented degradation.
+        // error null, which is also what a fresh `git init` gets (for-each-ref exits
+        // ZERO on an unborn HEAD, so no probe is needed here as it is in
+        // /api/git-log). The two SECONDARY calls below keep their documented
+        // degradation.
         if (!r.ok) return res.json({ branches: [], error: 'git branch listing failed' });
         const raw = r.stdout.trim();
         const branches = raw ? parseGitBranches(raw) : [];

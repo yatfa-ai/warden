@@ -95,6 +95,7 @@ let originalHome;
 let tempHome;
 let gitRepo;
 let nonGitDir;
+let unbornRepo;
 let behindRepo;
 let bareOrigin;
 let aheadRepo;
@@ -135,6 +136,16 @@ before(async () => {
   // A plain non-git directory
   nonGitDir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitlog-nongit-'));
   fs.writeFileSync(path.join(nonGitDir, 'readme.txt'), 'not a repo\n');
+
+  // A HEALTHY repo with an UNBORN HEAD (WARDEN-1021): `git init`'d, one uncommitted
+  // file, no commits yet. `git log` exits NON-ZERO here just as it does for a
+  // genuinely broken repo — so this fixture is the mirror image of nonGitDir and
+  // pins that the two are told apart rather than both reported as "git log failed".
+  unbornRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitlog-unborn-'));
+  git(['init', '-q', '-b', 'main'], unbornRepo);
+  git(['config', 'user.email', 'test@example.com'], unbornRepo);
+  git(['config', 'user.name', 'Tester'], unbornRepo);
+  fs.writeFileSync(path.join(unbornRepo, 'wip.txt'), 'uncommitted\n');
 
   // A repo whose upstream (@{u}) is AHEAD of HEAD — the "behind" case (WARDEN-225).
   // Commit all four subjects, push them ALL to a bare origin (→ @{u} at the tip),
@@ -259,6 +270,7 @@ before(async () => {
     JSON.stringify([
       { host: '(local)', session: 'warden-gitlog', cwd: gitRepo, cmd: 'bash', name: 'warden-gitlog' },
       { host: '(local)', session: 'warden-nongit', cwd: nonGitDir, cmd: 'bash', name: 'warden-nongit' },
+      { host: '(local)', session: 'warden-unborn', cwd: unbornRepo, cmd: 'bash', name: 'warden-unborn' },
       { host: '(local)', session: 'warden-behind', cwd: behindRepo, cmd: 'bash', name: 'warden-behind' },
       { host: '(local)', session: 'warden-ahead', cwd: aheadRepo, cmd: 'bash', name: 'warden-ahead' },
       { host: '(local)', session: 'warden-rename', cwd: renameRepo, cmd: 'bash', name: 'warden-rename' },
@@ -283,7 +295,7 @@ after(async () => {
   if (httpServer) await new Promise((r) => httpServer.close(r));
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  for (const d of [gitRepo, nonGitDir, behindRepo, bareOrigin, aheadRepo, bareOriginAhead, renameRepo, grepRepo, pickaxeRepo, pickaxeAheadRepo, bareOriginPickaxe, tempHome]) {
+  for (const d of [gitRepo, nonGitDir, unbornRepo, behindRepo, bareOrigin, aheadRepo, bareOriginAhead, renameRepo, grepRepo, pickaxeRepo, pickaxeAheadRepo, bareOriginPickaxe, tempHome]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 });
@@ -399,6 +411,20 @@ describe('/api/git-log HTTP endpoint (real Express app from server.js)', () => {
     assert.ok(body.error.length > 0, 'a failing git command must yield a NON-EMPTY error string');
   });
 
+  it('returns { commits: [], error: null } for a HEALTHY repo with an unborn HEAD (WARDEN-1021)', async () => {
+    // The mirror image of the case above, and the reason the non-zero leg probes
+    // instead of blanket-erroring: `git log` ALSO exits non-zero on a fresh
+    // `git init` with no commits yet. That is an entirely normal state for an agent
+    // that just created a repo — reporting "git log failed" for it would be exactly
+    // the false positive this convention exists to prevent, pointed the other way.
+    // A healthy repo with zero commits is a legitimate empty list.
+    const res = await fetch(`${baseUrl}/api/git-log?id=warden-unborn`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.deepStrictEqual(body.commits, []);
+    assert.strictEqual(body.error, null);
+  });
+
   it('returns 404 for an unknown chat id', async () => {
     const res = await fetch(`${baseUrl}/api/git-log?id=does-not-exist`);
     assert.strictEqual(res.status, 404);
@@ -453,16 +479,17 @@ describe('/api/git-log range=incoming (behind commits — WARDEN-225)', () => {
     assert.strictEqual(body.error, null);
   });
 
-  it('returns { commits: [], error: <non-empty> } (200, not 500) when there is no upstream (WARDEN-1021)', async () => {
+  it('names the no-upstream range failure the way /api/git-diff does (WARDEN-1021)', async () => {
     // gitRepo has commits but NO upstream configured → @{u} is unset → git exits
     // non-zero. The badge must never see a 500 — but since WARDEN-1021 the failure
-    // is no longer masked as an empty success either (mirrors /api/git-diff, which
-    // has always surfaced its own no-upstream non-zero exit as an error string).
+    // is no longer masked as an empty success either. The string is the SAME one
+    // /api/git-diff returns for the identical state, so two panes on one screen
+    // can't disagree about the same repo.
     const res = await fetch(`${baseUrl}/api/git-log?id=warden-gitlog&range=incoming`);
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     assert.deepStrictEqual(body.commits, []);
-    assert.ok(typeof body.error === 'string' && body.error.length > 0, 'non-empty error expected');
+    assert.strictEqual(body.error, 'no upstream configured');
   });
 });
 
@@ -514,15 +541,15 @@ describe('/api/git-log range=outgoing (ahead commits — WARDEN-252)', () => {
     assert.strictEqual(body.error, null);
   });
 
-  it('returns { commits: [], error: <non-empty> } (200, not 500) when there is no upstream (WARDEN-1021)', async () => {
+  it('names the no-upstream range failure the way /api/git-diff does (WARDEN-1021)', async () => {
     // gitRepo has commits but NO upstream configured → @{u} is unset → git exits
-    // non-zero. Mirrors the incoming no-upstream case; never a 500, and since
-    // WARDEN-1021 never a silently-empty success either.
+    // non-zero. Mirrors the incoming no-upstream case; never a 500, never a silently
+    // -empty success, and never a message that contradicts /api/git-diff.
     const res = await fetch(`${baseUrl}/api/git-log?id=warden-gitlog&range=outgoing`);
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     assert.deepStrictEqual(body.commits, []);
-    assert.ok(typeof body.error === 'string' && body.error.length > 0, 'non-empty error expected');
+    assert.strictEqual(body.error, 'no upstream configured');
   });
 });
 

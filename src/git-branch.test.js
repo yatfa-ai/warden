@@ -41,6 +41,7 @@ let multiRepo; // several branches: current(main) + merged-topic + not-merged(st
 let aheadRepo; // tracks a bare origin and is 1 commit ahead — exercises upstream + track parsing
 let detachedRepo; // HEAD detached at a commit — exercises the secondary symbolic-ref degradation
 let nonGitDir;
+let unbornRepo; // healthy repo, `git init` with no commits yet (WARDEN-1021)
 
 function git(args, cwd) {
   const r = spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'inherit'] });
@@ -134,6 +135,17 @@ before(async () => {
   nonGitDir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitbranch-nongit-'));
   fs.writeFileSync(path.join(nonGitDir, 'readme.txt'), 'not a repo\n');
 
+  // A HEALTHY repo whose HEAD has no commits yet (WARDEN-1021). This route's
+  // primary command exits ZERO here (unlike /api/git-log and /api/git-reflog,
+  // which need an explicit unborn-HEAD probe on their non-zero leg), so no
+  // production code is involved — this pins that asymmetry so a future change
+  // can't start reporting a brand-new repo as a failure.
+  unbornRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitbranch-unborn-'));
+  git(['init', '-q', '-b', 'main'], unbornRepo);
+  git(['config', 'user.email', 'test@example.com'], unbornRepo);
+  git(['config', 'user.name', 'Tester'], unbornRepo);
+  fs.writeFileSync(path.join(unbornRepo, 'wip.txt'), 'uncommitted\n');
+
   // Catalog with three LOCAL manual chats, resolved by bare session id (no ':'
   // prefix) so no host/tmux discovery runs.
   fs.writeFileSync(
@@ -143,6 +155,7 @@ before(async () => {
       { host: '(local)', session: 'warden-ahead', cwd: aheadRepo, cmd: 'bash', name: 'warden-ahead' },
       { host: '(local)', session: 'warden-detached', cwd: detachedRepo, cmd: 'bash', name: 'warden-detached' },
       { host: '(local)', session: 'warden-nongit', cwd: nonGitDir, cmd: 'bash', name: 'warden-nongit' },
+      { host: '(local)', session: 'warden-unborn', cwd: unbornRepo, cmd: 'bash', name: 'warden-unborn' },
     ]),
   );
 
@@ -160,7 +173,7 @@ after(async () => {
   if (httpServer) await new Promise((r) => httpServer.close(r));
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  for (const d of [multiRepo, aheadRepo, detachedRepo, nonGitDir, tempHome]) {
+  for (const d of [multiRepo, aheadRepo, detachedRepo, nonGitDir, unbornRepo, tempHome]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 });
@@ -231,6 +244,18 @@ describe('/api/git-branch endpoint (real Express app from server.js)', () => {
     assert.deepStrictEqual(body.branches, []);
     assert.strictEqual(typeof body.error, 'string');
     assert.ok(body.error.length > 0, 'a failing git command must yield a NON-EMPTY error string');
+  });
+
+  it('returns [] with error null for a HEALTHY repo with an unborn HEAD (WARDEN-1021)', async () => {
+    // `for-each-ref refs/heads/` exits ZERO on a fresh `git init` with no commits
+    // (there simply are no branch refs yet) — unlike `git log`/`git reflog`, which
+    // exit non-zero and therefore need an explicit unborn-HEAD probe. A brand-new
+    // repo is a real branch-less checkout, not a failure.
+    const res = await fetch(`${baseUrl}/api/git-branch?id=warden-unborn`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.deepStrictEqual(body.branches, []);
+    assert.strictEqual(body.error, null);
   });
 
   it('still lists branches with error null on a DETACHED HEAD (secondary calls keep degrading) (WARDEN-1021)', async () => {

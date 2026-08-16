@@ -34,6 +34,7 @@ let tempHome;
 let resetRepo; // the headline: a `git reset --hard` erased a commit — invisible except in the reflog
 let plainRepo; // ordinary commit history
 let nonGitDir;
+let unbornRepo; // healthy repo, `git init` with no commits yet — reflog exits NON-ZERO here too
 
 function git(args, cwd) {
   const r = spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'inherit'] });
@@ -87,6 +88,16 @@ before(async () => {
   nonGitDir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitreflog-nongit-'));
   fs.writeFileSync(path.join(nonGitDir, 'readme.txt'), 'not a repo\n');
 
+  // ---- unbornRepo: a HEALTHY repo whose HEAD has no commits yet (WARDEN-1021) --
+  // `git reflog` shares git-log's quirk of exiting non-zero before the first
+  // commit, so this is the mirror image of nonGitDir: it pins that a brand-new
+  // repo is told apart from a broken one instead of both reading as a failure.
+  unbornRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitreflog-unborn-'));
+  git(['init', '-q', '-b', 'main'], unbornRepo);
+  git(['config', 'user.email', 'test@example.com'], unbornRepo);
+  git(['config', 'user.name', 'Tester'], unbornRepo);
+  fs.writeFileSync(path.join(unbornRepo, 'wip.txt'), 'uncommitted\n');
+
   // Catalog with three LOCAL manual chats, resolved by bare session id (no ':'
   // prefix) so no host/tmux discovery runs.
   fs.writeFileSync(
@@ -95,6 +106,7 @@ before(async () => {
       { host: '(local)', session: 'warden-reset', cwd: resetRepo, cmd: 'bash', name: 'warden-reset' },
       { host: '(local)', session: 'warden-plain', cwd: plainRepo, cmd: 'bash', name: 'warden-plain' },
       { host: '(local)', session: 'warden-nongit', cwd: nonGitDir, cmd: 'bash', name: 'warden-nongit' },
+      { host: '(local)', session: 'warden-unborn', cwd: unbornRepo, cmd: 'bash', name: 'warden-unborn' },
     ]),
   );
 
@@ -112,7 +124,7 @@ after(async () => {
   if (httpServer) await new Promise((r) => httpServer.close(r));
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  for (const d of [resetRepo, plainRepo, nonGitDir, tempHome]) {
+  for (const d of [resetRepo, plainRepo, nonGitDir, unbornRepo, tempHome]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 });
@@ -170,6 +182,18 @@ describe('/api/git-reflog detail endpoint (real Express app from server.js)', ()
     assert.deepStrictEqual(body.entries, []);
     assert.strictEqual(typeof body.error, 'string');
     assert.ok(body.error.length > 0, 'a failing git command must yield a NON-EMPTY error string');
+  });
+
+  it('returns [] with error null for a HEALTHY repo with an unborn HEAD (WARDEN-1021)', async () => {
+    // The mirror image of the case above. `git reflog` exits non-zero on a fresh
+    // `git init` too, but a repo that simply has not been committed to yet has
+    // genuinely recorded no operations — calling that "git reflog failed" would be
+    // the same false-positive disease pointed the other way.
+    const res = await fetch(`${baseUrl}/api/git-reflog?id=warden-unborn`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.deepStrictEqual(body.entries, []);
+    assert.strictEqual(body.error, null);
   });
 
   it('keeps error null for a successful reflog read (no false positives) (WARDEN-1021)', async () => {
