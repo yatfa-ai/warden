@@ -21,9 +21,19 @@ import { DiffBlock } from './DiffBlock';
 // classifier (clean/empty vs dirty vs error vs loading) and the toolbar-toggle
 // exclusivity resolver. Pure so both have unit coverage (fileViewerChanges.test.mjs).
 import { classifyChangesView, resolveViewToggles } from '@/lib/fileViewerChanges';
+// Pure descriptor for the header toolbar's collapsible half (WARDEN-1019) — which
+// controls collapse into the `⋯` menu below `md`, in what order, and with what
+// pressed state. Unit-tested in fileViewerToolbar.test.mjs.
+import {
+  secondaryToolbarActions,
+  TOOLBAR_LEADING_KEYS,
+  TOOLBAR_TRAILING_KEYS,
+  type ToolbarAction,
+  type ToolbarActionKey,
+} from '@/lib/fileViewerToolbar';
 import { MarkdownBody } from './MarkdownBody';
 import { tokenizeCode, languageFromPath, type Leaf } from '@/lib/highlight';
-import { Loader2Icon, FileIcon, FolderIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon, RotateCwIcon, CircleDotIcon, FilePenIcon, ChevronLeftIcon } from 'lucide-react';
+import { Loader2Icon, FileIcon, FolderIcon, AlertCircleIcon, GitCommitHorizontalIcon, BookOpenIcon, Code2Icon, HistoryIcon, EyeIcon, RotateCwIcon, CircleDotIcon, FilePenIcon, ChevronLeftIcon, EllipsisIcon } from 'lucide-react';
 import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { basename } from '@/lib/chatDisplay';
@@ -215,6 +225,9 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
   // Brief in-flight flag for the manual ↻ reload button's spinner. The Follow
   // interval never sets this — its polls are silent background refreshes.
   const [manualReloading, setManualReloading] = useState(false);
+  // The `⋯` header-toolbar overflow menu (WARDEN-1019) — only reachable below
+  // `md`, where the low-priority controls collapse into it.
+  const [toolbarMenuOpen, setToolbarMenuOpen] = useState(false);
 
   // Changes view (WARDEN-786): the open file's uncommitted working-tree diff vs
   // HEAD — the missing fourth file-understanding surface (History = what committed
@@ -640,6 +653,70 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
     }
   }, [loadContent]);
 
+  // The collapsible half of the header toolbar (WARDEN-1019). `secondaryToolbarActions`
+  // owns WHICH controls collapse, in what order, and what state each reports —
+  // pure, so the contract has real unit coverage (fileViewerToolbar.test.mjs) in a
+  // repo with no DOM test runner. Icons and handlers stay here, keyed by `key`, so
+  // the inline row and the `⋯` menu drive the SAME callback and the same pressed
+  // state rather than being two copies that can drift.
+  const secondaryActions = useMemo(
+    () => secondaryToolbarActions({ isMarkdown, viewMode, history, annotate, follow, manualReloading }),
+    [isMarkdown, viewMode, history, annotate, follow, manualReloading],
+  );
+  const leadingActions = secondaryActions.filter((a) => TOOLBAR_LEADING_KEYS.includes(a.key));
+  const trailingActions = secondaryActions.filter((a) => TOOLBAR_TRAILING_KEYS.includes(a.key));
+  const actionMeta: Record<ToolbarActionKey, ToolbarActionMeta> = {
+    viewmode: {
+      icon: viewMode === 'rendered' ? <BookOpenIcon className="w-3.5 h-3.5" /> : <Code2Icon className="w-3.5 h-3.5" />,
+      onSelect: () => onViewModeChange(viewMode === 'rendered' ? 'source' : 'rendered'),
+    },
+    history: {
+      icon: <HistoryIcon className="w-3.5 h-3.5" />,
+      onSelect: () => {
+        // resolveViewToggles (WARDEN-786) centralizes the toolbar's
+        // mutual-exclusivity contract now that Changes joins the set:
+        // turning history on clears annotate + changes. viewAtCommit
+        // (a snapshot reached from the history list) is cleared when
+        // leaving history — its own history-specific asymmetry.
+        const t = resolveViewToggles({ annotate, history, changes }, 'history', !history);
+        setAnnotate(t.annotate);
+        setHistory(t.history);
+        setChanges(t.changes);
+        if (!t.history) setViewAtCommit(null); // leaving history → drop any at-commit snapshot
+      },
+    },
+    annotate: {
+      icon: <GitCommitHorizontalIcon className="w-3.5 h-3.5" />,
+      onSelect: () => {
+        // Turning annotate on clears history + changes (resolveViewToggles)
+        // and drops any at-commit snapshot (annotate replaces the content).
+        const t = resolveViewToggles({ annotate, history, changes }, 'annotate', !annotate);
+        setAnnotate(t.annotate);
+        setHistory(t.history);
+        setChanges(t.changes);
+        if (t.annotate) setViewAtCommit(null); // annotate forces history off → drop any snapshot
+      },
+    },
+    // Manual reload (WARDEN-749): a one-shot refresh. Independently useful —
+    // before this no refresh existed, so a stale file forced a close/reopen.
+    // Spinner swaps in while in-flight; icon-only on the row, labelled in the menu.
+    reload: {
+      icon: manualReloading
+        ? <Loader2Icon className="h-3.5 w-3.5 animate-spin" />
+        : <RotateCwIcon className="h-3.5 w-3.5" />,
+      onSelect: handleManualReload,
+      iconOnly: true,
+      disabled: manualReloading,
+    },
+    // Follow toggle (WARDEN-749): live-update the open file on the poll cadence
+    // as an agent writes to it (tail -f). Ephemeral — resets on close. Pauses
+    // while the tab is hidden.
+    follow: {
+      icon: <CircleDotIcon className="h-3.5 w-3.5" />,
+      onSelect: () => setFollow((f) => !f),
+    },
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <ContextMenu>
@@ -731,68 +808,28 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
                 ) : (
                   <span className="truncate">{filePath}</span>
                 )}
+                {/* The header toolbar (WARDEN-1019).
+
+                    Below `md` only `Changes` and the close X stay on the row and
+                    everything else collapses into the `⋯` overflow menu. Every
+                    control is `shrink-0`, so the full toolbar's min-content width
+                    (~510px with a markdown file's six controls) is a floor the row
+                    cannot go under: at 375px it paints through DialogTitle's `pr-8`
+                    close-X reserve and past the panel's right edge, and a click
+                    aimed at `Changes` lands on the close X or the overlay and shuts
+                    the viewer. `Changes` is the control that mis-hit was reported
+                    against, so it is the one that never collapses.
+
+                    Gated in CSS (`hidden md:flex` / `md:hidden`) rather than by a
+                    JS media query so there is no resize listener and no wrong-width
+                    first paint. The two inline groups straddle `Changes` to keep the
+                    desktop row exactly as it shipped — see TOOLBAR_LEADING_KEYS. */}
                 <div className="ml-auto flex items-center gap-2">
-                  {isMarkdown && (
-                    <Button
-                      type="button"
-                      variant={viewMode === 'rendered' ? 'default' : 'outline'}
-                      size="sm"
-                      className="h-7 shrink-0 gap-1.5 text-xs"
-                      onClick={() => onViewModeChange(viewMode === 'rendered' ? 'source' : 'rendered')}
-                      title={viewMode === 'rendered' ? 'Show raw markdown source' : 'Show rendered documentation'}
-                      aria-pressed={viewMode === 'rendered'}
-                    >
-                      {viewMode === 'rendered' ? (
-                        <BookOpenIcon className="w-3.5 h-3.5" />
-                      ) : (
-                        <Code2Icon className="w-3.5 h-3.5" />
-                      )}
-                      {viewMode === 'rendered' ? 'Rendered' : 'Source'}
-                    </Button>
-                  )}
-                  <Button
-                    type="button"
-                    variant={history ? 'default' : 'outline'}
-                    size="sm"
-                    className="h-7 shrink-0 gap-1.5 text-xs"
-                    onClick={() => {
-                      // resolveViewToggles (WARDEN-786) centralizes the toolbar's
-                      // mutual-exclusivity contract now that Changes joins the set:
-                      // turning history on clears annotate + changes. viewAtCommit
-                      // (a snapshot reached from the history list) is cleared when
-                      // leaving history — its own history-specific asymmetry.
-                      const t = resolveViewToggles({ annotate, history, changes }, 'history', !history);
-                      setAnnotate(t.annotate);
-                      setHistory(t.history);
-                      setChanges(t.changes);
-                      if (!t.history) setViewAtCommit(null); // leaving history → drop any at-commit snapshot
-                    }}
-                    title={history ? 'Hide file commit history' : 'Show commit history for this file (every commit that touched it, across renames)'}
-                    aria-pressed={history}
-                  >
-                    <HistoryIcon className="w-3.5 h-3.5" />
-                    History
-                  </Button>
-                  <Button
-                    type="button"
-                    variant={annotate ? 'default' : 'outline'}
-                    size="sm"
-                    className="h-7 shrink-0 gap-1.5 text-xs"
-                    onClick={() => {
-                      // Turning annotate on clears history + changes (resolveViewToggles)
-                      // and drops any at-commit snapshot (annotate replaces the content).
-                      const t = resolveViewToggles({ annotate, history, changes }, 'annotate', !annotate);
-                      setAnnotate(t.annotate);
-                      setHistory(t.history);
-                      setChanges(t.changes);
-                      if (t.annotate) setViewAtCommit(null); // annotate forces history off → drop any snapshot
-                    }}
-                    title={annotate ? 'Hide per-line git blame' : 'Show per-line git blame (which commit last touched each line)'}
-                    aria-pressed={annotate}
-                  >
-                    <GitCommitHorizontalIcon className="w-3.5 h-3.5" />
-                    Annotate
-                  </Button>
+                  <div className="hidden items-center gap-2 md:flex">
+                    {leadingActions.map((a) => (
+                      <ToolbarActionButton key={a.key} action={a} meta={actionMeta[a.key]} />
+                    ))}
+                  </div>
                   {/* Changes view (WARDEN-786): the missing fourth file-understanding
                       surface — this file's uncommitted working-tree diff vs HEAD, so a
                       coordinator can answer "what has the agent changed here since HEAD?"
@@ -823,40 +860,18 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
                     <FilePenIcon className="w-3.5 h-3.5" />
                     Changes
                   </Button>
-                  {/* Manual reload (WARDEN-749): a one-shot refresh. Independently
-                      useful — before this no refresh existed, so a stale file
-                      forced a close/reopen. Spinner swaps in while in-flight. */}
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="h-7 w-7 shrink-0 p-0 text-xs"
-                    onClick={handleManualReload}
-                    disabled={manualReloading}
-                    title="Reload file"
-                    aria-label="Reload file"
-                  >
-                    {manualReloading ? (
-                      <Loader2Icon className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <RotateCwIcon className="h-3.5 w-3.5" />
-                    )}
-                  </Button>
-                  {/* Follow toggle (WARDEN-749): live-update the open file on the
-                      poll cadence as an agent writes to it (tail -f). Ephemeral —
-                      resets on close. Pauses while the tab is hidden. */}
-                  <Button
-                    type="button"
-                    variant={follow ? 'default' : 'outline'}
-                    size="sm"
-                    className="h-7 shrink-0 gap-1.5 text-xs"
-                    onClick={() => setFollow((f) => !f)}
-                    title={follow ? 'Stop following — pause live updates' : 'Follow — live-update this file as it changes (tail -f)'}
-                    aria-pressed={follow}
-                  >
-                    <CircleDotIcon className="h-3.5 w-3.5" />
-                    Follow
-                  </Button>
+                  <div className="hidden items-center gap-2 md:flex">
+                    {trailingActions.map((a) => (
+                      <ToolbarActionButton key={a.key} action={a} meta={actionMeta[a.key]} />
+                    ))}
+                  </div>
+                  <ToolbarOverflowMenu
+                    className="md:hidden"
+                    actions={secondaryActions}
+                    metas={actionMeta}
+                    open={toolbarMenuOpen}
+                    onOpenChange={setToolbarMenuOpen}
+                  />
                 </div>
               </DialogTitle>
             </DialogHeader>
@@ -1463,6 +1478,123 @@ function CommitBlobView({ commit, filePath, content, loading, error, viewMode, i
         </div>
       )}
     </div>
+  );
+}
+
+// The per-key UI half of a collapsible header-toolbar control (WARDEN-1019): its
+// icon and its click handler. Paired with the pure `ToolbarAction` descriptor by
+// `key`, so the inline row and the `⋯` overflow menu render the SAME action from
+// ONE definition — a menu item and a button that can't drift apart.
+type ToolbarActionMeta = {
+  icon: ReactNode;
+  onSelect: () => void;
+  /** Icon-only on the inline row (the ↻ reload) — still labelled inside the menu. */
+  iconOnly?: boolean;
+  disabled?: boolean;
+};
+
+// One collapsible control as it renders ON the header row (>= `md`). Byte-for-byte
+// the button that shipped before WARDEN-1019 — same variant/size/classes, same
+// title, same aria-pressed — so the desktop toolbar is unchanged by the collapse.
+function ToolbarActionButton({ action, meta }: { action: ToolbarAction; meta: ToolbarActionMeta }) {
+  return (
+    <Button
+      type="button"
+      variant={action.pressed ? 'default' : 'outline'}
+      size="sm"
+      className={meta.iconOnly ? 'h-7 w-7 shrink-0 p-0 text-xs' : 'h-7 shrink-0 gap-1.5 text-xs'}
+      onClick={meta.onSelect}
+      disabled={meta.disabled}
+      title={action.title}
+      // A toggle announces its state; a plain icon-only action needs a name instead.
+      aria-pressed={action.pressed ?? undefined}
+      aria-label={meta.iconOnly ? action.label : undefined}
+    >
+      {meta.icon}
+      {!meta.iconOnly && action.label}
+    </Button>
+  );
+}
+
+// The `⋯` menu holding the toolbar controls that do not fit a narrow row
+// (WARDEN-1019) — the toolbar analog of CollapsedCrumbs, and built on the same
+// Popover pattern so a collapse stays non-destructive: every collapsed control is
+// still listed, still reachable, and still SHOWS its state.
+//
+// That last part is why the rows carry an explicit ON/OFF pill rather than the
+// usual "check mark when active": four of the five are toggles, and a check that
+// simply vanishes when off reads as "this action is unavailable" instead of "this
+// view is currently off". `aria-pressed` carries the same fact to assistive tech.
+//
+// Rendered only below `md` (the caller passes `md:hidden`). Above it the controls
+// are on the row and this trigger would be a second, redundant path to them.
+function ToolbarOverflowMenu({ actions, metas, open, onOpenChange, className }: {
+  actions: ToolbarAction[];
+  metas: Record<ToolbarActionKey, ToolbarActionMeta>;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  className?: string;
+}) {
+  const on = actions.filter((a) => a.pressed).map((a) => a.label);
+  return (
+    <Popover open={open} onOpenChange={onOpenChange}>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className={`h-7 w-7 shrink-0 p-0 text-xs ${className ?? ''}`}
+          // The summary rides in the tooltip/accessible name so the collapsed
+          // state is legible WITHOUT opening the menu.
+          title={on.length > 0 ? `More file actions (on: ${on.join(', ')})` : 'More file actions'}
+          aria-label={on.length > 0 ? `More file actions, ${on.length} on` : 'More file actions'}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <EllipsisIcon className="h-3.5 w-3.5" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="end"
+        sideOffset={4}
+        className="w-56 p-1 text-xs"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex flex-col">
+          {actions.map((a) => {
+            const meta = metas[a.key];
+            return (
+              <button
+                key={a.key}
+                type="button"
+                title={a.title}
+                aria-pressed={a.pressed ?? undefined}
+                disabled={meta.disabled}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  // Close first: every one of these swaps what the viewer is
+                  // showing, so leaving the menu open would cover the result.
+                  onOpenChange(false);
+                  meta.onSelect();
+                }}
+                className="flex w-full items-center gap-2 rounded px-1.5 py-1.5 text-left text-xs hover:bg-accent disabled:opacity-50"
+              >
+                <span className="shrink-0 text-muted-foreground">{meta.icon}</span>
+                <span className="truncate">{a.label}</span>
+                {a.pressed !== null && (
+                  <span
+                    className={`ml-auto shrink-0 rounded px-1 py-px text-[10px] font-medium uppercase tracking-wide ${
+                      a.pressed ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'
+                    }`}
+                  >
+                    {a.pressed ? 'on' : 'off'}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
