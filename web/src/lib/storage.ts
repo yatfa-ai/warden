@@ -668,156 +668,131 @@ function parseSnippets(raw: unknown): Snippet[] {
   return out;
 }
 
-// Sanitize a raw defaultNewChatCwdByHost value (host key → default cwd) into a
-// valid Record<string,string>. Defensive: never throws on malformed input
-// (WARDEN-89) — it drops bad entries instead, so one corrupt/blank entry can
-// never blank the spawn cwd field. Modeled on parseCustomPresets (and explicitly
-// NOT on the looser paneHost loader, which does not coerce values): each entry
-// requires a non-empty trimmed-string KEY and a trimmed-string VALUE, and
-// entries whose value is empty/whitespace are dropped — an empty override means
-// "use the global defaultNewChatCwd" and so must never persist as a blank that
-// could seed the spawn field empty. Values are trimmed, matching
-// defaultNewChatCwd's own load-time trim (line ~331).
-function parseCwdByHost(raw: unknown): Record<string, string> {
+// WARDEN-1027: the ONE object-map sanitizer skeleton, extracted from the six
+// hand-copied parsers below (cwd/shell/labels/collapsed/preset per-host maps and
+// the snoozed-alert map). Every copy shared the same ~16 lines and differed only
+// in its console.warn field name and its value rule, so each new per-host
+// preference re-copied the whole thing to inherit the WARDEN-89 guard. Now the
+// guard is inherited by CALLING this; only the delta is supplied.
+//
+// The invariants that live here once, for every caller:
+//   - a non-object / array / primitive `raw` degrades to {} — never throws
+//     (WARDEN-89), so one corrupt payload can never blank a whole map;
+//   - a PRESENT-but-wrong-type `raw` warns with `label` (the operator-facing
+//     corruption signal), while absent (undefined/null) is silent — absence is
+//     normal, corruption is not;
+//   - keys are trimmed and empty/whitespace keys are dropped;
+//   - `coerce` returns the value to keep, or `undefined` to DROP the entry. The
+//     drop sentinel is strictly `undefined`, not falsiness — `false` and `0` are
+//     legitimate kept values for a caller whose rule admits them.
+function parseObjectMap<T>(
+  raw: unknown,
+  label: string,
+  coerce: (v: unknown) => T | undefined,
+): Record<string, T> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     if (raw !== undefined && raw !== null) {
       // A present-but-wrong-type value is genuine corruption worth surfacing.
-      console.warn('[loadUi] defaultNewChatCwdByHost is not an object; ignoring:', raw);
+      console.warn(`[loadUi] ${label} is not an object; ignoring:`, raw);
     }
     return {};
   }
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    const key = typeof k === 'string' ? k.trim() : '';
-    const val = typeof v === 'string' ? v.trim() : '';
-    if (!key || !val) continue; // empty key → drop; empty value → inherit global default
-    out[key] = val;
-  }
-  return out;
-}
-
-// Sanitize a raw defaultShellByHost value (host key → default shell) into a
-// valid Record<string,string> (WARDEN-429 — mirrors parseCwdByHost). Like a cwd
-// path, a shell name is an arbitrary string, so a non-empty trim is enough
-// (there is no semantic "valid preset" check as parsePresetByHost needs).
-// Defensive: never throws on malformed input (WARDEN-89) — it drops bad entries
-// instead, so one corrupt/blank entry can never seed the spawn command with a
-// dangling shell name. Each entry requires a non-empty trimmed-string KEY and a
-// trimmed-string VALUE; entries whose value is empty/whitespace are dropped — an
-// empty override means "use the global defaultShell" (then the host login shell)
-// and so must never persist as a blank that could seed the command field empty.
-// Values are trimmed, matching defaultShell's own load-time trim.
-function parseShellByHost(raw: unknown): Record<string, string> {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) {
-      // A present-but-wrong-type value is genuine corruption worth surfacing.
-      console.warn('[loadUi] defaultShellByHost is not an object; ignoring:', raw);
-    }
-    return {};
-  }
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    const key = typeof k === 'string' ? k.trim() : '';
-    const val = typeof v === 'string' ? v.trim() : '';
-    if (!key || !val) continue; // empty key → drop; empty value → inherit global default
-    out[key] = val;
-  }
-  return out;
-}
-
-// Sanitize a raw hostLabels value (raw host key → friendly label) into a valid
-// HostLabels map (WARDEN-490). Mirrors parseCwdByHost/parseShellByHost's drop-
-// bad-entries discipline: each entry requires a non-empty trimmed-string KEY and
-// a trimmed-string VALUE, and entries whose value is empty/whitespace are
-// dropped — an empty label means "no label" (today's behavior), so it must never
-// persist as a blank that could blank a host's tag. Defensive: never throws on
-// malformed input (WARDEN-89) — it drops bad entries instead, so one corrupt
-// entry can never blank the label map. NOTE: this map is display-only; it never
-// reaches the backend (see the UiState.hostLabels comment).
-function parseLabelsByHost(raw: unknown): HostLabels {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) {
-      // A present-but-wrong-type value is genuine corruption worth surfacing.
-      console.warn('[loadUi] hostLabels is not an object; ignoring:', raw);
-    }
-    return {};
-  }
-  const out: HostLabels = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    const key = typeof k === 'string' ? k.trim() : '';
-    const val = typeof v === 'string' ? v.trim() : '';
-    if (!key || !val) continue; // empty key → drop; empty label → no label (today's behavior)
-    out[key] = val;
-  }
-  return out;
-}
-
-// Sanitize a raw healthCollapsedHosts value (host key → collapsed?) into a
-// valid Record<string,boolean> (WARDEN-500 — mirrors parseCwdByHost's
-// drop-bad-entries model). The per-host expand/collapse state inside Health's
-// Host grouping was a HealthDashboard-local useState that reset to {} on every
-// Warden restart; now App-owned + persisted so a cross-host human's collapsed
-// hosts survive reload (completing the persistence WARDEN-468 started for the
-// grouping toggle itself). Defensive: never throws on malformed input
-// (WARDEN-89) — it drops bad entries instead, so one corrupt entry can never
-// blank the whole collapse map. Each entry requires a non-empty trimmed-string
-// KEY and a strictly-boolean VALUE; anything else is dropped. A non-object
-// payload (string/array/number) degrades to {} (every host expanded — byte-for-
-// byte today's default, zero regression for fresh installs).
-function parseCollapsedHosts(raw: unknown): Record<string, boolean> {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) {
-      // A present-but-wrong-type value is genuine corruption worth surfacing.
-      console.warn('[loadUi] healthCollapsedHosts is not an object; ignoring:', raw);
-    }
-    return {};
-  }
-  const out: Record<string, boolean> = {};
+  const out: Record<string, T> = {};
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
     const key = typeof k === 'string' ? k.trim() : '';
     if (!key) continue; // empty/whitespace key → drop
-    if (typeof v !== 'boolean') continue; // non-boolean value → drop
-    out[key] = v;
+    const val = coerce(v);
+    if (val === undefined) continue; // caller's rule rejected this value → drop
+    out[key] = val;
   }
   return out;
 }
 
+// The value rule shared by the three string-valued per-host maps (cwd, shell,
+// labels): trim, and treat empty/whitespace as ABSENT rather than as a stored
+// blank. That distinction is load-bearing in all three — an empty override must
+// mean "inherit the global default" (cwd/shell) or "no label" (labels), never a
+// persisted blank that could seed a spawn field empty.
+const coerceNonEmptyString = (v: unknown): string | undefined => {
+  const s = typeof v === 'string' ? v.trim() : '';
+  return s || undefined;
+};
+
+// Sanitize a raw defaultNewChatCwdByHost value (host key → default cwd) into a
+// valid Record<string,string>. Defensive: never throws on malformed input
+// (WARDEN-89) — it drops bad entries instead, so one corrupt/blank entry can
+// never blank the spawn cwd field. Explicitly NOT modeled on the looser paneHost
+// loader, which does not coerce values: each entry requires a non-empty
+// trimmed-string KEY and a non-empty trimmed-string VALUE, and entries whose
+// value is empty/whitespace are dropped — an empty override means "use the
+// global defaultNewChatCwd" and so must never persist as a blank that could seed
+// the spawn field empty. Values are trimmed, matching defaultNewChatCwd's own
+// load-time trim (line ~331).
+function parseCwdByHost(raw: unknown): Record<string, string> {
+  return parseObjectMap(raw, 'defaultNewChatCwdByHost', coerceNonEmptyString);
+}
+
+// Sanitize a raw defaultShellByHost value (host key → default shell) into a
+// valid Record<string,string> (WARDEN-429). Like a cwd path, a shell name is an
+// arbitrary string, so a non-empty trim is enough (there is no semantic "valid
+// preset" check as parsePresetByHost needs). Entries whose value is
+// empty/whitespace are dropped — an empty override means "use the global
+// defaultShell" (then the host login shell) and so must never persist as a blank
+// that could seed the command field empty, or leave a dangling shell name.
+function parseShellByHost(raw: unknown): Record<string, string> {
+  return parseObjectMap(raw, 'defaultShellByHost', coerceNonEmptyString);
+}
+
+// Sanitize a raw hostLabels value (raw host key → friendly label) into a valid
+// HostLabels map (WARDEN-490). Entries whose value is empty/whitespace are
+// dropped — an empty label means "no label" (today's behavior), so it must never
+// persist as a blank that could blank a host's tag. NOTE: this map is
+// display-only; it never reaches the backend (see the UiState.hostLabels
+// comment).
+function parseLabelsByHost(raw: unknown): HostLabels {
+  return parseObjectMap(raw, 'hostLabels', coerceNonEmptyString);
+}
+
+// Sanitize a raw healthCollapsedHosts value (host key → collapsed?) into a
+// valid Record<string,boolean> (WARDEN-500). The per-host expand/collapse state
+// inside Health's Host grouping was a HealthDashboard-local useState that reset
+// to {} on every Warden restart; now App-owned + persisted so a cross-host
+// human's collapsed hosts survive reload (completing the persistence WARDEN-468
+// started for the grouping toggle itself). Each entry requires a STRICTLY
+// boolean VALUE; anything else (including the truthy string 'yes' or the numeric
+// 1) is dropped. `false` is a real, KEPT value — an explicitly-expanded host is
+// not the same as an absent one. A non-object payload (string/array/number)
+// degrades to {} (every host expanded — byte-for-byte today's default, zero
+// regression for fresh installs).
+function parseCollapsedHosts(raw: unknown): Record<string, boolean> {
+  return parseObjectMap(raw, 'healthCollapsedHosts', (v) => (typeof v === 'boolean' ? v : undefined));
+}
+
 // Sanitize a raw defaultNewChatPresetByHost value (host key → preset name) into a
-// valid Record<string,string> (WARDEN-352 — mirrors parseCwdByHost). CRITICAL
-// DIFFERENCE from parseCwdByHost: cwd values are arbitrary path strings (a
-// non-empty trim is enough), but preset values are SEMANTIC names — each must be
-// a VALID preset (a built-in 'claude'/'shell' OR an existing customPresets
-// entry). A host defaulting to a since-deleted custom preset is DROPPED on load,
-// which means "inherit the global defaultNewChatPreset" — exactly mirroring how
-// the global defaultNewChatPreset itself falls back to 'claude' via presetIsValid
-// when it names a deleted preset. `isValid` is that same loadUi-scoped
-// presetIsValid closure (built-in OR in the parsed customPresets), passed in at
-// the call site where customPresets is already in scope — so a per-host value
-// naming a REAL custom preset is correctly KEPT (do not call this where
-// customPresets has not yet been parsed). Defensive: never throws (WARDEN-89) —
-// drops bad entries instead, so one corrupt entry can never seed the spawn field
-// with a dangling preset name.
+// valid Record<string,string> (WARDEN-352). CRITICAL DIFFERENCE from
+// parseCwdByHost: cwd values are arbitrary path strings (a non-empty trim is
+// enough), but preset values are SEMANTIC names — each must be a VALID preset (a
+// built-in 'claude'/'shell' OR an existing customPresets entry). A host
+// defaulting to a since-deleted custom preset is DROPPED on load, which means
+// "inherit the global defaultNewChatPreset" — exactly mirroring how the global
+// defaultNewChatPreset itself falls back to 'claude' via presetIsValid when it
+// names a deleted preset. `isValid` is that same loadUi-scoped presetIsValid
+// closure (built-in OR in the parsed customPresets), passed in at the call site
+// where customPresets is already in scope — so a per-host value naming a REAL
+// custom preset is correctly KEPT. CALL-ORDERING CONTRACT (unchanged by
+// WARDEN-1027): do NOT call this where customPresets has not yet been parsed.
+// Defensive: never throws (WARDEN-89) — drops bad entries instead, so one
+// corrupt entry can never seed the spawn field with a dangling preset name.
 function parsePresetByHost(
   raw: unknown,
   isValid: (p: unknown) => boolean,
 ): Record<string, string> {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) {
-      // A present-but-wrong-type value is genuine corruption worth surfacing.
-      console.warn('[loadUi] defaultNewChatPresetByHost is not an object; ignoring:', raw);
-    }
-    return {};
-  }
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    const key = typeof k === 'string' ? k.trim() : '';
-    const val = typeof v === 'string' ? v.trim() : '';
-    // empty key → drop; empty value → inherit global default; invalid preset
-    // (not a built-in and not in customPresets) → inherit global default.
-    if (!key || !val || !isValid(val)) continue;
-    out[key] = val;
-  }
-  return out;
+  // empty value → inherit global default; invalid preset (not a built-in and not
+  // in customPresets) → inherit global default.
+  return parseObjectMap(raw, 'defaultNewChatPresetByHost', (v) => {
+    const val = coerceNonEmptyString(v);
+    return val !== undefined && isValid(val) ? val : undefined;
+  });
 }
 
 // Sanitize a raw mutedAlertKeys value into a de-duplicated string[] of non-empty
@@ -862,29 +837,20 @@ function parseRatioArray(raw: unknown): number[] {
 }
 
 // Sanitize a raw snoozedAlertKeys value (chat key → expiry ms) into a valid
-// Record<string, number> (WARDEN-551 — mirrors parseMutedKeys's drop-bad-entries
-// discipline, the WARDEN-89 defensive norm). Each entry requires a non-empty
-// trimmed-string KEY and a finite, strictly-POSITIVE number VALUE; anything else
-// is dropped, so one corrupt entry can never blank the snooze set. Entries whose
-// expiry is already in the past (a positive number < now) are NOT dropped here —
-// they are harmless (activeSnoozedKeys excludes them and App's mount prune clears
-// them on the next launch), and dropping them at load would require reading the
-// clock inside the sanitizer, which this pure loader deliberately avoids.
+// Record<string, number> (WARDEN-551 — the WARDEN-89 defensive norm). Each entry
+// requires a non-empty trimmed-string KEY and a finite, strictly-POSITIVE number
+// VALUE; anything else is dropped, so one corrupt entry can never blank the
+// snooze set. Note the value rule is STRICT: a numeric string is not coerced,
+// and 0 / negative / NaN / ±Infinity all drop. Entries whose expiry is already
+// in the past (a positive number < now) are NOT dropped here — they are harmless
+// (activeSnoozedKeys excludes them and App's mount prune clears them on the next
+// launch), and dropping them at load would require reading the clock inside this
+// pure loader, which it deliberately avoids. That non-behavior is pinned by the
+// WARDEN-1027 characterization tests in web/storage.test.mjs.
 function parseSnoozedKeys(raw: unknown): Record<string, number> {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) {
-      console.warn('[loadUi] snoozedAlertKeys is not an object; ignoring:', raw);
-    }
-    return {};
-  }
-  const out: Record<string, number> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    const key = typeof k === 'string' ? k.trim() : '';
-    if (!key) continue; // empty/whitespace key → drop
-    if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) continue; // non-number / non-finite / non-positive → drop
-    out[key] = v;
-  }
-  return out;
+  return parseObjectMap(raw, 'snoozedAlertKeys', (v) => (
+    typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined
+  ));
 }
 
 // Sanitize a raw workspaces value into a valid, id-unique WorkspacePaneSet[].
@@ -1295,8 +1261,9 @@ export function loadUi(): UiState {
         // the Project mode surviving a Warden restart.
         healthGroupBy: ['health', 'host', 'project'].includes(v.healthGroupBy) ? v.healthGroupBy : 'health',
         // WARDEN-500: defensive drop-bad-entries parse — a corrupt map never blanks
-        // the whole collapse state. Mirrors parseCwdByHost/parseShellByHost: require
-        // string keys + boolean values, drop anything else; a non-object → {}.
+        // the whole collapse state. Shares the parseObjectMap skeleton with the
+        // per-host maps (WARDEN-1027): require string keys, and strictly boolean
+        // values here — drop anything else; a non-object → {}.
         healthCollapsedHosts: parseCollapsedHosts(v.healthCollapsedHosts),
         // WARDEN-490 — per-host display labels. Sanitized to a host→label map
         // with empty values dropped (no label = today's behavior). Display-only;
