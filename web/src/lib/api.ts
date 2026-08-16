@@ -10,8 +10,9 @@
 //   - ok: false + res   → server returned non-2xx; `error` is the body's
 //                         `error` string when present, `res` is the raw
 //                         Response (e.g. for res.status).
-//   - ok: false, no res → the fetch itself failed (network/abort); `error`
-//                         is the exception message.
+//   - ok: false, no res → the fetch itself failed (network/abort), or a 2xx
+//                         body failed to parse (e.g. truncated mid-stream);
+//                         `error` is the exception message.
 // `error` carries no generic "request failed" wording of its own, so each call
 // site applies its own fallback toast/copy and existing messages are preserved.
 
@@ -35,10 +36,17 @@ async function requestJson<T>(
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(data),
     });
-    // A non-JSON body (e.g. an empty or HTML error page) parses to undefined
-    // rather than throwing, so a malformed failure response is reported via
-    // ok:false instead of surfacing a JSON parse error.
-    const body = await res.json().catch(() => undefined);
+    // The tolerance is gated to the FAILURE leg only (matching `readListBody`
+    // below — see its doc comment for the full rationale, WARDEN-1014):
+    //   - !ok → the body is OPTIONAL (an empty or HTML error page never parses);
+    //     the STATUS carries the message, so swallow the rejection to undefined
+    //     and report ok:false rather than surfacing a JSON parse error.
+    //   - ok  → the body IS the answer. `fetch` resolves as soon as the HEADERS
+    //     arrive, so a body truncated mid-stream (a dropped SSH tunnel) rejects
+    //     HERE, not at `fetch`. Let it throw to the catch below so the caller
+    //     sees ok:false — reporting ok:true with undefined data would hand the
+    //     caller a confident empty answer for a network failure.
+    const body = res.ok ? await res.json() : await res.json().catch(() => undefined);
     if (!res.ok) return { ok: false, error: body?.error, res };
     return { ok: true, data: body as T, res };
   } catch (e) {
@@ -125,10 +133,16 @@ export async function fetchJson<T = unknown>(
     try {
       const res = await fetchImpl(url, { signal: controller.signal });
       clearTimeout(timer);
-      // A non-JSON body (empty/HTML error page) parses to undefined rather than
-      // throwing, so a malformed failure is reported via ok:false (parity with
-      // requestJson) instead of surfacing a JSON parse error.
-      const body = await res.json().catch(() => undefined);
+      // The tolerance is gated to the FAILURE leg only (parity with
+      // `requestJson` above and `readListBody` below — WARDEN-1014's rule):
+      // a non-JSON 4xx/5xx body (empty/HTML error page) degrades to undefined
+      // so the status still drives ok:false, but a 2xx whose body fails to
+      // parse is a REAL failure and throws to the catch below. That matters
+      // most on `/api/config`, which gates the whole Settings render: a
+      // truncated 200 must surface the Retry state, never a defaults-populated
+      // form with Save enabled. A truncation is transient, so joining the
+      // retryable path here is correct.
+      const body = res.ok ? await res.json() : await res.json().catch(() => undefined);
       if (res.ok) return { ok: true, data: body as T, res };
       // 4xx is a hard client error — retrying will not help, so return at once.
       if (res.status >= 400 && res.status < 500) return { ok: false, error: body?.error, res };
