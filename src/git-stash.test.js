@@ -36,6 +36,7 @@ let tempHome;
 let stashRepo;
 let cleanRepo;
 let nonGitDir;
+let unbornRepo; // healthy repo, `git init` with no commits yet (WARDEN-1021)
 // The subject we stash, captured so the detail test can assert it survives the wire.
 const STASH_SUBJECT_HINT = 'uncommitted wip to stash';
 
@@ -88,6 +89,17 @@ before(async () => {
   nonGitDir = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitstash-nongit-'));
   fs.writeFileSync(path.join(nonGitDir, 'readme.txt'), 'not a repo\n');
 
+  // A HEALTHY repo whose HEAD has no commits yet (WARDEN-1021). This route's
+  // primary command exits ZERO here (unlike /api/git-log and /api/git-reflog,
+  // which need an explicit unborn-HEAD probe on their non-zero leg), so no
+  // production code is involved — this pins that asymmetry so a future change
+  // can't start reporting a brand-new repo as a failure.
+  unbornRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gitstash-unborn-'));
+  git(['init', '-q', '-b', 'main'], unbornRepo);
+  git(['config', 'user.email', 'test@example.com'], unbornRepo);
+  git(['config', 'user.name', 'Tester'], unbornRepo);
+  fs.writeFileSync(path.join(unbornRepo, 'wip.txt'), 'uncommitted\n');
+
   // Catalog with three LOCAL manual chats, resolved by bare session id (no ':'
   // prefix) so no host/tmux discovery runs.
   fs.writeFileSync(
@@ -96,6 +108,7 @@ before(async () => {
       { host: '(local)', session: 'warden-stashed', cwd: stashRepo, cmd: 'bash', name: 'warden-stashed' },
       { host: '(local)', session: 'warden-clean', cwd: cleanRepo, cmd: 'bash', name: 'warden-clean' },
       { host: '(local)', session: 'warden-nongit', cwd: nonGitDir, cmd: 'bash', name: 'warden-nongit' },
+      { host: '(local)', session: 'warden-unborn', cwd: unbornRepo, cmd: 'bash', name: 'warden-unborn' },
     ]),
   );
 
@@ -113,7 +126,7 @@ after(async () => {
   if (httpServer) await new Promise((r) => httpServer.close(r));
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  for (const d of [stashRepo, cleanRepo, nonGitDir, tempHome]) {
+  for (const d of [stashRepo, cleanRepo, nonGitDir, unbornRepo, tempHome]) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 });
@@ -165,6 +178,9 @@ describe('/api/git-stash detail endpoint (real Express app from server.js)', () 
   });
 
   it('returns [] for a repo with no stashes (200, not 500)', async () => {
+    // WARDEN-1021 no-false-positive guard: `git stash list` on a stash-less repo exits
+    // ZERO with empty stdout. That is a legitimate empty, NOT a failure — error stays
+    // null, so the non-git case above is genuinely distinguishable from this one.
     const res = await fetch(`${baseUrl}/api/git-stash?id=warden-clean`);
     assert.strictEqual(res.status, 200);
     const body = await res.json();
@@ -172,8 +188,28 @@ describe('/api/git-stash detail endpoint (real Express app from server.js)', () 
     assert.deepStrictEqual(body.stashes, []);
   });
 
-  it('returns [] (200, not 500) for a non-git cwd', async () => {
+  it('returns [] with a NON-EMPTY error (200, not 500) for a non-git cwd (WARDEN-1021)', async () => {
+    // `git stash list` exits non-zero on a non-git cwd. Before WARDEN-1021 the route
+    // discarded that exit status and answered `error: null`, so the dialog rendered a
+    // confident "no stashes" for a broken repo / deleted cwd / dropped SSH transport.
+    // The error must be non-empty: runGit pipes `2>/dev/null` on BOTH remote branches,
+    // so an `r.stderr` passthrough would be an empty string here — and
+    // readListResponse (web/src/lib/api.ts) treats an empty string as "no error",
+    // making the fix a silent no-op on exactly the transports warden deploys over.
     const res = await fetch(`${baseUrl}/api/git-stash?id=warden-nongit`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.deepStrictEqual(body.stashes, []);
+    assert.strictEqual(typeof body.error, 'string');
+    assert.ok(body.error.length > 0, 'a failing git command must yield a NON-EMPTY error string');
+  });
+
+  it('returns [] with error null for a HEALTHY repo with an unborn HEAD (WARDEN-1021)', async () => {
+    // `git stash list` exits ZERO on a fresh `git init` with no commits — unlike
+    // `git log`/`git reflog`, which exit non-zero and therefore need an explicit
+    // unborn-HEAD probe. So this route reaches the empty-list-with-error-null path
+    // on its own. Pinned because a brand-new repo must never read as a failure.
+    const res = await fetch(`${baseUrl}/api/git-stash?id=warden-unborn`);
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     assert.deepStrictEqual(body.stashes, []);
