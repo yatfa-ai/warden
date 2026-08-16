@@ -2216,4 +2216,83 @@ test('resetUiPrefDefaults() returns fresh containers (no aliasing of DEFAULT_UI/
   assert.equal(c.attentionStates.stuck, true, 'a mutated result does not leak into later calls');
 });
 
+console.log('\nsnoozedAlertKeys (chat key → expiry ms) is sanitized on load — WARDEN-551 / characterization for WARDEN-1027');
+// WARDEN-1027: parseSnoozedKeys was the ONLY one of the six object-map
+// sanitizers in storage.ts with no behavior-locking spec block, and it carries
+// the most divergent value predicate (finite, strictly-positive number) of the
+// six. These tests pin its CURRENT behavior against the pre-refactor code so
+// the extraction of the shared parseObjectMap skeleton cannot silently relax or
+// tighten it. They are characterization tests: they passed before the refactor
+// and must keep passing after, unchanged.
+test('defaults to {} when nothing is stored', () => {
+  reset();
+  assert.deepEqual(loadUi().snoozedAlertKeys, {});
+});
+test('a missing field loads as {}', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, {});
+});
+test('a valid key→expiry map round-trips', () => {
+  reset();
+  saveUi({ ...loadUi(), snoozedAlertKeys: { 'host/chat-a': 1893456000000, 'host/chat-b': 1 } });
+  assert.deepEqual(loadUi().snoozedAlertKeys, { 'host/chat-a': 1893456000000, 'host/chat-b': 1 });
+});
+test('a non-object coerces to {} (defensive, no throw)', () => {
+  reset();
+  // A string is not a plain map → {}.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: 'bogus' }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, {});
+  // An array is an object but NOT a plain map → {}.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: [['chat-a', 123]] }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, {});
+  // A number → {}.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: 42 }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, {});
+  // null → {} (and, per the shared skeleton, silently — null/undefined are the
+  // "absent" case, not corruption worth warning about).
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: null }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, {});
+});
+test('entries with empty/whitespace keys are dropped', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: { '': 123, '   ': 123, 'chat-a': 123 } }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-a': 123 });
+});
+test('keys are trimmed (a padded key survives under its trimmed form)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: { '  chat-a  ': 123 } }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-a': 123 });
+});
+test('entries with non-number values are dropped (one corrupt entry never blanks the snooze set)', () => {
+  reset();
+  // A numeric STRING is NOT coerced — the predicate is strictly typeof 'number'.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: { 'chat-a': '123', 'chat-b': 123, 'chat-c': true, 'chat-d': { x: 1 }, 'chat-e': [123] } }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-b': 123 });
+});
+test('non-finite values (NaN, Infinity) are dropped', () => {
+  reset();
+  // NaN/Infinity have no JSON literal, but an overflowing exponent parses to
+  // ±Infinity — exactly the hand-edited / legacy-corruption class this guard
+  // exists for. (JSON.parse('1e999999') === Infinity.)
+  mem.set('warden:ui:v3', '{"activeTabs":["x"],"snoozedAlertKeys":{"chat-a":1e999999,"chat-b":-1e999999,"chat-c":123}}');
+  assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-c': 123 });
+});
+test('zero and negative expiries are dropped (the value must be strictly positive)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: { 'chat-a': 0, 'chat-b': -1, 'chat-c': -1893456000000, 'chat-d': 1 } }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-d': 1 });
+});
+test('a positive PAST-expiry value is KEPT (the sanitizer deliberately does not read the clock)', () => {
+  // THE load-bearing non-behavior (storage.ts:866-872). An already-expired snooze
+  // is harmless — activeSnoozedKeys excludes it and App's mount prune clears it —
+  // and dropping it here would require a clock read inside this pure loader.
+  // A refactor that "helpfully" filtered past expiries would break the documented
+  // contract and silently change what App's prune effect observes on mount.
+  reset();
+  const longPast = 1; // 1ms after the epoch — positive, finite, and very much in the past.
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], snoozedAlertKeys: { 'chat-a': longPast, 'chat-b': 946684800000 } }));
+  assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-a': 1, 'chat-b': 946684800000 });
+});
+
 console.log(`\n✓ STORAGE TESTS PASS (${passed})`);
