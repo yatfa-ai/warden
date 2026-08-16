@@ -5,6 +5,44 @@
 // (see WARDEN-107).
 
 /**
+ * Split raw git stdout into the list of non-blank lines every git-output parser
+ * in this module iterates. This is the one shared implementation of the
+ * line-splitting contract that was hand-copied into six parsers
+ * (parseGitStatusPorcelain / parseOutgoingFiles / parseStashList / parseReflog /
+ * parseGitRemotes / parseGitBranches) — one per feature commit
+ * (WARDEN-107/153/211/411/460/528/577/601). Each new read-only "git axis" now
+ * inherits the contract instead of re-typing it. See WARDEN-1029.
+ *
+ * The contract, in three parts:
+ *   1. `(output ?? '').toString()` — accept string | Buffer | null | undefined,
+ *      so a parser never throws on an absent/binary stdout.
+ *   2. strip a trailing `\r` per line — tolerate CRLF (e.g. over SSH).
+ *   3. drop blank/whitespace-only lines, including the trailing empty line git
+ *      leaves after its final `\n`.
+ *
+ * CRITICAL — THIS HELPER MUST NEVER TRIM THE LINES IT RETURNS. `.filter((line)
+ * => line.trim())` TESTS emptiness; it does not REWRITE the line. Porcelain v1
+ * encodes staged-vs-unstaged in fixed columns 0-1, so a LEADING SPACE IS
+ * SIGNIFICANT: `' M README.md'` means modified-not-staged. Were this helper to
+ * trim, that line would become `'M README.md'` and parseGitStatusPorcelain's
+ * `substring(0, 2)` / `substring(3)` (see its body) would read `'M '` and
+ * `'EADME.md'` — silently corrupting EVERY porcelain path, and with it the
+ * cross-agent collision detector that joins on `.path` (WARDEN-288/601/650).
+ * A caller that genuinely wants per-line trimming does it as its own explicit
+ * step afterwards (parseOutgoingFiles is the sole such caller).
+ *
+ * @param {string|Buffer|undefined|null} output - Raw stdout from a git command.
+ * @returns {string[]} the non-blank lines, each with leading whitespace INTACT.
+ */
+export function splitGitLines(output) {
+  const raw = (output ?? '').toString();
+  return raw
+    .split('\n')
+    .map((line) => line.replace(/\r$/, '')) // tolerate CRLF (e.g. over SSH)
+    .filter((line) => line.trim());         // drop the trailing empty line + blanks
+}
+
+/**
  * Parse `git status --porcelain` output into a list of changed files.
  *
  * The porcelain v1 format is a fixed-width record per line:
@@ -308,11 +346,7 @@ export function unescapeGitPath(rawPath) {
 }
 
 export function parseGitStatusPorcelain(output) {
-  const raw = (output ?? '').toString();
-  return raw
-    .split('\n')
-    .map((line) => line.replace(/\r$/, '')) // tolerate CRLF (e.g. over SSH)
-    .filter((line) => line.trim())           // drop the trailing empty line + blanks
+  return splitGitLines(output)
     .map((line) => {
       const statusCode = line.substring(0, 2).trim();
       const rawPath = line.substring(3).trim();
@@ -428,10 +462,15 @@ export function parseAheadBehind(output) {
  * @returns {string[]} the outgoing changed-file paths (empty for empty input, never null).
  */
 export function parseOutgoingFiles(output) {
-  const raw = (output ?? '').toString();
-  return raw
-    .split('\n')
-    .map((line) => line.replace(/\r$/, '')) // tolerate CRLF (e.g. over SSH)
+  return splitGitLines(output)
+    // This parser — ALONE among the six that share splitGitLines — genuinely
+    // REWRITES each line rather than just testing it. That is safe here and
+    // unsafe elsewhere: `git diff --name-only` emits a bare path with no
+    // leading-column encoding, so a leading space is incidental whitespace,
+    // whereas porcelain's leading space is the staged/unstaged bit. Kept as an
+    // explicit step here rather than folded into splitGitLines, so the shared
+    // helper stays strictly non-mutating for its other five callers
+    // (WARDEN-1029). Locked by the `'  a.js  \n b.js\n'` spec.
     .map((line) => line.trim())
     // `git diff --name-only` does NOT quote a plain space, but it DOES C-quote a
     // backslash, double-quote, or non-ASCII byte in a path — the SAME quoting as
@@ -550,11 +589,7 @@ export function buildDockerGitArgv(container, cwd, gitArgs) {
  * @returns {Array<{ ref: string, subject: string, date: string }>}
  */
 export function parseStashList(output) {
-  const raw = (output ?? '').toString();
-  return raw
-    .split('\n')
-    .map((line) => line.replace(/\r$/, '')) // tolerate CRLF (e.g. over SSH)
-    .filter((line) => line.trim())           // drop the trailing empty line + blanks
+  return splitGitLines(output)
     .map((line) => {
       const firstPipe = line.indexOf('|');
       if (firstPipe === -1) return { ref: line, subject: '', date: '' };
@@ -588,11 +623,7 @@ export function parseStashList(output) {
  * @returns {Array<{ hash: string, subject: string, date: string }>}
  */
 export function parseReflog(output) {
-  const raw = (output ?? '').toString();
-  return raw
-    .split('\n')
-    .map((line) => line.replace(/\r$/, '')) // tolerate CRLF (e.g. over SSH)
-    .filter((line) => line.trim())           // drop the trailing empty line + blanks
+  return splitGitLines(output)
     .map((line) => {
       const firstPipe = line.indexOf('|');
       if (firstPipe === -1) return { hash: line, subject: '', date: '' };
@@ -719,11 +750,7 @@ export function parseRemoteUrl(input) {
  * @returns {Array<{ name: string, url: string, host: string | null, owner: string | null, repo: string | null, web: string | null }>}
  */
 export function parseGitRemotes(output) {
-  const raw = (output ?? '').toString();
-  return raw
-    .split('\n')
-    .map((line) => line.replace(/\r$/, '')) // tolerate CRLF (e.g. over SSH)
-    .filter((line) => line.trim())           // drop the trailing empty line + blanks
+  return splitGitLines(output)
     .reduce((acc, line) => {
       // `name<TAB>url (fetch|push)` — name and url are whitespace-separated; the
       // trailing `(fetch)`/`(push)` tag is matched optionally so a defensive shape
@@ -804,12 +831,7 @@ function parseUpstreamTrack(track) {
  * @returns {Array<{ name: string, headSha: string, headDate: string, upstream: string, ahead: number, behind: number, gone: boolean }>}
  */
 export function parseGitBranches(output) {
-  const raw = (output ?? '').toString();
-  return raw
-    .split('\n')
-    .map((line) => line.replace(/\r$/, '')) // tolerate CRLF (e.g. over SSH)
-    .filter((line) => line.trim())           // drop the trailing empty line + blanks
-    .map(parseGitBranchLine);
+  return splitGitLines(output).map(parseGitBranchLine);
 }
 
 // Parse ONE `name|sha|date|upstream|track` for-each-ref line. Extracted so the

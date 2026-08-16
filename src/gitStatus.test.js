@@ -1,6 +1,69 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { parseGitStatusPorcelain, unescapeGitPath, parseAheadBehind, parseOutgoingFiles, parseStashCount, parseStashList, parseReflog, parseDiffStat, isConflictStatus, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, parseGitBranches, buildDockerGitArgv } from './gitStatus.js';
+import { parseGitStatusPorcelain, unescapeGitPath, parseAheadBehind, parseOutgoingFiles, parseStashCount, parseStashList, parseReflog, parseDiffStat, isConflictStatus, isDetachedHead, normalizeHeadSha, parseUpstream, parseHeadDate, parseGitBranches, buildDockerGitArgv, splitGitLines } from './gitStatus.js';
+
+// The line-splitting contract that six parsers used to each implement for
+// themselves now has ONE implementation, so it gets asserted directly here
+// rather than only through its callers. See WARDEN-1029.
+describe('splitGitLines', () => {
+  it('splits on \\n and drops the trailing empty line git leaves', () => {
+    assert.deepEqual(splitGitLines('a\nb\n'), ['a', 'b']);
+  });
+
+  it('drops blank and whitespace-only lines', () => {
+    assert.deepEqual(splitGitLines('a\n\nb\n   \n\t\nc\n'), ['a', 'b', 'c']);
+  });
+
+  it('strips a trailing \\r per line (tolerate CRLF, e.g. over SSH)', () => {
+    assert.deepEqual(splitGitLines('a\r\nb\r\n'), ['a', 'b']);
+  });
+
+  it('strips ONLY a trailing \\r, not one in the middle of a line', () => {
+    assert.deepEqual(splitGitLines('a\rb\r\n'), ['a\rb']);
+  });
+
+  // (output ?? '').toString() leg — a parser must never throw on absent stdout.
+  it('returns [] for undefined, null and the empty string', () => {
+    assert.deepEqual(splitGitLines(undefined), []);
+    assert.deepEqual(splitGitLines(null), []);
+    assert.deepEqual(splitGitLines(''), []);
+    assert.deepEqual(splitGitLines('\n'), []);
+  });
+
+  it('accepts a Buffer input', () => {
+    assert.deepEqual(splitGitLines(Buffer.from('a\nb\n')), ['a', 'b']);
+  });
+
+  // THE regression this whole helper is governed by. `.filter((line) =>
+  // line.trim())` TESTS emptiness; it must not REWRITE the line. Porcelain
+  // encodes staged-vs-unstaged in columns 0-1, so a leading space is data.
+  it('PRESERVES leading whitespace — it filters on trim(), it does NOT trim', () => {
+    assert.deepEqual(splitGitLines(' M README.md\n'), [' M README.md']);
+    assert.deepEqual(splitGitLines('  a.js  \n'), ['  a.js  ']);
+    assert.deepEqual(splitGitLines('\tindented\n'), ['\tindented']);
+  });
+
+  it('preserves leading whitespace on a CRLF line too', () => {
+    assert.deepEqual(splitGitLines(' M README.md\r\n'), [' M README.md']);
+  });
+});
+
+// End-to-end guards on the two callers whose contracts DIVERGE across the
+// shared helper: porcelain must keep its significant leading space, while
+// parseOutgoingFiles must keep trimming (its own explicit step). WARDEN-1029.
+describe('splitGitLines callers: the trim divergence stays intact', () => {
+  it('parseGitStatusPorcelain keeps the leading-space status column intact', () => {
+    // If the shared helper trimmed, substring(0,2) would read 'M ' and
+    // substring(3) would read 'EADME.md' — every porcelain path corrupted.
+    assert.deepEqual(parseGitStatusPorcelain(' M README.md\n'), [
+      { path: 'README.md', status: 'M', staged: ' ', worktree: 'M', conflict: false },
+    ]);
+  });
+
+  it('parseOutgoingFiles still trims per-line whitespace', () => {
+    assert.deepEqual(parseOutgoingFiles('  a.js  \n b.js\n'), ['a.js', 'b.js']);
+  });
+});
 
 describe('parseGitStatusPorcelain', () => {
   it('parses the most common case: unstaged modification as the FIRST file', () => {
