@@ -9,6 +9,7 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Badge } from '@/components/ui/badge';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -1563,9 +1564,11 @@ function ToolbarOverflowMenu({ actions, metas, open, onOpenChange, className }: 
           {actions.map((a) => {
             const meta = metas[a.key];
             return (
-              <button
+              <Button
                 key={a.key}
                 type="button"
+                variant="ghost"
+                size="sm"
                 title={a.title}
                 aria-pressed={a.pressed ?? undefined}
                 disabled={meta.disabled}
@@ -1576,20 +1579,19 @@ function ToolbarOverflowMenu({ actions, metas, open, onOpenChange, className }: 
                   onOpenChange(false);
                   meta.onSelect();
                 }}
-                className="flex w-full items-center gap-2 rounded px-1.5 py-1.5 text-left text-xs hover:bg-accent disabled:opacity-50"
+                className="h-auto w-full justify-start gap-2 py-1.5 text-xs"
               >
                 <span className="shrink-0 text-muted-foreground">{meta.icon}</span>
                 <span className="truncate">{a.label}</span>
                 {a.pressed !== null && (
-                  <span
-                    className={`ml-auto shrink-0 rounded px-1 py-px text-[10px] font-medium uppercase tracking-wide ${
-                      a.pressed ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'
-                    }`}
+                  <Badge
+                    variant={a.pressed ? 'default' : 'secondary'}
+                    className="ml-auto uppercase"
                   >
                     {a.pressed ? 'on' : 'off'}
-                  </span>
+                  </Badge>
                 )}
-              </button>
+              </Button>
             );
           })}
         </div>
