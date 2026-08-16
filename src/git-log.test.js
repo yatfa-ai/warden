@@ -425,6 +425,28 @@ describe('/api/git-log HTTP endpoint (real Express app from server.js)', () => {
     assert.strictEqual(body.error, null);
   });
 
+  it('does NOT blame a missing upstream for a BROKEN repo under range= (WARDEN-1021)', async () => {
+    // The discriminator on the failing leg is the repo's validity, not merely the
+    // presence of `range=`. `no upstream configured` is a claim about a VALID repo
+    // whose branch tracks nothing; pasting it over a non-git cwd (or a deleted cwd,
+    // or a dropped SSH transport — all the same 'broken' classification) invents a
+    // cause and sends the human to `git branch --set-upstream` for a repo that isn't
+    // there. GitBadges renders the string verbatim, so a fabricated reason reaches
+    // the user. The error must stay non-empty (still a visible failure) but honest.
+    for (const range of ['incoming', 'outgoing']) {
+      const res = await fetch(`${baseUrl}/api/git-log?id=warden-nongit&range=${range}`);
+      assert.strictEqual(res.status, 200);
+      const body = await res.json();
+      assert.deepStrictEqual(body.commits, []);
+      assert.ok(body.error && body.error.length > 0, `range=${range}: error must be non-empty`);
+      assert.notStrictEqual(
+        body.error,
+        'no upstream configured',
+        `range=${range}: a broken repo must not be reported as a missing upstream`,
+      );
+    }
+  });
+
   it('returns 404 for an unknown chat id', async () => {
     const res = await fetch(`${baseUrl}/api/git-log?id=does-not-exist`);
     assert.strictEqual(res.status, 404);

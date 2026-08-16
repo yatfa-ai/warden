@@ -161,7 +161,13 @@ export async function runGit(chat, args, cwd) {
 }
 
 
-// Is this a HEALTHY repo whose HEAD simply has no commits yet? (WARDEN-1021)
+// WHY did this git command fail — is the repo fine, or is it gone? (WARDEN-1021)
+//
+// Returns one of:
+//   'unborn' — a HEALTHY repo whose HEAD simply has no commits yet.
+//   'broken' — not a repo / a deleted cwd / a dropped SSH transport.
+//   'other'  — a valid repo with a real HEAD; the command failed for its own
+//              reason (e.g. `@{u}` on a branch that tracks nothing).
 //
 // `git log` and `git reflog` exit NON-ZERO on a freshly `git init`'d repo before
 // its first commit — unlike `git stash list` / `git for-each-ref`, which exit zero
@@ -170,6 +176,13 @@ export async function runGit(chat, args, cwd) {
 // for it (that is the false positive the empty-list-with-error convention exists to
 // avoid, in the opposite direction). Called ONLY on an already-failing leg, so the
 // extra round-trips never touch the hot path.
+//
+// 'broken' is kept DISTINCT from 'other' rather than collapsed into a boolean
+// because a caller that has a more specific message for a route-level condition
+// (git-log's `no upstream configured` under ?range=) must not paste that message
+// over a repo that isn't there. Telling a human "no upstream configured" for a
+// deleted cwd sends them to `git branch --set-upstream` for a repo that no longer
+// exists — a fabricated cause, i.e. this ticket's own disease one layer up.
 //
 // Two probes, because neither bit is sufficient alone:
 //   1. `rev-parse --git-dir` — succeeds in ANY valid repo (unborn and detached
@@ -183,11 +196,11 @@ export async function runGit(chat, args, cwd) {
 // the code an unborn HEAD produces. That shortcut would re-introduce the false
 // empty on the deployment shape this ticket is about. Nor can `r.stderr` be read:
 // both remote branches pipe `2>/dev/null` (see runGit above).
-async function hasUnbornHead(chat, cwd) {
+async function classifyGitFailure(chat, cwd) {
   const dir = await runGit(chat, ['rev-parse', '--git-dir'], cwd);
-  if (!dir.ok) return false; // not a repo / deleted cwd / dead transport → a REAL failure
+  if (!dir.ok) return 'broken'; // not a repo / deleted cwd / dead transport → a REAL failure
   const head = await runGit(chat, ['rev-parse', '--verify', '-q', 'HEAD'], cwd);
-  return !head.ok; // valid repo + HEAD resolves to nothing → unborn, a benign empty
+  return head.ok ? 'other' : 'unborn'; // HEAD resolves to nothing → unborn, a benign empty
 }
 
 
@@ -846,13 +859,16 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
         //   • no upstream — `HEAD..@{u}` / `@{u}..HEAD` on a branch that tracks
         //     nothing. Named accurately, in the SAME words /api/git-range-diff uses
         //     for the identical state, so the two panes a human sees side by side
-        //     can't disagree about one repo.
+        //     can't disagree about one repo. Gated on kind === 'other', i.e. a VALID
+        //     repo — a broken/deleted cwd under ?range= keeps the honest generic
+        //     message rather than being told its branch tracks nothing.
         // `r.ok` with empty stdout likewise stays a legitimate empty list.
         if (!r.ok) {
-          if (await hasUnbornHead(chat, cwd)) return res.json({ commits: [], error: null });
+          const kind = await classifyGitFailure(chat, cwd);
+          if (kind === 'unborn') return res.json({ commits: [], error: null });
           return res.json({
             commits: [],
-            error: rangeRev ? 'no upstream configured' : 'git log failed',
+            error: rangeRev && kind === 'other' ? 'no upstream configured' : 'git log failed',
           });
         }
         const raw = r.stdout.trim();
@@ -1409,7 +1425,8 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
         // failure, so it takes the same probe and answers error null. A successful
         // reflog with empty stdout is likewise a real "no operations recorded".
         if (!r.ok) {
-          if (await hasUnbornHead(chat, cwd)) return res.json({ entries: [], error: null });
+          if ((await classifyGitFailure(chat, cwd)) === 'unborn')
+            return res.json({ entries: [], error: null });
           return res.json({ entries: [], error: 'git reflog failed' });
         }
         const raw = r.stdout.trim();
