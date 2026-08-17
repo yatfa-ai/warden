@@ -15,11 +15,14 @@ import os from 'node:os';
 // HOME is redirected BEFORE the dynamic import() below.
 //
 // These are CHARACTERIZATION tests: every assertion holds against unmodified
-// production code. Deliberately NOT pinned: the markdown-heading rewrite at
-// sessions.js:84 passes the new name straight into String.replace, so a name
-// containing `$&` / `` $` `` is interpreted as a replacement pattern. That is a
-// defect, not a contract — asserting today's output would pin the corruption in
-// (WARDEN-89). It is banked for a separate fix cycle.
+// production code. One exception, now resolved: the markdown-heading rewrite in
+// renameSession (sessions.js:90) used to pass the new name straight into
+// String.replace as the replacement STRING, so a name containing `$&` / `` $` `` /
+// `$'` was interpreted as a replacement pattern. That was a defect, not a
+// contract, so this suite deliberately declined to pin it (WARDEN-89) and banked
+// it for a separate fix cycle. WARDEN-1044 was that cycle: the sink now takes a
+// replacer function, and the "$-bearing names are literal" block below pins the
+// fixed behaviour.
 
 let mod; // dynamically-imported sessions.js (after HOME redirect)
 let tmpHome;
@@ -488,5 +491,76 @@ describe('renameSession — JSON + best-effort transcript heading', () => {
 
     assert.strictEqual(result, null);
     assert.strictEqual(corruptBackups().length, 1, 'the corrupt record is backed up by the defensive read');
+  });
+});
+
+// ------------- renameSession — `$`-bearing names are literal (WARDEN-1044) ----
+// The heading rewrite feeds the new name to String.replace. Passed as a STRING,
+// `$&` / `` $` `` / `$'` / `$<n>` are replacement PATTERNS, so an ordinary name
+// typed into the rename field (`cost $5 $& done`) silently corrupts the heading,
+// and `$'` re-injects everything after the match — the whole transcript body —
+// doubling the file on every rename because the write re-enters its own reader.
+// The sink takes a replacer function, which disables pattern interpretation.
+describe('renameSession — a $-bearing name is written literally, not as a replacement pattern', () => {
+  const BODY = '\n## 2026-01-01T00:00:00.000Z — 🧑 user\n\nsecret body line\n';
+
+  // Seed a session whose transcript carries a heading plus a body, so an injected
+  // `$&` (the match) / `` $` `` (before) / `$'` (after) has something to smuggle in.
+  function seedRenamable(id) {
+    seedJson(id, { id, name: 'Old name', createdAt: 1, updatedAt: 2, messages: [] });
+    fs.writeFileSync(mdPath(id), `# Old name\n${BODY}`);
+  }
+
+  for (const [id, name] of [
+    ['p1', 'A$&B'],
+    ['p2', 'x$`y'],
+    ['p3', "p$'q"],
+    ['p4', 'cost $5 $& done'],
+    ['p5', 'q$1w'],
+  ]) {
+    it(`writes ${JSON.stringify(name)} verbatim into the heading`, async () => {
+      seedRenamable(id);
+
+      await mod.renameSession(id, name);
+
+      const md = fs.readFileSync(mdPath(id), 'utf8');
+      assert.strictEqual(md.split('\n')[0], `# ${name}`,
+        `the heading must be the literal name, not a substituted pattern (got ${JSON.stringify(md.split('\n')[0])})`);
+      assert.ok(!md.includes('# Old name'), 'no fragment of the prior heading may survive');
+      // The contract being restored: the two halves of one session must agree.
+      assert.strictEqual(mod.getSession(id).name, name, 'the JSON name and the .md heading must agree');
+      assert.strictEqual(md, `# ${name}\n${BODY}`, 'only the heading line changes; the body is untouched');
+    });
+  }
+
+  it("does not grow the transcript across repeated $' renames (each rename used to double it)", async () => {
+    seedRenamable('p6');
+    const bytes = () => fs.statSync(mdPath('p6')).size;
+    const startBytes = bytes();
+
+    await mod.renameSession('p6', "p$'q");
+    const afterFirstBytes = bytes();
+
+    await mod.renameSession('p6', "p$'q");
+    const afterSecondBytes = bytes();
+    const afterSecond = fs.readFileSync(mdPath('p6'), 'utf8');
+
+    // A single call shows growth; only a second call demonstrates the compounding.
+    assert.strictEqual(afterSecondBytes, afterFirstBytes,
+      'a repeated rename must be a fixed point — the buggy form doubled the file each time');
+    // Both headings are ASCII, so the only legitimate change is their length delta.
+    assert.strictEqual(afterFirstBytes, startBytes + "p$'q".length - 'Old name'.length,
+      'the file changes only by the heading-length delta');
+    assert.strictEqual(afterSecond.split('secret body line').length - 1, 1,
+      'the transcript body must appear exactly once, not be re-injected by $\'');
+    assert.strictEqual(afterSecond, `# p$'q\n${BODY}`);
+  });
+
+  it('leaves a plain-name rename byte-for-byte as before', async () => {
+    seedRenamable('p7');
+
+    await mod.renameSession('p7', 'plain rename');
+
+    assert.strictEqual(fs.readFileSync(mdPath('p7'), 'utf8'), `# plain rename\n${BODY}`);
   });
 });
