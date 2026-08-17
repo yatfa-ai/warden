@@ -172,6 +172,20 @@ export function capDiff(diff) {
 // read-file/git-log. The `--` before the path stops option parsing so a path named
 // like a flag can't inject options.
 //
+// The script MUST `cd` into the repo itself (WARDEN-1051). Its preamble was copied
+// from buildReadFileScript, whose payload (`cat "$RESOLVED"`) consumes the ABSOLUTE
+// resolved path and therefore correctly needs no cd — but this payload is a git
+// command with a cwd-relative `-- "$FILE"` pathspec, so it only works inside the
+// worktree. Both preamble `cd`s live in `$( )` command substitutions (subshells) and
+// do not move the script itself, and no transport supplies one: runInContext delivers
+// this via `docker exec … bash -lc` (container WORKDIR) or `ssh host` (the LOGIN dir,
+// i.e. $HOME). Without the top-level cd every delivered diff either exits non-zero
+// ("diff failed" for every file) or — when the landing dir happens to be some OTHER
+// git repo — exits 0 with empty stdout, a silent, confident "no changes" for a file
+// that really changed. The cd reuses the already-validated `$RESOLVED_CWD` and is
+// placed AFTER the containment `case`, so an escaping path is still rejected (and
+// still `exit 1`s) before any directory change or git invocation happens.
+//
 // `staged` (WARDEN-369) swaps `git diff HEAD` for `git diff --cached` so clicking a
 // STAGED file shows exactly what will be committed (the index-vs-HEAD diff) rather
 // than the combined worktree-vs-HEAD diff. `git diff --cached` is strictly read-only
@@ -193,7 +207,7 @@ export function buildGitDiffScript(cwd, filePath, staged, rangeRev) {
   const diffCmd = rangeRev
     ? `git diff ${shellQuote(rangeRev)}`
     : (staged ? 'git diff --cached' : 'git diff HEAD');
-  return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; RESOLVED_CWD="$(cd "$CWD" && pwd -P)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -m -- "$FILE" 2>/dev/null)" || RESOLVED="$RESOLVED_CWD/$FILE"; case "$RESOLVED" in "$RESOLVED_CWD"/*|"$RESOLVED_CWD") ;; *) echo "ERROR path must be within working directory"; exit 1 ;; esac; ${diffCmd} -- "$FILE" 2>/dev/null`;
+  return `CWD=${shellQuote(cwd)}; FILE=${shellQuote(filePath)}; RESOLVED_CWD="$(cd "$CWD" && pwd -P)" || { echo "ERROR invalid path"; exit 1; }; RESOLVED="$(cd "$RESOLVED_CWD" && realpath -m -- "$FILE" 2>/dev/null)" || RESOLVED="$RESOLVED_CWD/$FILE"; case "$RESOLVED" in "$RESOLVED_CWD"/*|"$RESOLVED_CWD") ;; *) echo "ERROR path must be within working directory"; exit 1 ;; esac; cd "$RESOLVED_CWD" && ${diffCmd} -- "$FILE" 2>/dev/null`;
 }
 
 // Is a cwd-relative `filePath` contained within `cwd`? Mirrors /api/read-file's guard,
