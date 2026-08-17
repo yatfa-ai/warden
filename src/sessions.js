@@ -28,6 +28,12 @@ export async function listSessions() {
   }
   for (const f of files) {
     if (!f.endsWith('.json')) continue;
+    // Legacy quarantine artifacts (WARDEN-1040): backups written by a pre-fix
+    // build kept the source `.json` extension, so this scanner re-read its own
+    // rescue file, failed to parse it, and backed it up again — doubling the
+    // directory on every request. New backups end in `.bak` and are already
+    // excluded above; this skip retires the ones sitting on disk from before.
+    if (f.includes('.corrupt-')) continue;
     // Defensive read per file: a corrupt session is backed up (WARDEN-831) and
     // skipped from the index rather than crashing the list.
     const j = await readJsonDefensive(path.join(DIR, f), { fallback: null });

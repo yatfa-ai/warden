@@ -54,7 +54,7 @@ describe('config notification preferences', () => {
     assert.strictEqual(cfg.notifyChatOps, true);
     assert.strictEqual(cfg.notifySuccess, true);
     assert.strictEqual(cfg.notifyObserver, true);
-    // The corrupt text was surfaced to a .corrupt-<ts>.json backup, not lost.
+    // The corrupt text was surfaced to a .corrupt-<digest>.json.bak backup, not lost.
     assert.ok(writes.mock.calls.some((c) => String(c.arguments[0]).includes('.corrupt-')));
   });
 
