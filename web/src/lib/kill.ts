@@ -19,7 +19,7 @@
 // OXC, so this module loads under the same transpile-to-temp-`.mjs` +
 // dynamic-`import()` harness as broadcast.ts (see kill.test.mjs).
 
-import { runFanout, summarizeFanout, type FanoutToast, type FanoutToastVariant } from './fanout';
+import { formatFanoutToast, runFanout, summarizeFanout, type FanoutToast, type FanoutToastVariant } from './fanout';
 
 /** Outcome of one agent's /api/kill: either ok, or not-ok with a reason. */
 export interface KillOutcome { ok: boolean; error?: string }
@@ -67,29 +67,19 @@ export type KillToast = FanoutToast;
  * - Some/total failure → an error whose title carries the N/M tally and whose
  *   description lists each agent that wasn't stopped with its reason (so the
  *   human can see WHICH sessions are still running and why — host unreachable,
- *   session already dead, etc.). The description is the full failure list (not
- *   truncated): the sidebar's own selection caps it at a human-scale N, and
- *   sonner wraps a long description in a scrollable toast body. Rendered by
- *   showFanoutToast (./fanoutToast), which wraps it in `whitespace-pre-line` so
- *   each failure lands on its own line.
+ *   session already dead, etc.).
+ *
+ * The three-branch shape itself is the shared formatFanoutToast (./fanout,
+ * WARDEN-1034); only the kill COPY lives here. "Failed to stop" is passed as its
+ * own opaque phrase rather than derived from "Stopped" — see FanoutToastPhrases.
+ * `stopped` is mapped onto the shared `succeeded` field; the public KillSummary
+ * shape is unchanged.
  */
 export function formatKillToast(s: KillSummary): KillToast {
-  if (s.failed.length === 0) {
-    return { title: `Stopped ${s.stopped} agent${s.stopped === 1 ? '' : 's'}`, variant: 'success' };
-  }
-  const list = s.failed.map((f) => `${f.name}: ${f.error}`).join('\n');
-  if (s.stopped === 0) {
-    return {
-      title: `Failed to stop ${s.failed.length} of ${s.total} agent${s.total === 1 ? '' : 's'}`,
-      description: list,
-      variant: 'error',
-    };
-  }
-  return {
-    title: `Stopped ${s.stopped} of ${s.total} agents — ${s.failed.length} failed`,
-    description: list,
-    variant: 'error',
-  };
+  return formatFanoutToast(
+    { total: s.total, succeeded: s.stopped, failed: s.failed },
+    { success: 'Stopped', failure: 'Failed to stop' },
+  );
 }
 
 /**

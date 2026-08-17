@@ -12,10 +12,12 @@
 // Kill WARDEN-328, Interrupt WARDEN-492) re-typed the identical
 // allSettled-over-fetch block instead (WARDEN-974).
 //
-// Operation-specific concerns stay with the caller: the result-toast COPY
-// (formatBroadcastToast / formatKillToast) and the fallback string for a
-// fulfilled-{ok:false}-with-no-error ("send failed" vs "kill failed") are passed
-// in, because those are the only places broadcast and kill legitimately differ.
+// All three thirds of the fan-out now live here: the reducer (summarizeFanout),
+// the request loop (runFanout), and the result-toast SHAPE (formatFanoutToast).
+// Operation-specific concerns stay with the caller and are passed in: the toast
+// PHRASES ("Stopped" / "Failed to stop") and the fallback string for a
+// fulfilled-{ok:false}-with-no-error ("send failed" vs "kill failed") — those are
+// the only places the three operations legitimately differ.
 //
 // NO runtime imports below — only erased `import type`s plus the global `fetch`.
 // Three test harnesses transpile this file standalone via OXC into a temp dir and
@@ -93,6 +95,70 @@ export function summarizeFanout(
     }
   });
   return { total: results.length, succeeded, failed };
+}
+
+/**
+ * The two opaque copy fragments a fan-out toast needs. Each is a COMPLETE phrase
+ * slotted in front of the count — NOT a verb the helper conjugates.
+ *
+ * `failure` is passed separately, and passing it is not optional, because it is
+ * NOT derivable from `success`: broadcast succeeds with "Sent **to**" but fails
+ * with "Failed to **reach**" (no object). Rebuilding the failure phrase from a
+ * shared verb+object would render "Failed to reach **to** 2 of 3 agents".
+ * Whatever the call site's copy model is (kill's two constants, keysend's
+ * verb/verbInf/obj table), it collapses to these two strings before it gets here.
+ */
+export interface FanoutToastPhrases {
+  /** Prefixes the success count: "Stopped" / "Sent to" / "Interrupted". */
+  success: string;
+  /** Prefixes the all-failed count: "Failed to stop" / "Failed to reach". */
+  failure: string;
+}
+
+/**
+ * Shape the result toast for a fan-out summary — the ONE place the three-branch
+ * structure, the `\n`-joined failure list, the variant and the pluralization
+ * live. formatKillToast / formatBroadcastToast / formatKeySendToast are thin
+ * delegating wrappers over this (WARDEN-1034); they had three byte-identical
+ * copies of the body, which survived two prior extractions of their neighbours
+ * (5b944e5 folded the toast RENDERS into showFanoutToast, 716ec6f folded the
+ * request LOOPS into runFanout) — the formatter in between stayed copied.
+ *
+ * Three branches:
+ * - No failures        → one-line success: "Stopped 3 agents".
+ * - Zero successes     → "Failed to stop 2 of 2 agents" + the failure list.
+ * - Partial            → "Stopped 2 of 3 agents — 1 failed" + the failure list.
+ *
+ * The description is the FULL failure list (not truncated): each selection is
+ * capped at a human-scale N by its own surface, and sonner wraps a long
+ * description in a scrollable body. It MUST be rendered `whitespace-pre-line`
+ * (showFanoutToast does) or the `\n`-separated lines collapse into one run-on.
+ *
+ * The pluralization is deliberately ASYMMETRIC across the branches and is
+ * preserved verbatim from all three originals — do NOT "fix" it: the success
+ * branch pluralizes on the SUCCESS count, the all-failed branch on the TOTAL,
+ * and the partial branch hard-codes "agents" (it is unreachable with total < 2,
+ * since a partial needs at least one success AND one failure).
+ */
+export function formatFanoutToast(s: FanoutSummary, phrases: FanoutToastPhrases): FanoutToast {
+  const n = s.succeeded;
+  const k = s.failed.length;
+  if (k === 0) {
+    return { title: `${phrases.success} ${n} agent${n === 1 ? '' : 's'}`, variant: 'success' };
+  }
+  const description = s.failed.map((f) => `${f.name}: ${f.error}`).join('\n');
+  if (n === 0) {
+    return {
+      title: `${phrases.failure} ${k} of ${s.total} agent${s.total === 1 ? '' : 's'}`,
+      description,
+      variant: 'error',
+    };
+  }
+  return {
+    title: `${phrases.success} ${n} of ${s.total} agents — ${k} failed`,
+    description,
+    variant: 'error',
+  };
 }
 
 /**
