@@ -7,9 +7,10 @@
 // `import type`, erased at transpile time), so the emitted module loads standalone.
 //
 // Under test: activeSnoozedKeys (active vs expired, boundary at now === expiresAt),
-// isSuppressed (permanent-mute OR active-snooze), pruneExpired (drops only
-// expired, keeps active, stable ref when nothing pruned, handles empty), plus the
-// supporting snoozeExpiry (1h / until-tomorrow-midnight) and formatSnoozeRemaining.
+// alertMuteState (the per-row muted/snoozedUntil derivation the attention sections
+// feed to their rows), pruneExpired (drops only expired, keeps active, stable ref
+// when nothing pruned, handles empty), plus the supporting snoozeExpiry (1h /
+// until-tomorrow-midnight) and formatSnoozeRemaining.
 //
 // Run: node snooze.test.mjs   (from web/)
 import { transformWithOxc } from 'vite';
@@ -30,7 +31,7 @@ const tmpFile = join(tmpDir, 'snooze.mjs');
 writeFileSync(tmpFile, code);
 const {
   activeSnoozedKeys,
-  isSuppressed,
+  alertMuteState,
   pruneExpired,
   withoutSnoozeKey,
   snoozeExpiry,
@@ -82,33 +83,75 @@ test('activeSnoozedKeys: a non-number / non-finite expiry is dropped (defensive)
 });
 
 // ---------------------------------------------------------------------------
-// isSuppressed
+// alertMuteState — the per-row derivation each AttentionList section feeds to its
+// row (WARDEN-1043). It was seven byte-identical inline JSX expressions; the two
+// fields stay SEPARATE (never collapsed to one "suppressed" boolean) because the
+// row renders BellOff for a permanent mute but a Clock + countdown for a snooze.
+// `snoozedSet` is built with activeSnoozedKeys here exactly as the call site does
+// (once per render), so these cases exercise the real composition.
 // ---------------------------------------------------------------------------
-test('isSuppressed: false for an unmuted, unsnoozed key', () => {
-  assert.equal(isSuppressed('a', new Set(), {}, NOW), false);
+const muteStateAt = (key, muteEnabled, muted, snoozed, now = NOW) =>
+  alertMuteState(key, muteEnabled, new Set(muted), activeSnoozedKeys(snoozed, now), snoozed);
+
+test('alertMuteState: neither muted nor snoozed -> no suppression', () => {
+  assert.deepEqual(muteStateAt('a', true, [], {}), { muted: false, snoozedUntil: null });
 });
 
-test('isSuppressed: true for a permanently-muted key (the WARDEN-364 path, unchanged)', () => {
-  assert.equal(isSuppressed('a', new Set(['a']), {}, NOW), true);
+test('alertMuteState: a permanently-muted key reports muted, NOT snoozed (BellOff, no countdown)', () => {
+  assert.deepEqual(muteStateAt('a', true, ['a'], {}), { muted: true, snoozedUntil: null });
 });
 
-test('isSuppressed: true for an actively-snoozed key (the new path, identical suppression)', () => {
-  assert.equal(isSuppressed('a', new Set(), { a: NOW + 60_000 }, NOW), true);
+test('alertMuteState: an actively-snoozed key reports its expiry, NOT muted (Clock + countdown)', () => {
+  assert.deepEqual(muteStateAt('a', true, [], { a: NOW + 60_000 }), {
+    muted: false,
+    snoozedUntil: NOW + 60_000,
+  });
 });
 
-test('isSuppressed: false for a key whose snooze just expired (auto-rearm)', () => {
-  assert.equal(isSuppressed('a', new Set(), { a: NOW }, NOW), false);
-  assert.equal(isSuppressed('a', new Set(), { a: NOW - 1 }, NOW), false);
+test('alertMuteState: an EXPIRED snooze yields snoozedUntil null, not the stale timestamp', () => {
+  // The trap this function exists to close: the entry is STILL PRESENT in the
+  // snooze map (App's prune effect only runs on cadence), so the obvious
+  // `snoozedAlertKeys[key] ?? null` would hand the row an expired timestamp and
+  // render a dead snooze as active. The activeSnoozedKeys gate is what prevents
+  // it — stub the snooze branch to a bare index and THIS case is what fails.
+  assert.deepEqual(muteStateAt('a', true, [], { a: NOW - 1 }), { muted: false, snoozedUntil: null });
+  // ...including at the exact expiry instant (the closed-open boundary).
+  assert.deepEqual(muteStateAt('a', true, [], { a: NOW }), { muted: false, snoozedUntil: null });
 });
 
-test('isSuppressed: permanent mute OR snooze — a muted key stays suppressed even if also snoozed', () => {
-  // The two never overlap in practice (App's setter keeps them exclusive), but
-  // the pure rule is a union: either condition suppresses.
-  assert.equal(isSuppressed('a', new Set(['a']), { a: NOW + 60_000 }, NOW), true);
+test('alertMuteState: muteEnabled false zeroes BOTH fields (master desktop-alert gate off)', () => {
+  // With the channel off the whole routing layer is moot: no bell, no
+  // strike-through — the row renders exactly as it did before WARDEN-364, even
+  // for a key that is both muted and actively snoozed.
+  assert.deepEqual(muteStateAt('a', false, ['a'], { a: NOW + 60_000 }), {
+    muted: false,
+    snoozedUntil: null,
+  });
 });
 
-test('isSuppressed: does not bleed across keys', () => {
-  assert.equal(isSuppressed('b', new Set(['a']), { a: NOW + 60_000 }, NOW), false);
+test('alertMuteState: mute and snooze are reported independently, never collapsed', () => {
+  // The two channels are mutually exclusive in practice (App's setter clears one
+  // when setting the other), but the pure derivation reports each on its own so
+  // the row can always tell which visual to render.
+  assert.deepEqual(muteStateAt('a', true, ['a'], { a: NOW + 60_000 }), {
+    muted: true,
+    snoozedUntil: NOW + 60_000,
+  });
+});
+
+test('alertMuteState: does not bleed across keys', () => {
+  assert.deepEqual(muteStateAt('b', true, ['a'], { a: NOW + 60_000 }), {
+    muted: false,
+    snoozedUntil: null,
+  });
+});
+
+test('alertMuteState: a key in the active set but absent from the map coalesces to null, never undefined', () => {
+  // Defensive: the two arguments cannot disagree at the real call site, but the
+  // row's prop type is `number | null` — `undefined` must never leak through.
+  const state = alertMuteState('a', true, new Set(), new Set(['a']), {});
+  assert.deepEqual(state, { muted: false, snoozedUntil: null });
+  assert.equal(state.snoozedUntil, null);
 });
 
 // ---------------------------------------------------------------------------
@@ -175,7 +218,7 @@ test('snoozeExpiry: "1h" is exactly now + one hour', () => {
 test('snoozeExpiry: "1h" is in the future and active immediately after being set', () => {
   const expiry = snoozeExpiry('1h', NOW);
   assert.ok(expiry > NOW);
-  assert.equal(isSuppressed('a', new Set(), { a: expiry }, NOW), true);
+  assert.ok(activeSnoozedKeys({ a: expiry }, NOW).has('a'));
 });
 
 test('snoozeExpiry: "tomorrow" is the next local midnight strictly after now', () => {
@@ -241,8 +284,9 @@ test('snoozeManyKeys: writes every selected key at the duration expiry (exact se
 
 test('snoozeManyKeys: every selected key is immediately suppressed after the bulk write', () => {
   const out = snoozeManyKeys({}, ['a', 'b'], 'tomorrow', NOW);
-  assert.equal(isSuppressed('a', new Set(), out, NOW), true);
-  assert.equal(isSuppressed('b', new Set(), out, NOW), true);
+  const active = activeSnoozedKeys(out, NOW);
+  assert.ok(active.has('a'));
+  assert.ok(active.has('b'));
 });
 
 test('snoozeManyKeys: preserves existing snoozes on UN-selected keys (group snooze is additive)', () => {

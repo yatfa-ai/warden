@@ -33,7 +33,7 @@ import {
   type AttentionItem,
   type AttentionSeverity,
 } from '@/lib/attentionRollup';
-import { activeSnoozedKeys, formatSnoozeRemaining, SNOOZE_DURATION_OPTIONS, type AlertMuteMode, type SnoozeMap } from '@/lib/snooze';
+import { activeSnoozedKeys, alertMuteState, formatSnoozeRemaining, SNOOZE_DURATION_OPTIONS, type AlertMuteMode, type SnoozeMap } from '@/lib/snooze';
 import { formatStateDuration, formatStateDurationVerbose, languishingTone, sortOldestEnteredAtFirst, type StateDurationTone } from '@/lib/stateDuration';
 import type { AttentionAgent } from '@/lib/types';
 import type { Snippet } from '@/lib/storage';
@@ -143,6 +143,20 @@ export function AttentionList({
   // instant a snooze expires (App's prune effect also clears the stale entry from
   // state on cadence, so this never lingers past expiry).
   const snoozedSet = activeSnoozedKeys(snoozedAlertKeys, Date.now());
+  // WARDEN-1043: the per-row mute/snooze prop quad, derived in ONE place. Every
+  // per-agent problem section below spreads this instead of hand-copying the four
+  // props — the shape that produced WARDEN-953's silent no-op (a new section that
+  // simply forgot them) and that invites the subtler bug of reaching for
+  // `snoozedAlertKeys[key] ?? null` directly, which renders an EXPIRED snooze as
+  // active. The derivation itself lives in snooze.ts (unit-tested there, since
+  // web/ has no React test harness); this closure only binds the render-scoped
+  // values. `snoozedSet` is computed once above and reused, so this stays
+  // once-per-render work, not once-per-row.
+  const muteProps = (key: string) => ({
+    ...alertMuteState(key, muteEnabled, mutedSet, snoozedSet, snoozedAlertKeys),
+    muteEnabled,
+    onSetAlertMute,
+  });
 
   // The directed answer (WARDEN-384): the ONE pane a human should go to first,
   // "you're needed HERE, because X" — promoted above the flat rundown so the human
@@ -198,10 +212,7 @@ export function AttentionList({
                     agent={a}
                     dot="bg-red-500"
                     onClick={() => onOpenChat(key)}
-                    muted={muteEnabled && mutedSet.has(key)}
-                    snoozedUntil={muteEnabled && snoozedSet.has(key) ? (snoozedAlertKeys[key] ?? null) : null}
-                    muteEnabled={muteEnabled}
-                    onSetAlertMute={onSetAlertMute}
+                    {...muteProps(key)}
                   />
                 );
               })}
@@ -224,10 +235,7 @@ export function AttentionList({
                     // mute/snooze bell the health sections do — applySeverityPrefs now
                     // suppresses these buckets too, so the affordance must be reachable
                     // (and the snooze state visible) where the agent actually appears.
-                    muted={muteEnabled && mutedSet.has(key)}
-                    snoozedUntil={muteEnabled && snoozedSet.has(key) ? (snoozedAlertKeys[key] ?? null) : null}
-                    muteEnabled={muteEnabled}
-                    onSetAlertMute={onSetAlertMute}
+                    {...muteProps(key)}
                   />
                 );
               })}
@@ -246,10 +254,7 @@ export function AttentionList({
                     enteredAt={a.enteredAt}
                     durationStateLabel="erroring"
                     onClick={() => onOpenChat(key, a.customMatch?.line ?? a.signal ?? undefined)}
-                    muted={muteEnabled && mutedSet.has(key)}
-                    snoozedUntil={muteEnabled && snoozedSet.has(key) ? (snoozedAlertKeys[key] ?? null) : null}
-                    muteEnabled={muteEnabled}
-                    onSetAlertMute={onSetAlertMute}
+                    {...muteProps(key)}
                   />
                 );
               })}
@@ -265,10 +270,7 @@ export function AttentionList({
                     agent={a}
                     dot="bg-yellow-500"
                     onClick={() => onOpenChat(key)}
-                    muted={muteEnabled && mutedSet.has(key)}
-                    snoozedUntil={muteEnabled && snoozedSet.has(key) ? (snoozedAlertKeys[key] ?? null) : null}
-                    muteEnabled={muteEnabled}
-                    onSetAlertMute={onSetAlertMute}
+                    {...muteProps(key)}
                   />
                 );
               })}
@@ -294,10 +296,7 @@ export function AttentionList({
                     snippets={snippets}
                     onReplyResult={onReplyResult}
                     // WARDEN-953: mute/snooze bell — see the Stuck section above.
-                    muted={muteEnabled && mutedSet.has(key)}
-                    snoozedUntil={muteEnabled && snoozedSet.has(key) ? (snoozedAlertKeys[key] ?? null) : null}
-                    muteEnabled={muteEnabled}
-                    onSetAlertMute={onSetAlertMute}
+                    {...muteProps(key)}
                   />
                 );
               })}
@@ -322,10 +321,7 @@ export function AttentionList({
                     snippets={snippets}
                     onReplyResult={onReplyResult}
                     // WARDEN-953: mute/snooze bell — see the Stuck section above.
-                    muted={muteEnabled && mutedSet.has(key)}
-                    snoozedUntil={muteEnabled && snoozedSet.has(key) ? (snoozedAlertKeys[key] ?? null) : null}
-                    muteEnabled={muteEnabled}
-                    onSetAlertMute={onSetAlertMute}
+                    {...muteProps(key)}
                   />
                 );
               })}
@@ -347,10 +343,7 @@ export function AttentionList({
                     durationStateLabel="matching a watch pattern"
                     onClick={() => onOpenChat(key, a.customMatch?.line ?? a.signal ?? undefined)}
                     // WARDEN-953: mute/snooze bell — see the Stuck section above.
-                    muted={muteEnabled && mutedSet.has(key)}
-                    snoozedUntil={muteEnabled && snoozedSet.has(key) ? (snoozedAlertKeys[key] ?? null) : null}
-                    muteEnabled={muteEnabled}
-                    onSetAlertMute={onSetAlertMute}
+                    {...muteProps(key)}
                   />
                 );
               })}
