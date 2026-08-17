@@ -353,6 +353,78 @@ export function CommitMessage({ message }: { message?: string }) {
   );
 }
 
+/** One expandable commit row — the `<li>` shared by all three commit lists in
+ *  GitRepoDetails (recent, unpushed/outgoing, incoming). Click or Enter/Space
+ *  toggles the row open, revealing the commit body (CommitMessage) plus its changed
+ *  files, each a CommitFile whose per-file diff comes from /api/git-show.
+ *
+ *  The three lists had this block hand-copied three times (WARDEN-179 → 303/302 →
+ *  348/347, each copy made from the last), 33 of 35 lines byte-identical. The ONLY
+ *  behavior that varies between them is parameterized here: `hashClass` (the short
+ *  hash's per-list tint — cyan recent / amber unpushed / blue incoming) and `title`
+ *  (the row's hover, which names what KIND of commit this is before the shared
+ *  "click to inspect…" clause). Everything else — the role="button" + tabIndex +
+ *  aria-expanded + aria-label contract, the keyboard activation, the expansion body
+ *  and its loading/failed/empty legs — is identical across the three and lives here
+ *  once. Pure DRY extraction; zero behavior change. (WARDEN-1039.)
+ *
+ *  Expand state is NOT owned here: `expandedHash` / `toggleCommit` are threaded from
+ *  the single enclosing GitRepoDetails, so all three lists keep sharing ONE open row
+ *  (expanding an incoming commit still collapses an expanded recent one).
+ *
+ *  Module-level by requirement, matching the DiffInspectRow/CommitFile precedent:
+ *  declaring it inside GitRepoDetails would make it a fresh component type every
+ *  render, remounting the subtree and dropping the expanded row's state and focus. */
+function CommitRow({ cm, hashClass, title, expandedHash, toggleCommit, showCache, showLoading, chatId, onOpenFile }: {
+  cm: GitCommit;
+  hashClass: string;
+  title: string;
+  expandedHash: string | null;
+  toggleCommit: (hash: string) => void;
+  showCache: Record<string, { files?: GitFile[]; message?: string; error?: string | null }>;
+  showLoading: Record<string, boolean>;
+  chatId: string;
+  onOpenFile?: (path: string) => void;
+}) {
+  return (
+    <li className="rounded">
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={expandedHash === cm.hash}
+        aria-label={`inspect files changed by commit ${cm.hash}`}
+        onClick={(e) => { e.stopPropagation(); toggleCommit(cm.hash); }}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleCommit(cm.hash); } }}
+        title={title}
+        className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+      >
+        <span className={`shrink-0 font-mono text-[10px] ${hashClass}`}>{cm.hash}</span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[10px] text-foreground" title={cm.subject}>{cm.subject}</span>
+          <span className="block text-[10px] text-muted-foreground">{cm.date}{cm.author ? ` · ${cm.author}` : ''}</span>
+        </span>
+        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{expandedHash === cm.hash ? '▾' : '▸'}</span>
+      </div>
+      {expandedHash === cm.hash && (
+        <div className="pb-1 pl-1">
+          <CommitMessage message={showCache[cm.hash]?.message} />
+          {showLoading[cm.hash] && !showCache[cm.hash] ? (
+            <div className="px-1 text-[10px] text-muted-foreground">loading files…</div>
+          ) : (showCache[cm.hash]?.files?.length ?? 0) > 0 ? (
+            <div className="flex flex-col gap-0.5">
+              {showCache[cm.hash]!.files!.map((f) => (
+                <CommitFile key={f.path} chatId={chatId} hash={cm.hash} file={f} onOpenFile={onOpenFile} />
+              ))}
+            </div>
+          ) : (
+            <div className="px-1 text-[10px] text-muted-foreground">{showCache[cm.hash]?.error ? 'failed to load' : 'no files'}</div>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
+
 /**
  * The one-line repo summary for the focused pane (WARDEN-975) — the content the
  * per-row GitBranchBadge trigger used to render, now a NON-INTERACTIVE <span> that
@@ -1121,41 +1193,18 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
           ) : recent.items && recent.items.length > 0 ? (
             <ul className="max-h-72 overflow-auto">
               {recent.items.map((cm) => (
-                <li key={cm.hash} className="rounded">
-                  <div
-                    role="button"
-                    tabIndex={0}
-                    aria-expanded={expandedHash === cm.hash}
-                    aria-label={`inspect files changed by commit ${cm.hash}`}
-                    onClick={(e) => { e.stopPropagation(); toggleCommit(cm.hash); }}
-                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleCommit(cm.hash); } }}
-                    title="click to inspect the files this commit changed"
-                    className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
-                  >
-                    <span className="shrink-0 font-mono text-[10px] text-cyan-400/80">{cm.hash}</span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[10px] text-foreground" title={cm.subject}>{cm.subject}</span>
-                      <span className="block text-[10px] text-muted-foreground">{cm.date}{cm.author ? ` · ${cm.author}` : ''}</span>
-                    </span>
-                    <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{expandedHash === cm.hash ? '▾' : '▸'}</span>
-                  </div>
-                  {expandedHash === cm.hash && (
-                    <div className="pb-1 pl-1">
-                      <CommitMessage message={showCache[cm.hash]?.message} />
-                      {showLoading[cm.hash] && !showCache[cm.hash] ? (
-                        <div className="px-1 text-[10px] text-muted-foreground">loading files…</div>
-                      ) : (showCache[cm.hash]?.files?.length ?? 0) > 0 ? (
-                        <div className="flex flex-col gap-0.5">
-                          {showCache[cm.hash]!.files!.map((f) => (
-                            <CommitFile key={f.path} chatId={chatId} hash={cm.hash} file={f} onOpenFile={onOpenFile} />
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="px-1 text-[10px] text-muted-foreground">{showCache[cm.hash]?.error ? 'failed to load' : 'no files'}</div>
-                      )}
-                    </div>
-                  )}
-                </li>
+                <CommitRow
+                  key={cm.hash}
+                  cm={cm}
+                  hashClass="text-cyan-400/80"
+                  title="click to inspect the files this commit changed"
+                  expandedHash={expandedHash}
+                  toggleCommit={toggleCommit}
+                  showCache={showCache}
+                  showLoading={showLoading}
+                  chatId={chatId}
+                  onOpenFile={onOpenFile}
+                />
               ))}
             </ul>
           ) : (
@@ -1229,44 +1278,21 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
                     // per-file diff via /api/git-show — these commits are local objects
                     // reachable from HEAD. The incoming list below is explorable too
                     // (WARDEN-348): reachability from @{u}'s remote-tracking ref — not
-                    // HEAD-membership — is what makes git show reliable there. Mirrors
-                    // the recent-commits row above, diverging only in the amber hash
-                    // color to match this list's "unpushed" styling.
-                    <li key={cm.hash} className="rounded">
-                      <div
-                        role="button"
-                        tabIndex={0}
-                        aria-expanded={expandedHash === cm.hash}
-                        aria-label={`inspect files changed by commit ${cm.hash}`}
-                        onClick={(e) => { e.stopPropagation(); toggleCommit(cm.hash); }}
-                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleCommit(cm.hash); } }}
-                        title="unpushed commit (local, not yet pushed) — click to inspect the files this commit changed"
-                        className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
-                      >
-                        <span className="shrink-0 font-mono text-[10px] text-amber-400/80">{cm.hash}</span>
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-[10px] text-foreground" title={cm.subject}>{cm.subject}</span>
-                          <span className="block text-[10px] text-muted-foreground">{cm.date}{cm.author ? ` · ${cm.author}` : ''}</span>
-                        </span>
-                        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{expandedHash === cm.hash ? '▾' : '▸'}</span>
-                      </div>
-                      {expandedHash === cm.hash && (
-                        <div className="pb-1 pl-1">
-                          <CommitMessage message={showCache[cm.hash]?.message} />
-                          {showLoading[cm.hash] && !showCache[cm.hash] ? (
-                            <div className="px-1 text-[10px] text-muted-foreground">loading files…</div>
-                          ) : (showCache[cm.hash]?.files?.length ?? 0) > 0 ? (
-                            <div className="flex flex-col gap-0.5">
-                              {showCache[cm.hash]!.files!.map((f) => (
-                                <CommitFile key={f.path} chatId={chatId} hash={cm.hash} file={f} onOpenFile={onOpenFile} />
-                              ))}
-                            </div>
-                          ) : (
-                            <div className="px-1 text-[10px] text-muted-foreground">{showCache[cm.hash]?.error ? 'failed to load' : 'no files'}</div>
-                          )}
-                        </div>
-                      )}
-                    </li>
+                    // HEAD-membership — is what makes git show reliable there. The row
+                    // itself is the shared CommitRow (WARDEN-1039); the amber hash tint
+                    // matches this list's "unpushed" styling.
+                    <CommitRow
+                      key={cm.hash}
+                      cm={cm}
+                      hashClass="text-amber-400/80"
+                      title="unpushed commit (local, not yet pushed) — click to inspect the files this commit changed"
+                      expandedHash={expandedHash}
+                      toggleCommit={toggleCommit}
+                      showCache={showCache}
+                      showLoading={showLoading}
+                      chatId={chatId}
+                      onOpenFile={onOpenFile}
+                    />
                   ))}
                 </ul>
               ) : (
@@ -1307,43 +1333,20 @@ export function GitRepoDetails({ branch, clean, commits, commitsError, loading, 
                     // the branch's upstream remote-tracking ref (@{u}, a LOCAL object
                     // updated by the last git fetch), so a per-commit /api/git-show is
                     // reliable WITHOUT a pull — reachability, not HEAD-membership, is
-                    // what git show needs. Mirrors the unpushed/outgoing rows above,
-                    // diverging only in the blue hash color to match this list's styling.
-                    <li key={cm.hash} className="rounded">
-                      <div
-                        role="button"
-                        tabIndex={0}
-                        aria-expanded={expandedHash === cm.hash}
-                        aria-label={`inspect files changed by commit ${cm.hash}`}
-                        onClick={(e) => { e.stopPropagation(); toggleCommit(cm.hash); }}
-                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleCommit(cm.hash); } }}
-                        title="incoming commit (behind upstream, already fetched) — click to inspect the files this commit changed"
-                        className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
-                      >
-                        <span className="shrink-0 font-mono text-[10px] text-blue-400/80">{cm.hash}</span>
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-[10px] text-foreground" title={cm.subject}>{cm.subject}</span>
-                          <span className="block text-[10px] text-muted-foreground">{cm.date}{cm.author ? ` · ${cm.author}` : ''}</span>
-                        </span>
-                        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{expandedHash === cm.hash ? '▾' : '▸'}</span>
-                      </div>
-                      {expandedHash === cm.hash && (
-                        <div className="pb-1 pl-1">
-                          <CommitMessage message={showCache[cm.hash]?.message} />
-                          {showLoading[cm.hash] && !showCache[cm.hash] ? (
-                            <div className="px-1 text-[10px] text-muted-foreground">loading files…</div>
-                          ) : (showCache[cm.hash]?.files?.length ?? 0) > 0 ? (
-                            <div className="flex flex-col gap-0.5">
-                              {showCache[cm.hash]!.files!.map((f) => (
-                                <CommitFile key={f.path} chatId={chatId} hash={cm.hash} file={f} onOpenFile={onOpenFile} />
-                              ))}
-                            </div>
-                          ) : (
-                            <div className="px-1 text-[10px] text-muted-foreground">{showCache[cm.hash]?.error ? 'failed to load' : 'no files'}</div>
-                          )}
-                        </div>
-                      )}
-                    </li>
+                    // what git show needs. The row itself is the shared CommitRow
+                    // (WARDEN-1039); the blue hash tint matches this list's styling.
+                    <CommitRow
+                      key={cm.hash}
+                      cm={cm}
+                      hashClass="text-blue-400/80"
+                      title="incoming commit (behind upstream, already fetched) — click to inspect the files this commit changed"
+                      expandedHash={expandedHash}
+                      toggleCommit={toggleCommit}
+                      showCache={showCache}
+                      showLoading={showLoading}
+                      chatId={chatId}
+                      onOpenFile={onOpenFile}
+                    />
                   ))}
                 </ul>
               ) : (
