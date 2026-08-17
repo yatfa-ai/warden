@@ -19,6 +19,7 @@ import {
 import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
 import { copyWithToast } from '@/lib/clipboardToast';
+import { claimLatest, supersedeInFlight } from '@/lib/latestOnly';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { Loader2Icon, SearchIcon } from 'lucide-react';
 
@@ -171,6 +172,11 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
   const [sessionResults, setSessionResults] = useState<SessionSearchResult[]>([]);
   const [sessionSearching, setSessionSearching] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  // WARDEN-1049: generation counter for doSearch (the PANE leg). The session leg
+  // below is a debounced effect and keeps its own `cancelled` flag — an effect has
+  // a cleanup to hang one on; this event handler does not, so its sequencing lives
+  // in a ref that survives across invocations instead.
+  const searchGen = useRef(0);
 
   // Reset everything when the dialog closes — including `error`, so a stale
   // failure message from a previous open doesn't linger (mirrors the sibling).
@@ -179,12 +185,20 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
   // clean slate identical to the toggle-OFF baseline.
   useEffect(() => {
     if (!open) {
+      // WARDEN-1049: supersede the in-flight pane search FIRST — otherwise it
+      // resolves after these clears and repopulates `results`, so the next open
+      // renders the previous session's hits under an empty query box.
+      supersedeInFlight(searchGen);
       setQuery('');
       setResults([]);
       setError(null);
       setIncludeSessions(false);
       setSessionResults([]);
       setSessionSearching(false);
+      // A superseded pane response no longer runs doSearch's `finally`, so the
+      // pane spinner is cleared here (the session leg already resets its own
+      // above) — otherwise closing mid-search leaves the dialog stuck "searching".
+      setSearching(false);
     }
   }, [open]);
 
@@ -198,6 +212,10 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
   const doSearch = async () => {
     const q = query.trim();
     if (!q) return;
+    // WARDEN-1049: claim the newest generation; every write below is gated on
+    // still holding it. A response that has been overtaken by a newer search, or
+    // that lands after the dialog closed, writes NOTHING.
+    const isLatest = claimLatest(searchGen);
     setSearching(true);
     setError(null);
     try {
@@ -210,6 +228,7 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
       // "No results found" — resolving {} unconditionally would recreate exactly
       // the WARDEN-89 false-empty this dialog's gate exists to prevent.
       const data = res.ok ? await res.json() : await res.json().catch(() => ({} as { error?: string }));
+      if (!isLatest()) return;
       // /api/search-pane returns 500 { error: e.message } when capturePanes
       // fails (e.g. a pane's host is unreachable). fetch resolves on HTTP
       // errors, so check res.ok AND data.error — otherwise a real failure
@@ -222,10 +241,13 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
         setResults(Array.isArray(data.results) ? data.results : []);
       }
     } catch (e) {
+      if (!isLatest()) return;
       setError(e instanceof Error ? e.message : 'Search failed');
       setResults([]);
     } finally {
-      setSearching(false);
+      // Guarded like every other write: a superseded response that clears the
+      // spinner turns off the indicator for the search still running behind it.
+      if (isLatest()) setSearching(false);
     }
   };
 
@@ -318,12 +340,16 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
           </DialogDescription>
         </DialogHeader>
 
+        {/* WARDEN-1049: Enter is gated on `searching` exactly like the Button's
+            `disabled` below — the input is auto-focused on open, so Enter is the
+            primary way this dialog is fired and an ungated one walked around the
+            one-search-at-a-time rule the Button already implements. */}
         <div className="flex items-center gap-2">
           <Input
             ref={inputRef}
             value={query}
             onChange={(e) => { setQuery(e.target.value); setError(null); }}
-            onKeyDown={(e) => { if (e.key === 'Enter') doSearch(); }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !searching) doSearch(); }}
             placeholder="Search across all panes..."
           />
           <Button onClick={doSearch} disabled={searching || !query.trim()}>
