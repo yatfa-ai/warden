@@ -50,7 +50,7 @@ describe('loadCollections — defensive parse contract', () => {
   it('returns [] when the file contains corrupt JSON, and backs it up (WARDEN-831)', async () => {
     fs.writeFileSync(collectionsPath, 'not valid json {{{');
     assert.deepStrictEqual(await mod.loadCollections(), []);
-    // The corrupt text was surfaced to a .corrupt-<ts>.json backup, not lost.
+    // The corrupt text was surfaced to a .corrupt-<digest>.json.bak backup, not lost.
     const backups = fs.readdirSync(wardenDir).filter((n) => n.startsWith('collections.corrupt-'));
     assert.strictEqual(backups.length, 1);
     assert.strictEqual(fs.readFileSync(path.join(wardenDir, backups[0]), 'utf8'), 'not valid json {{{');

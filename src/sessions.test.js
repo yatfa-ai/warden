@@ -136,6 +136,53 @@ describe('listSessions — index projection and defensive skip', () => {
     );
   });
 
+  it('does not re-read its own corruption backup — repeated lists do not multiply files (WARDEN-1040)', async () => {
+    seedCorrupt('bad', '{"id":"bad","messages":[{');
+    seedJson('good', { id: 'good', name: 'ok', createdAt: 1, updatedAt: 2, messages: [] });
+
+    // The quarantine artifact used to keep the `.json` extension, so the very
+    // scanner that produced it re-globbed it, failed to parse it, and backed it
+    // up AGAIN — doubling the directory on every call. `GET /api/sessions`
+    // (server.js) is a request path, so that is unbounded traffic-driven disk
+    // growth. A single-call test cannot see this: the count must be compared
+    // ACROSS calls.
+    await withSilencedWarnings(() => mod.listSessions());
+    const afterFirst = fs.readdirSync(sessionsDir).sort();
+
+    await withSilencedWarnings(() => mod.listSessions());
+    await withSilencedWarnings(() => mod.listSessions());
+    const afterThird = fs.readdirSync(sessionsDir).sort();
+
+    assert.deepStrictEqual(
+      afterThird, afterFirst,
+      'listing again must not produce further backups — the quarantine artifact must leave the scanned namespace',
+    );
+    assert.strictEqual(
+      corruptBackups().length, 1,
+      `exactly one backup should ever be written for one corrupt file, got ${JSON.stringify(corruptBackups())}`,
+    );
+    assert.ok(
+      !corruptBackups()[0].endsWith('.json'),
+      `the backup must not land back in the scanned .json namespace: ${corruptBackups()[0]}`,
+    );
+  });
+
+  it('skips legacy .corrupt-*.json quarantine artifacts already on disk (WARDEN-1040)', async () => {
+    seedJson('good', { id: 'good', name: 'ok', createdAt: 1, updatedAt: 2, messages: [] });
+    // Written by a pre-fix build: keeps the .json extension, so the extension
+    // filter alone would let the scanner re-read and re-back-up this forever.
+    fs.writeFileSync(path.join(sessionsDir, 'old.corrupt-2026-01-01T00-00-00-000Z.json'), '{"broken":');
+
+    const before = fs.readdirSync(sessionsDir).sort();
+    const { result: list } = await withSilencedWarnings(() => mod.listSessions());
+
+    assert.deepStrictEqual(list.map((s) => s.id), ['good'], 'a legacy quarantine artifact is not a session');
+    assert.deepStrictEqual(
+      fs.readdirSync(sessionsDir).sort(), before,
+      'a legacy quarantine artifact must be skipped, not re-read and re-backed-up',
+    );
+  });
+
   it('sorts by updatedAt descending (most recently touched first)', async () => {
     seedJson('mid', { id: 'mid', name: 'mid', createdAt: 1, updatedAt: 200, messages: [] });
     seedJson('old', { id: 'old', name: 'old', createdAt: 1, updatedAt: 100, messages: [] });
