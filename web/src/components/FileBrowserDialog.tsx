@@ -47,7 +47,13 @@ export function FileBrowserDialog({ chatId, cwd, open, onOpenChange, onSelectFil
     setTree((t) => ({ ...t, [dir]: { ...(t[dir] || EMPTY_DIR), loading: true, error: null } }));
     try {
       const res = await fetch(`/api/git-ls?id=${encodeURIComponent(chatId)}&dir=${encodeURIComponent(dir)}`);
-      const data = await res.json();
+      // Parsed BEFORE the ok-gate BY DESIGN (see the data.error note below) — but
+      // the tolerance is gated to the FAILURE leg, matching lib/api.ts:39-50: on
+      // !ok the body is optional (a gateway 502/504 is HTML) so resolve to {} and
+      // let the gate produce 'ls failed'. The ok leg stays a bare .json() so a
+      // truncated 200 still throws to the catch instead of rendering a confident
+      // "empty directory" (WARDEN-89).
+      const data = res.ok ? await res.json() : await res.json().catch(() => ({} as { error?: string; entries?: unknown }));
       // /api/git-ls returns transport errors at HTTP 200 with an `error` field
       // (no-cwd / not-a-git-repo), mirroring /api/git-status + /api/search-files
       // — so check data.error too, not just res.ok, or a real error renders as

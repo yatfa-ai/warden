@@ -110,7 +110,14 @@ export function WorkspaceSearchDialog({ chatId, cwd, open, onOpenChange, onSelec
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: chatId, query: q }),
       });
-      const data = await res.json();
+      // Parsed BEFORE the ok-gate BY DESIGN (see the data.error note below) — but
+      // the tolerance is gated to the FAILURE leg, matching lib/api.ts:39-50.
+      // This is a POST, so express.json({limit:'1mb'}) can reject it in
+      // middleware with an HTML 400/413 before the route's try/catch runs; a bare
+      // .json() would throw and render a raw "Unexpected token '<'". The ok leg
+      // stays a bare .json() so a truncated 200 still throws rather than becoming
+      // a confident "No results found" (WARDEN-89).
+      const data = res.ok ? await res.json() : await res.json().catch(() => ({} as { error?: string }));
       // /api/search-files returns some errors at HTTP 200 with an `error` field
       // (no-cwd, remote transport failure — mirroring /api/git-status), not 4xx.
       // So check data.error too, not just res.ok: otherwise a real error renders

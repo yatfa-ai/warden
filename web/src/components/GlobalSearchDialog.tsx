@@ -202,7 +202,14 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
     setError(null);
     try {
       const res = await fetch(`/api/search-pane?query=${encodeURIComponent(q)}&panes=${openPanes.join(',')}`);
-      const data = await res.json();
+      // Parsed BEFORE the ok-gate BY DESIGN (see below) — but the tolerance is
+      // gated to the FAILURE leg, matching lib/api.ts:39-50. On !ok the body is
+      // optional (a gateway 502/504 is HTML), so resolve to {} and let the gate
+      // below produce 'Search failed'. The ok leg stays a bare .json() so a
+      // truncated 200 still throws to the catch rather than yielding a confident
+      // "No results found" — resolving {} unconditionally would recreate exactly
+      // the WARDEN-89 false-empty this dialog's gate exists to prevent.
+      const data = res.ok ? await res.json() : await res.json().catch(() => ({} as { error?: string }));
       // /api/search-pane returns 500 { error: e.message } when capturePanes
       // fails (e.g. a pane's host is unreachable). fetch resolves on HTTP
       // errors, so check res.ok AND data.error — otherwise a real failure
@@ -250,7 +257,8 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
       setError(null); // fresh attempt — clear any prior banner (mirrors doSearch)
       try {
         const res = await fetch(`/api/claude-sessions-search?q=${encodeURIComponent(q)}`);
-        const data = await res.json();
+        // Failure-leg-only tolerance, same rationale as doSearch above.
+        const data = res.ok ? await res.json() : await res.json().catch(() => ({} as { error?: string }));
         if (!res.ok || data.error) {
           if (!cancelled) { setError(data.error || 'Session search failed'); setSessionResults([]); }
         } else {
