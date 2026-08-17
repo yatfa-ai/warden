@@ -14,6 +14,7 @@ import {
   type FleetRecentCommitsResult,
 } from '@/lib/gitStateSummary';
 import { CommitFile, CommitMessage } from './sidebar/GitBadges';
+import { CollapsibleSectionHeader } from './CollapsibleSectionHeader';
 import type { Chat } from '@/lib/types';
 import type { GitFile } from './sidebar/types';
 
@@ -270,32 +271,31 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
     >
       {/* Collapsible header — the ▾/▸ affordance mirrors FleetActivityHeatmap so the
           collapse reads the same everywhere in Fleet Health. The manual refresh (↻)
-          is the only way to pull a fresh view past mount (no auto-poll). */}
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground hover:bg-accent rounded-md transition-colors"
-      >
-        <span className="text-[10px] text-muted-foreground/60 w-2 shrink-0">{open ? '▾' : '▸'}</span>
-        <span>Recent commits</span>
-        <span className="ml-auto normal-case tracking-normal text-[10px] text-muted-foreground/70">
-          {hasEligible ? `${fleetN} agent${fleetN === 1 ? '' : 's'}` : ''}
-        </span>
-        {/* stopPropagation so the ↻ refreshes without also toggling the collapse. */}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          onClick={(e) => { e.stopPropagation(); refresh(); }}
-          disabled={loading || !hasEligible}
-          aria-label="refresh recent commits across the fleet"
-          title="refresh — pull the fleet's newest commits on demand (no auto-poll)"
-          className="text-muted-foreground hover:text-foreground"
-        >
-          <RotateCw className={cn('size-3', loading && 'animate-spin')} />
-        </Button>
-      </button>
+          is the only way to pull a fresh view past mount (no auto-poll). It is a
+          SIBLING of the toggle, not a child of it (WARDEN-1050): the ↻ used to sit
+          inside the toggle <button>, which is invalid HTML and folded the ↻'s label
+          into the toggle's accessible name. Sibling placement is what let the
+          stopPropagation workaround go away. */}
+      <CollapsibleSectionHeader
+        open={open}
+        onToggle={() => setOpen((v) => !v)}
+        label="Recent commits"
+        meta={hasEligible ? `${fleetN} agent${fleetN === 1 ? '' : 's'}` : ''}
+        actions={
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            onClick={() => refresh()}
+            disabled={loading || !hasEligible}
+            aria-label="refresh recent commits across the fleet"
+            title="refresh — pull the fleet's newest commits on demand (no auto-poll)"
+            className="text-muted-foreground hover:text-foreground"
+          >
+            <RotateCw className={cn('size-3', loading && 'animate-spin')} />
+          </Button>
+        }
+      />
 
       {open && (
         <div className="px-2 pb-2 pt-0.5">
