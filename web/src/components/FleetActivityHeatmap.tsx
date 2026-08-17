@@ -116,7 +116,6 @@ export function FleetActivityHeatmap({ series, agents, timestampFormat }: Props)
         open={open}
         onToggle={() => setOpen((v) => !v)}
         label="Fleet activity · 24h"
-        ariaLabel={`Fleet activity over the last 24 hours, ${open ? 'collapse' : 'expand'}`}
         meta={hasRows ? `${matrix.rows.length} agent${matrix.rows.length === 1 ? '' : 's'}` : ''}
       />
 

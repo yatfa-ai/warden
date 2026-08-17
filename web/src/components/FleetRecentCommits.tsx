@@ -280,7 +280,6 @@ export function FleetRecentCommits({ agents, onOpenFile }: Props) {
         open={open}
         onToggle={() => setOpen((v) => !v)}
         label="Recent commits"
-        ariaLabel={`Recent commits across the fleet, ${open ? 'collapse' : 'expand'}`}
         meta={hasEligible ? `${fleetN} agent${fleetN === 1 ? '' : 's'}` : ''}
         actions={
           <Button
