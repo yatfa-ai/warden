@@ -4,6 +4,7 @@ import type { TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTimestamp } from '@/lib/formatTimestamp';
 import { displayName } from '@/lib/chatDisplay';
 import { cn } from '@/lib/utils';
+import { CollapsibleSectionHeader } from './CollapsibleSectionHeader';
 import {
   selectHeatmapCells,
   bucketLabelIndices,
@@ -109,19 +110,15 @@ export function FleetActivityHeatmap({ series, agents, timestampFormat }: Props)
       aria-label="Fleet activity over the last 24 hours"
     >
       {/* Collapsible header. Chevron ▾/▸ mirrors the host-grouping collapse in
-          HealthDashboard so the affordance reads the same everywhere. */}
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground hover:bg-accent rounded-md transition-colors"
-      >
-        <span className="text-[10px] text-muted-foreground/60 w-2 shrink-0">{open ? '▾' : '▸'}</span>
-        <span>Fleet activity · 24h</span>
-        <span className="ml-auto normal-case tracking-normal text-[10px] text-muted-foreground/70">
-          {hasRows ? `${matrix.rows.length} agent${matrix.rows.length === 1 ? '' : 's'}` : ''}
-        </span>
-      </button>
+          HealthDashboard so the affordance reads the same everywhere. Shared
+          with the sibling Fleet Health panels (WARDEN-1050). */}
+      <CollapsibleSectionHeader
+        open={open}
+        onToggle={() => setOpen((v) => !v)}
+        label="Fleet activity · 24h"
+        ariaLabel={`Fleet activity over the last 24 hours, ${open ? 'collapse' : 'expand'}`}
+        meta={hasRows ? `${matrix.rows.length} agent${matrix.rows.length === 1 ? '' : 's'}` : ''}
+      />
 
       {open && (
         <div className="px-2 pb-2 pt-0.5">
