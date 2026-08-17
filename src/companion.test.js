@@ -1671,11 +1671,15 @@ describe("streamFileToHost — close, not exit (WARDEN-464/766 class, WARDEN-100
   // because production calls .resume() on it; stderr is a plain EventEmitter so a
   // 'data' can be emitted SYNCHRONOUSLY at a chosen point in the ordering (a
   // Readable's push() defers, which is exactly the determinism these tests need
-  // to control). stdin swallows the piped bytes.
+  // to control) — with a no-op setEncoding stub, because production calls it
+  // (WARDEN-1045: accumulating Buffers with `+=` decodes each chunk in isolation
+  // and destroys a multibyte character split across a read boundary). The stub is
+  // a no-op because this fake emits pre-decoded strings, so there is no decoder
+  // state to carry. stdin swallows the piped bytes.
   const fakeUploadChild = () => {
     const c = new EventEmitter();
     c.stdout = new Readable({ read() {} });
-    c.stderr = new EventEmitter();
+    c.stderr = Object.assign(new EventEmitter(), { setEncoding() {} });
     c.stdin = new Writable({ write(_chunk, _enc, cb) { cb(); } });
     c.kill = () => {};
     return c;

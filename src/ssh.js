@@ -128,7 +128,15 @@ async function ensureControlMaster(host, cfg) {
       reject(new Error(`ControlMaster connect timeout to ${host}`));
     }, timeout * 1000 + 5000);
 
+    // setEncoding('utf8') BEFORE the 'data' listeners (WARDEN-1045): `stdout += d`
+    // on a Buffer decodes each chunk IN ISOLATION, so a multibyte sequence split
+    // across a read boundary is destroyed (both halves → U+FFFD). setEncoding
+    // installs a StringDecoder that carries the partial tail into the next chunk.
+    // Additive consistency here — this stdout is discarded and the stderr is a
+    // short connect diagnostic — but the idiom must not diverge between siblings.
+    child.stdout.setEncoding('utf8');
     child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.setEncoding('utf8');
     child.stderr.on('data', (d) => { stderr += d; });
 
     child.on('error', (err) => {
@@ -336,7 +344,19 @@ export function run(host, cmd, opts = {}, cfg = {}) {
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => child.kill('SIGKILL'), timeout);
+    // setEncoding('utf8') BEFORE the 'data' listeners (WARDEN-1045). Without it,
+    // `stdout += d` calls Buffer#toString on each chunk IN ISOLATION: a multibyte
+    // character straddling a read boundary (which is what happens once output
+    // exceeds the 64KB pipe buffer and arrives in several chunks) has its leading
+    // bytes decoded at the end of one chunk and its continuation bytes at the
+    // start of the next — both become U+FFFD and the character is destroyed
+    // irrecoverably. setEncoding installs a StringDecoder that holds an incomplete
+    // trailing sequence back and prepends it to the following chunk, so the
+    // accumulated string is byte-identical to the child's output. Mirrors the
+    // sibling primitives runLocalCapture (gitRoutes.js) and runLocalTmux (below).
+    child.stdout.setEncoding('utf8');
     child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.setEncoding('utf8');
     child.stderr.on('data', (d) => { stderr += d; });
     child.on('error', (err) => {
       clearTimeout(timer);
@@ -553,7 +573,19 @@ export function runLocalTmux(args, opts = {}) {
     let stderr = '';
     const ms = Number.isFinite(opts.timeout) ? opts.timeout : null;
     const timer = ms && ms > 0 ? setTimeout(() => child.kill('SIGTERM'), ms) : null;
+    // setEncoding('utf8') BEFORE the 'data' listeners (WARDEN-1045). This is the
+    // pane-capture transport: `capture-pane -p -e` output is full of multibyte box
+    // drawing, and /api/pane-export captures 5000 lines (hundreds of KB), so the
+    // read arrives in many chunks. Accumulating Buffers with `+=` decodes each
+    // chunk IN ISOLATION, so any character straddling a chunk boundary is split
+    // into two invalid halves and rendered as U+FFFD in the pane the user reads —
+    // and in the transcript they download. setEncoding installs a StringDecoder
+    // that carries the incomplete trailing sequence into the next chunk. Nothing
+    // downstream can repair this: tmux.js read() returns stdout verbatim and
+    // U+FFFD is valid JSON, so the corruption is silent all the way to the user.
+    child.stdout.setEncoding('utf8');
     child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.setEncoding('utf8');
     child.stderr.on('data', (d) => { stderr += d; });
     child.on('error', (err) => {
       if (timer) clearTimeout(timer);

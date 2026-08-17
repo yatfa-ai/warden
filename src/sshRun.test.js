@@ -47,14 +47,17 @@ import { run } from './ssh.js';
  */
 
 // A minimal ChildProcess stand-in: stdout/stderr are EventEmitters the production code
-// reads via .on('data') (run() does NOT call setEncoding — it accumulates with +=, so
-// the fake emits pre-decoded strings and needs no setEncoding stub); the child itself
-// is an EventEmitter for 'error'/'close'. .kill is a no-op (run() always arms a timer;
-// no test here lets it fire). Quacks just enough for run().
+// reads via .setEncoding + .on('data'); the child itself is an EventEmitter for
+// 'error'/'close'. .setEncoding is a no-op (the fake emits pre-decoded strings, so there
+// is no decoder state to carry) — but it MUST exist, because run() calls it (WARDEN-1045:
+// without setEncoding, `stdout += d` decoded each Buffer chunk in isolation and destroyed
+// multibyte characters straddling a read boundary). Mirrors src/runLocalCapture.test.js.
+// .kill is a no-op (run() always arms a timer; no test here lets it fire). Quacks just
+// enough for run().
 function fakeChild() {
   const c = new EventEmitter();
-  c.stdout = new EventEmitter();
-  c.stderr = new EventEmitter();
+  c.stdout = Object.assign(new EventEmitter(), { setEncoding() {} });
+  c.stderr = Object.assign(new EventEmitter(), { setEncoding() {} });
   c.kill = () => {};
   return c;
 }

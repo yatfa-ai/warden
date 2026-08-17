@@ -505,6 +505,12 @@ export function streamFileToHost(host, localBinaryPath, remotePath, cfg, spawnFn
       done({ ok: false, code: -1, stderr: `read binary failed: ${e.message}` });
     });
     child.on('error', (e) => done({ ok: false, code: -1, stderr: String(e) }));
+    // setEncoding('utf8') before the 'data' listener (WARDEN-1045): accumulating
+    // Buffers with `+=` decodes each chunk in isolation, so a multibyte character
+    // split across a read boundary is destroyed. Additive consistency only — this
+    // stderr carries short ssh diagnostics, well under the 64KB pipe buffer — but
+    // the idiom must not diverge between the spawn-and-collect siblings.
+    child.stderr.setEncoding('utf8');
     child.stderr.on('data', (d) => { stderr += d; });
     // Drain stdout. 'close' waits for ALL stdio to close, and this function never
     // reads child.stdout — an unconsumed pipe fills its buffer and stalls the
