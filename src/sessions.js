@@ -87,7 +87,13 @@ export async function renameSession(id, name) {
   // Rename the md heading too (best-effort — a missing/unreadable md is ignored).
   try {
     const md = await fs.promises.readFile(mdPath(id), 'utf8');
-    await atomicWrite(mdPath(id), md.replace(/^# .*/m, `# ${name}`));
+    // The replacement MUST be a function, not a string: as a string, `$&`, `` $` ``,
+    // `$'` and `$<n>` in a user-supplied name are interpreted as replacement patterns
+    // rather than literal text. `$'` is the worst of them — it re-injects everything
+    // after the match, i.e. the whole transcript body, and since the read-back above
+    // returns the file this line writes, every rename would double it. A replacer function
+    // disables pattern interpretation entirely (WARDEN-1044).
+    await atomicWrite(mdPath(id), md.replace(/^# .*/m, () => `# ${name}`));
   } catch { /* md missing or unreadable — ignore */ }
   return s;
 }
