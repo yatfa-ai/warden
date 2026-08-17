@@ -16,7 +16,7 @@ import os from 'node:os';
 //
 // These are CHARACTERIZATION tests: every assertion holds against unmodified
 // production code. One exception, now resolved: the markdown-heading rewrite in
-// renameSession (sessions.js:90) used to pass the new name straight into
+// renameSession (sessions.js) used to pass the new name straight into
 // String.replace as the replacement STRING, so a name containing `$&` / `` $` `` /
 // `$'` was interpreted as a replacement pattern. That was a defect, not a
 // contract, so this suite deliberately declined to pin it (WARDEN-89) and banked
