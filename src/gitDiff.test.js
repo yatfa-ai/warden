@@ -35,6 +35,18 @@ describe('server.js compiles', () => {
 let repo;
 let repoCleanup = [];
 
+// WARDEN-1051 landing-dir fixtures. No delivered transport ever drops the diff
+// script inside the repo: runInContext runs it via `docker exec … bash -lc` (the
+// container WORKDIR) or `ssh host` (the SSH LOGIN dir, i.e. $HOME). These two
+// directories stand in for those landing dirs and reproduce the two production
+// failure modes a repo-cwd harness cannot see:
+//   landingPlain — not a repo at all → git exits non-zero → route says "diff failed"
+//   landingDecoy — a DIFFERENT git repo (dotfiles $HOME, or a WORKDIR that is itself
+//                  a repo) → the pathspec is unknown there, so git exits 0 with EMPTY
+//                  stdout and the route reports a confident, silent "no changes".
+let landingPlain;
+let landingDecoy;
+
 function git(args, cwd = repo) {
   return spawnSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
@@ -78,6 +90,21 @@ before(() => {
   fs.writeFileSync(path.join(repo, 'partial.txt'), 'v1\n');
   assert.equal(git(['add', 'partial.txt'], repo).status, 0);
   fs.writeFileSync(path.join(repo, 'partial.txt'), 'v2\n');
+
+  // WARDEN-1051 landing dirs (see the declarations above).
+  landingPlain = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gd-landing-'));
+  landingDecoy = fs.mkdtempSync(path.join(os.tmpdir(), 'warden-gd-decoy-'));
+  repoCleanup.push(landingPlain, landingDecoy);
+  // The decoy is a real repo with its OWN commit, so `git diff HEAD -- <path>` run
+  // there exits 0 (rather than erroring) — that exit-0-with-empty-stdout is exactly
+  // what turns the bug into a silent wrong answer instead of a visible failure.
+  assert.equal(git(['init', '-q'], landingDecoy).status, 0);
+  assert.equal(git(['config', 'user.email', 't@t'], landingDecoy).status, 0);
+  assert.equal(git(['config', 'user.name', 't'], landingDecoy).status, 0);
+  assert.equal(git(['config', 'commit.gpgsign', 'false'], landingDecoy).status, 0);
+  fs.writeFileSync(path.join(landingDecoy, 'decoy.txt'), 'decoy\n');
+  assert.equal(git(['add', '-A'], landingDecoy).status, 0);
+  assert.equal(git(['commit', '-q', '-m', 'decoy'], landingDecoy).status, 0);
 });
 
 after(() => {
@@ -306,12 +333,25 @@ describe('isPathWithinCwd', () => {
 });
 
 // --- Remote diff script (buildGitDiffScript) ---------------------------------
-// Run the generated script under a real bash in the fixture repo, the same way
-// run(host, script) executes it over SSH.
-function runScript(cwd, filePath, staged) {
-  const script = buildGitDiffScript(cwd, filePath, staged);
-  const r = spawnSync('bash', ['-lc', script], { cwd, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
-  return { ok: r.status === 0, stdout: r.stdout || '', stderr: r.stderr || '' };
+// Run the generated script under a real bash the same way run(host, script)
+// executes it over SSH — which means running it from the transport's LANDING
+// directory, never from the repo.
+//
+// WARDEN-1051: this harness used to pass `{ cwd: repo }` to spawnSync, externally
+// supplying the very `cd` the script omitted. That is why a production path that
+// was broken for 100% of delivered (container / manual-remote) chats had a fully
+// green suite: the only assertions that survived a neutral cwd were the containment
+// rejections, which `exit 1` before ever reaching git and are cwd-independent by
+// construction. The default landing dir is now `landingPlain`, so the script has to
+// cd itself; pass `from` to run the same script from another landing dir.
+function runScriptFrom(from, cwd, filePath, staged, rangeRev) {
+  const script = buildGitDiffScript(cwd, filePath, staged, rangeRev);
+  const r = spawnSync('bash', ['-lc', script], { cwd: from, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
+  return { ok: r.status === 0, status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
+}
+
+function runScript(cwd, filePath, staged, rangeRev) {
+  return runScriptFrom(landingPlain, cwd, filePath, staged, rangeRev);
 }
 
 describe('buildGitDiffScript (remote SSH script)', () => {
@@ -405,21 +445,103 @@ describe('buildGitDiffScript (remote SSH script)', () => {
   });
 
   it('rangeRev keeps the realpath containment ceremony intact (blocks a ../ escape)', () => {
-    // The containment `case` runs BEFORE the diff command regardless of the range,
-    // so a path escape is still rejected even when a range is supplied.
-    const script = buildGitDiffScript(outRepo, '../escape.txt', false, '@{u}..HEAD');
-    const r = spawnSync('bash', ['-lc', script], { cwd: outRepo, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
-    assert.notEqual(r.status, 0);
-    assert.match(r.stdout || '', /ERROR path must be within working directory/);
+    // The containment `case` runs BEFORE the cd + diff command regardless of the
+    // range, so a path escape is still rejected even when a range is supplied.
+    const r = runScript(outRepo, '../escape.txt', false, '@{u}..HEAD');
+    assert.equal(r.ok, false);
+    assert.match(r.stdout, /ERROR path must be within working directory/);
   });
 
   it('rangeRev over the remote script path yields the outgoing diff (v0 to v1)', () => {
     // Same outgoing fixture as the local-path range tests: the delivered (remote)
     // script with rangeRev must show the committed v0->v1 change for outgoing.txt.
-    const script = buildGitDiffScript(outRepo, 'outgoing.txt', false, '@{u}..HEAD');
-    const r = spawnSync('bash', ['-lc', script], { cwd: outRepo, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
-    assert.equal(r.status, 0, `expected ok, stderr=${r.stderr}`);
-    assert.match(r.stdout || '', /\+v1/);
-    assert.match(r.stdout || '', /-v0/);
+    const r = runScript(outRepo, 'outgoing.txt', false, '@{u}..HEAD');
+    assert.equal(r.ok, true, `expected ok, stderr=${r.stderr}`);
+    assert.match(r.stdout, /\+v1/);
+    assert.match(r.stdout, /-v0/);
+  });
+});
+
+// --- WARDEN-1051: the script must cd into the repo itself ---------------------
+// Regression cover for the defect the repo-cwd harness above used to mask. Each
+// of these runs the script from a LANDING dir (what docker exec / ssh actually
+// give it) and asserts the real diff comes back anyway.
+describe('buildGitDiffScript cds into the repo (WARDEN-1051)', () => {
+  it('emits `cd "$RESOLVED_CWD" &&` immediately before the diff, AFTER the containment case', () => {
+    const script = buildGitDiffScript('/a/b', 'c.txt');
+    assert.match(script, /esac; cd "\$RESOLVED_CWD" && git diff HEAD -- "\$FILE"/);
+    // The cd reuses the validated $RESOLVED_CWD rather than the raw $CWD, and the
+    // containment `case` must still be the thing that runs first. Note the string
+    // `cd "$RESOLVED_CWD" &&` also occurs INSIDE the earlier realpath $( ) subshell,
+    // so this anchors on the LAST occurrence — the top-level one that actually moves
+    // the script — not the first.
+    assert.ok(
+      script.lastIndexOf('cd "$RESOLVED_CWD" &&') > script.indexOf('ERROR path must be within working directory'),
+      'containment case must precede the top-level cd',
+    );
+  });
+
+  it('diffs a modified tracked file when run from a NON-repo landing dir (failure mode A)', () => {
+    // Without the cd: git exits non-zero from a non-repo dir and getDeliveredGitDiff
+    // maps !r.ok to { error: 'diff failed' } for every single file.
+    const r = runScriptFrom(landingPlain, repo, 'tracked.txt');
+    assert.equal(r.ok, true, `expected ok, stderr=${r.stderr}`);
+    assert.match(r.stdout, /\+line2/);
+  });
+
+  it('diffs a modified tracked file when the landing dir is ANOTHER repo (failure mode B)', () => {
+    // The silent one. Without the cd the pathspec is unknown to the decoy repo, so
+    // git exits 0 with EMPTY stdout; the route's untracked probe (which does cd
+    // correctly) then confirms the file is tracked and returns a confident
+    // { diff: '', untracked: false } — "no changes" for a file that really changed.
+    const r = runScriptFrom(landingDecoy, repo, 'tracked.txt');
+    assert.equal(r.ok, true, `expected ok, stderr=${r.stderr}`);
+    assert.notEqual(r.stdout, '', 'a wrong-repo empty diff is the silent failure mode');
+    assert.match(r.stdout, /\+line2/);
+  });
+
+  it('diffs a nested path from a landing dir (relative pathspec resolves under the repo)', () => {
+    const r = runScriptFrom(landingDecoy, repo, 'sub/deep.txt');
+    assert.equal(r.ok, true, `expected ok, stderr=${r.stderr}`);
+    assert.match(r.stdout, /\+b/);
+  });
+
+  it('diffs a DELETED file from a landing dir (realpath fallback + cd still compose)', () => {
+    // toDelete.txt has no realpath, so RESOLVED comes from the `||` fallback. The cd
+    // uses $RESOLVED_CWD (which is always real), so the deletion diff still resolves.
+    const r = runScriptFrom(landingDecoy, repo, 'toDelete.txt');
+    assert.equal(r.ok, true, `expected ok, stderr=${r.stderr}`);
+    assert.match(r.stdout, /-gone/);
+  });
+
+  it('isolates the staged diff from a landing dir (staged=true)', () => {
+    const r = runScriptFrom(landingDecoy, repo, 'partial.txt', true);
+    assert.equal(r.ok, true, `expected ok, stderr=${r.stderr}`);
+    assert.match(r.stdout, /\+v1/);
+    assert.doesNotMatch(r.stdout, /v2/);
+  });
+
+  // Criterion 5: containment must still reject from EVERY cwd. These `exit 1` before
+  // the cd is reached, so they are cwd-independent by construction — pinned anyway,
+  // because the cd was inserted into exactly that code path.
+  const escapes = [
+    ['a "../" escape', '../escape.txt', false, null],
+    ['an absolute path outside cwd', '/etc/hosts', false, null],
+    ['a "../" escape combined with a range', '../escape.txt', false, '@{u}..HEAD'],
+  ];
+  for (const [label, file, staged, range] of escapes) {
+    it(`rejects ${label} from every landing dir (plain, decoy, and the repo itself)`, () => {
+      for (const from of [landingPlain, landingDecoy, repo]) {
+        const r = runScriptFrom(from, repo, file, staged, range);
+        assert.equal(r.ok, false, `${label} must be rejected from ${from}`);
+        assert.match(r.stdout, /ERROR path must be within working directory/);
+      }
+    });
+  }
+
+  it('still reports ERROR invalid path for a nonexistent cwd, from a landing dir', () => {
+    const r = runScriptFrom(landingPlain, path.join(repo, 'no-such-dir'), 'tracked.txt');
+    assert.equal(r.ok, false);
+    assert.match(r.stdout, /ERROR invalid path/);
   });
 });
