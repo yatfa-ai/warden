@@ -48,7 +48,7 @@ const { code } = await transformWithOxc(fanoutSrc, join(libDir, 'fanout.ts'), {}
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-fanout-test-'));
 const tmpFile = join(tmpDir, 'fanout.mjs');
 writeFileSync(tmpFile, code);
-const { summarizeFanout, runFanout } = await import(tmpFile);
+const { summarizeFanout, runFanout, formatFanoutToast } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -261,7 +261,154 @@ test('nameOf is not consulted at all when everything succeeds', () => {
 });
 
 // ---------------------------------------------------------------------------
-console.log('\nrunFanout — shared impure request loop (mocked fetch)');
+console.log('\nformatFanoutToast — shared result-toast shape');
+// ---------------------------------------------------------------------------
+// formatFanoutToast is the THIRD shared half of the fan-out (WARDEN-1034): the
+// 3-branch title/description/variant shape that formatKillToast,
+// formatBroadcastToast and formatKeySendToast had each hand-copied. Those three
+// are now thin wrappers that only supply their two copy phrases, so the branch
+// logic, the `\n` failure-list join, the variant and the pluralization are
+// asserted HERE once, at the seam, instead of three times over.
+//
+// The three call sites' real phrase pairs are used as fixtures so a regression
+// here shows up as the copy a human would actually see:
+const KILL = { success: 'Stopped', failure: 'Failed to stop' };
+const BROADCAST = { success: 'Sent to', failure: 'Failed to reach' };
+const CTRL_C = { success: 'Interrupted', failure: 'Failed to interrupt' };   // keysend, EMPTY obj
+const ESCAPE = { success: 'Sent Esc to', failure: 'Failed to send Esc to' }; // keysend, non-empty obj
+const f = (name, error) => ({ id: name, name, error });
+
+test('all succeeded → success variant, no description', () => {
+  const t = formatFanoutToast({ total: 3, succeeded: 3, failed: [] }, KILL);
+  assert.equal(t.variant, 'success');
+  assert.equal(t.title, 'Stopped 3 agents');
+  assert.equal(t.description, undefined);
+});
+test('zero succeeded → error variant, the FAILURE phrase + the N-of-M tally', () => {
+  const t = formatFanoutToast({ total: 2, succeeded: 0, failed: [f('a', 'network down'), f('b', 'timeout')] }, KILL);
+  assert.equal(t.variant, 'error');
+  assert.equal(t.title, 'Failed to stop 2 of 2 agents');
+  assert.equal(t.description, 'a: network down\nb: timeout');
+});
+test('partial → error variant, the SUCCESS phrase + an "— K failed" suffix', () => {
+  const t = formatFanoutToast({ total: 3, succeeded: 2, failed: [f('b', 'session not found')] }, KILL);
+  assert.equal(t.variant, 'error');
+  assert.equal(t.title, 'Stopped 2 of 3 agents — 1 failed');
+  assert.equal(t.description, 'b: session not found');
+});
+test('a partial is an ERROR even though most agents succeeded (success = ALL succeeded)', () => {
+  const t = formatFanoutToast({ total: 100, succeeded: 99, failed: [f('z', 'timeout')] }, KILL);
+  assert.equal(t.variant, 'error');
+});
+
+// --- Pluralization: asymmetric ON PURPOSE, copied verbatim from all three ---
+// The three branches pluralize off THREE different things. This asymmetry is
+// the quirk WARDEN-1034 was required to preserve, not repair — uniformizing it
+// turns kill/broadcast/keysend .test.mjs red. Each branch is pinned separately.
+test('success branch pluralizes on the SUCCESS count: n=1 → singular "agent"', () => {
+  const t = formatFanoutToast({ total: 1, succeeded: 1, failed: [] }, KILL);
+  assert.equal(t.title, 'Stopped 1 agent');
+});
+test('success branch pluralizes on SUCCEEDED, not total (n=1 of a 3-agent summary is still singular)', () => {
+  // Not reachable from the real reducer (no failures ⇒ succeeded === total), but
+  // it is the discriminator: reading `total` here would render "1 agents".
+  const t = formatFanoutToast({ total: 3, succeeded: 1, failed: [] }, KILL);
+  assert.equal(t.title, 'Stopped 1 agent');
+});
+test('all-failed branch pluralizes on TOTAL: a lone failed agent is singular', () => {
+  const t = formatFanoutToast({ total: 1, succeeded: 0, failed: [f('a', 'network down')] }, KILL);
+  assert.equal(t.title, 'Failed to stop 1 of 1 agent');
+});
+test('all-failed branch pluralizes on TOTAL: 3 of 3 is plural', () => {
+  const t = formatFanoutToast({ total: 3, succeeded: 0, failed: [f('a', 'e1'), f('b', 'e2'), f('c', 'e3')] }, KILL);
+  assert.equal(t.title, 'Failed to stop 3 of 3 agents');
+});
+test('partial branch HARD-CODES "agents" — a 1-of-2 partial does not become "1 agent"', () => {
+  const t = formatFanoutToast({ total: 2, succeeded: 1, failed: [f('b', 'timeout')] }, KILL);
+  assert.equal(t.title, 'Stopped 1 of 2 agents — 1 failed');
+});
+
+// --- The two phrases are OPAQUE: the helper never conjugates ----------------
+test('the failure phrase is used VERBATIM, not rebuilt from the success phrase', () => {
+  // broadcast is the trap (WARDEN-110): it succeeds with "Sent to" but fails
+  // with "Failed to reach" — no object. Any verb+object reconstruction renders
+  // "Failed to reach TO 2 of 2 agents".
+  const t = formatFanoutToast({ total: 2, succeeded: 0, failed: [f('a', 'e1'), f('b', 'e2')] }, BROADCAST);
+  assert.equal(t.title, 'Failed to reach 2 of 2 agents');
+  assert.ok(!t.title.includes('reach to'), 'the success phrase must not leak into the failure title');
+});
+test('the success phrase is used verbatim in BOTH branches that carry it', () => {
+  const phrases = BROADCAST;
+  assert.equal(formatFanoutToast({ total: 3, succeeded: 3, failed: [] }, phrases).title, 'Sent to 3 agents');
+  assert.equal(
+    formatFanoutToast({ total: 3, succeeded: 2, failed: [f('b', 'e')] }, phrases).title,
+    'Sent to 2 of 3 agents — 1 failed',
+  );
+});
+test('an EMPTY-object phrase pair (keysend C-c) reads naturally in all 3 branches', () => {
+  assert.equal(formatFanoutToast({ total: 1, succeeded: 1, failed: [] }, CTRL_C).title, 'Interrupted 1 agent');
+  assert.equal(formatFanoutToast({ total: 3, succeeded: 3, failed: [] }, CTRL_C).title, 'Interrupted 3 agents');
+  assert.equal(
+    formatFanoutToast({ total: 2, succeeded: 0, failed: [f('a', 'e1'), f('b', 'e2')] }, CTRL_C).title,
+    'Failed to interrupt 2 of 2 agents',
+  );
+  assert.equal(
+    formatFanoutToast({ total: 3, succeeded: 2, failed: [f('b', 'e')] }, CTRL_C).title,
+    'Interrupted 2 of 3 agents — 1 failed',
+  );
+});
+test('a NON-EMPTY-object phrase pair (keysend Escape) reads naturally in all 3 branches', () => {
+  assert.equal(formatFanoutToast({ total: 1, succeeded: 1, failed: [] }, ESCAPE).title, 'Sent Esc to 1 agent');
+  assert.equal(formatFanoutToast({ total: 3, succeeded: 3, failed: [] }, ESCAPE).title, 'Sent Esc to 3 agents');
+  assert.equal(
+    formatFanoutToast({ total: 2, succeeded: 0, failed: [f('a', 'e1'), f('b', 'e2')] }, ESCAPE).title,
+    'Failed to send Esc to 2 of 2 agents',
+  );
+  assert.equal(
+    formatFanoutToast({ total: 3, succeeded: 2, failed: [f('b', 'e')] }, ESCAPE).title,
+    'Sent Esc to 2 of 3 agents — 1 failed',
+  );
+});
+
+// --- The failure list ------------------------------------------------------
+test('the description lists EVERY failure, one per line, in summary order', () => {
+  const t = formatFanoutToast(
+    { total: 5, succeeded: 2, failed: [f('a', 'e1'), f('b', 'e2'), f('c', 'e3')] },
+    KILL,
+  );
+  assert.equal(t.description, 'a: e1\nb: e2\nc: e3');
+  assert.equal(t.description.split('\n').length, 3, 'the list must not be truncated');
+});
+test('the description uses the display NAME, not the raw id (summarizeFanout already resolved it)', () => {
+  const t = formatFanoutToast(
+    { total: 2, succeeded: 1, failed: [{ id: 'b', name: 'agent-b', error: 'session not found' }] },
+    KILL,
+  );
+  assert.equal(t.description, 'agent-b: session not found');
+});
+test('an empty summary (nothing selected) is a benign 0-agent success, not a crash', () => {
+  const t = formatFanoutToast({ total: 0, succeeded: 0, failed: [] }, KILL);
+  assert.equal(t.variant, 'success');
+  assert.equal(t.title, 'Stopped 0 agents');
+});
+test('does not mutate its inputs (pure formatter)', () => {
+  const s = { total: 2, succeeded: 1, failed: [f('b', 'timeout')] };
+  const phrases = { ...KILL };
+  const snapshot = JSON.stringify({ s, phrases });
+  formatFanoutToast(s, phrases);
+  assert.equal(JSON.stringify({ s, phrases }), snapshot);
+});
+test('summarizeFanout output feeds formatFanoutToast directly (no adapter in between)', () => {
+  // The composition the three wrappers rely on: the reducer's summary IS the
+  // formatter's input, with only the call site's field alias (stopped/sent) and
+  // its two phrases supplied on top.
+  const s = summarizeFanout([ok, fail('session not found'), ok], ['a', 'b', 'c'], nameOf, 'kill failed');
+  const t = formatFanoutToast(s, KILL);
+  assert.equal(t.variant, 'error');
+  assert.equal(t.title, 'Stopped 2 of 3 agents — 1 failed');
+  assert.equal(t.description, 'agent-b: session not found');
+});
+
 // ---------------------------------------------------------------------------
 // runFanout is the impure half of the fan-out (WARDEN-974): the POST-per-agent
 // loop that PRODUCES the allSettled array summarizeFanout reduces. All three

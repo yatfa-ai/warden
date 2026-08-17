@@ -13,7 +13,7 @@
 // transpile-to-temp-`.mjs` + dynamic-`import()` harness (see broadcast.test.mjs),
 // matching chatDisplay.test.mjs / gitStateSummary.test.mjs.
 
-import { summarizeFanout, type FanoutToast, type FanoutToastVariant } from './fanout';
+import { formatFanoutToast, summarizeFanout, type FanoutToast, type FanoutToastVariant } from './fanout';
 
 /** Outcome of one agent's /api/send: either ok, or not-ok with a reason. */
 export interface SendOutcome { ok: boolean; error?: string }
@@ -70,27 +70,18 @@ export type BroadcastToast = FanoutToast;
  * - Some/total failure → an error whose title carries the N/M tally and whose
  *   description lists each failed agent with its reason (so the human can see
  *   WHICH sessions didn't get the message and why — host unreachable, session
- *   dead, etc.). The description is the full failure list (not truncated): the
- *   sidebar's own selection caps it at a human-scale N, and sonner wraps a long
- *   description in a scrollable toast body. Rendered by showFanoutToast
- *   (./fanoutToast), which wraps it in `whitespace-pre-line` so each failure
- *   lands on its own line.
+ *   dead, etc.).
+ *
+ * The three-branch shape itself is the shared formatFanoutToast (./fanout,
+ * WARDEN-1034); only the broadcast COPY lives here. Broadcast is the reason the
+ * failure phrase is passed as its OWN opaque unit: it succeeds with "Sent to"
+ * but fails with "Failed to reach" — no object — so no verb+object
+ * reconstruction can produce both. `sent` is mapped onto the shared `succeeded`
+ * field; the public BroadcastSummary shape is unchanged.
  */
 export function formatBroadcastToast(s: BroadcastSummary): BroadcastToast {
-  if (s.failed.length === 0) {
-    return { title: `Sent to ${s.sent} agent${s.sent === 1 ? '' : 's'}`, variant: 'success' };
-  }
-  const list = s.failed.map((f) => `${f.name}: ${f.error}`).join('\n');
-  if (s.sent === 0) {
-    return {
-      title: `Failed to reach ${s.failed.length} of ${s.total} agent${s.total === 1 ? '' : 's'}`,
-      description: list,
-      variant: 'error',
-    };
-  }
-  return {
-    title: `Sent to ${s.sent} of ${s.total} agents — ${s.failed.length} failed`,
-    description: list,
-    variant: 'error',
-  };
+  return formatFanoutToast(
+    { total: s.total, succeeded: s.sent, failed: s.failed },
+    { success: 'Sent to', failure: 'Failed to reach' },
+  );
 }
