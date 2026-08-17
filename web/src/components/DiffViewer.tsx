@@ -81,7 +81,12 @@ export function DiffViewer({ chatId, filePath, staged, range, count, diffstat, o
         const response = await fetch(url);
 
         if (!response.ok) {
-          const data = await response.json();
+          // Failure leg only: the body is OPTIONAL here (a gateway/proxy 502/504
+          // returns HTML), so swallow a parse rejection to {} and let the status
+          // text carry the message — a bare .json() would surface a raw
+          // "Unexpected token '<'" instead. {} not undefined: `data.error` is
+          // read unguarded. Convention: lib/api.ts:39-50.
+          const data = await response.json().catch(() => ({} as { error?: string }));
           if (!cancelled) setError(data.error || `Failed to load diff: ${response.statusText}`);
           return;
         }

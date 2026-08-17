@@ -129,7 +129,13 @@ export function CreateCollectionDialog({
           });
 
       if (!r.ok) {
-        const j = await r.json();
+        // Failure leg only: the body is OPTIONAL here (express.json's own 400/413
+        // rejection fires in middleware, before this route's try/catch, so
+        // Express's finalhandler emits an HTML page — see lib/api.ts:39-50). A
+        // bare .json() would throw into the outer catch and misreport a server
+        // rejection as 'Network error — please try again'. Resolve to {} (not
+        // undefined) because `j.error` below is read unguarded.
+        const j = await r.json().catch(() => ({} as { error?: string }));
         setError(j.error || (isEditing ? 'Failed to save collection' : 'Failed to create collection'));
         setLoading(false);
         return;
