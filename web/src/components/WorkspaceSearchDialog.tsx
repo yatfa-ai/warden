@@ -18,6 +18,7 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { claimLatest, supersedeInFlight } from '@/lib/latestOnly';
+import { readErrorBody } from '@/lib/api';
 import { Loader2Icon, SearchIcon } from 'lucide-react';
 
 interface SearchResult {
@@ -130,19 +131,14 @@ export function WorkspaceSearchDialog({ chatId, cwd, open, onOpenChange, onSelec
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: chatId, query: q }),
       });
-      // Parsed BEFORE the ok-gate BY DESIGN (see the data.error note below) — but
-      // the tolerance is gated to the FAILURE leg, matching lib/api.ts:39-50.
-      // This is a POST, so express.json({limit:'1mb'}) can reject it in
-      // middleware with an HTML 400/413 before the route's try/catch runs; a bare
-      // .json() would throw and render a raw "Unexpected token '<'". The ok leg
-      // stays a bare .json() so a truncated 200 still throws rather than becoming
-      // a confident "No results found" (WARDEN-89).
-      const data = res.ok ? await res.json() : await res.json().catch(() => ({} as { error?: string }));
+      // Parsed BEFORE the ok-gate BY DESIGN: /api/search-files returns some
+      // errors at HTTP 200 with an `error` field (no-cwd, remote transport
+      // failure — mirroring /api/git-status), not 4xx, so the gate below reads
+      // `data.error` alongside `res.ok`; otherwise a real error renders as
+      // "No results found" and the user misdiagnoses a config/runtime problem.
+      // Leg gating lives in `readErrorBody`.
+      const data = await readErrorBody(res);
       if (!isLatest()) return;
-      // /api/search-files returns some errors at HTTP 200 with an `error` field
-      // (no-cwd, remote transport failure — mirroring /api/git-status), not 4xx.
-      // So check data.error too, not just res.ok: otherwise a real error renders
-      // as "No results found" and the user misdiagnoses a config/runtime problem.
       if (!res.ok || data.error) {
         setError(data.error || 'Search failed');
         setResults([]);
