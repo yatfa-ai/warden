@@ -182,18 +182,32 @@ describe('groupByHealth — CLOSED has its own bucket', () => {
   });
 });
 
-describe('getHealthSummary — closed is counted and labelled', () => {
+describe('getHealthSummary — closed and unknown are counted and labelled', () => {
   it('counts closed chats in the summary and includes them in the total', () => {
     const groups = groupByHealth([
       { id: 'a', healthState: HealthState.HEALTHY },
       { id: 'b', healthState: HealthState.CLOSED },
       { id: 'c', healthState: HealthState.CLOSED },
-      { id: 'd', healthState: HealthState.UNKNOWN }, // excluded from total
+      { id: 'd', healthState: HealthState.UNKNOWN },
     ]);
     const summary = getHealthSummary(groups);
     assert.strictEqual(summary.closed, 2);
     assert.strictEqual(summary.healthy, 1);
-    assert.strictEqual(summary.total, 3); // healthy(1) + closed(2); unknown excluded
+    assert.strictEqual(summary.unknown, 1);
+    assert.strictEqual(summary.total, 4); // healthy(1) + closed(2) + unknown(1)
+    assert.match(summary.label, /1 unknown/);
+  });
+
+  it('counts a catalog-only (all-unknown) fleet in the total — WARDEN-1068', () => {
+    const groups = groupByHealth([
+      { id: 'a', healthState: HealthState.UNKNOWN },
+      { id: 'b', healthState: HealthState.UNKNOWN },
+      { id: 'c', healthState: HealthState.UNKNOWN },
+    ]);
+    const summary = getHealthSummary(groups);
+    assert.strictEqual(summary.unknown, 3);
+    assert.strictEqual(summary.total, 3);
+    assert.match(summary.label, /3 unknown/);
   });
 
   it('includes "N closed" in the label', () => {

@@ -1094,6 +1094,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
             <span className="text-red-500">{healthData.summary.critical} critical</span>
             <span className="text-gray-500">{healthData.summary.idle} idle</span>
             <span className="text-gray-500">{healthData.summary.closed} closed</span>
+            <span className="text-muted-foreground">{healthData.summary.unknown} unknown</span>
             {/* Fleet-wide uncommitted-WIP count (WARDEN-766): the # of fanned agents
                 whose /api/git-status reported clean === false — the missing
                 repository-state axis in the summary bar. Reuses the sidebar's amber/

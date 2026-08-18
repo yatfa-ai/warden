@@ -47,6 +47,7 @@ export interface HealthData {
     critical: number;
     idle: number;
     closed: number;
+    unknown: number;
     total: number;
     label: string;
   };
