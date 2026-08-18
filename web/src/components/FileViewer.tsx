@@ -535,7 +535,12 @@ export function FileViewer({ chatId, filePath, open, line, timestampFormat, view
       let error: string | null = null;
       try {
         const r = await fetch(`/api/git-cat-file?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(viewAtCommit.hash)}&path=${encodeURIComponent(filePath)}`);
-        const j = await r.json().catch(() => ({}));
+        // Tolerant on !ok (the status carries the message), STRICT on 2xx — a 2xx
+        // body that fails to parse is a real failure and must reach the catch below
+        // rather than becoming empty content with no error at all (WARDEN-1014).
+        // The `?? {}` is load-bearing: readListBody resolves to `undefined` on the
+        // !ok leg, and both fields are dereferenced unconditionally right below.
+        const j = ((await readListBody(r)) as { content?: string; error?: string }) ?? {};
         content = typeof j.content === 'string' ? j.content : null;
         error = j.error || (r.ok ? null : `Failed to load file at commit (${r.status})`);
       } catch (e) {
@@ -1808,7 +1813,12 @@ function DirListing({ chatId, dir, onPick }: {
     setError(null);
     fetch(`/api/git-ls?id=${encodeURIComponent(chatId)}&dir=${encodeURIComponent(curDir)}`)
       .then(async (r) => {
-        const data = await r.json().catch(() => ({}));
+        // Tolerant on !ok (the status carries the message), STRICT on 2xx — a 2xx
+        // body that fails to parse must reach the .catch below rather than becoming
+        // a confident "empty directory" (WARDEN-1014). The `?? {}` is load-bearing:
+        // readListBody resolves to `undefined` on the !ok leg, which the `!r.ok`
+        // branch below dereferences.
+        const data = ((await readListBody(r)) as { error?: string; entries?: Entry[] }) ?? {};
         if (cancelled) return;
         // /api/git-ls returns transport errors at HTTP 200 with an `error` field
         // (no-cwd / not-a-git-repo) and a 400 for an unsafe dir — check BOTH
