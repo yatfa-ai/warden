@@ -30,7 +30,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 // SSH_BASE_OPTS is no longer imported here: buildSshArgv applies it (WARDEN-989).
 import { run as defaultRun, SSH_BIN, buildSshArgv, shellQuote } from './ssh.js';
-import { buildChat, sortChats, parseActivityTimestamp } from './chatMeta.js';
+import { buildChat, sortChats, parseActivityTimestamp, paneTarget } from './chatMeta.js';
 import { loopMonitor } from './loop-monitor.js';
 
 const LOCAL = '(local)';
@@ -951,12 +951,7 @@ export async function capturePanes(host, list, cfg = {}, opts = {}, deps = {}) {
     const channel = await getChannel(host, cfg, deps);
     // Send the per-host pane list. `container` is null for bare-tmux / manual
     // chats so the companion selects bare `tmux` (vs `docker exec <c> tmux`).
-    // The target falls back container -> 'agent', identical to chats.js.
-    const panes = (list || []).map((c) => ({
-      key: c.key,
-      container: c.container || null,
-      session: c.session || c.container || 'agent',
-    }));
+    const panes = describePanes(list);
     const result = await channel.call('capturePanes', { panes }, { timeout: opts.timeout ?? 15000 });
     return { host, ok: true, panes: (result && result.panes) || {} };
   } catch (e) {
@@ -986,10 +981,9 @@ export async function hasSession(host, { container, session } = {}, cfg = {}, op
   }
   try {
     const channel = await getChannel(host, cfg, deps);
-    // The target falls back session -> container -> 'agent', identical to
-    // capturePanes (companion.js:512-517) and src/chats.js. `container` is null
-    // for bare-tmux / manual chats so the companion selects bare `tmux`.
-    const target = session || container || 'agent';
+    // `container` is null for bare-tmux / manual chats so the companion selects
+    // bare `tmux`.
+    const target = paneTarget(session, container);
     const result = await channel.call('hasSession', { container: container || null, session: target }, { timeout: opts.timeout ?? 10000 });
     return { host, ok: true, exists: !!(result && result.exists) };
   } catch (e) {
@@ -1027,7 +1021,7 @@ export async function spawnSession(host, params, cfg = {}, opts = {}, deps = {})
     const channel = await getChannel(host, cfg, deps);
     const payload = {
       container: params?.container || null,
-      session: params?.session || params?.container || 'agent',
+      session: paneTarget(params?.session, params?.container),
       cwd: params?.cwd || '',
       cmd: Array.isArray(params?.cmd) ? params.cmd : [],
     };
@@ -1053,7 +1047,7 @@ export async function killSession(host, params, cfg = {}, opts = {}, deps = {}) 
     const channel = await getChannel(host, cfg, deps);
     const payload = {
       container: params?.container || null,
-      session: params?.session || params?.container || 'agent',
+      session: paneTarget(params?.session, params?.container),
     };
     await channel.call('killSession', payload, { timeout: opts.timeout ?? 15000 });
     return { host, ok: true };
@@ -1110,16 +1104,15 @@ function mapCmdError(host, e) {
 // resize() over the companion channel: runs `set-option -t <target> window-size
 // latest` host-side. Returns {host, ok, code, stdout, stderr} (the raw runTmux
 // shape) or {host, ok:false, code:-1, stderr} on ANY failure — it NEVER falls back
-// to raw SSH. The target falls back session → container → "agent", identical to
-// hasSession (companion.js) and src/chats.js. `container` is null for bare-tmux /
-// manual chats so the companion selects bare `tmux`.
+// to raw SSH. `container` is null for bare-tmux / manual chats so the companion
+// selects bare `tmux`.
 export async function resize(host, { container, session } = {}, cfg = {}, opts = {}, deps = {}) {
   if (host === LOCAL) {
     return { host, ok: false, code: -1, stdout: '', stderr: 'companion transport does not apply to the local host' };
   }
   try {
     const channel = await getChannel(host, cfg, deps);
-    const target = session || container || 'agent';
+    const target = paneTarget(session, container);
     const result = await channel.call('resize', { container: container || null, session: target }, { timeout: opts.timeout ?? 10000 });
     return mapCmdResult(host, result);
   } catch (e) {
@@ -1154,8 +1147,7 @@ export async function resize(host, { container, session } = {}, cfg = {}, opts =
 // send() over the companion channel: runs the WARDEN-254 write sequence
 // (single-line send-keys -l + Enter; multiline set-buffer / paste-buffer -p -d /
 // send-keys Enter) host-side. <text> is an arbitrary user directive carried as a
-// JSON param and shell-quoted HOST-SIDE (never interpolated raw). The target
-// falls back session → container → "agent", identical to resize / hasSession.
+// JSON param and shell-quoted HOST-SIDE (never interpolated raw).
 export async function send(host, { container, session, text } = {}, cfg = {}, opts = {}, deps = {}) {
   if (host === LOCAL) {
     return { host, ok: false, code: -1, stdout: '', stderr: 'companion transport does not apply to the local host' };
@@ -1168,7 +1160,7 @@ export async function send(host, { container, session, text } = {}, cfg = {}, op
       // is alive (getChannel succeeded); only the binary lacks the `send` RPC.
       return { host, unsupported: true };
     }
-    const target = session || container || 'agent';
+    const target = paneTarget(session, container);
     const result = await channel.call('send', {
       container: container || null,
       session: target,
@@ -1194,7 +1186,7 @@ export async function sendKey(host, { container, session, key } = {}, cfg = {}, 
     if (!methods.includes('sendKeys')) {
       return { host, unsupported: true };
     }
-    const target = session || container || 'agent';
+    const target = paneTarget(session, container);
     const result = await channel.call('sendKeys', {
       container: container || null,
       session: target,
@@ -1336,13 +1328,12 @@ function ensurePaneDeltaHandler(channel, host) {
 }
 
 // describePanes normalizes a chat list to the {key,container,session} shape the
-// companion expects (identical to capturePanes' mapping). container null for
-// bare-tmux; target falls back session -> container -> 'agent'.
+// companion expects. container null for bare-tmux; target via paneTarget().
 function describePanes(list) {
   return (list || []).map((c) => ({
     key: c.key,
     container: c.container || null,
-    session: c.session || c.container || 'agent',
+    session: paneTarget(c.session, c.container),
   }));
 }
 
