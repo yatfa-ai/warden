@@ -36,18 +36,9 @@ async function requestJson<T>(
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(data),
     });
-    // The tolerance is gated to the FAILURE leg only (matching `readListBody`
-    // below — see its doc comment for the full rationale, WARDEN-1014):
-    //   - !ok → the body is OPTIONAL (an empty or HTML error page never parses);
-    //     the STATUS carries the message, so swallow the rejection to undefined
-    //     and report ok:false rather than surfacing a JSON parse error.
-    //   - ok  → the body IS the answer. `fetch` resolves as soon as the HEADERS
-    //     arrive, so a body truncated mid-stream (a dropped SSH tunnel) rejects
-    //     HERE, not at `fetch`. Let it throw to the catch below so the caller
-    //     sees ok:false — reporting ok:true with undefined data would hand the
-    //     caller a confident empty answer for a network failure.
-    const body = res.ok ? await res.json() : await res.json().catch(() => undefined);
-    if (!res.ok) return { ok: false, error: body?.error, res };
+    // Leg-gated parse — the one rule lives in `readListBody` below.
+    const body = await readListBody(res);
+    if (!res.ok) return { ok: false, error: (body as { error?: string } | undefined)?.error, res };
     return { ok: true, data: body as T, res };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
@@ -133,21 +124,18 @@ export async function fetchJson<T = unknown>(
     try {
       const res = await fetchImpl(url, { signal: controller.signal });
       clearTimeout(timer);
-      // The tolerance is gated to the FAILURE leg only (parity with
-      // `requestJson` above and `readListBody` below — WARDEN-1014's rule):
-      // a non-JSON 4xx/5xx body (empty/HTML error page) degrades to undefined
-      // so the status still drives ok:false, but a 2xx whose body fails to
-      // parse is a REAL failure and throws to the catch below. That matters
-      // most on `/api/config`, which gates the whole Settings render: a
-      // truncated 200 must surface the Retry state, never a defaults-populated
-      // form with Save enabled. A truncation is transient, so joining the
-      // retryable path here is correct.
-      const body = res.ok ? await res.json() : await res.json().catch(() => undefined);
+      // Leg-gated parse — the one rule lives in `readListBody` below. A 2xx that
+      // fails to parse therefore rejects into the catch and joins the RETRYABLE
+      // path, which is what `/api/config` (it gates the whole Settings render)
+      // needs: a truncated 200 must surface Retry, never a defaults-populated
+      // form with Save enabled.
+      const body = await readListBody(res);
       if (res.ok) return { ok: true, data: body as T, res };
+      const bodyError = (body as { error?: string } | undefined)?.error;
       // 4xx is a hard client error — retrying will not help, so return at once.
-      if (res.status >= 400 && res.status < 500) return { ok: false, error: body?.error, res };
+      if (res.status >= 400 && res.status < 500) return { ok: false, error: bodyError, res };
       // 5xx is transient — record the error and fall through to a retry.
-      lastError = body?.error || `Request failed with status ${res.status}`;
+      lastError = bodyError || `Request failed with status ${res.status}`;
     } catch (e) {
       // AbortError (timeout fired) or a network failure — both are retryable.
       lastError = e instanceof Error ? e.message : String(e);
@@ -247,4 +235,28 @@ export async function readListBody(
 ): Promise<unknown> {
   if (res.ok) return res.json();
   return res.json().catch(() => undefined);
+}
+
+/**
+ * The same leg-gated parse as {@link readListBody}, narrowed for a call site that
+ * reads `body.error` UNGUARDED (the search/browse dialogs, whose endpoints answer
+ * some failures at HTTP 200). `readListBody` deliberately returns `unknown`
+ * because it feeds `readListResponse`, which handles `unknown`; this companion is
+ * a typing convenience over the SAME decision — the `res.ok` gate is not
+ * re-expressed here.
+ *
+ * The `?? {}` coalesce is deliberately gated to the FAILURE leg:
+ * - **`!ok`** — a body that parsed to literal `null` becomes `{}`, so the
+ *   unguarded `body.error` that follows cannot throw. The site's own `!res.ok`
+ *   gate still produces its message.
+ * - **`ok`** — the value is returned VERBATIM, `null` included. Coalescing here
+ *   would turn a `null` 200 body from a throw (→ the site's error banner) into an
+ *   empty record (→ "No results found") — a fresh WARDEN-89 false-empty, in
+ *   exactly the direction this rule exists to prevent.
+ */
+export async function readErrorBody(
+  res: Pick<Response, 'ok'> & { json: () => Promise<unknown> },
+): Promise<{ error?: string } & Record<string, unknown>> {
+  const body = await readListBody(res);
+  return (res.ok ? body : (body ?? {})) as { error?: string } & Record<string, unknown>;
 }

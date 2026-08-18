@@ -55,7 +55,7 @@ const { code } = await transformWithOxc(src, modPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-list-response-'));
 const tmpFile = join(tmpDir, 'api.mjs');
 writeFileSync(tmpFile, code);
-const { readListResponse, readListBody, fetchJson } = await import(tmpFile);
+const { readListResponse, readListBody, readErrorBody, fetchJson } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 // `readListResponse` reads only `ok` and `status`, so a plain object stands in for a
@@ -222,6 +222,51 @@ await test('CALLER — a parseable body is returned unchanged on both legs', asy
   assert.equal(readListResponse(res(200), ok, 'stashes', 'stashes').error, 'no cwd');
   const notOk = await readListBody({ ok: false, status: 500, json: async () => body });
   assert.deepEqual(notOk, body, 'a body that DOES parse on the !ok leg is still handed back');
+});
+
+// === readErrorBody — the typed companion (WARDEN-1058) ====================
+//
+// `readErrorBody` is `readListBody` plus ONE narrowing convenience for the six
+// dialog sites that read `body.error` UNGUARDED: on the FAILURE leg only, an
+// absent/unparseable body is coalesced to `{}` so that read cannot throw. It
+// re-uses `readListBody` for the ok/!ok decision — the gate exists once.
+//
+// The ok leg is the one that must NOT be coalesced, and the last test below is
+// the guard: a 200 whose body is literal `null` has to stay `null` so the site's
+// unguarded `data.error` still throws into its catch → an error banner. Turning
+// that into `{}` would render "No results found" for a broken response — a fresh
+// WARDEN-89 false-empty, in exactly the direction this rule exists to prevent.
+
+await test('ERROR-BODY — a 2xx whose body fails to parse REJECTS (inherited from readListBody)', async () => {
+  await assert.rejects(
+    () => readErrorBody(badBody(200)),
+    /Unexpected end of JSON input/,
+    'a truncated 2xx must reach the site catch, never a coalesced {} → "No results found"',
+  );
+});
+
+await test('ERROR-BODY — a non-2xx whose body fails to parse yields {} so `data.error` is safe', async () => {
+  const j = await readErrorBody(badBody(502));
+  assert.deepEqual(j, {}, 'the body is optional on the !ok leg; {} keeps the unguarded read safe');
+  assert.equal(j.error, undefined, 'the site falls through to its own status-derived message');
+});
+
+await test('ERROR-BODY — a parseable body is returned unchanged on both legs', async () => {
+  const body = { results: [{ key: 'a' }], error: 'no cwd' };
+  const ok = await readErrorBody({ ok: true, status: 200, json: async () => body });
+  assert.deepEqual(ok, body);
+  const notOk = await readErrorBody({ ok: false, status: 500, json: async () => body });
+  assert.deepEqual(notOk, body, 'a body that DOES parse on the !ok leg is still handed back verbatim');
+});
+
+await test('ERROR-BODY — a 2xx body of literal null stays null, NOT {} (the false-empty guard)', async () => {
+  const j = await readErrorBody({ ok: true, status: 200, json: async () => null });
+  assert.equal(j, null, 'the ok leg is returned verbatim — coalescing here would mask a broken 200');
+  // …which is what keeps the site's unguarded `data.error` throwing, as it does today.
+  assert.throws(() => j.error, TypeError);
+  // The SAME null on the failure leg IS coalesced — there the status carries the message.
+  const notOk = await readErrorBody({ ok: false, status: 500, json: async () => null });
+  assert.deepEqual(notOk, {}, 'the !ok leg coalesces, so the unguarded read cannot throw');
 });
 
 // === Non-interference with fetchJson ======================================

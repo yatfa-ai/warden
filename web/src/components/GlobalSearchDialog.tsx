@@ -20,6 +20,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { claimLatest, supersedeInFlight } from '@/lib/latestOnly';
+import { readErrorBody } from '@/lib/api';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { Loader2Icon, SearchIcon } from 'lucide-react';
 
@@ -220,20 +221,14 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
     setError(null);
     try {
       const res = await fetch(`/api/search-pane?query=${encodeURIComponent(q)}&panes=${openPanes.join(',')}`);
-      // Parsed BEFORE the ok-gate BY DESIGN (see below) — but the tolerance is
-      // gated to the FAILURE leg, matching lib/api.ts:39-50. On !ok the body is
-      // optional (a gateway 502/504 is HTML), so resolve to {} and let the gate
-      // below produce 'Search failed'. The ok leg stays a bare .json() so a
-      // truncated 200 still throws to the catch rather than yielding a confident
-      // "No results found" — resolving {} unconditionally would recreate exactly
-      // the WARDEN-89 false-empty this dialog's gate exists to prevent.
-      const data = res.ok ? await res.json() : await res.json().catch(() => ({} as { error?: string }));
+      // Parsed BEFORE the ok-gate BY DESIGN: /api/search-pane returns some
+      // failures at HTTP 200 with an `error` field, so the gate below reads
+      // `data.error` alongside `res.ok`. Leg gating lives in `readErrorBody`.
+      const data = await readErrorBody(res);
       if (!isLatest()) return;
-      // /api/search-pane returns 500 { error: e.message } when capturePanes
-      // fails (e.g. a pane's host is unreachable). fetch resolves on HTTP
-      // errors, so check res.ok AND data.error — otherwise a real failure
-      // collapses into a fake "No results found" (the WARDEN-89 silent-error
-      // trap). Mirrors WorkspaceSearchDialog's doSearch exactly.
+      // fetch resolves on HTTP errors, so check res.ok AND data.error —
+      // otherwise a real failure collapses into a fake "No results found" (the
+      // WARDEN-89 silent-error trap). Mirrors WorkspaceSearchDialog's doSearch.
       if (!res.ok || data.error) {
         setError(data.error || 'Search failed');
         setResults([]);
@@ -279,8 +274,8 @@ export function GlobalSearchDialog({ open, onClose, openPanes, onFocusPane, onJu
       setError(null); // fresh attempt — clear any prior banner (mirrors doSearch)
       try {
         const res = await fetch(`/api/claude-sessions-search?q=${encodeURIComponent(q)}`);
-        // Failure-leg-only tolerance, same rationale as doSearch above.
-        const data = res.ok ? await res.json() : await res.json().catch(() => ({} as { error?: string }));
+        // Parsed before the ok-gate, same soft-error-at-200 rationale as doSearch.
+        const data = await readErrorBody(res);
         if (!res.ok || data.error) {
           if (!cancelled) { setError(data.error || 'Session search failed'); setSessionResults([]); }
         } else {

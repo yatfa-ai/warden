@@ -19,6 +19,7 @@ import { Loader2Icon, FileIcon, GitCompare, AlertCircleIcon, ChevronUp, ChevronD
 import { classifyDiffLine, DIFF_LINE_CLASS, collectChangeRegions } from '@/lib/diff';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { basename } from '@/lib/chatDisplay';
+import { readErrorBody } from '@/lib/api';
 import { DiffStatChip } from '@/components/sidebar/DiffStatChip';
 import type { DiffStat } from '@/components/sidebar/types';
 
@@ -81,12 +82,11 @@ export function DiffViewer({ chatId, filePath, staged, range, count, diffstat, o
         const response = await fetch(url);
 
         if (!response.ok) {
-          // Failure leg only: the body is OPTIONAL here (a gateway/proxy 502/504
-          // returns HTML), so swallow a parse rejection to {} and let the status
-          // text carry the message — a bare .json() would surface a raw
-          // "Unexpected token '<'" instead. {} not undefined: `data.error` is
-          // read unguarded. Convention: lib/api.ts:39-50.
-          const data = await response.json().catch(() => ({} as { error?: string }));
+          // Leg gating lives in `readErrorBody` — inside this !ok branch it is
+          // the failure leg, so an unparseable body (a gateway/proxy 502/504
+          // returns HTML) degrades to {} and the status text carries the
+          // message, instead of surfacing a raw "Unexpected token '<'".
+          const data = await readErrorBody(response);
           if (!cancelled) setError(data.error || `Failed to load diff: ${response.statusText}`);
           return;
         }
