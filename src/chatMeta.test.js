@@ -9,7 +9,7 @@
 // shared sortChats() ordering both paths use.
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { ROLES, parseContainerName, buildChat, sortChats, parseActivityTimestamp } from './chatMeta.js';
+import { ROLES, parseContainerName, buildChat, sortChats, parseActivityTimestamp, paneTarget } from './chatMeta.js';
 
 describe('parseContainerName', () => {
   it('splits "{project}-{role}" on the LAST hyphen', () => {
@@ -197,5 +197,35 @@ describe('parseActivityTimestamp (the shared leading-line timestamp parse)', () 
     // an ISO date-time with no zone rejects it as Invalid Date. The helper must
     // return null rather than stamping NaN into lastActivity.
     assert.strictEqual(parseActivityTimestamp('2024-13-01T10:00:00'), null);
+  });
+});
+
+// paneTarget() — the SINGLE tmux-target ladder both transports derive from
+// (WARDEN-1065). Before this helper the `session || container || 'agent'` chain
+// was hand-written at 9 production sites across chats.js + companion.js; these
+// cases pin the contract those sites now inherit.
+describe('paneTarget', () => {
+  it('prefers an explicit session over the container', () => {
+    assert.strictEqual(paneTarget('mysession', 'mycontainer'), 'mysession');
+    assert.strictEqual(paneTarget('mysession', null), 'mysession');
+  });
+
+  it('falls through an EMPTY session string to the container', () => {
+    // Load-bearing: the ladder uses `||`, never `??`. A chat discovered with no
+    // live tmux session carries session:'' and MUST target its container —
+    // pinned end-to-end by companion.test.js capturePanes/hasSession specs.
+    assert.strictEqual(paneTarget('', 'c1'), 'c1');
+  });
+
+  it('falls through a null / undefined / absent session to the container', () => {
+    assert.strictEqual(paneTarget(null, 'c1'), 'c1');
+    assert.strictEqual(paneTarget(undefined, 'c1'), 'c1');
+    assert.strictEqual(paneTarget(), 'agent');
+  });
+
+  it("defaults to the 'agent' session when neither is set", () => {
+    assert.strictEqual(paneTarget(null, null), 'agent');
+    assert.strictEqual(paneTarget('', ''), 'agent');
+    assert.strictEqual(paneTarget(undefined, undefined), 'agent');
   });
 });

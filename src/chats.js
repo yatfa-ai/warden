@@ -5,7 +5,7 @@
 // whether `container` is set, and uses `session` for the tmux target.
 import { run, runWithPool, runLocalTmux, shellQuote } from './ssh.js';
 import { loadCatalog, stampCatalogActivity } from './config.js';
-import { ROLES, parseContainerName, buildChat, sortChats, parseActivityTimestamp, agentTarget } from './chatMeta.js';
+import { ROLES, parseContainerName, buildChat, sortChats, parseActivityTimestamp, agentTarget, paneTarget } from './chatMeta.js';
 // Re-export for any external consumer; the canonical home is now ./chatMeta.js.
 export { ROLES, parseContainerName, agentTarget };
 import { isCompanionTransportEnabled, discover as discoverViaCompanion, capturePanes as capturePanesViaCompanion, hasFreshPaneDelta, readPaneDeltas } from './companion.js';
@@ -551,7 +551,7 @@ export async function discoverHost(host, cfg) {
 export function buildCaptureScript(list) {
   return list.map((c) => {
     const t = c.container ? `docker exec ${shellQuote(c.container)} tmux` : 'tmux';
-    const s = shellQuote(c.session || c.container || 'agent');
+    const s = shellQuote(paneTarget(c.session, c.container));
     return `printf '___B_${c.key}___\\n'; ${t} capture-pane -t ${s} -p -e -S -60 -E - 2>/dev/null; printf '\\n___E_${c.key}___\\n'`;
   }).join('; ');
 }
