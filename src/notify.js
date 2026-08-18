@@ -24,33 +24,12 @@
 // WHICH newly-needy agent to ping (diffAttentionTransitions), so the sweep logic
 // is testable without a server.
 
-const realSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// Bounded retry cap — mirrors src/telemetry-send.js's MAX_ATTEMPTS. A down or
-// slow webhook destination never loops or blocks the host app: after MAX_ATTEMPTS
-// transient failures the alert is dropped, not retried forever.
-const MAX_ATTEMPTS = 3;
-
-// A response status is transient (retryable) when it is a rate-limit (429) or a
-// server error (5xx). 4xx (other than 429) is permanent for this payload — the
-// body is a fixed alert, so retrying the identical body cannot fix a 400/401/
-// 404/410, and we fail fast rather than burn attempts. Mirrors telemetry-send.
-function isTransientStatus(status) {
-  return status === 429 || (status >= 500 && status <= 599);
-}
-
-// Jittered exponential backoff — the same shape as telemetry-send's backoffMs.
-// Base doubles per attempt, then +/-25% jitter so a fleet of Warden instances
-// retrying a down receiver do not thunder-herd in lockstep. The jitter is
-// bounded and non-deterministic by design; tests inject a sleepImpl recorder
-// and assert that backoff WAS slept (and how many times), never its exact ms.
-function backoffMs(attempt) {
-  const base = 200 * 2 ** attempt; // attempt 0 → 200, 1 → 400, 2 → 800 …
-  const jitter = base * 0.25 * (Math.random() * 2 - 1); // +/-25% of base
-  return Math.max(0, Math.round(base + jitter));
-}
-
-const noopLog = () => {};
+// Bounded-retry policy (cap, transient-status predicate, jittered backoff) and
+// the two injectable defaults live in the shared src/retry.js leaf — the same
+// primitives src/telemetry-send.js uses. Only the RETRY LOOP below is local to
+// this module; it deliberately does NOT share telemetry-send's consent re-check,
+// schema-drift circuit-break, or replayable exhaustion result.
+import { realSleep, MAX_ATTEMPTS, isTransientStatus, backoffMs, noopLog } from './retry.js';
 
 // The result returned when the gate is closed (disabled or no URL). `dropped` is
 // deliberately false: nothing was attempted OR discarded, the gate was simply
