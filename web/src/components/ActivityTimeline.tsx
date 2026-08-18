@@ -63,6 +63,7 @@ export function ActivityTimeline({
   const {
     events,
     loading,
+    error,
     refreshing,
     isLive,
     setIsLive,
@@ -433,6 +434,15 @@ export function ActivityTimeline({
         {loading ? (
           <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
             Loading activity...
+          </div>
+        ) : error && events.length === 0 ? (
+          // Mirrors DirectiveHistory.tsx:234 — gate on the RAW list, not `filtered`,
+          // so an active filter matching nothing during a healthy fetch still shows
+          // the normal empty state. Render `error.message`: the hook stores an
+          // `Error` instance (unlike DirectiveHistory's `string`), and an Error
+          // object as a React child throws.
+          <div className="flex items-center justify-center h-full text-destructive text-sm">
+            ⚠ {error.message}
           </div>
         ) : filtered.length === 0 ? (
           <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
