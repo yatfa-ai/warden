@@ -57,6 +57,10 @@ export function hasCredentials() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Bounded retry: after MAX_ATTEMPTS transient failures the request gives up and
+// throws. Mirrors the shape src/notify.js and src/telemetry-send.js use.
+const MAX_ATTEMPTS = 3;
+
 // complete({system, messages, tools, max_tokens}) -> raw Anthropic message JSON.
 export async function complete({ system, messages, tools, max_tokens = 2048 }) {
   const TOKEN = resolveToken();
@@ -72,7 +76,7 @@ export async function complete({ system, messages, tools, max_tokens = 2048 }) {
   }
   const url = `${BASE.replace(/\/$/, '')}/v1/messages`;
   let lastErr;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
       const res = await fetch(url, {
         method: 'POST',
@@ -88,14 +92,17 @@ export async function complete({ system, messages, tools, max_tokens = 2048 }) {
       if (res.ok) return JSON.parse(text);
       if (res.status === 429 || res.status >= 500) {
         lastErr = new Error(`LLM HTTP ${res.status}: ${text.slice(0, 200)}`);
-        await sleep(1200 * (attempt + 1));
+        // 429 / 5xx — transient. Back off and retry unless this was the final try.
+        if (attempt + 1 < MAX_ATTEMPTS) await sleep(1200 * (attempt + 1));
         continue;
       }
       throw new Error(`LLM HTTP ${res.status}: ${text.slice(0, 300)}`);
     } catch (e) {
       if (e.message && e.message.startsWith('LLM HTTP')) throw e;
-      lastErr = e; // network blip — retry
-      await sleep(1000 * (attempt + 1));
+      // Network blip (DNS, refused, reset, timeout) — transient. Back off and
+      // retry unless this was the final attempt; otherwise fall through to throw.
+      lastErr = e;
+      if (attempt + 1 < MAX_ATTEMPTS) await sleep(1000 * (attempt + 1));
     }
   }
   throw lastErr || new Error('LLM request failed');
