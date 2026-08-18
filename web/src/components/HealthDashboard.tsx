@@ -1086,7 +1086,15 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
       {/* Summary Bar */}
       {healthData && (
         <div className="px-3 py-2 border-b bg-muted/30">
-          <div className="flex items-center gap-2 text-xs">
+          {/* flex-wrap, not a single line (WARDEN-1068): this panel is pinned to a
+              fixed HEALTH_WIDTH (320px, web/src/lib/layout.ts) inside an
+              overflow-hidden section, so the row has ~295px of usable width and no
+              viewport-responsive slack. The six health chips alone measure ~324px, and
+              a 2-/3-digit fleet or the conditional git chips below widen it further —
+              without wrapping the trailing chip is silently clipped mid-word ("6 unkno")
+              with no ellipsis or scroll. Wrapping grows the bar by a line instead of
+              hiding a count the user is meant to reconcile against "N agents". */}
+          <div className="flex flex-wrap items-center gap-2 text-xs">
             <span className="font-medium">{healthData.summary.total} agents</span>
             <span className="text-muted-foreground">·</span>
             <span className="text-green-500">{healthData.summary.healthy} healthy</span>
