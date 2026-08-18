@@ -130,9 +130,10 @@ export function getHealthSummary(groups) {
   const critical = groups.critical?.length || 0;
   const idle = groups.idle?.length || 0;
   const closed = groups.closed?.length || 0;
-  const total = healthy + warning + critical + idle + closed;
+  const unknown = groups.unknown?.length || 0;
+  const total = healthy + warning + critical + idle + closed + unknown;
 
-  const label = `${healthy} healthy · ${warning} warning · ${critical} critical · ${idle} idle · ${closed} closed`;
+  const label = `${healthy} healthy · ${warning} warning · ${critical} critical · ${idle} idle · ${closed} closed · ${unknown} unknown`;
 
   return {
     healthy,
@@ -140,6 +141,7 @@ export function getHealthSummary(groups) {
     critical,
     idle,
     closed,
+    unknown,
     total,
     label
   };
