@@ -48,10 +48,13 @@ const {
   createFitScheduler,
   isFittableRect,
   shouldAnnounceSize,
+  repaintNudgeSize,
   MIN_FIT_PX,
+  MIN_PTY_ROWS,
   FIT_SETTLE_MS,
   FIT_RETRY_MS,
   FIT_MAX_RETRIES,
+  REPAINT_NUDGE_MS,
 } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
@@ -218,16 +221,19 @@ test('the workspace-switch storm announces the settled size exactly once', () =>
   assert.deepEqual(state.size, { cols: 112, rows: 28 });
 });
 
-test('a pane that settles back to the size the PTY already has stays silent', () => {
+test('the attach fit is not mistaken for a bounce — markAnnounced retires its settle', () => {
   const clock = makeEnv();
   const { state, scheduler } = makePane(clock);
-  // The attach message carried this geometry, so the PTY already knows it.
-  scheduler.markAnnounced({ cols: 100, rows: 25 });
+  // The real attach sequence (PaneTile): fitNow() FIRST, so the attach message
+  // can carry the geometry it just produced, then markAnnounced() records that
+  // the server has painted it.
   state.rect = { width: 800, height: 425 };    // 800/8 = 100 cols, 425/17 = 25 rows
-  scheduler.request();
-  clock.frame();
-  clock.advance(FIT_SETTLE_MS * 2);
-  assert.deepEqual(state.announced, [], 'no redundant resize → tmux has no reason to redraw the prompt');
+  scheduler.fitNow();
+  assert.deepEqual(state.size, { cols: 100, rows: 25 }, 'attach carries the fitted size');
+  scheduler.markAnnounced({ cols: 100, rows: 25 });
+  clock.advance(FIT_SETTLE_MS * 2 + REPAINT_NUDGE_MS);
+  assert.deepEqual(state.announced, [],
+    'no redundant resize AND no repaint nudge — the attach already painted this geometry');
 });
 
 test('back-and-forth switching announces only the sizes that actually differ', () => {
@@ -254,6 +260,127 @@ test('shouldAnnounceSize rejects repeats and nonsense geometries', () => {
   assert.equal(shouldAnnounceSize({ cols: 100, rows: 25 }, { cols: 99, rows: 25 }), true, 'cols changed');
   assert.equal(shouldAnnounceSize(null, { cols: 0, rows: 25 }), false, 'zero cols is not a terminal');
   assert.equal(shouldAnnounceSize(null, { cols: NaN, rows: 25 }), false, 'NaN never reaches the PTY');
+});
+
+// === WARDEN-1052: the settled size is right, the settled PAINT is not ========
+//
+// The residual WARDEN-920's coalescing does not cover. A relayout that BOUNCES —
+// maximize→restore, a sidebar/Observer panel opened and closed, a window resize
+// dragged back — really does resize xterm on the way through (destroying its
+// alternate-screen buffer, which is what tmux runs in) and then lands back on the
+// geometry the PTY already has. De-dup said "stay silent", so tmux never redrew
+// and the pane kept a paint for a size it no longer had: the status line and the
+// prompt stranded in the upper third with a dead band of blank rows under them.
+
+test('a relayout that bounces back to the same size repaints instead of going silent', () => {
+  const clock = makeEnv();
+  const { state, scheduler } = makePane(clock);
+  // Steady state: 100x25, and that is what the PTY was told and painted.
+  state.rect = { width: 800, height: 425 };
+  scheduler.request(); clock.frame();
+  clock.advance(FIT_SETTLE_MS * 2);
+  assert.deepEqual(state.announced, ['100x25'], 'the settled geometry, announced once');
+
+  // The bounce. 150px/17 = 8 rows — the "content confined to rows 8-9" the ticket
+  // measured in the live product — then back to the full 425px it started at.
+  for (const rect of [
+    { width: 800, height: 150 },
+    { width: 800, height: 90 },
+    { width: 800, height: 300 },
+    { width: 800, height: 425 },
+  ]) {
+    state.rect = rect;
+    scheduler.request(); clock.frame();
+    clock.advance(16);      // ~one frame of the grid's 200ms transition
+  }
+  assert.deepEqual(state.announced, ['100x25'], 'still nothing while the layout is moving');
+
+  clock.advance(FIT_SETTLE_MS);
+  assert.deepEqual(state.announced, ['100x25', '100x24'],
+    'the settle asks tmux for a redraw instead of returning silently');
+  clock.advance(REPAINT_NUDGE_MS);
+  assert.deepEqual(state.announced, ['100x25', '100x24', '100x25'],
+    'and puts the pane back on its true geometry, repainted');
+  assert.deepEqual(state.size, { cols: 100, rows: 25 },
+    'the nudge changes only what the PTY is TOLD — xterm is never resized by it');
+});
+
+test('the two halves of the nudge cannot land in the same tick', () => {
+  const clock = makeEnv();
+  const { state, scheduler } = makePane(clock);
+  state.rect = { width: 800, height: 425 };
+  scheduler.request(); clock.frame(); clock.advance(FIT_SETTLE_MS * 2);
+  state.rect = { width: 800, height: 150 };
+  scheduler.request(); clock.frame();
+  state.rect = { width: 800, height: 425 };
+  scheduler.request(); clock.frame();
+  clock.advance(FIT_SETTLE_MS);
+  clock.advance(REPAINT_NUDGE_MS - 1);
+  assert.deepEqual(state.announced, ['100x25', '100x24'],
+    'the restore waits out the full gap — two ioctls in one turn coalesce into no size change at all');
+  clock.advance(1);
+  assert.deepEqual(state.announced, ['100x25', '100x24', '100x25']);
+  assert.equal(clock.pendingTimers(), 0, 'and the nudge leaves nothing armed behind it');
+});
+
+test('a real resize landing mid-nudge supersedes it — no stale restore follows', () => {
+  const clock = makeEnv();
+  const { state, scheduler } = makePane(clock);
+  state.rect = { width: 800, height: 425 };
+  scheduler.request(); clock.frame(); clock.advance(FIT_SETTLE_MS * 2);
+  // Bounce → nudge armed.
+  state.rect = { width: 800, height: 150 };
+  scheduler.request(); clock.frame();
+  state.rect = { width: 800, height: 425 };
+  scheduler.request(); clock.frame();
+  clock.advance(FIT_SETTLE_MS);
+  assert.deepEqual(state.announced, ['100x25', '100x24'], 'the shrink half is out');
+  // ...and before the restore fires, the user drags the window to a new size.
+  state.rect = { width: 800, height: 340 };   // 340/17 = 20 rows
+  scheduler.request(); clock.frame();
+  clock.advance(FIT_SETTLE_MS + REPAINT_NUDGE_MS * 2);
+  assert.deepEqual(state.announced, ['100x25', '100x24', '100x20'],
+    'the new geometry is announced once; the superseded restore never fires');
+  assert.equal(clock.pendingTimers(), 0);
+});
+
+test('dispose during a pending nudge sends nothing further', () => {
+  const clock = makeEnv();
+  const { state, scheduler } = makePane(clock);
+  state.rect = { width: 800, height: 425 };
+  scheduler.request(); clock.frame(); clock.advance(FIT_SETTLE_MS * 2);
+  state.rect = { width: 800, height: 150 };
+  scheduler.request(); clock.frame();
+  state.rect = { width: 800, height: 425 };
+  scheduler.request(); clock.frame();
+  clock.advance(FIT_SETTLE_MS);
+  assert.equal(state.announced.length, 2);
+  scheduler.dispose();                      // the pane unmounts mid-nudge
+  clock.advance(REPAINT_NUDGE_MS * 4);
+  assert.equal(state.announced.length, 2, 'a detaching pane sends no restore');
+  assert.equal(clock.pendingTimers(), 0);
+});
+
+test('repaintNudgeSize shrinks by a row — and only grows where a shrink would be clamped away', () => {
+  assert.deepEqual(repaintNudgeSize({ cols: 100, rows: 55 }), { cols: 100, rows: 54 },
+    'shrinking paints one row SHORT of the pane; growing would overflow xterm and scroll it');
+  assert.deepEqual(repaintNudgeSize({ cols: 100, rows: MIN_PTY_ROWS + 1 }), { cols: 100, rows: MIN_PTY_ROWS },
+    'one row above the server clamp still shrinks');
+  assert.deepEqual(repaintNudgeSize({ cols: 100, rows: MIN_PTY_ROWS }), { cols: 100, rows: MIN_PTY_ROWS + 1 },
+    'at the clamp a shrink is flattened server-side into no change at all → grow instead');
+  assert.equal(repaintNudgeSize({ cols: 100, rows: 55 }).cols, 100, 'columns are never touched');
+});
+
+test('a pane that never resized is never nudged', () => {
+  const clock = makeEnv();
+  const { state, scheduler } = makePane(clock);
+  state.rect = { width: 800, height: 425 };
+  scheduler.request(); clock.frame(); clock.advance(FIT_SETTLE_MS * 2);
+  // Re-observed at an identical size (a re-render, a theme change, the mount
+  // backstop): fit() runs, cols/rows do not move, onResize never fires.
+  for (let i = 0; i < 5; i += 1) { scheduler.request(); clock.frame(); clock.advance(16); }
+  clock.advance(FIT_SETTLE_MS + REPAINT_NUDGE_MS);
+  assert.deepEqual(state.announced, ['100x25'], 'no size change, no settle, no repaint traffic');
 });
 
 // === Readiness retry: the case a ResizeObserver can never re-fire for ========

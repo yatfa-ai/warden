@@ -374,6 +374,12 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     // sizes as the grid transition settles; tmux now redraws for the final one
     // instead of once per transient — which is what stopped the input line from
     // hopping. Coalescing fit() alone would NOT have fixed that.
+    // WARDEN-1052: "differs from what the PTY was last told" is not the whole
+    // test. A relayout that BOUNCES (maximize→restore, a panel opened and closed,
+    // a window resize dragged back) really does resize xterm on the way — which
+    // destroys its alternate-screen buffer — and then lands on the size the PTY
+    // already has. The scheduler now answers that settle with a repaint nudge
+    // instead of silence, so tmux repaints the pane it can see is unchanged.
     term.onResize(() => fitScheduler.noteResize());
     // WARDEN-285: copy-on-select. Registered once at mount; the handler reads the
     // latest pref from copyOnSelectRef so a Settings toggle applies live to this
@@ -596,6 +602,11 @@ export function PaneTile({ id, label, focused, maximized, hasNew, onClearNew, on
     // sends a resize only if the pane genuinely ended up a different size —
     // a pane that settles back to where it already was stays silent, and tmux has
     // no reason to redraw the prompt.
+    // WARDEN-1052: attaching also PAINTS this geometry (the server resizes the
+    // PTY and tmux redraws for the new client), which is why markAnnounced is the
+    // right call here and not a bare "remember this number" — it also retires the
+    // settle armed by fitNow() above, so the attach's own fit is not mistaken for
+    // a stale-paint bounce and does not trigger a repaint nudge.
     fitSchedulerRef.current?.markAnnounced({ cols: attachCols, rows: attachRows });
 
     // Elapsed-seconds counter so a slow host reads as "connecting… Ns". Stops
