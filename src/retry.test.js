@@ -113,28 +113,28 @@ describe('backoffMs', () => {
 
   for (const [attempt, lo, hi] of ENVELOPES) {
     it(`attempt ${attempt} always lands in [${lo}, ${hi}] (base ${200 * 2 ** attempt} +/-25%)`, () => {
-      let min = Infinity;
-      let max = -Infinity;
       for (let i = 0; i < SAMPLES; i++) {
         const ms = backoffMs(attempt);
         assert.ok(
           ms >= lo && ms <= hi,
           `backoffMs(${attempt}) returned ${ms}, outside the +/-25% envelope [${lo}, ${hi}]`,
         );
-        if (ms < min) min = ms;
-        if (ms > max) max = ms;
       }
-      // Exponential growth: each attempt's WHOLE envelope sits above the previous
-      // attempt's. Asserting the observed extremes (rather than a single sample)
-      // keeps this deterministic while still catching a linear/constant backoff.
-      assert.ok(min >= lo, `observed minimum ${min} fell below ${lo}`);
-      assert.ok(max <= hi, `observed maximum ${max} rose above ${hi}`);
     });
   }
 
   it('never returns a negative delay', () => {
-    // The Math.max(0, ...) clamp. Includes hostile/degenerate inputs a caller
-    // should never pass but which must not produce a negative setTimeout.
+    // Pins the CONTRACT — backoffMs never hands setTimeout a negative delay —
+    // across normal and degenerate inputs a caller should never actually pass.
+    //
+    // HONEST NOTE ON WHAT THIS DOES *NOT* GUARD: it does not exercise the
+    // `Math.max(0, ...)` clamp in retry.js. That clamp is unreachable given the
+    // bounded jitter — `jitter` is +/-25% of `base`, so `base + jitter >= 0.75 *
+    // base`, and `base = 200 * 2**attempt` is positive for every real attempt
+    // (including the -1 and -5 below: bases 100 and 6.25). Measured: deleting the
+    // clamp leaves this whole file green. So a green run here is NOT a licence to
+    // delete the clamp as dead defensive code — it is the guard that keeps the
+    // contract true if the jitter bound is ever widened past 100%.
     for (const attempt of [0, 1, 2, 3, 5, 10, -1, -5]) {
       for (let i = 0; i < 200; i++) {
         assert.ok(backoffMs(attempt) >= 0, `backoffMs(${attempt}) went negative`);
