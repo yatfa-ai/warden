@@ -26,22 +26,39 @@ export interface ActivitySeriesState {
   series: ActivitySeries | null;
   /** True only during the very first fetch (before any data has arrived). */
   loading: boolean;
+  /** Last fetch error, if any; cleared by the next successful poll. Mirrors
+   *  useLiveTimeline's channel (WARDEN-1060). Load-bearing because `series`
+   *  alone cannot distinguish "still loading" from "loaded, and it failed":
+   *  both failure paths below leave `series` null with `loading` false, so
+   *  without this the panels render their loading string forever (WARDEN-1078).
+   *  Stale data is still retained on failure — see the catch below. */
+  error: Error | null;
 }
 
 export function useActivitySeries(): ActivitySeriesState {
   const [series, setSeries] = useState<ActivitySeries | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
 
   const load = async () => {
     const after = new Date(Date.now() - WINDOW_MS).toISOString();
     try {
       const res = await fetch(`/api/activity/series?after=${encodeURIComponent(after)}`);
-      if (!res.ok) return;
+      // A non-2xx (502/503 mid-restart, dev proxy down, a throw out of the
+      // server's /api/activity/series handler) is a real failure, not a no-op:
+      // record it so an observer can say so instead of claiming to be loading.
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as ActivitySeries;
       setSeries(data);
-    } catch {
+      setError(null);
+    } catch (e) {
       // Transient network blip — keep the last known series rather than blanking
-      // the sparklines to "no data" on every flake.
+      // the sparklines to "no data" on every flake. That retention is deliberate
+      // and preserved; what is NEW is that the failure is also RECORDED, so the
+      // persistent case (no data ever arrived) is representable. Consumers gate
+      // their error UI on `series == null` so a blip after a good poll still
+      // renders the last good chart rather than swapping it for an error.
+      setError(e instanceof Error ? e : new Error(String(e)));
     } finally {
       setLoading(false);
     }
@@ -55,5 +72,5 @@ export function useActivitySeries(): ActivitySeriesState {
   // post-unmount behaves identically (no crash, no warning, no state update).
   useVisiblePoller(load, POLL_MS, []);
 
-  return { series, loading };
+  return { series, loading, error };
 }
