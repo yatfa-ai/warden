@@ -992,8 +992,18 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ host }),
       });
-      const body = await r.json().catch(() => ({}));
-      if (r.ok && body.ok) {
+      // The verdict is `r.ok` ALONE (WARDEN-1094). The route's only 2xx is
+      // res.json({ok:true}), emitted after uninstallCompanion() already
+      // succeeded, and every failure leg is a 400/500 carrying {error} — so the
+      // body tells us nothing the status does not. Reading it as part of the
+      // guard could only get the verdict WRONG: fetch resolves on headers, so a
+      // 200 whose body truncates mid-stream parses to {}, and the old
+      // `r.ok && body.ok` sent a provably-successful removal down the failure
+      // leg — toasting "HTTP 200", leaving the confirm dialog open, and skipping
+      // the refreshes the comment below exists to guarantee. This mirrors the
+      // /api/kill sibling declared above, runFanout in lib/fanout.ts, which
+      // likewise gates on r.ok and lets the body inform only the error string.
+      if (r.ok) {
         toast.success(`Removed companion from ${hostLabelFor(host, hostLabels) || host}`);
         setRemoveCompanionHost(null);
         // Reflect the removal immediately. The host-status surface that carries
@@ -1006,6 +1016,10 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
         // separate /api/health agent rows in parallel.
         await Promise.all([fetchHealth(), refreshHostStatuses()]);
       } else {
+        // Failure leg only: here the body is genuinely optional — a 4xx/5xx may
+        // carry {error}, or may be a gateway's HTML, so the .catch fallback to
+        // `HTTP ${r.status}` is the legitimate use of this pattern (WARDEN-89).
+        const body = await r.json().catch(() => ({}));
         toast.error(`Failed to remove companion from ${hostLabelFor(host, hostLabels) || host}`, {
           description: body.error || `HTTP ${r.status}`,
         });
