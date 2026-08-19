@@ -2295,4 +2295,103 @@ test('a positive PAST-expiry value is KEPT (the sanitizer deliberately does not 
   assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-a': 1, 'chat-b': 946684800000 });
 });
 
+console.log('\nmutedAlertKeys (muted chat keys) is sanitized on load — WARDEN-364 / characterization for WARDEN-1091');
+// WARDEN-1091: parseMutedKeys is the ONLY one of the five array sanitizers in
+// storage.ts with no behavior-locking spec block, and it carries the most
+// divergent ENTRY rule of the five (a bare `typeof k !== 'string'` guard where
+// its four siblings guard `!entry || typeof entry !== 'object'`). These tests
+// pin its CURRENT behavior against the pre-refactor code so the extraction of
+// the shared parseEntryArray skeleton cannot silently relax or tighten it. They
+// are characterization tests: they passed before the refactor and must keep
+// passing after, unchanged. (Same discipline as the WARDEN-1027 block above.)
+test('defaults to [] when nothing is stored', () => {
+  reset();
+  assert.deepEqual(loadUi().mutedAlertKeys, []);
+});
+test('a missing field loads as []', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'] }));
+  assert.deepEqual(loadUi().mutedAlertKeys, []);
+});
+test('a valid key list round-trips', () => {
+  reset();
+  saveUi({ ...loadUi(), mutedAlertKeys: ['host/chat-a', 'host/chat-b'] });
+  assert.deepEqual(loadUi().mutedAlertKeys, ['host/chat-a', 'host/chat-b']);
+});
+test('a non-array coerces to [] (defensive, no throw)', () => {
+  reset();
+  // A string is not an array → [].
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: 'bogus' }));
+  assert.deepEqual(loadUi().mutedAlertKeys, []);
+  // A plain object → [].
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: { 'chat-a': true } }));
+  assert.deepEqual(loadUi().mutedAlertKeys, []);
+  // A number → [].
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: 42 }));
+  assert.deepEqual(loadUi().mutedAlertKeys, []);
+  // null → [] (the "absent" case, not corruption).
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: null }));
+  assert.deepEqual(loadUi().mutedAlertKeys, []);
+});
+test('a present-but-wrong-type value WARNS, while an absent one is silent', () => {
+  // The operator-facing corruption signal (WARDEN-89). Absence is normal and
+  // must stay quiet; a present-but-wrong-type payload is genuine corruption and
+  // must surface. This asymmetry is the whole point of the shared preamble.
+  const realWarn = console.warn;
+  const warnsFor = (payload) => {
+    const seen = [];
+    console.warn = (...args) => { seen.push(String(args[0])); };
+    try {
+      reset();
+      mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], ...payload }));
+      loadUi();
+    } finally {
+      console.warn = realWarn;
+    }
+    return seen.filter((m) => m.includes('mutedAlertKeys is not an array; ignoring'));
+  };
+  assert.equal(warnsFor({ mutedAlertKeys: 'bogus' }).length, 1, 'a string payload warns');
+  assert.equal(warnsFor({ mutedAlertKeys: 42 }).length, 1, 'a number payload warns');
+  assert.equal(warnsFor({ mutedAlertKeys: null }).length, 0, 'null is absent, not corrupt — silent');
+  assert.equal(warnsFor({}).length, 0, 'a missing field is absent, not corrupt — silent');
+  assert.equal(warnsFor({ mutedAlertKeys: ['host/chat-a'] }).length, 0, 'a valid array never warns');
+});
+test('non-string entries are dropped (one corrupt entry never blanks the mute set)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({
+    activeTabs: ['x'],
+    mutedAlertKeys: [1, true, null, { name: 'chat-a' }, ['chat-b'], 'chat-c'],
+  }));
+  assert.deepEqual(loadUi().mutedAlertKeys, ['chat-c']);
+});
+test('entries are trimmed (a padded key survives under its trimmed form)', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: ['  host/chat-a  '] }));
+  assert.deepEqual(loadUi().mutedAlertKeys, ['host/chat-a']);
+});
+test('blank and whitespace-only entries are dropped', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: ['', '   ', '\t\n', 'chat-a'] }));
+  assert.deepEqual(loadUi().mutedAlertKeys, ['chat-a']);
+});
+test('duplicates are dropped on the TRIMMED value, first occurrence wins, order preserved', () => {
+  reset();
+  mem.set('warden:ui:v3', JSON.stringify({
+    activeTabs: ['x'],
+    mutedAlertKeys: ['chat-b', 'chat-a', '  chat-b  ', 'chat-c', 'chat-a'],
+  }));
+  // 'chat-b' and 'chat-a' keep their FIRST position; the padded repeat of
+  // 'chat-b' collides under its trimmed form and is dropped, not re-appended.
+  assert.deepEqual(loadUi().mutedAlertKeys, ['chat-b', 'chat-a', 'chat-c']);
+});
+test('the mute set is NOT capped (every valid key survives)', () => {
+  // Unlike recentlyClosed/snippets, parseMutedKeys has no cap constant — a long
+  // mute list must round-trip whole. Pinned so the shared skeleton's optional
+  // cap is never wired up here by accident.
+  reset();
+  const many = Array.from({ length: 120 }, (_, i) => `host/chat-${i}`);
+  mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], mutedAlertKeys: many }));
+  assert.deepEqual(loadUi().mutedAlertKeys, many);
+});
+
 console.log(`\n✓ STORAGE TESTS PASS (${passed})`);
