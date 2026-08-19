@@ -20,7 +20,7 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator,
 import { IconTooltip } from '@/components/ui/icon-tooltip';
 import { StatusDot } from '@/components/StatusDot';
 import { cn } from '@/lib/utils';
-import { chatType, displayName, hostTagOf, hostLabelFor } from '@/lib/chatDisplay';
+import { chatType, displayName, hostTagOf } from '@/lib/chatDisplay';
 import { useHostLabels } from '@/lib/hostLabels';
 import { formatTimestamp, formatAbsoluteFull, type TimestampFormat } from '@/lib/formatTimestamp';
 import type { Chat, AgentStateRow } from '@/lib/types';
@@ -159,7 +159,7 @@ export function ChatRow({ c, open, onOpen, onKill, onRename, dim, hostStatus, sh
   };
   const type = chatType(c);
   const typeColor = TYPE_COLOR[type] || 'text-violet-400';
-  const hostTag = isUser ? (hostLabelFor(c.host, hostLabels) || (c.host === '(local)' ? 'local' : (c.host || ''))) : null;
+  const hostTag = isUser ? hostTagOf(c.host || '', hostLabels) : null;
   // WARDEN-198: when this agent's managed host is offline, render a distinct
   // "unreachable" state instead of the ambiguous idle/undiscovered gray dot.
   // Driven by the shared 30s host-status poll, so it self-clears on recovery.

@@ -46,7 +46,7 @@ import { useFleetGitStatus } from '@/lib/useFleetGitStatus';
 import { useNotificationPrefs } from '@/lib/useNotificationPrefs';
 import { useVisiblePoller } from '@/lib/useVisiblePoller';
 import { buildAgentActivity, selectAgentSparkline } from '@/lib/agentSparkline';
-import { displayName, hostLabelFor, THIS_MACHINE } from '@/lib/chatDisplay';
+import { displayName, hostLabelFor, hostTagOf, THIS_MACHINE } from '@/lib/chatDisplay';
 import { formatTokens } from '@/lib/formatTokens';
 import { useHostLabels } from '@/lib/hostLabels';
 import { cn } from '@/lib/utils';
@@ -1490,7 +1490,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
                       */}
                       <div className="flex flex-wrap items-center gap-1.5 min-w-0 pl-7">
                         {summarizeProjectHosts(group.agents, (h) => hostStatuses[h]).map((span, i) => {
-                          const spanLabel = hostLabelFor(span.host, hostLabels) || (span.host === '(local)' ? 'local' : span.host);
+                          const spanLabel = hostTagOf(span.host, hostLabels);
                           return (
                             <Fragment key={span.host}>
                               {i > 0 && <span className="text-[10px] text-muted-foreground/40">·</span>}
@@ -1540,7 +1540,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
                   const status = hostStatuses[group.host];
                   const collapsed = !!collapsedHosts[group.host];
                   const dist = HEALTH_SECTION_ORDER.filter(s => group.counts[s] > 0);
-                  const hostLabel = hostLabelFor(group.host, hostLabels) || (group.host === '(local)' ? 'local' : group.host);
+                  const hostLabel = hostTagOf(group.host, hostLabels);
                   // Per-host rolled-up CPU/mem (WARDEN-361): mean cpu, MAX mem, or
                   // null when no agent carries docker-stats. Rendered in the line-2
                   // distribution area so an overloaded host (≥90% mem) is red and
