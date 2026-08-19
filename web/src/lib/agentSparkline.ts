@@ -16,6 +16,10 @@
 // (criterion #1). Extracted here as PURE functions so the cases are unit-testable
 // without a DOM (mirrors web/src/lib/attentionRollup.ts + its web/*.test.mjs),
 // and so HealthDashboard's render is a thin call instead of inline JSX logic.
+// Its ONE runtime import is the shared aria-label formatter (WARDEN-1080) —
+// web/agentSparkline.test.mjs transpiles that module into the same tmpdir and
+// rewrites the specifier, the pattern web/storage.test.mjs established.
+import { activityAriaLabel } from '@/lib/activityAria';
 import type { ActivitySeries, Chat } from '@/lib/types';
 
 /** Per-container 24h totals, pre-summed for an O(1) row lookup + aria-label. */
@@ -89,7 +93,7 @@ export function selectAgentSparkline(
     return {
       values: a.values,
       errors: a.errors,
-      ariaLabel: `${a.totalSum} event${a.totalSum === 1 ? '' : 's'}, ${a.errorSum} error${a.errorSum === 1 ? '' : 's'} in the last 24 hours`,
+      ariaLabel: activityAriaLabel(a.totalSum, a.errorSum),
     };
   }
 
@@ -98,7 +102,7 @@ export function selectAgentSparkline(
   // (its `hasData` guard is false → the flat-baseline branch), not a blank.
   if (bucketCount > 0) {
     const zeros = new Array<number>(bucketCount).fill(0);
-    return { values: zeros, errors: zeros, ariaLabel: '0 events in the last 24 hours' };
+    return { values: zeros, errors: zeros, ariaLabel: activityAriaLabel(0, 0) };
   }
 
   // Series not loaded yet (bucketCount 0) — render nothing until it is.

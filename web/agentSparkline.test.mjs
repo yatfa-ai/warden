@@ -3,9 +3,11 @@
 //
 // No front-end test runner in this repo, so (like attentionRollup.test.mjs) this
 // loads the REAL src/lib/agentSparkline.ts (transpiled TS -> ESM via Vite's OXC
-// transform) and exercises it with plain objects. The `import type` in that file
-// is erased at transpile time, so the emitted module is import-free and loads
-// standalone.
+// transform) and exercises it with plain objects. That file now has one runtime
+// import — the shared aria-label formatter (WARDEN-1080) — so, following the
+// web/storage.test.mjs precedent, we transpile BOTH modules into the same tmp dir
+// and rewrite the bare `@/lib/activityAria` specifier to a relative path Node can
+// resolve. (`import type` lines are still erased at transpile time.)
 //
 // The case this file exists to lock down is selectAgentSparkline's THIRD branch:
 // a container that is alive but had ZERO events in the window must yield a
@@ -24,13 +26,17 @@ import assert from 'node:assert/strict';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const helperPath = resolve(__dirname, 'src/lib/agentSparkline.ts');
+const ariaPath = resolve(__dirname, 'src/lib/activityAria.ts');
 
 // --- Load the REAL agentSparkline.ts (TS -> ESM via the OXC transform Vite bundles) ----
 const src = readFileSync(helperPath, 'utf8');
+const ariaSrc = readFileSync(ariaPath, 'utf8');
 const { code } = await transformWithOxc(src, helperPath, {});
+const { code: ariaCode } = await transformWithOxc(ariaSrc, ariaPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-agentspark-test-'));
+writeFileSync(join(tmpDir, 'activityAria.mjs'), ariaCode);
 const tmpFile = join(tmpDir, 'agentSparkline.mjs');
-writeFileSync(tmpFile, code);
+writeFileSync(tmpFile, code.replaceAll('@/lib/activityAria', './activityAria.mjs'));
 const { buildAgentActivity, selectAgentSparkline } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
@@ -107,10 +113,13 @@ test('aria-label is singular for exactly one event / one error', () => {
   const sel = selectAgentSparkline(agent('c1'), m, 5);
   assert.equal(sel.ariaLabel, '1 event, 1 error in the last 24 hours');
 });
-test('active agent with zero errors pluralizes events only', () => {
+test('active agent with zero errors omits the errors clause entirely', () => {
+  // WARDEN-1080: this used to assert '4 events, 0 errors …' — the one path of four
+  // that announced a zero error count. It now matches rowAriaLabel byte-for-byte
+  // (see the cross-producer parity test in activityAria.test.mjs).
   const m = buildAgentActivity(series({ c1: activityEntry([0, 4, 0, 0, 0]) }));
   const sel = selectAgentSparkline(agent('c1'), m, 5);
-  assert.equal(sel.ariaLabel, '4 events, 0 errors in the last 24 hours');
+  assert.equal(sel.ariaLabel, '4 events in the last 24 hours');
 });
 
 console.log('\ncase 3 — container with NO events (idle) -> zero-filled flat baseline');

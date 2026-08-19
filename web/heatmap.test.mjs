@@ -4,9 +4,11 @@
 //
 // No front-end test runner in this repo, so (like agentSparkline.test.mjs) this
 // loads the REAL src/lib/heatmap.ts (transpiled TS -> ESM via Vite's OXC
-// transform) and exercises it with plain objects. The `import type` in that file
-// is erased at transpile time, so the emitted module is import-free and loads
-// standalone.
+// transform) and exercises it with plain objects. That file now has one runtime
+// import — the shared aria-label formatter (WARDEN-1080) — so, following the
+// web/storage.test.mjs precedent, we transpile BOTH modules into the same tmp dir
+// and rewrite the bare `@/lib/activityAria` specifier to a relative path Node can
+// resolve. (`import type` lines are still erased at transpile time.)
 //
 // The case this file exists to lock down is selectHeatmapCells's THIRD branch +
 // the shared-axis normalization: a container that is alive but had ZERO events
@@ -27,13 +29,17 @@ import assert from 'node:assert/strict';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const helperPath = resolve(__dirname, 'src/lib/heatmap.ts');
+const ariaPath = resolve(__dirname, 'src/lib/activityAria.ts');
 
 // --- Load the REAL heatmap.ts (TS -> ESM via the OXC transform Vite bundles) ----
 const src = readFileSync(helperPath, 'utf8');
+const ariaSrc = readFileSync(ariaPath, 'utf8');
 const { code } = await transformWithOxc(src, helperPath, {});
+const { code: ariaCode } = await transformWithOxc(ariaSrc, ariaPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-heatmap-test-'));
+writeFileSync(join(tmpDir, 'activityAria.mjs'), ariaCode);
 const tmpFile = join(tmpDir, 'heatmap.mjs');
-writeFileSync(tmpFile, code);
+writeFileSync(tmpFile, code.replaceAll('@/lib/activityAria', './activityAria.mjs'));
 const {
   selectHeatmapCells,
   cellIntensity,
@@ -217,7 +223,7 @@ test('degenerate inputs -> empty', () => {
   assert.deepEqual(bucketLabelIndices(5, -1), []);
 });
 
-console.log('\nrowAriaLabel — screen-reader summary per row (mirrors sparkline grammar)');
+console.log('\nrowAriaLabel — screen-reader summary per row (delegates to the shared activityAriaLabel)');
 test('plural events, no errors', () => {
   const cells = [{ total: 5, error: 0 }, { total: 1, error: 0 }];
   assert.equal(rowAriaLabel(cells), '6 events in the last 24 hours');
