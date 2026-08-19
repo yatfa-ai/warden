@@ -229,18 +229,50 @@ export async function localClaudeSessions(limit = 40) {
 //
 // The fix is per-line first-occurrence-wins: `grep -on` keeps the JSONL line
 // number on every match, so awk can reset its four "seen" flags whenever the
-// line number changes and count each field once per record. First-occurrence is
-// the ROLLUP because it is emitted before its own `iterations[]` in the raw text
-// (verified 7611/7611 locally). Adding `-n` costs no portability: it is POSIX,
-// unlike the `-o` this pipeline already relies on.
+// line number changes and count each field once per record. Adding `-n` costs
+// no portability: it is POSIX, unlike the `-o` this pipeline already relies on.
+//
+// WHAT FIRST-OCCURRENCE-WINS ACTUALLY REQUIRES (WARDEN-1092). "The rollup is
+// emitted before its own iterations[]" is TRUE but is NOT the invariant this
+// dedup needs. It needs the strictly stronger property that NO key named
+// input_tokens / output_tokens / cache_creation_input_tokens /
+// cache_read_input_tokens, FROM ANY JSON PATH, precedes the `message.usage`
+// rollup on that line — `iterations[]` is only one such source. That stronger
+// property is FALSE in the wild: a transcript measured at WARDEN-1088's HEAD
+// carried, on one assistant line, a tool ARGUMENT at
+// `.message.content[].input.metadata.frozen_window_measured.output_tokens`
+// (85502) ahead of the real rollup (3362) — so the scan took 85502 and
+// DISCARDED the true value. That is a new failure direction: pre-WARDEN-1088
+// the scan could only over-add; a naked first-occurrence rule can UNDER-count.
+// Scope was small (1 file in 407, ~2.3% of that file's total) but real.
+//
+// So the match is gated on `"usage":{`: the grep alternation emits that opener
+// as its own token, and awk counts the four names only AFTER it has seen one on
+// the current line (flag `u`, reset with the seen flags on every line change).
+// This is sound rather than heuristic — a rollup key is BY CONSTRUCTION inside
+// its own `"usage":{...}` object, and JSONL puts that whole object on one line,
+// so the opener always precedes the rollup on that line. The gate therefore
+// cannot suppress a true rollup; it can only drop same-named keys that precede
+// every `"usage":{` on the line, and such a key is never the rollup.
+//
+// STILL ASSUMED, NOT PROVEN: a foreign same-named key sitting AFTER some
+// `"usage":{` but BEFORE `message.usage` would still win. Nothing rules that
+// out — it is unobserved, not impossible. Closing it needs to know which object
+// a key belongs to, i.e. brace tracking, i.e. substr/split — see the
+// portability rule below. Falsify this claim by finding a line where the four
+// grep matches after the first `"usage":{` are not the rollup's.
 //
 // The awk deliberately uses ONLY POSIX field splitting, scalar flags, regex
-// match and printf — no `delete`, arrays, `match()`, `substr()` or `split()` —
-// because a minimal remote host may run busybox/mawk. `-F:` splits each grep
-// record `LINE:"key":VALUE` into the line number ($1), the quoted key ($2) and
-// the value ($NF); the key names contain no colon, so the split is unambiguous.
-// Verified byte-identical to parseJsonlTokenUsage on all 78 local transcripts
-// under BOTH busybox awk and mawk.
+// match, `next` and printf — no `delete`, arrays, `match()`, `substr()` or
+// `split()` — because a minimal remote host may run busybox/mawk. `-F:` splits
+// each grep record `LINE:"key":VALUE` into the line number ($1), the quoted key
+// ($2) and the value ($NF); the key names contain no colon, so the split is
+// unambiguous. The `"usage":{` token splits the same way ($2 == `"usage"`,
+// $NF == `{`, which numifies to the harmless 0). Verified byte-identical to
+// parseJsonlTokenUsage on all 80 local transcripts (16521 lines, 7779 carrying
+// a rollup) under BOTH busybox awk 1.35.0 and mawk 1.3.4 — the gate changed no
+// local total, since every one of those lines already had `"usage":{` ahead of
+// its first match.
 //
 // KNOWN, DELIBERATE RESIDUAL: subagent turns store usage at
 // `toolUseResult.usage.*` rather than `message.usage.*`. This name-keyed scan
@@ -248,15 +280,21 @@ export async function localClaudeSessions(limit = 40) {
 // read higher remotely. That is a genuine product question — do subagent tokens
 // belong in a session total? — and NOT the double-count fixed here (a total
 // summed with its own parts is wrong under any definition). Left as-is on
-// purpose. The two never interact: no JSONL line carries both keys, so the
-// per-line dedup above cannot swallow or alter this class. (WARDEN-1088.)
+// purpose: `toolUseResult.usage` carries its own `"usage":{` opener, so the gate
+// arms for it exactly as before. On the corpus measured for WARDEN-1088 no
+// JSONL line carried both keys, so the per-line dedup did not interact with
+// this class — but that is a property of that corpus, not a guarantee. On a
+// line that did carry both, whichever came first would win.
+// (WARDEN-1088, WARDEN-1092.)
 export function buildRemoteSessionScript() {
   return `for f in ~/.claude/projects/*/*.jsonl; do
 [ -f "$f" ] || continue
 id=$(basename "$f" .jsonl)
 mt=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)
-tu=$(grep -onE '"(input_tokens|output_tokens|cache_creation_input_tokens|cache_read_input_tokens)"[[:space:]]*:[[:space:]]*[0-9]+' "$f" 2>/dev/null | awk -F: '
-{ if ($1 != pl) { pl = $1; si = 0; so = 0; scc = 0; scr = 0 }; v = $NF + 0 }
+tu=$(grep -onE '"(input_tokens|output_tokens|cache_creation_input_tokens|cache_read_input_tokens)"[[:space:]]*:[[:space:]]*[0-9]+|"usage"[[:space:]]*:[[:space:]]*[{]' "$f" 2>/dev/null | awk -F: '
+{ if ($1 != pl) { pl = $1; u = 0; si = 0; so = 0; scc = 0; scr = 0 }; v = $NF + 0 }
+$2 ~ /^"usage"/ { u = 1; next }
+!u { next }
 $2 ~ /^"cache_creation_input_tokens"/ { if (!scc) { scc = 1; cc += v } }
 $2 ~ /^"cache_read_input_tokens"/     { if (!scr) { scr = 1; cr += v } }
 $2 ~ /^"input_tokens"/                { if (!si)  { si  = 1; inp += v } }
