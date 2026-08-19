@@ -62,6 +62,8 @@ const {
   getTelemetryRuntimeStatus,
   onTelemetryRuntimeStatus,
   clearTelemetryRuntimeDrift,
+  setTelemetryContext,
+  forwardRendererError,
 } = await import(file);
 
 // --- Load the REAL mainOwnedPref.ts (the CONSUMER of the setters above) -----
@@ -76,6 +78,24 @@ const reconcileOut = await transformWithOxc(reconcileSrc, join(libDir, 'mainOwne
 const reconcileFile = join(tmpDir, 'mainOwnedPref.mjs');
 writeFileSync(reconcileFile, reconcileOut.code);
 const { reconcileMainOwnedPref } = await import(reconcileFile);
+
+// --- Two INDEPENDENT extra copies of electron.ts (fresh install latches) ----
+// `rendererErrorCaptureInstalled` (electron.ts:407) is MODULE-LEVEL and latches
+// on the first successful install, so within one module instance the capture can
+// be installed exactly once — every later call no-ops no matter what `window`
+// says. The install tests therefore need modules whose latch is still false.
+// `import()` caches per RESOLVED PATH, so writing the same transpiled `code` to a
+// different filename yields a genuinely separate module instance with its own
+// latch (and its own copy of the private `serializeErrorForTelemetry`).
+//   - captureMod: drives the absent-`window` early return (which returns BEFORE
+//     setting the latch, so the module stays pristine) and then the real install.
+//   - idempotenceMod: a pristine module for the install-twice guard test.
+const captureFile = join(tmpDir, 'electron-capture.mjs');
+writeFileSync(captureFile, code);
+const captureMod = await import(captureFile);
+const idempotenceFile = join(tmpDir, 'electron-idempotence.mjs');
+writeFileSync(idempotenceFile, code);
+const idempotenceMod = await import(idempotenceFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -543,6 +563,329 @@ await testAsync('the optimistic write lands BEFORE the persist call settles (the
   release(false);
   await done;
   assert.deepEqual(display.seen, [true, false], 'and reconciled once main answered');
+});
+
+// Record console.warn instead of blanket-silencing it, so a "no-op" that is
+// really a caught internal TypeError is distinguishable from a clean return.
+// (restore() puts the real console.warn back after every case.)
+const recordWarn = () => {
+  const warns = [];
+  console.warn = (...args) => { warns.push(args); };
+  return warns;
+};
+
+// ---------------------------------------------------------------------------
+console.log('\nsetTelemetryContext — the focused-name push (WARDEN-538)');
+// ---------------------------------------------------------------------------
+await testAsync('no-ops when the bridge is absent (browser/dev/smoke), never rejects', async () => {
+  const warns = recordWarn();
+  noBridge();
+  await setTelemetryContext({ chatName: 'anything' });
+  assert.deepEqual(warns, [], 'a clean return, not a caught internal failure');
+});
+await testAsync('delegates the context straight to the bridge', async () => {
+  let seen;
+  telemetryBridge({ setContext: async (ctx) => { seen = ctx; } });
+  await setTelemetryContext({ chatName: 'refactor the poller' });
+  assert.deepEqual(seen, { chatName: 'refactor the poller' });
+});
+await testAsync('a nullish context is coerced to {} (main never receives null)', async () => {
+  let seen = 'unset';
+  telemetryBridge({ setContext: async (ctx) => { seen = ctx; } });
+  await setTelemetryContext(null);
+  assert.deepEqual(seen, {}, 'null becomes an empty context, not null');
+});
+await testAsync('a REJECTING setContext is swallowed — never an unhandled rejection', async () => {
+  silenceWarn();
+  telemetryBridge({ setContext: async () => { throw new Error('bridge exploded'); } });
+  await setTelemetryContext({ chatName: 'x' });
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nforwardRendererError — serialization (WARDEN-637, WARDEN-1082)');
+// The warden UI is a React app, so a non-fatal renderer error is invisible to
+// main's process-level telemetry (render-process-gone / unresponsive) unless
+// this forward carries it. Main's half IS pinned (telemetry-source.test.mjs:463+
+// asserts buildErrorEvent reads a serialized { name, message, stack }); nothing
+// asserted the RENDERER ever produces that shape. These cases pin the sender.
+// `serializeErrorForTelemetry` is private, so every case drives it through the
+// public forward and reads what the bridge actually received.
+// ---------------------------------------------------------------------------
+
+// Install a telemetry bridge that records every serialized payload it is handed.
+const reportSink = () => {
+  const seen = [];
+  telemetryBridge({ reportError: (payload) => { seen.push(payload); } });
+  return seen;
+};
+
+test('an Error instance carries name/message/stack through', () => {
+  const seen = reportSink();
+  const err = new TypeError('cannot read properties of undefined');
+  err.stack = 'TypeError: cannot read properties of undefined\n    at Chat (Chat.tsx:12:3)';
+  forwardRendererError(err);
+  assert.equal(seen.length, 1);
+  assert.deepEqual(seen[0], {
+    name: 'TypeError',
+    message: 'cannot read properties of undefined',
+    stack: 'TypeError: cannot read properties of undefined\n    at Chat (Chat.tsx:12:3)',
+  });
+});
+
+test('an Error with a blanked name falls back to "Error" (never an empty name)', () => {
+  const seen = reportSink();
+  const err = new Error('boom');
+  err.name = '';
+  err.stack = '';
+  forwardRendererError(err);
+  assert.deepEqual(seen[0], { name: 'Error', message: 'boom', stack: '' });
+});
+
+test('a plain object adopts ONLY its string fields; wrong-typed fields keep the defaults', () => {
+  const seen = reportSink();
+  forwardRendererError({ name: 42, message: 'partially structured', stack: null });
+  assert.deepEqual(
+    seen[0],
+    { name: 'Error', message: 'partially structured', stack: '' },
+    'a numeric name and a null stack are ignored, not stringified',
+  );
+});
+
+test('a plain object with an EMPTY name keeps the "Error" default (the truthiness guard)', () => {
+  const seen = reportSink();
+  forwardRendererError({ name: '', message: '', stack: 'at somewhere' });
+  assert.deepEqual(seen[0], { name: 'Error', message: '', stack: 'at somewhere' });
+});
+
+test('a thrown STRING lands in message; name stays "Error"', () => {
+  const seen = reportSink();
+  forwardRendererError('something went wrong');
+  assert.deepEqual(seen[0], { name: 'Error', message: 'something went wrong', stack: '' });
+});
+
+test('nullish and non-object throws degrade to the defaults and never throw', () => {
+  const seen = reportSink();
+  for (const value of [null, undefined, 42, false]) forwardRendererError(value);
+  assert.equal(seen.length, 4, 'every shape still forwards — the channel never drops here');
+  for (const payload of seen) {
+    assert.deepEqual(payload, { name: 'Error', message: '', stack: '' });
+  }
+});
+
+test('componentStack APPENDS to a non-empty stack, separated by a newline', () => {
+  // The frames then parse into the event's frames array; the schema carries no
+  // separate componentStack field, so the stack is the one slot the component
+  // tree can reach without a schema change (electron.ts:352-357).
+  const seen = reportSink();
+  const err = new Error('render blew up');
+  err.stack = 'Error: render blew up\n    at Chat (Chat.tsx:12:3)';
+  forwardRendererError(err, '\n    at ErrorBoundary (App.tsx:1951:5)');
+  assert.equal(
+    seen[0].stack,
+    'Error: render blew up\n    at Chat (Chat.tsx:12:3)\n\n    at ErrorBoundary (App.tsx:1951:5)',
+  );
+});
+
+test('componentStack REPLACES the stack when the error carries none', () => {
+  const seen = reportSink();
+  forwardRendererError({ message: 'no stack here' }, '    at ErrorBoundary (App.tsx:2041:5)');
+  assert.deepEqual(seen[0], {
+    name: 'Error',
+    message: 'no stack here',
+    stack: '    at ErrorBoundary (App.tsx:2041:5)',
+    // no leading newline — the empty stack is replaced, not appended to
+  });
+});
+
+test('an EMPTY or nullish componentStack is skipped, leaving the stack untouched', () => {
+  const seen = reportSink();
+  const err = new Error('boom');
+  err.stack = 'Error: boom\n    at Chat (Chat.tsx:12:3)';
+  forwardRendererError(err, '');
+  forwardRendererError(err, null);
+  forwardRendererError(err, undefined);
+  for (const payload of seen) {
+    assert.equal(payload.stack, 'Error: boom\n    at Chat (Chat.tsx:12:3)', 'no stray newline');
+  }
+});
+
+test('the forwarded payload is a PLAIN serializable object — NOT an Error instance', () => {
+  // The load-bearing invariant of the whole channel (electron.ts:337-339): an
+  // Error instance does not survive the contextBridge structured clone with its
+  // prototype, so `name`/`message`/`stack` would arrive empty and main would
+  // build empty events. Serializing must stay HERE, in the renderer's main world.
+  // This assertion is what stops someone "simplifying" it back into main.
+  const seen = reportSink();
+  forwardRendererError(new RangeError('out of range'));
+  const payload = seen[0];
+  assert.equal(payload instanceof Error, false, 'an Error would not survive the clone');
+  assert.equal(Object.getPrototypeOf(payload), Object.prototype, 'a plain object literal');
+  assert.deepEqual(
+    Object.keys(payload).sort(),
+    ['message', 'name', 'stack'],
+    'exactly the shape telemetry-source.test.mjs asserts main reads',
+  );
+  for (const key of Object.keys(payload)) assert.equal(typeof payload[key], 'string');
+  assert.deepEqual(JSON.parse(JSON.stringify(payload)), payload, 'survives serialization intact');
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nforwardRendererError — degradation (it must never break the caller)');
+// The forward fails silently BY CONSTRUCTION: it is wired into an ErrorBoundary's
+// onError, so a throw escaping it would break error handling itself — at exactly
+// the moment the app is already broken. Nothing red appears if this stops
+// working, which is why the degradation paths are pinned rather than assumed.
+//
+// "It did not throw" is NOT a sufficient assertion here: the catch-all at
+// electron.ts:391-393 swallows everything, so a version with its guards DELETED
+// would also not throw — it would throw internally and log. So these cases assert
+// on console.warn too: a guarded path must return CLEANLY (zero warns), and only
+// a genuinely throwing bridge may reach the swallow (exactly one warn).
+// ---------------------------------------------------------------------------
+
+test('bridge absent (browser / npm run dev / node web/smoke.cjs) — a CLEAN no-op', () => {
+  const warns = recordWarn();
+  noBridge();
+  forwardRendererError(new Error('boom'), 'at Chat');
+  assert.deepEqual(warns, [], 'returned before touching the bridge — no caught TypeError');
+});
+
+test('bridge present but reportError is not a function — a guarded CLEAN no-op', () => {
+  const warns = recordWarn();
+  telemetryBridge({ reportError: 'not a function' });
+  forwardRendererError(new Error('boom'));
+  telemetryBridge({});
+  forwardRendererError(new Error('boom'));
+  telemetryBridge({ reportError: null });
+  forwardRendererError(new Error('boom'));
+  assert.deepEqual(warns, [], 'the typeof guard returns cleanly instead of calling and catching');
+});
+
+test('a THROWING reportError is swallowed — the ErrorBoundary caller is unaffected', () => {
+  const warns = recordWarn();
+  let called = 0;
+  telemetryBridge({ reportError: () => { called += 1; throw new Error('bridge exploded'); } });
+  forwardRendererError(new Error('boom'));
+  assert.equal(called, 1, 'the bridge really was called — the swallow is not a skip');
+  assert.equal(warns.length, 1, 'and the degradation IS logged (this is the only path that warns)');
+});
+
+// ---------------------------------------------------------------------------
+console.log('\ninstallRendererErrorCapture — the global (non-React) half');
+// These listeners MUST live in the renderer's MAIN world: under contextIsolation
+// a listener installed in preload's isolated world never fires for main-world
+// errors (sentry-electron#316, WARDEN-648).
+// ---------------------------------------------------------------------------
+
+// A `window` fake that records addEventListener registrations so the installed
+// handlers can be driven directly. Extended locally (rather than folded into the
+// shared telemetryBridge helper) so the 55 pre-existing cases stay untouched.
+const recordingWindow = (bridge) => {
+  const handlers = {};
+  const w = {
+    handlers,
+    count: () => Object.values(handlers).reduce((n, list) => n + list.length, 0),
+    fire: (type, event) => { for (const h of handlers[type] ?? []) h(event); },
+    addEventListener: (type, fn) => { (handlers[type] ??= []).push(fn); },
+  };
+  if (bridge) w.wardenTelemetry = bridge;
+  return w;
+};
+
+// Held at module scope so the handlers installed into it survive `restore()` and
+// can be re-driven case by case (the bridge is re-read from globalThis.window at
+// CALL time, so each case below supplies its own sink).
+const capturedWindow = recordingWindow();
+
+// captureMod is a pristine copy of electron.ts. This case runs FIRST and on
+// purpose: the absent-`window` guard returns BEFORE the latch is set, so the
+// module is still installable afterwards — which every case below relies on.
+test('no-ops when `window` is absent or has no addEventListener (non-DOM host)', () => {
+  globalThis.window = undefined;
+  captureMod.installRendererErrorCapture();
+  globalThis.window = {}; // a `window` with no addEventListener
+  captureMod.installRendererErrorCapture();
+  globalThis.window = capturedWindow;
+  captureMod.installRendererErrorCapture();
+  assert.equal(capturedWindow.count(), 2, 'the guarded calls latched nothing, so this one still installs');
+});
+
+test('registers listeners for BOTH `error` and `unhandledrejection`', () => {
+  assert.deepEqual(
+    Object.keys(capturedWindow.handlers).sort(),
+    ['error', 'unhandledrejection'],
+  );
+  assert.equal(capturedWindow.handlers.error.length, 1);
+  assert.equal(capturedWindow.handlers.unhandledrejection.length, 1);
+});
+
+test('an `error` event forwards event.error (the thrown value)', () => {
+  const seen = reportSink();
+  capturedWindow.fire('error', { error: new TypeError('undefined is not a function'), message: 'ignored' });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].name, 'TypeError');
+  assert.equal(seen[0].message, 'undefined is not a function', 'the thrown value wins over .message');
+});
+
+test('an `error` event with NO .error falls back to the message string (resource-load errors)', () => {
+  const seen = reportSink();
+  capturedWindow.fire('error', { message: 'Script error.' });
+  assert.deepEqual(seen[0], { name: 'Error', message: 'Script error.', stack: '' });
+});
+
+test('an `error` event with neither .error nor a string message forwards NOTHING (the drop branch)', () => {
+  const seen = reportSink();
+  capturedWindow.fire('error', { error: null, message: undefined });
+  capturedWindow.fire('error', { error: undefined });
+  capturedWindow.fire('error', {});
+  assert.deepEqual(seen, [], 'an empty event is dropped, not forwarded as a blank error');
+});
+
+test('an `unhandledrejection` forwards event.reason, Error or not', () => {
+  const seen = reportSink();
+  capturedWindow.fire('unhandledrejection', { reason: new Error('fetch failed') });
+  capturedWindow.fire('unhandledrejection', { reason: 'rejected with a string' });
+  capturedWindow.fire('unhandledrejection', { reason: { message: 'plain object reason' } });
+  assert.deepEqual(seen.map((p) => p.message), [
+    'fetch failed',
+    'rejected with a string',
+    'plain object reason',
+  ]);
+});
+
+test('an `unhandledrejection` with a nullish reason forwards NOTHING', () => {
+  const seen = reportSink();
+  capturedWindow.fire('unhandledrejection', { reason: null });
+  capturedWindow.fire('unhandledrejection', { reason: undefined });
+  assert.deepEqual(seen, []);
+});
+
+test('the installed listeners no-op (never throw) when the bridge is absent', () => {
+  // The `npm run dev` browser and `node web/smoke.cjs` hosts: the capture is
+  // installed but there is no main process to forward to.
+  const warns = recordWarn();
+  globalThis.window = { ...capturedWindow, wardenTelemetry: undefined };
+  capturedWindow.fire('error', { error: new Error('boom') });
+  capturedWindow.fire('unhandledrejection', { reason: new Error('boom') });
+  assert.deepEqual(warns, [], 'a clean no-op, not a caught internal failure');
+});
+
+test('is IDEMPOTENT — a second install does not stack duplicate listeners', () => {
+  // The module-level latch (electron.ts:407) guards against Vite HMR re-eval.
+  // Duplicate listeners would double every reported error.
+  const w = recordingWindow({ reportError: () => {} });
+  globalThis.window = w;
+  idempotenceMod.installRendererErrorCapture();
+  assert.equal(w.count(), 2, 'first install registers exactly the two listeners');
+  idempotenceMod.installRendererErrorCapture();
+  idempotenceMod.installRendererErrorCapture();
+  assert.equal(w.count(), 2, 'repeat installs add nothing');
+
+  // And the effect: one error event yields exactly ONE forward, not three.
+  const seen = [];
+  globalThis.window = { wardenTelemetry: { reportError: (p) => seen.push(p) } };
+  w.fire('error', { error: new Error('boom') });
+  assert.equal(seen.length, 1, 'a single error reports once');
 });
 
 console.log(`\n✓ ELECTRON BRIDGE TESTS PASS (${passed})`);
