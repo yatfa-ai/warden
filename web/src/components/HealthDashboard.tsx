@@ -571,7 +571,15 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
   // Per-agent 24h activity series for the row sparklines (WARDEN-299). Fetched on
   // its own slow ~60s cadence inside the hook — explicitly NOT part of the 10s
   // /api/health poll below, so adding the sparklines is a no-op on the hot path.
-  const { series: activitySeries } = useActivitySeries();
+  // `loading` + `error` are threaded to the two fleet-wide panels below so their
+  // empty states can tell "still fetching" from "fetched, and it failed"
+  // — `series == null` alone conflates the two, which is how both panels used to
+  // render "Loading…" forever on a persistently failing endpoint (WARDEN-1078).
+  const {
+    series: activitySeries,
+    loading: activityLoading,
+    error: activityError,
+  } = useActivitySeries();
   // Per-agent uncommitted-WIP fan (WARDEN-766): fans /api/git-status across the
   // eligible fleet (active project agents) and lifts { statusByKey, dirtyCount,
   // errorCount, refresh, loading } so BOTH the per-row WipChip in renderAgent AND the
@@ -1291,6 +1299,8 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
               series={activitySeries}
               agents={healthData.agents}
               timestampFormat={timestampFormat}
+              loading={activityLoading}
+              error={activityError}
             />
             {/*
               Fleet-wide 24h per-agent STATE timeline (WARDEN-788). The orthogonal
@@ -1308,6 +1318,8 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
               series={activitySeries}
               agents={healthData.agents}
               timestampFormat={timestampFormat}
+              loading={activityLoading}
+              error={activityError}
             />
             {/*
               Fleet-wide recent-commits feed (WARDEN-597). The commit-history analog

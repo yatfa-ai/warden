@@ -57,6 +57,14 @@ interface Props {
   agents: readonly Chat[];
   /** Routes the sparse column time-labels through the shared timestamp helper. */
   timestampFormat: TimestampFormat;
+  /** True only during the very first fetch, before any data has arrived. The
+   *  ONLY honest source for "still loading" — `series == null` conflates it with
+   *  a failed fetch (WARDEN-1078). */
+  loading: boolean;
+  /** Last fetch error from useActivitySeries, or null. Surfaced ONLY when no
+   *  series has ever arrived; a blip after a good poll keeps the last good
+   *  matrix on screen rather than swapping it for an error. */
+  error: Error | null;
 }
 
 // Per-state Tailwind background classes (the render concern — kept OUT of the
@@ -91,7 +99,7 @@ function cellBg(state: string | null): string {
   return state != null ? (STATE_BG[state] ?? UNKNOWN_BG) : UNKNOWN_BG;
 }
 
-export function FleetStateTimeline({ series, agents, timestampFormat }: Props) {
+export function FleetStateTimeline({ series, agents, timestampFormat, loading, error }: Props) {
   // LOCAL collapse state — never serialized to /api/config (avoids the dead-pref
   // trap). Defaults open so the fleet pattern is glanceable on entry.
   const [open, setOpen] = useState(true);
@@ -216,10 +224,22 @@ export function FleetStateTimeline({ series, agents, timestampFormat }: Props) {
               })}
             </div>
           ) : (
-            // Graceful empty state: series still loading, or no container-bearing
-            // agents / no state history yet. Never render a misleading empty grid.
+            // Graceful empty state: series still loading, the fetch failed, or
+            // no container-bearing agents / no state history yet. Never render a
+            // misleading empty grid — and never claim to be loading data we have
+            // already given up on (WARDEN-1078). Same three-way branch as the
+            // sibling heatmap: `loading` is the only honest "still fetching"
+            // signal; `error` is only surfaced when NO series ever arrived.
             <div className="py-2 text-center text-[10px] text-muted-foreground">
-              {series == null ? 'Loading fleet state…' : 'No agent state history in the last 24 hours.'}
+              {loading && series == null ? (
+                'Loading fleet state…'
+              ) : error && series == null ? (
+                <span className="text-destructive">
+                  ⚠ Couldn't load fleet state: {error.message}
+                </span>
+              ) : (
+                'No agent state history in the last 24 hours.'
+              )}
             </div>
           )}
 

@@ -55,6 +55,14 @@ interface Props {
   agents: readonly Chat[];
   /** Routes the sparse column time-labels through the shared timestamp helper. */
   timestampFormat: TimestampFormat;
+  /** True only during the very first fetch, before any data has arrived. The
+   *  ONLY honest source for "still loading" — `series == null` conflates it with
+   *  a failed fetch (WARDEN-1078). */
+  loading: boolean;
+  /** Last fetch error from useActivitySeries, or null. Surfaced ONLY when no
+   *  series has ever arrived; a blip after a good poll keeps the last good
+   *  matrix on screen rather than swapping it for an error. */
+  error: Error | null;
 }
 
 // Sparse column label cadence: label ~every 6 buckets (≈ every 6h for the default
@@ -71,7 +79,7 @@ function intensityOpacity(intensity: number): number {
   return OPACITY_FLOOR + OPACITY_RANGE * intensity;
 }
 
-export function FleetActivityHeatmap({ series, agents, timestampFormat }: Props) {
+export function FleetActivityHeatmap({ series, agents, timestampFormat, loading, error }: Props) {
   // LOCAL collapse state — never serialized to /api/config (avoids the dead-pref
   // trap). Defaults open so the fleet pattern is glanceable on entry.
   const [open, setOpen] = useState(true);
@@ -198,10 +206,22 @@ export function FleetActivityHeatmap({ series, agents, timestampFormat }: Props)
               })}
             </div>
           ) : (
-            // Graceful empty state: series still loading, or no container-bearing
-            // agents. Never render a misleading empty grid.
+            // Graceful empty state: series still loading, the fetch failed, or
+            // no container-bearing agents. Never render a misleading empty grid
+            // — and never claim to be loading data we have already given up on
+            // (WARDEN-1078). `loading` is the only honest "still fetching"
+            // signal; `error` is only surfaced when NO series ever arrived, so a
+            // blip after a good poll leaves the matrix above on screen.
             <div className="py-2 text-center text-[10px] text-muted-foreground">
-              {series == null ? 'Loading fleet activity…' : 'No agent activity in the last 24 hours.'}
+              {loading && series == null ? (
+                'Loading fleet activity…'
+              ) : error && series == null ? (
+                <span className="text-destructive">
+                  ⚠ Couldn't load fleet activity: {error.message}
+                </span>
+              ) : (
+                'No agent activity in the last 24 hours.'
+              )}
             </div>
           )}
 
