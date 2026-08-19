@@ -86,6 +86,42 @@ const DEFAULT_CONFIG: ConfigData = {
 };
 
 /**
+ * The write-only-secret state machine, shared by all three secrets Settings
+ * holds (observer auth token / webhook secret / telemetry auth token).
+ *
+ * WARDEN-883 / WARDEN-856 added the `pendingClear` + remove/undo discipline to
+ * all three at once by copy-paste, leaving three byte-identical blocks; this is
+ * that block, written once. It is purely the DECLARATION half — the legs that
+ * legitimately diverge per secret (which config path it hydrates from, how it is
+ * shaped onto the PUT body, which draft field it contributes) stay at their own
+ * call sites.
+ *
+ * The raw `setIsSet` / `setTail` setters are returned because the hydrate and
+ * reset-to-defaults legs drive them from outside the block. `setInputRaw` and
+ * `setPendingClear` deliberately are NOT: the only sanctioned writes to the
+ * input are through `setInput` (which cancels a pending clear first — typing is
+ * the natural undo), `remove`, and `undoRemove`.
+ */
+function useWriteOnlySecret() {
+  const [isSet, setIsSet] = useState(false);
+  const [tail, setTail] = useState<string | null>(null);
+  const [input, setInputRaw] = useState('');
+  const [pendingClear, setPendingClear] = useState(false);
+  const setInput = useCallback((v: string) => {
+    setPendingClear(false);
+    setInputRaw(v);
+  }, []);
+  const remove = useCallback(() => {
+    setInputRaw('');
+    setPendingClear(true);
+  }, []);
+  const undoRemove = useCallback(() => {
+    setPendingClear(false);
+  }, []);
+  return { isSet, setIsSet, tail, setTail, input, setInput, pendingClear, remove, undoRemove };
+}
+
+/**
  * Owns the backend config state + its GET/PUT round-trip + the write-only
  * secrets + the live test/runtime status. `onSaved` is fired after a successful
  * PUT (SettingsPage wires it to App's onConfigChange + close). `onConfigChange`
@@ -151,42 +187,34 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
   // a pending clear (typing is the natural undo); after Remove the input is
   // emptied so a blank field + pendingClear = "clear it", while a blank field +
   // no pendingClear = "leave it" (no-clobber).
-  const [observerAuthTokenSet, setObserverAuthTokenSet] = useState(false);
-  const [observerAuthTokenTail, setObserverAuthTokenTail] = useState<string | null>(null);
-  const [observerAuthTokenInput, setObserverAuthTokenInputRaw] = useState('');
-  const [observerAuthTokenPendingClear, setObserverAuthTokenPendingClear] = useState(false);
-  const setObserverAuthTokenInput = useCallback((v: string) => {
-    setObserverAuthTokenPendingClear(false);
-    setObserverAuthTokenInputRaw(v);
-  }, []);
-  const removeObserverAuthToken = useCallback(() => {
-    setObserverAuthTokenInputRaw('');
-    setObserverAuthTokenPendingClear(true);
-  }, []);
-  const undoRemoveObserverAuthToken = useCallback(() => {
-    setObserverAuthTokenPendingClear(false);
-  }, []);
+  const {
+    isSet: observerAuthTokenSet,
+    setIsSet: setObserverAuthTokenSet,
+    tail: observerAuthTokenTail,
+    setTail: setObserverAuthTokenTail,
+    input: observerAuthTokenInput,
+    setInput: setObserverAuthTokenInput,
+    pendingClear: observerAuthTokenPendingClear,
+    remove: removeObserverAuthToken,
+    undoRemove: undoRemoveObserverAuthToken,
+  } = useWriteOnlySecret();
 
   // Webhook shared secret (WARDEN-555) — write-only, identical discipline to the
   // observer auth token above: GET returns only a set + tail indicator, so the
   // input stays empty until the human types a new secret; on save it is sent ONLY
   // when non-empty, and an untouched field is omitted so the backend no-clobbers
   // the stored secret. WARDEN-883 adds a Remove control (pendingClear → null).
-  const [webhookSecretSet, setWebhookSecretSet] = useState(false);
-  const [webhookSecretTail, setWebhookSecretTail] = useState<string | null>(null);
-  const [webhookSecretInput, setWebhookSecretInputRaw] = useState('');
-  const [webhookSecretPendingClear, setWebhookSecretPendingClear] = useState(false);
-  const setWebhookSecretInput = useCallback((v: string) => {
-    setWebhookSecretPendingClear(false);
-    setWebhookSecretInputRaw(v);
-  }, []);
-  const removeWebhookSecret = useCallback(() => {
-    setWebhookSecretInputRaw('');
-    setWebhookSecretPendingClear(true);
-  }, []);
-  const undoRemoveWebhookSecret = useCallback(() => {
-    setWebhookSecretPendingClear(false);
-  }, []);
+  const {
+    isSet: webhookSecretSet,
+    setIsSet: setWebhookSecretSet,
+    tail: webhookSecretTail,
+    setTail: setWebhookSecretTail,
+    input: webhookSecretInput,
+    setInput: setWebhookSecretInput,
+    pendingClear: webhookSecretPendingClear,
+    remove: removeWebhookSecret,
+    undoRemove: undoRemoveWebhookSecret,
+  } = useWriteOnlySecret();
   const [testingWebhook, setTestingWebhook] = useState(false);
   // "Send test alert" verdict (WARDEN-970) — the precise, persistent in-section
   // read of the LAST probe, replacing the transient raw-status toast. Same
@@ -203,21 +231,17 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
   // sent ONLY when non-empty, and an untouched field is omitted so the backend
   // no-clobbers the stored token. Sent on the wire as `Authorization: Bearer`.
   // WARDEN-883 adds a Remove control (pendingClear → null).
-  const [telemetryAuthTokenSet, setTelemetryAuthTokenSet] = useState(false);
-  const [telemetryAuthTokenTail, setTelemetryAuthTokenTail] = useState<string | null>(null);
-  const [telemetryAuthTokenInput, setTelemetryAuthTokenInputRaw] = useState('');
-  const [telemetryAuthTokenPendingClear, setTelemetryAuthTokenPendingClear] = useState(false);
-  const setTelemetryAuthTokenInput = useCallback((v: string) => {
-    setTelemetryAuthTokenPendingClear(false);
-    setTelemetryAuthTokenInputRaw(v);
-  }, []);
-  const removeTelemetryAuthToken = useCallback(() => {
-    setTelemetryAuthTokenInputRaw('');
-    setTelemetryAuthTokenPendingClear(true);
-  }, []);
-  const undoRemoveTelemetryAuthToken = useCallback(() => {
-    setTelemetryAuthTokenPendingClear(false);
-  }, []);
+  const {
+    isSet: telemetryAuthTokenSet,
+    setIsSet: setTelemetryAuthTokenSet,
+    tail: telemetryAuthTokenTail,
+    setTail: setTelemetryAuthTokenTail,
+    input: telemetryAuthTokenInput,
+    setInput: setTelemetryAuthTokenInput,
+    pendingClear: telemetryAuthTokenPendingClear,
+    remove: removeTelemetryAuthToken,
+    undoRemove: undoRemoveTelemetryAuthToken,
+  } = useWriteOnlySecret();
 
   // "Test connection" probe state (WARDEN-595). The verdict is NOT the destination
   // label's "configured" non-claim — it is a LIVE probe of the receiver's
@@ -389,7 +413,20 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
     return () => {
       cancelled = true;
     };
-  }, [loadToken]);
+    // The six secret setters are `useState` setters returned by
+    // `useWriteOnlySecret`, so their identity is stable for the lifetime of the
+    // hook — listing them is a formality the linter can no longer infer now that
+    // they arrive through a helper rather than inline. `loadToken` remains the
+    // only dependency that can actually re-fire this effect.
+  }, [
+    loadToken,
+    setObserverAuthTokenSet,
+    setObserverAuthTokenTail,
+    setWebhookSecretSet,
+    setWebhookSecretTail,
+    setTelemetryAuthTokenSet,
+    setTelemetryAuthTokenTail,
+  ]);
 
   const handleSave = async () => {
     setSaving(true);
