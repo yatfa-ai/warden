@@ -205,31 +205,20 @@ export function mergeRecentlyClosed(
 // strings; closedAt coerces to a number (0 if absent/invalid). Dedups by id
 // (first occurrence wins) and caps at RECENTLY_CLOSED_CAP.
 function parseRecentlyClosed(raw: unknown): RecentlyClosedEntry[] {
-  if (!Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) {
-      console.warn('[loadUi] recentlyClosed is not an array; ignoring:', raw);
-    }
-    return [];
-  }
-  const seen = new Set<string>();
-  const out: RecentlyClosedEntry[] = [];
-  for (const entry of raw) {
-    if (!entry || typeof entry !== 'object') continue;
+  return parseEntryArray<RecentlyClosedEntry>(raw, 'recentlyClosed', (entry) => {
+    if (!entry || typeof entry !== 'object') return undefined;
     const e = entry as Record<string, unknown>;
     const id = typeof e.id === 'string' ? e.id : '';
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
+    if (!id) return undefined;
     const closedAt = typeof e.closedAt === 'number' && Number.isFinite(e.closedAt) ? e.closedAt : 0;
-    out.push({
+    return {
       id,
       name: typeof e.name === 'string' ? e.name : '',
       host: typeof e.host === 'string' ? e.host : '',
       cwd: typeof e.cwd === 'string' ? e.cwd : '',
       closedAt,
-    });
-    if (out.length >= RECENTLY_CLOSED_CAP) break;
-  }
-  return out;
+    };
+  }, { cap: RECENTLY_CLOSED_CAP, key: (e) => e.id });
 }
 
 // A user-defined instruction snippet: a named, reusable instruction the human
@@ -609,29 +598,16 @@ export interface UiState {
 // name or cmd, names over PRESET_NAME_MAX chars, reserved built-in names
 // (case-insensitive), and duplicates (case-insensitive; first occurrence wins).
 function parseCustomPresets(raw: unknown): CustomPreset[] {
-  if (!Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) {
-      // A present-but-wrong-type value is genuine corruption worth surfacing.
-      console.warn('[loadUi] customPresets is not an array; ignoring:', raw);
-    }
-    return [];
-  }
-  const seen = new Set<string>();
-  const out: CustomPreset[] = [];
-  for (const entry of raw) {
-    if (!entry || typeof entry !== 'object') continue;
+  return parseEntryArray<CustomPreset>(raw, 'customPresets', (entry) => {
+    if (!entry || typeof entry !== 'object') return undefined;
     const e = entry as Record<string, unknown>;
     const name = typeof e.name === 'string' ? e.name.trim() : '';
     const cmd = typeof e.cmd === 'string' ? e.cmd.trim() : '';
-    if (!name || !cmd) continue;
-    if (name.length > PRESET_NAME_MAX) continue;
-    if (isReservedPresetName(name)) continue;
-    const key = name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ name, cmd });
-  }
-  return out;
+    if (!name || !cmd) return undefined;
+    if (name.length > PRESET_NAME_MAX) return undefined;
+    if (isReservedPresetName(name)) return undefined;
+    return { name, cmd };
+  }, { key: (p) => p.name.toLowerCase() });
 }
 
 // Sanitize a raw snippets value into a valid Snippet[]. Defensive: never throws
@@ -642,28 +618,73 @@ function parseCustomPresets(raw: unknown): CustomPreset[] {
 // SNIPPET_MAX_COUNT (overflow dropped) so the payload can never bloat
 // localStorage. Mirrors parseCustomPresets's drop-bad-entries discipline.
 function parseSnippets(raw: unknown): Snippet[] {
+  return parseEntryArray<Snippet>(raw, 'snippets', (entry) => {
+    if (!entry || typeof entry !== 'object') return undefined;
+    const e = entry as Record<string, unknown>;
+    const name = typeof e.name === 'string' ? e.name.trim() : '';
+    const text = typeof e.text === 'string' ? e.text.trim() : '';
+    if (!name || !text) return undefined;
+    if (name.length > SNIPPET_NAME_MAX) return undefined;
+    if (text.length > SNIPPET_TEXT_MAX) return undefined;
+    return { name, text };
+  }, { cap: SNIPPET_MAX_COUNT, key: (s) => s.name.toLowerCase() });
+}
+
+// WARDEN-1091: the ONE array sanitizer skeleton — the array complement of
+// parseObjectMap below. Five parsers (recentlyClosed, customPresets, snippets,
+// mutedAlertKeys, workspaces) each carried a byte-identical copy of the same
+// 6-line preamble, re-copied by five separate shipped features (WARDEN-219,
+// 256, 323, 364, 372) so each could inherit the WARDEN-89 guard. Now the guard
+// is inherited by CALLING this; only the delta is supplied.
+//
+// The invariants that live here once, for every caller:
+//   - a non-array `raw` degrades to [] — never throws (WARDEN-89), so one
+//     corrupt payload can never blank a whole list;
+//   - a PRESENT-but-wrong-type `raw` warns with `label` (the operator-facing
+//     corruption signal), while absent (undefined/null) is silent — absence is
+//     normal, corruption is not;
+//   - `coerce` returns the entry to keep, or `undefined` to DROP it. The drop
+//     sentinel is strictly `undefined`, not falsiness — a caller whose element
+//     type admits '' / 0 / false keeps those as real values. `coerce` also owns
+//     the per-caller ENTRY guard, which is NOT uniform across the five (four
+//     want `!entry || typeof entry !== 'object'`, mutedAlertKeys wants
+//     `typeof k !== 'string'`), so it does not belong in the skeleton.
+//
+// Two OPTIONAL deltas, because they are not universal:
+//   - `opts.cap` — stop after N kept entries (retaining the FIRST N valid ones).
+//     Only recentlyClosed and snippets cap; mutedAlertKeys deliberately has no
+//     cap. Checked at the top of the loop; the pre-refactor copies checked at
+//     the top (snippets) and after the push (recentlyClosed), which retain the
+//     same entries — the difference was never observable.
+//   - `opts.key` — DROP an entry whose key repeats (first occurrence wins,
+//     order preserved). NOT universal: parseWorkspaces REPAIRS a duplicate id
+//     with a fresh one and keeps the entry, so it passes no `key` and owns its
+//     own seen-set inside its coerce closure.
+function parseEntryArray<T>(
+  raw: unknown,
+  label: string,
+  coerce: (entry: unknown) => T | undefined,
+  opts?: { cap?: number; key?: (v: T) => string },
+): T[] {
   if (!Array.isArray(raw)) {
     if (raw !== undefined && raw !== null) {
       // A present-but-wrong-type value is genuine corruption worth surfacing.
-      console.warn('[loadUi] snippets is not an array; ignoring:', raw);
+      console.warn(`[loadUi] ${label} is not an array; ignoring:`, raw);
     }
     return [];
   }
   const seen = new Set<string>();
-  const out: Snippet[] = [];
+  const out: T[] = [];
   for (const entry of raw) {
-    if (out.length >= SNIPPET_MAX_COUNT) break; // cap payload size
-    if (!entry || typeof entry !== 'object') continue;
-    const e = entry as Record<string, unknown>;
-    const name = typeof e.name === 'string' ? e.name.trim() : '';
-    const text = typeof e.text === 'string' ? e.text.trim() : '';
-    if (!name || !text) continue;
-    if (name.length > SNIPPET_NAME_MAX) continue;
-    if (text.length > SNIPPET_TEXT_MAX) continue;
-    const key = name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ name, text });
+    if (opts?.cap !== undefined && out.length >= opts.cap) break; // cap payload size
+    const val = coerce(entry);
+    if (val === undefined) continue; // caller's rule rejected this entry → drop
+    if (opts?.key) {
+      const k = opts.key(val);
+      if (seen.has(k)) continue; // duplicate → drop (first occurrence wins)
+      seen.add(k);
+    }
+    out.push(val);
   }
   return out;
 }
@@ -801,22 +822,10 @@ function parsePresetByHost(
 // can never blank the mute set. Modeled on parseCustomPresets's drop-bad-entries
 // discipline; order is preserved (first occurrence wins) so the set is stable.
 function parseMutedKeys(raw: unknown): string[] {
-  if (!Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) {
-      console.warn('[loadUi] mutedAlertKeys is not an array; ignoring:', raw);
-    }
-    return [];
-  }
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const k of raw) {
-    if (typeof k !== 'string') continue;
-    const key = k.trim();
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(key);
-  }
-  return out;
+  return parseEntryArray<string>(raw, 'mutedAlertKeys', (k) => {
+    if (typeof k !== 'string') return undefined;
+    return k.trim() || undefined; // blank/whitespace-only → drop
+  }, { key: (k) => k });
 }
 
 // WARDEN-660: coerce a persisted gutter-ratio array to a valid number[] (each
@@ -865,16 +874,12 @@ function parseSnoozedKeys(raw: unknown): Record<string, number> {
 // Id UNIQUENESS is enforced (first occurrence wins; duplicates get fresh ids)
 // so active-workspace lookup-by-id is always unambiguous.
 function parseWorkspaces(raw: unknown): WorkspacePaneSet[] {
-  if (!Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) {
-      console.warn('[loadUi] workspaces is not an array; ignoring:', raw);
-    }
-    return [];
-  }
+  // NB: no `key` option — parseWorkspaces REPAIRS a duplicate id with a fresh
+  // one and KEEPS the entry, where the shared `key` option would DROP it. The
+  // seen-set therefore lives here, in this closure, fresh per call.
   const seenIds = new Set<string>();
-  const out: WorkspacePaneSet[] = [];
-  for (const entry of raw) {
-    if (!entry || typeof entry !== 'object') continue;
+  return parseEntryArray<WorkspacePaneSet>(raw, 'workspaces', (entry) => {
+    if (!entry || typeof entry !== 'object') return undefined;
     const e = entry as Record<string, unknown>;
     let id = typeof e.id === 'string' && e.id ? e.id : genWorkspaceId();
     if (seenIds.has(id)) id = genWorkspaceId();
@@ -883,9 +888,8 @@ function parseWorkspaces(raw: unknown): WorkspacePaneSet[] {
     const openPanes = Array.isArray(e.openPanes) ? e.openPanes.filter((p: unknown): p is string => typeof p === 'string') : [];
     const focused = typeof e.focused === 'string' ? e.focused : null;
     const recentlyClosed = parseRecentlyClosed(e.recentlyClosed);
-    out.push({ id, name, openPanes, focused, recentlyClosed });
-  }
-  return out;
+    return { id, name, openPanes, focused, recentlyClosed };
+  });
 }
 
 // Version-tolerant read: prefer the current key, but if it is absent, walk down
