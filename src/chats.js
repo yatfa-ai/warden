@@ -518,7 +518,10 @@ export async function discoverHost(host, cfg) {
               await stampCatalogActivity(LOCAL, o.session, o.lastActivity);
             }
           }
-        }).catch(() => {})
+        })
+        .catch(err => {
+          console.warn(`Failed to capture activity for local session ${o.session}:`, err instanceof Error ? err.message : String(err));
+        })
     ));
     chats.push(...objs);
   } else {
