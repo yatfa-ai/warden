@@ -498,29 +498,37 @@ export function parsePhaseFromTailOutput(stdout) {
 // Read the local filesystem's most-recent transcript tail and return it in the
 // ___TAIL-marked shape parsePhaseFromTailOutput expects (or '' if none). Uses
 // os.homedir(), so a test redirects HOME to a throwaway dir to isolate it.
-function readLocalTranscriptTail() {
+// Async (WARDEN-1073): this walk stat'd every transcript in the archive with
+// synchronous fs on the WS request path — 400+ blocking syscalls per call, once
+// per pane, growing monotonically with transcript history. Converted to fsp so
+// the syscalls yield the event loop, matching collectLocalSessionFiles in
+// claudeSessions.js:134 (the same walk, already async) and the WARDEN-832
+// decision of record: no synchronous fs on a runtime/request path. Structure and
+// skip/'' semantics are otherwise unchanged.
+async function readLocalTranscriptTail() {
   const dir = path.join(os.homedir(), '.claude', 'projects');
   const files = [];
   let projects;
-  try { projects = fs.readdirSync(dir); } catch { return ''; } // no ~/.claude/projects
+  try { projects = await fsp.readdir(dir); } catch { return ''; } // no ~/.claude/projects
   for (const proj of projects) {
     const pdir = path.join(dir, proj);
-    try { if (!fs.statSync(pdir).isDirectory()) continue; } catch { continue; }
-    for (const f of fs.readdirSync(pdir)) {
+    try { if (!(await fsp.stat(pdir)).isDirectory()) continue; } catch { continue; }
+    for (const f of await fsp.readdir(pdir)) {
       if (!f.endsWith('.jsonl')) continue;
       const fp = path.join(pdir, f);
-      try { files.push({ fp, mtime: fs.statSync(fp).mtimeMs }); } catch { /* skip */ }
+      try { files.push({ fp, mtime: (await fsp.stat(fp)).mtimeMs }); } catch { /* skip */ }
     }
   }
   if (!files.length) return '';
   files.sort((a, b) => b.mtime - a.mtime);
   const { fp } = files[0];
-  const size = fs.statSync(fp).size;
+  const size = (await fsp.stat(fp)).size;
   const len = Math.min(size, 8192);
-  const fd = fs.openSync(fp, 'r');
   const buf = Buffer.alloc(len);
-  fs.readSync(fd, buf, 0, len, size - len);
-  fs.closeSync(fd);
+  // try/finally: the handle closes on every path, including a throwing read — a
+  // leaked fd on this per-pane path would be worse than the stall being fixed.
+  const fh = await fsp.open(fp, 'r');
+  try { await fh.read(buf, 0, len, size - len); } finally { await fh.close(); }
   return '___TAIL\n' + buf.toString('utf8');
 }
 
@@ -541,7 +549,7 @@ export async function readTranscriptPhase(chat, cfg = {}) {
       stdout = res.stdout;
     } else if (chat.host === LOCAL) {
       // bare local tmux 'claude' session: transcript on the local filesystem.
-      stdout = readLocalTranscriptTail();
+      stdout = await readLocalTranscriptTail();
     } else {
       // bare remote tmux session: transcript on the remote host.
       const res = await run(chat.host, buildTranscriptTailScript(), { timeout: 10000 }, cfg);
