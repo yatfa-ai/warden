@@ -28,6 +28,14 @@ import { buildRemoteSessionScript, parseJsonlTokenUsage } from './claudeSessions
  * shipped. The load-bearing assertion is `contributes an iterations[] rollup
  * exactly once` below.
  *
+ * WARDEN-1092 then found that per-line first-occurrence-wins needs more than
+ * "the rollup precedes its own iterations[]": ANY same-named key earlier on the
+ * line wins, including one from an unrelated JSON path. Measured once in 407
+ * transcripts, where it suppressed a true rollup — so the pipeline now gates on
+ * `"usage":{`. `ignores a same-named token key nested BEFORE the rollup` pins
+ * that, and `still counts a rollup whose usage object is the only thing on the
+ * line` pins the gate against over-tightening.
+ *
  * WHY IT RUNS THE REAL SCRIPT. These tests execute the string
  * `remoteClaudeSessions` actually ships, against a fixture HOME, rather than a
  * re-typed copy of the awk. Pinning a copy would re-create the very
@@ -131,6 +139,44 @@ describe('remote on-host token extractor', { skip: HAVE_SH ? false : 'bash/grep/
       [{ input_tokens: n, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }],
     );
     assert.strictEqual(runRemote('perline', [mk(11), mk(22), mk(33)]).input, 66);
+  });
+
+  it('ignores a same-named token key nested BEFORE the rollup (WARDEN-1092)', () => {
+    // The counter-example to naked first-occurrence-wins, measured on a real
+    // transcript: a tool ARGUMENT at
+    // `.message.content[].input.metadata.frozen_window_measured.output_tokens`
+    // sits earlier in the line than `message.usage`, so "first match on the
+    // line" took 85502 and DISCARDED the true rollup 3362 — under-counting,
+    // the opposite direction from the WARDEN-1088 double-count. The `"usage":{`
+    // gate is what makes the earlier key unreachable. Field values mirror the
+    // measured line so the numbers stay traceable to it.
+    const line = j({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'tool_use', input: { metadata: { frozen_window_measured: { by_ticket_entries: 0, output_tokens: 85502, credits_delta: 22 } } } }],
+        usage: {
+          input_tokens: 2,
+          cache_creation_input_tokens: 3325,
+          cache_read_input_tokens: 150126,
+          output_tokens: 3362,
+          iterations: [{ input_tokens: 2, output_tokens: 3362, cache_creation_input_tokens: 3325, cache_read_input_tokens: 150126 }],
+        },
+      },
+    });
+    const remote = runRemote('nested-before', [line]);
+    // The rollup, not the tool argument. Pre-WARDEN-1092 output was 85502.
+    assert.deepStrictEqual(remote, parseJsonlTokenUsage(line + '\n'));
+    assert.strictEqual(remote.output, 3362);
+    assert.deepStrictEqual(remote, { input: 2, output: 3362, cacheCreation: 3325, cacheRead: 150126, total: 156815 });
+  });
+
+  it('still counts a rollup whose usage object is the only thing on the line', () => {
+    // Guards the gate from the opposite failure: `"usage":{` must ARM counting,
+    // never be required to appear twice or in some richer context. A bare turn
+    // has exactly one opener and must still contribute in full.
+    const line = j({ type: 'assistant', message: { role: 'assistant', usage: { input_tokens: 9, output_tokens: 4, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } });
+    assert.deepStrictEqual(runRemote('bare-usage', [line]), parseJsonlTokenUsage(line + '\n'));
   });
 
   it('emits no token group for a no-usage or all-zero transcript (null-for-zero contract)', () => {
