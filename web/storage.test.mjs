@@ -318,6 +318,59 @@ test('a missing field loads as []', () => {
   assert.deepEqual(loadUi().paneColRatios, []);
   assert.deepEqual(loadUi().paneRowRatios, []);
 });
+test('a present-but-wrong-type ratio value WARNS, while an absent one is silent (WARDEN-1097)', () => {
+  // The operator-facing corruption signal (WARDEN-89), which parseRatioArray was
+  // the last shape guard in storage.ts to lack. Absence is the COMMON case here
+  // (both fields are unset until the user drags a gutter) and must stay quiet.
+  const realWarn = console.warn;
+  const warnsFor = (payload, needle) => {
+    const seen = [];
+    console.warn = (...args) => { seen.push(String(args[0])); };
+    try {
+      reset();
+      mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], ...payload }));
+      loadUi();
+    } finally {
+      console.warn = realWarn;
+    }
+    return seen.filter((m) => m.includes(needle));
+  };
+  const notArray = (f) => `${f} is not an array; ignoring`;
+  assert.equal(warnsFor({ paneColRatios: 'wide' }, notArray('paneColRatios')).length, 1, 'a string payload warns');
+  assert.equal(warnsFor({ paneRowRatios: 3 }, notArray('paneRowRatios')).length, 1, 'a number payload warns');
+  assert.equal(warnsFor({ paneColRatios: { a: 1 } }, notArray('paneColRatios')).length, 1, 'an object payload warns');
+  assert.equal(warnsFor({ paneColRatios: null }, notArray('paneColRatios')).length, 0, 'null is absent, not corrupt — silent');
+  assert.equal(warnsFor({}, notArray('paneColRatios')).length, 0, 'a missing field is absent, not corrupt — silent');
+  assert.equal(warnsFor({}, notArray('paneRowRatios')).length, 0, 'the sibling field is silent too — a normal load warns ZERO times');
+  assert.equal(warnsFor({ paneColRatios: [1, 3] }, notArray('paneColRatios')).length, 0, 'a valid array never warns');
+});
+test('a rejected ENTRY warns and names the whole-array degrade (WARDEN-1097)', () => {
+  // The all-or-nothing entry rejection is exactly the Stage-1 producer fallout an
+  // operator needs to see: their whole pane layout silently reset to equal split.
+  const realWarn = console.warn;
+  const warnsFor = (payload, needle) => {
+    const seen = [];
+    console.warn = (...args) => { seen.push(String(args[0])); };
+    try {
+      reset();
+      mem.set('warden:ui:v3', JSON.stringify({ activeTabs: ['x'], ...payload }));
+      loadUi();
+    } finally {
+      console.warn = realWarn;
+    }
+    return seen.filter((m) => m.includes(needle));
+  };
+  const badEntry = (f) => `${f} has a non-positive/non-finite entry`;
+  // A zero entry is what a cramped-pair drag used to persist (see paneGrid.test.mjs).
+  assert.equal(warnsFor({ paneColRatios: [2, 0] }, badEntry('paneColRatios')).length, 1, 'a zero entry warns');
+  assert.equal(warnsFor({ paneColRatios: [2.4, -0.4] }, badEntry('paneColRatios')).length, 1, 'a negative entry warns');
+  assert.equal(warnsFor({ paneRowRatios: [1, null, 2] }, badEntry('paneRowRatios')).length, 1, 'a non-number entry warns');
+  // Infinity does not survive JSON, so drive the non-finite case through the raw value.
+  assert.equal(warnsFor({ paneRowRatios: [1, 'Infinity', 2] }, badEntry('paneRowRatios')).length, 1, 'a string entry warns');
+  assert.equal(warnsFor({ paneColRatios: [1, 3] }, badEntry('paneColRatios')).length, 0, 'a valid array never warns');
+  assert.equal(warnsFor({ paneColRatios: [] }, badEntry('paneColRatios')).length, 0, 'an empty array never warns');
+  assert.equal(warnsFor({}, badEntry('paneColRatios')).length, 0, 'a missing field never warns');
+});
 test('persistUiState carries the ratios from the live object (not workspace-frozen)', () => {
   // Like paneLayout, the ratios are a pref — NOT a workspace-restoration field —
   // so persistUiState must spread them from `live` even when the workspace is
