@@ -835,11 +835,31 @@ function parseMutedKeys(raw: unknown): string[] {
 // as corrupt rather than silently dropped (mirroring the all-or-nothing
 // discipline that keeps a hand-edited / legacy payload from distorting the
 // grid). [] is the meaningful "equal split" default the rest of the code reads.
-function parseRatioArray(raw: unknown): number[] {
-  if (!Array.isArray(raw)) return [];
+//
+// WARDEN-1097: this was the last shape guard in this file outside the WARDEN-89
+// norm — it degraded silently, so a user whose whole pane layout reset to an
+// equal split got no diagnostic at all (and Settings → Reset copy promises that
+// layout is PRESERVED). It now warns like its parseEntryArray/parseObjectMap
+// siblings, with the same asymmetry: a PRESENT-but-wrong-type value is genuine
+// corruption worth surfacing, while absent (undefined/null) is normal and stays
+// silent — getting that backwards would warn twice on every ordinary load,
+// since both ratio fields are absent until the user drags a gutter. The
+// all-or-nothing ENTRY rejection warns too: that is the case this comment
+// already calls corrupt, and it is exactly what a bad persisted ratio looks like.
+function parseRatioArray(raw: unknown, label: string): number[] {
+  if (!Array.isArray(raw)) {
+    if (raw !== undefined && raw !== null) {
+      // A present-but-wrong-type value is genuine corruption worth surfacing.
+      console.warn(`[loadUi] ${label} is not an array; ignoring:`, raw);
+    }
+    return [];
+  }
   const out: number[] = [];
   for (const r of raw) {
-    if (typeof r !== 'number' || !Number.isFinite(r) || r <= 0) return [];
+    if (typeof r !== 'number' || !Number.isFinite(r) || r <= 0) {
+      console.warn(`[loadUi] ${label} has a non-positive/non-finite entry; ignoring the whole array:`, raw);
+      return [];
+    }
     out.push(r);
   }
   return out;
@@ -1200,8 +1220,8 @@ export function loadUi(): UiState {
         density: v.density === 'compact' ? 'compact' : 'comfortable',
         paneLayout: (v.paneLayout === 'stacked' || v.paneLayout === 'side-by-side') ? v.paneLayout : 'auto',
         // WARDEN-660: a corrupt/non-array value degrades to [] (equal split).
-        paneColRatios: parseRatioArray(v.paneColRatios),
-        paneRowRatios: parseRatioArray(v.paneRowRatios),
+        paneColRatios: parseRatioArray(v.paneColRatios, 'paneColRatios'),
+        paneRowRatios: parseRatioArray(v.paneRowRatios, 'paneRowRatios'),
         onExitBehavior: ['keep', 'dim', 'auto-close'].includes(v.onExitBehavior) ? v.onExitBehavior : 'keep',
         // Only an explicit false opts out; absent/unknown defaults to true so a
         // partial payload never silently disables focus-stealing.

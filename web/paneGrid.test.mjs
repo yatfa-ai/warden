@@ -336,6 +336,46 @@ test('returns null for unusable inputs (caller treats as no-change, never NaN)',
   assert.equal(redistributeRatios('nope', 0, 200, 200, 50, 100), null, 'non-array ratios');
 });
 
+// WARDEN-1097: t0/t1 are the tracks' ACTUAL rendered widths, and CSS grid renders
+// tracks BELOW their minmax() floor when the container can't honor every floor.
+// Once floorPx >= t0 + t1 the old clamp was ill-ordered (minDx > maxDx), collapsed
+// to minDx regardless of dx, and emitted a ZERO or NEGATIVE ratio — which then
+// persisted and made parseRatioArray discard the user's whole saved pane layout.
+test('a pair too cramped to honor the floor on both sides returns null (never a non-positive ratio)', () => {
+  // floorPx (120) >= t0 + t1 — the corruption threshold. Before the guard these
+  // returned [2, 0] and [2.4, -0.4] respectively.
+  assert.equal(redistributeRatios([1, 1], 0, 60, 60, 50, 120), null, 'pair sums exactly to the floor → [2, 0] before the fix');
+  assert.equal(redistributeRatios([1, 1], 0, 50, 50, 50, 120), null, 'pair narrower than the floor → [2.4, -0.4] before the fix');
+});
+
+test('a cramped pair refuses the drag even when dx is ZERO (a still pointer committed garbage too)', () => {
+  // The old clamp ignored dx entirely once minDx > maxDx, so even a negligible or
+  // zero resolved drag committed the corrupt value on pointerup.
+  assert.equal(redistributeRatios([1, 1], 0, 60, 60, 0, 120), null, 'zero drag, pair at the floor');
+  assert.equal(redistributeRatios([1, 1], 0, 50, 50, 0, 120), null, 'zero drag, pair below the floor');
+  assert.equal(redistributeRatios([1, 1], 0, 100, 100, 0, 120), null, 'zero drag, degenerate pair (moved the gutter before the fix)');
+});
+
+test('the guard never returns a non-positive ratio across a sweep of cramped geometries', () => {
+  // The invariant the header claims: no output entry is ever <= 0 (or NaN).
+  for (const t of [30, 50, 60, 71, 72, 90, 120, 200]) {
+    for (const dx of [-200, -50, 0, 50, 200]) {
+      const next = redistributeRatios([1, 1], 0, t, t, dx, 144);
+      if (next === null) continue; // refused — the cramped case
+      for (const r of next) {
+        assert.ok(Number.isFinite(r) && r > 0, `t=${t} dx=${dx} produced a bad ratio: ${JSON.stringify(next)}`);
+      }
+    }
+  }
+});
+
+test('a pair that can still honor the floor is UNAFFECTED by the guard', () => {
+  // t0 + t1 > floorPx → minDx <= maxDx, so the ordinary clamp still applies.
+  assert.deepEqual(redistributeRatios([1, 1], 0, 400, 400, 50, 120), [1.125, 0.875], 'healthy pair redistributes normally');
+  assert.deepEqual(redistributeRatios([1, 1], 0, 400, 400, 0, 120), [1, 1], 'healthy pair, zero drag → unchanged');
+  assert.notEqual(redistributeRatios([1, 1], 0, 100, 200, 50, 144), null, 'pair sum (300) above the floor (144) still resizes');
+});
+
 test('floor constants match the spec (9rem cols, 6rem rows)', () => {
   assert.equal(PANE_COL_FLOOR_REM, 9, 'column floor = the historic 9rem minmax minimum');
   assert.equal(PANE_ROW_FLOOR_REM, 6, 'row floor = ~6rem (a few terminal lines)');
