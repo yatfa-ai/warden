@@ -5,10 +5,16 @@
 // loads the REAL src/lib/desktopAlerts.ts (transpiled TS -> ESM via Vite's OXC
 // transform) and exercises the PURE helpers with plain objects. The `import type`
 // in that file is erased at transpile time, so the emitted module is import-free
-// and loads standalone — the browser-touching helpers (requestAlertPermission /
-// fireAttentionNotification) are not exercised here (no Notification API under
-// Node); they are kept defensive so a construction failure can never crash the
-// poll.
+// and loads standalone.
+//
+// The browser-touching helpers ARE exercised too, via the minimal `makeNotificationShim`
+// harness at the fireWatchNotification block below (added by WARDEN-417 and reused by
+// WARDEN-1109 for fireBudgetNotification) — the earlier version of this header said they
+// were not, which stopped being true the day that shim landed. Still untested: the
+// permission-prompt helper requestAlertPermission. fireAttentionNotification is loaded
+// only so its tag literal can be compared against the budget one (tag-collision drift);
+// its own behaviour is otherwise unexercised. All three stay defensive so a construction
+// failure can never crash the poll.
 //
 // This file is auto-discovered by `npm test` (`node --test` runs every *.test.mjs
 // in web/), so it runs in CI with no package.json wiring.
@@ -30,7 +36,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-desktop-alerts-test-'));
 const tmpFile = join(tmpDir, 'desktopAlerts.mjs');
 writeFileSync(tmpFile, code);
-const { shouldFireAlert, shouldFireWatch, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage, watchReasonTone, formatWatchInApp, diffNewAttention, excludeFocusedPane, applyFleetAttentionCooldown, formatInAppEntry, fireWatchNotification, watchStateLabel } = await import(tmpFile);
+const { shouldFireAlert, shouldFireWatch, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage, watchReasonTone, formatWatchInApp, diffNewAttention, excludeFocusedPane, applyFleetAttentionCooldown, formatInAppEntry, fireWatchNotification, fireBudgetNotification, fireAttentionNotification, watchStateLabel } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -1319,6 +1325,157 @@ test('away: fires uniformly across waiting/erroring/stuck/completed even when fo
     const row = { id: 'i', key: 'k', state };
     assert.equal(shouldFireWatch(focus, row, 'hidden'), true, `${state} fires when away + focused on it`);
   }
+});
+
+// --- WARDEN-1109: fireBudgetNotification (the token-spend budget alarm, WARDEN-415) ----
+//
+// The "while the founder is away" alarm. Sibling of fireAttentionNotification /
+// fireWatchNotification: same Web Notifications channel, same notificationsSupported /
+// permission guards, same never-throw discipline. It takes PRE-FORMATTED title + body
+// (tokenBudget.ts's formatBudgetMessageWith computes them) so desktopAlerts.ts stays
+// runtime-import-free and loadable here.
+//
+// Its sole caller is useTokenBudget.ts:110, which has runtime react + sonner imports and
+// therefore cannot load in this OXC harness at all — so there is no indirect path to this
+// function. It is driven directly, through the same makeNotificationShim built above.
+//
+// fireBudgetNotification returns void (unlike fireWatchNotification's delivered boolean),
+// so "did it fire?" is asserted via `lastNotification` — null means nothing was constructed.
+
+console.log('\nfireBudgetNotification: the three silent no-op guards (nothing must be constructed)');
+test('no-op when the Notifications API is unsupported (no Notification global)', () => {
+  globalThis.window = { focus() {} };
+  delete globalThis.Notification;
+  lastNotification = null;
+  assert.doesNotThrow(() => fireBudgetNotification('Budget', 'over', () => {}));
+  assert.equal(lastNotification, null, 'nothing constructed without a Notification global');
+  restoreGlobals();
+});
+test('no-op when there is no window global at all (headless / non-browser host)', () => {
+  globalThis.window = undefined;
+  globalThis.Notification = makeNotificationShim({ permission: 'granted' });
+  lastNotification = null;
+  assert.doesNotThrow(() => fireBudgetNotification('Budget', 'over', () => {}));
+  assert.equal(lastNotification, null, 'nothing constructed without a window global');
+  restoreGlobals();
+});
+test('no-op when permission is denied — the human said no, so no OS ping', () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'denied' });
+  lastNotification = null;
+  fireBudgetNotification('Budget', 'over', () => {});
+  assert.equal(lastNotification, null, 'no Notification constructed when denied');
+  restoreGlobals();
+});
+test("no-op when permission is still 'default' — the guard is === 'granted', not !== 'denied'", () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'default' });
+  lastNotification = null;
+  fireBudgetNotification('Budget', 'over', () => {});
+  assert.equal(lastNotification, null, "an unanswered OS prompt ('default') must not fire");
+  restoreGlobals();
+});
+
+console.log('\nfireBudgetNotification: constructs with the pre-formatted title/body verbatim');
+test('passes the caller-formatted title + body straight through to the Notification', () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted' });
+  lastNotification = null;
+  fireBudgetNotification('Token budget exceeded', 'worker-1 used 1.2M of 1M tokens');
+  assert.ok(lastNotification, 'a Notification was constructed');
+  assert.equal(lastNotification.title, 'Token budget exceeded');
+  assert.equal(lastNotification.options.body, 'worker-1 used 1.2M of 1M tokens');
+  restoreGlobals();
+});
+
+console.log("\nfireBudgetNotification: the 'warden-budget' tag — distinct from watch/attention, stable across repeats");
+test("tags the budget ping 'warden-budget'", () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted' });
+  fireBudgetNotification('Budget', 'over');
+  assert.equal(lastNotification.options.tag, 'warden-budget');
+  restoreGlobals();
+});
+test('the budget tag is stable across repeats, so a re-crossing REPLACES its prior ping (no stacking)', () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted' });
+  fireBudgetNotification('Budget', 'first crossing');
+  const first = lastNotification.options.tag;
+  fireBudgetNotification('Budget', 'same breach, still over');
+  const second = lastNotification.options.tag;
+  assert.equal(first, second, 'same tag on a repeat crossing => the OS replaces, not stacks');
+  restoreGlobals();
+});
+// The collision guard. desktopAlerts.ts:793-795 states the budget tag is deliberately
+// DISTINCT so the budget alarm "never replaces — and is never replaced by — an
+// attention/watch ping". A drift that made any two of these three literals equal would
+// silently overwrite one alarm with another: no error, no visible symptom. So this reads
+// all three tags from the REAL functions (not from three hardcoded strings, which could
+// not detect the drift at all) and asserts pairwise distinctness.
+test('the budget tag never collides with the attention or watch tag (real tags, read from all three fns)', () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted' });
+
+  fireBudgetNotification('Budget', 'over');
+  const budgetTag = lastNotification.options.tag;
+
+  fireAttentionNotification(roll({ critical: [agent('a1')] }));
+  const attentionTag = lastNotification.options.tag;
+
+  fireWatchNotification({ id: 'w', key: 'w', name: 'w', state: 'waiting', signal: null }, 'waiting');
+  const watchTag = lastNotification.options.tag;
+
+  assert.notEqual(budgetTag, attentionTag, 'budget must not share the attention tag');
+  assert.notEqual(budgetTag, watchTag, 'budget must not share the watch tag');
+  assert.equal(new Set([budgetTag, attentionTag, watchTag]).size, 3, 'all three channels distinct');
+  restoreGlobals();
+});
+
+console.log('\nfireBudgetNotification: the onclick deep-link into the All Sessions usage view');
+test('onclick calls onOpenSessions, then focuses the window, then closes the ping — in that order', () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted' });
+  const seq = [];
+  globalThis.window.focus = () => { seq.push('focus'); };
+  fireBudgetNotification('Budget', 'over', () => { seq.push('open'); });
+  assert.ok(lastNotification?.onclick, 'onclick handler was wired on construction');
+  lastNotification.close = () => { seq.push('close'); };
+  lastNotification.onclick();
+  assert.deepEqual(seq, ['open', 'focus', 'close'], 'deep-link, then raise the window, then dismiss');
+  restoreGlobals();
+});
+test('onclick does not throw when onOpenSessions is omitted (the param is optional)', () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted' });
+  let focused = 0;
+  let closed = 0;
+  globalThis.window.focus = () => { focused += 1; };
+  fireBudgetNotification('Budget', 'over');
+  lastNotification.close = () => { closed += 1; };
+  assert.doesNotThrow(() => lastNotification.onclick(), 'clicking a handler-less budget ping is safe');
+  assert.equal(focused, 1, 'still raises the window');
+  assert.equal(closed, 1, 'still dismisses the ping');
+  restoreGlobals();
+});
+
+console.log('\nfireBudgetNotification: a rejected construction must never crash the budget poll');
+test('swallows a restrictive webview rejecting new Notification (the catch at :814)', () => {
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted', throws: true });
+  lastNotification = null;
+  assert.doesNotThrow(() => fireBudgetNotification('Budget', 'over', () => {}));
+  assert.equal(lastNotification, null, 'nothing was constructed');
+  restoreGlobals();
+});
+test('a throwing onOpenSessions is the CALLER contract, not swallowed by the try/catch', () => {
+  // The try/catch wraps CONSTRUCTION only — onclick runs later, outside it. Pinning this
+  // stops a future refactor from quietly widening the swallow to cover the click handler,
+  // which would hide a broken deep-link instead of surfacing it in the console.
+  globalThis.window = { focus() {} };
+  globalThis.Notification = makeNotificationShim({ permission: 'granted' });
+  fireBudgetNotification('Budget', 'over', () => { throw new Error('nav blew up'); });
+  assert.throws(() => lastNotification.onclick(), /nav blew up/);
+  restoreGlobals();
 });
 
 console.log(`\n✓ DESKTOP ALERTS TESTS PASS (${passed})`);
