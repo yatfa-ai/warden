@@ -94,9 +94,51 @@ function sshControl(host, socketPath, sub, timeout = 5000) {
   });
 }
 
-async function ensureControlMaster(host, cfg) {
+// How long the FAILURE path may wait for the dead child's stdio to drain before
+// it gives up and rejects with whatever stderr has arrived. Bounded so a
+// pathological child that exits non-zero and never closes its pipes cannot hang
+// the promise (the connect timer is already cleared by then — see below).
+const CONTROL_MASTER_DRAIN_GRACE_MS = 300;
+
+// Establish (or reuse) the ControlMaster every pooled request multiplexes over.
+//
+// SETTLE-TRIGGER ASYMMETRY (WARDEN-1107) — this is the ONE spawn-and-capture
+// primitive in the repo that legitimately diverges from its siblings' blanket
+// "resolve on 'close', not 'exit'" rule (run() src/ssh.js:371, runLocalTmux(),
+// runLocalCapture() gitRoutes.js:94 — WARDEN-464/766). The two paths settle on
+// DIFFERENT events, on purpose:
+//
+//   success (code === 0) → settle on 'exit'. Unlike its siblings this child is
+//     DAEMONIZING: `ssh -N -o ControlMaster=yes -o ControlPersist=10m` forks a
+//     background master and the foreground process exits 0 while the backgrounded
+//     master RETAINS the inherited stdout/stderr pipe fds. The write ends stay
+//     open, so 'close' may never fire on success — waiting for it would hang until
+//     the connect timer fired and turn every successful remote connection into a
+//     bogus `ControlMaster connect timeout`. A naive one-line 'exit'→'close' swap
+//     here is a severe regression on the primary remote-host path
+//     (getConnection → runWithPool → chats.js discover, every poll tick). It would
+//     also delay resolution past the child's exit, which the pool's
+//     `process.on('exit', …)` eviction listener (src/ssh.js) depends on.
+//
+//   failure (code !== 0) → wait for the stdio drain ('close', bounded by
+//     CONTROL_MASTER_DRAIN_GRACE_MS). The rejection message is built FROM stderr,
+//     and 'exit' can fire before the pipe drains — so settling on 'exit' reads a
+//     still-empty stderr and the real ssh diagnostic ("Permission denied
+//     (publickey)", "Host key verification failed", "Could not resolve hostname")
+//     degrades to the `exit 255` fallback. That fallback firing IS the bug: this
+//     console.error'd message is how an unreachable host actually gets diagnosed
+//     server-side (browser surfaces genericize it by design). On failure no master
+//     is established, so nothing holds the pipes open and 'close' does arrive.
+//
+// `spawn` is injectable (defaults to node's child_process.spawn) so BOTH halves of
+// that asymmetry have deterministic unit tests — a real subprocess can't reproduce
+// 'exit'-before-final-'data', nor a success that never closes, reliably on every
+// machine. Mirrors runLocalCapture's seam (gitRoutes.js:77).
+export async function ensureControlMaster(host, cfg) {
   const socketPath = `${controlMasterPath()}-${host.replace(/[^a-zA-Z0-9]/g, '_')}`;
   const timeout = (cfg?.connectTimeout ?? 10);
+  const spawnFn = cfg?.spawn ?? spawn;
+  const drainGrace = cfg?.drainGrace ?? CONTROL_MASTER_DRAIN_GRACE_MS;
 
   // Check if master is already running (async — never blocks the event loop).
   if ((await sshControl(host, socketPath, 'check', 2000)) === 0) {
@@ -119,13 +161,34 @@ async function ensureControlMaster(host, cfg) {
   });
 
   return new Promise((resolve, reject) => {
-    const child = spawn(SSH_BIN, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawnFn(SSH_BIN, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
 
-    const timer = setTimeout(() => {
-      child.kill('SIGTERM');
-      reject(new Error(`ControlMaster connect timeout to ${host}`));
+    // Single-settle guard (the pattern sshControl already uses above): 'exit',
+    // 'close', 'error', the connect timer and the drain timer can all fire, and
+    // exactly one of them may settle the promise. Every path clears both timers.
+    let settled = false;
+    let drainTimer = null;
+    let timer = null;
+    const settle = (fn) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (drainTimer) clearTimeout(drainTimer);
+      fn();
+    };
+    // The failure rejection, built AFTER the drain so `stderr` is the real ssh
+    // diagnostic. The `stderr || \`exit ${code}\`` fallback is preserved verbatim —
+    // it is still the correct answer for a child that genuinely wrote nothing.
+    const rejectFailure = (code) =>
+      settle(() => reject(new Error(`ControlMaster failed to ${host}: ${stderr || `exit ${code}`}`)));
+
+    timer = setTimeout(() => {
+      settle(() => {
+        child.kill('SIGTERM');
+        reject(new Error(`ControlMaster connect timeout to ${host}`));
+      });
     }, timeout * 1000 + 5000);
 
     // setEncoding('utf8') BEFORE the 'data' listeners (WARDEN-1045): `stdout += d`
@@ -140,17 +203,34 @@ async function ensureControlMaster(host, cfg) {
     child.stderr.on('data', (d) => { stderr += d; });
 
     child.on('error', (err) => {
-      clearTimeout(timer);
-      reject(new Error(`ControlMaster spawn failed: ${err.message}`));
+      settle(() => reject(new Error(`ControlMaster spawn failed: ${err.message}`)));
     });
 
     child.on('exit', (code) => {
-      clearTimeout(timer);
+      if (settled) return;
       if (code === 0) {
-        resolve({ socketPath, existing: false, process: child });
+        // SUCCESS — settle HERE, on 'exit', never on 'close'. The ControlPersist
+        // daemon this call just forked holds the inherited pipe fds open, so
+        // 'close' may never arrive. See the function header.
+        settle(() => resolve({ socketPath, existing: false, process: child }));
       } else {
-        reject(new Error(`ControlMaster failed to ${host}: ${stderr || `exit ${code}`}`));
+        // FAILURE — the message is built from stderr, which may still be draining.
+        // Hand off to 'close'. The connect timer is disarmed (the child has already
+        // exited; there is nothing left to time out or SIGTERM) and replaced by a
+        // short bounded grace so a child that never closes its pipes still rejects
+        // — with whatever stderr arrived, exactly as today.
+        clearTimeout(timer);
+        drainTimer = setTimeout(() => rejectFailure(code), drainGrace);
       }
+    });
+
+    // 'close' fires only after the stdio streams drain, and passes the same `code`
+    // as 'exit' — so the reject contract is unchanged, only its message is complete.
+    // Reached on the failure path (and on a spawn failure that emits 'close' with no
+    // 'exit'); a no-op after the success path has already settled on 'exit'.
+    child.on('close', (code) => {
+      if (settled) return;
+      rejectFailure(code ?? -1);
     });
   });
 }
