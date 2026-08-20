@@ -41,6 +41,34 @@ export function shouldRefreshOnVisibility(
 }
 
 /**
+ * Dedupe + drop falsy + sort, so a filter menu built from a newest-first feed
+ * keeps a stable order across polls instead of following feed recency.
+ *
+ * Both feeds behind these menus arrive newest-first from the server
+ * (`src/activity.js`, `src/observer.js`), and `Set` iteration is insertion
+ * order — so an unsorted `Array.from(new Set(...))` renders the options as
+ * "whichever host/agent was most recently active", reshuffling them under the
+ * user's cursor on every poll. Sorting makes the order a function of the option
+ * VALUES rather than of feed recency.
+ *
+ * Mirrors attentionFilterOptions (attentionRollup.ts:253-256), which already
+ * holds this invariant for the Attention tab's equivalent Selects.
+ *
+ * The `string` return type is load-bearing: Radix `SelectItem` requires a
+ * non-empty `string` value, so callers no longer need an `as string[]` cast or
+ * an inline `: x is string` type guard to satisfy it.
+ */
+export function sortedFilterOptions(values: (string | undefined | null)[]): string[] {
+  const seen = new Set<string>();
+  for (const v of values) {
+    // Falsy (undefined / null / '') is not a selectable option — an empty
+    // string is also rejected outright by Radix SelectItem.
+    if (v) seen.add(v);
+  }
+  return Array.from(seen).sort((x, y) => x.localeCompare(y));
+}
+
+/**
  * Human label for "how long since the last successful refresh", given the
  * current time and the last update timestamp (both ms since epoch). Returns
  * null when there has been no update yet. Takes `now` explicitly (never reads

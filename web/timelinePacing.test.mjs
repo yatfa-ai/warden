@@ -24,7 +24,7 @@ const { code } = await transformWithOxc(src, pacingPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-timeline-test-'));
 const tmpFile = join(tmpDir, 'timelinePacing.mjs');
 writeFileSync(tmpFile, code);
-const { shouldPoll, shouldRefreshOnVisibility, formatUpdatedAgo, POLL_INTERVAL_MS } =
+const { shouldPoll, shouldRefreshOnVisibility, formatUpdatedAgo, POLL_INTERVAL_MS, sortedFilterOptions } =
   await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
@@ -87,6 +87,46 @@ test('negative diff (clock skew) clamps to "just now", not negative/NaN', () => 
 console.log('\nthe cadence is the ~15s live interval (not seconds, not minutes)');
 test('POLL_INTERVAL_MS is 15000 (15s)', () => {
   assert.equal(POLL_INTERVAL_MS, 15_000);
+});
+
+console.log('\nsortedFilterOptions: stable filter-menu order from a newest-first feed');
+test('dedupes repeated values (one option per distinct value)', () => {
+  assert.deepEqual(sortedFilterOptions(['alpha', 'zeta', 'alpha', 'zeta', 'alpha']), ['alpha', 'zeta']);
+});
+test('drops falsy values — undefined/null/empty are not selectable options', () => {
+  assert.deepEqual(
+    sortedFilterOptions(['zeta', undefined, 'alpha', null, '', 'zeta']),
+    ['alpha', 'zeta'],
+  );
+});
+test('sorts by localeCompare, NOT by feed insertion order', () => {
+  // Input is newest-first (the order both feeds arrive in); output is alphabetical.
+  assert.deepEqual(sortedFilterOptions(['zeta', 'alpha', 'Mid']), ['alpha', 'Mid', 'zeta']);
+});
+test('empty input -> []', () => {
+  assert.deepEqual(sortedFilterOptions([]), []);
+});
+test('all-falsy input -> []', () => {
+  assert.deepEqual(sortedFilterOptions([undefined, null, '']), []);
+});
+test('THE BUG: a newly-active host does not reorder the menu across a poll', () => {
+  // Poll 1: alpha was most recently active, so the newest-first feed leads with it.
+  const poll1 = sortedFilterOptions(['alpha', 'zeta']);
+  // Poll 2: zeta emits an event and jumps to the head of the same feed.
+  const poll2 = sortedFilterOptions(['zeta', 'alpha']);
+  // The menu the user is reaching for must be identical across the two polls.
+  assert.deepEqual(poll1, poll2);
+  assert.deepEqual(poll2, ['alpha', 'zeta']);
+});
+test('the option SET is preserved — same values as a plain dedupe+falsy-drop', () => {
+  const raw = ['zeta', undefined, 'alpha', 'zeta', '', 'mid', null];
+  const today = Array.from(new Set(raw.filter(Boolean)));
+  assert.deepEqual([...sortedFilterOptions(raw)].sort(), [...today].sort());
+});
+test('does not mutate the caller\'s array', () => {
+  const input = ['zeta', 'alpha'];
+  sortedFilterOptions(input);
+  assert.deepEqual(input, ['zeta', 'alpha']);
 });
 
 console.log(`\n✓ TIMELINE PACING TESTS PASS (${passed})`);

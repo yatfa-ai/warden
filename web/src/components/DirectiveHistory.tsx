@@ -16,7 +16,7 @@ import { copyText } from '@/lib/clipboard';
 import { toast } from 'sonner';
 import { EmptyState } from './EmptyState';
 import { MarkdownBody } from './MarkdownBody';
-import { formatUpdatedAgo } from '@/lib/timelinePacing';
+import { formatUpdatedAgo, sortedFilterOptions } from '@/lib/timelinePacing';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { POLL_INTERVAL_MS, shouldPoll, shouldRefreshOnVisibility } from '@/lib/timelinePacing';
 
@@ -116,9 +116,11 @@ export function DirectiveHistory({
     return () => clearInterval(id);
   }, [isLive, isHidden, fetchDirectives]);
 
-  // Unique filter options derived from loaded directives.
-  const allAgents = Array.from(new Set(directives.map((d) => d.container).filter(Boolean))) as string[];
-  const allHosts = Array.from(new Set(directives.map((d) => d.host).filter(Boolean))) as string[];
+  // Unique filter options derived from loaded directives. Sorted (not feed
+  // order) so the menus don't reshuffle under the cursor on every poll —
+  // directives arrive newest-first from the server.
+  const allAgents = sortedFilterOptions(directives.map((d) => d.container));
+  const allHosts = sortedFilterOptions(directives.map((d) => d.host));
 
   const filtered = directives.filter((d) => {
     if (agentFilter !== 'all' && d.container !== agentFilter) return false;
