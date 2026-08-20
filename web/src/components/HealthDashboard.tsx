@@ -5,6 +5,7 @@ import type { HealthData, Chat } from '@/lib/types';
 import type { FleetGitStatusSlice } from '@/lib/gitStateSummary';
 import {
   HealthState,
+  HEALTH_STATES,
   getHealthIcon,
   formatHealthState,
   normalizeHealthState,
@@ -96,12 +97,18 @@ interface Props {
   companionTransportEnabled: boolean;
 }
 
-// Closed sits between idle and unknown: a dead session is non-critical and less
-// actionable than an idle (potentially waking) one, so it sinks toward the tail.
-// (WARDEN-245)
-const HEALTH_SECTION_ORDER = ['healthy', 'warning', 'critical', 'idle', 'closed', 'unknown'] as const;
+// Section render order. Derived from the canonical health-state vocabulary
+// (healthUtils.ts `HEALTH_STATES`, WARDEN-1104) rather than re-typed, so a new
+// member gets a section automatically. The canonical order IS the display order:
+// closed sits between idle and unknown because a dead session is non-critical and
+// less actionable than an idle (potentially waking) one, so it sinks toward the
+// tail. (WARDEN-245)
+const HEALTH_SECTION_ORDER = HEALTH_STATES;
 
-const SECTION_LABELS: Record<string, { title: string; color: string; icon: string }> = {
+// Typed Record<HealthStateValue, …> (not Record<string, …>) so omitting a state
+// is a COMPILE error — matching its HEALTH_DIST_COLOR neighbour below, which has
+// always been enforced this way. (WARDEN-1104)
+const SECTION_LABELS: Record<HealthStateValue, { title: string; color: string; icon: string }> = {
   healthy: { title: 'Healthy Agents', color: 'text-green-500', icon: '●' },
   warning: { title: 'Warning Agents', color: 'text-yellow-500', icon: '◐' },
   critical: { title: 'Critical Agents', color: 'text-red-500', icon: '●' },
@@ -1580,11 +1587,11 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
 
                         Why two lines (UX): the dashboard panel is 320px
                         (HEALTH_WIDTH). Fusing connectivity + a long hostname + a
-                        rich 5-segment distribution onto one line is noisy and
+                        rich 6-segment distribution onto one line is noisy and
                         fragile; giving the distribution line 2 the full panel
                         width (indented under the hostname) keeps it legible. The
                         distribution line itself is `flex-wrap`, so a very wide
-                        distribution (5 states, 3-digit counts) that still exceeds
+                        distribution (6 states, 3-digit counts) that still exceeds
                         the panel width wraps to a third line rather than clipping
                         — no segment is ever cut off.
 
@@ -1665,7 +1672,7 @@ export function HealthDashboard({ onOpenChat, onClose, timestampFormat, fileView
                             amber, ≥90 red) so a host whose agents collectively sit at ≥90% mem
                             is red here too. Indented (pl-7) to align under the hostname.
                             `flex-wrap` makes the line bulletproof against overflow: if a very
-                            wide distribution (all 5 states, 3-digit counts) + the load segment
+                            wide distribution (all 6 states, 3-digit counts) + the load segment
                             still exceeds the panel width, the excess wraps to a third line
                             instead of being clipped. Each segment is its own flex item, so a
                             wrapped segment stays whole (it never breaks mid-word). (WARDEN-237) */}

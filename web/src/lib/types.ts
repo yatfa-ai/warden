@@ -1,3 +1,5 @@
+import type { HealthStateValue } from '@/lib/healthUtils';
+
 export interface Chat {
   id: string;
   key?: string;        // unique display/stream id (yatfa: container; manual: session)
@@ -14,7 +16,7 @@ export interface Chat {
   active?: boolean | null;  // null = undiscovered (lazy mode, before host is clicked)
   status?: string;
   lastActivity?: number;  // Timestamp of last activity (ms since epoch)
-  healthState?: string;  // Health state (healthy, warning, critical, idle, unknown)
+  healthState?: string;  // Health state (healthy, warning, critical, idle, closed, unknown)
   // Per-container resource usage from `docker stats` (WARDEN-309). Captured in the
   // SSH discover() path only (rides the existing discover round-trip), cache-carried
   // into /api/health (zero SSH on the 10s poll). Optional → chats without them
@@ -31,23 +33,16 @@ export interface Chat {
   tokenUsage?: { total: number };
 }
 
+// The /api/health payload. `groups` and `summary` mirror src/health.js's
+// groupByHealth / getHealthSummary exactly — both are keyed by the canonical
+// health-state vocabulary, so they are DERIVED from HealthStateValue rather than
+// re-typing the six members (WARDEN-1104). `HealthStateValue` is a type-only
+// import (erased at build), so this does not create a runtime cycle with
+// healthUtils.ts, which imports `Chat` from here.
 export interface HealthData {
   agents: Chat[];  // Agents with healthState
-  groups: {
-    healthy: Chat[];
-    warning: Chat[];
-    critical: Chat[];
-    idle: Chat[];
-    closed: Chat[];
-    unknown: Chat[];
-  };
-  summary: {
-    healthy: number;
-    warning: number;
-    critical: number;
-    idle: number;
-    closed: number;
-    unknown: number;
+  groups: Record<HealthStateValue, Chat[]>;
+  summary: Record<HealthStateValue, number> & {
     total: number;
     label: string;
   };
