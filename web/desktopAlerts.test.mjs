@@ -1342,8 +1342,8 @@ test('away: fires uniformly across waiting/erroring/stuck/completed even when fo
 // The "while the founder is away" alarm. Sibling of fireAttentionNotification /
 // fireWatchNotification: same Web Notifications channel, same notificationsSupported /
 // permission guards, same never-throw discipline. It takes PRE-FORMATTED title + body
-// (tokenBudget.ts's formatBudgetMessageWith computes them) so desktopAlerts.ts stays
-// runtime-import-free and loadable here.
+// (tokenBudget.ts's formatBudgetMessageWith computes them) so desktopAlerts.ts does not
+// import tokenBudget.ts — keeping this loader's transpile set to the one sibling above.
 //
 // Its sole caller is useTokenBudget.ts:110, which has runtime react + sonner imports and
 // therefore cannot load in this OXC harness at all — so there is no indirect path to this
@@ -1416,7 +1416,7 @@ test('the budget tag is stable across repeats, so a re-crossing REPLACES its pri
   assert.equal(first, second, 'same tag on a repeat crossing => the OS replaces, not stacks');
   restoreGlobals();
 });
-// The collision guard. desktopAlerts.ts:793-795 states the budget tag is deliberately
+// The collision guard. desktopAlerts.ts:795-797 states the budget tag is deliberately
 // DISTINCT so the budget alarm "never replaces — and is never replaced by — an
 // attention/watch ping". A drift that made any two of these three literals equal would
 // silently overwrite one alarm with another: no error, no visible symptom. So this reads
@@ -1469,7 +1469,7 @@ test('onclick does not throw when onOpenSessions is omitted (the param is option
 });
 
 console.log('\nfireBudgetNotification: a rejected construction must never crash the budget poll');
-test('swallows a restrictive webview rejecting new Notification (the catch at :814)', () => {
+test('swallows a restrictive webview rejecting new Notification (the catch at :815)', () => {
   globalThis.window = { focus() {} };
   globalThis.Notification = makeNotificationShim({ permission: 'granted', throws: true });
   lastNotification = null;
