@@ -8,9 +8,9 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import {
-  type SnippetNameIssue,
   SNIPPET_NAME_MAX,
   SNIPPET_TEXT_MAX,
+  snippetNameErrorMessage,
   validateSnippetName,
 } from '@/lib/storage';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
@@ -42,16 +42,6 @@ export function SnippetsSection(props: SnippetsSectionProps) {
   // permanent and a hand-written instruction body is unrecoverable. Cancel/
   // Escape/overlay-click clear it WITHOUT touching setSnippets.
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
-
-  // Human message for a non-null snippet-name validation issue. The contract
-  // itself lives in storage.ts (validateSnippetName); this just renders it.
-  const snippetNameErrorMessage = (name: string, issue: SnippetNameIssue): string => {
-    switch (issue) {
-      case 'empty': return 'Snippet needs a name.';
-      case 'too-long': return `Snippet name must be ${SNIPPET_NAME_MAX} characters or fewer.`;
-      case 'duplicate': return `A snippet named "${name}" already exists.`;
-    }
-  };
 
   const addSnippet = () => {
     const name = newSnippetName.trim();

@@ -40,7 +40,7 @@ const tmpDir = mkdtempSync(join(tmpdir(), 'warden-storage-test-'));
 writeFileSync(join(tmpDir, 'themes.mjs'), themesCode);
 const tmpFile = join(tmpDir, 'storage.mjs');
 writeFileSync(tmpFile, storageCode.replaceAll('@/lib/themes', './themes.mjs'));
-const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, mergeRecentlyClosed, RECENTLY_CLOSED_CAP, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, validateSnippetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, SNIPPET_MAX_COUNT, STARTER_SNIPPETS, validatePatternName, isValidRegex, WATCH_PATTERN_NAME_MAX, resetUiPrefsPreservingWorkspace, DEFAULT_UI, PERSISTED_PREF_KEYS, RESET_PRESERVED_KEYS, resetUiPrefDefaults } = await import(tmpFile);
+const { loadUi, saveUi, loadObs, saveObs, persistUiState, initialWorkspace, mergeRecentlyClosed, RECENTLY_CLOSED_CAP, validatePresetName, isReservedPresetName, PRESET_NAME_MAX, presetNameErrorMessage, validateSnippetName, SNIPPET_NAME_MAX, SNIPPET_TEXT_MAX, SNIPPET_MAX_COUNT, STARTER_SNIPPETS, snippetNameErrorMessage, validatePatternName, isValidRegex, WATCH_PATTERN_NAME_MAX, patternNameErrorMessage, resetUiPrefsPreservingWorkspace, DEFAULT_UI, PERSISTED_PREF_KEYS, RESET_PRESERVED_KEYS, resetUiPrefDefaults } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -1835,6 +1835,89 @@ test('false for an empty expression', () => {
   assert.equal(isValidRegex(''), false);
 });
 
+console.log('\nvalidateEntryName — the shared skeleton\'s per-caller parameterization (WARDEN-1111)');
+// The skeleton itself is module-private; these pin the deltas each of the three
+// public validators supplies to it, so a future edit cannot quietly unify a
+// per-caller knob (cap / reserved guard / `except` identity) across all three.
+test('each validator keeps its OWN cap — the cap is a parameter, never a shared constant', () => {
+  // Patterns allow 64, presets/snippets 32. A name in between must therefore be
+  // rejected by two of the three and accepted by the third.
+  assert.notEqual(WATCH_PATTERN_NAME_MAX, PRESET_NAME_MAX);
+  const between = 'x'.repeat(PRESET_NAME_MAX + 1);
+  assert.ok(between.length <= WATCH_PATTERN_NAME_MAX);
+  assert.equal(validatePresetName(between, []), 'too-long');
+  assert.equal(validateSnippetName(between, []), 'too-long');
+  assert.equal(validatePatternName(between, []), null);
+});
+test('the reserved guard is preset-only — snippets and patterns may be named "claude"', () => {
+  // Only validatePresetName passes a `reserved` predicate to the skeleton, which
+  // is what keeps 'reserved' out of the snippet/pattern issue unions.
+  assert.equal(validatePresetName('claude', []), 'reserved');
+  assert.equal(validateSnippetName('claude', []), null);
+  assert.equal(validatePatternName('SHELL', []), null);
+});
+test('reserved is checked BEFORE duplicate when a name is both', () => {
+  // Order is load-bearing: a preset list already holding 'claude' must still
+  // report the more specific 'reserved', not 'duplicate'.
+  assert.equal(validatePresetName('claude', [{ name: 'claude', cmd: 'c' }]), 'reserved');
+});
+test('`except` identity is per-caller: presets/snippets exclude by NAME, patterns by ID', () => {
+  // The complement of the "excludes `except`" tests above: passing the WRONG
+  // kind of key must NOT exclude anything. This is the assertion that fails if
+  // the skeleton's identityOf is ever flattened to one shared key.
+  const pattern = [{ id: 'p1', name: 'Deploy failed', expression: 'x', mode: 'string', enabled: true }];
+  // Patterns key on id, so the entry's NAME is not an identity → no exclusion.
+  assert.equal(validatePatternName('Deploy failed', pattern, 'Deploy failed'), 'duplicate');
+  assert.equal(validatePatternName('Deploy failed', pattern, 'p1'), null);
+  // Presets/snippets key on name, so an id-shaped `except` excludes nothing.
+  assert.equal(validatePresetName('codex', [{ name: 'codex', cmd: 'c' }], 'p1'), 'duplicate');
+  assert.equal(validateSnippetName('Ship', [{ name: 'Ship', text: 's' }], 'p1'), 'duplicate');
+});
+
+console.log('\npresetNameErrorMessage / snippetNameErrorMessage / patternNameErrorMessage — the toast text (WARDEN-1111)');
+// Relocated out of NewChatsSection/SnippetsSection/PatternsSection so they are
+// testable at all — this repo has no React test runner, so a pure function
+// trapped in a component is a pure function nothing can cover.
+test('presetNameErrorMessage renders every arm of PresetNameIssue', () => {
+  assert.equal(presetNameErrorMessage('codex', 'empty'), 'Preset needs a name.');
+  assert.equal(presetNameErrorMessage('codex', 'duplicate'), 'A preset named "codex" already exists.');
+  assert.equal(
+    presetNameErrorMessage('claude', 'reserved'),
+    '"claude" is a reserved preset name (use the built-in claude/shell instead).',
+  );
+});
+test('snippetNameErrorMessage renders every arm of SnippetNameIssue', () => {
+  assert.equal(snippetNameErrorMessage('Run tests', 'empty'), 'Snippet needs a name.');
+  assert.equal(snippetNameErrorMessage('Run tests', 'duplicate'), 'A snippet named "Run tests" already exists.');
+});
+test('patternNameErrorMessage renders every arm of PatternNameIssue', () => {
+  assert.equal(patternNameErrorMessage('Deploy failed', 'empty'), 'Pattern needs a name.');
+  assert.equal(patternNameErrorMessage('Deploy failed', 'duplicate'), 'A pattern named "Deploy failed" already exists.');
+});
+test('each too-long message quotes its OWN cap (32 preset/snippet vs 64 pattern)', () => {
+  // Literal caps, not the constants, so this fails loudly if a formatter is ever
+  // rewired to a shared cap — the exact mistake the shared skeleton invites.
+  assert.equal(PRESET_NAME_MAX, 32);
+  assert.equal(SNIPPET_NAME_MAX, 32);
+  assert.equal(WATCH_PATTERN_NAME_MAX, 64);
+  assert.equal(presetNameErrorMessage('x', 'too-long'), 'Preset name must be 32 characters or fewer.');
+  assert.equal(snippetNameErrorMessage('x', 'too-long'), 'Snippet name must be 32 characters or fewer.');
+  assert.equal(patternNameErrorMessage('x', 'too-long'), 'Pattern name must be 64 characters or fewer.');
+});
+test('validator issue → formatter is the exact toast the Settings write sites show', () => {
+  // The end-to-end shape each section runs: validate, then render the issue.
+  const presets = [{ name: 'codex', cmd: 'c' }];
+  assert.equal(
+    presetNameErrorMessage('codex', validatePresetName('codex', presets)),
+    'A preset named "codex" already exists.',
+  );
+  const patterns = [{ id: 'p1', name: 'Deploy failed', expression: 'x', mode: 'string', enabled: true }];
+  assert.equal(
+    patternNameErrorMessage('Deploy failed', validatePatternName('Deploy failed', patterns)),
+    'A pattern named "Deploy failed" already exists.',
+  );
+});
+
 console.log('\ndefaultNewChatPresetByHost (per-host preset overrides) round-trips through loadUi/saveUi — WARDEN-352');
 test('defaults to {} when nothing is stored', () => {
   reset();
@@ -2337,7 +2420,7 @@ test('zero and negative expiries are dropped (the value must be strictly positiv
   assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-d': 1 });
 });
 test('a positive PAST-expiry value is KEPT (the sanitizer deliberately does not read the clock)', () => {
-  // THE load-bearing non-behavior (storage.ts:866-872). An already-expired snooze
+  // THE load-bearing non-behavior (see parseSnoozedKeys in storage.ts). An already-expired snooze
   // is harmless — activeSnoozedKeys excludes it and App's mount prune clears it —
   // and dropping it here would require a clock read inside this pure loader.
   // A refactor that "helpfully" filtered past expiries would break the documented
