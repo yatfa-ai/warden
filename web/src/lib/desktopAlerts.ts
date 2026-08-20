@@ -13,10 +13,15 @@
 // browser globals (no Notification API in the Node test runner) and are kept
 // defensive so they can never throw inside the 10s poll.
 //
-// `import type` is fully erased at transpile time, so the emitted module has no
-// runtime imports — the unit test can import it standalone (mirrors
-// attentionRollup.ts's testability discipline).
-import type { AttentionRollup } from '@/lib/attentionRollup';
+// This module has ONE runtime import — `finalizeRollup` from attentionRollup.ts
+// (WARDEN-1115, which collapsed the three hand-copied rollup-finalize blocks onto one
+// helper). Everything else is `import type`, fully erased at transpile time. That single
+// value import is why desktopAlerts.test.mjs must transpile attentionRollup.ts into the
+// SAME tmpdir and rewrite the `@/lib/attentionRollup` specifier — the emitted module is
+// no longer import-free, so a standalone import would fail to resolve at load. The
+// sibling is safe to transpile alongside: attentionRollup.ts has zero runtime imports of
+// its own, so the chain bottoms out there.
+import { finalizeRollup, type AttentionRollup } from '@/lib/attentionRollup';
 import type { AgentStateRow } from '@/lib/types';
 import type { WatchReason } from '@/lib/chatWatch';
 
@@ -162,10 +167,7 @@ export function applySeverityPrefs(
   const done = rollup.done ?? [];
   const directives = prefs.alertDirective ? rollup.directives : 0;
   const errors = prefs.alertError ? rollup.errors : 0;
-  const total =
-    critical.length + warning.length + directives + errors +
-    stuck.length + erroring.length + waiting.length + blocked.length + custom.length;
-  return { critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors, total };
+  return finalizeRollup({ critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors });
 }
 
 /**
@@ -232,9 +234,9 @@ export function fireAttentionNotification(rollup: AttentionRollup): void {
 // reason, fire-once) lives in chatWatch.ts (pure, unit-tested); this module is only
 // the formatting + browser delivery channel — the same discipline as the fleet alert.
 //
-// `import type { WatchReason }` is erased at transpile, so this module stays
-// runtime-import-free and the existing desktopAlerts.test.mjs can still load it
-// standalone via the OXC transform.
+// `import type { WatchReason }` is erased at transpile, so it adds nothing to this
+// module's runtime imports — which are exactly one (finalizeRollup, see the file
+// header), the one desktopAlerts.test.mjs's loader resolves by transpiling the sibling.
 
 // Reason → human phrasing for the watch body. Conveys the concrete "why" so the
 // human knows what kind of attention the chat needs, not just that it needs some.
@@ -786,9 +788,9 @@ export function applyFleetAttentionCooldown(
 // shipped. Sibling of fireAttentionNotification / fireWatchNotification: same
 // Web Notifications channel + the same notificationsSupported / permission
 // guards. Takes PRE-FORMATTED title + body (computed by tokenBudget.ts's
-// formatBudgetMessageWith) rather than the BudgetState itself, so THIS module
-// stays runtime-import-free (the `import type` discipline above) and the
-// standalone desktopAlerts.test.mjs can still load it via the OXC transform.
+// formatBudgetMessageWith) rather than the BudgetState itself. Keep it that way:
+// the two siblings' formatters live HERE, this one's lives in tokenBudget.ts, and
+// the strings keep that cross-module dependency out of the loader (see the header).
 //
 // Uses a DISTINCT stable tag (`warden-budget`) so the budget alert never
 // replaces — and is never replaced by — an attention/watch ping; a repeat

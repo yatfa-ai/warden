@@ -30,7 +30,7 @@ const { code } = await transformWithOxc(src, helperPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-attention-test-'));
 const tmpFile = join(tmpDir, 'attentionRollup.mjs');
 writeFileSync(tmpFile, code);
-const { buildAttentionRollup, EMPTY_ATTENTION_ROLLUP, rankAttention, pickCalloutTop, attentionReason, hasReturnContent, isDoneTransition, rollupSeverity, filterAttentionRollup, attentionFilterOptions } = await import(tmpFile);
+const { buildAttentionRollup, EMPTY_ATTENTION_ROLLUP, rankAttention, pickCalloutTop, attentionReason, hasReturnContent, isDoneTransition, rollupSeverity, filterAttentionRollup, attentionFilterOptions, finalizeRollup } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -897,5 +897,73 @@ test('an empty rollup offers no options (the Selects show only their All sentine
   assert.deepEqual(attentionFilterOptions(EMPTY_ATTENTION_ROLLUP), { hosts: [], agents: [] });
 });
 
+
+console.log('\nfinalizeRollup — the one finalize step all three rollup producers share (WARDEN-1115)');
+// The 10-field input shape, defaulted so each case reads as "which parts differ".
+const parts = (p = {}) => ({
+  critical: [], warning: [], stuck: [], erroring: [], waiting: [], blocked: [],
+  custom: [], done: [], directives: 0, errors: 0, ...p,
+});
+test('sums the eight problem row-buckets by LENGTH', () => {
+  const r = finalizeRollup(parts({
+    critical: [agent('c1'), agent('c2')],
+    warning: [agent('w1')],
+    stuck: [agent('s1')],
+    erroring: [agent('e1')],
+    waiting: [agent('t1')],
+    blocked: [agent('b1')],
+    custom: [agent('x1')],
+  }));
+  assert.equal(r.total, 8);
+});
+test('directives/errors add as NUMBERS, not as lengths', () => {
+  // The trap this pins: `.length` on a number is undefined, and treating these two
+  // event counts as arrays would silently contribute NaN (or 0) instead of 7.
+  const r = finalizeRollup(parts({ directives: 3, errors: 4 }));
+  assert.equal(r.total, 7);
+  // ...and they compose with the row buckets rather than replacing them.
+  const mixedR = finalizeRollup(parts({ critical: [agent('c1')], directives: 2, errors: 5 }));
+  assert.equal(mixedR.total, 8);
+});
+test('done NEVER counts toward total (the WARDEN-575 invariant, in its single home)', () => {
+  const r = finalizeRollup(parts({ done: [agent('d1'), agent('d2'), agent('d3')] }));
+  assert.equal(r.total, 0);
+  // ...and it does not perturb a non-zero total either.
+  const withProblems = finalizeRollup(parts({
+    critical: [agent('c1')], directives: 2, done: [agent('d1'), agent('d2')],
+  }));
+  assert.equal(withProblems.total, 3);
+});
+test('done is still CARRIED THROUGH in full (excluded from the count, not dropped)', () => {
+  const done = [agent('d1'), agent('d2')];
+  const r = finalizeRollup(parts({ done }));
+  assert.deepEqual(r.done, done);
+});
+test('an all-empty input finalizes to total 0 with every bucket intact', () => {
+  assert.deepEqual(finalizeRollup(parts()), EMPTY_ATTENTION_ROLLUP);
+});
+test('preserves the AttentionRollup key ORDER exactly', () => {
+  assert.deepEqual(Object.keys(finalizeRollup(parts())), Object.keys(EMPTY_ATTENTION_ROLLUP));
+});
+test('all three producers agree with the helper on the same buckets (no copy drifted)', () => {
+  // The point of the collapse: build / filter / severity-route must finalize identically.
+  // Here: one critical + one stuck + 2 directives + 1 error, and a done row that must not
+  // count. Every route must land on total 5 and carry the done row.
+  const built = buildAttentionRollup(
+    health({ critical: [agent('c1')] }),
+    { directive_proposed: 2, error: 1 },
+    [agent('s1', { state: 'stuck' }), agent('d1', { state: 'idle' })],
+    { doneKeys: new Set(['d1']) },
+  );
+  assert.equal(built.total, 5);
+  assert.equal(built.done.length, 1);
+  const viaHelper = finalizeRollup(parts({
+    critical: built.critical, stuck: built.stuck, done: built.done,
+    directives: built.directives, errors: built.errors,
+  }));
+  assert.deepEqual(viaHelper, built);
+  // filterAttentionRollup is the second producer — unfiltered it must finalize the same.
+  assert.deepEqual(filterAttentionRollup(built, 'all', 'all'), built);
+});
 
 console.log(`\n✓ ATTENTION ROLLUP TESTS PASS (${passed})`);
