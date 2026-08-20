@@ -776,8 +776,22 @@ app.get('/api/activity', async (req, res) => {
   // case in ActivityTimeline.tsx), and the from:null baseline fires for every
   // agent on every warden restart — fleet-wide noise. The transition still flows
   // to /api/activity/series's stateSeries (its dedicated surface).
-  const events = (await readEvents({ after, before, limit }))
+  //
+  // WARDEN-1101: the limit MUST be applied AFTER the exclusion, so it is read
+  // here rather than passed into readEvents. readEvents sorts newest-first and
+  // slices internally, so `readEvents({ limit })` then `.filter()` subtracts every
+  // state_changed in the newest N from the user's requested N instead of skipping
+  // over it — and that restart baseline arrives as one newest-first burst of N
+  // agents. On a fleet ≥50, "Last 50" rendered "Showing 0 of 0 events" with a full
+  // store on disk. Filtering first and slicing after makes N mean "N activity
+  // events", which is what the caller asked for.
+  const activity = (await readEvents({ after, before }))
     .filter((e) => !NON_ACTIVITY_TYPES.has(e.type));
+  // Guard the slice explicitly: `?limit=abc` → parseInt → NaN, and a bare
+  // `.slice(0, NaN)` returns [] — trading one blanking bug for another. readEvents'
+  // own `if (limit && …)` guard treats NaN/0 as "no limit" and returns the full
+  // feed; this preserves that behaviour for every non-positive-integer value.
+  const events = Number.isInteger(limit) && limit > 0 ? activity.slice(0, limit) : activity;
   res.json({ events });
 });
 
