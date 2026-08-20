@@ -14,6 +14,26 @@ export const HealthState = {
 export type HealthStateValue = typeof HealthState[keyof typeof HealthState];
 
 /**
+ * The canonical, ORDERED health-state vocabulary — the ONE hand-written list on
+ * the frontend (its backend twin is `HEALTH_STATES` in `src/health.js`; the two
+ * stay separate modules because this one is bundled and that one is Node-only).
+ * Every other frontend site that needs "all six states" derives from this
+ * instead of re-typing the members (WARDEN-1104).
+ *
+ * The order is `HealthState`'s declaration order (healthy → unknown, with closed
+ * between idle and unknown per WARDEN-245) and is LOAD-BEARING: it is the
+ * dashboard's section order (`HEALTH_SECTION_ORDER`) and therefore also the
+ * per-host/per-project distribution order and `healthRank`'s sort key.
+ *
+ * Adding a state = add it to `HealthState` (in its display position); the
+ * derived sites pick it up, and the `Record<HealthStateValue, …>` maps
+ * (`SECTION_LABELS`, `HEALTH_DIST_COLOR`) become compile errors until they are
+ * given the new member. The `switch` helpers below each have a `default:` arm,
+ * so a new member degrades gracefully there rather than crashing.
+ */
+export const HEALTH_STATES: readonly HealthStateValue[] = Object.values(HealthState);
+
+/**
  * Get color class for a health state
  */
 export function getHealthColor(state: HealthStateValue): string {
@@ -101,6 +121,23 @@ export function getHealthIcon(state: HealthStateValue): string {
 }
 
 /**
+ * The wire→enum lookup, derived from the canonical vocabulary (WARDEN-1104).
+ *
+ * ⚠️ Built with `Object.fromEntries`, which returns a NORMAL, prototype-inheriting
+ * object — exactly what the hand-written literal was. That is deliberate and
+ * load-bearing: `web/healthUtils.test.mjs` has a CHARACTERIZATION test pinning
+ * the fact that `'constructor'` / `'__proto__'` currently resolve to inherited
+ * `Object.prototype` members rather than collapsing to UNKNOWN. Switching to
+ * `Object.create(null)` or a `Map` would "fix" that leak and break that test —
+ * a separate, deliberately-deferred decision (see WARDEN-885), NOT part of this
+ * derivation. Hoisted to module scope (it was rebuilt on every call) — it is
+ * never mutated, so the lookup is unchanged.
+ */
+const VALID_STATES: Record<string, HealthStateValue> = Object.fromEntries(
+  HEALTH_STATES.map((state) => [state, state]),
+);
+
+/**
  * Safely normalize an arbitrary health-state string (from the wire) to a valid
  * HealthStateValue. Missing/garbage states collapse to UNKNOWN instead of
  * crashing the grouping/tally logic. Shared by the dashboard's health-row
@@ -108,15 +145,7 @@ export function getHealthIcon(state: HealthStateValue): string {
  */
 export function normalizeHealthState(state: string | undefined): HealthStateValue {
   if (!state) return HealthState.UNKNOWN;
-  const validStates: Record<string, HealthStateValue> = {
-    healthy: HealthState.HEALTHY,
-    warning: HealthState.WARNING,
-    critical: HealthState.CRITICAL,
-    idle: HealthState.IDLE,
-    closed: HealthState.CLOSED,
-    unknown: HealthState.UNKNOWN,
-  };
-  return validStates[state.toLowerCase()] ?? HealthState.UNKNOWN;
+  return VALID_STATES[state.toLowerCase()] ?? HealthState.UNKNOWN;
 }
 
 // ---- Resource load coloring (shared by per-agent + per-host surfaces) ----
@@ -240,15 +269,15 @@ export function shouldScheduleCheckingRetry(
   });
 }
 
-/** Count of agents in each health state on one host. */
-export interface HostHealthCounts {
-  healthy: number;
-  warning: number;
-  critical: number;
-  idle: number;
-  closed: number;
-  unknown: number;
-}
+/**
+ * Count of agents in each health state on one host.
+ *
+ * Derived from the canonical vocabulary (WARDEN-1104) rather than hand-listing
+ * the members, so a new state is automatically part of every tally — and, being
+ * a `Record<HealthStateValue, number>`, any object literal that omits one is a
+ * COMPILE error rather than a silently-missing bucket.
+ */
+export type HostHealthCounts = Record<HealthStateValue, number>;
 
 /** One host's bucket: its agents plus a per-health-state tally. */
 export interface HostHealthGroup {
@@ -257,7 +286,10 @@ export interface HostHealthGroup {
   counts: HostHealthCounts;
 }
 
-const EMPTY_COUNTS: HostHealthCounts = { healthy: 0, warning: 0, critical: 0, idle: 0, closed: 0, unknown: 0 };
+/** A zero tally for every canonical state — spread-copied per bucket. (WARDEN-1104) */
+const EMPTY_COUNTS: HostHealthCounts = Object.fromEntries(
+  HEALTH_STATES.map((state) => [state, 0]),
+) as HostHealthCounts;
 
 /**
  * Bucket agents by host and tally each health state per host.
