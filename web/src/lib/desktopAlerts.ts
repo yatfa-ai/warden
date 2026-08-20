@@ -13,10 +13,15 @@
 // browser globals (no Notification API in the Node test runner) and are kept
 // defensive so they can never throw inside the 10s poll.
 //
-// `import type` is fully erased at transpile time, so the emitted module has no
-// runtime imports — the unit test can import it standalone (mirrors
-// attentionRollup.ts's testability discipline).
-import type { AttentionRollup } from '@/lib/attentionRollup';
+// This module has ONE runtime import — `finalizeRollup` from attentionRollup.ts
+// (WARDEN-1115, which collapsed the three hand-copied rollup-finalize blocks onto one
+// helper). Everything else is `import type`, fully erased at transpile time. That single
+// value import is why desktopAlerts.test.mjs must transpile attentionRollup.ts into the
+// SAME tmpdir and rewrite the `@/lib/attentionRollup` specifier — the emitted module is
+// no longer import-free, so a standalone import would fail to resolve at load. The
+// sibling is safe to transpile alongside: attentionRollup.ts has zero runtime imports of
+// its own, so the chain bottoms out there.
+import { finalizeRollup, type AttentionRollup } from '@/lib/attentionRollup';
 import type { AgentStateRow } from '@/lib/types';
 import type { WatchReason } from '@/lib/chatWatch';
 
@@ -162,10 +167,7 @@ export function applySeverityPrefs(
   const done = rollup.done ?? [];
   const directives = prefs.alertDirective ? rollup.directives : 0;
   const errors = prefs.alertError ? rollup.errors : 0;
-  const total =
-    critical.length + warning.length + directives + errors +
-    stuck.length + erroring.length + waiting.length + blocked.length + custom.length;
-  return { critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors, total };
+  return finalizeRollup({ critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors });
 }
 
 /**

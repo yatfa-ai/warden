@@ -3,9 +3,9 @@
 //
 // No front-end test runner in this repo, so (like attentionRollup.test.mjs) this
 // loads the REAL src/lib/desktopAlerts.ts (transpiled TS -> ESM via Vite's OXC
-// transform) and exercises the PURE helpers with plain objects. The `import type`
-// in that file is erased at transpile time, so the emitted module is import-free
-// and loads standalone.
+// transform) and exercises the PURE helpers with plain objects. That module has one
+// runtime import (finalizeRollup, WARDEN-1115), so the loader below transpiles
+// attentionRollup.ts alongside it and rewrites the alias — see the note there.
 //
 // The browser-touching helpers ARE exercised too, via the minimal `makeNotificationShim`
 // harness at the fireWatchNotification block below (added by WARDEN-417 and reused by
@@ -31,11 +31,21 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const helperPath = resolve(__dirname, 'src/lib/desktopAlerts.ts');
 
 // --- Load the REAL desktopAlerts.ts (TS -> ESM via the OXC transform Vite bundles) ----
+// desktopAlerts.ts imports finalizeRollup from @/lib/attentionRollup (WARDEN-1115), so —
+// exactly as storage.test.mjs does for @/lib/themes — we transpile BOTH modules into the
+// same tmp dir and rewrite the bare specifier to a relative path Node can resolve. Without
+// this the emitted module carries an unresolvable '@/lib/attentionRollup' and the WHOLE
+// suite dies with ERR_MODULE_NOT_FOUND at import, not just one test. attentionRollup.ts
+// has no runtime imports of its own, so it loads standalone and the chain ends there.
+const attentionRollupPath = resolve(__dirname, 'src/lib/attentionRollup.ts');
 const src = readFileSync(helperPath, 'utf8');
+const attentionRollupSrc = readFileSync(attentionRollupPath, 'utf8');
 const { code } = await transformWithOxc(src, helperPath, {});
+const { code: attentionRollupCode } = await transformWithOxc(attentionRollupSrc, attentionRollupPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-desktop-alerts-test-'));
+writeFileSync(join(tmpDir, 'attentionRollup.mjs'), attentionRollupCode);
 const tmpFile = join(tmpDir, 'desktopAlerts.mjs');
-writeFileSync(tmpFile, code);
+writeFileSync(tmpFile, code.replaceAll('@/lib/attentionRollup', './attentionRollup.mjs'));
 const { shouldFireAlert, shouldFireWatch, formatAlertMessage, applySeverityPrefs, ATTENTION_SEVERITY_DEFAULTS, alertAgentKey, formatWatchMessage, watchReasonTone, formatWatchInApp, diffNewAttention, excludeFocusedPane, applyFleetAttentionCooldown, formatInAppEntry, fireWatchNotification, fireBudgetNotification, fireAttentionNotification, watchStateLabel } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 

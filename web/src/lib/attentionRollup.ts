@@ -90,6 +90,35 @@ export const EMPTY_ATTENTION_ROLLUP: AttentionRollup = {
 };
 
 /**
+ * The one finalize step every rollup PRODUCER ends with: sum the problem buckets into
+ * `total` and assemble the AttentionRollup. Three different producers converge here —
+ * `buildAttentionRollup` (build from raw endpoints), `filterAttentionRollup` (narrow to
+ * a host/agent), and `desktopAlerts.applySeverityPrefs` (route by severity + mute set) —
+ * each having independently computed the same 10 inputs.
+ *
+ * It exists because the summation encodes a subtle invariant that was being restated by
+ * hand in every copy: **`done` is EXCLUDED from `total`**. A finished agent is a positive
+ * review cue, not an alarm, so it must not inflate the red/amber count nor trip the
+ * increase-only desktop-alert gate (WARDEN-575; see the `total` docstring above). Getting
+ * it wrong in ONE copy makes the badge header contradict the list it heads — and every
+ * bucket added since (WARDEN-540's `custom`, WARDEN-575's `done`) cost an identical
+ * lockstep edit in each then-existing copy. One home, one edit.
+ *
+ * `directives`/`errors` are event COUNTS (added as numbers); the other eight are row
+ * arrays (added as lengths). Pure and dependency-free like the rest of this module.
+ *
+ * NOT used by EMPTY_ATTENTION_ROLLUP above: that is a static constant with nothing to
+ * compute, so routing it through here would add indirection for zero dedup.
+ */
+export function finalizeRollup(parts: Omit<AttentionRollup, 'total'>): AttentionRollup {
+  const { critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors } = parts;
+  const total =
+    critical.length + warning.length + directives + errors +
+    stuck.length + erroring.length + waiting.length + blocked.length + custom.length;
+  return { critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors, total };
+}
+
+/**
  * Did an open pane JUST finish a task? The fleet "done" DETECTION rule (WARDEN-575):
  * fire ONLY on `active → idle` — the clean "was genuinely working → finished"
  * transition. Pure + dependency-free (only the `import type` above, erased at
@@ -186,10 +215,7 @@ export function buildAttentionRollup(
     ? rows.filter((a) => a && !customKeys.has(a.key ?? a.id) && doneKeys.has(a.key ?? a.id))
     : [];
 
-  const total =
-    critical.length + warning.length + directives + errors +
-    stuck.length + erroring.length + waiting.length + blocked.length + custom.length;
-  return { critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors, total };
+  return finalizeRollup({ critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors });
 }
 
 // ─── Host / agent narrowing (WARDEN-971) ──────────────────────────────────────
@@ -303,10 +329,7 @@ export function filterAttentionRollup(
   const done = rollup.done.filter(keep);
   const { directives, errors } = rollup;
 
-  const total =
-    critical.length + warning.length + directives + errors +
-    stuck.length + erroring.length + waiting.length + blocked.length + custom.length;
-  return { critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors, total };
+  return finalizeRollup({ critical, warning, stuck, erroring, waiting, blocked, custom, done, directives, errors });
 }
 
 // ─── Directed ranking (Observer Intelligence roadmap WARDEN-8, Job #2) ────────
