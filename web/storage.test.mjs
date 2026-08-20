@@ -2420,7 +2420,7 @@ test('zero and negative expiries are dropped (the value must be strictly positiv
   assert.deepEqual(loadUi().snoozedAlertKeys, { 'chat-d': 1 });
 });
 test('a positive PAST-expiry value is KEPT (the sanitizer deliberately does not read the clock)', () => {
-  // THE load-bearing non-behavior (storage.ts:866-872). An already-expired snooze
+  // THE load-bearing non-behavior (see parseSnoozedKeys in storage.ts). An already-expired snooze
   // is harmless — activeSnoozedKeys excludes it and App's mount prune clears it —
   // and dropping it here would require a clock read inside this pure loader.
   // A refactor that "helpfully" filtered past expiries would break the documented
