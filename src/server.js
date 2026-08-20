@@ -2270,6 +2270,62 @@ app.post('/api/search-files', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// JSON error handler — WARDEN-1105.
+//
+// MUST be registered after every route/`app.use` above, and MUST declare four
+// arguments, or Express treats it as ordinary middleware and it catches nothing.
+//
+// Without it, Express hands every error to `finalhandler`, which answers with a
+// `text/html` body. The browser client parses every response with `res.json()`
+// and falls back to `undefined` when that throws (`web/src/lib/api.ts`), so an
+// HTML body erases the server's real diagnostic — an ENOSPC from a config
+// write, or body-parser's own 400/413 — and each caller shows its generic
+// default toast instead. Most routes here have no top-level try/catch, and
+// Express 5 auto-forwards a rejected `async` handler to this handler, so this is
+// the single place that guarantees a parseable `{ error }` for all of them. It
+// generalizes what `/api/send` and `/api/key` already do by hand.
+//
+// Scope: an error handler only runs for errors routed through `next(err)`. An
+// unmatched path never produces an error, so 404s still come from
+// `express.static`/`finalhandler` — deliberately unchanged here, since a
+// catch-all would shadow the static serving of the built frontend.
+app.use((err, req, res, next) => {
+  // A route that already began responding owns the socket; sending again would
+  // corrupt the response. Delegate to Express's default handler, which closes
+  // the connection instead.
+  if (res.headersSent) return next(err);
+
+  // body-parser sets 400 (malformed JSON) and 413 (over the 1mb limit set at the
+  // top of this file). Preserving those is the difference between "your payload
+  // is too big" and a blanket, misleading 500. Anything that is not a plausible
+  // HTTP error status (absent, non-integer, out of range) becomes a 500 rather
+  // than being passed to res.status(), which would throw on a bogus code.
+  const declared = Number(err?.status ?? err?.statusCode);
+  const status = Number.isInteger(declared) && declared >= 400 && declared <= 599 ? declared : 500;
+
+  // 4xx messages are authored by express/body-parser about the client's own
+  // request ("request entity too large") — safe and actionable, so they pass
+  // through. 5xx messages are unbounded server internals: a HostConnectionError
+  // embeds the remote hostname, an fs error embeds an absolute path. Those are
+  // replaced wholesale, mirroring the `/api/search-pane` handler just above.
+  // Never `err.stack`, at any status.
+  //
+  // The 4xx message can embed a fragment of the client's own body (V8 renders
+  // one into a JSON parse error), so it is length-capped for the same reason
+  // requestLabelPath caps its label: a diagnostic must not become a channel for
+  // arbitrary text. 200 chars mirrors the caps the rest of this file uses.
+  const message = typeof err?.message === 'string' ? err.message.trim().slice(0, 200) : '';
+  const safe = status < 500 ? (message || 'bad request') : 'internal server error';
+
+  // The browser losing the detail is the bug being fixed — not the logging. Keep
+  // the full error server-side, under the same curated path label the loop
+  // monitor uses so an arbitrary URL can't inject text into the log.
+  if (status >= 500) console.error(`[error] ${req.method} ${requestLabelPath(req.path)}:`, err);
+
+  res.status(status).json({ error: safe });
+});
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
