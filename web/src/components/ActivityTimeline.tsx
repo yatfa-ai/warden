@@ -5,7 +5,7 @@ import type { ActivityEvent } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useLiveTimeline } from '@/lib/useLiveTimeline';
-import { formatUpdatedAgo } from '@/lib/timelinePacing';
+import { formatUpdatedAgo, sortedFilterOptions } from '@/lib/timelinePacing';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { copyText } from '@/lib/clipboard';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger, ContextMenuLabel } from '@/components/ui/context-menu';
@@ -76,13 +76,15 @@ export function ActivityTimeline({
     return () => clearInterval(id);
   }, []);
 
-  // Extract unique values for filters. The type-guard filters (`: x is string`)
-  // are runtime-identical to `.filter(Boolean)` but narrow the element type to
-  // `string` — Radix SelectItem requires a non-empty `string` value, whereas the
-  // native <option> tolerated `string | undefined`.
-  const allTypes = Array.from(new Set(events.map((e) => e.type)));
-  const allAgents = Array.from(new Set(events.map((e) => e.container).filter((c): c is string => Boolean(c))));
-  const allHosts = Array.from(new Set(events.map((e) => e.host).filter((h): h is string => Boolean(h))));
+  // Extract unique values for filters. `sortedFilterOptions` dedupes, drops
+  // falsy values (Radix SelectItem requires a non-empty `string`, so this also
+  // replaces the old inline `: x is string` type guards) and sorts — events
+  // arrive newest-first, so unsorted options would reorder on every poll.
+  // `allTypes` is included for within-component consistency: it has the same
+  // shape and the same reshuffle.
+  const allTypes = sortedFilterOptions(events.map((e) => e.type));
+  const allAgents = sortedFilterOptions(events.map((e) => e.container));
+  const allHosts = sortedFilterOptions(events.map((e) => e.host));
 
   // Apply filters
   useEffect(() => {
