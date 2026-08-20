@@ -17,8 +17,8 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import {
-  type PresetNameIssue,
   PRESET_NAME_MAX,
+  presetNameErrorMessage,
   validatePresetName,
 } from '@/lib/storage';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
@@ -58,17 +58,6 @@ export function NewChatsSection(props: NewChatsSectionProps) {
   // user-composed spawn command is unrecoverable. Cancel/Escape/overlay-click
   // clear it WITHOUT touching setCustomPresets (or the cascade setters below).
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
-
-  // Human message for a non-null preset-name validation issue. The contract
-  // itself lives in storage.ts (validatePresetName); this just renders it.
-  const presetNameErrorMessage = (name: string, issue: PresetNameIssue): string => {
-    switch (issue) {
-      case 'empty': return 'Preset needs a name.';
-      case 'too-long': return `Preset name must be ${PRESET_NAME_MAX} characters or fewer.`;
-      case 'reserved': return `"${name}" is a reserved preset name (use the built-in claude/shell instead).`;
-      case 'duplicate': return `A preset named "${name}" already exists.`;
-    }
-  };
 
   const addPreset = () => {
     const name = newPresetName.trim();

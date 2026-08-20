@@ -90,6 +90,80 @@ export function isReservedPresetName(name: string): boolean {
   return BUILTIN_PRESETS.some((b) => b.toLowerCase() === lower);
 }
 
+// ─── The ONE name-validation skeleton (WARDEN-1111) ───────────────────────────
+//
+// Extracted from the three hand-copied validate*Name bodies (preset WARDEN-219,
+// snippet WARDEN-323, pattern WARDEN-540) — same six steps in the same order,
+// re-copied per feature, exactly the vein parseObjectMap (WARDEN-1027) and
+// parseEntryArray (WARDEN-1091) already collapsed further down this file. Now
+// the contract is inherited by CALLING this; only the delta is supplied.
+//
+// The invariants that live here once, for every caller:
+//   - the name is TRIMMED first, matching how each load-time sanitizer
+//     normalizes, so validation and persistence agree on the same string;
+//   - check ORDER is empty → too-long → reserved → duplicate, and it is
+//     load-bearing: a reserved name that is ALSO a duplicate reports 'reserved';
+//   - duplicate detection is CASE-INSENSITIVE (a custom entry can never
+//     near-collide with a differently-cased sibling);
+//   - `except` excludes ONE entry from duplicate detection, so a case-only
+//     rename (codex -> Codex) is never flagged as its own duplicate.
+//
+// The per-caller delta:
+//   - `opts.max` — the caller's own cap. Deliberately a PARAMETER, never a
+//     shared constant: PRESET_NAME_MAX/SNIPPET_NAME_MAX/WATCH_PATTERN_NAME_MAX
+//     stay distinct and independently tunable.
+//   - `opts.identityOf` — what `except` is compared against, and the reason this
+//     parameter is REQUIRED rather than defaulted. Preset and snippet exclude by
+//     NAME; watch patterns key on a stable id and exclude by ID. That divergence
+//     was previously an accident hiding under a "Mirrors validateSnippetName"
+//     comment — every call site happens to pass the matching kind, so it is
+//     correct today, but a fourth validator could silently inherit the wrong
+//     semantics. Making it explicit means the caller must now STATE its choice.
+//   - `opts.reserved` — the built-in-name guard. Preset-only; omitting it makes
+//     'reserved' unreachable, which is what lets snippet/pattern keep their
+//     narrower issue unions.
+type NameIssue = 'empty' | 'too-long' | 'reserved' | 'duplicate';
+
+function validateEntryName<T extends { name: string }>(
+  name: string,
+  existing: T[],
+  opts: {
+    max: number;
+    identityOf: (entry: T) => string;
+    reserved?: (n: string) => boolean;
+  },
+  except?: string,
+): NameIssue | null {
+  const n = name.trim();
+  if (!n) return 'empty';
+  if (n.length > opts.max) return 'too-long';
+  if (opts.reserved?.(n)) return 'reserved';
+  const lower = n.toLowerCase();
+  if (existing.some((e) => opts.identityOf(e) !== except && e.name.toLowerCase() === lower)) {
+    return 'duplicate';
+  }
+  return null;
+}
+
+// The message text shared by all three name formatters below. Only the noun and
+// the cap differ; the reserved-preset arm is the one genuinely per-noun message
+// and stays with its own formatter. `noun` is passed Capitalized (it opens two
+// of the three sentences) and lower-cased for the mid-sentence duplicate arm.
+type CommonNameIssue = 'empty' | 'too-long' | 'duplicate';
+
+function nameIssueMessage(
+  noun: string,
+  max: number,
+  name: string,
+  issue: CommonNameIssue,
+): string {
+  switch (issue) {
+    case 'empty': return `${noun} needs a name.`;
+    case 'too-long': return `${noun} name must be ${max} characters or fewer.`;
+    case 'duplicate': return `A ${noun.toLowerCase()} named "${name}" already exists.`;
+  }
+}
+
 // The validation outcome for a candidate preset name. `null` means acceptable.
 export type PresetNameIssue = 'empty' | 'too-long' | 'reserved' | 'duplicate';
 
@@ -98,21 +172,31 @@ export type PresetNameIssue = 'empty' | 'too-long' | 'reserved' | 'duplicate';
 // persist a name the sanitizer would silently drop. Pure and dependency-free so
 // it is unit-tested directly (there is no React test runner in this repo).
 //   - `existing`: the current custom-preset list (for duplicate detection)
-//   - `except`:   an entry name to EXCLUDE from duplicate detection (for renames,
+//   - `except`:   an entry NAME to EXCLUDE from duplicate detection (for renames,
 //                 so a case-only rename like codex -> Codex isn't its own dupe)
-// Trims the name first, matching how parseCustomPresets normalizes on load.
 export function validatePresetName(
   name: string,
   existing: CustomPreset[],
   except?: string,
 ): PresetNameIssue | null {
-  const n = name.trim();
-  if (!n) return 'empty';
-  if (n.length > PRESET_NAME_MAX) return 'too-long';
-  if (isReservedPresetName(n)) return 'reserved';
-  const lower = n.toLowerCase();
-  if (existing.some((p) => p.name !== except && p.name.toLowerCase() === lower)) return 'duplicate';
-  return null;
+  return validateEntryName(
+    name,
+    existing,
+    { max: PRESET_NAME_MAX, identityOf: (p) => p.name, reserved: isReservedPresetName },
+    except,
+  );
+}
+
+// Human message for a non-null preset-name validation issue. Lives here beside
+// the contract it renders (rather than inside NewChatsSection) so it is covered
+// by storage.test.mjs — this repo has no React test runner, so a pure function
+// trapped in a component is a pure function nothing can test.
+export function presetNameErrorMessage(name: string, issue: PresetNameIssue): string {
+  // The one arm with no snippet/pattern counterpart; the rest are shared text.
+  if (issue === 'reserved') {
+    return `"${name}" is a reserved preset name (use the built-in claude/shell instead).`;
+  }
+  return nameIssueMessage('Preset', PRESET_NAME_MAX, name, issue);
 }
 
 // A snapshot of a pane the user closed, kept per-workspace as a click-to-reopen
@@ -254,21 +338,29 @@ export type SnippetNameIssue = 'empty' | 'too-long' | 'duplicate';
 // persist a name the sanitizer would silently drop. Pure and dependency-free so
 // it is unit-tested directly (there is no React test runner in this repo).
 //   - `existing`: the current snippet list (for duplicate detection)
-//   - `except`:   an entry name to EXCLUDE from duplicate detection (for renames,
+//   - `except`:   an entry NAME to EXCLUDE from duplicate detection (for renames,
 //                 so a case-only rename like "Run tests" -> "RUN TESTS" isn't its
 //                 own dupe)
-// Trims the name first, matching how parseSnippets normalizes on load.
 export function validateSnippetName(
   name: string,
   existing: Snippet[],
   except?: string,
 ): SnippetNameIssue | null {
-  const n = name.trim();
-  if (!n) return 'empty';
-  if (n.length > SNIPPET_NAME_MAX) return 'too-long';
-  const lower = n.toLowerCase();
-  if (existing.some((s) => s.name !== except && s.name.toLowerCase() === lower)) return 'duplicate';
-  return null;
+  // Passing no `reserved` guard makes 'reserved' unreachable (snippets have no
+  // built-ins), so narrowing the skeleton's union to SnippetNameIssue is sound.
+  return validateEntryName(
+    name,
+    existing,
+    { max: SNIPPET_NAME_MAX, identityOf: (s) => s.name },
+    except,
+  ) as SnippetNameIssue | null;
+}
+
+// Human message for a non-null snippet-name validation issue. Lives here beside
+// the contract it renders (rather than inside SnippetsSection) so it is covered
+// by storage.test.mjs — see presetNameErrorMessage.
+export function snippetNameErrorMessage(name: string, issue: SnippetNameIssue): string {
+  return nameIssueMessage('Snippet', SNIPPET_NAME_MAX, name, issue);
 }
 
 // The starter snippet set seeded once on a fresh install (and on a v2→v3
@@ -326,21 +418,35 @@ export type PatternNameIssue = 'empty' | 'too-long' | 'duplicate';
 
 /**
  * Validate a candidate watch-pattern name against the SAME contract the backend
- * sanitizer enforces (WARDEN-540). Mirrors validateSnippetName: trims first, then
- * rejects empty / over-cap / duplicate (case-insensitive, with an `except` for the
- * rename case). Pure + dependency-free so it is unit-tested directly.
+ * sanitizer enforces (WARDEN-540): trims first, then rejects empty / over-cap /
+ * duplicate (case-insensitive, with an `except` for the rename case).
+ *
+ * `except` is a pattern ID, NOT a name — watch patterns key on a stable id, so a
+ * rename never confuses the row. That is the one thing this validator does
+ * differently from its preset/snippet siblings, and it is now stated outright as
+ * the skeleton's `identityOf` rather than buried in a hand-copied `.some()`.
  */
 export function validatePatternName(
   name: string,
   existing: WatchPattern[],
   except?: string,
 ): PatternNameIssue | null {
-  const n = name.trim();
-  if (!n) return 'empty';
-  if (n.length > WATCH_PATTERN_NAME_MAX) return 'too-long';
-  const lower = n.toLowerCase();
-  if (existing.some((p) => p.id !== except && p.name.toLowerCase() === lower)) return 'duplicate';
-  return null;
+  // No `reserved` guard → 'reserved' is unreachable; see validateSnippetName.
+  return validateEntryName(
+    name,
+    existing,
+    { max: WATCH_PATTERN_NAME_MAX, identityOf: (p) => p.id },
+    except,
+  ) as PatternNameIssue | null;
+}
+
+/**
+ * Human message for a non-null pattern-name validation issue. Lives here beside
+ * the contract it renders (rather than inside PatternsSection) so it is covered
+ * by storage.test.mjs — see presetNameErrorMessage.
+ */
+export function patternNameErrorMessage(name: string, issue: PatternNameIssue): string {
+  return nameIssueMessage('Pattern', WATCH_PATTERN_NAME_MAX, name, issue);
 }
 
 /**

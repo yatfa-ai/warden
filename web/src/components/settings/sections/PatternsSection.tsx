@@ -15,10 +15,10 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import {
-  type PatternNameIssue,
   WATCH_PATTERN_NAME_MAX,
   WATCH_PATTERN_EXPRESSION_MAX,
   WATCH_PATTERN_MAX_COUNT,
+  patternNameErrorMessage,
   validatePatternName,
   isValidRegex,
 } from '@/lib/storage';
@@ -40,14 +40,6 @@ export function PatternsSection({ config, setConfig, hidden }: PatternsSectionPr
   const [newPatternName, setNewPatternName] = useState('');
   const [newPatternExpression, setNewPatternExpression] = useState('');
   const [newPatternMode, setNewPatternMode] = useState<'string' | 'regex'>('string');
-
-  const patternNameErrorMessage = (name: string, issue: PatternNameIssue): string => {
-    switch (issue) {
-      case 'empty': return 'Pattern needs a name.';
-      case 'too-long': return `Pattern name must be ${WATCH_PATTERN_NAME_MAX} characters or fewer.`;
-      case 'duplicate': return `A pattern named "${name}" already exists.`;
-    }
-  };
 
   // Stable id for a new pattern. crypto.randomUUID is available in every target
   // (mirrors genWorkspaceId in storage.ts); the fallback covers an older webview.
