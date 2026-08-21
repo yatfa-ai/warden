@@ -177,6 +177,25 @@ export function comparePinned(a, b, pins) {
   return pa - pb;
 }
 
+// The COMPOSED discovery order, shared by every `.sort(` in this file: pinned
+// first (delegating to comparePinned above — the PUT /api/pins contract), then
+// active chats before inactive, then the host-prefixed `id` as a stable
+// tiebreak. WARDEN-57 extracted the pin half because it was triplicated but
+// left the composition hand-copied at all three sites; this is the other half
+// of that job, so one semantic change is one edit instead of three.
+//
+// `active` is tested for TRUTHINESS, not subtracted: rows reach these sorts as
+// true/false (discoverAll, discoverHost) or as `null` (catalogChats builds
+// every row with active: null), and `null` must read as inactive rather than
+// poison the comparison.
+export function compareChats(a, b, pins) {
+  const pc = comparePinned(a, b, pins);
+  if (pc !== 0) return pc;
+  const aa = a.active ? 1 : 0, ab = b.active ? 1 : 0;
+  if (aa !== ab) return ab - aa;
+  return a.id.localeCompare(b.id);
+}
+
 // Resolve ALL alive local tmux session names in ONE async `list-sessions` — a
 // single tmux spawn — instead of one `has-session` per catalog chat. The per-chat
 // loop ran synchronously inside a `.map`, so it blocked the Node event loop for
@@ -447,11 +466,7 @@ export async function discoverAll(hosts, cfg, opts = {}, deps = {}) {
   }
 
   const pins = new Set(cfg.pins || []);
-  all.sort((a, b) => {
-    const pc = comparePinned(a, b, pins);
-    if (pc !== 0) return pc;
-    return (b.active - a.active) || a.id.localeCompare(b.id);
-  });
+  all.sort((a, b) => compareChats(a, b, pins));
   return { chats: all, errors };
 }
 
@@ -479,11 +494,7 @@ function toCatalogChat(host, entry, active, lastActivity) {
 export async function catalogChats(cfg) {
   const pins = new Set(cfg.pins || []);
   const chats = (await loadCatalog()).map((e) => toCatalogChat(e.host || LOCAL, e, null, null));
-  chats.sort((a, b) => {
-    const pc = comparePinned(a, b, pins);
-    if (pc !== 0) return pc;
-    return a.id.localeCompare(b.id);
-  });
+  chats.sort((a, b) => compareChats(a, b, pins));
   return { chats, errors: [] };
 }
 
@@ -534,13 +545,7 @@ export async function discoverHost(host, cfg) {
     }
   }
 
-  chats.sort((a, b) => {
-    const pc = comparePinned(a, b, pins);
-    if (pc !== 0) return pc;
-    const aa = a.active ? 1 : 0, ab = b.active ? 1 : 0;
-    if (aa !== ab) return ab - aa;
-    return a.id.localeCompare(b.id);
-  });
+  chats.sort((a, b) => compareChats(a, b, pins));
   return { host, chats };
 }
 
