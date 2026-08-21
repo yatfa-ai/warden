@@ -23,7 +23,13 @@
 // React layer is NOT imported; instead a local minimal slice is defined below,
 // which Chat structurally satisfies — so ChatSidebar passes Chat instances
 // unchanged (zero behavior change).
-import { chatType } from './chatDisplay';
+//
+// NOTE: this must remain the module's ONLY `./chatDisplay` import statement.
+// agentFilter.test.mjs:48 rewrites the specifier with a NON-GLOBAL regex
+// (first-match-only), so a second import line would go unrewritten and the spec
+// would die with ERR_MODULE_NOT_FOUND. Add new names to this list, never a new
+// line (WARDEN-1071 Principle 3b).
+import { chatType, displayName } from './chatDisplay';
 
 // Minimal slice of Chat these helpers read. Defined locally rather than imported
 // from the React-layer types so the helpers stay decoupled and are testable with
@@ -108,4 +114,22 @@ export function sortChats<T extends AgentFilterChat>(chats: T[], sort: AgentSort
 // flows through (a Chat[] in yields a Chat | undefined out).
 export function findChat<T extends AgentFilterChat>(chats: T[], id: string): T | undefined {
   return chats.find((c) => (c.key || c.id) === id);
+}
+
+// Display label for a fleet-action target id (WARDEN-1121). Falls back to the
+// RAW ID rather than to undefined/'?' so an orphan target — an agent that died
+// between selecting and acting on it — stays identifiable in the result toast
+// instead of reading as the literal string 'undefined' (the contract pinned by
+// fanout.test.mjs:240-248 and broadcast.test.mjs:115-120).
+//
+// This is the resolver the three ChatSidebar fleet fan-outs (broadcast
+// WARDEN-292, batch kill WARDEN-328, batch interrupt WARDEN-492) each pass as
+// their `nameOf` callback. It lived as three byte-identical inline copies until
+// WARDEN-974's fan-out extraction left it as the last triplicated piece; it
+// belongs here because it is a shared contract across lib/broadcast.ts,
+// lib/kill.ts and lib/keysend.ts, and because findChat — its only dependency —
+// is defined directly above.
+export function displayNameFor<T extends AgentFilterChat>(chats: T[], id: string): string {
+  const c = findChat(chats, id);
+  return c ? displayName(c) : id;
 }

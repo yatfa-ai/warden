@@ -50,7 +50,7 @@ const { code } = await transformWithOxc(src, libPath, {});
 const tmpFile = join(tmpDir, 'agentFilter.mjs');
 writeFileSync(tmpFile, code);
 const {
-  matchesAgentFilter, compareChats, sortChats, findChat,
+  matchesAgentFilter, compareChats, sortChats, findChat, displayNameFor,
   FILTER_OPTIONS, SORT_OPTIONS,
 } = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
@@ -200,6 +200,48 @@ test('finds a chat by id when no key is set', () => {
 test('returns undefined when no chat matches', () => {
   const arr = [chat({ id: '1' })];
   assert.equal(findChat(arr, 'missing'), undefined);
+});
+
+// ---------------------------------------------------------------------------
+console.log('\ndisplayNameFor — fleet-action target label, raw-id fallback');
+// ---------------------------------------------------------------------------
+// The resolver the three ChatSidebar fleet fan-outs pass as `nameOf`
+// (WARDEN-1121, collapsing the byte-identical copies at :564/:591/:629). It is
+// findChat + displayName composed, so these cases assert the RESOLVED LABEL
+// each precedence branch produces — not merely that a string came back.
+test('resolves a hit to the yatfa key (displayName precedence)', () => {
+  const arr = [chat({ id: '1', key: 'proj-worker', kind: 'yatfa' })];
+  assert.equal(displayNameFor(arr, 'proj-worker'), 'proj-worker');
+});
+test('resolves a hit to the user rename when name differs from key', () => {
+  const arr = [chat({ id: '2', key: 'hostA:2', kind: 'tmux', name: 'my agent' })];
+  assert.equal(displayNameFor(arr, 'hostA:2'), 'my agent');
+});
+test('resolves a hit to the process·cwd fallback when unrenamed', () => {
+  const arr = [chat({ id: '3', key: 'hostA:3', kind: 'tmux', cmd: 'claude', cwd: '/home/u/myproj' })];
+  assert.equal(displayNameFor(arr, 'hostA:3'), 'claude · myproj');
+});
+test('falls back to the RAW ID for an orphan id (dead/unknown target)', () => {
+  const arr = [chat({ id: '1', key: 'hostA:1' })];
+  assert.equal(displayNameFor(arr, 'hostA:9'), 'hostA:9');
+});
+test('falls back to the raw id against an empty chat list', () => {
+  assert.equal(displayNameFor([], 'hostA:1'), 'hostA:1');
+});
+test('a bare id whose chat has a key is an orphan → raw id, not the chat label', () => {
+  // findChat matches on key||id, so a bare '1' misses a chat keyed 'hostA:1'.
+  // The fan-out toast must then show '1' verbatim rather than that chat's name.
+  const arr = [chat({ id: '1', key: 'hostA:1', kind: 'tmux', name: 'my agent' })];
+  assert.equal(displayNameFor(arr, '1'), '1');
+});
+test('never yields undefined or the string "undefined" on a miss', () => {
+  // The orphan-id contract the fan-out summarizers rely on
+  // (fanout.test.mjs:240-248, broadcast.test.mjs:115-120): a target that cannot
+  // be resolved still reads as its own id in the toast.
+  const out = displayNameFor([], 'chat-abc123');
+  assert.equal(typeof out, 'string');
+  assert.notEqual(out, 'undefined');
+  assert.equal(out, 'chat-abc123');
 });
 
 // ---------------------------------------------------------------------------

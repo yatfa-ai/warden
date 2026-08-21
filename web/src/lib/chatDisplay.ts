@@ -1,5 +1,3 @@
-import type { Chat } from '@/lib/types';
-
 // Canonical id of this machine's own tmux host (mirrors LOCAL in src/chats.js). Local
 // agents are auto-discovered on mount so their dots are live without a click; remote
 // SSH hosts stay on-demand per lazy mode. Shared by the sidebar and the Open Chat
@@ -26,8 +24,25 @@ export function chatType(c?: { kind?: string; cmd?: string }): string {
   return bin || 'shell';
 }
 
+// Minimal structural slice the NAMING helpers (processCwdLabel + displayName)
+// actually read — the same narrowing WARDEN-936 applied to chatType above, for
+// the same reason: lib/agentFilter.ts is deliberately import-light and passes
+// its own local AgentFilterChat slice, which carries every field named here.
+// Chat (lib/types) remains structurally assignable (its `kind` union
+// 'yatfa' | 'tmux' | 'local' satisfies `kind?: string`), so every existing call
+// site is unchanged. With this, the module no longer references Chat at all —
+// the now-dead `import type { Chat }` was dropped rather than left behind.
+type NameableChat = {
+  id: string;
+  key?: string;
+  kind?: string;
+  name?: string;
+  cmd?: string;
+  cwd?: string;
+};
+
 // "process · cwd-basename" label, used as the fallback display name.
-export function processCwdLabel(c: Chat): string {
+export function processCwdLabel(c: NameableChat): string {
   const proc = chatType(c);
   const dir = basename(c.cwd || '');
   return dir ? `${proc} · ${dir}` : proc;
@@ -40,7 +55,7 @@ export function processCwdLabel(c: Chat): string {
 // The raw chat-xxxxx id is NEVER shown: a fresh spawn has name === key, so it falls
 // through to processCwdLabel. A user rename or a resumed session sets name ≠ key.
 // Shared so the sidebar and the Open Chat browser render identical labels.
-export function displayName(c?: Chat): string {
+export function displayName(c?: NameableChat): string {
   if (!c) return '?';
   if (c.kind === 'yatfa') return c.key || c.id;
   if (c.name && c.name !== c.key) return c.name;
