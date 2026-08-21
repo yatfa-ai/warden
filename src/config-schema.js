@@ -856,8 +856,14 @@ function crossField(cfg) {
 // (telemetryBaseEnabled / telemetryExtendedEnabled) into the per-category keys,
 // preserving the user's EFFECTIVE consent exactly: base on → incidents on;
 // extended on WITH base on → names on. A stale `{base:false, extended:true}` pair
-// (which the old model resolved to "send nothing") migrates to names-only, which
-// also sends nothing — so nothing new is silently enabled either way.
+// (which the old model resolved to "send nothing", because the old resolver
+// clamped extended off unless base was on) migrates to NOTHING enabled —
+// `incidents:false, names:false`. That is what the `requires` translation rule in
+// the category registry is for: carrying the raw `extended:true` flag forward
+// would resurrect `names:true`, a category the user's old EFFECTIVE consent never
+// had on, and once a collecting category is later switched on it would put chat
+// names on the wire the user never consented to. So nothing new is silently
+// enabled.
 //
 // Non-destructive: the legacy keys are left on disk untouched (a downgrade still
 // finds what it expects); they are simply never read once the new keys exist.
