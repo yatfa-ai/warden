@@ -2,7 +2,8 @@
 
 // Telemetry pre-collection redaction engine — CJS MIRROR of
 // web/src/lib/telemetry/redact.ts (slice 2 of roadmap WARDEN-446 / design
-// WARDEN-443). This is the tiered redactor the live main-process pipeline needs.
+// WARDEN-443). This is the category-gated redactor the live main-process
+// pipeline needs.
 //
 // WHY A CJS MIRROR (and not a require() of redact.ts):
 // The live call site is electron/main.cjs (CommonJS, runs in the Electron MAIN
@@ -18,16 +19,17 @@
 // scrubString rule order, the IPv6 validator, and the recursive scrubValue are all
 // identical. web/telemetry-redact-cjs-parity.test.mjs guards the mirror against
 // drift by asserting deepEqual equality against the REAL redact.ts (loaded via
-// Vite's OXC transform) across a battery of inputs + every tier — so a future
-// edit to either file that diverges them fails the suite.
+// Vite's OXC transform) across a battery of inputs + every consent combination —
+// so a future edit to either file that diverges them fails the suite.
 //
-// Everything here is PURE and ZERO-DEPENDENCY so it loads standalone under
-// `node --test` (same as telemetry-source.cjs / window-state.cjs).
+// Its ONLY runtime dependency is ../src/telemetry-consent.cjs (the CJS mirror of the
+// single consent authority), matching redact.ts's single `./consent` import — so
+// this file is never a second place a consent decision is made.
 
 // ---------------------------------------------------------------------------
 // THE REDACTION CONTRACT (spec — verbatim from WARDEN-443, "Data boundaries")
 // ---------------------------------------------------------------------------
-// Hard exclusions — NEVER collected or sent, at ANY tier (strip before any
+// Hard exclusions — NEVER collected or sent, under ANY consent (strip before any
 // payload is buffered / queued / serialized):
 //   • API keys        — AWS access-key-id (AKIA…), GitHub tokens (ghp_/gho_/…),
 //                       plus known-format (OpenAI sk-, Stripe, Slack, Google AIza)
@@ -47,18 +49,25 @@
 //                       addresses (`00:1A:2B:3C:4D:5E`) are scrubbed in the same
 //                       host/device pass — they reveal network topology too.
 //
-// Identifiers permitted ONLY at the extended tier: chat name + Claude session
-// name. CONTENT IS NEVER SENT — names only, never content.
+// Identifiers permitted ONLY when their gating category is enabled: chat name +
+// Claude session name (the `names` category). CONTENT IS NEVER SENT — names only,
+// never content.
 //
-// Tier semantics (from the WARDEN-443 consent model):
-//   • base      — anonymous error/crash/performance events. NO identifiers.
-//   • extended  — (gated behind base) additionally retains chat + session names.
-//   • off / unknown / undefined — default to MOST-REDACTED (drop names). When in
-//                 doubt, strip more; never default to retaining identifiers.
+// Category semantics (from the WARDEN-443 per-category consent model):
+//   • Each category is INDEPENDENT and OFF by default. A field gated by a
+//     category survives iff that category is on.
+//   • A missing / corrupt / unrecognized consent value resolves to NOTHING
+//     enabled, which is the MOST-REDACTED output (every gated field dropped).
 // ---------------------------------------------------------------------------
 
+const {
+  GATED_FIELD_CATEGORY,
+  TELEMETRY_CATEGORIES,
+  normalizeConsent,
+} = require('../src/telemetry-consent.cjs');
+
 // Field names whose value is categorically chat CONTENT / prompts. These are
-// hard-excluded at every tier and are dropped WHOLESALE (never partially
+// hard-excluded under every consent state and are dropped WHOLESALE (never partially
 // scrubbed) — content must never enter the pipeline, by name or by substring.
 // Matched case-insensitively against the lowercased key.
 const CONTENT_FIELDS = new Set([
@@ -78,34 +87,29 @@ const CONTENT_FIELDS = new Set([
   'transcript',
 ]);
 
-// Identifier field names — chat / session names. Retained ONLY when the
-// effective tier is 'extended'; dropped (absent from the output) at base /
-// off / unknown. Matched case-insensitively against the lowercased key.
-const IDENTIFIER_FIELDS = new Set([
-  'chatname',
-  'sessionname',
-  'chattitle',
-  'sessiontitle',
-]);
+// Every field name any category gates, flattened. DERIVED from the category
+// registry (the single source of truth), so a new category's fields appear here
+// automatically. Kept as a named export because callers/tests enumerate it.
+const IDENTIFIER_FIELDS = new Set(TELEMETRY_CATEGORIES.flatMap((c) => c.gatedFields));
 
 // The pure, deterministic redaction transform.
 //
-// Takes a candidate event / field-bag plus the effective consent tier and returns
-// a SCRUBBED COPY — the input is never mutated. Content/prompt fields are
-// dropped wholesale (all tiers); chat/session-name fields are kept only at the
-// extended tier; every remaining string value is passed through scrubString so no
-// credential, path, or hostname can survive in free text (e.g. an error message
-// or stack trace). Numbers / booleans / null pass through untouched.
+// Takes a candidate event / field-bag plus the user's per-category consent and
+// returns a SCRUBBED COPY — the input is never mutated. Content/prompt fields are
+// dropped wholesale (always, no category can enable them); a field gated by a
+// category is kept only when that category is enabled; every remaining string
+// value is passed through scrubString so no credential, path, or hostname can
+// survive in free text (e.g. an error message or stack trace). Numbers /
+// booleans / null pass through untouched.
 //
-// Unrecognized, undefined, or 'off' tiers yield the MOST-REDACTED output (names
-// dropped) — the module makes it impossible for an un-redacted payload to be
-// produced regardless of caller.
+// A missing, partial, or corrupt consent value yields the MOST-REDACTED output
+// (every gated field dropped) — the module makes it impossible for an
+// un-redacted payload to be produced regardless of caller.
 //
 // Idempotent: redacting already-redacted output is a no-op.
 function redact(payload, opts) {
   const o = opts || {};
-  const allowNames = o.tier === 'extended';
-  return scrubValue(payload, allowNames);
+  return scrubValue(payload, normalizeConsent(o.consent));
 }
 
 // Source-code file extensions (lowercased, no leading dot). A stack frame's
@@ -287,26 +291,28 @@ function looksLikeIPv6(token) {
 }
 
 // Deep scrub of a single value. Builds a fresh copy at every level so the input
-// tree is never mutated. `allowNames` is whether the effective tier permits
-// chat/session-name identifiers (only true at the extended tier). `preserveSource`
-// is set ONLY while scrubbing a stack frame's `file`/`function` fields so a
-// source basename survives rule 8 (WARDEN-680) — it is never set for generic
-// free text, which stays byte-identical to before.
-function scrubValue(value, allowNames, preserveSource) {
+// tree is never mutated. `consent` is the NORMALIZED per-category consent; a
+// field listed in GATED_FIELD_CATEGORY survives iff its category is enabled.
+// `preserveSource` is set ONLY while scrubbing a stack frame's `file`/`function`
+// fields so a source basename survives rule 8 (WARDEN-680) — it is never set for
+// generic free text, which stays byte-identical to before.
+function scrubValue(value, consent, preserveSource) {
   if (value === null || value === undefined) return value;
   if (typeof value === 'string') return scrubString(value, preserveSource);
-  if (Array.isArray(value)) return value.map((v) => scrubValue(v, allowNames, false));
+  if (Array.isArray(value)) return value.map((v) => scrubValue(v, consent, false));
   if (typeof value === 'object') {
     const out = {};
     for (const [k, v] of Object.entries(value)) {
       const key = String(k);
       const lower = key.toLowerCase();
-      // Content / prompts: hard-excluded at every tier — drop wholesale.
+      // Content / prompts: hard-excluded ALWAYS — no category can enable them.
       if (CONTENT_FIELDS.has(lower)) continue;
-      // Chat / session names: retained ONLY at the extended tier.
-      if (IDENTIFIER_FIELDS.has(lower)) {
-        if (!allowNames) continue;
-        out[key] = scrubValue(v, allowNames, false); // kept; still scrubbed for embedded secrets
+      // Category-gated fields (today: chat/session names, gated by `names`).
+      // Retained iff that category is enabled; otherwise absent from the output.
+      const gate = GATED_FIELD_CATEGORY.get(lower);
+      if (gate !== undefined) {
+        if (consent[gate] !== true) continue;
+        out[key] = scrubValue(v, consent, false); // kept; still scrubbed for embedded secrets
         continue;
       }
       // Structured stack frames (schema: `frames: StackFrame[]`). A frame's
@@ -317,14 +323,14 @@ function scrubValue(value, allowNames, preserveSource) {
       // generic free text and the frame's other fields (`line`/`column`) are
       // byte-identical to before.
       if (lower === 'frames' && Array.isArray(v)) {
-        out[key] = v.map((frame) => scrubValue(frame, allowNames, true));
+        out[key] = v.map((frame) => scrubValue(frame, consent, true));
         continue;
       }
       if (preserveSource && (lower === 'file' || lower === 'function')) {
-        out[key] = scrubValue(v, allowNames, true);
+        out[key] = scrubValue(v, consent, true);
         continue;
       }
-      out[key] = scrubValue(v, allowNames, false); // recurse into nested / scrub strings
+      out[key] = scrubValue(v, consent, false); // recurse into nested / scrub strings
     }
     return out;
   }

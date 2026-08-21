@@ -2,7 +2,7 @@
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
-import { deriveDefaults } from './config-schema.js';
+import { deriveDefaults, migrateConfig } from './config-schema.js';
 import { atomicWriteJson, readJsonDefensive, readJsonDefensiveSync } from './persist.js';
 
 export const dir = path.join(os.homedir(), '.yatfa-warden');
@@ -32,7 +32,10 @@ function reviveConfig(raw) {
 
 export function load() {
   const raw = readJsonDefensiveSync(configPath, { fallback: {}, revive: reviveConfig });
-  return { ...DEFAULTS, ...raw };
+  // WARDEN-1116 — fold an OLDER build's keys forward BEFORE the defaults spread.
+  // Order matters: once DEFAULTS is spread, every declared key is present, so a
+  // migration that keys off "the new field is absent" has to run first.
+  return { ...DEFAULTS, ...migrateConfig(raw) };
 }
 
 // Persist config atomically (WARDEN-831): temp + fsync + rename, async so a

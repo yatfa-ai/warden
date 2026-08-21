@@ -79,8 +79,8 @@ const GET_TOP_LEVEL_KEYS = [
   'showProjectBadges',
   'hideOfflineHosts',
   'watchPatterns',
-  'telemetryBaseEnabled',
-  'telemetryExtendedEnabled',
+  'telemetryIncidentsEnabled',
+  'telemetryNamesEnabled',
 ];
 
 // The EXACT nested llm key order GET emits today.
@@ -218,8 +218,8 @@ describe('/api/config GET shape — byte-identical key set + order (WARDEN-773)'
       showProjectBadges: true,
       hideOfflineHosts: true,
       watchPatterns: [{ id: 'w1', name: 'W', expression: 'x', mode: 'string', enabled: true }],
-      telemetryBaseEnabled: false,
-      telemetryExtendedEnabled: false,
+      telemetryIncidentsEnabled: false,
+      telemetryNamesEnabled: false,
     });
     const body = await get();
     assert.deepStrictEqual(Object.keys(body), GET_TOP_LEVEL_KEYS,
@@ -271,7 +271,7 @@ describe('/api/config PUT no-clobber — one save preserves all three stored sec
       webhookSecret: WEBHOOK_SECRET,
     });
     // A save that changes unrelated fields and sends NO secret fields.
-    await put({ hosts: ['x'], notifyErrors: false, telemetryBaseEnabled: false });
+    await put({ hosts: ['x'], notifyErrors: false, telemetryIncidentsEnabled: false });
     const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     assert.strictEqual(onDisk.llm.authToken, LLM_SECRET, 'llm.authToken survived the save');
     assert.strictEqual(onDisk.telemetryAuthToken, TELEMETRY_SECRET, 'telemetryAuthToken survived the save');
@@ -302,8 +302,8 @@ describe('/api/config PUT post-save side-effects — the four afterSave steps (W
     process.send = (msg) => sent.push(msg);
     try {
       await put({
-        telemetryBaseEnabled: false,
-        telemetryExtendedEnabled: false,
+        telemetryIncidentsEnabled: false,
+        telemetryNamesEnabled: false,
         telemetryEndpoint: 'https://recv.example/ingest',
         telemetryAuthToken: TELEMETRY_SECRET,
       });
@@ -313,8 +313,9 @@ describe('/api/config PUT post-save side-effects — the four afterSave steps (W
     }
     const forward = sent.find((m) => m && m.type === 'telemetry-config');
     assert.ok(forward, 'process.send was called with a telemetry-config message');
-    assert.strictEqual(forward.base, false, 'forwarded base flag');
-    assert.strictEqual(forward.extended, false, 'forwarded extended flag (latched off without base)');
+    // WARDEN-1116 — consent travels as a per-CATEGORY map, not named booleans.
+    assert.deepStrictEqual(forward.categories, { incidents: false, names: false },
+      'forwarded the per-category consent map');
     assert.strictEqual(forward.endpoint, 'https://recv.example/ingest', 'forwarded endpoint');
     assert.strictEqual(forward.authToken, TELEMETRY_SECRET,
       'the CLEARTEXT auth token is forwarded over the internal IPC channel (NOT masked here)');
@@ -324,7 +325,7 @@ describe('/api/config PUT post-save side-effects — the four afterSave steps (W
     // The forward is guarded by `typeof process.send === 'function'`. With no
     // mock installed, a standalone server must skip the IPC forward (no crash).
     assert.ok(typeof process.send !== 'function', 'precondition: no parent IPC');
-    const res = await put({ telemetryBaseEnabled: false });
+    const res = await put({ telemetryIncidentsEnabled: false });
     assert.strictEqual(res.res.status, 200, 'PUT succeeds without parent IPC');
   });
 

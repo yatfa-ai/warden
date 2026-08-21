@@ -1,51 +1,37 @@
-// TelemetryClient — slice 1 of roadmap WARDEN-446 (design WARDEN-443).
-//
-// The consent-gated SINK for telemetry events. This is the stable call site the
-// later slices plug into: slice 4's instrumentation source
-// (electron/telemetry-source.cjs) is wired today with `record: null` awaiting
-// `client.record.bind(client)` (see electron/main.cjs WARDEN-463 seam); when the
-// pipeline-assembly slice connects them, the source's already-redacted events
-// flow into `record()` here. Pipeline assembly (schema → redact → consent-gate →
-// transport, wired end-to-end with the source) is a later slice — per
-// redact.ts's note — so THIS slice ships only the gate + the buffer, no transport.
+// TelemetryClient — the consent-gated SINK for telemetry events (roadmap
+// WARDEN-446 / design WARDEN-443), reworked onto INDEPENDENT PER-CATEGORY consent
+// by WARDEN-1116.
 //
 // TWO INVARIANTS this client enforces by construction:
-//   1. OFF = NOTHING. With consent off, `record()` is a guarded no-op that
-//      records, buffers, and sends nothing (the first layer of "off = nothing";
-//      the source's consent gate is the second). Nothing leaves the machine
-//      until base consent is explicitly turned on.
-//   2. EXTENDED REQUIRES BASE. The extended tier (chat/session names) CANNOT be
-//      enabled unless base is on — enforced at EVERY setter, so no caller can
-//      bypass it. The server PUT handler enforces the same clamp server-side
-//      (src/server.js WARDEN-457); the UI disables the toggle when base is off.
-//      Defense in depth: UI + client + server all refuse extended-without-base.
+//   1. NOTHING COLLECTED = NOTHING RECORDED. `record()` is a guarded no-op unless
+//      at least one COLLECTING category is enabled. Everything is off by default,
+//      so out of the box this records, buffers, and sends nothing.
+//   2. CATEGORIES ARE INDEPENDENT. Enabling one NEVER enables another, and none
+//      is subordinate to another. The old "extended requires base" clamp is gone:
+//      `names` is a DECORATING category that adds fields to events other
+//      categories produce, so on its own it is naturally inert — with nothing
+//      collecting, `record()` still enqueues nothing. Safety comes from that
+//      inertness, not from a clamp.
 //
-// NO TRANSPORT / NO NETWORK / NO ENDPOINT in this slice. `record()` validates
-// the event against the schema and enqueues it to a bounded in-memory buffer; the
-// send path is slotted in by a later slice (call `drain()` to hand the buffer to
-// a transport) WITHOUT changing call sites.
+// The consent decision itself is NOT made here — it is delegated to `./consent`,
+// the single authority. This client only asks it questions.
 //
-// REDACTION SEAM (WARDEN-443 Principle #3 — nothing un-redacted retained). A
-// later slice inserts a pre-collection `redact()` pass at the marked seam below
-// (before the buffer). It is safe to defer here because (a) in THIS slice no real
-// source is wired to `record()` — the buffer only holds synthetic/test events —
-// and (b) when the source IS wired, slice 4 already redacts at the collection
-// boundary (buildErrorEvent redacts the message; parseStackFrames drops paths),
-// so events arriving at `record()` are already scrubbed. The seam makes the
-// later defense-in-depth redact a one-line insertion with no call-site change.
+// NO TRANSPORT / NO NETWORK / NO ENDPOINT. `record()` validates the event against
+// the schema and enqueues it to a bounded in-memory buffer; the live send path is
+// the main-process pipeline (electron/telemetry-pipeline.cjs).
 
 import {
   validateEvent,
-  type ConsentTier,
   type TelemetryEvent,
 } from './schema';
-
-/** The two consent flags as the Settings page stores them (telemetryBaseEnabled /
- *  telemetryExtendedEnabled). `extended` is meaningful only when `base` is on. */
-export interface TelemetryConsent {
-  base: boolean;
-  extended: boolean;
-}
+import {
+  NO_CONSENT,
+  collectsEvents,
+  isCategoryEnabled,
+  normalizeConsent,
+  type TelemetryCategory,
+  type TelemetryConsent,
+} from './consent';
 
 export interface TelemetryClientOptions {
   /** Max events retained in the in-memory buffer; oldest are dropped past this so
@@ -55,88 +41,81 @@ export interface TelemetryClientOptions {
 }
 
 export interface TelemetryClient {
-  /** Set consent flags. Any field may be omitted to leave it unchanged. Extended
-   *  is CLAMPED to false unless base is on. Returns the effective (post-clamp)
-   *  consent so the caller can confirm what was applied. */
-  setConsent(consent: Partial<TelemetryConsent>): TelemetryConsent;
-  /** Toggle base consent. Turning base OFF also forces extended OFF. */
-  setBaseConsent(base: boolean): TelemetryConsent;
-  /** Toggle extended consent — CLAMPED to false unless base is on. */
-  setExtendedConsent(extended: boolean): TelemetryConsent;
-  /** The effective (already-clamped) consent flags. */
+  /** Set consent for one or more categories. Any category omitted is left
+   *  unchanged. NO clamping and NO coupling — setting one category never changes
+   *  another. Returns the effective consent so the caller can confirm what was
+   *  applied. */
+  setConsent(consent: Partial<Record<TelemetryCategory, boolean>>): TelemetryConsent;
+  /** Toggle ONE category. Independent of every other category. */
+  setCategory(category: TelemetryCategory, enabled: boolean): TelemetryConsent;
+  /** Replace the whole consent state (anything unrecognized resolves to off). */
+  replaceConsent(consent: unknown): TelemetryConsent;
+  /** The effective per-category consent. */
   getConsent(): TelemetryConsent;
-  /** The effective tier: 'off' (base off), 'base' (base on), or 'extended'
-   *  (both on). */
-  getTier(): ConsentTier;
-  /** True iff base consent is on (i.e. `record()` will enqueue). */
-  isConsentOn(): boolean;
-  /** Record a telemetry event. A guarded NO-OP (records nothing) when consent is
-   *  off. When base consent is on, validates the event against the schema and
-   *  enqueues it to the in-memory buffer. Returns true iff an event was
-   *  enqueued (consent on AND schema-valid). */
+  /** Is this one category enabled? */
+  isCategoryOn(category: TelemetryCategory): boolean;
+  /** True iff a COLLECTING category is on (i.e. `record()` will enqueue). A
+   *  decorating-only consent is false: nothing is collected, so nothing is sent. */
+  isCollecting(): boolean;
+  /** Record a telemetry event. A guarded NO-OP (records nothing) while nothing is
+   *  being collected. Otherwise validates the event against the schema and
+   *  enqueues it to the in-memory buffer. Returns true iff an event was enqueued
+   *  (collecting AND schema-valid). */
   record(event: unknown): boolean;
-  /** Drain + return the buffered events, clearing the buffer. The transport a
-   *  later slice slots in calls this on its send cadence. */
+  /** Drain + return the buffered events, clearing the buffer. */
   drain(): TelemetryEvent[];
   /** Number of events currently buffered. */
   size(): number;
 }
 
-/** Construct a TelemetryClient. Consent defaults to OFF (both tiers false). */
+/** Construct a TelemetryClient. Consent defaults to OFF for every category. */
 export function createTelemetryClient(options: TelemetryClientOptions = {}): TelemetryClient {
   const maxBuffer = typeof options.maxBuffer === 'number' && options.maxBuffer > 0
     ? Math.floor(options.maxBuffer)
     : 100;
 
-  let base = false;
-  let extended = false;
+  let consent: TelemetryConsent = NO_CONSENT;
   const buffer: TelemetryEvent[] = [];
 
-  const clampExtended = () => {
-    if (!base && extended) extended = false;
-  };
-
-  const effective = (): TelemetryConsent => ({ base, extended: base && extended });
-
   return {
-    setConsent(consent) {
-      if (typeof consent.base === 'boolean') base = consent.base;
-      if (typeof consent.extended === 'boolean') extended = consent.extended;
-      clampExtended();
-      return effective();
+    setConsent(partial) {
+      const next: Record<string, boolean> = { ...consent };
+      if (partial && typeof partial === 'object') {
+        for (const [k, v] of Object.entries(partial)) {
+          // Only a real boolean changes a category; anything else leaves it as
+          // it was (a garbage value must never flip a consent switch).
+          if (typeof v === 'boolean') next[k] = v;
+        }
+      }
+      consent = normalizeConsent(next);
+      return consent;
     },
-    setBaseConsent(value) {
-      base = value;
-      clampExtended();
-      return effective();
+    setCategory(category, enabled) {
+      consent = normalizeConsent({ ...consent, [category]: enabled === true });
+      return consent;
     },
-    setExtendedConsent(value) {
-      // Extended is subordinate to base: enabling it is ignored (clamped to
-      // false) unless base is already on. This is the extended-requires-base
-      // invariant enforced at the setter.
-      extended = value && base;
-      return effective();
+    replaceConsent(value) {
+      consent = normalizeConsent(value);
+      return consent;
     },
     getConsent() {
-      return effective();
+      return consent;
     },
-    getTier() {
-      if (!base) return 'off';
-      return extended ? 'extended' : 'base';
+    isCategoryOn(category) {
+      return isCategoryEnabled(consent, category);
     },
-    isConsentOn() {
-      return base;
+    isCollecting() {
+      return collectsEvents(consent);
     },
     record(event) {
-      // INVARIANT 1: OFF = NOTHING. Before anything else, the consent gate. With
-      // base off this records/buffers/sends nothing — no allocation, no validation.
-      if (!base) return false;
+      // INVARIANT 1: nothing collected = nothing recorded. Before anything else,
+      // the consent gate. With no collecting category on this records/buffers/
+      // sends nothing — no allocation, no validation.
+      if (!collectsEvents(consent)) return false;
       // Schema conformance: only well-formed events are retained. An invalid
       // event is dropped (returns false), never buffered.
       if (!validateEvent(event)) return false;
 
-      // REDACTION SEAM — a later slice inserts the pre-collection redact() pass
-      // HERE, before the buffer, per WARDEN-443 Principle #3. See file header.
       const safe = event as TelemetryEvent;
 
       // Bounded buffer (ring): drop oldest past maxBuffer so a burst or a

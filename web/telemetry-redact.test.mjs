@@ -2,13 +2,16 @@
 // of roadmap WARDEN-446). This module is the pipeline's safety gate: it MUST
 // make it impossible for an un-redacted payload to be produced — credentials /
 // chat content / prompts / file paths / hostnames can never survive, and chat /
-// session names survive only at the extended consent tier.
+// session names survive only while the `names` consent CATEGORY is enabled.
 //
 // No front-end test runner in this repo, so (like web/desktopAlerts.test.mjs)
 // this loads the REAL web/src/lib/telemetry/redact.ts (transpiled TS -> ESM via
 // Vite's OXC transform) and exercises the PURE transform with plain objects.
-// The `import type` in that file is erased at transpile time and there are no
-// runtime imports, so the emitted module loads standalone.
+//
+// HARNESS (WARDEN-1116): redact.ts has ONE runtime import — `./consent`, the
+// single consent authority — so both files are transformed into the SAME tmpDir
+// and the relative specifier is rewritten to the .mjs Node can resolve (the
+// telemetry-transparency.test.mjs pattern).
 //
 // Auto-discovered by `npm run dev:test` (`node --test` in web/).
 //
@@ -21,16 +24,23 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const modPath = resolve(__dirname, 'src/lib/telemetry/redact.ts');
 
-// --- Load the REAL redact.ts (TS -> ESM via the OXC transform Vite bundles) ----
-const src = readFileSync(modPath, 'utf8');
-const { code } = await transformWithOxc(src, modPath, {});
+// --- Load the REAL redact.ts + its './consent' sibling (TS -> ESM via OXC) -----
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-telemetry-redact-test-'));
-const tmpFile = join(tmpDir, 'redact.mjs');
-writeFileSync(tmpFile, code);
-const { redact, scrubString } = await import(tmpFile);
+for (const name of ['consent', 'redact']) {
+  const modPath = resolve(__dirname, `src/lib/telemetry/${name}.ts`);
+  let { code } = await transformWithOxc(readFileSync(modPath, 'utf8'), modPath, {});
+  code = code.replace(/from\s+(["'])\.\/consent\1/g, 'from "./consent.mjs"');
+  writeFileSync(join(tmpDir, `${name}.mjs`), code);
+}
+const { redact, scrubString } = await import(join(tmpDir, 'redact.mjs'));
 rmSync(tmpDir, { recursive: true, force: true });
+
+// The consent states this suite exercises. `NAMES_ON` is the only one that
+// retains chat/session names; every other shape (including a corrupt or missing
+// value) must produce the most-redacted output.
+const NAMES_ON = { incidents: true, names: true };
+const NAMES_OFF = { incidents: true, names: false };
 
 let passed = 0;
 const test = (name, fn) => {
@@ -53,7 +63,7 @@ const PEM_KEY = [
 ].join('\n');
 
 // The combined candidate event used across most assertions — every hard
-// exclusion category appears somewhere in it, alongside safe base-tier fields.
+// exclusion category appears somewhere in it, alongside safe anonymous fields.
 const EVENT = {
   type: 'renderer_crash',
   timestamp: 1719500000123,
@@ -82,11 +92,11 @@ const EVENT = {
 
 // Serialized views are used for the "NONE of the sensitive material survives"
 // substring-absence checks across the whole scrubbed payload.
-const redacted = redact(EVENT, { tier: 'extended' });
+const redacted = redact(EVENT, { consent: NAMES_ON });
 const redactedAnyTier = JSON.stringify(redacted); // extended retains names; secrets still gone
-const baseSerialized = JSON.stringify(redact(EVENT, { tier: 'base' }));
+const baseSerialized = JSON.stringify(redact(EVENT, { consent: NAMES_OFF }));
 
-console.log('\nhard exclusions — credentials never survive (all tiers)');
+console.log('\nhard exclusions — credentials never survive (every consent combination)');
 
 test('AWS access-key-id is absent from output', () => {
   assert.doesNotMatch(redactedAnyTier, /AKIAIOSFODNN7EXAMPLE/);
@@ -146,14 +156,14 @@ test('high-entropy rule leaves ordinary words / numbers / versions untouched', (
 console.log('\nhard exclusions — chat content & prompts are dropped wholesale');
 
 test('chat-content field is dropped entirely (not partially scrubbed)', () => {
-  const out = redact(EVENT, { tier: 'extended' });
+  const out = redact(EVENT, { consent: NAMES_ON });
   assert.equal(out.content, undefined, 'content field must be absent');
   // The content text never leaks anywhere in the payload.
   assert.doesNotMatch(JSON.stringify(out), /production database password/);
 });
 
 test('prompt field is dropped entirely (PEM key inside it never leaks)', () => {
-  const out = redact(EVENT, { tier: 'extended' });
+  const out = redact(EVENT, { consent: NAMES_ON });
   assert.equal(out.prompt, undefined, 'prompt field must be absent');
   assert.doesNotMatch(JSON.stringify(out), /BEGIN RSA PRIVATE KEY/);
 });
@@ -219,7 +229,7 @@ test('IPv6 addresses are absent from a payload driven through redact()', () => {
   // real transform — none of the three IPv6 shapes survive in the output.
   const out = redact(
     { type: 'network_error', error: { message: 'connect fe80::1 / 2001:db8:abcd:ef12::1 / ::1 refused' } },
-    { tier: 'extended' },
+    { consent: NAMES_ON },
   );
   const s = JSON.stringify(out);
   assert.doesNotMatch(s, /fe80::1/);
@@ -241,44 +251,76 @@ test('MAC addresses (persistent device identifiers) are scrubbed in the host pas
   assert.equal(scrubString('nic a0:b1:c2:d3:e4:f5'), 'nic [REDACTED:host]');
 });
 
-console.log('\ntier gating — chat/session names only at the extended tier');
+console.log('\ncategory gating — chat/session names only while the `names` category is on');
 
-test('names are PRESENT at the extended tier', () => {
-  const out = redact(EVENT, { tier: 'extended' });
+test('names are PRESENT when the `names` category is on', () => {
+  const out = redact(EVENT, { consent: NAMES_ON });
   assert.equal(out.chatName, 'Refactor auth module');
   assert.equal(out.sessionName, 'claude-7b3a2f1');
 });
 
-test('names are ABSENT at the base tier', () => {
-  const out = redact(EVENT, { tier: 'base' });
+test('names are ABSENT when the `names` category is off — INDEPENDENTLY of any other category', () => {
+  const out = redact(EVENT, { consent: NAMES_OFF });
   assert.equal(out.chatName, undefined);
   assert.equal(out.sessionName, undefined);
   assert.ok(!('chatName' in out), 'chatName key must not even be present');
   assert.ok(!('sessionName' in out), 'sessionName key must not even be present');
 });
 
-test('names are ABSENT when tier is off / unknown / undefined (most-redacted default)', () => {
-  assert.equal(redact(EVENT, { tier: 'off' }).chatName, undefined);
-  assert.equal(redact(EVENT, { tier: 'off' }).sessionName, undefined);
-  assert.equal(redact(EVENT, { tier: 'unknown' }).chatName, undefined);
-  assert.equal(redact(EVENT, {}).chatName, undefined); // tier omitted entirely
-  assert.equal(redact(EVENT, { tier: undefined }).chatName, undefined);
-  assert.equal(redact(EVENT, { tier: null }).chatName, undefined);
+test('names are ABSENT for a missing / corrupt / unrecognized consent (most-redacted default)', () => {
+  // Every failure mode of the persisted consent value resolves to nothing enabled.
+  const bad = [
+    {},                                   // nothing enabled
+    { names: 'yes' },                     // non-boolean
+    { names: 1 },                         // truthy non-boolean
+    { names: null },
+    { chatnames: true },                  // unrecognized category key
+    { incidents: true },                  // a DIFFERENT category on — must not leak names
+    undefined,
+    null,
+    'extended',                           // a stale tier STRING from an older build
+    42,
+    [],
+  ];
+  for (const consent of bad) {
+    const out = redact(EVENT, { consent });
+    assert.equal(out.chatName, undefined, `chatName dropped for ${JSON.stringify(consent)}`);
+    assert.equal(out.sessionName, undefined, `sessionName dropped for ${JSON.stringify(consent)}`);
+  }
+  assert.equal(redact(EVENT, {}).chatName, undefined, 'consent omitted entirely');
+  assert.equal(redact(EVENT).chatName, undefined, 'opts omitted entirely');
 });
 
-test('safe base-tier fields survive every tier (scrubbed, not dropped)', () => {
-  for (const tier of ['base', 'extended', 'off', 'unknown', undefined]) {
-    const out = redact(EVENT, { tier });
-    assert.equal(out.type, 'renderer_crash', `type preserved at tier ${tier}`);
-    assert.equal(out.timestamp, 1719500000123, `timestamp preserved at tier ${tier}`);
-    assert.equal(out.error.name, 'Error', `error.name preserved at tier ${tier}`);
-    assert.deepEqual(out.meta.counts, { errors: 3, panes: 2, recovered: 1 }, `counts preserved at tier ${tier}`);
+test('anonymous fields survive EVERY consent combination (scrubbed, not dropped)', () => {
+  const combos = [{}, { incidents: true }, { names: true }, { incidents: true, names: true }, undefined];
+  for (const consent of combos) {
+    const label = JSON.stringify(consent);
+    const out = redact(EVENT, { consent });
+    assert.equal(out.type, 'renderer_crash', `type preserved for ${label}`);
+    assert.equal(out.timestamp, 1719500000123, `timestamp preserved for ${label}`);
+    assert.equal(out.error.name, 'Error', `error.name preserved for ${label}`);
+    assert.deepEqual(out.meta.counts, { errors: 3, panes: 2, recovered: 1 }, `counts preserved for ${label}`);
   }
 });
 
+test('hard exclusions hold across the WHOLE category set — even with every category ON', () => {
+  // Redaction is not scoped to "what used to be the extended tier": with every
+  // category enabled, credentials / paths / hosts / content are still excluded.
+  const everything = { incidents: true, names: true };
+  const out = redact(EVENT, { consent: everything });
+  const json = JSON.stringify(out);
+  assert.doesNotMatch(json, /ghp_/, 'no GitHub token survives with all categories on');
+  assert.doesNotMatch(json, /AKIA/, 'no AWS key id survives with all categories on');
+  assert.doesNotMatch(json, /home\/alice/, 'no home path survives with all categories on');
+  assert.doesNotMatch(json, /prod-db-01/, 'no internal host survives with all categories on');
+  assert.doesNotMatch(json, /BEGIN RSA PRIVATE KEY/, 'no PEM key survives with all categories on');
+  assert.ok(!('content' in out), 'content is dropped with all categories on');
+  assert.ok(!('prompt' in out), 'prompt is dropped with all categories on');
+});
+
 test('free-text error.message is RETAINED but scrubbed of every secret/path/host', () => {
-  const msg = redact(EVENT, { tier: 'base' }).error.message;
-  assert.ok(typeof msg === 'string' && msg.length > 0, 'the message itself is kept (base-tier crash signal)');
+  const msg = redact(EVENT, { consent: NAMES_OFF }).error.message;
+  assert.ok(typeof msg === 'string' && msg.length > 0, 'the message itself is kept (the crash signal)');
   assert.doesNotMatch(msg, /prod-db-01/); // host
   assert.doesNotMatch(msg, /\/home\/alice/); // path
   assert.doesNotMatch(msg, /ghp_/); // token
@@ -311,29 +353,31 @@ const FRAMES_EVENT = {
   },
 };
 
-test('a structured frame.file basename with a source extension survives redact() at base AND extended tiers', () => {
-  for (const tier of ['base', 'extended']) {
-    const frames = redact(FRAMES_EVENT, { tier }).error.frames;
-    assert.equal(frames[0].file, 'server.js', `server.js preserved @ ${tier}`);
-    assert.equal(frames[0].function, 'handleSend', `function preserved @ ${tier}`);
-    assert.equal(frames[0].line, 601, `line preserved @ ${tier}`);
-    assert.equal(frames[0].column, 12, `column preserved @ ${tier}`);
-    assert.equal(frames[1].file, 'App.tsx', `App.tsx preserved @ ${tier}`);
-    assert.equal(frames[2].file, 'telemetry-pipeline.cjs', `telemetry-pipeline.cjs preserved @ ${tier}`);
+test('a structured frame.file basename with a source extension survives redact() under EVERY consent', () => {
+  for (const consent of [NAMES_OFF, NAMES_ON, {}]) {
+    const label = JSON.stringify(consent);
+    const frames = redact(FRAMES_EVENT, { consent }).error.frames;
+    assert.equal(frames[0].file, 'server.js', `server.js preserved @ ${label}`);
+    assert.equal(frames[0].function, 'handleSend', `function preserved @ ${label}`);
+    assert.equal(frames[0].line, 601, `line preserved @ ${label}`);
+    assert.equal(frames[0].column, 12, `column preserved @ ${label}`);
+    assert.equal(frames[1].file, 'App.tsx', `App.tsx preserved @ ${label}`);
+    assert.equal(frames[2].file, 'telemetry-pipeline.cjs', `telemetry-pipeline.cjs preserved @ ${label}`);
   }
 });
 
 test('common warden source basenames all survive frame.file (not just the three named in the spec)', () => {
   const files = ['config.json', 'index.ts', 'main.cjs', 'redact.ts', 'client.mjs', 'settings.jsx', 'schema.ts', 'server.js'];
-  const out = redact({ frames: files.map((f) => ({ file: f })) }, { tier: 'base' });
+  const out = redact({ frames: files.map((f) => ({ file: f })) }, { consent: NAMES_OFF });
   out.frames.forEach((fr, i) => assert.equal(fr.file, files[i], `${files[i]} should be preserved`));
 });
 
 test('a host-shaped frame.file is STILL [REDACTED:host] (trust preserved)', () => {
-  for (const tier of ['base', 'extended']) {
-    const frames = redact(FRAMES_EVENT, { tier }).error.frames;
-    assert.equal(frames[3].file, '[REDACTED:host]', `api.github.com redacted @ ${tier}`);
-    assert.equal(frames[4].file, '[REDACTED:host]', `prod-db-01.corp.local redacted @ ${tier}`);
+  for (const consent of [NAMES_OFF, NAMES_ON, {}]) {
+    const label = JSON.stringify(consent);
+    const frames = redact(FRAMES_EVENT, { consent }).error.frames;
+    assert.equal(frames[3].file, '[REDACTED:host]', `api.github.com redacted @ ${label}`);
+    assert.equal(frames[4].file, '[REDACTED:host]', `prod-db-01.corp.local redacted @ ${label}`);
   }
 });
 
@@ -341,7 +385,7 @@ test('a dotted frame.function whose suffix is NOT a source extension is still [R
   // `Object.defineProperty` parses as a dotted token; only a known source
   // extension is preserved, so a dotted identifier redacts exactly as before —
   // the preserve scope does not broaden to every dotted frame value.
-  const out = redact({ frames: [{ function: 'Object.defineProperty', file: 'server.js' }] }, { tier: 'base' });
+  const out = redact({ frames: [{ function: 'Object.defineProperty', file: 'server.js' }] }, { consent: NAMES_OFF });
   assert.equal(out.frames[0].function, '[REDACTED:host]');
   assert.equal(out.frames[0].file, 'server.js');
 });
@@ -358,13 +402,13 @@ test('free-text redaction is byte-identical — a basename or ccTLD-colliding to
   );
   // The same values, structured as frame.file, ARE preserved — proving the
   // discriminator is the field context, not the token.
-  const out = redact({ frames: [{ file: 'example.py' }, { file: 'example.rs' }] }, { tier: 'base' });
+  const out = redact({ frames: [{ file: 'example.py' }, { file: 'example.rs' }] }, { consent: NAMES_OFF });
   assert.deepEqual(out.frames.map((f) => f.file), ['example.py', 'example.rs']);
 });
 
 test('frame-basename preservation is idempotent — re-redacting the kept-basename output is a no-op', () => {
-  const once = redact(FRAMES_EVENT, { tier: 'base' });
-  const twice = redact(once, { tier: 'base' });
+  const once = redact(FRAMES_EVENT, { consent: NAMES_OFF });
+  const twice = redact(once, { consent: NAMES_OFF });
   assert.deepEqual(twice, once);
   // The surviving basenames contain no secret/path/host pattern that re-triggers.
   assert.equal(twice.error.frames[0].file, 'server.js');
@@ -374,7 +418,7 @@ console.log('\nstructural guarantees — non-mutation & idempotency');
 
 test('input payload is NOT mutated (defensive copy)', () => {
   const snapshot = JSON.parse(JSON.stringify(EVENT));
-  const out = redact(EVENT, { tier: 'extended' });
+  const out = redact(EVENT, { consent: NAMES_ON });
   // Input unchanged.
   assert.deepEqual(EVENT, snapshot, 'original EVENT must be byte-for-byte unchanged');
   // Output is a distinct object, not the input reference.
@@ -383,11 +427,11 @@ test('input payload is NOT mutated (defensive copy)', () => {
 });
 
 test('redaction is idempotent — re-redacting already-redacted output is a no-op', () => {
-  const once = redact(EVENT, { tier: 'extended' });
-  const twice = redact(once, { tier: 'extended' });
+  const once = redact(EVENT, { consent: NAMES_ON });
+  const twice = redact(once, { consent: NAMES_ON });
   assert.deepEqual(twice, once);
-  // Same holds at base tier and for the raw string scrubber.
-  assert.deepEqual(redact(redact(EVENT, { tier: 'base' }), { tier: 'base' }), redact(EVENT, { tier: 'base' }));
+  // Same holds with names off and for the raw string scrubber.
+  assert.deepEqual(redact(redact(EVENT, { consent: NAMES_OFF }), { consent: NAMES_OFF }), redact(EVENT, { consent: NAMES_OFF }));
   const messy = 'AKIAIOSFODNN7EXAMPLE and /etc/shadow and ubuntu@host.local';
   assert.equal(scrubString(scrubString(messy)), scrubString(messy));
 });
@@ -407,7 +451,7 @@ test('deeply nested payloads are scrubbed at every level', () => {
     a: { b: { c: 'key AKIAIOSFODNN7EXAMPLE in deep', content: 'secret chat' } },
     list: [{ token: 'Bearer abcdefghijklmnop' }],
   };
-  const out = redact(nested, { tier: 'base' });
+  const out = redact(nested, { consent: NAMES_OFF });
   assert.doesNotMatch(JSON.stringify(out), /AKIAIOSFODNN7EXAMPLE/);
   assert.equal(out.a.b.c, 'key [REDACTED:aws-key] in deep');
   assert.equal(out.a.b.content, undefined, 'deeply nested content still dropped');
@@ -415,12 +459,12 @@ test('deeply nested payloads are scrubbed at every level', () => {
 });
 
 test('null / undefined / primitive inputs are handled defensively', () => {
-  assert.equal(redact(null, { tier: 'extended' }), null);
-  assert.equal(redact(undefined, { tier: 'extended' }), undefined);
-  assert.equal(redact(42, { tier: 'extended' }), 42);
-  assert.equal(redact(true, { tier: 'extended' }), true);
+  assert.equal(redact(null, { consent: NAMES_ON }), null);
+  assert.equal(redact(undefined, { consent: NAMES_ON }), undefined);
+  assert.equal(redact(42, { consent: NAMES_ON }), 42);
+  assert.equal(redact(true, { consent: NAMES_ON }), true);
   // A bare sensitive string passed at the top level is still scrubbed.
-  assert.equal(redact('leak: AKIAIOSFODNN7EXAMPLE', { tier: 'extended' }), 'leak: [REDACTED:aws-key]');
+  assert.equal(redact('leak: AKIAIOSFODNN7EXAMPLE', { consent: NAMES_ON }), 'leak: [REDACTED:aws-key]');
 });
 
 console.log(`\n✓ TELEMETRY REDACTION TESTS PASS (${passed})`);

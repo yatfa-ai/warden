@@ -22,11 +22,19 @@
 // slice 1's canonical schema when it lands.
 //
 // INVARIANT — two layers of "off = nothing": instrumentation subscribes to
-// signals ONLY when base-tier consent is on (and re-evaluates on consent
-// change). When telemetry is off (the default): no tap is subscribed, no event
-// is built or buffered, and `record()` is additionally never called. Every run
-// is user-enabled. The tests in web/telemetry-source.test.mjs prove (a)–(e);
-// main.cjs proves the integration (f).
+// signals ONLY while a COLLECTING consent category is on (and re-evaluates on
+// every consent change). When telemetry is off (the default): no tap is
+// subscribed, no event is built or buffered, and `record()` is additionally
+// never called. Every run is user-enabled. The tests in
+// web/telemetry-source.test.mjs prove (a)–(e); main.cjs proves the integration (f).
+
+// WARDEN-1116 — THE consent authority (per-category, independent, off by
+// default). This module makes no consent decision of its own; it asks.
+const {
+  collectsEvents,
+  isCategoryEnabled,
+  normalizeConsent,
+} = require('../src/telemetry-consent.cjs');
 
 // ---------------------------------------------------------------------------
 // Slice-1 contract (base-tier). Reconcile with WARDEN-457's canonical schema
@@ -384,21 +392,27 @@ function containsPath(text) {
 // thresholdMs }) returns a handle:
 //   .attachMain(processLike)        — store the main-process emitter (process)
 //   .attachRenderer(webContentsLike) — store the renderer emitter (win.webContents)
-//   .setBaseConsent(boolean)        — toggle subscriptions on consent change
-//   .setExtendedConsent(boolean)    — toggle name attachment (clamped to base; WARDEN-538)
+//   .setConsent(consentState)       — apply the per-category consent (WARDEN-1116):
+//                                     arms/disarms subscriptions AND name attachment
 //   .setContext({chatName?, sessionName?}) — latest focused names (WARDEN-538)
 //   .setRecord(fn)                  — hot-swap the record sink (slice 1 wiring)
 //   .recordRendererError(serialized) — consent-gated renderer JS-error entry point
 //                                       (forwarded over IPC from preload; WARDEN-637)
 //   .dispose()                      — detach everything + stop the heartbeat
 //
-// Signals subscribe ONLY when base consent is on; turning it off detaches every
-// tap and stops the heartbeat. record() is additionally gated by consent, so
-// there are two independent layers of "off = nothing". Name attachment is a THIRD
-// independent gate: even with base + extended on, no name attaches unless a
-// focused-chat context was pushed; and the sink's tier redactor strips names at
-// base/off regardless — so an extended opt-in is the only path to a name-bearing
-// event, through three independent layers.
+// WARDEN-1116 — consent is a set of INDEPENDENT per-category switches, resolved
+// by the single authority in src/telemetry-consent.cjs. Signals subscribe
+// ONLY while a COLLECTING category is on; turning collection off detaches every
+// tap and stops the heartbeat. record() is additionally gated, so there are two
+// independent layers of "off = nothing". Name attachment is a THIRD independent
+// gate: it needs the `names` category on AND a focused-chat context pushed; and
+// the sink's redactor strips names whenever `names` is off regardless.
+//
+// The `names` category is NOT subordinate to any other category — the old
+// "extended requires base" clamp is gone. It does not need one: `names` only
+// DECORATES events other categories produce, so with nothing collecting no event
+// is ever built and there is nothing for a name to ride on. Inert by
+// construction, not by clamp.
 // ---------------------------------------------------------------------------
 
 function createTelemetrySource(opts) {
@@ -419,7 +433,7 @@ function createTelemetrySource(opts) {
   const appVersion = typeof o.appVersion === 'string' && o.appVersion ? o.appVersion : null;
   // A reusable spread fragment threaded into every builder call below — `appVersion`
   // is captured once and never mutated per-factory, so a constant fragment (mirroring
-  // the ...extendedNameFields() spread) is correct and keeps the gate in ONE place.
+  // the ...nameFields() spread) is correct and keeps the gate in ONE place.
   const versionOpt = appVersion ? { appVersion } : {};
 
   // BASE-tier OS label (WARDEN-684). A non-identifying OS label (process.platform
@@ -433,15 +447,16 @@ function createTelemetrySource(opts) {
   const platform = typeof o.platform === 'string' && o.platform ? o.platform : null;
   const platformOpt = platform ? { platform } : {};
 
-  let baseConsent = false;
-  // EXTENDED-tier producer state (WARDEN-538). `extendedConsent` mirrors the sink
-  // client's extended-requires-base invariant (client.ts: clamped to false unless
-  // base is on); `context` holds the latest focused chat/session name the renderer
-  // pushed over IPC. Together they gate name attachment: a built event carries the
-  // focused name ONLY when extended consent is on (which requires base) AND a
-  // non-empty name is held — otherwise today's anonymous event (zero change for
-  // base/off). The builders themselves stay pure; the gate is `extendedNameFields`.
-  let extendedConsent = false;
+  // Whether a COLLECTING category is enabled — the arm/disarm state for every
+  // signal subscription and the first "off = nothing" layer.
+  let collecting = false;
+  // `names` category producer state (WARDEN-538, per-category since WARDEN-1116).
+  // INDEPENDENT of `collecting`: it is never clamped to it. `context` holds the
+  // latest focused chat/session name the renderer pushed over IPC. Together they
+  // gate name attachment: a built event carries the focused name ONLY when the
+  // `names` category is on AND a non-empty name is held — otherwise an anonymous
+  // event. The builders themselves stay pure; the gate is `nameFields`.
+  let namesConsent = false;
   let context = { chatName: null, sessionName: null };
   let mainEmitter = null;
   let rendererEmitter = null;
@@ -450,9 +465,10 @@ function createTelemetrySource(opts) {
   let heartbeatTimer = null;
   let lastTick = 0;
 
-  // record only when (1) consent is on AND (2) a real sink is wired. Two layers.
+  // record only when (1) a collecting category is on AND (2) a real sink is
+  // wired. Two layers.
   function emit(event) {
-    if (!baseConsent) return;
+    if (!collecting) return;
     if (typeof record !== 'function') return;
     try {
       record(event);
@@ -462,15 +478,15 @@ function createTelemetrySource(opts) {
     }
   }
 
-  // The extended-tier identifier fields to thread into a builder's opts. Returns
-  // `{}` (anonymous event) UNLESS extended consent is on AND a non-empty name is
-  // held — so base/off users get byte-identical payloads to today. Spread into
-  // every builder call below so the gate lives in ONE place (not 5). The builders
-  // attach exactly these fields; the sink's redactor then retains them only at
-  // the live `extended` tier (defense in depth: if consent drops between build and
-  // dispatch, the redactor strips the names).
-  function extendedNameFields() {
-    if (!extendedConsent) return {};
+  // The `names`-category identifier fields to thread into a builder's opts.
+  // Returns `{}` (anonymous event) UNLESS the `names` category is on AND a
+  // non-empty name is held — so a user without it gets byte-identical payloads to
+  // an anonymous event. Spread into every builder call below so the gate lives in
+  // ONE place (not 5). The builders attach exactly these fields; the sink's
+  // redactor then retains them only while `names` is live (defense in depth: if
+  // consent drops between build and dispatch, the redactor strips the names).
+  function nameFields() {
+    if (!namesConsent) return {};
     const f = {};
     if (context.chatName) f.chatName = context.chatName;
     if (context.sessionName) f.sessionName = context.sessionName;
@@ -479,20 +495,20 @@ function createTelemetrySource(opts) {
 
   // --- signal handlers (gated by consent at emit time) ---
   const onUncaught = (err) => {
-    if (!baseConsent) return;
-    emit(buildErrorEvent(err, { now: nowFn(), runtime: RUNTIME.MAIN, ...extendedNameFields(), ...versionOpt, ...platformOpt }));
+    if (!collecting) return;
+    emit(buildErrorEvent(err, { now: nowFn(), runtime: RUNTIME.MAIN, ...nameFields(), ...versionOpt, ...platformOpt }));
   };
   const onRejection = (reason) => {
-    if (!baseConsent) return;
-    emit(buildErrorEvent(reason, { now: nowFn(), runtime: RUNTIME.MAIN, ...extendedNameFields(), ...versionOpt, ...platformOpt }));
+    if (!collecting) return;
+    emit(buildErrorEvent(reason, { now: nowFn(), runtime: RUNTIME.MAIN, ...nameFields(), ...versionOpt, ...platformOpt }));
   };
   const onRenderGone = (_event, details) => {
-    if (!baseConsent) return;
-    emit(buildCrashEvent(details, { now: nowFn(), ...extendedNameFields(), ...versionOpt, ...platformOpt }));
+    if (!collecting) return;
+    emit(buildCrashEvent(details, { now: nowFn(), ...nameFields(), ...versionOpt, ...platformOpt }));
   };
   const onUnresponsive = () => {
-    if (!baseConsent) return;
-    emit(buildStallEvent(0, { now: nowFn(), runtime: RUNTIME.RENDERER, source: 'unresponsive', ...extendedNameFields(), ...versionOpt, ...platformOpt }));
+    if (!collecting) return;
+    emit(buildStallEvent(0, { now: nowFn(), runtime: RUNTIME.RENDERER, source: 'unresponsive', ...nameFields(), ...versionOpt, ...platformOpt }));
   };
 
   // --- heartbeat: measures real wall-clock lag between timer callbacks ---
@@ -504,7 +520,7 @@ function createTelemetrySource(opts) {
       const overdue = t - lastTick - heartbeatMs; // how late this tick arrived
       lastTick = t;
       if (isStall(overdue, thresholdMs)) {
-        emit(buildStallEvent(overdue, { now: t, runtime: RUNTIME.MAIN, source: 'event-loop', ...extendedNameFields(), ...versionOpt, ...platformOpt }));
+        emit(buildStallEvent(overdue, { now: t, runtime: RUNTIME.MAIN, source: 'event-loop', ...nameFields(), ...versionOpt, ...platformOpt }));
       }
     }, heartbeatMs);
     // The telemetry heartbeat must never keep the process alive on its own —
@@ -559,47 +575,49 @@ function createTelemetrySource(opts) {
       // If a main emitter is already attached, detach it first (defensive).
       if (mainAttached) detachMainListeners();
       mainEmitter = emitter || null;
-      if (baseConsent) attachMainListeners();
+      if (collecting) attachMainListeners();
       return this;
     },
     attachRenderer(emitter) {
       if (rendererAttached) detachRendererListeners();
       rendererEmitter = emitter || null;
-      if (baseConsent) attachRendererListeners();
+      if (collecting) attachRendererListeners();
       return this;
     },
-    setBaseConsent(enabled) {
-      const next = enabled === true;
-      if (next === baseConsent) return;
-      baseConsent = next;
-      // extended requires base: turning base off also drops extended consent, so
-      // no name-bearing event can be built once base is off (mirrors the sink
-      // client's setBaseConsent clamp in client.ts). Context is retained — it is
-      // inert while extended is off and reactivates if extended is re-enabled.
-      if (!next) extendedConsent = false;
+    // WARDEN-1116 — apply the whole per-category consent state in ONE call. The
+    // categories are applied INDEPENDENTLY: `names` is set from its own switch
+    // and is NEVER clamped to whether anything is collecting. Safety with names
+    // on and nothing collecting comes from inertness — no event is built, so no
+    // name is attached to anything — not from a clamp.
+    //
+    // Whatever is passed goes through the single consent authority
+    // (normalizeConsent), so a missing / partial / malformed / unrecognized value
+    // resolves to nothing enabled: telemetry stays silent on garbage.
+    setConsent(consent) {
+      const resolved = normalizeConsent(consent);
+      namesConsent = isCategoryEnabled(resolved, 'names');
+      const next = collectsEvents(resolved);
+      if (next === collecting) return;
+      collecting = next;
       if (next) {
         attachMainListeners();
         attachRendererListeners();
         startHeartbeat();
       } else {
+        // Turning collection off detaches every tap immediately — no restart.
+        // Context is retained: it is inert while nothing is collected.
         detachMainListeners();
         detachRendererListeners();
         stopHeartbeat();
       }
     },
-    setExtendedConsent(enabled) {
-      // extended requires base: clamped to false unless base is on (mirrors the
-      // sink client's setExtendedConsent in client.ts). Names are never attached
-      // without base consent — defense in depth alongside the sink's tier gate.
-      extendedConsent = enabled === true && baseConsent;
-    },
     setContext(ctx) {
       // Store the latest focused chat/session names pushed by the renderer. Strings
       // only; garbage (non-strings, non-objects, empty) is normalized to null so a
       // buggy/late payload can never inject a non-string or empty identifier into a
-      // built event. Storing is ALWAYS safe: names attach only when extendedConsent
-      // is on (which requires base), so this holds nothing-identifying-useful until
-      // the user has opted into the extended tier.
+      // built event. Storing is ALWAYS safe: names attach only when the `names`
+      // category is on AND something is being collected, so this holds
+      // nothing-identifying-useful until the user has opted in.
       const c = ctx && typeof ctx === 'object' ? ctx : {};
       context = {
         chatName: typeof c.chatName === 'string' && c.chatName ? c.chatName : null,
@@ -617,11 +635,11 @@ function createTelemetrySource(opts) {
     // directly (coerceErrorFields) and produces a renderer-runtime event through
     // the SAME consent-gated record() pipeline as main-process errors. Mirrors
     // onUncaught/onRejection: gated at the top (the FIRST "off = nothing" layer)
-    // so nothing is built or recorded while base consent is off — the preload
+    // so nothing is built or recorded while nothing is being collected — the preload
     // listener forwards unconditionally and main drops it here (refinement D).
     recordRendererError(serialized) {
-      if (!baseConsent) return;
-      emit(buildErrorEvent(serialized, { now: nowFn(), runtime: RUNTIME.RENDERER, ...extendedNameFields(), ...versionOpt, ...platformOpt }));
+      if (!collecting) return;
+      emit(buildErrorEvent(serialized, { now: nowFn(), runtime: RUNTIME.RENDERER, ...nameFields(), ...versionOpt, ...platformOpt }));
     },
     // WARDEN-687 — consent-gated entry point for a MAIN-process hard kill detected
     // on the NEXT launch by the crash sentinel (electron/crash-sentinel.cjs). A hard
@@ -629,24 +647,29 @@ function createTelemetrySource(opts) {
     // bypasses uncaughtExceptionMonitor, so the prior instance died emitting NOTHING;
     // the sentinel writes a per-PID marker at startup and, on the next launch, finds
     // markers whose PID is dead and calls this once per crashed instance. Mirrors
-    // recordRendererError: gated at the top (the FIRST "off = nothing" layer) so off =
-    // nothing is built or recorded; the emit() gate is the second layer.
+    // recordRendererError: gated at the top (the FIRST "off = nothing" layer) so
+    // nothing is built or recorded while nothing is collected; emit() is layer two.
     //
-    // DELIBERATELY omits extendedNameFields(): the crash happened in a PRIOR session,
+    // DELIBERATELY omits nameFields(): the crash happened in a PRIOR session,
     // so the current launch's focused chat/session name would be a wrong-session
     // correlation. Per the WARDEN-687 trust model the event carries NO chat/session
     // names — only the synthetic MAIN_CRASH_REASON + the session-independent
     // appVersion/platform labels (a maintainer can still attribute the crash to a
     // release/OS). buildCrashEvent honors the explicit `runtime: RUNTIME.MAIN`.
     recordMainCrash() {
-      if (!baseConsent) return;
+      if (!collecting) return;
       emit(buildCrashEvent(
         { reason: MAIN_CRASH_REASON },
         { now: nowFn(), runtime: RUNTIME.MAIN, ...versionOpt, ...platformOpt },
       ));
     },
-    isConsentOn() {
-      return baseConsent;
+    // True iff a COLLECTING category is on (i.e. signals are armed).
+    isCollecting() {
+      return collecting;
+    },
+    // True iff the `names` category is on. Independent of isCollecting().
+    isNamesConsentOn() {
+      return namesConsent;
     },
     dispose() {
       detachMainListeners();
@@ -654,8 +677,8 @@ function createTelemetrySource(opts) {
       stopHeartbeat();
       mainEmitter = null;
       rendererEmitter = null;
-      baseConsent = false;
-      extendedConsent = false;
+      collecting = false;
+      namesConsent = false;
       context = { chatName: null, sessionName: null };
     },
   };

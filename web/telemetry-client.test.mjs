@@ -1,14 +1,17 @@
-// Tests for the consent-gated TelemetryClient (WARDEN-457, slice 1 of roadmap
-// WARDEN-446 / design WARDEN-443). Asserts the two invariants this slice ships:
-//   1. OFF = NOTHING — record() is a guarded no-op while consent is off.
-//   2. EXTENDED REQUIRES BASE — enforced at every setter (the UI + server clamp
-//      are defense-in-depth; the client is the third layer).
+// Tests for the consent-gated TelemetryClient (WARDEN-446 / WARDEN-443, reworked
+// onto per-category consent by WARDEN-1116). Asserts the two invariants:
+//   1. NOTHING COLLECTED = NOTHING RECORDED — record() is a guarded no-op unless
+//      a COLLECTING category is on.
+//   2. CATEGORIES ARE INDEPENDENT — setting one never changes another, and none
+//      is subordinate to another. The old extended-requires-base clamp is gone;
+//      a decorating category is safe on its own because it is INERT, which these
+//      tests demonstrate rather than assume.
 //
 // No front-end test runner in this repo, so (like web/storage.test.mjs) this
 // loads the REAL web/src/lib/telemetry/client.ts (transpiled TS -> ESM via Vite's
-// OXC transform). client.ts runtime-imports validateEvent from ./schema, so BOTH
-// modules are transpiled into the same tmp dir and the relative specifier is
-// rewritten to the .mjs path Node can resolve (the storage.test.mjs pattern).
+// OXC transform). client.ts runtime-imports ./schema and ./consent, so all three
+// modules are transpiled into the same tmp dir and the relative specifiers are
+// rewritten to the .mjs paths Node can resolve (the storage.test.mjs pattern).
 //
 // Auto-discovered by `npm run dev:test` (`node --test` in web/).
 //
@@ -22,19 +25,23 @@ import assert from 'node:assert/strict';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// --- Transpile client.ts + schema.ts into one tmp dir, rewrite the specifier ---
-const clientPath = resolve(__dirname, 'src/lib/telemetry/client.ts');
-const schemaPath = resolve(__dirname, 'src/lib/telemetry/schema.ts');
+// --- Transpile client.ts + its runtime siblings into one tmp dir -------------
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-telemetry-client-test-'));
-const { code: schemaCode } = await transformWithOxc(readFileSync(schemaPath, 'utf8'), schemaPath, {});
-const { code: clientCode } = await transformWithOxc(readFileSync(clientPath, 'utf8'), clientPath, {});
-writeFileSync(join(tmpDir, 'schema.mjs'), schemaCode);
-// client.ts imports from './schema' — rewrite the specifier to the .mjs path Node
-// resolves (OXC may emit either quote style, so match both).
-writeFileSync(join(tmpDir, 'client.mjs'), clientCode.replace(/from\s+(['"])\.\/schema\1/g, 'from "./schema.mjs"'));
+for (const name of ['schema', 'consent', 'client']) {
+  const modPath = resolve(__dirname, `src/lib/telemetry/${name}.ts`);
+  let { code } = await transformWithOxc(readFileSync(modPath, 'utf8'), modPath, {});
+  // Node ESM needs an explicit extension on a relative specifier (OXC may emit
+  // either quote style, so match both).
+  code = code
+    .replace(/from\s+(['"])\.\/schema\1/g, 'from "./schema.mjs"')
+    .replace(/from\s+(['"])\.\/consent\1/g, 'from "./consent.mjs"');
+  writeFileSync(join(tmpDir, `${name}.mjs`), code);
+}
 const { createTelemetryClient } = await import(join(tmpDir, 'client.mjs'));
 const { SCHEMA_VERSION } = await import(join(tmpDir, 'schema.mjs'));
 rmSync(tmpDir, { recursive: true, force: true });
+
+const ALL_OFF = { incidents: false, names: false };
 
 let passed = 0;
 const test = (name, fn) => {
@@ -55,17 +62,18 @@ const errorEvent = {
 };
 
 // ==========================================================================
-// (1) OFF = NOTHING — consent defaults off; record() is a guarded no-op
+// (1) NOTHING COLLECTED = NOTHING RECORDED — everything off by default
 // ==========================================================================
 
-test('a fresh client defaults to off (both tiers false)', () => {
+test('a fresh client defaults to every category off', () => {
   const c = createTelemetryClient();
-  assert.deepEqual(c.getConsent(), { base: false, extended: false });
-  assert.equal(c.getTier(), 'off');
-  assert.equal(c.isConsentOn(), false);
+  assert.deepEqual({ ...c.getConsent() }, ALL_OFF);
+  assert.equal(c.isCollecting(), false);
+  assert.equal(c.isCategoryOn('incidents'), false);
+  assert.equal(c.isCategoryOn('names'), false);
 });
 
-test('with consent OFF, record() records nothing (guarded no-op)', () => {
+test('with nothing collecting, record() records nothing (guarded no-op)', () => {
   const c = createTelemetryClient();
   assert.equal(c.record(errorEvent), false, 'returns false — nothing enqueued');
   assert.equal(c.size(), 0);
@@ -80,22 +88,21 @@ test('record() does not throw on garbage while off and buffers nothing', () => {
 });
 
 // ==========================================================================
-// (2) Records when base is on — validates + enqueues
+// (2) Records when a COLLECTING category is on — validates + enqueues
 // ==========================================================================
 
-test('turning base on moves the tier to "base" and record() enqueues a valid event', () => {
+test('turning `incidents` on makes the client collect, and record() enqueues a valid event', () => {
   const c = createTelemetryClient();
-  c.setBaseConsent(true);
-  assert.equal(c.getTier(), 'base');
-  assert.equal(c.isConsentOn(), true);
+  c.setCategory('incidents', true);
+  assert.equal(c.isCollecting(), true);
   assert.equal(c.record(errorEvent), true);
   assert.equal(c.size(), 1);
   assert.deepEqual(c.drain(), [errorEvent]);
 });
 
-test('record() drops an INVALID event even when consent is on', () => {
+test('record() drops an INVALID event even when a category is on', () => {
   const c = createTelemetryClient();
-  c.setBaseConsent(true);
+  c.setCategory('incidents', true);
   assert.equal(c.record({ schemaVersion: 999, type: 'nope' }), false);
   assert.equal(c.record(null), false);
   assert.equal(c.size(), 0, 'only schema-valid events are buffered');
@@ -103,7 +110,7 @@ test('record() drops an INVALID event even when consent is on', () => {
 
 test('drain() empties the buffer (the send-path seam)', () => {
   const c = createTelemetryClient({ maxBuffer: 10 });
-  c.setBaseConsent(true);
+  c.setCategory('incidents', true);
   c.record(errorEvent);
   c.record({ ...errorEvent, timestamp: 2 });
   assert.equal(c.size(), 2);
@@ -114,7 +121,7 @@ test('drain() empties the buffer (the send-path seam)', () => {
 
 test('the buffer is bounded — oldest events are dropped past maxBuffer', () => {
   const c = createTelemetryClient({ maxBuffer: 2 });
-  c.setBaseConsent(true);
+  c.setCategory('incidents', true);
   c.record({ ...errorEvent, timestamp: 1 });
   c.record({ ...errorEvent, timestamp: 2 });
   c.record({ ...errorEvent, timestamp: 3 }); // over cap → oldest (ts 1) dropped
@@ -124,46 +131,85 @@ test('the buffer is bounded — oldest events are dropped past maxBuffer', () =>
 });
 
 // ==========================================================================
-// (3) EXTENDED REQUIRES BASE — enforced at every setter
+// (3) INDEPENDENCE — no category implies, clamps, or revokes another
 // ==========================================================================
 
-test('setExtendedConsent(true) is ignored while base is off', () => {
+test('enabling `names` alone does NOT enable collection — the decorating category is INERT', () => {
+  // The property that makes the old "extended requires base" clamp unnecessary:
+  // with nothing collecting there is no event for a name to ride on, so the
+  // client records nothing. Demonstrated, not assumed.
   const c = createTelemetryClient();
-  const applied = c.setExtendedConsent(true);
-  assert.deepEqual(applied, { base: false, extended: false }, 'clamped to false');
-  assert.equal(c.getTier(), 'off');
+  const applied = c.setCategory('names', true);
+  assert.deepEqual({ ...applied }, { incidents: false, names: true },
+    'the user\'s choice is stored VERBATIM — not silently clamped back off');
+  assert.equal(c.isCollecting(), false, 'names alone collects nothing');
+  assert.equal(c.record(errorEvent), false, 'and therefore records nothing');
+  assert.equal(c.size(), 0);
 });
 
-test('setConsent({ extended:true }) without base clamps extended to false', () => {
+test('setConsent({ names:true }) leaves every other category exactly as it was', () => {
   const c = createTelemetryClient();
-  const applied = c.setConsent({ extended: true });
-  assert.deepEqual(applied, { base: false, extended: false });
-  assert.equal(c.getTier(), 'off');
+  c.setConsent({ names: true });
+  assert.deepEqual({ ...c.getConsent() }, { incidents: false, names: true },
+    'turning one category on never turns another on');
 });
 
-test('setConsent({ base:true, extended:true }) enables both → tier "extended"', () => {
+test('setConsent({ incidents:true, names:true }) enables both', () => {
   const c = createTelemetryClient();
-  const applied = c.setConsent({ base: true, extended: true });
-  assert.deepEqual(applied, { base: true, extended: true });
-  assert.equal(c.getTier(), 'extended');
+  const applied = c.setConsent({ incidents: true, names: true });
+  assert.deepEqual({ ...applied }, { incidents: true, names: true });
+  assert.equal(c.isCollecting(), true);
 });
 
-test('setBaseConsent(false) latches extended off (revoking base revokes the subordinate tier)', () => {
+test('revoking `incidents` does NOT revoke `names` (no subordination)', () => {
   const c = createTelemetryClient();
-  c.setConsent({ base: true, extended: true });
-  assert.equal(c.getTier(), 'extended');
-  const applied = c.setBaseConsent(false);
-  assert.deepEqual(applied, { base: false, extended: false });
-  assert.equal(c.getTier(), 'off');
+  c.setConsent({ incidents: true, names: true });
+  const applied = c.setCategory('incidents', false);
+  assert.deepEqual({ ...applied }, { incidents: false, names: true },
+    'names survives — it was never subordinate to incidents');
+  assert.equal(c.isCollecting(), false, 'but nothing is collected any more');
 });
 
-test('extended can be toggled independently only while base is on', () => {
+test('revoking `names` does NOT revoke `incidents`', () => {
   const c = createTelemetryClient();
-  c.setBaseConsent(true);
-  assert.equal(c.setExtendedConsent(true).extended, true);
-  assert.equal(c.getTier(), 'extended');
-  assert.equal(c.setExtendedConsent(false).extended, false);
-  assert.equal(c.getTier(), 'base');
+  c.setConsent({ incidents: true, names: true });
+  const applied = c.setCategory('names', false);
+  assert.deepEqual({ ...applied }, { incidents: true, names: false });
+  assert.equal(c.isCollecting(), true, 'incidents keeps collecting');
+});
+
+test('each category toggles independently, in any order, with no ordering dependency', () => {
+  const c = createTelemetryClient();
+  assert.equal(c.setCategory('names', true).names, true, 'names can be set FIRST');
+  assert.equal(c.setCategory('incidents', true).names, true, 'and survives incidents being set after');
+  assert.deepEqual({ ...c.getConsent() }, { incidents: true, names: true });
+});
+
+// ==========================================================================
+// (4) OFF-BY-DEFAULT SURVIVES EVERY FAILURE MODE
+// ==========================================================================
+
+test('a non-boolean value never flips a category', () => {
+  const c = createTelemetryClient();
+  c.setConsent({ incidents: 'true', names: 1 });
+  assert.deepEqual({ ...c.getConsent() }, ALL_OFF, 'garbage leaves every category off');
+  assert.equal(c.record(errorEvent), false);
+});
+
+test('replaceConsent() resolves missing / malformed / unrecognized state to nothing enabled', () => {
+  for (const bad of [undefined, null, 42, 'extended', [], { unknownCategory: true }, { incidents: 'yes' }]) {
+    const c = createTelemetryClient();
+    c.replaceConsent(bad);
+    assert.deepEqual({ ...c.getConsent() }, ALL_OFF, `resolves to nothing for ${JSON.stringify(bad)}`);
+    assert.equal(c.record(errorEvent), false, `and records nothing for ${JSON.stringify(bad)}`);
+  }
+});
+
+test('an unrecognized category key is ignored and can never enable collection', () => {
+  const c = createTelemetryClient();
+  c.setConsent({ usage: true });
+  assert.deepEqual({ ...c.getConsent() }, ALL_OFF);
+  assert.equal(c.isCollecting(), false);
 });
 
 console.log(`\n✓ TELEMETRY-CLIENT TESTS PASS (${passed})`);

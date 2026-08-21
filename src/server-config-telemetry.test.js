@@ -180,7 +180,7 @@ describe('/api/config telemetryAuthToken (WARDEN-569) — secret, write-only', (
     await fetch(`${baseUrl}/api/config`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ telemetryBaseEnabled: false }),
+      body: JSON.stringify({ telemetryIncidentsEnabled: false }),
     });
     const after = await (await fetch(`${baseUrl}/api/config`)).json();
     assert.strictEqual(after.telemetryAuthTokenSet, true, 'token preserved when the field is omitted');

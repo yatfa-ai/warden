@@ -1,6 +1,8 @@
 // Regression tests for the WARDEN-557 "is anything being sent, and to where?"
 // derivation: `telemetryDestinationLabel` (raw endpoint -> host) and
 // `deriveTelemetrySendingStatus` (the off/unconfigured/configured state machine).
+// WARDEN-1116: the first input is `collecting` — whether a COLLECTING consent
+// category is on — not a base-tier flag.
 //
 // The telemetry subsystem is the most unit-tested part of web/ — every sibling
 // pure-logic module ships a *.test.mjs (client, schema, redact, source, pipeline,
@@ -128,12 +130,12 @@ test('garbage that cannot parse falls back to the raw trimmed value rather than 
 // deriveTelemetrySendingStatus — the off / unconfigured / configured machine
 // ==========================================================================
 
-test('base OFF is OFF regardless of endpoint (off is off)', () => {
-  assert.deepEqual(deriveTelemetrySendingStatus({ baseEnabled: false, endpoint: '' }), {
+test('nothing collecting is OFF regardless of endpoint (off is off)', () => {
+  assert.deepEqual(deriveTelemetrySendingStatus({ collecting: false, endpoint: '' }), {
     kind: 'off',
   });
   assert.deepEqual(
-    deriveTelemetrySendingStatus({ baseEnabled: false, endpoint: 'https://r.example/ingest' }),
+    deriveTelemetrySendingStatus({ collecting: false, endpoint: 'https://r.example/ingest' }),
     { kind: 'off' },
     'a configured endpoint does not override base OFF',
   );
@@ -141,21 +143,21 @@ test('base OFF is OFF regardless of endpoint (off is off)', () => {
 
 // THE CORE CASE THE TICKET EXISTS TO SURFACE. Base is on but the endpoint is
 // blank — the opt-in is silently inert (transport no-ops, events buffer + drop).
-test('base ON + empty endpoint -> unconfigured (the silently-inert opt-in)', () => {
-  assert.deepEqual(deriveTelemetrySendingStatus({ baseEnabled: true, endpoint: '' }), {
+test('collecting + empty endpoint -> unconfigured (the silently-inert opt-in)', () => {
+  assert.deepEqual(deriveTelemetrySendingStatus({ collecting: true, endpoint: '' }), {
     kind: 'unconfigured',
   });
 });
 
-test('base ON + whitespace-only endpoint -> unconfigured (whitespace is not a configured endpoint)', () => {
-  assert.deepEqual(deriveTelemetrySendingStatus({ baseEnabled: true, endpoint: '   ' }), {
+test('collecting + whitespace-only endpoint -> unconfigured (whitespace is not a configured endpoint)', () => {
+  assert.deepEqual(deriveTelemetrySendingStatus({ collecting: true, endpoint: '   ' }), {
     kind: 'unconfigured',
   });
 });
 
-test('base ON + configured endpoint -> configured, with a host-only destination', () => {
+test('collecting + configured endpoint -> configured, with a host-only destination', () => {
   assert.deepEqual(
-    deriveTelemetrySendingStatus({ baseEnabled: true, endpoint: 'https://receiver.example/ingest/v1' }),
+    deriveTelemetrySendingStatus({ collecting: true, endpoint: 'https://receiver.example/ingest/v1' }),
     { kind: 'configured', destination: 'receiver.example' },
   );
 });
@@ -165,7 +167,7 @@ test('base ON + configured endpoint -> configured, with a host-only destination'
 // status object.
 test('NO PATH LEAK through the configured status — destination is host-only', () => {
   const status = deriveTelemetrySendingStatus({
-    baseEnabled: true,
+    collecting: true,
     endpoint: 'https://receiver.example/secret/ingest',
   });
   assert.equal(status.kind, 'configured');

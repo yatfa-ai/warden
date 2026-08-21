@@ -119,8 +119,8 @@ describe('POST /api/config/reset — restores a configured backend to defaults',
       llm: { model: 'glm-5.2', baseUrl: 'https://api.x.example', maxTokens: 9000 },
       observerAutoStart: true,
       observerConfirmMode: 'auto-safe',
-      telemetryBaseEnabled: true,
-      telemetryExtendedEnabled: true,
+      telemetryIncidentsEnabled: true,
+      telemetryNamesEnabled: true,
       telemetryEndpoint: 'https://receiver.example/ingest',
       tokenBudgetEnabled: true,
       hideOfflineHosts: true,
@@ -140,8 +140,8 @@ describe('POST /api/config/reset — restores a configured backend to defaults',
     // Observer knobs + telemetry + display prefs reverted.
     assert.strictEqual(after.observerAutoStart, false);
     assert.strictEqual(after.observerConfirmMode, 'always');
-    assert.strictEqual(after.telemetryBaseEnabled, false, 'telemetry base back to off-by-default');
-    assert.strictEqual(after.telemetryExtendedEnabled, false);
+    assert.strictEqual(after.telemetryIncidentsEnabled, false, 'telemetry incidents back to off-by-default');
+    assert.strictEqual(after.telemetryNamesEnabled, false);
     assert.strictEqual(after.telemetryEndpoint, '', 'telemetry endpoint cleared');
     assert.strictEqual(after.tokenBudgetEnabled, false);
     assert.strictEqual(after.hideOfflineHosts, false);

@@ -3,7 +3,7 @@
  * status from the main→renderer bridge payload.
  *
  * This is the RUNTIME sibling of `deriveTelemetrySendingStatus` (destination.ts).
- * That function is a pure function of CONFIG prefs (`baseEnabled × endpoint`) and
+ * That function is a pure function of CONFIG prefs (`collecting × endpoint`) and
  * answers "is telemetry configured to send?". This one is a pure function of the
  * pipeline's runtime DELIVERY outcome and answers "are events actually landing,
  * or is the receiver rejecting/failing them?". The two are distinct concerns:

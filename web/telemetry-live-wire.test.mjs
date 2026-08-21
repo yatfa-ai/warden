@@ -1,7 +1,8 @@
 // Constructed live-wire integration tests (WARDEN-524). These prove the capstone
 // wiring in electron/main.cjs actually moves a real base-tier signal to the wire:
-// a source-built event flows source → record() → pipeline (resolveTier → redact →
-// validate) → the REAL transport, which POSTs it via the injected fetchImpl seam.
+// a source-built event flows source → record() → pipeline (resolve per-category
+// consent → redact → validate) → the REAL transport, which POSTs it via the
+// injected fetchImpl seam.
 //
 // The construction mirrors main.cjs EXACTLY: the source's record sink is bound to
 // a pipeline built with the CJS redact mirror + validateBaseEvent + SCHEMA_VERSION
@@ -12,9 +13,11 @@
 // testing notes prescribe.
 //
 // Success criteria covered:
-//   #1 — sends when opted in (base on + endpoint set): one POST, x-telemetry-schema=1.
-//   #2 — no-ops when off OR unconfigured: zero fetchImpl calls.
-//   #3 — runtime toggle starts/stops capture immediately (no restart).
+//   #1 — sends when opted in (a collecting category on + endpoint set): one POST,
+//        x-telemetry-schema=<SCHEMA_VERSION>.
+//   #2 — no-ops when nothing is collecting OR unconfigured: zero fetchImpl calls.
+//   #3 — runtime toggle starts/stops capture immediately (no restart), PER
+//        CATEGORY and independently (WARDEN-1116).
 //
 // Auto-discovered by `npm test` in web/ (`node --test`).
 //
@@ -34,7 +37,7 @@ const { send: realSend } = await import(resolve(__dirname, '..', 'src', 'telemet
 const { createTelemetrySource, SCHEMA_VERSION, validateBaseEvent } = require('../electron/telemetry-source.cjs');
 const { createTelemetryPipeline } = require('../electron/telemetry-pipeline.cjs');
 const { redact: redactCjs } = require('../electron/telemetry-redact.cjs');
-const { resolveTelemetryTier } = require('../electron/telemetry-config.cjs');
+const { resolveTelemetryConsent } = require('../electron/telemetry-config.cjs');
 const { createTransmissionLog } = require('../electron/telemetry-transmission-log.cjs');
 
 let passed = 0;
@@ -103,10 +106,10 @@ function fetchSeq(responses) {
 // transmission log main.cjs injects (WARDEN-583) — so the actual-outcome criteria
 // assert on what the REAL transport produced.
 function buildWire({ fetchImpl, transmissionLog, logCap, onRuntimeStatus } = {}) {
-  const prefs = { telemetryBaseEnabled: false, telemetryExtendedEnabled: false, telemetryEndpoint: '' };
+  const prefs = { telemetryIncidentsEnabled: false, telemetryNamesEnabled: false, telemetryEndpoint: '' };
   const log = transmissionLog || createTransmissionLog({ clock: () => TS, cap: logCap });
   const pipeline = createTelemetryPipeline({
-    consent: () => resolveTelemetryTier(prefs),
+    consent: () => resolveTelemetryConsent(prefs),
     redact: redactCjs,
     validate: validateBaseEvent,
     schemaVersion: SCHEMA_VERSION,
@@ -126,11 +129,13 @@ function buildWire({ fetchImpl, transmissionLog, logCap, onRuntimeStatus } = {})
   source.attachMain(main);
   const apply = (next) => {
     if (next && typeof next === 'object') {
-      if (typeof next.telemetryBaseEnabled === 'boolean') prefs.telemetryBaseEnabled = next.telemetryBaseEnabled;
-      if (typeof next.telemetryExtendedEnabled === 'boolean') prefs.telemetryExtendedEnabled = next.telemetryExtendedEnabled;
+      if (typeof next.telemetryIncidentsEnabled === 'boolean') prefs.telemetryIncidentsEnabled = next.telemetryIncidentsEnabled;
+      if (typeof next.telemetryNamesEnabled === 'boolean') prefs.telemetryNamesEnabled = next.telemetryNamesEnabled;
       if (typeof next.telemetryEndpoint === 'string') prefs.telemetryEndpoint = next.telemetryEndpoint;
     }
-    source.setBaseConsent(prefs.telemetryBaseEnabled === true);
+    // Exactly what main.cjs's applyTelemetryConfig does: hand the source the whole
+    // resolved per-category consent in ONE call, then push the endpoint.
+    source.setConsent(resolveTelemetryConsent(prefs));
     pipeline.setEndpoint(prefs.telemetryEndpoint || '');
   };
   return { prefs, pipeline, source, main, apply, log };
@@ -143,7 +148,7 @@ function buildWire({ fetchImpl, transmissionLog, logCap, onRuntimeStatus } = {})
 await test('a real source error signal POSTs once with x-telemetry-schema=1 + a redacted JSON body', async () => {
   const fetch = fetchRecorder();
   const w = buildWire({ fetchImpl: fetch });
-  w.apply({ telemetryBaseEnabled: true, telemetryExtendedEnabled: false, telemetryEndpoint: ENDPOINT });
+  w.apply({ telemetryIncidentsEnabled: true, telemetryNamesEnabled: false, telemetryEndpoint: ENDPOINT });
 
   // Drive the source the way the live main process would: an uncaught error.
   w.main.emit('uncaughtExceptionMonitor', new Error(`auth token ${GH_TOKEN} leaked on /home/alice/secret`));
@@ -171,7 +176,7 @@ await test('a real source error signal POSTs once with x-telemetry-schema=1 + a 
 await test('an unhandledRejection signal flows the same path (source → pipeline → transport)', async () => {
   const fetch = fetchRecorder();
   const w = buildWire({ fetchImpl: fetch });
-  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.apply({ telemetryIncidentsEnabled: true, telemetryEndpoint: ENDPOINT });
   w.main.emit('unhandledRejection', new Error('rejected boom'));
   await tick();
   assert.equal(fetch.calls.length, 1);
@@ -179,25 +184,25 @@ await test('an unhandledRejection signal flows the same path (source → pipelin
 });
 
 // ==========================================================================
-// Criterion #2 — no-ops when off OR unconfigured (zero fetchImpl calls)
+// Criterion #2 — no-ops when nothing is collecting OR unconfigured (zero fetch calls)
 // ==========================================================================
 
-await test('consent OFF ⇒ ZERO fetchImpl calls (source not armed; nothing emitted)', async () => {
+await test('nothing collecting ⇒ ZERO fetchImpl calls (source not armed; nothing emitted)', async () => {
   const fetch = fetchMustNotBeCalled();
   const w = buildWire({ fetchImpl: fetch });
-  w.apply({ telemetryBaseEnabled: false, telemetryEndpoint: ENDPOINT }); // consent off
+  w.apply({ telemetryIncidentsEnabled: false, telemetryEndpoint: ENDPOINT }); // consent off
   w.main.emit('uncaughtExceptionMonitor', new Error(`token ${GH_TOKEN}`));
   await tick();
-  assert.equal(fetch.count(), 0, 'the source subscribes to nothing with consent off');
+  assert.equal(fetch.count(), 0, 'the source subscribes to nothing with nothing collecting');
 });
 
 await test('endpoint empty ⇒ ZERO fetchImpl calls (transport last gate, now actually reached)', async () => {
   const fetch = fetchMustNotBeCalled();
   const w = buildWire({ fetchImpl: fetch });
-  // Base consent ON but no endpoint configured — the source IS armed and the
+  // A collecting category ON but no endpoint configured — the source IS armed and the
   // pipeline DOES process the event, but the transport's own final gate
   // (consent + endpoint) returns { attempts: 0 } without opening a connection.
-  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: '' });
+  w.apply({ telemetryIncidentsEnabled: true, telemetryEndpoint: '' });
   w.main.emit('uncaughtExceptionMonitor', new Error('boom'));
   await tick();
   assert.equal(fetch.count(), 0, 'no-endpoint ⇒ transport no-ops (fetchImpl never called)');
@@ -219,14 +224,14 @@ await test('flipping consent on at runtime starts capture on the next signal', a
   const fetch = fetchRecorder();
   const w = buildWire({ fetchImpl: fetch });
   // Boot default: off + no endpoint. A signal sends nothing.
-  w.apply({ telemetryBaseEnabled: false, telemetryExtendedEnabled: false, telemetryEndpoint: '' });
+  w.apply({ telemetryIncidentsEnabled: false, telemetryNamesEnabled: false, telemetryEndpoint: '' });
   w.main.emit('uncaughtExceptionMonitor', new Error('first'));
   await tick();
-  assert.equal(fetch.calls.length, 0, 'no send while consent is off');
+  assert.equal(fetch.calls.length, 0, 'no send while nothing is collecting');
 
   // A live Settings flip (PUT /api/config forwarded over the fork's IPC channel)
-  // turns base on + sets the endpoint — capture begins on the NEXT signal.
-  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  // turns incidents on + sets the endpoint — capture begins on the NEXT signal.
+  w.apply({ telemetryIncidentsEnabled: true, telemetryEndpoint: ENDPOINT });
   w.main.emit('uncaughtExceptionMonitor', new Error('second'));
   await tick();
   assert.equal(fetch.calls.length, 1, 'capture starts immediately after the toggle');
@@ -236,22 +241,66 @@ await test('flipping consent on at runtime starts capture on the next signal', a
 await test('revoking consent at runtime stops capture on the next signal', async () => {
   const fetch = fetchRecorder();
   const w = buildWire({ fetchImpl: fetch });
-  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.apply({ telemetryIncidentsEnabled: true, telemetryEndpoint: ENDPOINT });
   w.main.emit('uncaughtExceptionMonitor', new Error('on'));
   await tick();
   assert.equal(fetch.calls.length, 1);
 
-  // Flip base OFF — the source detaches its subscriptions; the next signal no-ops.
-  w.apply({ telemetryBaseEnabled: false });
+  // Flip incidents OFF — the source detaches its subscriptions; the next signal no-ops.
+  w.apply({ telemetryIncidentsEnabled: false });
   w.main.emit('uncaughtExceptionMonitor', new Error('off'));
   await tick();
   assert.equal(fetch.calls.length, 1, 'capture stops immediately when consent is revoked');
 });
 
+await test('revoking ONLY the `names` category keeps incident traffic flowing (independent revoke)', async () => {
+  // WARDEN-1116, end-to-end through the REAL transport: the two categories are
+  // independent on the wire. Turning names off halts NAMES immediately without
+  // halting incidents, and turning incidents off halts everything — with no
+  // restart in either direction.
+  const fetch = fetchRecorder();
+  const w = buildWire({ fetchImpl: fetch });
+  w.apply({ telemetryIncidentsEnabled: true, telemetryNamesEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.source.setContext({ chatName: 'refactor-auth' });
+
+  w.main.emit('uncaughtExceptionMonitor', new Error('with name'));
+  await tick();
+  assert.equal(fetch.calls.length, 1);
+  assert.equal(JSON.parse(fetch.calls[0].opts.body).events[0].chatName, 'refactor-auth',
+    'the name rides out while its category is on');
+
+  // Revoke ONLY names.
+  w.apply({ telemetryNamesEnabled: false });
+  w.main.emit('uncaughtExceptionMonitor', new Error('without name'));
+  await tick();
+  assert.equal(fetch.calls.length, 2, 'incident events keep reaching the wire');
+  const second = JSON.parse(fetch.calls[1].opts.body).events[0];
+  assert.equal(second.chatName, undefined, 'the name stops on the very next signal — no restart');
+  assert.equal(second.type, 'error', 'and the incident event itself is unaffected');
+});
+
+await test('`names` ON with NOTHING COLLECTING sends nothing at all (inert end-to-end)', async () => {
+  // The combination the old linear tier could not express. The user really has
+  // names on — nothing clamps it off — and the wire stays silent because no
+  // collecting category produces an event for the name to ride on.
+  const fetch = fetchMustNotBeCalled();
+  const w = buildWire({ fetchImpl: fetch });
+  w.apply({ telemetryIncidentsEnabled: false, telemetryNamesEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.source.setContext({ chatName: 'should-never-reach-the-wire' });
+  assert.equal(w.source.isNamesConsentOn(), true, 'names IS on — it was not clamped away');
+  assert.equal(w.pipeline.effectiveConsent().names, true, 'and the pipeline agrees');
+
+  w.main.emit('uncaughtExceptionMonitor', new Error('boom'));
+  w.main.emit('unhandledRejection', new Error('boom2'));
+  await tick();
+  assert.equal(fetch.count(), 0, 'nothing collecting ⇒ nothing on the wire');
+  assert.equal(w.log.size(), 0, 'and no transmission-log entry — the absence IS the proof');
+});
+
 await test('clearing the endpoint at runtime stops sends (consent still on)', async () => {
   const fetch = fetchRecorder();
   const w = buildWire({ fetchImpl: fetch });
-  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.apply({ telemetryIncidentsEnabled: true, telemetryEndpoint: ENDPOINT });
   w.main.emit('uncaughtExceptionMonitor', new Error('one'));
   await tick();
   assert.equal(fetch.calls.length, 1);
@@ -270,7 +319,7 @@ await test('clearing the endpoint at runtime stops sends (consent still on)', as
 await test('a source signal with consent on never rejects out of the pipeline', async () => {
   const fetch = fetchRecorder();
   const w = buildWire({ fetchImpl: fetch });
-  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.apply({ telemetryIncidentsEnabled: true, telemetryEndpoint: ENDPOINT });
   // The pipeline swallows transport rejections; this just confirms the path
   // resolves cleanly (no unhandled rejection) on the happy path.
   assert.doesNotThrow(() => w.main.emit('uncaughtExceptionMonitor', new Error('ok')));
@@ -292,7 +341,7 @@ await test('a source signal with consent on never rejects out of the pipeline', 
 await test('(a) a successful 2xx send records an outcome:ok entry (attempts:1, status:200)', async () => {
   const fetch = fetchRecorder();
   const w = buildWire({ fetchImpl: fetch });
-  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.apply({ telemetryIncidentsEnabled: true, telemetryEndpoint: ENDPOINT });
   w.main.emit('uncaughtExceptionMonitor', new Error(`token ${GH_TOKEN} leaked`));
   await tick();
   assert.equal(w.log.size(), 1, 'one ok entry for one successful send');
@@ -308,7 +357,7 @@ await test('(a) a successful 2xx send records an outcome:ok entry (attempts:1, s
 await test('(b) an unreachable receiver (persistent 503) records an outcome:dropped entry', async () => {
   const fetch = fetchSeq([{ ok: false, status: 503 }]); // always 503 → exhausts MAX_ATTEMPTS
   const w = buildWire({ fetchImpl: fetch });
-  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.apply({ telemetryIncidentsEnabled: true, telemetryEndpoint: ENDPOINT });
   w.main.emit('uncaughtExceptionMonitor', new Error('boom'));
   await tick();
   assert.equal(w.log.size(), 1, 'the lost batch is recorded — today it would vanish silently');
@@ -321,7 +370,7 @@ await test('(b) an unreachable receiver (persistent 503) records an outcome:drop
 await test('(b) a network error (fetch throws) records a dropped entry with status null', async () => {
   const fetch = fetchSeq([{ throw: new Error('fetch failed: ECONNREFUSED') }]);
   const w = buildWire({ fetchImpl: fetch });
-  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.apply({ telemetryIncidentsEnabled: true, telemetryEndpoint: ENDPOINT });
   w.main.emit('uncaughtExceptionMonitor', new Error('boom'));
   await tick();
   assert.equal(w.log.size(), 1);
@@ -333,7 +382,7 @@ await test('(b) a network error (fetch throws) records a dropped entry with stat
 await test('(c) consent OFF records NO entries (disabling halts all traffic)', async () => {
   const fetch = fetchMustNotBeCalled();
   const w = buildWire({ fetchImpl: fetch });
-  w.apply({ telemetryBaseEnabled: false, telemetryEndpoint: ENDPOINT }); // consent off
+  w.apply({ telemetryIncidentsEnabled: false, telemetryEndpoint: ENDPOINT }); // consent off
   w.main.emit('uncaughtExceptionMonitor', new Error('boom'));
   await tick();
   assert.equal(w.log.size(), 0, 'no entries while consent is off');
@@ -342,11 +391,11 @@ await test('(c) consent OFF records NO entries (disabling halts all traffic)', a
 await test('(c) revoking consent stops new entries — the cessation IS the proof', async () => {
   const fetch = fetchRecorder();
   const w = buildWire({ fetchImpl: fetch });
-  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.apply({ telemetryIncidentsEnabled: true, telemetryEndpoint: ENDPOINT });
   w.main.emit('uncaughtExceptionMonitor', new Error('on'));
   await tick();
   assert.equal(w.log.size(), 1, 'one ok entry while on');
-  w.apply({ telemetryBaseEnabled: false }); // revoke
+  w.apply({ telemetryIncidentsEnabled: false }); // revoke
   w.main.emit('uncaughtExceptionMonitor', new Error('off'));
   await tick();
   assert.equal(w.log.size(), 1, 'no further entry after revoke — entries STOPPED');
@@ -355,7 +404,7 @@ await test('(c) revoking consent stops new entries — the cessation IS the proo
 await test('(d) recorded entries are METADATA ONLY — no payload, token, or file path', async () => {
   const fetch = fetchRecorder();
   const w = buildWire({ fetchImpl: fetch });
-  w.apply({ telemetryBaseEnabled: true, telemetryExtendedEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.apply({ telemetryIncidentsEnabled: true, telemetryNamesEnabled: true, telemetryEndpoint: ENDPOINT });
   // The raw error carries a credential AND a file path; both are redacted before
   // transport, and the log re-collects NEITHER (it is a pure metadata consumer).
   w.main.emit('uncaughtExceptionMonitor', new Error(`token ${GH_TOKEN} leaked on /home/alice/secret`));
@@ -375,7 +424,7 @@ await test('(d) recorded entries are METADATA ONLY — no payload, token, or fil
 await test('(e) the live log is bounded — many sends never grow it past the cap', async () => {
   const fetch = fetchRecorder();
   const w = buildWire({ fetchImpl: fetch, logCap: 3 });
-  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.apply({ telemetryIncidentsEnabled: true, telemetryEndpoint: ENDPOINT });
   for (let i = 0; i < 6; i++) {
     w.main.emit('uncaughtExceptionMonitor', new Error(`evt ${i}`));
     await tick();
@@ -396,7 +445,7 @@ await test('(e) the live log is bounded — many sends never grow it past the ca
 await test('a runtime 415 (schema drift) arms the breaker → a SECOND signal makes ZERO further fetch calls', async () => {
   const fetch = fetchSeq([{ ok: false, status: 415 }]); // always 415
   const w = buildWire({ fetchImpl: fetch });
-  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.apply({ telemetryIncidentsEnabled: true, telemetryEndpoint: ENDPOINT });
   w.main.emit('uncaughtExceptionMonitor', new Error('first'));
   await tick();
   assert.equal(fetch.calls.length, 1, 'the first signal POSTed and hit the 415');
@@ -414,7 +463,7 @@ await test('a runtime 415 (schema drift) arms the breaker → a SECOND signal ma
 await test('a schema-MATCHED receiver (200) never arms the breaker — legitimate traffic is unaffected', async () => {
   const fetch = fetchRecorder(); // always 200
   const w = buildWire({ fetchImpl: fetch });
-  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.apply({ telemetryIncidentsEnabled: true, telemetryEndpoint: ENDPOINT });
   for (let i = 0; i < 3; i++) {
     w.main.emit('uncaughtExceptionMonitor', new Error(`evt ${i}`));
     await tick();
@@ -426,7 +475,7 @@ await test('a schema-MATCHED receiver (200) never arms the breaker — legitimat
 await test('re-pointing the receiver at runtime clears the breaker → sends resume to the new endpoint', async () => {
   const fetch = fetchSeq([{ ok: false, status: 415 }, { ok: true, status: 200 }]);
   const w = buildWire({ fetchImpl: fetch });
-  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.apply({ telemetryIncidentsEnabled: true, telemetryEndpoint: ENDPOINT });
   w.main.emit('uncaughtExceptionMonitor', new Error('drift'));
   await tick();
   assert.equal(w.pipeline.getRuntimeStatus().drifted, true, 'drifted on the first endpoint');
@@ -443,7 +492,7 @@ await test('the runtime-status bridge tap fires on a live 415 arm and on its cle
   const statuses = [];
   const fetch = fetchSeq([{ ok: false, status: 415 }, { ok: true, status: 200 }]);
   const w = buildWire({ fetchImpl: fetch, onRuntimeStatus: (s) => statuses.push(s) });
-  w.apply({ telemetryBaseEnabled: true, telemetryEndpoint: ENDPOINT });
+  w.apply({ telemetryIncidentsEnabled: true, telemetryEndpoint: ENDPOINT });
   w.main.emit('uncaughtExceptionMonitor', new Error('drift'));
   await tick();
   assert.deepEqual(statuses, [{ drifted: true, deliveryFailing: false }], 'the 415 pushed a drift-arm status to the bridge');

@@ -18,8 +18,9 @@ import { fileURLToPath } from 'node:url';
 //
 // This forks the REAL src/server.js — the same `stdio:[..., 'ipc']` slot
 // electron/main.cjs uses — and asserts the telemetry-config message arrives on
-// the parent for each PUT, including the extended-requires-base clamp
-// (extended:true sent with base:false must arrive as extended:false). A future
+// the parent for each PUT, carrying the WARDEN-1116 per-CATEGORY consent map and
+// proving the categories are INDEPENDENT on the wire (turning one off must not
+// turn another off, and turning one on must not turn another on). A future
 // refactor that drops process.send, renames the message type, tightens the
 // `typeof process.send` guard, or rewires stdio will turn this red while every
 // other telemetry suite stays green — which is exactly the silent-break this
@@ -126,15 +127,15 @@ async function putConfig(body) {
   assert.strictEqual(res.status, 200, `PUT /api/config failed: ${res.status}`);
 }
 
-describe('telemetry-config IPC forward (WARDEN-524) — server fork → parent', () => {
-  it('forwards base + endpoint to the parent on PUT /api/config', async () => {
+describe('telemetry-config IPC forward (WARDEN-524/1116) — server fork → parent', () => {
+  it('forwards the incidents category + endpoint to the parent on PUT /api/config', async () => {
     const endpoint = 'https://receiver.example/ingest';
     const done = nextTelemetryConfig();
-    await putConfig({ telemetryBaseEnabled: true, telemetryEndpoint: endpoint });
+    await putConfig({ telemetryIncidentsEnabled: true, telemetryEndpoint: endpoint });
     const msg = await done;
     assert.strictEqual(msg.type, 'telemetry-config');
-    assert.strictEqual(msg.base, true, 'base consent forwarded');
-    assert.strictEqual(msg.extended, false, 'extended stays off when only base set');
+    assert.deepStrictEqual(msg.categories, { incidents: true, names: false },
+      'incidents forwarded on; names stays off — enabling one category never enables another');
     assert.strictEqual(msg.endpoint, endpoint, 'endpoint forwarded');
     // Fresh config (no token on disk, no prior PUT) → auth token is empty. This
     // runs first in the suite, before any token is persisted, so it reliably
@@ -142,32 +143,51 @@ describe('telemetry-config IPC forward (WARDEN-524) — server fork → parent',
     assert.strictEqual(msg.authToken, '', 'no token configured → empty string forwarded');
   });
 
-  it('forwards extended on when base is already on', async () => {
+  it('forwards both categories on when both are enabled', async () => {
     const done = nextTelemetryConfig();
-    await putConfig({ telemetryBaseEnabled: true, telemetryExtendedEnabled: true });
+    await putConfig({ telemetryIncidentsEnabled: true, telemetryNamesEnabled: true });
     const msg = await done;
-    assert.strictEqual(msg.base, true);
-    assert.strictEqual(msg.extended, true, 'extended forwarded on when base is on');
+    assert.deepStrictEqual(msg.categories, { incidents: true, names: true });
   });
 
-  it('CLAMPS extended off when sent with base:false (extended-requires-base)', async () => {
-    // The critical runtime-toggle guard: a hand-crafted PUT enabling extended
-    // without base must arrive at main as base:false, extended:false — never
-    // extended:true. The server clamps on write (server.js) AND the resolver
-    // clamps again in main; this asserts the value main would actually receive.
+  it('forwards names ON with incidents OFF — no clamp between categories (WARDEN-1116)', async () => {
+    // The OLD model clamped this combination to "nothing" (extended-requires-base).
+    // Per-category consent must carry it through UNCHANGED: the categories are
+    // independent, so the user's choice arrives at main exactly as they made it.
+    // Safety comes from inertness downstream (nothing collects → no event exists
+    // for a name to ride on), which web/telemetry-source.test.mjs proves — NOT
+    // from silently rewriting the user's consent here.
     const done = nextTelemetryConfig();
-    await putConfig({ telemetryBaseEnabled: false, telemetryExtendedEnabled: true });
+    await putConfig({ telemetryIncidentsEnabled: false, telemetryNamesEnabled: true });
     const msg = await done;
-    assert.strictEqual(msg.base, false);
-    assert.strictEqual(msg.extended, false, 'extended MUST be clamped off when base is off');
+    assert.deepStrictEqual(msg.categories, { incidents: false, names: true },
+      'names must NOT be clamped off just because incidents is off');
   });
 
-  it('forwards a consent-off flip (capture stops) to the parent', async () => {
+  it('forwards a per-category revoke WITHOUT disturbing the other category', async () => {
+    // Precondition: both on (staged by the previous PUT is not assumed — stage it).
+    let done = nextTelemetryConfig();
+    await putConfig({ telemetryIncidentsEnabled: true, telemetryNamesEnabled: true });
+    assert.deepStrictEqual((await done).categories, { incidents: true, names: true },
+      'precondition: both categories on');
+    // Revoke ONLY names.
+    done = nextTelemetryConfig();
+    await putConfig({ telemetryNamesEnabled: false });
+    assert.deepStrictEqual((await done).categories, { incidents: true, names: false },
+      'revoking names left incidents untouched');
+    // Revoke ONLY incidents — capture stops on the next signal.
+    done = nextTelemetryConfig();
+    await putConfig({ telemetryIncidentsEnabled: false });
+    assert.deepStrictEqual((await done).categories, { incidents: false, names: false },
+      'revoking incidents forwarded — capture stops on next signal');
+  });
+
+  it('forwards a non-boolean consent value as OFF (corrupt input can never enable)', async () => {
     const done = nextTelemetryConfig();
-    await putConfig({ telemetryBaseEnabled: false });
+    await putConfig({ telemetryIncidentsEnabled: 'yes', telemetryNamesEnabled: 1 });
     const msg = await done;
-    assert.strictEqual(msg.base, false, 'base off forwarded — capture stops on next signal');
-    assert.strictEqual(msg.extended, false);
+    assert.deepStrictEqual(msg.categories, { incidents: false, names: false },
+      'a non-boolean body value never reaches main as enabled');
   });
 
   it('forwards the cleartext telemetry auth token to the parent on PUT (WARDEN-569)', async () => {

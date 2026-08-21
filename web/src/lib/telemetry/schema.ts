@@ -12,8 +12,8 @@
 //     instrumentation source) inlines SCHEMA_VERSION / BASE_EVENT_TYPES / RUNTIME
 //     / validateBaseEvent + the base-tier event builders.
 //   • web/src/lib/telemetry/redact.ts (WARDEN-459, slice 2 — the pre-collection
-//     redaction engine) inlines the ConsentTier model + the extended-tier
-//     identifier field names (chat / session names).
+//     redaction engine) owns the identifier field names (chat / session names);
+//     which of them survive is decided by ./consent.ts (WARDEN-1116).
 // The constants, event-type list, runtimes, field shapes, and validate()
 // semantics below MATCH those inlined copies exactly, so this module reconciles
 // them into one shareable source. (Consolidating slice 4's CJS copy to import
@@ -29,25 +29,25 @@
 // warden-app dependency here.
 
 // ---------------------------------------------------------------------------
-// Two-tier consent model (verbatim from WARDEN-443 "Consent model")
+// CONSENT IS NOT DECLARED HERE (WARDEN-1116).
 // ---------------------------------------------------------------------------
-// Both tiers are OFF by default; each is revocable anytime; NOTHING leaves the
-// machine until the BASE tier is explicitly turned on in Settings.
-//   • base      — anonymous error / crash / performance-stall events only. No
-//                 identifiers, no content, no paths, no hostnames (the base-tier
-//                 field set below carries none of these BY DESIGN).
-//   • extended  — gated behind base; ADDITIONALLY retains chat name + Claude
-//                 session name. CONTENT IS NEVER SENT — names only.
-//   • off       — telemetry disabled (the default).
-// An unrecognized / undefined value is treated as `off`, so a missing or corrupt
-// consent value can never accidentally enable telemetry.
+// This file used to carry the linear three-value consent tier ('base' |
+// 'extended' | 'off') plus a resolver for it. Consent is now a set of
+// INDEPENDENT per-category switches (WARDEN-443 Principle 2), and there is
+// EXACTLY ONE authority that resolves it: `./consent.ts` (mirrored for the
+// Node-side processes at src/telemetry-consent.cjs). Every gate consults that
+// module; nothing re-derives consent for itself, and no second resolver lives
+// here.
+//
+// Consent was never part of the cross-repo WIRE contract anyway — the receiver
+// validates event SHAPE, not who consented to what. What follows is that wire
+// contract, and it is unchanged: same SCHEMA_VERSION, same event types, same
+// field shapes, same validate() semantics.
+//
+// Tier GATING of the optional identifier fields below is enforced by consent +
+// redaction (see ./consent.ts and ./redact.ts), not by this schema — a valid
+// event may legitimately carry absent names.
 // ---------------------------------------------------------------------------
-export type ConsentTier = 'base' | 'extended' | 'off';
-
-/** Resolve a raw consent value to a known tier, defaulting to `off` (most-safe). */
-export function resolveConsentTier(value: unknown): ConsentTier {
-  return value === 'base' || value === 'extended' ? value : 'off';
-}
 
 // ---------------------------------------------------------------------------
 // The schema version. Bumping this is a coordinated client + receiver change.
@@ -100,7 +100,7 @@ export interface StackFrame {
 // millions of users on an OS. Both are carried so a maintainer can attribute
 // event volume to a release / OS instead of staring at un-attributable volume.
 // Neither is an identifier (no user/device/session tie-break) and neither is
-// content — both sit within the base tier, not behind extended consent. Both are
+// content — both ride the `incidents` category itself, behind no extra consent. Both are
 // OPTIONAL: a source that cannot read the value omits the field, and a v3 event
 // without either still validates (graceful for that source). Redaction is a
 // no-op for both (fixed/coarse labels) — neither appears in any redaction
@@ -152,22 +152,22 @@ export interface StallEvent {
 export type BaseEvent = ErrorEvent | CrashEvent | StallEvent;
 
 // ---------------------------------------------------------------------------
-// Extended tier — base + chat / session NAMES (gated behind base consent).
-// CONTENT IS NEVER SENT; names only. These are the ONLY identifiers ever
-// retained, and ONLY when the effective consent tier is `extended` (slice 2's
-// redactor drops them at base/off). Field names match slice 2's IDENTIFIER_FIELDS
-// (`chatName` / `sessionName`) so the redactor recognizes them by name.
+// Optional identifier fields — chat / session NAMES. CONTENT IS NEVER SENT;
+// names only. These are the ONLY identifiers ever retained, and ONLY while the
+// `names` consent CATEGORY is enabled (the redactor drops them otherwise —
+// WARDEN-1116). Field names match the redactor's gated-field set (`chatName` /
+// `sessionName`) so it recognizes them by name.
 // ---------------------------------------------------------------------------
 export interface ExtendedFields {
   chatName?: string;
   sessionName?: string;
 }
 
-/** An event carrying the extended-tier identifier fields. The base-tier
- *  discriminated union is unchanged; extended just ADDS optional names. */
+/** An event carrying the optional identifier fields. The base event union is
+ *  unchanged; the `names` category just ADDS optional names. */
 export type ExtendedEvent = BaseEvent & Partial<ExtendedFields>;
 
-/** Any event the pipeline can carry, at any tier. */
+/** Any event the pipeline can carry, under any consent. */
 export type TelemetryEvent = ExtendedEvent;
 
 // ---------------------------------------------------------------------------
@@ -217,9 +217,9 @@ export function validateBaseEvent(event: unknown): event is BaseEvent {
 }
 
 /** True iff `event` is a valid base-tier event whose extended-tier fields (if
- *  present) are well-typed. Tier GATING of the extended fields (names retained
- *  only at `extended`) is enforced by consent + redaction, not by the schema — a
- *  base event may legitimately carry absent names. */
+ *  present) are well-typed. GATING of the identifier fields (names retained only
+ *  while the `names` category is on) is enforced by consent + redaction, not by
+ *  the schema — a valid event may legitimately carry absent names. */
 export function validateEvent(event: unknown): event is TelemetryEvent {
   if (!validateBaseEvent(event)) return false;
   const e = event as unknown as Record<string, unknown>;

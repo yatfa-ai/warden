@@ -1,7 +1,12 @@
-// Telemetry section (WARDEN-457/522/557/569/595/631) — backend /api/config +
+// Telemetry section (WARDEN-457/522/557/569/595/631/1116) — backend /api/config +
 // write-only receiver auth token + the live test-connection probe + runtime
-// schema-drift status. Extracted verbatim from SettingsPage (WARDEN-664);
-// behavior is unchanged.
+// schema-drift status.
+//
+// WARDEN-1116 — the consent surface is a set of INDEPENDENT per-category
+// switches, RENDERED FROM THE REGISTRY (`TELEMETRY_CATEGORIES`). No switch is
+// disabled by another, none implies another, and adding a category adds a switch
+// here without editing this file. A category with no producer is not in the
+// registry, so this surface cannot show a toggle that collects nothing.
 import { useState } from 'react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -12,6 +17,11 @@ import { TelemetryTransparency } from '@/components/TelemetryTransparency';
 import { describeTelemetryTestVerdict, type TelemetryTestVerdict } from '@/lib/telemetry/testConnection';
 import { deriveTelemetryRuntimeStatus } from '@/lib/telemetry/runtimeStatus';
 import { telemetryDestinationLabel } from '@/lib/telemetry/destination';
+import {
+  TELEMETRY_CATEGORIES,
+  collectsEvents,
+  resolveConsent,
+} from '@/lib/telemetry/consent';
 import { type TelemetryRuntimeStatus } from '@/lib/electron';
 import {
   TelemetrySendingStatus,
@@ -63,73 +73,66 @@ export function TelemetrySection({
 }: TelemetrySectionProps) {
   // WARDEN-631/808 — derive the runtime delivery status ONCE. Precedence:
   // schema-drift (415, sending paused) wins over delivery-failing (sustained drops,
-  // still retrying) wins over the default sending status. Gated on baseEnabled in
-  // the JSX below so NEITHER runtime banner shows when telemetry is off.
+  // still retrying) wins over the default sending status. Gated on `collecting` in
+  // the JSX below so NEITHER runtime banner shows when nothing is being collected.
   const runtimeKind = deriveTelemetryRuntimeStatus(telemetryRuntimeStatus).kind;
+  // THE consent authority, consulted (never re-derived) for the live draft config.
+  const consent = resolveConsent(config);
+  const collecting = collectsEvents(consent);
   // WARDEN-883 — confirm the irreversible token removal before queueing it.
   const [confirmRemoveOpen, setConfirmRemoveOpen] = useState(false);
   return (
     <>
     <SettingsSection title="Telemetry" className={hidden ? 'hidden' : undefined}>
       <p className="text-xs text-muted-foreground">
-        Optional, off by default. Help improve warden by sending
-        anonymous diagnostics. Nothing is sent until you turn a tier on,
-        and the destination is a self-hosted receiver — no third-party
-        analytics service. You can revoke either tier at any time.
+        Optional, off by default. Help improve warden by sending anonymous
+        diagnostics. Each category below is an independent choice — turning one on
+        never turns another on — and nothing is sent until you turn one on. The
+        destination is a self-hosted receiver you configure, never a third-party
+        analytics service. You can revoke any category at any time; it takes effect
+        immediately, with no restart.
       </p>
 
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-2">
-          <Switch
-            id="telemetryBaseEnabled"
-            checked={config.telemetryBaseEnabled}
-            onCheckedChange={(v) =>
-              setConfig({
-                ...config,
-                telemetryBaseEnabled: v,
-                // Turning base off also revokes extended
-                // (extended-requires-base). The server re-clamps on
-                // save; this keeps the toggle honest in the meantime.
-                telemetryExtendedEnabled: v && config.telemetryExtendedEnabled,
-              })
-            }
-          />
-          <Label htmlFor="telemetryBaseEnabled" className="cursor-pointer">
-            Anonymous errors, crashes &amp; freezes
-          </Label>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Base tier. Anonymous error, crash, and event-loop-freeze
-          reports — no chat content, no file paths, no hostnames, no
-          credentials.
-        </p>
-      </div>
-
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-2">
-          <Switch
-            id="telemetryExtendedEnabled"
-            checked={config.telemetryExtendedEnabled}
-            disabled={!config.telemetryBaseEnabled}
-            onCheckedChange={(v) =>
-              // Disabled while base is off, so a toggle only arrives
-              // with base on. Guard anyway: extended requires base.
-              setConfig({ ...config, telemetryExtendedEnabled: v && config.telemetryBaseEnabled })
-            }
-          />
-          <Label htmlFor="telemetryExtendedEnabled" className="cursor-pointer">
-            Also include chat &amp; session names
-          </Label>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Extended tier (requires the base tier). Additionally includes
-          chat names and Claude session names to help diagnose reports.
-          Chat <em>content</em> is never sent — names only.
-        </p>
-      </div>
+      {/* One independent switch per consent category, from the registry. No
+          switch is `disabled` by another and no handler writes another category:
+          that is the WARDEN-443 Principle 2 independence, enforced at the surface
+          the user actually touches. */}
+      {TELEMETRY_CATEGORIES.map((cat) => {
+        const enabled = consent[cat.id] === true;
+        // Honest disclosure for a DECORATING category with nothing collecting:
+        // the switch is on and it still sends nothing, because there is no event
+        // for its fields to ride on. Saying so is the difference between an inert
+        // category and a toggle that lies.
+        const inert = enabled && cat.role === 'decorating' && !collecting;
+        return (
+          <div key={cat.id} className="flex flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <Switch
+                id={cat.configKey}
+                checked={enabled}
+                onCheckedChange={(v) => setConfig({ ...config, [cat.configKey]: v })}
+              />
+              <Label htmlFor={cat.configKey} className="cursor-pointer">
+                {cat.label}
+              </Label>
+            </div>
+            <p className="text-xs text-muted-foreground">{cat.summary}</p>
+            {inert && (
+              <p
+                className="text-xs text-amber-700 dark:text-amber-400"
+                data-telemetry-category-inert={cat.id}
+                role="status"
+              >
+                On, but nothing is being sent: this only adds fields to events other
+                categories produce, and none of those is turned on.
+              </p>
+            )}
+          </div>
+        );
+      })}
 
       {/* WARDEN-557 — honest sending status. A pure derived view of
-          config.telemetryBaseEnabled × config.telemetryEndpoint
+          "is a collecting category on" × config.telemetryEndpoint
           (see TelemetrySendingStatus). Placed here, directly above the
           endpoint field, so the cause (blank endpoint) and the consequence
           (nothing sent) read together. Reads the same `config` the toggles/
@@ -140,19 +143,19 @@ export function TelemetrySection({
           is rejecting or refusing every send. schema-drift (a 415, sending paused)
           takes precedence over delivery-failing (sustained non-415 drops, still
           retrying) — a 415 is also a run of all-drops, so it must win the slot.
-          Gated on baseEnabled so neither runtime banner shows when telemetry is
-          off (both are moot then). */}
-      {config.telemetryBaseEnabled && runtimeKind === 'schema-drift' ? (
+          Gated on `collecting` so neither runtime banner shows when nothing is
+          being collected (both are moot then). */}
+      {collecting && runtimeKind === 'schema-drift' ? (
         <TelemetryRuntimeDriftStatus
           destination={telemetryDestinationLabel(config.telemetryEndpoint)}
         />
-      ) : config.telemetryBaseEnabled && runtimeKind === 'delivery-failing' ? (
+      ) : collecting && runtimeKind === 'delivery-failing' ? (
         <TelemetryRuntimeDeliveryFailingStatus
           destination={telemetryDestinationLabel(config.telemetryEndpoint)}
         />
       ) : (
         <TelemetrySendingStatus
-          baseEnabled={config.telemetryBaseEnabled}
+          collecting={collecting}
           endpoint={config.telemetryEndpoint}
         />
       )}
@@ -270,17 +273,14 @@ export function TelemetrySection({
         })()}
       </div>
 
-      {/* WARDEN-526 — read-only "What telemetry sends" verifiability
-          panel. Renders WARDEN-508's describeCollection (per-tier
-          collection catalog) + previewPayload (exact redacted payload
-          of a sample event) so an opt-in user can inspect precisely
-          what is transmitted. Pure functions, no transport, no new
-          consent flag; read-only. Placed last in the section so the
-          flow reads: consent toggles → endpoint → inspect payload. */}
-      <TelemetryTransparency
-        telemetryBaseEnabled={config.telemetryBaseEnabled}
-        telemetryExtendedEnabled={config.telemetryExtendedEnabled}
-      />
+      {/* WARDEN-526 — read-only "What telemetry sends" verifiability panel.
+          Renders describeCollection (the PER-CATEGORY collection catalog) +
+          previewPayload (exact redacted payload of a sample event) so an opt-in
+          user can inspect precisely what is transmitted under the exact
+          combination they picked. Pure functions, no transport, no new consent
+          flag; read-only. Placed last in the section so the flow reads: consent
+          switches → endpoint → inspect payload. */}
+      <TelemetryTransparency consent={consent} />
     </SettingsSection>
 
     {/* WARDEN-883 — confirm the token removal before queueing the clear. */}

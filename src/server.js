@@ -17,6 +17,9 @@ import { WebSocketServer } from 'ws';
 // saveCatalog out of scope makes that invariant structural rather than a convention.
 import { load, save, loadCatalog, mutateCatalog, allSshHosts, sameCatalogEntry } from './config.js';
 import { buildGetResponse, applyConfigPut, afterSave, resetConfig } from './config-schema.js';
+// WARDEN-1116 — THE telemetry consent authority (pure, dependency-free CJS shared
+// by the server and the Electron main process; see src/telemetry-consent.cjs).
+import { resolveConsent } from './telemetry-consent.cjs';
 import { applyCompanionToggle } from './companion.js';
 import * as collections from './collections.js';
 import { capturePanes, resolveChatWithRefresh, catalogChats, discoverHost, discoverAll } from './chats.js';
@@ -1042,19 +1045,24 @@ app.post('/api/config/reset', async (_req, res) => {
   res.json({ ok: true });
 });
 
-// Forward the (now-clamped) telemetry prefs to the Electron main process over
+// Forward the (now-sanitized) telemetry prefs to the Electron main process over
 // the fork's IPC channel so a consent/endpoint flip takes effect on the next
 // signal without an app restart — the source + pipeline live in MAIN, but the
 // PUT is serviced here in the server child. Guarded: process.send exists only
 // when the server is forked by electron/main.cjs (standalone `node src/server`
 // has no parent). WARDEN-524. Pulled out of the PUT handler so afterSave can
 // name it as an injected dep, keeping config-schema.js dependency-free.
+//
+// WARDEN-1116 — consent travels as a per-CATEGORY map, resolved through the ONE
+// consent authority rather than assembled here from named booleans. A new
+// category rides this channel with no change to this function, and main maps it
+// straight back onto the same registry. Turning a category off therefore halts
+// its traffic on the next signal, with no restart.
 function forwardTelemetryConfig(cfg) {
   if (typeof process.send !== 'function') return;
   process.send({
     type: 'telemetry-config',
-    base: cfg.telemetryBaseEnabled === true,
-    extended: cfg.telemetryExtendedEnabled === true,
+    categories: resolveConsent(cfg),
     endpoint: typeof cfg.telemetryEndpoint === 'string' ? cfg.telemetryEndpoint : '',
     // Forward the cleartext auth token. This is the parent↔child IPC channel
     // (main process ↔ server child, both in-app on the same host) — NOT the

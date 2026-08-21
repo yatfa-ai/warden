@@ -1,21 +1,21 @@
 // Tests for the telemetry VERIFIABILITY engine (WARDEN-508, slice 6 of roadmap
 // WARDEN-446 / design WARDEN-443). This module makes the redaction guarantee
-// INSPECTABLE: `describeCollection` catalogs exactly what each consent tier
-// collects; `previewPayload` previews the exact redacted + validated payload the
-// pipeline would transmit for any candidate event. The success criteria (a)–(f)
-// below are the roadmap's literal "trust made verifiable" measure.
+// INSPECTABLE: `describeCollection` catalogs exactly what a PER-CATEGORY consent
+// state collects; `previewPayload` previews the exact redacted + validated
+// payload the pipeline would transmit for any candidate event. The success
+// criteria (a)–(f) below are the roadmap's literal "trust made verifiable"
+// measure, re-expressed over per-category consent by WARDEN-1116 — including the
+// combinations the old three-value tier could not express.
 //
 // No front-end test runner in this repo, so (like web/telemetry-redact.test.mjs)
 // this loads the REAL web/src/lib/telemetry/transparency.ts (transpiled TS -> ESM
 // via Vite's OXC transform) and exercises the PURE functions with plain objects.
 //
-// HARNESS WRINKLE (decision A): unlike redact.ts (zero runtime imports),
-// transparency.ts has a REAL runtime `import … from './redact'`. A lone
-// transformed transparency.mjs would fail to resolve './redact'. So this harness
-// transforms redact.ts -> tmpDir/redact.mjs AND transparency.ts ->
-// tmpDir/transparency.mjs into the SAME tmpDir, then imports transparency.mjs;
-// the relative './redact' then resolves to redact.mjs. (The `import type
-// { ConsentTier }` is erased at transpile time, exactly as in redact.ts.)
+// HARNESS WRINKLE (decision A): transparency.ts has REAL runtime imports —
+// './redact' and './consent'. A lone transformed transparency.mjs would fail to
+// resolve them, so this harness transforms consent.ts, redact.ts AND
+// transparency.ts into the SAME tmpDir and rewrites the relative specifiers to
+// the .mjs paths Node resolves.
 //
 // Belt-and-suspenders (decision B): the module carries a LOCAL base-event
 // contract copy; the TEST additionally cross-checks `valid` against the REAL
@@ -41,23 +41,35 @@ const require = createRequire(import.meta.url);
 // --- OXC transform Vite bundles), into the SAME tmpDir so the relative import --
 // --- resolves. ---------------------------------------------------------------
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-telemetry-transparency-test-'));
-for (const name of ['redact', 'transparency']) {
+for (const name of ['consent', 'redact', 'transparency']) {
   const modPath = resolve(__dirname, `src/lib/telemetry/${name}.ts`);
   const src = readFileSync(modPath, 'utf8');
   let { code } = await transformWithOxc(src, modPath, {});
-  // Node ESM requires an explicit extension on the relative specifier, but the
-  // TS source (correctly) uses extensionless './redact' (resolved by Vite at
-  // build time). Patch ONLY the emitted test artifact so the './redact' import
-  // resolves to the sibling redact.mjs written below.
-  if (name === 'transparency') {
-    code = code.replace(/from\s+(["'])\.\/redact\1/, 'from $1./redact.mjs$1');
-  }
+  // Node ESM requires an explicit extension on a relative specifier, but the TS
+  // sources (correctly) use extensionless './redact' / './consent' (resolved by
+  // Vite at build time). Patch ONLY the emitted test artifacts.
+  code = code
+    .replace(/from\s+(["'])\.\/redact\1/g, 'from "./redact.mjs"')
+    .replace(/from\s+(["'])\.\/consent\1/g, 'from "./consent.mjs"');
   writeFileSync(join(tmpDir, `${name}.mjs`), code);
 }
 const { describeCollection, previewPayload, isValidBaseEvent, SCHEMA_VERSION } = await import(
   join(tmpDir, 'transparency.mjs')
 );
 rmSync(tmpDir, { recursive: true, force: true });
+
+// Named consent states this suite exercises. INCIDENTS_ONLY / BOTH are the two
+// the old base/extended tiers could express; NAMES_ONLY is the combination they
+// could NOT, and NOTHING is the default.
+const NOTHING = {};
+const INCIDENTS_ONLY = { incidents: true, names: false };
+const NAMES_ONLY = { incidents: false, names: true };
+const BOTH = { incidents: true, names: true };
+// Every shape a corrupt / missing / stale-tier persisted value can take. All of
+// them must resolve to nothing enabled.
+const DEGENERATE = [NOTHING, undefined, null, 'base', 'extended', 'off', 'garbage', 42, [], { unknown: true }, { incidents: 'yes' }];
+const cat = (c) => describeCollection(c);
+const catOf = (c, id) => describeCollection(c).categories.find((x) => x.id === id);
 
 // Belt-and-suspenders: the REAL main-process validator (exported) for the
 // schema-validity cross-check (criterion b).
@@ -146,7 +158,7 @@ const GH_TOKEN = 'ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789';
 
 // A well-formed ERROR base-event candidate whose free-text message carries one
 // of every hard-exclusion category (path, hostname, Authorization header),
-// alongside tier-gated identifier + content fields. After redaction it MUST
+// alongside category-gated identifier + content fields. After redaction it MUST
 // still conform to the schema (valid === true) — criterion (b).
 const CANDIDATE = {
   schemaVersion: SCHEMA_VERSION,
@@ -154,13 +166,13 @@ const CANDIDATE = {
   runtime: 'renderer',
   timestamp: 1719500000123,
   // A non-identifying release label (WARDEN-665). Neither content nor an
-  // identifier → it must SURVIVE redaction unredacted at every tier, which the
+  // identifier → it must SURVIVE redaction unredacted under every consent, which the
   // preview must disclose (a transparency panel that hides a collected field is
   // a lie of omission even when the data is benign).
   appVersion: '0.1.19',
   // A non-identifying OS label (WARDEN-684). Same trust posture as appVersion
   // (neither content nor an identifier) → it too must SURVIVE redaction unredacted
-  // at every tier, which the preview must disclose.
+  // under every consent, which the preview must disclose.
   platform: 'darwin',
   name: 'Error',
   message:
@@ -171,122 +183,137 @@ const CANDIDATE = {
   // Tier-gated: kept (scrubbed) only at extended.
   chatName: 'deploy@prod.internal refactor',
   sessionName: 'claude-7b3a2f1',
-  // Hard-excluded at every tier.
+  // Hard-excluded under every consent.
   content: 'User asked for the production database password',
   prompt: 'Run: ssh ubuntu@10.0.0.5 with the deploy key',
 };
 
-console.log('\n(a) describeCollection — tier catalog of what is collected');
+console.log('\n(a) describeCollection — PER-CATEGORY catalog of what is collected');
 
-test('describeCollection(base) lists ONLY anonymous fields (no chat/session-name fields)', () => {
-  const cat = describeCollection('base');
-  assert.equal(cat.tier, 'base');
-  assert.equal(cat.collectsBaseEvents, true);
-  assert.equal(cat.collectsIdentifiers, false);
-  assert.deepEqual(cat.identifierFields, []);
-  // All three anonymous base-event types, each with its anonymous fields.
-  assert.deepEqual(
-    cat.eventTypes.map((e) => e.type),
-    ['error', 'crash', 'performance-stall'],
-  );
-  // The identifier field names are the ones extended collects; NONE of them may
-  // appear among the base-tier event fields. (An error event's `name` is the
-  // anonymous Error-class name, NOT a chat/session-name identifier.)
-  const idFields = new Set(describeCollection('extended').identifierFields);
-  for (const et of cat.eventTypes) {
+test('every category is listed, in registry order, with its enabled state', () => {
+  const c = cat(INCIDENTS_ONLY);
+  assert.deepEqual(c.categories.map((x) => x.id), ['incidents', 'names']);
+  assert.equal(catOf(INCIDENTS_ONLY, 'incidents').enabled, true);
+  assert.equal(catOf(INCIDENTS_ONLY, 'names').enabled, false);
+  assert.deepEqual([...c.enabled], ['incidents']);
+});
+
+test('incidents-only collects the three anonymous event types and NO identifier fields', () => {
+  const c = cat(INCIDENTS_ONLY);
+  assert.equal(c.collectsAnything, true);
+  assert.deepEqual(c.eventTypes.map((e) => e.type), ['error', 'crash', 'performance-stall']);
+  assert.deepEqual(c.retainedFields, [], 'no chat/session-name fields are retained');
+  // No identifier field name may appear among the anonymous event fields. (An
+  // error event's `name` is the Error CLASS name, not a chat/session identifier.)
+  const idFields = new Set(catOf(BOTH, 'names').fields);
+  for (const et of c.eventTypes) {
     assert.ok(et.fields.length > 0, `${et.type} lists its anonymous fields`);
     for (const f of et.fields) {
-      assert.ok(!idFields.has(f.toLowerCase()), `no identifier field at base: ${f}`);
+      assert.ok(!idFields.has(f.toLowerCase()), `no identifier field with incidents only: ${f}`);
     }
   }
 });
 
-test('describeCollection(extended) ADDITIONALLY lists the chat/session-name identifier fields', () => {
-  const cat = describeCollection('extended');
-  assert.equal(cat.collectsBaseEvents, true);
-  assert.equal(cat.collectsIdentifiers, true);
-  assert.ok(cat.identifierFields.length > 0, 'extended collects identifier fields');
-  assert.ok(cat.identifierFields.includes('chatname'), 'chat name advertised at extended');
-  assert.ok(cat.identifierFields.includes('sessionname'), 'session name advertised at extended');
-  // Base events are still the same three anonymous types.
-  assert.equal(cat.eventTypes.length, 3);
+test('incidents + names ADDITIONALLY retains the chat/session-name fields', () => {
+  const c = cat(BOTH);
+  assert.equal(c.collectsAnything, true);
+  assert.ok(c.retainedFields.includes('chatname'), 'chat name advertised');
+  assert.ok(c.retainedFields.includes('sessionname'), 'session name advertised');
+  assert.equal(c.eventTypes.length, 3, 'the same three anonymous types');
+  assert.equal(catOf(BOTH, 'names').inert, false, 'names is live when something collects');
 });
 
-test('describeCollection(off / unknown / undefined) collects NOTHING (most-redacted)', () => {
-  for (const t of ['off', 'unknown', undefined, null, 'garbage']) {
-    const cat = describeCollection(t);
-    assert.equal(cat.collectsBaseEvents, false, `no base events at tier ${t}`);
-    assert.equal(cat.collectsIdentifiers, false, `no identifiers at tier ${t}`);
-    assert.deepEqual(cat.eventTypes, [], `no event types at tier ${t}`);
-    assert.deepEqual(cat.identifierFields, [], `no identifier fields at tier ${t}`);
-  }
+test('names-ONLY is reported as enabled but INERT — nothing is collected or retained', () => {
+  // The combination the old three-value tier could not express. The catalog must
+  // tell the truth: the switch is on, and it still sends nothing.
+  const c = cat(NAMES_ONLY);
+  assert.equal(catOf(NAMES_ONLY, 'names').enabled, true, 'the user DID turn names on');
+  assert.equal(catOf(NAMES_ONLY, 'names').inert, true, 'and it is flagged inert');
+  assert.equal(c.collectsAnything, false, 'nothing is collected');
+  assert.deepEqual(c.eventTypes, [], 'no event types');
+  assert.deepEqual(c.retainedFields, [],
+    'and NO fields are advertised as retained — there is no event for a name to ride on');
 });
 
-test('describeCollection lists content/prompt fields as HARD-EXCLUDED at every tier', () => {
-  for (const t of ['base', 'extended', 'off']) {
-    const cat = describeCollection(t);
-    assert.ok(cat.hardExcludedContent.includes('content'), `content hard-excluded at ${t}`);
-    assert.ok(cat.hardExcludedContent.includes('prompt'), `prompt hard-excluded at ${t}`);
-    assert.ok(cat.hardExcludedContent.includes('messages'), `messages hard-excluded at ${t}`);
-  }
-});
-
-test('describeCollection DISCLOSES the optional appVersion? field on every base-event type (WARDEN-665)', () => {
-  // The transparency panel's contract is to list EVERY field a tier collects.
-  // Production attaches appVersion to every emitted event, so it MUST appear in
-  // the disclosed field catalog — modeled with the `?` suffix (like `exitCode?`)
-  // to document that a v2 event WITHOUT it still validates. This is the forcing
-  // function: removing appVersion? from BASE_EVENT_FIELDS turns this red.
-  for (const tier of ['base', 'extended']) {
-    const cat = describeCollection(tier);
-    assert.equal(cat.eventTypes.length, 3, `three event types at ${tier}`);
-    for (const et of cat.eventTypes) {
-      assert.ok(
-        et.fields.includes('appVersion?'),
-        `${et.type} discloses optional appVersion? at ${tier}`,
-      );
-    }
-  }
-  // appVersion is a release label, NOT an identifier — it must not be classified
-  // as a chat/session-name identifier field (those are extended-only).
-  for (const tier of ['base', 'extended', 'off']) {
-    const cat = describeCollection(tier);
-    for (const id of cat.identifierFields) {
-      assert.ok(!/appversion/.test(id), `appVersion is not an identifier field at ${tier}`);
+test('a missing / malformed / unrecognized / stale-tier consent collects NOTHING (most-redacted)', () => {
+  for (const bad of DEGENERATE) {
+    const c = cat(bad);
+    assert.equal(c.collectsAnything, false, `nothing collected for ${JSON.stringify(bad)}`);
+    assert.deepEqual(c.eventTypes, [], `no event types for ${JSON.stringify(bad)}`);
+    assert.deepEqual(c.retainedFields, [], `no retained fields for ${JSON.stringify(bad)}`);
+    for (const x of c.categories) {
+      assert.equal(x.enabled, false, `${x.id} off for ${JSON.stringify(bad)}`);
     }
   }
 });
 
-test('describeCollection DISCLOSES the optional platform? field on every base-event type (WARDEN-684)', () => {
-  // The transparency panel's contract is to list EVERY field a tier collects.
-  // Production attaches platform to every emitted event, so it MUST appear in the
-  // disclosed field catalog — modeled with the `?` suffix to document that a v3
-  // event WITHOUT it still validates. Removing platform? from BASE_EVENT_FIELDS
-  // turns this red.
-  for (const tier of ['base', 'extended']) {
-    const cat = describeCollection(tier);
-    assert.equal(cat.eventTypes.length, 3, `three event types at ${tier}`);
-    for (const et of cat.eventTypes) {
-      assert.ok(
-        et.fields.includes('platform?'),
-        `${et.type} discloses optional platform? at ${tier}`,
-      );
+test('describeCollection lists content/prompt fields as HARD-EXCLUDED under EVERY combination', () => {
+  for (const c of [NOTHING, INCIDENTS_ONLY, NAMES_ONLY, BOTH]) {
+    const label = JSON.stringify(c);
+    const out = cat(c);
+    assert.ok(out.hardExcludedContent.includes('content'), `content hard-excluded for ${label}`);
+    assert.ok(out.hardExcludedContent.includes('prompt'), `prompt hard-excluded for ${label}`);
+    assert.ok(out.hardExcludedContent.includes('messages'), `messages hard-excluded for ${label}`);
+  }
+});
+
+test('describeCollection DISCLOSES the optional appVersion? field on every event type (WARDEN-665)', () => {
+  // The panel's contract is to list EVERY field a category collects. Production
+  // attaches appVersion to every emitted event, so it MUST appear in the disclosed
+  // field catalog — modeled with the `?` suffix (like `exitCode?`) to document
+  // that an event WITHOUT it still validates. Removing appVersion? from
+  // BASE_EVENT_FIELDS turns this red.
+  for (const c of [INCIDENTS_ONLY, BOTH]) {
+    const label = JSON.stringify(c);
+    const out = cat(c);
+    assert.equal(out.eventTypes.length, 3, `three event types for ${label}`);
+    for (const et of out.eventTypes) {
+      assert.ok(et.fields.includes('appVersion?'), `${et.type} discloses optional appVersion? for ${label}`);
     }
   }
-  // platform is an OS label, NOT an identifier — it must not be classified as a
-  // chat/session-name identifier field (those are extended-only).
-  for (const tier of ['base', 'extended', 'off']) {
-    const cat = describeCollection(tier);
-    for (const id of cat.identifierFields) {
-      assert.ok(!/platform/.test(id), `platform is not an identifier field at ${tier}`);
+  // appVersion is a release label, NOT an identifier — it is never a gated field.
+  for (const c of [INCIDENTS_ONLY, BOTH, NAMES_ONLY, NOTHING]) {
+    for (const f of cat(c).retainedFields) {
+      assert.ok(!/appversion/.test(f), 'appVersion is never a category-gated identifier field');
     }
+  }
+});
+
+test('describeCollection DISCLOSES the optional platform? field on every event type (WARDEN-684)', () => {
+  for (const c of [INCIDENTS_ONLY, BOTH]) {
+    const label = JSON.stringify(c);
+    const out = cat(c);
+    assert.equal(out.eventTypes.length, 3, `three event types for ${label}`);
+    for (const et of out.eventTypes) {
+      assert.ok(et.fields.includes('platform?'), `${et.type} discloses optional platform? for ${label}`);
+    }
+  }
+  for (const c of [INCIDENTS_ONLY, BOTH, NAMES_ONLY, NOTHING]) {
+    for (const f of cat(c).retainedFields) {
+      assert.ok(!/platform/.test(f), 'platform is never a category-gated identifier field');
+    }
+  }
+});
+
+test('the catalog is DERIVED from the registry — every declared category carries its own copy', () => {
+  // The forcing function for "adding a category is a data addition": each entry
+  // must arrive with a label, a summary, a role, and its own field/event lists,
+  // so a new registry entry is disclosed without editing describeCollection.
+  for (const x of cat(BOTH).categories) {
+    assert.equal(typeof x.label, 'string');
+    assert.ok(x.label.length > 0, `${x.id} has a label`);
+    assert.ok(x.summary.length > 0, `${x.id} has a user-facing summary`);
+    assert.ok(x.role === 'collecting' || x.role === 'decorating', `${x.id} declares a role`);
+    assert.ok(Array.isArray(x.eventTypes) && Array.isArray(x.fields));
+    assert.ok(x.eventTypes.length > 0 || x.fields.length > 0,
+      `${x.id} has a REAL producer behind it (events or fields) — no empty toggle`);
   }
 });
 
 console.log('\n(b) previewPayload — path/host/Authorization redacted + schema-valid');
 
 test('previewPayload replaces the file path, hostname, and Authorization header with [REDACTED:…]', () => {
-  const { payload, valid } = previewPayload(CANDIDATE, 'base');
+  const { payload, valid } = previewPayload(CANDIDATE, INCIDENTS_ONLY);
   assert.equal(valid, true, 'a well-formed redacted error event is valid');
   const s = JSON.stringify(payload);
   assert.ok(s.includes('[REDACTED:path]'), 'file path replaced with [REDACTED:path]');
@@ -300,45 +327,47 @@ test('previewPayload replaces the file path, hostname, and Authorization header 
   assert.equal(validateBaseEvent(payload), true, 'real validateBaseEvent agrees valid');
 });
 
-test('a non-identifying appVersion release label SURVIVES redaction unredacted at every tier (WARDEN-665)', () => {
+test('a non-identifying appVersion release label SURVIVES redaction under EVERY consent (WARDEN-665)', () => {
   // appVersion is neither a content/prompt field nor a chat/session-name
   // identifier, so the redactor neither drops nor rewrites it. This is exactly
   // what the transparency panel's live preview must SHOW: a benign release label
   // passing through intact — reinforcing, not undermining, the trust model.
-  for (const t of ['base', 'extended', 'off', 'unknown', undefined]) {
-    const { payload } = previewPayload(CANDIDATE, t);
-    assert.equal(payload.appVersion, '0.1.19', `appVersion survives unredacted at tier ${t}`);
+  for (const c of [INCIDENTS_ONLY, BOTH, NAMES_ONLY, NOTHING, undefined]) {
+    const t = JSON.stringify(c);
+    const { payload } = previewPayload(CANDIDATE, c);
+    assert.equal(payload.appVersion, '0.1.19', `appVersion survives unredacted for ${t}`);
     // And it is never enumerated as a redaction change (it was not transformed).
-    const re = previewPayload(CANDIDATE, t);
-    const touched = re.changes.some((c) => c.path === 'appVersion');
-    assert.equal(touched, false, `appVersion is never a redacted/dropped path at tier ${t}`);
+    const re = previewPayload(CANDIDATE, c);
+    const touched = re.changes.some((ch) => ch.path === 'appVersion');
+    assert.equal(touched, false, `appVersion is never a redacted/dropped path for ${t}`);
   }
 });
 
-test('a non-identifying platform OS label SURVIVES redaction unredacted at every tier (WARDEN-684)', () => {
+test('a non-identifying platform OS label SURVIVES redaction under EVERY consent (WARDEN-684)', () => {
   // platform is neither a content/prompt field nor a chat/session-name identifier,
   // so the redactor neither drops nor rewrites it. Same as appVersion: a benign OS
   // label (darwin/win32/linux) passing through intact — what the transparency
   // panel's live preview must SHOW.
-  for (const t of ['base', 'extended', 'off', 'unknown', undefined]) {
-    const { payload } = previewPayload(CANDIDATE, t);
-    assert.equal(payload.platform, 'darwin', `platform survives unredacted at tier ${t}`);
-    const re = previewPayload(CANDIDATE, t);
-    const touched = re.changes.some((c) => c.path === 'platform');
-    assert.equal(touched, false, `platform is never a redacted/dropped path at tier ${t}`);
+  for (const c of [INCIDENTS_ONLY, BOTH, NAMES_ONLY, NOTHING, undefined]) {
+    const t = JSON.stringify(c);
+    const { payload } = previewPayload(CANDIDATE, c);
+    assert.equal(payload.platform, 'darwin', `platform survives unredacted for ${t}`);
+    const re = previewPayload(CANDIDATE, c);
+    const touched = re.changes.some((ch) => ch.path === 'platform');
+    assert.equal(touched, false, `platform is never a redacted/dropped path for ${t}`);
   }
 });
 
 test('previewPayload is valid for a well-formed crash and performance-stall event too', () => {
   const crash = previewPayload(
     { schemaVersion: SCHEMA_VERSION, type: 'crash', runtime: 'renderer', timestamp: 1, reason: 'oom' },
-    'base',
+    INCIDENTS_ONLY,
   );
   assert.equal(crash.valid, true);
   assert.equal(validateBaseEvent(crash.payload), true);
   const stall = previewPayload(
     { schemaVersion: SCHEMA_VERSION, type: 'performance-stall', runtime: 'main', timestamp: 1, lagMs: 2500, source: 'event-loop' },
-    'base',
+    INCIDENTS_ONLY,
   );
   assert.equal(stall.valid, true);
   assert.equal(validateBaseEvent(stall.payload), true);
@@ -346,62 +375,89 @@ test('previewPayload is valid for a well-formed crash and performance-stall even
 
 test('previewPayload flags an INVALID candidate (missing required field) without throwing', () => {
   // No message/name/frames → not a conformant error event.
-  const bad = previewPayload({ schemaVersion: SCHEMA_VERSION, type: 'error', runtime: 'renderer', timestamp: 1 }, 'base');
+  const bad = previewPayload({ schemaVersion: SCHEMA_VERSION, type: 'error', runtime: 'renderer', timestamp: 1 }, INCIDENTS_ONLY);
   assert.equal(bad.valid, false);
   assert.equal(isValidBaseEvent(bad.payload), false);
   // Unknown event type → invalid.
   const unknown = previewPayload(
     { schemaVersion: SCHEMA_VERSION, type: 'mystery', runtime: 'renderer', timestamp: 1 },
-    'base',
+    INCIDENTS_ONLY,
   );
   assert.equal(unknown.valid, false);
   // A primitive (non-event) → invalid, changes still enumerated.
-  const prim = previewPayload('leak: AKIAIOSFODNN7EXAMPLE at /etc/shadow', 'base');
+  const prim = previewPayload('leak: AKIAIOSFODNN7EXAMPLE at /etc/shadow', INCIDENTS_ONLY);
   assert.equal(prim.valid, false);
   assert.equal(prim.payload, 'leak: [REDACTED:aws-key] at [REDACTED:path]');
 });
 
-console.log('\n(c) content field is absent from the preview at EVERY tier');
+console.log('\n(c) content field is absent from the preview under EVERY combination');
 
-test('content + prompt fields are absent at every tier (dropped wholesale)', () => {
-  for (const t of ['base', 'extended', 'off', 'unknown', undefined]) {
-    const { payload } = previewPayload(CANDIDATE, t);
+test('content + prompt fields are absent under every combination (dropped wholesale)', () => {
+  for (const c of [INCIDENTS_ONLY, BOTH, NAMES_ONLY, NOTHING, undefined]) {
+    const t = JSON.stringify(c);
+    const { payload } = previewPayload(CANDIDATE, c);
     const p = payload || {};
-    assert.equal(p.content, undefined, `content absent at tier ${t}`);
-    assert.equal(p.prompt, undefined, `prompt absent at tier ${t}`);
-    assert.ok(!('content' in p), `content key absent at tier ${t}`);
-    assert.ok(!('prompt' in p), `prompt key absent at tier ${t}`);
+    assert.equal(p.content, undefined, `content absent for ${t}`);
+    assert.equal(p.prompt, undefined, `prompt absent for ${t}`);
+    assert.ok(!('content' in p), `content key absent for ${t}`);
+    assert.ok(!('prompt' in p), `prompt key absent for ${t}`);
     // The content text never leaks anywhere.
     assert.doesNotMatch(JSON.stringify(payload), /production database password/);
     assert.doesNotMatch(JSON.stringify(payload), /ssh ubuntu/);
   }
 });
 
-console.log('\n(d) chatName absent at base/off/unknown, present (scrubbed) at extended');
+console.log('\n(d) names are gated by THEIR OWN category, independently of any other');
 
-test('chatName / sessionName ABSENT at base / off / unknown / undefined', () => {
-  for (const t of ['base', 'off', 'unknown', undefined, null]) {
-    const { payload } = previewPayload(CANDIDATE, t);
-    assert.equal(payload.chatName, undefined, `chatName absent at tier ${t}`);
-    assert.equal(payload.sessionName, undefined, `sessionName absent at tier ${t}`);
-    assert.ok(!('chatName' in payload), `chatName key absent at tier ${t}`);
+test('chatName / sessionName ABSENT whenever the `names` category is off', () => {
+  for (const c of [INCIDENTS_ONLY, NOTHING, undefined, null, 'extended', { incidents: true, names: 'yes' }]) {
+    const t = JSON.stringify(c);
+    const { payload } = previewPayload(CANDIDATE, c);
+    assert.equal(payload.chatName, undefined, `chatName absent for ${t}`);
+    assert.equal(payload.sessionName, undefined, `sessionName absent for ${t}`);
+    assert.ok(!('chatName' in payload), `chatName key absent for ${t}`);
   }
 });
 
-test('chatName / sessionName PRESENT (scrubbed) at extended', () => {
-  const { payload } = previewPayload(CANDIDATE, 'extended');
-  assert.ok('chatName' in payload, 'chatName present at extended');
-  assert.ok('sessionName' in payload, 'sessionName present at extended');
+test('chatName / sessionName PRESENT (scrubbed) when the `names` category is on', () => {
+  const { payload } = previewPayload(CANDIDATE, BOTH);
+  assert.ok('chatName' in payload, 'chatName present');
+  assert.ok('sessionName' in payload, 'sessionName present');
   // Retained, but scrubbed: the raw chatName carried a user@host that must not survive.
   assert.doesNotMatch(payload.chatName, /deploy@prod\.internal/);
   assert.equal(containsIdentifier(payload.chatName), false, 'retained chatName is scrubbed of identifiers');
 });
 
-console.log('\n(e) PROOF — no identifier pattern survives ANY preview');
+test('a names-ONLY preview is schema-valid but reports transmitted:false (the honest answer)', () => {
+  // The combination the old tier could not express. Redaction retains the name
+  // (the user consented to it) and the schema is satisfied — but nothing is being
+  // COLLECTED, so nothing would actually be sent. The preview must say so rather
+  // than implying a name is on the wire.
+  const res = previewPayload(CANDIDATE, NAMES_ONLY);
+  assert.equal(res.valid, true, 'the payload itself is schema-valid');
+  assert.equal(res.transmitted, false, 'but it would NOT be sent — nothing is collected');
+  const collecting = previewPayload(CANDIDATE, BOTH);
+  assert.equal(collecting.transmitted, true, 'with a collecting category on, it would be sent');
+  assert.equal(previewPayload(CANDIDATE, NOTHING).transmitted, false, 'nothing on → not sent');
+});
+
+test('each dropped/retained change names the CATEGORY that gates it', () => {
+  // The enumerated diff is category-keyed, so a future category's fields are
+  // attributed correctly with no change to the diff walker.
+  const off = previewPayload(CANDIDATE, INCIDENTS_ONLY).changes.filter((x) => x.kind === 'dropped-identifier');
+  assert.ok(off.length > 0, 'names were dropped');
+  for (const ch of off) assert.equal(ch.gate, 'names', `${ch.path} attributed to the names category`);
+  const on = previewPayload(CANDIDATE, BOTH).changes.filter((x) => x.kind === 'retained-identifier');
+  assert.ok(on.length > 0, 'names were retained');
+  for (const ch of on) assert.equal(ch.gate, 'names', `${ch.path} attributed to the names category`);
+});
+
+console.log('\n(e) PROOF — no identifier pattern survives ANY preview, under ANY combination');
 
 test('no path / host / IPv4 / IPv6 / user@host survives any preview (re-uses containsIdentifier)', () => {
-  for (const t of ['base', 'extended', 'off', 'unknown', undefined]) {
-    const { payload } = previewPayload(CANDIDATE, t);
+  for (const c of [INCIDENTS_ONLY, BOTH, NAMES_ONLY, NOTHING, undefined]) {
+    const t = JSON.stringify(c);
+    const { payload } = previewPayload(CANDIDATE, c);
     const strings = [];
     collectStrings(payload, strings);
     for (const { s, frameField } of strings) {
@@ -409,7 +465,7 @@ test('no path / host / IPv4 / IPv6 / user@host survives any preview (re-uses con
       // intentionally preserved — exempt it ONLY when it is a recognized source
       // basename, so a host-shaped frame value (api.github.com) is still caught.
       if (frameField && isSourceBasename(s)) continue;
-      assert.equal(containsIdentifier(s), false, `identifier leaked at tier ${t}: ${s}`);
+      assert.equal(containsIdentifier(s), false, `identifier leaked for ${t}: ${s}`);
     }
   }
 });
@@ -418,8 +474,9 @@ test('a stack frame source basename SURVIVES previewPayload (WARDEN-680 — non-
   // The redactor preserves a frame.file/function source basename; the preview is
   // the EXACT transmitted payload, so it must reflect `loader.js`/`loadCreds`,
   // NOT [REDACTED:host]. The single most useful debug field stays actionable.
-  for (const t of ['base', 'extended']) {
-    const { payload } = previewPayload(CANDIDATE, t);
+  for (const c of [INCIDENTS_ONLY, BOTH]) {
+    const t = JSON.stringify(c);
+    const { payload } = previewPayload(CANDIDATE, c);
     const frame = payload.frames[0];
     assert.equal(frame.file, 'loader.js', `frame.file basename preserved @ ${t}`);
     assert.equal(frame.function, 'loadCreds', `frame.function preserved @ ${t}`);
@@ -427,7 +484,7 @@ test('a stack frame source basename SURVIVES previewPayload (WARDEN-680 — non-
   }
 });
 
-test('a candidate packed with every identifier shape is fully scrubbed at every tier', () => {
+test('a candidate packed with every identifier shape is fully scrubbed under every combination', () => {
   const packed = {
     schemaVersion: SCHEMA_VERSION,
     type: 'error',
@@ -437,14 +494,15 @@ test('a candidate packed with every identifier shape is fully scrubbed at every 
     message: 'path /etc/shadow host 10.0.0.5 v6 fe80::1 mail ops@example.com fqdn db.internal.local',
     frames: [],
   };
-  for (const t of ['base', 'extended', 'off']) {
-    const { payload, valid } = previewPayload(packed, t);
-    assert.equal(valid, true, `packed event still valid after scrub at tier ${t}`);
+  for (const c of [INCIDENTS_ONLY, BOTH, NOTHING]) {
+    const t = JSON.stringify(c);
+    const { payload, valid } = previewPayload(packed, c);
+    assert.equal(valid, true, `packed event still valid after scrub for ${t}`);
     const strings = [];
     collectStrings(payload, strings);
     for (const { s, frameField } of strings) {
       if (frameField && isSourceBasename(s)) continue;
-      assert.equal(containsIdentifier(s), false, `identifier survived at tier ${t}: ${s}`);
+      assert.equal(containsIdentifier(s), false, `identifier survived for ${t}: ${s}`);
     }
   }
 });
@@ -452,27 +510,29 @@ test('a candidate packed with every identifier shape is fully scrubbed at every 
 console.log('\n(f) determinism + non-mutation');
 
 test('describeCollection is deterministic — stable across calls (pure)', () => {
-  assert.deepEqual(describeCollection('base'), describeCollection('base'));
-  assert.deepEqual(describeCollection('extended'), describeCollection('extended'));
-  assert.deepEqual(describeCollection('off'), describeCollection('off'));
+  for (const c of [NOTHING, INCIDENTS_ONLY, NAMES_ONLY, BOTH]) {
+    assert.deepEqual(describeCollection(c), describeCollection(c));
+  }
 });
 
-test('previewPayload is deterministic — same input+tier yields equal results', () => {
-  assert.deepEqual(previewPayload(CANDIDATE, 'base'), previewPayload(CANDIDATE, 'base'));
-  assert.deepEqual(previewPayload(CANDIDATE, 'extended'), previewPayload(CANDIDATE, 'extended'));
+test('previewPayload is deterministic — same input+consent yields equal results', () => {
+  for (const c of [NOTHING, INCIDENTS_ONLY, NAMES_ONLY, BOTH]) {
+    assert.deepEqual(previewPayload(CANDIDATE, c), previewPayload(CANDIDATE, c));
+  }
 });
 
 test('previewPayload does NOT mutate its input (defensive copy)', () => {
   const snapshot = JSON.parse(JSON.stringify(CANDIDATE));
-  previewPayload(CANDIDATE, 'extended');
-  previewPayload(CANDIDATE, 'base');
+  previewPayload(CANDIDATE, BOTH);
+  previewPayload(CANDIDATE, INCIDENTS_ONLY);
+  previewPayload(CANDIDATE, NAMES_ONLY);
   assert.deepEqual(CANDIDATE, snapshot, 'original CANDIDATE must be byte-for-byte unchanged');
 });
 
 console.log('\nchanges — enumerated diff of what redaction did');
 
 test('changes enumerate dropped content, dropped/retained identifiers, and redacted substitutions', () => {
-  const base = previewPayload(CANDIDATE, 'base');
+  const base = previewPayload(CANDIDATE, INCIDENTS_ONLY);
   const kinds = base.changes.map((c) => c.kind);
   assert.ok(kinds.includes('dropped-content'), 'content drop recorded');
   assert.ok(kinds.includes('dropped-identifier'), 'identifier drop recorded at base');
@@ -492,7 +552,7 @@ test('changes enumerate dropped content, dropped/retained identifiers, and redac
     if (c.kind === 'redacted') assert.ok(c.count >= 1, 'redacted change has a positive count');
   }
 
-  const ext = previewPayload(CANDIDATE, 'extended');
+  const ext = previewPayload(CANDIDATE, BOTH);
   const extKinds = ext.changes.map((c) => c.kind);
   assert.ok(extKinds.includes('retained-identifier'), 'identifier retained at extended');
   // The retained chatName carried a user@host → a redacted substitution is recorded too.

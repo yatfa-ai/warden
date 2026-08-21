@@ -23,6 +23,24 @@
 // the external contract.
 
 import { sanitizeWatchPatterns } from './agentState.js';
+// WARDEN-1116 — THE telemetry consent authority. Its category registry DRIVES the
+// telemetry consent fields below, so adding a category is one entry there rather
+// than a new descriptor (plus a new GET key, a new PUT guard, a new default…)
+// here. `.cjs` is CommonJS regardless of this package's "type": "module", and the
+// module is pure + dependency-free — importing it pulls in no Electron and no
+// renderer code; it is simply the ONE resolver implementation the main process
+// and the server both run.
+import {
+  TELEMETRY_CATEGORIES,
+  migrateConsentPrefs,
+  resolveConsent,
+} from './telemetry-consent.cjs';
+
+// GET-order rank of the first telemetry consent category. Categories occupy
+// consecutive ranks from here in registry order — 38/39 today, preserving the
+// byte-pinned position the legacy telemetryBaseEnabled/telemetryExtendedEnabled
+// pair held.
+const TELEMETRY_CONSENT_ORDER = 38;
 
 // exposure values:
 //   'public'   — in DEFAULTS, emitted in GET (by resolve rule), accepted in PUT.
@@ -283,36 +301,34 @@ export const CONFIG_FIELDS = [
     // the env var remains an explicit operator override (force on/off regardless
     // of the UI). Remote-only by design — local hosts never route through it.
   },
-  {
-    key: 'telemetryBaseEnabled',
+  // Optional telemetry — OFF BY DEFAULT, INDEPENDENT PER-CATEGORY consent
+  // (WARDEN-1116 / roadmap WARDEN-446 / design WARDEN-443 Principle 2). Nothing
+  // leaves the machine until the user explicitly turns a category on in Settings;
+  // this is warden's "off by default" trust foundation, persisted server-side (NOT
+  // client localStorage) so it survives behind the backend config and a restart.
+  // The receiver lives in a SEPARATE repo (warden-telemetry); this repo ships only
+  // the client + the schema version it speaks.
+  //
+  // One `public` boolean per category, DERIVED from the consent registry — each
+  // independent, each defaulting to false, NONE implying another. There is no
+  // cross-field clamp between them (the old "extended requires base" is gone; see
+  // crossField). The pre-WARDEN-1116 keys telemetryBaseEnabled /
+  // telemetryExtendedEnabled are no longer declared: `migrateConfig` folds them
+  // forward into these on load, once, and they are never read again.
+  //
+  // Only a category with a REAL PRODUCER is listed in the registry, so this can
+  // never emit a toggle that collects nothing (WARDEN-131's silent-no-op trap
+  // applied to a consent surface, where it is worst).
+  ...TELEMETRY_CATEGORIES.map((cat, i) => ({
+    key: cat.configKey,
     default: false,
     exposure: 'public',
     type: 'boolean',
     resolve: 'identity',
-    order: 38,
-    // Optional telemetry — OFF BY DEFAULT, two tiers, both revocable anytime
-    // (roadmap WARDEN-446 / design WARDEN-443). Nothing leaves the machine until
-    // the user explicitly turns the base tier on in Settings; this is warden's
-    // "off by default" trust foundation, persisted server-side (NOT client
-    // localStorage) so it survives behind the backend config and a restart. The
-    // receiver lives in a SEPARATE repo (warden-telemetry); this repo ships only
-    // the client + the schema version it speaks.
-    //   telemetryBaseEnabled — anonymous error / crash / performance-stall
-    //                         events only. No content, no paths, no identifiers.
-  },
-  {
-    key: 'telemetryExtendedEnabled',
-    default: false,
-    exposure: 'public',
-    type: 'boolean',
-    resolve: 'identity',
-    order: 39,
-    //   telemetryExtendedEnabled — gated behind base: additionally retains chat +
-    //                              session NAMES (content is never sent). The PUT
-    //                              pipeline CLAMPS this to false unless base is
-    //                              also on (extended-requires-base, enforced in
-    //                              crossField — WARDEN-457).
-  },
+    order: TELEMETRY_CONSENT_ORDER + i,
+    category: cat.id,
+    summary: cat.summary,
+  })),
   {
     key: 'telemetryEndpoint',
     default: '',
@@ -637,7 +653,7 @@ export function deriveDefaults() {
 //   `derived` fields (companionTransportOverridden) are boot-computed from env,
 //     not persisted in cfg, so there is nothing to reset.
 // crossField then runs so the restored state is well-formed exactly as a PUT
-// would leave it (health warning<=critical, telemetry extended-requires-base) —
+// would leave it (health warning<=critical, telemetry consent booleans) —
 // defensive: the defaults are already well-formed, but a future default that
 // wasn't would still come out clean.
 export function resetConfig(cfg) {
@@ -814,12 +830,41 @@ function crossField(cfg) {
   const criticalMin = cfg.healthCriticalThresholdMin ?? DEFAULT_CRITICAL_MIN;
   if (warningMin > criticalMin) cfg.healthWarningThresholdMin = criticalMin;
 
-  // (b) Telemetry extended-requires-base (WARDEN-457): the SERVER enforces this
-  // (not just the UI) so a hand-crafted PUT cannot enable extended without base.
-  // The unconditional clamp guarantees the persisted pair is always well-formed
-  // regardless of which fields were in the body: revoking base latches extended
-  // off, and a corrupt disk state self-heals on the next PUT.
-  cfg.telemetryExtendedEnabled = cfg.telemetryExtendedEnabled && cfg.telemetryBaseEnabled;
+  // (b) Telemetry consent (WARDEN-1116): the SERVER independently sanitizes what
+  // it PERSISTS, so a hand-crafted PUT can never store a consent value that is
+  // anything other than a real boolean. This is the second of the two INDEPENDENT
+  // off-by-default enforcement points (the first is the Electron main process's
+  // boot read, electron/telemetry-config.cjs) — deliberately not a single point of
+  // trust. `resolveConsent` is `=== true` per category, so a non-boolean, missing,
+  // corrupt, or unrecognized value lands as false.
+  //
+  // There is NO cross-CATEGORY clamp. The old "extended requires base" coupling is
+  // gone: categories are independent, and the `names` category is safe on its own
+  // because it only decorates events other categories produce — with nothing
+  // collecting there is no event for a name to ride on. Re-introducing a clamp
+  // here would re-couple the categories WARDEN-443 Principle 2 requires to be
+  // independent.
+  const consent = resolveConsent(cfg);
+  for (const cat of TELEMETRY_CATEGORIES) cfg[cat.configKey] = consent[cat.id] === true;
+}
+
+// ---------------------------------------------------------------------------
+// migrateConfig — fold a config written by an OLDER build forward (WARDEN-1116).
+//
+// Runs on LOAD, before DEFAULTS are spread, so a legacy key is still visible as
+// "the new key is absent". Today it carries the linear telemetry consent pair
+// (telemetryBaseEnabled / telemetryExtendedEnabled) into the per-category keys,
+// preserving the user's EFFECTIVE consent exactly: base on → incidents on;
+// extended on WITH base on → names on. A stale `{base:false, extended:true}` pair
+// (which the old model resolved to "send nothing") migrates to names-only, which
+// also sends nothing — so nothing new is silently enabled either way.
+//
+// Non-destructive: the legacy keys are left on disk untouched (a downgrade still
+// finds what it expects); they are simply never read once the new keys exist.
+// ---------------------------------------------------------------------------
+export function migrateConfig(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  return migrateConsentPrefs(raw);
 }
 
 // ---------------------------------------------------------------------------
