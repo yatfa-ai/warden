@@ -227,6 +227,30 @@ export function DirectiveHistory({
         </div>
       </div>
 
+      {/* Fetch-failure strip. This feed RETAINS stale directives on a failed
+          fetch (:73-76) — without this, a feed that already had rows and then
+          started failing would keep presenting stale state as live with no
+          indicator at all, since the error arm below is unreachable while the
+          list is non-empty. Non-blocking by design: the rows stay on screen.
+          Gate on the RAW `directives`, never `filtered` — an active filter
+          matching nothing during a healthy fetch must not be dressed up as a
+          failure. `error` is a `string` here (unlike ActivityTimeline, whose
+          hook stores an `Error` instance and must render `error.message`). */}
+      {!loading && error && directives.length > 0 && (
+        <div
+          role="status"
+          title={`Live updates failed: ${error}`}
+          className="flex-shrink-0 flex items-start gap-2 px-3 py-1.5 border-b border-destructive/30 bg-destructive/10 text-destructive text-sm leading-snug"
+        >
+          <span aria-hidden="true">⚠</span>
+          {/* No `truncate`: the panel is narrow, and clipping the message would
+              hide the one diagnostic part of the strip (e.g. "HTTP 503"). */}
+          <span className="min-w-0">
+            Live updates failed ({error}) — showing last known directives.
+          </span>
+        </div>
+      )}
+
       {/* Directive list */}
       <div className="flex-1 overflow-y-auto min-h-0">
         {loading ? (
