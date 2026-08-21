@@ -45,7 +45,8 @@ const {
 //   source signal → record() → resolveTier → redact (CJS mirror) → validate → send
 const { createTelemetryPipeline } = require('./telemetry-pipeline.cjs');
 const { redact: redactTelemetry } = require('./telemetry-redact.cjs');
-const { resolveTelemetryTier, readTelemetryPrefs } = require('./telemetry-config.cjs');
+const { resolveTelemetryConsent, readTelemetryPrefs } = require('./telemetry-config.cjs');
+const { TELEMETRY_CATEGORIES } = require('../src/telemetry-consent.cjs');
 const { createTransmissionLog, readSnapshot, parseTransmissionLog } = require('./telemetry-transmission-log.cjs');
 
 const PORT = parseInt(process.env.WARDEN_PORT || '7421', 10);
@@ -70,16 +71,19 @@ let tray = null;
 // turning each into a schema-valid base-tier event routed to `record()`, which is
 // bound to the assembled pipeline (redact → validate → transport) below.
 //
-// TWO LAYERS OF "off = nothing", both driven from the persisted prefs
-// (telemetryBaseEnabled / telemetryExtendedEnabled / telemetryEndpoint) — read at
-// boot and kept live over the fork's IPC channel on a Settings change:
-//   1. CONSENT defaults to off. With consent off the source subscribes to NOTHING
-//      and builds/records NOTHING. applyTelemetryConfig() calls
-//      `telemetry.setBaseConsent(base)` with the initial value AND on every live
-//      change (the source re-evaluates on toggle).
+// WARDEN-1116 — consent is a set of INDEPENDENT per-category switches
+// (telemetryIncidentsEnabled / telemetryNamesEnabled), each off by default, none
+// implying another. TWO LAYERS OF "off = nothing", both driven from the persisted
+// prefs — read at boot and kept live over the fork's IPC channel on a Settings
+// change:
+//   1. CONSENT defaults to everything off. With nothing collecting the source
+//      subscribes to NOTHING and builds/records NOTHING. applyTelemetryConfig()
+//      calls `telemetry.setConsent(consent)` with the initial value AND on every
+//      live change (the source re-evaluates on toggle — no restart).
 //   2. RECORD is bound to the pipeline's entry point (telemetry.setRecord). The
-//      pipeline's own consent resolver (resolveTelemetryTier) is a SECOND off-gate,
-//      and the transport is the LAST — consent-off OR no-endpoint sends nothing.
+//      pipeline's own consent resolver (resolveTelemetryConsent) is a SECOND
+//      off-gate, and the transport is the LAST — nothing collecting OR
+//      no-endpoint sends nothing.
 const telemetry = createTelemetrySource({
   // The source's record sink is bound to the pipeline's entry point below — a
   // source signal then flows source → record() → pipeline (resolveTier → redact
@@ -108,11 +112,12 @@ const telemetry = createTelemetrySource({
 // object so the pipeline's consent resolver reads the CURRENT value on every
 // record() without being re-wired.
 const telemetryPrefs = {
-  telemetryBaseEnabled: false,
-  telemetryExtendedEnabled: false,
   telemetryEndpoint: '',
   telemetryAuthToken: '',
 };
+// Every consent category starts OFF. Derived from the category registry so a new
+// category needs no edit here.
+for (const cat of TELEMETRY_CATEGORIES) telemetryPrefs[cat.configKey] = false;
 
 // The local transmission log of ACTUAL send outcomes (WARDEN-583) — verifiability's
 // third leg. Bounded, metadata-only; records one entry per real send the pipeline
@@ -180,7 +185,7 @@ const telemetryTransmissionLog = createTransmissionLog({
 // setEndpoint (applyTelemetryConfig) so the transport's own final gate (consent +
 // endpoint) is the last line of defense for "off / unconfigured = nothing".
 const telemetryPipeline = createTelemetryPipeline({
-  consent: () => resolveTelemetryTier(telemetryPrefs),
+  consent: () => resolveTelemetryConsent(telemetryPrefs),
   redact: redactTelemetry,
   validate: validateBaseEvent,
   schemaVersion: SCHEMA_VERSION,
@@ -203,22 +208,23 @@ telemetry.setRecord(telemetryPipeline.record);
 // (prefs read from the persisted config) and on every live Settings change
 // (forwarded over the fork's IPC channel from the server child, where PUT
 // /api/config is serviced + persisted). Drives BOTH layers of the double gate:
-//   • the source's baseConsent — arms/disarms the uncaught / rejection / render /
-//     unresponsive / heartbeat signal subscriptions (the FIRST "off = nothing").
+//   • the source's consent — arms/disarms the uncaught / rejection / render /
+//     unresponsive / heartbeat signal subscriptions (the FIRST "off = nothing")
+//     and the name-attachment gate, per category and independently.
 //   • the pipeline's endpoint — threads to the transport's final gate (consent +
 //     endpoint), the LAST "off / unconfigured = nothing". The pipeline's consent
-//     resolver reads telemetryPrefs live, so the effective tier (and the
-//     extended-requires-base clamp mirrored in resolveTelemetryTier) is current
-//     on the next record() with no extra wiring.
+//     resolver reads telemetryPrefs live, so the effective per-category consent is
+//     current on the next record() with no extra wiring and no restart.
 // Idempotent + defensive: a malformed/missing field is ignored, and the source's
-// setBaseConsent is itself a no-op when the value is unchanged.
+// setConsent is itself a no-op for the arm/disarm side when nothing changed.
 function applyTelemetryConfig(prefs) {
   if (!prefs || typeof prefs !== 'object') return;
-  if (typeof prefs.telemetryBaseEnabled === 'boolean') {
-    telemetryPrefs.telemetryBaseEnabled = prefs.telemetryBaseEnabled;
-  }
-  if (typeof prefs.telemetryExtendedEnabled === 'boolean') {
-    telemetryPrefs.telemetryExtendedEnabled = prefs.telemetryExtendedEnabled;
+  // Per-category consent, applied independently and driven by the registry: a
+  // malformed/missing value leaves that category untouched (and it started off).
+  for (const cat of TELEMETRY_CATEGORIES) {
+    if (typeof prefs[cat.configKey] === 'boolean') {
+      telemetryPrefs[cat.configKey] = prefs[cat.configKey];
+    }
   }
   if (typeof prefs.telemetryEndpoint === 'string') {
     telemetryPrefs.telemetryEndpoint = prefs.telemetryEndpoint;
@@ -231,12 +237,10 @@ function applyTelemetryConfig(prefs) {
   if (typeof prefs.telemetryAuthToken === 'string') {
     telemetryPrefs.telemetryAuthToken = prefs.telemetryAuthToken;
   }
-  telemetry.setBaseConsent(telemetryPrefs.telemetryBaseEnabled === true);
-  // WARDEN-538 — thread the EXTENDED consent pref to the source so it can attach
-  // the focused chat/session name to built events. MUST follow setBaseConsent:
-  // the source's setExtendedConsent clamps to `value && baseConsent`, so base has
-  // to be current first (mirrors the sink client's extended-requires-base order).
-  telemetry.setExtendedConsent(telemetryPrefs.telemetryExtendedEnabled === true);
+  // WARDEN-1116 — one call applies every category. No ordering dependency exists
+  // any more: the categories are independent, so there is no clamp that requires
+  // one to be applied before another.
+  telemetry.setConsent(resolveTelemetryConsent(telemetryPrefs));
   telemetryPipeline.setEndpoint(telemetryPrefs.telemetryEndpoint || '');
   telemetryPipeline.setAuthToken(telemetryPrefs.telemetryAuthToken || '');
 }
@@ -822,9 +826,16 @@ app.whenReady().then(async () => {
   // immediately — the success criterion that a runtime change needs no restart.
   serverProcess.on('message', (msg) => {
     if (msg && msg.type === 'telemetry-config') {
+      // The server forwards the already-sanitized per-category consent under
+      // `categories` ({ incidents: bool, names: bool }); map it back onto the
+      // registry's config keys. Anything absent stays as it was (and defaults off).
+      const categories = msg.categories && typeof msg.categories === 'object' ? msg.categories : {};
+      const forwarded = {};
+      for (const cat of TELEMETRY_CATEGORIES) {
+        if (typeof categories[cat.id] === 'boolean') forwarded[cat.configKey] = categories[cat.id];
+      }
       applyTelemetryConfig({
-        telemetryBaseEnabled: msg.base,
-        telemetryExtendedEnabled: msg.extended,
+        ...forwarded,
         telemetryEndpoint: msg.endpoint,
         telemetryAuthToken: msg.authToken,
       });
@@ -852,15 +863,15 @@ app.whenReady().then(async () => {
 
   // Telemetry source (WARDEN-463): attach the MAIN-process signal taps. With
   // base consent off (the default) this subscribes to nothing; it only begins
-  // capturing once applyTelemetryConfig turns consent on from the persisted
+  // capturing once applyTelemetryConfig turns a collecting category on from the persisted
   // pref. The renderer taps are attached per-window inside createWindow()
   // (win.webContents).
   telemetry.attachMain(process);
   // CONSENT + ENDPOINT, read from the persisted config at boot (the live-change
   // channel is the fork's IPC, not re-reads). Replaces the old hardcoded
-  // `setBaseConsent(false)`: a user who opted in (base on + endpoint set) now
-  // captures for real, while off-by-default / consent-off / no-endpoint are all
-  // preserved (the transport is the last gate). WARDEN-524.
+  // hardcoded all-off consent: a user who opted in (a collecting category on +
+  // endpoint set) now captures for real, while off-by-default / consent-off /
+  // no-endpoint are all preserved (the transport is the last gate). WARDEN-524.
   applyTelemetryConfig(readTelemetryPrefs());
 
   // Crash sentinel (WARDEN-687): detect a main-process hard kill from a PRIOR

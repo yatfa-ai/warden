@@ -6,7 +6,7 @@
 //   ~/.yatfa-warden/stalls.jsonl   — one JSON line per stall, append-only
 //
 // WHY A FILE AND NOT TELEMETRY: telemetry is opt-in and OFF by default
-// (config-schema.js `telemetryBaseEnabled`), so it cannot be the channel for a
+// (config-schema.js `telemetryIncidentsEnabled`), so it cannot be the channel for a
 // signal the owner needs to read on demand. A JSONL file in the warden data dir
 // — beside config.json and activity.jsonl, the established home for local state
 // (WARDEN-831/832) — needs no consent, no rebuild, no debugger and no

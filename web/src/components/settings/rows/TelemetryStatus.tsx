@@ -8,33 +8,35 @@ import { deriveTelemetrySendingStatus } from '@/lib/telemetry/destination';
 
 /**
  * WARDEN-557 — the honest "is signal actually flowing?" status for the
- * Telemetry section. A pure, live-derived view of the two already-bound prefs
- * `telemetryBaseEnabled` × `telemetryEndpoint` (no new consent flag, no
- * transport change, no delivery feedback). It reads the same values the
- * consent toggles and endpoint field use, so it re-renders the instant either
- * changes — there is no shadow state.
+ * Telemetry section. A pure, live-derived view of the already-bound prefs
+ * (whether a COLLECTING consent category is on) × `telemetryEndpoint` (no new
+ * consent flag, no transport change, no delivery feedback). It reads the same
+ * values the consent switches and endpoint field mutate, so it re-renders the
+ * instant either changes — there is no shadow state.
  *
  * Three states (see deriveTelemetrySendingStatus):
- *  - base OFF → renders nothing (off is off).
- *  - base ON + blank endpoint → amber notice: enabled but no receiver is
+ *  - nothing collecting → renders nothing (off is off). WARDEN-1116: a
+ *    decorating-only consent (names on, nothing collecting) lands here, because
+ *    no event is produced for a name to ride on.
+ *  - collecting + blank endpoint → amber notice: enabled but no receiver is
  *    configured, so nothing is being sent (the silently-inert opt-in).
- *  - base ON + endpoint set → positive destination confirmation (host only,
+ *  - collecting + endpoint set → positive destination confirmation (host only,
  *    derived from the configured URL; NOT a reachability claim).
  */
 export function TelemetrySendingStatus({
-  baseEnabled,
+  collecting,
   endpoint,
 }: {
-  baseEnabled: boolean;
+  collecting: boolean;
   endpoint: string;
 }) {
-  const status = deriveTelemetrySendingStatus({ baseEnabled, endpoint });
+  const status = deriveTelemetrySendingStatus({ collecting, endpoint });
   if (status.kind === 'off') return null;
   if (status.kind === 'unconfigured') {
     return (
       // role="status" (an aria-live=polite region): the whole point of this
-      // slice is that the status updates live as the user toggles base consent
-      // or edits the endpoint. The unconfigured notice is the state change most
+      // slice is that the status updates live as the user toggles a consent
+      // category or edits the endpoint. The unconfigured notice is the state change most
       // worth announcing — "you opted in, but nothing is being sent yet."
       <div
         role="status"

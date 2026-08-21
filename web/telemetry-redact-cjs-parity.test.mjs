@@ -20,18 +20,24 @@ import assert from 'node:assert/strict';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 
-// --- Load the REAL redact.ts (TS -> ESM via the OXC transform Vite bundles) ----
-const tsPath = resolve(__dirname, 'src/lib/telemetry/redact.ts');
-const tsSrc = readFileSync(tsPath, 'utf8');
-const { code } = await transformWithOxc(tsSrc, tsPath, {});
+// --- Load the REAL redact.ts + its './consent' sibling (TS -> ESM via OXC) -----
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-telemetry-cjs-parity-'));
-const tsTmp = join(tmpDir, 'redact.mjs');
-writeFileSync(tsTmp, code);
-const { redact: tsRedact, scrubString: tsScrubString } = await import(tsTmp);
+for (const name of ['consent', 'redact']) {
+  const modPath = resolve(__dirname, `src/lib/telemetry/${name}.ts`);
+  let { code } = await transformWithOxc(readFileSync(modPath, 'utf8'), modPath, {});
+  code = code.replace(/from\s+(["'])\.\/consent\1/g, 'from "./consent.mjs"');
+  writeFileSync(join(tmpDir, `${name}.mjs`), code);
+}
+const { redact: tsRedact, scrubString: tsScrubString } = await import(join(tmpDir, 'redact.mjs'));
+const { TELEMETRY_CATEGORY_IDS: tsCategoryIds } = await import(join(tmpDir, 'consent.mjs'));
 rmSync(tmpDir, { recursive: true, force: true });
 
-// --- Load the CJS mirror ------------------------------------------------------
+// --- Load the CJS mirrors -----------------------------------------------------
 const { redact: cjsRedact, scrubString: cjsScrubString } = require('../electron/telemetry-redact.cjs');
+const {
+  TELEMETRY_CATEGORY_IDS: cjsCategoryIds,
+  normalizeConsent: cjsNormalizeConsent,
+} = require('../src/telemetry-consent.cjs');
 
 let passed = 0;
 const test = (name, fn) => {
@@ -40,9 +46,29 @@ const test = (name, fn) => {
   console.log('  ok -', name);
 };
 
-// Every consent tier the pipeline resolver can hand the redactor, including the
-// "most-redacted" fallbacks for unrecognized / missing tiers.
-const TIERS = ['base', 'extended', 'off', undefined, null, 'weird', '', 42];
+// Every consent shape the pipeline resolver can hand the redactor: each real
+// combination of the registry's categories, plus the "most-redacted" fallbacks
+// for unrecognized / missing / corrupt values (including a stale TIER STRING
+// from a pre-WARDEN-1116 build, which must resolve to nothing enabled).
+const CONSENTS = [
+  {},
+  { incidents: true },
+  { names: true },
+  { incidents: true, names: true },
+  { incidents: false, names: false },
+  { names: 'yes' },
+  { names: 1 },
+  { unknownCategory: true },
+  undefined,
+  null,
+  'base',
+  'extended',
+  'off',
+  'weird',
+  '',
+  42,
+  [],
+];
 
 // A canonical event exercising every hard-exclusion category (credentials, paths,
 // hosts, IPv4/IPv6, MAC, content, prompts) plus the identifier fields (names).
@@ -100,21 +126,31 @@ const BATTERY = [
   // Structured stack frames (WARDEN-680): a frame's `file`/`function` source
   // basename must survive while host-shaped values still redact. Guards the
   // mirror against drift on the frame-scoped preserveSource path across every
-  // tier — basename, host-shaped, dotted-host, and a ccTLD-colliding extension.
+  // consent — basename, host-shaped, dotted-host, and a ccTLD-colliding extension.
   { frames: [{ function: 'handleSend', file: 'server.js', line: 601, column: 12 }, { function: 'render', file: 'App.tsx' }, { file: 'telemetry-pipeline.cjs' }] },
   { error: { name: 'TypeError', message: 'boom at api.github.com and server.js', frames: [{ file: 'server.js', line: 1 }, { file: 'api.github.com', line: 443 }, { file: 'prod-db-01.corp.local' }] } },
   { frames: [{ file: 'config.json' }, { file: 'index.ts' }, { file: 'main.cjs' }, { function: 'Object.defineProperty', file: 'redact.ts' }, { file: 'example.py' }] },
 ];
 
-console.log('\nparity — cjsRedact === tsRedact across the battery × every tier');
+console.log('\nparity — the two redactors gate on the same category set');
+
+test('both redactors see the same category ids, in the same order', () => {
+  // The redaction gate is keyed off the consent registry, so a registry that
+  // diverged between the TS and CJS sides would gate different fields even with
+  // identical redaction rules. Full consent-authority parity (resolver, queries,
+  // migration) is pinned in web/telemetry-consent-cjs-parity.test.mjs.
+  assert.deepEqual([...cjsCategoryIds], [...tsCategoryIds]);
+});
+
+console.log('\nparity — cjsRedact === tsRedact across the battery × every consent combination');
 
 for (const input of BATTERY) {
-  for (const tier of TIERS) {
-    test(`deepEqual for input ${String(JSON.stringify(input)).slice(0, 40)} @ tier ${JSON.stringify(tier)}`, () => {
+  for (const consent of CONSENTS) {
+    test(`deepEqual for input ${String(JSON.stringify(input)).slice(0, 40)} @ consent ${JSON.stringify(consent)}`, () => {
       assert.deepEqual(
-        cjsRedact(input, { tier }),
-        tsRedact(input, { tier }),
-        `CJS mirror must match redact.ts exactly for tier ${JSON.stringify(tier)}`,
+        cjsRedact(input, { consent }),
+        tsRedact(input, { consent }),
+        `CJS mirror must match redact.ts exactly for consent ${JSON.stringify(consent)}`,
       );
     });
   }
@@ -149,10 +185,14 @@ for (const s of SCRUB_BATTERY) {
 console.log('\nparity — idempotency holds in the CJS mirror (re-redacting is a no-op)');
 
 test('CJS redact is idempotent (matches TS idempotency)', () => {
-  const once = cjsRedact(CANONICAL, { tier: 'extended' });
-  assert.deepEqual(cjsRedact(once, { tier: 'extended' }), once);
+  const consent = cjsNormalizeConsent({ incidents: true, names: true });
+  const once = cjsRedact(CANONICAL, { consent });
+  assert.deepEqual(cjsRedact(once, { consent }), once);
   // And the CJS idempotent output equals the TS idempotent output.
-  assert.deepEqual(cjsRedact(once, { tier: 'extended' }), tsRedact(tsRedact(CANONICAL, { tier: 'extended' }), { tier: 'extended' }));
+  assert.deepEqual(
+    cjsRedact(once, { consent }),
+    tsRedact(tsRedact(CANONICAL, { consent }), { consent }),
+  );
 });
 
 console.log(`\n✓ TELEMETRY CJS-REDACT PARITY TESTS PASS (${passed})`);

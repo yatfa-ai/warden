@@ -71,8 +71,8 @@ const DEFAULT_CONFIG: ConfigData = {
   showProjectBadges: false,
   hideOfflineHosts: false,
   // Telemetry consent (WARDEN-457) — off by default.
-  telemetryBaseEnabled: false,
-  telemetryExtendedEnabled: false,
+  telemetryIncidentsEnabled: false,
+  telemetryNamesEnabled: false,
   // Receiver endpoint (WARDEN-522) — empty by default = unconfigured = no-op.
   telemetryEndpoint: '',
   // Webhook push channel (WARDEN-555) — off by default; both routing toggles on.
@@ -358,8 +358,11 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
         hideOfflineHosts: configData.hideOfflineHosts ?? false,
         // Telemetry consent (WARDEN-457) — defensive ?? false so an older
         // backend that does not return the fields stays safely OFF.
-        telemetryBaseEnabled: configData.telemetryBaseEnabled ?? false,
-        telemetryExtendedEnabled: configData.telemetryExtendedEnabled ?? false,
+        // WARDEN-1116 — per-category consent, each independent and defaulting to
+        // OFF when the backend omits it (a partial/older GET can never turn a
+        // category on by accident).
+        telemetryIncidentsEnabled: configData.telemetryIncidentsEnabled === true,
+        telemetryNamesEnabled: configData.telemetryNamesEnabled === true,
         // Defensive ?? '' so an older backend that does not return the field
         // stays safely unconfigured (empty = sends nothing).
         telemetryEndpoint: configData.telemetryEndpoint ?? '',

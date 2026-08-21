@@ -203,12 +203,21 @@ describe('applyConfigPut — PUT guards derived from the registry', () => {
 
   it('runs both cross-field invariants after the per-field loop', () => {
     // health warning <= critical
-    const cfg = { healthWarningThresholdMin: 5, healthCriticalThresholdMin: 30, telemetryBaseEnabled: true, telemetryExtendedEnabled: true };
+    const cfg = { healthWarningThresholdMin: 5, healthCriticalThresholdMin: 30, telemetryIncidentsEnabled: true, telemetryNamesEnabled: true };
     applyConfigPut(cfg, { healthWarningThresholdMin: 60, healthCriticalThresholdMin: 30 });
     assert.strictEqual(cfg.healthWarningThresholdMin, 30, 'inverted pair clamped');
-    // telemetry extended-requires-base (revoking base latches extended)
-    applyConfigPut(cfg, { telemetryBaseEnabled: false });
-    assert.strictEqual(cfg.telemetryExtendedEnabled, false, 'extended latched off when base revoked');
+    // WARDEN-1116 — telemetry consent is SANITIZED (every category coerced to a
+    // real boolean) but NOT clamped between categories: revoking one category
+    // must leave the others exactly as the user set them.
+    applyConfigPut(cfg, { telemetryIncidentsEnabled: false });
+    assert.strictEqual(cfg.telemetryIncidentsEnabled, false, 'incidents revoked');
+    assert.strictEqual(cfg.telemetryNamesEnabled, true,
+      'names is INDEPENDENT — revoking incidents must not silently revoke it');
+    // A corrupt (non-boolean) persisted value is sanitized to false by crossField
+    // even though the per-field PUT guard ignored the bad body value.
+    cfg.telemetryNamesEnabled = 'yes';
+    applyConfigPut(cfg, {});
+    assert.strictEqual(cfg.telemetryNamesEnabled, false, 'non-boolean consent sanitized to off');
   });
 
   it('no-clobbers secrets (empty/omitted preserves the stored value)', () => {
@@ -290,8 +299,8 @@ describe('resetConfig — restore every backend preference to its default (WARDE
       showStatusIndicators: false,
       showProjectBadges: true,
       hideOfflineHosts: true,
-      telemetryBaseEnabled: true,
-      telemetryExtendedEnabled: true,
+      telemetryIncidentsEnabled: true,
+      telemetryNamesEnabled: true,
       telemetryEndpoint: 'https://receiver.example/ingest',
       telemetryAuthToken: 'tok-ABCD',
       webhookUrl: 'https://hooks.example/notify',
@@ -336,7 +345,8 @@ describe('resetConfig — restore every backend preference to its default (WARDE
     assert.strictEqual(cfg.webhookUrl, '');
     assert.strictEqual(cfg.webhookEnabled, false);
     assert.strictEqual(cfg.telemetryEndpoint, '');
-    assert.strictEqual(cfg.telemetryBaseEnabled, false);
+    assert.strictEqual(cfg.telemetryIncidentsEnabled, false);
+    assert.strictEqual(cfg.telemetryNamesEnabled, false);
   });
 
   it('PRESERVES internal user data (pins / agentNotes / sessionTags)', () => {
@@ -351,15 +361,15 @@ describe('resetConfig — restore every backend preference to its default (WARDE
 
   it('leaves the restored state well-formed (crossField invariants hold)', () => {
     // The restored defaults run through crossField, exactly as a PUT would, so
-    // the persisted pair stays well-ordered and telemetry extended cannot be on
-    // without base. (Defaults are well-formed by construction; these assert the
-    // reset output satisfies the same invariants a PUT leaves behind.)
+    // the persisted pair stays well-ordered and every telemetry consent category
+    // is a real boolean. (Defaults are well-formed by construction; these assert
+    // the reset output satisfies the same invariants a PUT leaves behind.)
     const cfg = seeded();
     resetConfig(cfg);
     assert.ok(cfg.healthWarningThresholdMin <= cfg.healthCriticalThresholdMin,
       'health warning <= critical after reset');
-    assert.ok(!(cfg.telemetryExtendedEnabled && !cfg.telemetryBaseEnabled),
-      'telemetry extended-requires-base holds after reset');
+    assert.strictEqual(cfg.telemetryIncidentsEnabled, false, 'incidents off after reset');
+    assert.strictEqual(cfg.telemetryNamesEnabled, false, 'names off after reset');
   });
 
   it('mutates the cfg object in place and returns it', () => {
@@ -379,7 +389,7 @@ describe('afterSave — the four post-save side-effects (Correction 2)', () => {
   // (process.send + companion env) end-to-end.
   it('invokes all four deps in order with the right arguments', () => {
     const calls = [];
-    const cfg = { companionTransportEnabled: true, telemetryBaseEnabled: true };
+    const cfg = { companionTransportEnabled: true, telemetryIncidentsEnabled: true };
     afterSave(cfg, {
       forwardTelemetryConfig: (c) => calls.push(['forwardTelemetryConfig', c === cfg]),
       applyCompanionToggle: (enabled, opts) => calls.push(['applyCompanionToggle', enabled, opts]),

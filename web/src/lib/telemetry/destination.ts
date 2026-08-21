@@ -5,7 +5,7 @@
  * This is a *derived view of configuration only*. It does NOT touch the
  * transport (telemetry-send.js), does NOT add a consent flag, and does NOT
  * report delivery outcome (whether the receiver is reachable or accepts
- * events). Its sole job: given `baseEnabled` × `endpoint`, tell the user
+ * events). Its sole job: given `collecting` × `endpoint`, tell the user
  * whether their opt-in is live or silently inert — and if live, name the
  * destination host.
  *
@@ -41,12 +41,12 @@ export function telemetryDestinationLabel(raw: string): string {
 }
 
 export type TelemetrySendingStatus =
-  // Base consent off — off is off; the UI renders no sending status.
+  // Nothing is being collected — off is off; the UI renders no sending status.
   | { kind: 'off' }
-  // Base on but no receiver endpoint — the silently-inert opt-in: the
+  // Collecting but no receiver endpoint — the silently-inert opt-in: the
   // transport no-ops, events buffer in memory and are dropped.
   | { kind: 'unconfigured' }
-  // Base on and a receiver endpoint is set — events will go to `destination`.
+  // Collecting and a receiver endpoint is set — events will go to `destination`.
   // `destination` is host-only (no path) and is NOT a reachability claim.
   | { kind: 'configured'; destination: string };
 
@@ -55,15 +55,20 @@ export type TelemetrySendingStatus =
  * inputs → same output, no stale closures. The endpoint is trimmed for the
  * blank check so a whitespace-only field reads as "unconfigured" (a real URL
  * has not been set); the persisted value itself is left untouched.
+ *
+ * WARDEN-1116 — `collecting` is "a COLLECTING consent category is enabled"
+ * (`collectsEvents`), not "the base tier is on". A decorating-only consent (e.g.
+ * names with nothing collecting) is `off` here, which is the truth: no event is
+ * produced, so nothing is sent.
  */
 export function deriveTelemetrySendingStatus({
-  baseEnabled,
+  collecting,
   endpoint,
 }: {
-  baseEnabled: boolean;
+  collecting: boolean;
   endpoint: string;
 }): TelemetrySendingStatus {
-  if (!baseEnabled) return { kind: 'off' };
+  if (!collecting) return { kind: 'off' };
   // telemetryDestinationLabel('') === '', and for any non-blank input it
   // returns a non-empty host (or the raw value), so emptiness here is exactly
   // "no real endpoint configured".

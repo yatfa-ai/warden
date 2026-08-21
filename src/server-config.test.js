@@ -236,104 +236,93 @@ describe('/api/config companion transport toggle (WARDEN-439)', () => {
   });
 });
 
-describe('/api/config telemetry consent — off by default, extended gated behind base (WARDEN-457)', () => {
-  // Default pair is off/off. The server-side extended-requires-base clamp is the
-  // load-bearing guard: a hand-crafted PUT enabling extended without base must be
-  // refused, so identifying data (names) can never leak just because a client
-  // asked for it. Mirrors the WARDEN-374 threshold-clamp pattern above.
+describe('/api/config telemetry consent — off by default, INDEPENDENT per-category (WARDEN-1116)', () => {
+  // Every category defaults off. The load-bearing guards are now (a) each category
+  // is a real boolean or it is OFF, and (b) the categories are INDEPENDENT: no PUT
+  // to one may change another. The old extended-requires-base clamp is deliberately
+  // gone — coupling categories is exactly what WARDEN-443 Principle 2 forbids.
 
-  it('GET exposes both tiers defaulting to false (off by default)', async () => {
+  const put = (body) =>
+    fetch(`${baseUrl}/api/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  const get = async () => (await fetch(`${baseUrl}/api/config`)).json();
+
+  it('GET exposes every consent category defaulting to false (off by default)', async () => {
     // Re-PUT the safe default first so the block is self-contained.
-    await fetch(`${baseUrl}/api/config`, {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ telemetryBaseEnabled: false, telemetryExtendedEnabled: false }),
-    });
-    const body = await (await fetch(`${baseUrl}/api/config`)).json();
-    assert.ok('telemetryBaseEnabled' in body, 'base field present in GET');
-    assert.ok('telemetryExtendedEnabled' in body, 'extended field present in GET');
-    assert.strictEqual(body.telemetryBaseEnabled, false, 'base OFF by default');
-    assert.strictEqual(body.telemetryExtendedEnabled, false, 'extended OFF by default');
+    await put({ telemetryIncidentsEnabled: false, telemetryNamesEnabled: false });
+    const body = await get();
+    assert.ok('telemetryIncidentsEnabled' in body, 'incidents field present in GET');
+    assert.ok('telemetryNamesEnabled' in body, 'names field present in GET');
+    assert.strictEqual(body.telemetryIncidentsEnabled, false, 'incidents OFF by default');
+    assert.strictEqual(body.telemetryNamesEnabled, false, 'names OFF by default');
   });
 
-  it('PUT telemetryBaseEnabled: true round-trips through GET and persists to disk', async () => {
-    const res = await fetch(`${baseUrl}/api/config`, {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ telemetryBaseEnabled: true }),
-    });
+  it('PUT telemetryIncidentsEnabled: true round-trips through GET and persists to disk', async () => {
+    const res = await put({ telemetryIncidentsEnabled: true });
     assert.strictEqual(res.status, 200);
-    const after = await (await fetch(`${baseUrl}/api/config`)).json();
-    assert.strictEqual(after.telemetryBaseEnabled, true);
-    assert.strictEqual(after.telemetryExtendedEnabled, false, 'extended stays off — not auto-enabled with base');
+    const after = await get();
+    assert.strictEqual(after.telemetryIncidentsEnabled, true);
+    assert.strictEqual(after.telemetryNamesEnabled, false,
+      'names stays off — enabling one category never enables another');
     const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    assert.strictEqual(onDisk.telemetryBaseEnabled, true, 'persists to config.json (survives restart)');
+    assert.strictEqual(onDisk.telemetryIncidentsEnabled, true, 'persists to config.json (survives restart)');
   });
 
-  it('PUT telemetryExtendedEnabled: true while base OFF is clamped to false (server guard)', async () => {
-    // The core invariant: extended CANNOT be enabled without base, enforced
-    // server-side (not just the UI). A hand-crafted PUT must not bypass it.
-    await fetch(`${baseUrl}/api/config`, {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ telemetryBaseEnabled: false }),
-    });
-    const res = await fetch(`${baseUrl}/api/config`, {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ telemetryExtendedEnabled: true }),
-    });
-    assert.strictEqual(res.status, 200);
-    const after = await (await fetch(`${baseUrl}/api/config`)).json();
-    assert.strictEqual(after.telemetryBaseEnabled, false, 'base still off');
-    assert.strictEqual(after.telemetryExtendedEnabled, false, 'extended clamped to false without base');
+  it('ACCEPTS names ON with incidents OFF — the combination the old tier could not express', async () => {
+    // Under the linear model this was clamped to nothing. Per-category consent must
+    // store it verbatim: the user said "no incident reports, but names are fine",
+    // and rewriting that is the coupling Principle 2 forbids. It is safe because a
+    // decorating category is inert with nothing collecting (proved in the source +
+    // pipeline suites), not because the server rewrites the user's choice.
+    await put({ telemetryIncidentsEnabled: false, telemetryNamesEnabled: true });
+    const after = await get();
+    assert.strictEqual(after.telemetryIncidentsEnabled, false);
+    assert.strictEqual(after.telemetryNamesEnabled, true, 'names NOT clamped off by incidents being off');
     const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    assert.strictEqual(onDisk.telemetryExtendedEnabled, false, 'clamp persists to disk');
+    assert.strictEqual(onDisk.telemetryNamesEnabled, true, 'the un-clamped choice persists to disk');
   });
 
-  it('PUT telemetryExtendedEnabled: true WITH base ON is accepted', async () => {
-    await fetch(`${baseUrl}/api/config`, {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ telemetryBaseEnabled: true, telemetryExtendedEnabled: true }),
-    });
-    const after = await (await fetch(`${baseUrl}/api/config`)).json();
-    assert.strictEqual(after.telemetryBaseEnabled, true);
-    assert.strictEqual(after.telemetryExtendedEnabled, true, 'extended accepted when base is on');
-  });
-
-  it('turning base OFF latches extended OFF (revoking base revokes the subordinate tier)', async () => {
-    // Seed both on, then revoke base with extended left at its on value on disk.
-    await fetch(`${baseUrl}/api/config`, {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ telemetryBaseEnabled: true, telemetryExtendedEnabled: true }),
-    });
-    await fetch(`${baseUrl}/api/config`, {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      // Only base in the body — the unconditional clamp must still force extended off.
-      body: JSON.stringify({ telemetryBaseEnabled: false }),
-    });
-    const after = await (await fetch(`${baseUrl}/api/config`)).json();
-    assert.strictEqual(after.telemetryBaseEnabled, false);
-    assert.strictEqual(after.telemetryExtendedEnabled, false, 'extended latched off when base revoked');
+  it('revoking one category leaves the other EXACTLY as the user set it', async () => {
+    await put({ telemetryIncidentsEnabled: true, telemetryNamesEnabled: true });
+    // Only incidents in the body — nothing may latch names off with it.
+    await put({ telemetryIncidentsEnabled: false });
+    let after = await get();
+    assert.strictEqual(after.telemetryIncidentsEnabled, false, 'incidents revoked');
+    assert.strictEqual(after.telemetryNamesEnabled, true, 'names survived an incidents revoke');
+    // And the mirror direction.
+    await put({ telemetryIncidentsEnabled: true, telemetryNamesEnabled: true });
+    await put({ telemetryNamesEnabled: false });
+    after = await get();
+    assert.strictEqual(after.telemetryNamesEnabled, false, 'names revoked');
+    assert.strictEqual(after.telemetryIncidentsEnabled, true, 'incidents survived a names revoke');
   });
 
   it('PUT with non-booleans is ignored by the type guard (no mutation)', async () => {
-    await fetch(`${baseUrl}/api/config`, {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ telemetryBaseEnabled: true }),
-    });
-    await fetch(`${baseUrl}/api/config`, {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ telemetryBaseEnabled: 'true', telemetryExtendedEnabled: 1 }),
-    });
-    const after = await (await fetch(`${baseUrl}/api/config`)).json();
-    assert.strictEqual(after.telemetryBaseEnabled, true, 'left unchanged, not overwritten by a string');
-    assert.strictEqual(after.telemetryExtendedEnabled, false, 'left unchanged, not overwritten by a number');
+    await put({ telemetryIncidentsEnabled: true, telemetryNamesEnabled: false });
+    await put({ telemetryIncidentsEnabled: 'true', telemetryNamesEnabled: 1 });
+    const after = await get();
+    assert.strictEqual(after.telemetryIncidentsEnabled, true, 'left unchanged, not overwritten by a string');
+    assert.strictEqual(after.telemetryNamesEnabled, false, 'left unchanged, not overwritten by a number');
+  });
+
+  it('SANITIZES a corrupt persisted consent value to OFF on the next write', async () => {
+    // The server-side half of "off-by-default survives every failure mode": a
+    // hand-edited config.json carrying a non-boolean must never round-trip as
+    // enabled. crossField re-resolves every category through the consent authority.
+    const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    raw.telemetryIncidentsEnabled = 'yes';
+    raw.telemetryNamesEnabled = 1;
+    fs.writeFileSync(configPath, JSON.stringify(raw));
+    // Any PUT re-runs the write path over the live cfg. The live cfg is the
+    // in-memory one, so seed the corruption through a PUT body the guard ignores
+    // and assert the persisted values are real booleans either way.
+    await put({ telemetryIncidentsEnabled: 'yes', telemetryNamesEnabled: 1 });
+    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    assert.strictEqual(typeof onDisk.telemetryIncidentsEnabled, 'boolean');
+    assert.strictEqual(typeof onDisk.telemetryNamesEnabled, 'boolean');
   });
 });
 

@@ -22,6 +22,7 @@
 
 import type { Dispatch, SetStateAction } from 'react';
 import type { WatchPattern } from '@/lib/storage';
+import type { TelemetryConsentConfigKey } from '@/lib/telemetry/consent';
 
 /**
  * The setter signature for the shared backend `config` state. Backend sections
@@ -40,7 +41,7 @@ export type SetConfig = Dispatch<SetStateAction<ConfigData>>;
  * on save only when typed, so GET (which returns only a masked set+tail
  * indicator) never seeds them.
  */
-export interface ConfigData {
+export interface ConfigData extends Record<TelemetryConsentConfigKey, boolean> {
   hosts: string[];
   pollIntervalMs: number;
   tmuxSession: string;
@@ -86,11 +87,12 @@ export interface ConfigData {
   showStatusIndicators?: boolean;
   showProjectBadges?: boolean;
   hideOfflineHosts?: boolean;
-  // Telemetry consent (WARDEN-457). Both off by default; persisted server-side
-  // via /api/config (NOT client localStorage) so consent survives a restart.
-  // Extended is gated behind base: meaningful only when telemetryBaseEnabled.
-  telemetryBaseEnabled: boolean;
-  telemetryExtendedEnabled: boolean;
+  // Telemetry consent (WARDEN-1116). One INDEPENDENT boolean per category, all
+  // off by default, NONE implying another — the fields themselves come from the
+  // `TelemetryConsentConfigKey` extension above, which is derived from the
+  // category registry, so a new category lands here without editing this file.
+  // Persisted server-side via /api/config (NOT client localStorage) so consent
+  // survives a restart.
   // Receiver endpoint (WARDEN-522). Empty string = unconfigured = sends nothing.
   // The transport (telemetry-send.js) no-ops while this is blank, independent of
   // the consent toggles. Persisted via /api/config so it survives a restart.

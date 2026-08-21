@@ -7,12 +7,14 @@
 // isolated modules into one functioning `record()` path. A recorded event flows:
 //
 //   record(event)
-//     → resolve effective tier (base / extended / off)
-//     → off / unknown / undefined?  HARD NO-OP  (send nothing; also CLEAR the replay
-//       buffer so a buffered event never survives an opt-out — WARDEN-671)
+//     → resolve effective PER-CATEGORY consent (WARDEN-1116 — the single authority
+//       in src/telemetry-consent.cjs; never a tier string)
+//     → nothing being COLLECTED (all off / unknown / corrupt / decorating-only)?
+//       HARD NO-OP  (send nothing; also CLEAR the replay buffer so a buffered
+//       event never survives an opt-out — WARDEN-671)
 //     → flush the in-memory replay buffer first if non-empty (re-dispatch prior
 //       transient-exhausted drops through dispatch(), in arrival order — WARDEN-671)
-//     → redact(payload, { tier })                 [slice 2, SHIPPED — injected]
+//     → redact(payload, { consent })              [slice 2, SHIPPED — injected]
 //     → validate(redacted)                        [schema check — injected]
 //     → invalid?  drop pre-send (never send an invalid payload)
 //     → send({ events, consent, endpointUrl, schemaVersion, fetchImpl, sleepImpl })
@@ -82,21 +84,21 @@ const {
   hostOf,
   noopTransmissionLog,
 } = require('./telemetry-transmission-log.cjs');
+// WARDEN-1116 — THE consent authority. The pipeline makes no consent decision of
+// its own: it normalizes whatever the injected resolver returns through
+// normalizeConsent and asks collectsEvents whether anything is being collected.
+// A missing / corrupt / unrecognized value normalizes to nothing enabled, so a
+// bad consent value can never accidentally send.
+const {
+  NO_CONSENT,
+  collectsEvents,
+  normalizeConsent,
+} = require('../src/telemetry-consent.cjs');
 
-// Effective consent tiers (mirrors slice 2's ConsentTier). Anything other than
-// 'base' / 'extended' resolves to 'off' (hard no-op) — a missing or corrupt
-// consent value can never accidentally send.
-const TIERS = Object.freeze({ BASE: 'base', EXTENDED: 'extended', OFF: 'off' });
-
-// Resolve an arbitrary consent value to a known tier. Unknown / undefined → 'off'.
-function resolveTier(value) {
-  if (value === TIERS.BASE || value === TIERS.EXTENDED) return value;
-  return TIERS.OFF;
-}
-
-// Safe default consent resolver: OFF. Slice 1's consent pref is injected.
+// Safe default consent resolver: everything OFF. The live per-category prefs are
+// injected by main.cjs.
 function defaultConsent() {
-  return TIERS.OFF;
+  return NO_CONSENT;
 }
 
 // Safe default transport: sends NOTHING. Out of the box the pipeline cannot phone
@@ -167,7 +169,7 @@ function isDeliveryFailing(entries, threshold) {
 //                       redact → validate → transport. Exposed for direct testing
 //                       and as the future buffer-flush entry point; it redacts +
 //                       validates the payload itself, so it cannot leak.
-//   .effectiveTier()  — the resolved tier (for tests + live introspection)
+//   .effectiveConsent() — the resolved per-category consent (tests + introspection)
 //   .setConsent(fn) / .setRedact(fn) / .setValidate(fn) / .setSend(fn)
 //   .setEndpoint(url) / .setAuthToken(token) / .setSchemaVersion(n)
 //                     — hot-swap seams (slice 1/3 wiring + WARDEN-569 auth)
@@ -222,7 +224,7 @@ function createTelemetryPipeline(opts) {
   //   4. NEVER buffers drifted (415) or non-retryable 4xx drops — only the
   //      transient-exhausted (replayable) drop is recoverable (replaying the others
   //      is futile and would fight the drift breaker / waste the retry budget).
-  //   5. CLEARS the instant the effective tier flips to off — no event lingers after
+  //   5. CLEARS the instant collection stops — no event lingers after
   //      the user opts out (upholds "revocable"). record()'s layer-1 guard is the
   //      clear site.
   const replayBufferCap =
@@ -274,13 +276,14 @@ function createTelemetryPipeline(opts) {
     }
   }
 
-  // Resolve the current effective tier. A throwing consent resolver (slice 1 bug,
-  // missing pref, etc.) degrades to OFF — telemetry must never crash the host.
-  function effectiveTier() {
+  // Resolve the current effective per-category consent. A throwing consent
+  // resolver (a wiring bug, a missing pref, etc.) degrades to NOTHING ENABLED —
+  // telemetry must never crash the host, and must never send on a failure.
+  function effectiveConsent() {
     try {
-      return resolveTier(consent());
+      return normalizeConsent(consent());
     } catch {
-      return TIERS.OFF;
+      return NO_CONSENT;
     }
   }
 
@@ -320,20 +323,24 @@ function createTelemetryPipeline(opts) {
     });
   }
 
-  // The airtight processing core: resolve the tier → redact → validate → transport,
+  // The airtight processing core: resolve consent → redact → validate → transport,
   // with its OWN consent guard. This redacts and validates the payload ITSELF (it
   // does not trust the caller to have done so), so no matter how it is reached —
   // record(), or the replay-buffer flush (WARDEN-671) — only a redacted + schema-
-  // validated payload can ever reach transport, and only when the effective tier is
-  // not OFF. The consent guard here is the SECOND layer of "off = nothing"; record()
+  // validated payload can ever reach transport, and only while a collecting
+  // category is enabled. The consent guard here is the SECOND layer of "off = nothing"; record()
   // is the first. Both layers re-resolve LIVE consent, so a consent revoked between the
   // entry gate and dispatch (or after a buffer held an event) still prevents a
   // send. Transport errors (sync throw OR async rejection) are swallowed: a
   // telemetry failure must never throw the instrumented process into a worse state
   // (mirrors telemetry-source's emit()).
   function dispatch(payload) {
-    const tier = effectiveTier();
-    if (tier === TIERS.OFF) return; // layer 2 consent guard (defense in depth)
+    const consentState = effectiveConsent();
+    // Layer 2 consent guard (defense in depth). Nothing COLLECTING on → nothing
+    // is dispatched. A decorating-only consent (e.g. names with no collecting
+    // category) is naturally inert here: there is no event to decorate, so the
+    // gate closes without needing a clamp between categories.
+    if (!collectsEvents(consentState)) return;
 
     // WARDEN-631 — circuit-breaker. If the current endpoint already rejected the
     // current schema (415), do NOT redact/validate/POST: the receiver cannot
@@ -347,7 +354,7 @@ function createTelemetryPipeline(opts) {
 
     let redacted;
     try {
-      redacted = redact(payload, { tier });
+      redacted = redact(payload, { consent: consentState });
     } catch {
       return; // a throwing redactor degrades to a dropped event, not a crash
     }
@@ -403,21 +410,24 @@ function createTelemetryPipeline(opts) {
       const targetEndpoint = endpointUrl;
       const result = transportSend({
         events,
-        consent: tier,
+        // The transport's gate is a plain truthiness check on `consent`; hand it
+        // the resolved boolean "something is being collected" rather than a tier
+        // string, so the gate means exactly what it reads.
+        consent: true,
         endpointUrl,
         schemaVersion,
         authToken,
         fetchImpl,
         sleepImpl,
         // LIVE consent for the transport's in-loop re-check (WARDEN-585). Re-resolves
-        // the SAME source this layer-2 guard uses — effectiveTier(), which re-reads
-        // consent() and degrades to OFF on a throwing resolver — so a revoke that
-        // lands during the transport's bounded-retry backoff halts the in-flight
-        // batch before its next attempt. "Halts all traffic immediately" now holds
-        // end-to-end (toggle → dispatch → WIRE), not just up to this boundary. The
-        // snapshot `tier` above stays as the transport's entry gate; this callback
-        // is the mid-loop re-check between attempts.
-        isConsentActive: () => effectiveTier() !== TIERS.OFF,
+        // the SAME source this layer-2 guard uses — effectiveConsent(), which re-reads
+        // consent() and degrades to nothing-enabled on a throwing resolver — so a
+        // revoke that lands during the transport's bounded-retry backoff halts the
+        // in-flight batch before its next attempt. "Turning a category off halts its
+        // traffic immediately" holds end-to-end (toggle → dispatch → WIRE), not just
+        // up to this boundary. The snapshot above stays as the transport's entry
+        // gate; this callback is the mid-loop re-check between attempts.
+        isConsentActive: () => collectsEvents(effectiveConsent()),
       });
       // Route the transport outcome into the transmission log instead of
       // swallowing it (WARDEN-583 — verifiability's third leg), arm/clear the
@@ -496,15 +506,15 @@ function createTelemetryPipeline(opts) {
 
   // The assembled pipeline entry point.
   function record(event) {
-    // Layer 1 — resolve the effective tier. off / unknown / undefined → HARD
-    // NO-OP: never hand anything to dispatch() (dispatch() guards again — layer 2 —
-    // so the two layers are independent). WARDEN-671: off also CLEARS the replay
-    // buffer so no event lingers after the user opts out (upholds "revocable").
-    // Events recorded while off were never dispatched, so the ring is normally empty
-    // here, but a revoke that lands AFTER a replayable drop filled the ring must not
-    // let a buffered event survive the opt-out — clear it at the natural clear site.
-    const tier = effectiveTier();
-    if (tier === TIERS.OFF) {
+    // Layer 1 — resolve the effective per-category consent. Nothing collecting
+    // (all off / unknown / corrupt / decorating-only) → HARD NO-OP: never hand
+    // anything to dispatch() (dispatch() guards again — layer 2 — so the two
+    // layers are independent). WARDEN-671: it also CLEARS the replay buffer so no
+    // event lingers after the user opts out (upholds "revocable"). Events recorded
+    // while off were never dispatched, so the ring is normally empty here, but a
+    // revoke that lands AFTER a replayable drop filled the ring must not let a
+    // buffered event survive the opt-out — clear it at the natural clear site.
+    if (!collectsEvents(effectiveConsent())) {
       pendingRing.length = 0;
       return;
     }
@@ -530,7 +540,7 @@ function createTelemetryPipeline(opts) {
   return {
     record,
     dispatch,
-    effectiveTier,
+    effectiveConsent,
     setConsent(fn) {
       if (typeof fn === 'function') consent = fn;
     },
@@ -549,7 +559,7 @@ function createTelemetryPipeline(opts) {
       endpointUrl = next;
       // WARDEN-631 — a real endpoint change may resolve drift: the new destination
       // is a different receiver that may accept the current schema. applyTelemetry-
-      // Config calls this on EVERY pref update (incl. a tier toggle), so the
+      // Config calls this on EVERY pref update (incl. a category toggle), so the
       // change-guard above is what prevents a same-endpoint toggle from clearing
       // the breaker and re-arming a futile send.
       if (drifted) {
@@ -601,10 +611,8 @@ function createTelemetryPipeline(opts) {
 }
 
 module.exports = {
-  TIERS,
   SCHEMA_VERSION,
   BASE_EVENT_TYPES,
-  resolveTier,
   createTelemetryPipeline,
   isDeliveryFailing,
 };
