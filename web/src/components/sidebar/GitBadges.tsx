@@ -32,6 +32,7 @@ import { formatRelative, formatAbsoluteFull } from '@/lib/formatTimestamp';
 import type { GitCommit, GitFile, GitStash, GitReflogEntry, GitRemote, GitBranch, DiffStat } from './types';
 import { DiffStatChip } from './DiffStatChip';
 import { readListBody, readListResponse } from '@/lib/api';
+import { readFileDiff } from '@/lib/gitDiffApi';
 
 /**
  * Color the porcelain X/Y columns for one changed file (WARDEN-369). Working-tree
@@ -249,19 +250,35 @@ function DiffInspectRow({ file, buildUrl, label, onOpenFile }: { file: GitFile; 
   const [diff, setDiff] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [fetched, setFetched] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const toggle = async () => {
     if (!open && !fetched) {
       setLoading(true);
+      // Clear any previous failure BEFORE retrying, so a retry that succeeds does
+      // not render its diff underneath a stale error line.
+      setError(null);
       try {
-        const r = await fetch(buildUrl());
-        const j = await r.json();
-        setDiff(typeof j.diff === 'string' ? j.diff : null);
-      } catch {
+        // WARDEN-1187: read through the extracted seam, which honours BOTH halves
+        // of warden's error convention (non-2xx, and the 200-with-{error} half the
+        // `withGitRepo` no-cwd/catch-all paths use). It THROWS on failure, so the
+        // failure can no longer arrive here disguised as an empty diff.
+        const text = await readFileDiff(await fetch(buildUrl()));
+        // A genuinely empty diff stays empty and still renders "no diff" — only a
+        // real failure takes the catch below.
+        setDiff(text || null);
+        // Cache the SUCCESS only. Setting this in a `finally` (as the pre-fix code
+        // did) pinned a failed row to its error forever: the guard above is
+        // `!open && !fetched`, so collapsing and re-expanding — the user's only
+        // recovery affordance — silently did nothing until the component
+        // remounted. On the failure path `fetched` stays false, so a re-expand
+        // RE-ISSUES the fetch. Successful caching is unchanged.
+        setFetched(true);
+      } catch (e) {
         setDiff(null);
+        setError(e instanceof Error && e.message ? e.message : 'Failed to load diff');
       } finally {
         setLoading(false);
-        setFetched(true);
       }
     }
     setOpen((o) => !o);
@@ -292,6 +309,16 @@ function DiffInspectRow({ file, buildUrl, label, onOpenFile }: { file: GitFile; 
       {open && (
         loading ? (
           <div className="px-1 text-[10px] text-muted-foreground">loading diff…</div>
+        ) : error ? (
+          // WARDEN-1187 / WARDEN-89: a backend failure is NOT "no diff". This row only
+          // exists for a file the UI has already listed as changed, so rendering the
+          // empty state here would assert — as a fact about the user's data — the exact
+          // opposite of what the parent row just said. Kept in-place and quiet (the row
+          // has no toast surface) at the row's own scale; `fetched` is not set on this
+          // path, so collapsing and re-expanding retries the fetch.
+          <div className="px-1 text-[10px] text-muted-foreground" role="status">
+            could not load diff — {error}
+          </div>
         ) : diff ? (
           <DiffBlock diff={diff} />
         ) : (
