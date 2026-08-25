@@ -408,6 +408,14 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
   }, [query]);
 
   const toggleHost = (h: string) => {
+    // WARDEN-1188: drop any stale failure when the host selection changes.
+    // `fetchAllSessions` only runs on mount (empty dep array below), so without
+    // this a failed load-more would leave `sessionsError` set indefinitely — and
+    // if the user then narrowed to a selection that is GENUINELY empty, the page
+    // would render "Could not load sessions — …" over a truthful emptiness. That
+    // is a false-ERROR, the exact mirror of the false-empty this ticket removes,
+    // and it is just as much a lie about the user's machines.
+    setSessionsError(null);
     setSelected((prev) => {
       const base = prev && prev.length ? prev : effective;
       const next = base.includes(h) ? base.filter((x) => x !== h) : [...base, h];
@@ -651,6 +659,25 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
                 isBudgetOffender={isBudgetOffenderRow(it)}
               />
             ))
+          )}
+          {/* WARDEN-1188: the SECOND render site for `sessionsError`, and the one
+              that makes the load-more failure visible at all. The branch above
+              lives inside the `filtered.length === 0` leg, and the load-more
+              button below only exists under `filtered.length > 0` — the two are
+              mutually exclusive by construction, so a failed load-more click
+              could set the error and render nothing whatsoever (the WARDEN-89
+              silent-failure shape, on the second of this ticket's two paths).
+              This line covers exactly the rows-present case the empty leg cannot
+              reach. It carries role="status" unconditionally because a failure
+              the user triggered by an explicit click is the one that most needs
+              announcing. Gated on `!query` for the same reason as the empty leg:
+              while a content query is active the list is fed by the SEARCH
+              endpoint, so this endpoint's error is not what the user is looking
+              at. */}
+          {sessionsError && filtered.length > 0 && !query && (
+            <div role="status" className="text-xs text-red-400/90 px-2 py-1 text-center">
+              Could not load sessions — {sessionsError}
+            </div>
           )}
           {searchLoading && filtered.length > 0 && (
             <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-muted-foreground">

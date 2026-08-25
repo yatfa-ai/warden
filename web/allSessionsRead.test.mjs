@@ -356,3 +356,79 @@ test("the two sibling empty messages are preserved verbatim (criterion 5)", () =
   assert.match(page, /'No matches across selected hosts'/);
   assert.match(page, /'Select at least one host'/);
 });
+
+// --- 6. The error must be REACHABLE on BOTH paths, not just the empty one -----
+//
+// The defect the first attempt at this ticket shipped, and why a "does the state
+// get set?" guard is not enough. `sessionsError` was set correctly by both catch
+// legs, but it had exactly ONE render site — inside the `filtered.length === 0`
+// leg. The load-more button only exists under `filtered.length > 0`. Those two
+// conditions are MUTUALLY EXCLUSIVE BY CONSTRUCTION, so the whole load-more
+// failure path set an error channel that could never reach the screen: the click
+// did nothing at all, visibly. That is the WARDEN-89 silent failure reproduced on
+// the second of the two paths this ticket exists to fix.
+//
+// So the guards below pin REACHABILITY, not assignment.
+
+/**
+ * Strip BOTH `//` line comments and `{/* … *\/}` JSX comments.
+ *
+ * Load-bearing for the same reason `stripComments` is: the render site added
+ * below documents the very conditions it must satisfy, so a naive source match
+ * would go green on the PROSE explaining the invariant while the code violated
+ * it — the exact failure mode of a guard that proves nothing.
+ */
+const stripAllComments = (s) => s.replace(/\{\/\*[\s\S]*?\*\/\}/g, '').replace(/\/\/[^\n]*/g, '');
+
+test('`sessionsError` has a render site OUTSIDE the empty-list leg (the load-more path)', () => {
+  const src = stripAllComments(page);
+
+  // `filtered.map(` opens the else-branch of the `filtered.length === 0` ternary,
+  // so everything after it is provably NOT inside the empty-only leg.
+  const elseBranch = src.indexOf('filtered.map(');
+  assert.ok(elseBranch > 0, 'the list branch marker moved — this guard needs updating');
+  const emptyLeg = src.indexOf('filtered.length === 0');
+  assert.ok(emptyLeg > 0 && emptyLeg < elseBranch, 'the empty-list leg must precede the list branch');
+
+  const outside = src.slice(elseBranch);
+  assert.match(
+    outside,
+    /sessionsError/,
+    'sessionsError is rendered ONLY inside the filtered.length === 0 leg, which the '
+      + 'load-more button (filtered.length > 0) can never coexist with — a failed '
+      + 'load-more would set an error that cannot reach the screen',
+  );
+  assert.match(
+    outside,
+    /sessionsError\s*&&\s*filtered\.length\s*>\s*0/,
+    'the rows-present render site must be gated on there BEING rows',
+  );
+});
+
+test('the rows-present error line is announced (role="status")', () => {
+  // A screen-reader user triggers this failure by an explicit click, so it is the
+  // one failure that most needs a live region — and it is served by a render site
+  // the empty-leg role gate does not cover.
+  const src = stripAllComments(page);
+  const at = src.search(/sessionsError\s*&&\s*filtered\.length\s*>\s*0/);
+  assert.ok(at > 0, 'the rows-present render site is missing');
+  assert.match(
+    src.slice(at, at + 400),
+    /role="status"/,
+    'the rows-present error line must carry role="status"',
+  );
+});
+
+test('changing the host selection CLEARS a stale error (no false-ERROR)', () => {
+  // The mirror of the false-empty. `fetchAllSessions` runs only on mount, so a
+  // failed load-more leaves `sessionsError` set indefinitely. If the user then
+  // narrows to a selection that is GENUINELY empty, `filtered.length` drops to 0
+  // and the page would render "Could not load sessions — …" over a truthful
+  // emptiness — lying about the user's machines in the opposite direction.
+  const body = functionBody('const toggleHost');
+  assert.match(
+    body,
+    /setSessionsError\(\s*null\s*\)/,
+    'toggleHost must clear a stale sessionsError, or a resolved failure outlives the request',
+  );
+});
