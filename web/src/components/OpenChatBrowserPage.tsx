@@ -22,6 +22,7 @@ import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTokens } from '@/lib/formatTokens';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { budgetProgress, budgetOverPercent, type BudgetState } from '@/lib/tokenBudget';
+import { readAllSessionsPage } from '@/lib/allSessionsApi';
 import type { ClaudeSession, SessionSearchResult, TokenUsage } from './ChatSidebar';
 
 // Loading placeholder for a session row (two skeleton bars). Local to this page —
@@ -231,6 +232,11 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
 
   const [allSessions, setAllSessions] = useState<(ClaudeSession & { host: string })[]>([]);
   const [loadingAllSessions, setLoadingAllSessions] = useState(false);
+  // A backend failure on the cross-host list, kept DISTINCT from emptiness
+  // (WARDEN-1188 / WARDEN-89). Before this existed, every failure seated `[]` and
+  // the page asserted "Nothing runnable on the selected hosts yet" — a fact about
+  // the user's machines — when the truth was that the request failed.
+  const [sessionsError, setSessionsError] = useState<string | null>(null);
   // Cross-host "All Sessions" pagination (WARDEN-176). `hasMoreSessions` mirrors
   // the server's `hasMore` so Load-more converges; `loadingMoreSessions` gates
   // the button.
@@ -257,13 +263,28 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
   // view-switch ternary), so this doubles as the "on open" refresh.
   const fetchAllSessions = async () => {
     setLoadingAllSessions(true);
+    // Clear any previous failure BEFORE retrying, so a retry that succeeds does
+    // not render its rows underneath a stale error line.
+    setSessionsError(null);
     try {
-      const r = await fetch(`/api/claude-sessions-all?offset=0&limit=${ALL_SESSIONS_PAGE}`);
-      const j = await r.json();
-      setAllSessions(j.sessions || []);
-      setHasMoreSessions(!!j.hasMore);
+      // WARDEN-1188: read through the extracted seam, which gates on `r.ok` and
+      // parses with the right tolerance per leg. It THROWS on failure, so a
+      // backend failure can no longer arrive here disguised as an empty list.
+      const { sessions, hasMore } = await readAllSessionsPage(
+        await fetch(`/api/claude-sessions-all?offset=0&limit=${ALL_SESSIONS_PAGE}`),
+      );
+      // A genuinely empty result stays empty and still renders the existing
+      // "Nothing runnable on the selected hosts yet" empty state — only a real
+      // failure takes the catch below.
+      setAllSessions(sessions);
+      setHasMoreSessions(hasMore);
     } catch (error) {
       console.error('[claude-sessions-all] Failed:', error);
+      // Record the failure instead of seating `[]`. Note what is NOT done here:
+      // `setAllSessions([])`. On a failed REFRESH of an already-populated list the
+      // loaded rows stay on screen — blanking real data on a transient failure is
+      // the same false-empty in miniature (WARDEN-1181's stated discipline).
+      setSessionsError(error instanceof Error && error.message ? error.message : 'Failed to load sessions');
     }
     setLoadingAllSessions(false);
   };
@@ -275,17 +296,23 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
   const loadMoreSessions = async () => {
     if (loadingMoreSessions || !hasMoreSessions) return;
     setLoadingMoreSessions(true);
+    setSessionsError(null);
     try {
-      const r = await fetch(`/api/claude-sessions-all?offset=${allSessions.length}&limit=${ALL_SESSIONS_PAGE}`);
-      const j = await r.json();
-      const next = (j.sessions || []) as (ClaudeSession & { host: string })[];
-      setHasMoreSessions(!!j.hasMore);
+      const { sessions: next, hasMore } = await readAllSessionsPage(
+        await fetch(`/api/claude-sessions-all?offset=${allSessions.length}&limit=${ALL_SESSIONS_PAGE}`),
+      );
+      setHasMoreSessions(hasMore);
       setAllSessions((prev) => {
         const seen = new Set(prev.map((s) => `${s.host}:${s.id}`));
         return [...prev, ...next.filter((s) => !seen.has(`${s.host}:${s.id}`))];
       });
     } catch (error) {
       console.error('[claude-sessions-all load-more] Failed:', error);
+      // Deliberately NOT `setHasMoreSessions(false)` here: the long tail still
+      // exists, the REQUEST failed. Clearing it would retire the load-more
+      // affordance — the user's only retry — on a transient error. The already
+      // loaded rows likewise stay on screen; only the error line is added.
+      setSessionsError(error instanceof Error && error.message ? error.message : 'Failed to load more sessions');
     }
     setLoadingMoreSessions(false);
   };
@@ -381,6 +408,14 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
   }, [query]);
 
   const toggleHost = (h: string) => {
+    // WARDEN-1188: drop any stale failure when the host selection changes.
+    // `fetchAllSessions` only runs on mount (empty dep array below), so without
+    // this a failed load-more would leave `sessionsError` set indefinitely — and
+    // if the user then narrowed to a selection that is GENUINELY empty, the page
+    // would render "Could not load sessions — …" over a truthful emptiness. That
+    // is a false-ERROR, the exact mirror of the false-empty this ticket removes,
+    // and it is just as much a lie about the user's machines.
+    setSessionsError(null);
     setSelected((prev) => {
       const base = prev && prev.length ? prev : effective;
       const next = base.includes(h) ? base.filter((x) => x !== h) : [...base, h];
@@ -593,8 +628,22 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
           ) : searchLoading && filtered.length === 0 ? (
             [1, 2, 3].map((i) => <SessionRowSkeleton key={i} />)
           ) : filtered.length === 0 ? (
-            <div className="text-xs text-muted-foreground p-4 text-center">
-              {query ? 'No matches across selected hosts' : effective.length === 0 ? 'Select at least one host' : 'Nothing runnable on the selected hosts yet'}
+            <div className="text-xs text-muted-foreground p-4 text-center" role={!query && effective.length > 0 && sessionsError ? 'status' : undefined}>
+              {/* WARDEN-1188 / WARDEN-89: a backend failure is NOT "nothing runnable".
+                  The error branch sits INSIDE the no-query, hosts-selected leg so the
+                  two sibling messages are preserved exactly: a content query still
+                  reports 'No matches across selected hosts' (fed by the SEARCH
+                  endpoint, not this one), and an empty host selection still reports
+                  'Select at least one host'. Only the confident claim about the
+                  user's machines gives way — and only when the request actually
+                  failed, so a genuine 200 with zero sessions still renders it. */}
+              {query
+                ? 'No matches across selected hosts'
+                : effective.length === 0
+                  ? 'Select at least one host'
+                  : sessionsError
+                    ? `Could not load sessions — ${sessionsError}`
+                    : 'Nothing runnable on the selected hosts yet'}
             </div>
           ) : (
             filtered.map((it) => (
@@ -610,6 +659,31 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
                 isBudgetOffender={isBudgetOffenderRow(it)}
               />
             ))
+          )}
+          {/* WARDEN-1188: the SECOND render site for `sessionsError`, and the one
+              that makes the load-more failure visible at all. The branch above
+              lives inside the `filtered.length === 0` leg, and the load-more
+              button below only exists under `filtered.length > 0` — the two are
+              mutually exclusive by construction, so a failed load-more click
+              could set the error and render nothing whatsoever (the WARDEN-89
+              silent-failure shape, on the second of this ticket's two paths).
+              This line covers exactly the rows-present case the empty leg cannot
+              reach. It carries role="status" unconditionally because a failure
+              the user triggered by an explicit click is the one that most needs
+              announcing. Gated on `!query.trim()` — the SAME predicate as the
+              load-more button below, deliberately, because this line exists to
+              cover the states in which that button is clickable. While a content
+              query is active the list is fed by the SEARCH endpoint, so this
+              endpoint's error is not what the user is looking at; but a
+              whitespace-only box is NOT a content query by this file's own
+              definition (`items`, `filtered` and the search effect all decide
+              that with `.trim()`, and all three route back to `allSessions`), so
+              a bare `!query` would gate this line off while the button it
+              annotates is still rendered and still failing silently. */}
+          {sessionsError && filtered.length > 0 && !query.trim() && (
+            <div role="status" className="text-xs text-red-400/90 px-2 py-1 text-center">
+              Could not load sessions — {sessionsError}
+            </div>
           )}
           {searchLoading && filtered.length > 0 && (
             <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-muted-foreground">
