@@ -105,7 +105,17 @@ export function dayBucket(timestamp: number, now: number): DayBucket {
 
   const eventDate = new Date(timestamp).toDateString();
   if (eventDate === new Date(now).toDateString()) return 'Today';
-  if (eventDate === new Date(now - oneDay).toDateString()) return 'Yesterday';
+
+  // Derive yesterday by CALENDAR arithmetic, not by subtracting 24h. A local
+  // calendar day is not always 24 hours long — it is 23h on a DST
+  // spring-forward day and 25h on fall-back — so `now - 24h` lands on the
+  // wrong calendar day around a transition, which is the very elapsed-ms-vs-
+  // wall-clock confusion this helper exists to remove. `setDate` walks the
+  // calendar and handles variable-length days plus month/year rollover
+  // (Mar 1 -> Feb 28) for us.
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (eventDate === yesterday.toDateString()) return 'Yesterday';
 
   if (diff < 7 * oneDay) return 'This week';
   return 'Older';
