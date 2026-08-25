@@ -16,6 +16,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { CreateCollectionDialog } from './CreateCollectionDialog';
 import { copyWithToast } from '@/lib/clipboardToast';
 import { countAgentsInCollection } from '@/lib/collections';
+import { readCollectionsList } from '@/lib/collectionsApi';
 import type { Collection, Chat } from '@/lib/types';
 
 interface Props {
@@ -39,14 +40,23 @@ export function CollectionsSection({ chats, onEnterCollection, onCreateCollectio
   // dialog is closed). Drives CreateCollectionDialog's edit mode.
   const [editTarget, setEditTarget] = useState<Collection | null>(null);
 
+  // WARDEN-1181: this read populates the ENTIRE section, so a failure that seats
+  // an empty list renders the definitive "no collections — create one to organize
+  // agents" empty state with a `0` badge — a failure told to the user as a fact
+  // about their data (WARDEN-89). The response reading lives in
+  // src/lib/collectionsApi.ts (unit-tested in web/collectionsRead.test.mjs); it
+  // rides the shared readListBody/readListResponse pair, so a non-2xx, an HTML
+  // error body from a proxy, and a truncated 2xx body all THROW here instead of
+  // becoming an empty array. A genuinely empty 200 still returns [] normally.
   const fetchCollections = async () => {
     setLoading(true);
     try {
-      const r = await fetch('/api/collections');
-      const j = await r.json();
-      setCollections(j.collections || []);
-    } catch {
-      setCollections([]);
+      setCollections(await readCollectionsList(await fetch('/api/collections')));
+    } catch (e) {
+      // Deliberately DO NOT blank the list: replacing real data with [] on a
+      // transient refresh failure is the same false-empty in miniature. Surface
+      // the failure instead — the sibling rename/delete paths already toast.
+      toast.error(e instanceof Error ? e.message : 'Failed to load collections');
     }
     setLoading(false);
   };
