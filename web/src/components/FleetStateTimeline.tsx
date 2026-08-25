@@ -1,11 +1,9 @@
-import { useState, useMemo } from 'react';
+import { useMemo } from 'react';
 import type { ActivitySeries, Chat } from '@/lib/types';
 import type { TimestampFormat } from '@/lib/formatTimestamp';
 import { formatTimestamp } from '@/lib/formatTimestamp';
-import { displayName } from '@/lib/chatDisplay';
 import { cn } from '@/lib/utils';
-import { CollapsibleSectionHeader } from './CollapsibleSectionHeader';
-import { bucketLabelIndices } from '@/lib/heatmap';
+import { FleetMatrixPanel, MATRIX_CELL_SIZE } from './FleetMatrixPanel';
 import {
   selectStateCells,
   stateGlyph,
@@ -37,6 +35,12 @@ import {
  * three cases) so they are unit-tested without a render; this file is the thin
  * renderer.
  *
+ * The `<section>` + collapsible header + loading/error/empty branch + `role="grid"`
+ * tree are the SHARED `FleetMatrixPanel` scaffold (WARDEN-1177) — the same one
+ * FleetActivityHeatmap renders through. This file supplies only what genuinely
+ * differs: the per-state colour domain, the cell (a `<div>` wrapping its glyph
+ * `<span>`), and the per-state legend key.
+ *
  * Encoding (WCAG 2.1 1.4.1 — never color alone, the same discipline heatmap.ts
  * follows): each state is a distinct BACKGROUND COLOR + a GLYPH + a human LABEL,
  * and every cell carries a tooltip + aria-label with the state name. So a
@@ -48,7 +52,8 @@ import {
  * "calm" baseline), unknown/null is a transparent outlined cell.
  *
  * Collapse state is LOCAL React state (deliberately NOT a persisted /api/config
- * pref — avoids the dead-pref trap, same as the heatmap). Defaults OPEN.
+ * pref — avoids the dead-pref trap, same as the heatmap) and lives in the
+ * scaffold. Defaults OPEN.
  */
 interface Props {
   /** The same 24h series the heatmap + sparklines consume (useActivitySeries). */
@@ -90,183 +95,79 @@ const LEGEND_STATES = [
   'active', 'done', 'idle', 'waiting', 'blocked', 'stuck', 'erroring', 'capture_failed',
 ] as const;
 
-// Sparse column label cadence: label ~every 6 buckets (≈ every 6h for the default
-// 24h / 1h-bucket window) — identical to the heatmap so the two panels share axis ticks.
-const LABEL_STEP = 6;
-const CELL_SIZE = 'h-3 compact:h-2.5';
-
 function cellBg(state: string | null): string {
   return state != null ? (STATE_BG[state] ?? UNKNOWN_BG) : UNKNOWN_BG;
 }
 
 export function FleetStateTimeline({ series, agents, timestampFormat, loading, error }: Props) {
-  // LOCAL collapse state — never serialized to /api/config (avoids the dead-pref
-  // trap). Defaults open so the fleet pattern is glanceable on entry.
-  const [open, setOpen] = useState(true);
-
   // Memoized on the series + agents ONLY — refreshes on the 60s series cadence.
   const matrix = useMemo(() => selectStateCells(series, agents), [series, agents]);
 
-  const nameByContainer = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const a of agents) if (a.container) m.set(a.container, displayName(a));
-    return m;
-  }, [agents]);
-
-  const colCount = matrix.buckets.length;
-  // Shared axis tick set with the heatmap (bucketLabelIndices is the heatmap's own
-  // helper — reused so the two panels' time labels align verbatim when stacked).
-  const labelled = useMemo(
-    () => new Set(bucketLabelIndices(colCount, LABEL_STEP)),
-    [colCount],
-  );
-  const gridCols = `minmax(52px, 5rem) repeat(${colCount}, minmax(0, 1fr))`;
-
-  const columnLabel = (bucket: number, i: number): string => {
-    if (i === colCount - 1) return 'now';
-    return formatTimestamp(bucket, timestampFormat);
-  };
-
-  const hasRows = matrix.rows.length > 0;
-
   return (
-    <section
-      className="rounded-md border border-border bg-card/40"
-      aria-label="Fleet agent state over the last 24 hours"
-    >
-      {/* Shared with the sibling Fleet Health panels (WARDEN-1050). */}
-      <CollapsibleSectionHeader
-        open={open}
-        onToggle={() => setOpen((v) => !v)}
-        label="Fleet state · 24h"
-        meta={hasRows ? `${matrix.rows.length} agent${matrix.rows.length === 1 ? '' : 's'}` : ''}
-      />
-
-      {open && (
-        <div className="px-2 pb-2 pt-0.5">
-          {hasRows ? (
-            <div
-              role="grid"
-              aria-label={matrixStateAriaLabel(matrix.rows, colCount)}
-              aria-rowcount={matrix.rows.length + 1}
-              aria-colcount={colCount + 1}
-              className="flex flex-col gap-px"
-            >
-              {/* Column-header row: mirrors the heatmap's sparse labelled columns. */}
-              <div role="row" className="grid" style={{ gridTemplateColumns: gridCols, gap: '1px' }}>
-                <div role="presentation" className="h-3 compact:h-2.5" aria-hidden="true" />
-                {matrix.buckets.map((b, i) =>
-                  labelled.has(i) ? (
-                    <div
-                      key={i}
-                      role="columnheader"
-                      aria-label={columnLabel(b, i)}
-                      className="text-center text-[8px] leading-none text-muted-foreground/80 overflow-visible whitespace-nowrap"
-                    >
-                      {columnLabel(b, i)}
-                    </div>
-                  ) : (
-                    <div key={i} role="presentation" aria-hidden="true" />
-                  ),
-                )}
-              </div>
-
-              {/* Agent rows. Each row is keyboard-focusable with a full summary
-                  aria-label (state-change count = the oscillation signal); cells
-                  carry per-bucket state tooltips for granularity. */}
-              {matrix.rows.map((row) => {
-                const name = nameByContainer.get(row.agent.container) ?? row.agent.container;
-                return (
-                  <div
-                    key={row.agent.container}
-                    role="row"
-                    tabIndex={0}
-                    aria-label={`${name}: ${rowStateAriaLabel(row.cells)}`}
-                    className="grid items-center rounded-sm outline-none focus-visible:ring-1 focus-visible:ring-primary focus-visible:bg-accent/40"
-                    style={{ gridTemplateColumns: gridCols, gap: '1px' }}
-                  >
-                    <div
-                      role="rowheader"
-                      className="truncate text-[10px] text-muted-foreground pr-1"
-                      title={name}
-                    >
-                      {name}
-                    </div>
-                    {row.cells.map((cell: StateCell, i: number) => {
-                      const label = stateLabel(cell.state);
-                      const glyph = stateGlyph(cell.state);
-                      const bucketTime = formatTimestamp(matrix.buckets[i], 'absolute');
-                      return (
-                        <div
-                          key={i}
-                          role="gridcell"
-                          aria-label={label}
-                          title={`${name} · ${bucketTime}: ${label}`}
-                          className={cn(
-                            CELL_SIZE,
-                            'rounded-[2px] min-w-0 flex items-center justify-center',
-                            cellBg(cell.state),
-                          )}
-                        >
-                          {/* WCAG 1.4.1 non-color channel: the glyph reinforces the
-                              color. Subtle (8px) — the tooltip/aria/legend carry the
-                              authoritative state name, same discipline as the heatmap. */}
-                          {glyph && (
-                            <span className="text-[8px] leading-none text-white/90 select-none">
-                              {glyph}
-                            </span>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            // Graceful empty state: series still loading, the fetch failed, or
-            // no container-bearing agents / no state history yet. Never render a
-            // misleading empty grid — and never claim to be loading data we have
-            // already given up on (WARDEN-1078). Same three-way branch as the
-            // sibling heatmap: `loading` is the only honest "still fetching"
-            // signal; `error` is only surfaced when NO series ever arrived.
-            <div className="py-2 text-center text-[10px] text-muted-foreground">
-              {loading && series == null ? (
-                'Loading fleet state…'
-              ) : error && series == null ? (
-                <span className="text-destructive">
-                  ⚠ Couldn't load fleet state: {error.message}
-                </span>
-              ) : (
-                'No agent state history in the last 24 hours.'
-              )}
-            </div>
-          )}
-
-          {/* Legend — color + glyph + label per state (the WCAG encoding key). */}
-          {hasRows && (
-            <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[9px] text-muted-foreground">
-              {LEGEND_STATES.map((s) => (
-                <span key={s} className="flex items-center gap-1">
-                  <span
-                    className={cn(
-                      'inline-flex h-2 w-2 compact:h-1.5 compact:w-1.5 items-center justify-center rounded-[1px]',
-                      STATE_BG[s],
-                    )}
-                  >
-                    <span className="text-[6px] leading-none text-white/90">{stateGlyph(s)}</span>
-                  </span>
-                  {stateLabel(s)}
-                </span>
-              ))}
-              <span className="flex items-center gap-1">
-                <span className={cn('inline-block h-2 w-2 compact:h-1.5 compact:w-1.5 rounded-[1px]', UNKNOWN_BG)} />
-                unknown
+    <FleetMatrixPanel<StateCell>
+      sectionAriaLabel="Fleet agent state over the last 24 hours"
+      headerLabel="Fleet state · 24h"
+      rows={matrix.rows}
+      buckets={matrix.buckets}
+      agents={agents}
+      timestampFormat={timestampFormat}
+      loading={loading}
+      error={error}
+      hasSeries={series != null}
+      loadingText="Loading fleet state…"
+      errorText="Couldn't load fleet state"
+      emptyText="No agent state history in the last 24 hours."
+      matrixAriaLabel={matrixStateAriaLabel}
+      rowAriaLabel={rowStateAriaLabel}
+      renderCell={({ cell, index, agentName, bucket }) => {
+        const label = stateLabel(cell.state);
+        const glyph = stateGlyph(cell.state);
+        const bucketTime = formatTimestamp(bucket, 'absolute');
+        return (
+          <div
+            key={index}
+            role="gridcell"
+            aria-label={label}
+            title={`${agentName} · ${bucketTime}: ${label}`}
+            className={cn(
+              MATRIX_CELL_SIZE,
+              'rounded-[2px] min-w-0 flex items-center justify-center',
+              cellBg(cell.state),
+            )}
+          >
+            {/* WCAG 1.4.1 non-color channel: the glyph reinforces the
+                color. Subtle (8px) — the tooltip/aria/legend carry the
+                authoritative state name, same discipline as the heatmap. */}
+            {glyph && (
+              <span className="text-[8px] leading-none text-white/90 select-none">
+                {glyph}
               </span>
-            </div>
-          )}
-        </div>
-      )}
-    </section>
+            )}
+          </div>
+        );
+      }}
+      legend={
+        // Color + glyph + label per state (the WCAG encoding key).
+        <>
+          {LEGEND_STATES.map((s) => (
+            <span key={s} className="flex items-center gap-1">
+              <span
+                className={cn(
+                  'inline-flex h-2 w-2 compact:h-1.5 compact:w-1.5 items-center justify-center rounded-[1px]',
+                  STATE_BG[s],
+                )}
+              >
+                <span className="text-[6px] leading-none text-white/90">{stateGlyph(s)}</span>
+              </span>
+              {stateLabel(s)}
+            </span>
+          ))}
+          <span className="flex items-center gap-1">
+            <span className={cn('inline-block h-2 w-2 compact:h-1.5 compact:w-1.5 rounded-[1px]', UNKNOWN_BG)} />
+            unknown
+          </span>
+        </>
+      }
+    />
   );
 }
