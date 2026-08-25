@@ -77,9 +77,14 @@ const { validateBaseEvent } = require('../electron/telemetry-source.cjs');
 
 // The identifier-leak PROOF shape — mirrors telemetry-source.cjs:77-91 (the five
 // patterns) + :249-258 (the combine). Re-implemented here INDEPENDENTLY of the
-// module under test (the source does not export containsIdentifier) so criterion
-// (e) is a self-contained proof, not the module checking itself. Non-global
-// regexes → stateless `.test`, no lastIndex hazard (same as the source).
+// module under test — DELIBERATELY, so criterion (e) is a self-contained proof
+// rather than the module checking itself. (This re-implementation is NOT a
+// workaround for a missing export: transparency.ts:101 does export
+// `containsIdentifier`. Importing it would make (e) tautological — the redactor's
+// output would be judged by the very predicate the redactor's own module ships —
+// so the copy stays. Corrected by WARDEN-1180; the old note claimed the symbol
+// was unexported, which is false today.) Non-global regexes → stateless `.test`,
+// no lastIndex hazard (same as the source).
 const ID_PROOF = {
   path: /(?:[A-Za-z]:[\\/]|[\\/]|~\/|\.(?:\.)?\/)(?:[^\s:'"<>|*?]+[\\/])*[^\s:'"<>|*?\\/]*/,
   userhost: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+/,
@@ -558,6 +563,152 @@ test('changes enumerate dropped content, dropped/retained identifiers, and redac
   // The retained chatName carried a user@host → a redacted substitution is recorded too.
   const chatRedactions = ext.changes.filter((c) => c.kind === 'redacted' && c.path === 'chatName');
   assert.ok(chatRedactions.some((c) => c.category === 'host'), 'retained chatName scrubbed of embedded host');
+});
+
+console.log('\n(g) hard-exclusion proof — isValidBaseEvent REJECTS a leaked identifier');
+
+// WARDEN-1180. Groups (a)–(f) above drive the module through `previewPayload`,
+// which computes `payload = redact(rawEvent, …)` BEFORE calling the validator —
+// so the payload reaching `isValidBaseEvent` is already scrubbed and its
+// hard-exclusion arms (transparency.ts:146-154) can never fire through that
+// path. The one existing direct call (`isValidBaseEvent(bad.payload)`) passes an
+// event with no `message` at all, which short-circuits on the structural check
+// long before the proof block. Mutation-verified at eb37e09: deleting :146,
+// :149, :151, :152 — or the whole :146-154 body — left all 26 tests green, while
+// deleting the covered :130 turned the suite red (positive control). These tests
+// close that seam by driving the validator DIRECTLY.
+//
+// Why it matters (design WARDEN-443): redaction is the primary barrier and it is
+// well tested, but this block is the INDEPENDENT re-check that catches a
+// redaction ESCAPE — a new identifier shape, a regex gap, a future refactor of
+// `redact`. Its verdict is not inert at runtime: `valid` gates `transmitted`
+// (transparency.ts:420-426) and is rendered on the consent panel
+// (TelemetryTransparency.tsx:335), the surface whose entire job is proving what
+// leaves the machine. It is also the exact code WARDEN-1167 fences off with
+// "do NOT collapse isValidBaseEvent onto validateBaseEvent — merging them would
+// silently drop the redaction guarantee this module exists to prove"; today that
+// collapse would keep the suite green, and after this block it would not.
+//
+// Each case ISOLATES one arm: the fixture is structurally valid and clean on
+// every OTHER field, so the rejection can only come from the arm under test.
+
+/** A structurally-valid `error` base event, clean by default. */
+const validErrorEvent = (over = {}) => ({
+  schemaVersion: SCHEMA_VERSION,
+  type: 'error',
+  runtime: 'renderer',
+  timestamp: 1719500000123,
+  name: 'Error',
+  message: 'Failed to load credentials',
+  frames: [],
+  ...over,
+});
+
+// One message per hard-exclusion shape. `family` names the ID_PROOF regex the
+// fixture is MEANT to trip — asserted as a fixture PRECONDITION (so a case can
+// never pass for the wrong reason, e.g. an "IPv4" string that is really only
+// caught as a path); the behavior under test is the validator's verdict.
+const LEAKED_MESSAGES = [
+  { family: 'path', text: 'Failed to load key from /home/alice/.ssh/aws-creds' },
+  { family: 'userhost', text: 'auth rejected for deploy@corp.internal' },
+  { family: 'ipv4', text: 'connect ECONNREFUSED 10.0.0.5' },
+  { family: 'ipv6', text: 'connect failed to 2001:0db8:85a3:0000:0000:8a2e:0370:7334' },
+  { family: 'hostname', text: 'timeout talking to prod-db-01.corp.local' },
+];
+
+test(':146 — a structurally-valid event whose message still carries an identifier is REJECTED', () => {
+  for (const { family, text } of LEAKED_MESSAGES) {
+    // Fixture precondition: this string really does carry the shape it claims.
+    assert.equal(ID_PROOF[family].test(text), true, `fixture for ${family} carries that shape`);
+    const event = validErrorEvent({ message: text });
+    // Everything EXCEPT the message is clean, so a `false` here can only be :146.
+    assert.equal(isValidBaseEvent(event), false, `message with ${family} rejected`);
+    // The CJS main-process mirror must agree (drift guard, same posture as (b)).
+    assert.equal(validateBaseEvent(event), false, `CJS validator agrees for ${family}`);
+  }
+  // Control on the SAME fixture shape: identical event, clean message → accepted.
+  // Without this, ":146 rejects" would be indistinguishable from a fixture that
+  // was structurally invalid all along.
+  assert.equal(isValidBaseEvent(validErrorEvent()), true, 'clean message accepted');
+});
+
+test(':146 applies to NON-error types too (the proof is not inside the error branch)', () => {
+  // `crash` / `performance-stall` carry a message only incidentally, but :146 is
+  // OUTSIDE the per-type branch — a leaked identifier must be rejected there too.
+  const crash = {
+    schemaVersion: SCHEMA_VERSION, type: 'crash', runtime: 'main', timestamp: 1,
+    reason: 'oom', message: 'child died at /var/lib/warden/session.sock',
+  };
+  assert.equal(isValidBaseEvent(crash), false, 'crash with leaked path rejected');
+  assert.equal(isValidBaseEvent({ ...crash, message: 'child died' }), true, 'clean crash accepted');
+  const stall = {
+    schemaVersion: SCHEMA_VERSION, type: 'performance-stall', runtime: 'main', timestamp: 1,
+    lagMs: 2500, source: 'event-loop', message: 'stalled while polling 192.168.1.44',
+  };
+  assert.equal(isValidBaseEvent(stall), false, 'performance-stall with leaked IPv4 rejected');
+  assert.equal(isValidBaseEvent({ ...stall, message: 'stalled while polling' }), true, 'clean stall accepted');
+});
+
+test(':151 — a frame whose `function` carries a PATH is REJECTED', () => {
+  // message clean, frame.file a bare basename → only :151 can reject this.
+  const event = validErrorEvent({
+    frames: [{ function: '/home/u/app/loader.js:12', file: 'loader.js' }],
+  });
+  assert.equal(isValidBaseEvent(event), false);
+  assert.equal(validateBaseEvent(event), false, 'CJS validator agrees');
+  // Windows separator too — the guard is on separators, not on a leading slash.
+  const win = validErrorEvent({ frames: [{ function: 'C:\\app\\loader.js', file: 'loader.js' }] });
+  assert.equal(isValidBaseEvent(win), false, 'windows-style path in function rejected');
+});
+
+test(':152 — a frame whose `file` carries a PATH is REJECTED', () => {
+  // message clean, frame.function a bare symbol → only :152 can reject this.
+  const event = validErrorEvent({
+    frames: [{ function: 'loadCreds', file: '/etc/warden/loader.js' }],
+  });
+  assert.equal(isValidBaseEvent(event), false);
+  assert.equal(validateBaseEvent(event), false, 'CJS validator agrees');
+  // A relative path is still a path (it has a separator).
+  const rel = validErrorEvent({ frames: [{ function: 'loadCreds', file: './src/lib/loader.js' }] });
+  assert.equal(isValidBaseEvent(rel), false, 'relative path in file rejected');
+});
+
+test('the ALLOWED side of the boundary (WARDEN-680) — a bare basename is ACCEPTED', () => {
+  // Assert BOTH sides or the guard can be "fixed" into uselessness: frame fields
+  // are checked for PATHS only, because a bare filename basename is
+  // non-identifying under WARDEN-443 (the directory is dropped at the collection
+  // boundary) and the redactor intentionally PRESERVES it. A guard widened to
+  // reject basenames would strip warden's own stack frames — this test fails if
+  // anyone does that.
+  const event = validErrorEvent({ frames: [{ function: 'loadCreds', file: 'loader.js', line: 12 }] });
+  assert.equal(isSourceBasename('loader.js'), true, 'fixture really is a source basename');
+  assert.equal(isValidBaseEvent(event), true);
+  assert.equal(validateBaseEvent(event), true, 'CJS validator agrees');
+  // Multiple clean frames, and an empty frames array, are accepted too.
+  assert.equal(
+    isValidBaseEvent(validErrorEvent({
+      frames: [{ function: 'a', file: 'a.ts' }, { function: 'b', file: 'b.tsx' }],
+    })),
+    true,
+    'several clean frames accepted',
+  );
+  assert.equal(isValidBaseEvent(validErrorEvent({ frames: [] })), true, 'no frames accepted');
+});
+
+test(':149 — a malformed frame ELEMENT (non-object) is REJECTED', () => {
+  // Each of these is structurally valid up to the frames loop and carries no
+  // path in any frame FIELD (there are no fields) — so only :149 can reject.
+  for (const bad of [null, undefined, 'loader.js', 42, true]) {
+    const event = validErrorEvent({ frames: [bad] });
+    assert.equal(isValidBaseEvent(event), false, `frames: [${JSON.stringify(bad)}] rejected`);
+    assert.equal(validateBaseEvent(event), false, `CJS validator agrees for ${JSON.stringify(bad)}`);
+  }
+  // A malformed element ANYWHERE in the array is caught, not just at index 0.
+  assert.equal(
+    isValidBaseEvent(validErrorEvent({ frames: [{ function: 'loadCreds', file: 'loader.js' }, null] })),
+    false,
+    'malformed element after a good one rejected',
+  );
 });
 
 console.log(`\n✓ TELEMETRY TRANSPARENCY TESTS PASS (${passed})`);
