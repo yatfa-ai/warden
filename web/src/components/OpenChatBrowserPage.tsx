@@ -670,11 +670,17 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
               This line covers exactly the rows-present case the empty leg cannot
               reach. It carries role="status" unconditionally because a failure
               the user triggered by an explicit click is the one that most needs
-              announcing. Gated on `!query` for the same reason as the empty leg:
-              while a content query is active the list is fed by the SEARCH
-              endpoint, so this endpoint's error is not what the user is looking
-              at. */}
-          {sessionsError && filtered.length > 0 && !query && (
+              announcing. Gated on `!query.trim()` — the SAME predicate as the
+              load-more button below, deliberately, because this line exists to
+              cover the states in which that button is clickable. While a content
+              query is active the list is fed by the SEARCH endpoint, so this
+              endpoint's error is not what the user is looking at; but a
+              whitespace-only box is NOT a content query by this file's own
+              definition (`items`, `filtered` and the search effect all decide
+              that with `.trim()`, and all three route back to `allSessions`), so
+              a bare `!query` would gate this line off while the button it
+              annotates is still rendered and still failing silently. */}
+          {sessionsError && filtered.length > 0 && !query.trim() && (
             <div role="status" className="text-xs text-red-400/90 px-2 py-1 text-center">
               Could not load sessions — {sessionsError}
             </div>

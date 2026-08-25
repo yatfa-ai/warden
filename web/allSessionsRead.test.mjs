@@ -405,6 +405,54 @@ test('`sessionsError` has a render site OUTSIDE the empty-list leg (the load-mor
   );
 });
 
+// The query gate on that render site is not free-choice: this line exists to
+// annotate the load-more button, so any state in which the BUTTON is clickable
+// and this LINE is gated off is a silent failure again, in a narrower slice.
+// A whitespace-only box is exactly such a state — `!query` is false while
+// `!query.trim()` is true, and `items`/`filtered`/the search effect all decide
+// "is a content query active?" with `.trim()`, so the rows on screen are still
+// fed by THIS endpoint. Pin the two predicates to be the SAME expression so
+// they cannot drift apart again.
+const queryGateOf = (src, re, what) => {
+  const m = src.match(re);
+  assert.ok(m, `could not locate the query gate on ${what} — this guard needs updating`);
+  return m[1].replace(/\s+/g, '');
+};
+
+test('the rows-present error line and the load-more button share ONE query gate', () => {
+  const src = stripAllComments(page);
+
+  const errorGate = queryGateOf(
+    src,
+    /sessionsError\s*&&\s*filtered\.length\s*>\s*0\s*&&\s*(![\w.()]*query[\w.()]*)/,
+    'the rows-present error line',
+  );
+  const buttonGate = queryGateOf(
+    src,
+    /(![\w.()]*query[\w.()]*)\s*&&\s*hasMoreSessions/,
+    'the load-more button',
+  );
+
+  assert.equal(
+    errorGate,
+    buttonGate,
+    'the error line must use the SAME query predicate as the load-more button it '
+      + `annotates (error: ${errorGate}, button: ${buttonGate}). A weaker gate — e.g. `
+      + '`!query` against the button\'s `!query.trim()` — hides the error for a '
+      + 'whitespace-only query, in which the button is still rendered, still fed by '
+      + 'this endpoint, and still able to fail silently on click',
+  );
+
+  // Parity alone would also be satisfied by BOTH sides degrading to raw `query`,
+  // so pin the normalization itself: the predicate must ignore whitespace.
+  assert.match(
+    errorGate,
+    /query\.trim\(\)/,
+    'the query gate must be trim-normalized, matching how items/filtered/the search '
+      + 'effect all decide whether a content query is active',
+  );
+});
+
 test('the rows-present error line is announced (role="status")', () => {
   // A screen-reader user triggers this failure by an explicit click, so it is the
   // one failure that most needs a live region — and it is served by a render site
