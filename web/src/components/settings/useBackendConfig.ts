@@ -32,6 +32,7 @@ import {
 } from '@/lib/electron';
 import { type ConfigData } from './types';
 import { isBackendConfigDirty, type BackendConfigDraft } from './configDirty';
+import { normalizeLoadedConfig } from './normalizeLoadedConfig';
 
 /**
  * The initial `config` state, held before the GET /api/config load resolves.
@@ -313,71 +314,7 @@ export function useBackendConfig({ onSaved, onConfigChange }: { onSaved: () => v
         return;
       }
       const configData = result.data ?? {};
-      const loaded: ConfigData = {
-        hosts: configData.hosts || [],
-        pollIntervalMs: configData.pollIntervalMs || 1500,
-        tmuxSession: configData.tmuxSession || 'agent',
-        connectTimeout: configData.connectTimeout || 10,
-        observerConfirmMode: ['always', 'auto-safe'].includes(configData.observerConfirmMode)
-          ? configData.observerConfirmMode
-          : 'always',
-        observerAutoStart: configData.observerAutoStart || false,
-        observerSessionTimeout: configData.observerSessionTimeout ?? 30,
-        llm: {
-          model: configData.llm?.model ?? '',
-          baseUrl: configData.llm?.baseUrl ?? '',
-          maxTokens: typeof configData.llm?.maxTokens === 'number' ? configData.llm.maxTokens : null,
-        },
-        healthWarningThresholdMin: configData.healthWarningThresholdMin ?? 5,
-        healthCriticalThresholdMin: configData.healthCriticalThresholdMin ?? 30,
-        tokenBudgetEnabled: configData.tokenBudgetEnabled ?? false,
-        tokenBudgetThresholdTokens:
-          typeof configData.tokenBudgetThresholdTokens === 'number'
-            ? configData.tokenBudgetThresholdTokens
-            : 2_000_000,
-        tokenBudgetWindowHours:
-          typeof configData.tokenBudgetWindowHours === 'number'
-            ? configData.tokenBudgetWindowHours
-            : 24,
-        tokenBudgetPerSessionThresholdTokens:
-          typeof configData.tokenBudgetPerSessionThresholdTokens === 'number'
-            ? configData.tokenBudgetPerSessionThresholdTokens
-            : 1_000_000,
-        companionTransportEnabled: configData.companionTransportEnabled ?? false,
-        companionTransportOverridden: configData.companionTransportOverridden ?? false,
-        confirmDestructiveActions: configData.confirmDestructiveActions ?? true,
-        notifyChatOps: configData.notifyChatOps ?? true,
-        notifyErrors: configData.notifyErrors ?? true,
-        notifySuccess: configData.notifySuccess ?? true,
-        notifyObserver: configData.notifyObserver ?? true,
-        // Display customization
-        showHostTags: configData.showHostTags ?? true,
-        showTypeBadges: configData.showTypeBadges ?? true,
-        showStatusIndicators: configData.showStatusIndicators ?? true,
-        showProjectBadges: configData.showProjectBadges ?? false,
-        hideOfflineHosts: configData.hideOfflineHosts ?? false,
-        // Telemetry consent (WARDEN-457) — defensive ?? false so an older
-        // backend that does not return the fields stays safely OFF.
-        // WARDEN-1116 — per-category consent, each independent and defaulting to
-        // OFF when the backend omits it (a partial/older GET can never turn a
-        // category on by accident).
-        telemetryIncidentsEnabled: configData.telemetryIncidentsEnabled === true,
-        telemetryNamesEnabled: configData.telemetryNamesEnabled === true,
-        // Defensive ?? '' so an older backend that does not return the field
-        // stays safely unconfigured (empty = sends nothing).
-        telemetryEndpoint: configData.telemetryEndpoint ?? '',
-        // Webhook push channel (WARDEN-555). Defensive fallbacks so an older
-        // backend without these fields stays safely OFF / unconfigured.
-        webhookUrl: configData.webhookUrl ?? '',
-        webhookEnabled: configData.webhookEnabled ?? false,
-        webhookAlertAttention: configData.webhookAlertAttention ?? true,
-        webhookAlertBudget: configData.webhookAlertBudget ?? true,
-        webhookAlertDone: configData.webhookAlertDone ?? true,
-        // WARDEN-540: patterns are sanitized on the PUT boundary, so the GET
-        // response is already well-formed. Defensive ?? [] keeps an older backend
-        // (no watchPatterns field) safely empty → no alerts.
-        watchPatterns: Array.isArray(configData.watchPatterns) ? configData.watchPatterns : [],
-      };
+      const loaded: ConfigData = normalizeLoadedConfig(configData);
       setConfig(loaded);
       // WARDEN-906 — this GET is the persisted truth, so it is also the dirty
       // baseline. The write-only secrets are baselined EMPTY: GET never returns
