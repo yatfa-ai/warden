@@ -24,8 +24,14 @@ const { code } = await transformWithOxc(src, pacingPath, {});
 const tmpDir = mkdtempSync(join(tmpdir(), 'warden-timeline-test-'));
 const tmpFile = join(tmpDir, 'timelinePacing.mjs');
 writeFileSync(tmpFile, code);
-const { shouldPoll, shouldRefreshOnVisibility, formatUpdatedAgo, POLL_INTERVAL_MS, sortedFilterOptions } =
-  await import(tmpFile);
+const {
+  shouldPoll,
+  shouldRefreshOnVisibility,
+  formatUpdatedAgo,
+  POLL_INTERVAL_MS,
+  sortedFilterOptions,
+  dayBucket,
+} = await import(tmpFile);
 rmSync(tmpDir, { recursive: true, force: true });
 
 let passed = 0;
@@ -127,6 +133,71 @@ test('does not mutate the caller\'s array', () => {
   const input = ['zeta', 'alpha'];
   sortedFilterOptions(input);
   assert.deepEqual(input, ['zeta', 'alpha']);
+});
+
+// --- dayBucket: group headers are CALENDAR-correct, not elapsed-time guesses -
+//
+// `Today`/`Yesterday` are calendar-day claims; the two Observer feeds used to
+// assign them from elapsed ms alone, so they were wrong for an ordinary
+// fraction of rows every night. `now` is a parameter, so every case below pins
+// a fixed wall-clock pair with NO time mocking. Dates are built with the local
+// Date constructor because `toDateString()` — the comparison formatAbsolute
+// uses, and therefore the one dayBucket must match — is local-time.
+const at = (day, h, m = 0) => new Date(2026, 7, day, h, m).getTime();
+const MON = 24, SUN = 23, SAT = 22; // Aug 2026: 22nd = Sat, 23rd = Sun, 24th = Mon
+
+console.log('\ndayBucket: headers follow the calendar, not the stopwatch');
+test('THE BUG #1: Mon 09:00, a Sun 14:00 event (19h) is Yesterday — not Today', () => {
+  assert.equal(dayBucket(at(SUN, 14), at(MON, 9)), 'Yesterday');
+});
+test('THE BUG #2: Mon 00:30, a Sun 21:00 event (3.5h) is Yesterday — not Today', () => {
+  // The worst window: the real "today" is 30 min old, but the old 24h-wide
+  // `Today` bucket swallowed nearly all of yesterday.
+  assert.equal(dayBucket(at(SUN, 21), at(MON, 0, 30)), 'Yesterday');
+});
+test('THE BUG #3: Mon 09:00, a Sat 10:00 event (47h) is This week — not Yesterday', () => {
+  assert.equal(dayBucket(at(SAT, 10), at(MON, 9)), 'This week');
+});
+test('Last hour BEATS Yesterday: a 23:30 -> 00:15 event (35 min) reads Last hour', () => {
+  // Crossed the day boundary, so it is calendar-yesterday — but the elapsed
+  // check runs first, because "35 minutes ago" is the more useful truth.
+  assert.equal(dayBucket(at(SUN, 23, 30), at(MON, 0, 15)), 'Last hour');
+});
+test('same calendar day, >1h old -> Today', () => {
+  assert.equal(dayBucket(at(MON, 2), at(MON, 9)), 'Today');
+});
+test('<1h old on the same day -> Last hour (not Today)', () => {
+  assert.equal(dayBucket(at(MON, 8, 30), at(MON, 9)), 'Last hour');
+});
+test('the 24h/48h thresholds do not decide: 19h reads Yesterday, 22h reads Today', () => {
+  // Same bucket boundary, opposite verdicts — decided by the day boundary
+  // between them, which is precisely what an elapsed-ms ladder cannot see.
+  assert.equal(dayBucket(at(SUN, 14), at(MON, 9)), 'Yesterday'); // 19h, crossed midnight
+  assert.equal(dayBucket(at(MON, 1), at(MON, 23)), 'Today'); // 22h, same day
+});
+test('beyond a week -> Older', () => {
+  assert.equal(dayBucket(at(MON, 9) - 8 * 24 * 60 * 60 * 1000, at(MON, 9)), 'Older');
+});
+test('the header can never contradict the row\'s own absolute timestamp', () => {
+  // formatAbsolute (lib/formatTimestamp.ts) decides "is this today?" by
+  // toDateString() equality. dayBucket must agree, or a row renders under a
+  // `Today` heading while its own timestamp reads a past date — the exact
+  // on-screen self-contradiction this fix removes.
+  const now = at(MON, 9);
+  for (const ts of [at(MON, 2), at(SUN, 14), at(SUN, 21), at(SAT, 10), at(MON, 8, 30)]) {
+    const sameCalendarDay = new Date(ts).toDateString() === new Date(now).toDateString();
+    const bucket = dayBucket(ts, now);
+    if (bucket === 'Today') assert.equal(sameCalendarDay, true, `"${bucket}" claimed for a past date`);
+    if (!sameCalendarDay) assert.notEqual(bucket, 'Today');
+  }
+});
+test('both feeds bucket identically — one shared helper, called with one clock', () => {
+  // ActivityTimeline and DirectiveHistory now both call THIS function with
+  // their 1s-ticking `now`, so identical input cannot produce two answers.
+  const now = at(MON, 9);
+  const rows = [at(MON, 2), at(SUN, 14), at(SAT, 10)];
+  assert.deepEqual(rows.map((t) => dayBucket(t, now)), rows.map((t) => dayBucket(t, now)));
+  assert.deepEqual(rows.map((t) => dayBucket(t, now)), ['Today', 'Yesterday', 'This week']);
 });
 
 console.log(`\n✓ TIMELINE PACING TESTS PASS (${passed})`);

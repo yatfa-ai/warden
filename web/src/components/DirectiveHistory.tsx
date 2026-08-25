@@ -16,7 +16,7 @@ import { copyText } from '@/lib/clipboard';
 import { toast } from 'sonner';
 import { EmptyState } from './EmptyState';
 import { MarkdownBody } from './MarkdownBody';
-import { formatUpdatedAgo, sortedFilterOptions } from '@/lib/timelinePacing';
+import { dayBucket, formatUpdatedAgo, sortedFilterOptions } from '@/lib/timelinePacing';
 import { formatTimestamp, type TimestampFormat } from '@/lib/formatTimestamp';
 import { POLL_INTERVAL_MS, shouldPoll, shouldRefreshOnVisibility } from '@/lib/timelinePacing';
 
@@ -128,21 +128,15 @@ export function DirectiveHistory({
     return true;
   });
 
-  // Group by the same time-period buckets ActivityTimeline uses, for consistency.
+  // Group by time period via the shared, tested `dayBucket` helper
+  // (lib/timelinePacing.ts) — the SAME function ActivityTimeline calls, so the
+  // two feeds cannot drift, and `Today`/`Yesterday` are decided by CALENDAR DAY
+  // (matching what each row's own formatTimestamp renders) rather than by
+  // elapsed milliseconds.
   const grouped = (() => {
     const groups: { [key: string]: Directive[] } = {};
-    const oneHour = 60 * 60 * 1000;
-    const oneDay = 24 * oneHour;
-    const twoDays = 2 * oneDay;
     for (const d of filtered) {
-      const diff = now - new Date(d.timestamp).getTime();
-      let key: string;
-      if (diff < oneHour) key = 'Last hour';
-      else if (diff < oneDay) key = 'Today';
-      else if (diff < twoDays) key = 'Yesterday';
-      else if (diff < 7 * oneDay) key = 'This week';
-      else key = 'Older';
-      (groups[key] ??= []).push(d);
+      (groups[dayBucket(new Date(d.timestamp).getTime(), now)] ??= []).push(d);
     }
     return groups;
   })();

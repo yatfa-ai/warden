@@ -68,6 +68,49 @@ export function sortedFilterOptions(values: (string | undefined | null)[]): stri
   return Array.from(seen).sort((x, y) => x.localeCompare(y));
 }
 
+/** The group headers both Observer feeds bucket their rows under. */
+export type DayBucket = 'Last hour' | 'Today' | 'Yesterday' | 'This week' | 'Older';
+
+/**
+ * Which group header a row belongs under, given its timestamp and the current
+ * time (both ms since epoch). Takes `now` explicitly (never reads a clock) so
+ * it is testable without time mocks.
+ *
+ * WHY THIS EXISTS: `Today` and `Yesterday` are CALENDAR-DAY claims, but both
+ * feeds used to assign them from elapsed milliseconds alone (`diff < 24h` ->
+ * 'Today'). A day boundary is a wall-clock event that a duration cannot see, so
+ * the header was wrong for an ordinary fraction of rows every night — at Mon
+ * 09:00 a Sun 14:00 event is 19h old and read `Today`, and just after midnight
+ * the 24h-wide `Today` bucket held almost nothing but yesterday's events. That
+ * is the worst possible failure for the "while I was away" catch-up surface,
+ * whose entire job is telling a returning human WHEN things happened.
+ *
+ * It pairs with `formatAbsolute` (lib/formatTimestamp.ts), which each row's own
+ * timestamp renders through: that helper decides "is this today?" by
+ * `toDateString()` equality, so the calendar comparisons below use exactly the
+ * same test. That alignment IS the fix — it is what makes it impossible for a
+ * row to sit under a `Today` heading while its own timestamp reads a past date.
+ *
+ * `Last hour` stays on elapsed time and is checked FIRST, so a 23:30 -> 00:15
+ * event (35 min old, previous calendar day) still reads `Last hour` rather than
+ * `Yesterday`. `This week` / `Older` also stay on elapsed time — they are vague
+ * enough to remain honest.
+ */
+export function dayBucket(timestamp: number, now: number): DayBucket {
+  const oneHour = 60 * 60 * 1000;
+  const oneDay = 24 * oneHour;
+  const diff = now - timestamp;
+
+  if (diff < oneHour) return 'Last hour';
+
+  const eventDate = new Date(timestamp).toDateString();
+  if (eventDate === new Date(now).toDateString()) return 'Today';
+  if (eventDate === new Date(now - oneDay).toDateString()) return 'Yesterday';
+
+  if (diff < 7 * oneDay) return 'This week';
+  return 'Older';
+}
+
 /**
  * Human label for "how long since the last successful refresh", given the
  * current time and the last update timestamp (both ms since epoch). Returns
