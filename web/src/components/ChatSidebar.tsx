@@ -1110,13 +1110,15 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
                 <span className="min-w-0 flex-1 wrap-anywhere">
                   ✖ could not reach {hostLabelFor(H, hostLabels) || LABEL[H] || H} — {info.error}. Sessions on this host are unknown, not absent.
                 </span>
-                <button
-                  className="shrink-0 underline hover:text-foreground disabled:opacity-50"
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  className="h-auto p-0 text-[11px] underline hover:bg-transparent hover:text-foreground shrink-0"
                   onClick={() => fetchHostSessions(H)}
                   disabled={loadingHost === H}
                 >
                   retry
-                </button>
+                </Button>
               </div>
             )}
             {/* The ⚠ install-claude instruction is suppressed on a failed fetch: with the
