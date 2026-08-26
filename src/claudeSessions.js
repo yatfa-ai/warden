@@ -23,7 +23,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { run } from './ssh.js';
+import { run, isTransportFailure } from './ssh.js';
 
 // fs.promises alias — the local session enumeration/transcript reads are async
 // (WARDEN-828) so the single-threaded server answers /api/config mid-sweep
@@ -306,18 +306,20 @@ printf '\\n___E\\t%s\\n' "$id"
 done`;
 }
 
-// `limit` bounds the returned list (most-recent first). Defaults to 40 so
-// `/api/claude-sessions` is unchanged; the "All Sessions" endpoint passes a
-// larger window for pagination (WARDEN-176). The remote script already walks
-// every file and transfers each head, so the per-request SSH cost is the same
-// regardless of limit — only the in-Node slice changes.
-export async function remoteClaudeSessions(host, limit = 40) {
-  const res = await run(host, buildRemoteSessionScript(), { timeout: 15000 });
-  if (!res.ok) return [];
+// Parse the remote session script's stdout into the session rows, most-recent
+// first, capped at `limit`. Split out of `remoteClaudeSessions` (WARDEN-1196) so
+// the transport-failure channel below could be added WITHOUT the parse loop
+// having to be duplicated or re-tested — the two callers share this one body, so
+// the frozen array contract and the new detail variant cannot drift apart.
+//
+// Pure (no SSH, no fs), so it is unit-testable directly — the `sessionRecovery.js`
+// pattern, and the reason the new failure leg has real coverage under `node --test
+// src` on a repo with no `mock.module` (Node 20).
+export function parseRemoteSessionOutput(stdout, limit = 40) {
   const out = [];
   let cur = null;
   const buf = [];
-  for (const line of res.stdout.split('\n')) {
+  for (const line of String(stdout || '').split('\n')) {
     // ___S now optionally carries four tab-separated token ints after the
     // mtime: ___S  id  mt  input  output  cacheCreation  cacheRead. The token
     // group is optional so a no-usage file (or a pre-token-format archive)
@@ -346,6 +348,58 @@ export async function remoteClaudeSessions(host, limit = 40) {
   }
   out.sort((a, b) => b.mtime - a.mtime);
   return out.slice(0, limit);
+}
+
+// The same enumeration as `remoteClaudeSessions`, keeping the SECOND thing the
+// SSH result carries: WHETHER THE HOST ANSWERED AT ALL (WARDEN-1196).
+//
+// WHY A SIBLING RATHER THAN A WIDER `remoteClaudeSessions`. That function has
+// three production callers (`/api/claude-sessions`, `/api/claude-sessions-all`,
+// and the budget sweep) and the other two consume its return value as a BARE
+// ARRAY — `mergeAndPaginateSessions` wraps it, the sweep calls `.map()` on it
+// directly. Changing its contract to a record would break both. Hence the pair:
+// `remoteClaudeSessions` keeps its narrow array contract (and its callers) and
+// this variant serves the one site that needs to tell "this host has no sessions"
+// apart from "I could not reach this host" — the same shape as
+// `readFileDiff`/`readFileDiffDetail` (web/src/lib/gitDiffApi.ts:149).
+//
+// The distinction is NOT invented here: `isTransportFailure` (src/ssh.js:488) is
+// the house classifier, already used for exactly this call by
+// `sessionRecovery.js:20`. Critically it returns FALSE when stdout is non-empty —
+// a host that answers with a non-zero exit and real output ran the command, so
+// that is a COMMAND failure, not an unreachable host, and it degrades to the
+// existing empty-list behaviour rather than being reported as a dead machine.
+//
+// `deps` is an optional test seam (production callers omit it), mirroring the
+// seams on `detectClaude`/`runWithPool`/`discover` — the repo is on Node 20
+// without `mock.module`, so without it this leg could not be driven without real
+// SSH.
+//
+// @returns `{ sessions, unreachable }`. `unreachable` is true ONLY for a transport
+//          failure; `sessions` is always an array (empty on any failure), so a
+//          caller that ignores the flag behaves exactly as before.
+export async function remoteClaudeSessionsDetail(host, limit = 40, deps = {}) {
+  const exec = deps.run ?? run;
+  const res = await exec(host, buildRemoteSessionScript(), { timeout: 15000 });
+  if (!res.ok) return { sessions: [], unreachable: isTransportFailure(res) };
+  return { sessions: parseRemoteSessionOutput(res.stdout, limit), unreachable: false };
+}
+
+// `limit` bounds the returned list (most-recent first). Defaults to 40 so
+// `/api/claude-sessions` is unchanged; the "All Sessions" endpoint passes a
+// larger window for pagination (WARDEN-176). The remote script already walks
+// every file and transfers each head, so the per-request SSH cost is the same
+// regardless of limit — only the in-Node slice changes.
+//
+// CONTRACT FROZEN (WARDEN-1196): returns a BARE ARRAY, empty on any failure —
+// transport or otherwise. `/api/claude-sessions-all` (src/server.js:1434) and the
+// budget sweep (:2817) both consume it as one, so this signature must not grow a
+// failure channel. It is now a thin projection of `remoteClaudeSessionsDetail`
+// above, which is where a caller that needs to distinguish an unreachable host
+// goes; behaviour here is byte-identical to before that split.
+export async function remoteClaudeSessions(host, limit = 40) {
+  const { sessions } = await remoteClaudeSessionsDetail(host, limit);
+  return sessions;
 }
 
 // ---- read-only transcript view (WARDEN-233) ----
