@@ -52,7 +52,7 @@ import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/Sidebar
 import { SourceControlPanel } from './sidebar/SourceControlPanel';
 import { SessionTagChips, SessionTagFilterRow } from './sidebar/SessionTags';
 import { computeTagsInUse, filterSessionsByTags, addTag, removeTag } from '@/lib/sessionTags';
-import { readListBody, readListResponse } from '@/lib/api';
+import { readListBody, readListResponse, readResponse } from '@/lib/api';
 
 // Back-compat re-export: OpenChatBrowserPage.tsx imports these types from
 // './ChatSidebar' — keep that path stable so it needs no change (WARDEN-315).
@@ -242,7 +242,14 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // any of the selected tags (union semantics).
   const [sessionTags, setSessionTags] = useState<Record<string, string[]>>({});
   const [activeTagFilters, setActiveTagFilters] = useState<Set<string>>(new Set());
-  const [hostSessions, setHostSessions] = useState<Record<string, { sessions: ClaudeSession[]; claudeAvailable?: boolean }>>({});
+  // WARDEN-1196: `error` is the per-host failure reason (null/absent = the last fetch
+  // succeeded). Written by fetchHostSessions from readResponse, so it is non-null for
+  // BOTH a non-2xx AND a 200 carrying {error} — the latter is how the backend reports
+  // an unreachable host, since the SSH failure is server-side and the HTTP call itself
+  // succeeds. `claudeAvailable` stays OPTIONAL and is genuinely absent on that path:
+  // an unreachable host cannot answer whether claude is installed, so the ⚠ warning's
+  // strict `=== false` gate must not be satisfied.
+  const [hostSessions, setHostSessions] = useState<Record<string, { sessions: ClaudeSession[]; claudeAvailable?: boolean; error?: string | null }>>({});
   const [loadingHost, setLoadingHost] = useState<string | null>(null);
   const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; detached?: boolean; headSha?: string | null; headDate?: string | null; clean: boolean | null; cwd: string; files?: GitFile[]; ahead?: number | null; behind?: number | null; upstream?: string | null; inProgress?: { operation: string | null; detail?: string | null }; stashCount?: number | null; diffstat?: DiffStat | null; outgoingFiles?: string[] | null }>>({});
   // recent commit history (git log) per chatId — cached so re-expanding the badge is instant
@@ -310,15 +317,48 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // WARDEN-581 — bulk-snooze duration dialog (sibling of broadcast/kill/interrupt).
   const [snoozeOpen, setSnoozeOpen] = useState(false);
 
+  // WARDEN-1196: the response READ goes through the shared `readResponse`/`readListBody`
+  // pair from lib/api.ts, so BOTH halves of warden's error convention are honoured — a
+  // non-2xx AND a 200 carrying {error}. The second half is the load-bearing one here:
+  // an unreachable host is an SSH failure that happens SERVER-side, so the HTTP request
+  // itself succeeds with a 200 and a well-formed body. The old code had no `r.ok` gate
+  // and no `j.error` read (`j.sessions || []`), and its `catch` → toast leg could not
+  // fire for exactly that reason — our own server answered 200 and `r.json()` parsed —
+  // so a dead host rendered as a confident "claude not found — install it".
+  //
+  // `claudeAvailable` is read as a strict boolean rather than passed through: on the
+  // failure path the key is ABSENT, and it must stay `undefined` (never coerced to
+  // `false`) or the ⚠ warning's `=== false` gate would fire for an unreachable host —
+  // the very bug this closes.
   const fetchHostSessions = async (host: string) => {
     setLoadingHost(host);
     try {
       const r = await fetch(`/api/claude-sessions?host=${encodeURIComponent(host)}`);
-      const j = await r.json();
-      setHostSessions((p) => ({ ...p, [host]: { sessions: j.sessions || [], claudeAvailable: j.claudeAvailable } }));
+      // Tolerant on !ok (the status carries the message), STRICT on 2xx — a 2xx body
+      // that fails to parse is a real failure and must reach the catch below rather
+      // than becoming a confident empty list (WARDEN-1014).
+      const body = await readListBody(r);
+      const { record, error } = readResponse(r, body, 'sessions');
+      const sessions = Array.isArray(record.sessions) ? (record.sessions as ClaudeSession[]) : [];
+      setHostSessions((p) => ({
+        ...p,
+        [host]: {
+          // A failure keeps NO stale rows: the point is that we do not know what is on
+          // this host, so showing the last successful scan's sessions beside an error
+          // would be its own quieter version of the same lie.
+          sessions: error ? [] : sessions,
+          claudeAvailable: typeof record.claudeAvailable === 'boolean' ? record.claudeAvailable : undefined,
+          error,
+        },
+      }));
     } catch (error) {
       console.error('[fetchHostSessions] Failed:', error);
-      if (prefs.notifyErrors) toast.error(`Failed to fetch sessions for ${host}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      // A thrown fetch/parse is the same class of "we could not read this host" as the
+      // 200-with-{error} leg, so it lands in the SAME state field and renders the same
+      // failure row — not only a toast the human may have disabled.
+      setHostSessions((p) => ({ ...p, [host]: { sessions: [], error: message } }));
+      if (prefs.notifyErrors) toast.error(`Failed to fetch sessions for ${host}: ${message}`);
     }
     setLoadingHost(null);
   };
@@ -1057,7 +1097,35 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
                 {[1, 2, 3, 4].map((i) => <SessionRowSkeleton key={i} />)}
               </>
             )}
-            {info.claudeAvailable === false && (
+            {/* WARDEN-1196 — the host could not be READ. Distinct from both siblings
+                below/above it: this is "we do not know what is on this machine",
+                whereas the ⚠ warning is a claim ABOUT the machine ("claude is not
+                installed") and the EmptyState is a claim about its CONTENTS ("there is
+                nothing here"). Both of those are factual assertions we are not entitled
+                to make when the fetch failed, which is exactly how a dropped tunnel used
+                to render as "install claude" — a wrong instruction the user would act on.
+                Offers the only useful action (retry) instead of a false remediation. */}
+            {info.error && (
+              <div className="mx-1 my-2 px-2 py-2 text-[11px] text-red-400 bg-red-500/10 border border-red-500/30 rounded-md flex items-start gap-2">
+                <span className="min-w-0 flex-1 wrap-anywhere">
+                  ✖ could not reach {hostLabelFor(H, hostLabels) || LABEL[H] || H} — {info.error}. Sessions on this host are unknown, not absent.
+                </span>
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  className="h-auto p-0 text-[11px] underline hover:bg-transparent hover:text-foreground shrink-0"
+                  onClick={() => fetchHostSessions(H)}
+                  disabled={loadingHost === H}
+                >
+                  retry
+                </Button>
+              </div>
+            )}
+            {/* The ⚠ install-claude instruction is suppressed on a failed fetch: with the
+                host unreachable the backend omits `claudeAvailable` entirely, so this
+                strict `=== false` gate cannot fire. The explicit `!info.error` term is
+                belt-and-suspenders for any future route that sends both. */}
+            {!info.error && info.claudeAvailable === false && (
               <div className="mx-1 my-2 px-2 py-2 text-[11px] text-yellow-400 bg-yellow-500/10 border border-yellow-500/30 rounded-md">
                 ⚠ claude not found on {hostLabelFor(H, hostLabels) || LABEL[H] || H} — install it to resume sessions here.
               </div>
@@ -1144,7 +1212,10 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
                 no sessions match the selected tag{activeTagFilters.size > 1 ? 's' : ''} — <button className="underline hover:text-foreground" onClick={() => setActiveTagFilters(new Set())}>clear filter</button>
               </div>
             )}
-            {sortedHostChats.length === 0 && sessions.length === 0 && loadingHost !== H && (
+            {/* WARDEN-1196: `!info.error` — "there is nothing here" is a claim about the
+                host's CONTENTS, which we cannot make when we could not read it. The
+                failure row above renders instead, so the two are mutually exclusive. */}
+            {!info.error && sortedHostChats.length === 0 && sessions.length === 0 && loadingHost !== H && (
               <EmptyState type="nothing-here" message={hostChats.length === 0 ? undefined : 'no agents match the current filter'} />
             )}
           </div>

@@ -27,7 +27,7 @@ import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn 
 import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude, startConnectionPoolCleanup, validateHost } from './ssh.js';
 import {
   parseJsonlHead, snippetFromLine,
-  localClaudeSessions, remoteClaudeSessions,
+  localClaudeSessions, remoteClaudeSessions, remoteClaudeSessionsDetail,
   mergeAndPaginateSessions,
   readLocalSessionTranscript, buildSessionReadScript, parseSessionReadOutput,
 } from './claudeSessions.js';
@@ -1404,11 +1404,49 @@ async function remoteSearchClaudeSessions(host, q) {
   return out.slice(0, SESSION_SEARCH_PER_HOST);
 }
 
+// An unreachable REMOTE host answers `{ host, sessions: [], error: 'host
+// unreachable' }` — and, critically, WITHOUT a `claudeAvailable` key (WARDEN-1196).
+//
+// THE BUG THIS CLOSES. Both helpers destroyed the failure server-side:
+// `remoteClaudeSessions` returned `[]` for a dead host, and `detectClaude`
+// returned `null` because its probes could not reach the machine. That produced a
+// clean `200 {sessions: [], claudeAvailable: false}`, and the sidebar's warning is
+// gated on `claudeAvailable === false` — so a dropped tunnel / wedged control
+// socket / powered-off box was reported in the product's own voice as
+// "⚠ claude not found on <host> — install it", a confident, WRONG, and ACTIONABLE
+// claim about the user's machine. `detectClaude` cannot tell "claude is absent"
+// from "I could not reach the host", so the answer is not to make it try: it is to
+// not ask a question whose answer we already know is unknowable.
+//
+// WHY THE KEY IS OMITTED RATHER THAN SENT AS `false`. Sending `claudeAvailable:
+// false` alongside the error would leave the bug LIVE — the gate is a strict
+// `=== false`. Omitting it arrives as `undefined`, which that gate does not
+// satisfy, so the wrong instruction cannot render. The client state shape already
+// types the field optional, so this needs no change to the gate's operator (which
+// would risk over-correcting the two states that MUST keep their existing render:
+// a reachable host with zero sessions, and a reachable host genuinely missing
+// claude).
+//
+// Skipping `detectClaude` on this path also drops three SSH probes to a machine we
+// have just proven unreachable — each on an 8s timeout.
+//
+// Scope: the REMOTE leg only. `(local)` does no SSH (`localClaudeSessions` reads
+// the filesystem), so transport failure is impossible there and that path is
+// unchanged. A host that answers with a non-zero exit and real stdout is a COMMAND
+// failure, not transport — `isTransportFailure` returns false when stdout is
+// non-empty — and still degrades to the pre-existing empty list.
 app.get('/api/claude-sessions', async (req, res) => {
   const host = String(req.query.host || LOCAL);
-  const sessions = host === LOCAL ? await localClaudeSessions() : await remoteClaudeSessions(host);
+  if (host !== LOCAL) {
+    const { sessions, unreachable } = await remoteClaudeSessionsDetail(host);
+    // `claudeAvailable` is deliberately absent from this body — see above.
+    if (unreachable) return res.json({ host, sessions: [], error: 'host unreachable' });
+    const claudeAvailable = !!(await detectClaude(host));
+    return res.json({ host, sessions, claudeAvailable });
+  }
+  const sessions = await localClaudeSessions();
   const claudeAvailable = !!(await detectClaude(host));
-  res.json({ sessions, claudeAvailable });
+  res.json({ host, sessions, claudeAvailable });
 });
 
 // Page-size guardrails for the unified "All Sessions" endpoint. Default 40 matches
