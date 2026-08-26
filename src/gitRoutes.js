@@ -1149,7 +1149,23 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
           // commit's full message rides a separate --no-patch call (commitMessage) so the
           // FileViewer blame/history popover can show the "why" above this diff too.
           const r = await runGit(chat, ['show', '--format=', hash, '--', filePath], cwd);
-          diff = capDiff(r.ok ? r.stdout : '');
+          // Non-zero exit → an explicit error, never a manufactured empty diff. A DIFF
+          // leg has no vocabulary for "empty" (`diff: null` can't say it), so per the
+          // /api/git-log carve-out it must word a failure as an error — otherwise a
+          // deleted cwd / non-git cwd / stopped container / dropped tunnel is
+          // byte-identical on the wire to a clean empty diff (WARDEN-89's false-empty
+          // disease). The sibling `files` leg below keeps answering `[]` because a LIST
+          // says "empty" precisely by being empty; that asymmetry is the rule, not a bug.
+          // FIXED literal, never r.stderr: both remote branches pipe `2>/dev/null`, so
+          // stderr is empty on every remote chat and an empty error string reads as
+          // "no error" to the client reader (same reasoning as /api/git-reflog).
+          // Deliberately NO classifyGitFailure probe — unlike the list routes, an unborn
+          // HEAD is NOT benign here: this request names a specific hash that cannot
+          // exist in a commitless repo, so "clean empty diff" would assert a falsehood
+          // about the user's data. `r.ok` with empty stdout stays the benign empty
+          // (`{ diff: '', error: null }`) — a file untouched by the commit is not a failure.
+          if (!r.ok) return res.json({ files: [], diff: null, error: 'git show failed' });
+          diff = capDiff(r.stdout);
           message = await commitMessage(chat, hash, cwd);
         } else {
           const r = await runGit(chat, ['show', '--name-status', '--pretty=format:', hash], cwd);
@@ -1558,7 +1574,21 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
         let diff = null;
         if (filePath) {
           const r = await runGit(chat, ['diff', `${ref}^`, ref, '--', filePath], cwd);
-          diff = capDiff(r.ok ? r.stdout : '');
+          // Non-zero exit → an explicit error, never a manufactured empty diff — the
+          // git-show per-file twin of the same rule. A DIFF leg has no vocabulary for
+          // "empty" (`diff: null` can't say it), so per the /api/git-log carve-out it
+          // must word a failure as an error; otherwise a deleted cwd / non-git cwd /
+          // stopped container / dropped tunnel is byte-identical on the wire to a clean
+          // empty diff (WARDEN-89's false-empty disease). The sibling `files` leg below
+          // keeps answering `[]` because a LIST says "empty" precisely by being empty.
+          // FIXED literal, never r.stderr (`2>/dev/null` on both remote branches makes
+          // stderr empty, and an empty error string reads as "no error" to the client).
+          // Deliberately NO classifyGitFailure probe — an unborn HEAD is not benign
+          // here: this request names a specific stash ref that cannot exist in a
+          // commitless repo. `r.ok` with empty stdout stays the benign empty
+          // (`{ diff: '', error: null }`) — a path not in the stash is not a failure.
+          if (!r.ok) return res.json({ files: [], diff: null, error: 'git stash diff failed' });
+          diff = capDiff(r.stdout);
         } else {
           const r = await runGit(chat, ['stash', 'show', '--name-status', '--pretty=format:', ref], cwd);
           files = parseGitShowNameStatus(r.ok ? r.stdout : '');

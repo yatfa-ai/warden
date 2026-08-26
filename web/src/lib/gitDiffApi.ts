@@ -63,12 +63,35 @@ import { readListBody, readResponse } from './api';
  *     leg `readListBody` deliberately lets that rejection through, so it lands in
  *     the caller's `catch` rather than becoming a confident "no diff".
  *
- * ⛔ NOT reached, and deliberately not guessed at: a genuine **git** failure on
- * this leg never arrives as an error. `gitRoutes.js:1152` / `:1561` both do
- * `diff = capDiff(r.ok ? r.stdout : '')` and then answer `error: null` at HTTP
- * 200, so a broken repo is indistinguishable on the wire from a clean empty diff.
- * That is a SERVER-side masking defect and its own ticket. Here it reads as a
- * genuine emptiness — which is the only honest reading available to the client.
+ *  6. **a genuine git failure** — 200 `{files: [], diff: null, error: 'git show
+ *     failed'}` / `'git stash diff failed'` (`gitRoutes.js:1167` / `:1590`). The
+ *     200-with-`{error}` half again, so it throws here and the caller renders it
+ *     through the row's ERROR channel — distinct from the empty state.
+ *
+ * ✅ That sixth shape is NEW (WARDEN-1192), and this block used to say the opposite.
+ * It previously recorded that a genuine git failure never arrives as an error,
+ * because both legs did `diff = capDiff(r.ok ? r.stdout : '')` and then answered
+ * `error: null` at HTTP 200 — a broken repo was byte-identical on the wire to a
+ * clean empty diff, which this client could only read as a genuine emptiness. That
+ * was called out here as a SERVER-side masking defect and its own ticket;
+ * WARDEN-1192 WAS that ticket, and it landed the exit-status gate on both per-file
+ * legs. The failure now arrives as an error string and is rendered as one.
+ *
+ * Two scoping facts worth keeping, because they make the shapes above look
+ * inconsistent unless you know them:
+ *   • Only the **per-file** (`path`-bearing) legs were hardened. The sibling
+ *     **files** legs still answer `{files: [], error: null}` on a failing git
+ *     command, deliberately: a LIST says "empty" precisely by being empty, while a
+ *     DIFF has no such vocabulary (`diff: null` cannot mean "empty"), so only the
+ *     diff must word it as an error. See the carve-out comment at
+ *     `gitRoutes.js:857-858`, which states that rule.
+ *   • Consequently a **valid-format but unknown** hash/ref on a healthy repo now
+ *     answers DIFFERENTLY on the two legs — `error: null` from the files leg, an
+ *     error string from this one. That divergence is the rule above working as
+ *     intended, not a bug.
+ *
+ * `readFileDiff`'s own behavior did NOT change for this: the reader already threw
+ * on any 200 carrying a non-empty `{error}`, so the new shape needed no code here.
  *
  * @param res the Response (only `ok` / `status` / `json` are read, so a plain
  *            object stands in for one under test)

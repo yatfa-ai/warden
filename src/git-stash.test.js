@@ -299,6 +299,49 @@ describe('/api/git-stash-show detail endpoint (real Express app from server.js)'
     assert.strictEqual(body.error, null);
   });
 
+  // ---- per-file leg: a FAILING git command must say so (WARDEN-1192) ----------
+  // The git-show twin of the same rule. The files leg above is a LIST and says "empty"
+  // precisely by being empty, so it stays error:null. The per-file leg is a DIFF —
+  // `diff: null` cannot mean "empty" — so a failure must be worded as an error string
+  // (the /api/git-log carve-out rule). Before this, the leg discarded the exit status
+  // and stamped error:null, so a broken repo was byte-identical on the wire to a clean
+  // empty diff (WARDEN-89's false-empty disease).
+  it('per-file leg surfaces a git failure as an error for a non-git cwd (200, not a false empty diff)', async () => {
+    const res = await fetch(`${baseUrl}/api/git-stash-show?id=warden-nongit&ref=${encodeURIComponent('stash@{0}')}&path=${encodeURIComponent('wip.txt')}`);
+    assert.strictEqual(res.status, 200); // still never a 500
+    const body = await res.json();
+    assert.strictEqual(body.diff, null, 'a failed diff must be null, not an empty string');
+    assert.strictEqual(body.error, 'git stash diff failed');
+    // Fixed literal, never r.stderr: both remote branches pipe 2>/dev/null, so a stderr
+    // passthrough would be an EMPTY string here — which the client reader treats as
+    // "no error", silently restoring the very bug this test pins.
+    assert.ok(typeof body.error === 'string' && body.error.length > 0, 'error must be a non-empty string');
+  });
+
+  it('per-file leg surfaces an error for a valid-shape but unknown stash ref (deliberately diverges from the files leg)', async () => {
+    // The same ref the files-leg test above asserts answers error:null. The two legs
+    // ANSWER DIFFERENTLY on purpose: a list truthfully says "empty"; a diff cannot, so
+    // it says "failed" rather than assert a clean empty diff for a stash that does not
+    // exist. If this ever goes back to error:null, the false-empty bug is back.
+    const res = await fetch(`${baseUrl}/api/git-stash-show?id=warden-stashed&ref=${encodeURIComponent('stash@{999}')}&path=${encodeURIComponent('wip.txt')}`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.diff, null);
+    assert.strictEqual(body.error, 'git stash diff failed');
+  });
+
+  it('preserves the BENIGN empty: a path not present in the stash stays { diff: "", error: null }', async () => {
+    // committed.txt is in the repo but was NOT part of the stashed change, so
+    // `git diff stash@{0}^ stash@{0} -- committed.txt` exits ZERO with empty stdout.
+    // That is a genuinely unchanged file, NOT a failure — the r.ok gate must let it
+    // through untouched, or the fix would over-correct and report healthy repos broken.
+    const res = await fetch(`${baseUrl}/api/git-stash-show?id=warden-stashed&ref=${encodeURIComponent('stash@{0}')}&path=${encodeURIComponent('committed.txt')}`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.diff, '', 'a successful-but-empty diff stays an empty STRING');
+    assert.strictEqual(body.error, null, 'a benign empty must not be converted into an error');
+  });
+
   it('returns 404 for an unknown chat id', async () => {
     const res = await fetch(`${baseUrl}/api/git-stash-show?id=does-not-exist&ref=${encodeURIComponent('stash@{0}')}`);
     assert.strictEqual(res.status, 404);
