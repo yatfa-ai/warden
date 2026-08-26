@@ -207,6 +207,74 @@ export function readListResponse<T = unknown>(
   return { items, error: bodyError };
 }
 
+/** What {@link readResponse} extracts: the body as a record + a failure string, or null. */
+export interface ResponseRead {
+  /**
+   * `body` narrowed to a record — `{}` when it was `undefined` or not an object, so
+   * the caller can read its own keys unguarded. This is the ONE home of that
+   * narrowing: {@link readListResponse} keeps its own copy only because it predates
+   * this sibling and is pinned byte-for-byte by web/list-response.test.mjs.
+   */
+  record: Record<string, unknown>;
+  /** Non-null whenever the response failed — by EITHER half of the convention. */
+  error: string | null;
+}
+
+/**
+ * Apply warden's error convention to a response whose payload is NOT a list — a
+ * scalar, or a list PLUS a scalar — and leave the body to the caller (WARDEN-1191).
+ *
+ * {@link readListResponse} answers `{items, error}`, so it can only serve a payload
+ * whose whole answer IS the list. Two seams landed a day apart needing the other
+ * shape, and both re-derived the same missing half by hand:
+ *
+ * - `gitDiffApi.ts` (WARDEN-1187) — the payload key is a STRING, so `items` was
+ *   `[]` unconditionally and got DISCARDED; `field: 'diff'` was passed only so the
+ *   reader's signature was honoured. A parameter that exists to be ignored is the
+ *   clearest sign the abstraction was missing.
+ * - `allSessionsApi.ts` (WARDEN-1188) — a real list PLUS `hasMore`, so the reader
+ *   served half the payload and the scalar was re-read off the body by hand. Its
+ *   own comment cites WARDEN-1187 by name.
+ *
+ * This is a SIBLING, not a flag on `readListResponse` — the same reasoning stated
+ * for that reader above, one layer up. Widening the list reader to also answer
+ * scalars would relocate the list contract's 19 specs into a conditional, and the
+ * two shapes want different return types, not different arguments. `readListBody`
+ * and `readErrorBody` are already exactly such siblings; the scalar/mixed case is
+ * the one family member that was never given a home. Additive here, nothing moves.
+ *
+ * Error precedence is IDENTICAL to `readListResponse`'s — that identity is the
+ * whole point, since a divergence is precisely the drift this removes:
+ *   1. `!res.ok`                      → `Failed to load <label> (<status>)`
+ *   2. 2xx + non-empty `body.error`   → that string
+ *   3. otherwise                      → `null`
+ *
+ * Leg 1 never consults the body, which matters because it IS reachable: on a
+ * non-2xx `readListBody` swallows a parse failure to `undefined` but a body that
+ * DOES parse arrives live, and `withGitRepo` answers exactly that shape (a 404
+ * carrying a bare `{error}`). The status wins there, deliberately.
+ *
+ * An empty-string `error` on a 2xx is NOT a failure, so a route that spreads
+ * `error: ''` (or omits it) still reads as success.
+ *
+ * @param res   the Response (only `ok`/`status` are read, so a plain object works in tests)
+ * @param body  the parsed JSON body, or `undefined` when it did not parse
+ * @param label human-readable noun for the status message (`diff`, `sessions`, …)
+ */
+export function readResponse(
+  res: Pick<Response, 'ok' | 'status'>,
+  body: unknown,
+  label: string,
+): ResponseRead {
+  // `body` is `unknown` (it may be undefined for a non-JSON response), so narrow it
+  // once here and hand the caller a record it can read unguarded.
+  const record = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+  if (!res.ok) return { record, error: `Failed to load ${label} (${res.status})` };
+  // An empty string is not an error — only a non-empty one is.
+  const bodyError = typeof record.error === 'string' && record.error ? record.error : null;
+  return { record, error: bodyError };
+}
+
 /**
  * Parse a git list response's body with the tolerance each leg actually deserves —
  * the caller-side companion to {@link readListResponse} (WARDEN-1014 review).

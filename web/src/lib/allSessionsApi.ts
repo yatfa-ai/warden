@@ -23,7 +23,7 @@
 // (OpenChatBrowserPage.tsx:255-257), there is no stale-data cushion: with a broken
 // backend, EVERY visit shows "Nothing runnable".
 
-import { readListBody, readListResponse } from './api';
+import { readListBody, readListResponse, readResponse } from './api';
 import type { ClaudeSession } from '@/components/sidebar/types';
 
 /** One page of the cross-host session timeline: the list plus the pagination scalar. */
@@ -58,13 +58,16 @@ export interface AllSessionsPage {
  *     leg `readListBody` deliberately lets that rejection through, so it lands in
  *     the caller's `catch` rather than becoming a confident empty list.
  *
- * ⚠ WHY THE PAIR IS WRAPPED RATHER THAN CALLED RAW. `readListResponse` returns
- * only `{items, error}` (api.ts:149-155), but THIS payload carries a list AND a
- * scalar: the route answers `res.json({ sessions, hasMore, totals })`
- * (src/server.js:1441). Calling the reader raw would silently DROP `hasMore` and
- * break Load-more pagination — the same list-vs-scalar mismatch already corrected
- * once in WARDEN-1187. So `hasMore` is read off the body directly, alongside the
- * list, and `web/src/lib/api.ts` stays byte-identical to `origin/main`.
+ * ⚠ WHY TWO READERS RATHER THAN ONE. `readListResponse` returns only
+ * `{items, error}`, but THIS payload carries a list AND a scalar: the route
+ * answers `res.json({ sessions, hasMore, totals })` (src/server.js:1441). Calling
+ * the list reader alone would silently DROP `hasMore` and break Load-more
+ * pagination — the same list-vs-scalar mismatch corrected once in WARDEN-1187.
+ * So the list rides `readListResponse` (it IS a real list) and the scalar rides
+ * `readResponse`, the scalar/mixed sibling added in WARDEN-1191. Before that
+ * sibling existed this seam re-derived the body-narrowing line by hand, which is
+ * the duplication that motivated the extraction; the narrowing now has one owner
+ * in `web/src/lib/api.ts`.
  *
  * Note the 2xx-`body.error` leg inside `readListResponse` is INERT on this route:
  * the handler (src/server.js:1423-1442) emits no `error` key on any path. It is
@@ -97,9 +100,12 @@ export async function readAllSessionsPage(
   // On a hard HTTP failure `items` is the reader's placeholder, not data — so the
   // error wins and the caller keeps whatever was already on screen.
   if (error) throw new Error(error);
-  // Read the pagination scalar off the SAME body the list came from. Coerced the
-  // way the call sites did (`!!j.hasMore`), so an omitted or junk value reads as
-  // "no further page" exactly as before.
-  const record = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+  // Read the pagination scalar off the SAME body the list came from, through the
+  // scalar sibling (WARDEN-1191) so the narrowing line has ONE owner. Only its
+  // `record` is taken: its error leg is the same precedence `readListResponse`
+  // just applied above, so re-reading it here would assert nothing new.
+  // Coerced the way the call sites did (`!!j.hasMore`), so an omitted or junk
+  // value reads as "no further page" exactly as before.
+  const { record } = readResponse(res, body, 'sessions');
   return { sessions: items, hasMore: !!record.hasMore };
 }

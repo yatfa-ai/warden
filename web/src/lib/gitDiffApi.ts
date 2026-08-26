@@ -25,24 +25,24 @@
 // (:1037) all honour the error contract. The holdout was the CHILD of the very
 // rows whose parent (`fetchShow`) already captures `j.error`.
 
-import { readListBody, readListResponse } from './api';
+import { readListBody, readResponse } from './api';
 
 /**
  * Read a per-file git diff response (`GET /api/git-show` and
  * `GET /api/git-stash-show`, both with a `path`) the way warden's backend
  * actually answers, and FAIL LOUDLY when it did not answer with data.
  *
- * Delegates to the house reader pair (`readListBody` + `readListResponse`,
- * WARDEN-1014) for the two parts that genuinely transfer — the leg-gated body
- * parse and the status-over-body error precedence — so this path inherits the
- * legs those encode, and inherits any future fix to them.
+ * Delegates to the house reader pair (`readListBody` + `readResponse`) for the two
+ * parts that genuinely transfer — the leg-gated body parse and the status-over-body
+ * error precedence — so this path inherits the legs those encode, and inherits any
+ * future fix to them.
  *
- * ⚠ `readListResponse` is a LIST reader and this payload key is a STRING, so its
- * `items` is deliberately DISCARDED here: `Array.isArray('diff text')` is false,
- * so `items` would be `[]` unconditionally. Only its ERROR leg is used, and the
- * diff is read off the body directly below. `readListResponse` itself is left
- * byte-identical (it is shared by 4 files and pinned by web/list-response.test.mjs)
- * rather than widened to handle scalars.
+ * This payload key is a STRING, so it reads through `readResponse` (WARDEN-1191),
+ * the scalar/mixed sibling of `readListResponse`. Until that sibling existed this
+ * seam called the LIST reader and threw its `items` away — `Array.isArray('diff
+ * text')` is false, so `items` was `[]` unconditionally — while passing
+ * `field: 'diff'` purely to honour a signature it did not want. The precedence is
+ * unchanged; only the reader that expresses it fits the payload now.
  *
  * The failure shapes this reaches, traced against src/gitRoutes.js — both routes
  * go through `withGitRepo` (:516-540) and NEITHER sets `notFoundEmpty`:
@@ -87,11 +87,10 @@ export async function readFileDiff(
   // that fails to parse is a real failure and must reach the caller's catch
   // rather than becoming a confident "no diff" (WARDEN-1014 review).
   const body = await readListBody(res);
-  // `items` discarded — see the note above. `field: 'diff'` is passed only so the
-  // reader's signature is honoured; the label is what shapes the message.
-  const { error } = readListResponse(res, body, 'diff', 'diff');
+  // The scalar sibling: same precedence as the list reader, and it hands back the
+  // narrowed body so the diff is read off it without a second cast.
+  const { record, error } = readResponse(res, body, 'diff');
   if (error) throw new Error(error);
-  const record = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
   // A genuine emptiness stays empty. This is NOT an over-correction point: the
   // caller renders `''` as "no diff", exactly as before the fix.
   return typeof record.diff === 'string' ? record.diff : '';
