@@ -106,6 +106,49 @@ import { readListBody, readResponse } from './api';
 export async function readFileDiff(
   res: Pick<Response, 'ok' | 'status'> & { json: () => Promise<unknown> },
 ): Promise<string> {
+  // Rests on the detail reader below so there is ONE expression of the error
+  // precedence for this payload. `readFileDiff`'s own contract is unchanged — it
+  // still resolves to the diff string alone and throws on exactly the same shapes
+  // — because the only difference between the two is which fields are KEPT off an
+  // already-validated record (WARDEN-1194).
+  const { diff } = await readFileDiffDetail(res);
+  return diff;
+}
+
+/**
+ * The same read as {@link readFileDiff}, keeping the SECOND field the per-file
+ * `/api/git-show` response carries: `message`, the commit's body (WARDEN-388).
+ *
+ * WHY A SIBLING RATHER THAN A WIDER `readFileDiff` (WARDEN-1194). `FileViewer`'s
+ * `BlameHash` popover — the diff behind every hash in both the Blame and the
+ * History view — was the LAST raw path-bearing read of these routes: an `r.ok`
+ * gate and then `j.diff` / `j.message` straight off an unchecked body, so the
+ * 200-with-`{error}` half of warden's convention (a `no cwd`, a route throw, and
+ * since WARDEN-1192 a genuine `git show failed`) rendered as the popover's
+ * definitive "no diff for this file at this commit" — a confident factual claim
+ * about the user's data made when the truth is "we could not read the
+ * repository". Routing it through `readFileDiff` as-is would have closed that
+ * hole and silently DROPPED the commit body, regressing WARDEN-388. Hence the
+ * pair: `readFileDiff` keeps its narrow string contract (and its pinned tests)
+ * for `DiffInspectRow`, which has no commit body to render, and this reader
+ * serves the site that does.
+ *
+ * Every failure shape, and every non-failure, is the SAME as `readFileDiff`'s —
+ * see its doc block above; this function adds no leg of its own, it only keeps a
+ * second field off the record the shared reader already validated.
+ *
+ * @returns `{ diff, message }` on success. `diff` is `''` for a genuinely empty
+ *          diff (the caller must keep rendering that as "no diff", NOT as a
+ *          failure). `message` is `''` for a subject-only commit and for any
+ *          response that omits/mistypes the key — the caller renders an empty
+ *          body as nothing, exactly as the pre-fix `typeof j.message === 'string'
+ *          && j.message` guard did.
+ * @throws  the same Error as {@link readFileDiff}, on either half of warden's
+ *          error convention.
+ */
+export async function readFileDiffDetail(
+  res: Pick<Response, 'ok' | 'status'> & { json: () => Promise<unknown> },
+): Promise<{ diff: string; message: string }> {
   // Tolerant on !ok (the status carries the message), STRICT on 2xx — a 2xx body
   // that fails to parse is a real failure and must reach the caller's catch
   // rather than becoming a confident "no diff" (WARDEN-1014 review).
@@ -114,7 +157,10 @@ export async function readFileDiff(
   // narrowed body so the diff is read off it without a second cast.
   const { record, error } = readResponse(res, body, 'diff');
   if (error) throw new Error(error);
-  // A genuine emptiness stays empty. This is NOT an over-correction point: the
-  // caller renders `''` as "no diff", exactly as before the fix.
-  return typeof record.diff === 'string' ? record.diff : '';
+  return {
+    // A genuine emptiness stays empty. This is NOT an over-correction point: the
+    // caller renders `''` as "no diff", exactly as before the fix.
+    diff: typeof record.diff === 'string' ? record.diff : '',
+    message: typeof record.message === 'string' ? record.message : '',
+  };
 }

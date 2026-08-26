@@ -56,6 +56,11 @@ import { toast } from 'sonner';
 import { useStickToBottom } from '@/lib/useStickToBottom';
 import { WEB_POLL_DEFAULT_MS } from '@/lib/pollInterval';
 import { readListBody, readListResponse } from '@/lib/api';
+// The per-file git-diff READ seam (WARDEN-1187 / WARDEN-1194). BlameHash reads its
+// popover diff through the DETAIL reader — the sibling that also keeps the commit
+// body (`message`, WARDEN-388) off the same response — so this site honours both
+// halves of warden's error convention instead of gating on `r.ok` alone.
+import { readFileDiffDetail } from '@/lib/gitDiffApi';
 
 interface FileViewerProps {
   chatId: string;
@@ -1205,26 +1210,49 @@ function BlameHash({ chatId, filePath, hash, summary, author, dateLabel }: {
   const [message, setMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [fetched, setFetched] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const handleOpenChange = async (next: boolean) => {
     setOpen(next);
     if (!next || fetched) return;
     setLoading(true);
+    // Clear any previous failure BEFORE retrying, so a retry that succeeds does not
+    // render its diff underneath a stale error line.
+    setError(null);
     try {
-      const r = await fetch(`/api/git-show?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(hash)}&path=${encodeURIComponent(filePath)}`);
-      if (!r.ok) { setDiff(null); setMessage(null); return; }
-      const j = await r.json();
-      setDiff(typeof j.diff === 'string' ? j.diff : null);
+      // WARDEN-1194: read through the extracted seam, which honours BOTH halves of
+      // warden's error convention (non-2xx, AND the 200-with-{error} half that the
+      // old `r.ok` gate missed entirely — `no cwd`, a route throw, and since
+      // WARDEN-1192 a genuine `git show failed` for a deleted cwd / non-git cwd /
+      // stopped container / dropped tunnel). It THROWS on failure, so a broken
+      // repository can no longer arrive here disguised as an empty diff and render
+      // the popover's confident "no diff for this file at this commit".
+      // The DETAIL reader, not `readFileDiff`, because this popover renders a second
+      // field off the same response: the commit body (WARDEN-388), below.
+      const { diff: text, message: body } = await readFileDiffDetail(
+        await fetch(`/api/git-show?id=${encodeURIComponent(chatId)}&hash=${encodeURIComponent(hash)}&path=${encodeURIComponent(filePath)}`),
+      );
+      // A genuinely empty diff stays empty and still renders "no diff for this file
+      // at this commit" — only a real failure takes the catch below.
+      setDiff(text || null);
       // The commit's body rides the same per-file fetch (no extra round-trip). Empty
       // for a subject-only commit → null so it renders nothing above the diff (the
       // hash row already shows the summary/subject) (WARDEN-388).
-      setMessage(typeof j.message === 'string' && j.message ? j.message : null);
-    } catch {
+      setMessage(body || null);
+      // Cache the SUCCESS only. Setting this in a `finally` (as the pre-fix code did)
+      // pinned a failed popover to its wrong state forever: the guard above is
+      // `if (!next || fetched)`, so closing and re-opening — the user's only recovery
+      // affordance — silently did nothing until the component remounted. On the
+      // failure path `fetched` stays false, so a re-open RE-ISSUES the fetch.
+      // Successful caching (instant re-open) is unchanged. (WARDEN-1187's coupling,
+      // same shape, same reason.)
+      setFetched(true);
+    } catch (e) {
       setDiff(null);
       setMessage(null);
+      setError(e instanceof Error && e.message ? e.message : 'Failed to load diff');
     } finally {
       setLoading(false);
-      setFetched(true);
     }
   };
 
@@ -1258,6 +1286,17 @@ function BlameHash({ chatId, filePath, hash, summary, author, dateLabel }: {
         </div>
         {loading ? (
           <div className="px-1 text-[10px] text-muted-foreground">loading diff…</div>
+        ) : error ? (
+          // WARDEN-1194 / WARDEN-89: a backend failure is NOT "no diff for this file at
+          // this commit". That empty state is a confident factual assertion about the
+          // user's data, and rendering it for a repository we could not read asserts
+          // the opposite of the truth. Kept in-place and quiet at the popover's own
+          // scale (it has no toast surface), visually distinct from the empty state,
+          // `role="status"` so AT announces it. `fetched` is not set on this path, so
+          // closing and re-opening the popover retries the fetch.
+          <div className="px-1 text-[10px] text-muted-foreground" role="status">
+            could not load diff — {error}
+          </div>
         ) : (
           <>
             {message ? (
