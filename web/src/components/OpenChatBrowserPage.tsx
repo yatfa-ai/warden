@@ -237,6 +237,14 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
   // the page asserted "Nothing runnable on the selected hosts yet" — a fact about
   // the user's machines — when the truth was that the request failed.
   const [sessionsError, setSessionsError] = useState<string | null>(null);
+  // Hosts the server could not REACH while assembling the last page (WARDEN-1200).
+  // Kept DISTINCT from `sessionsError`, which means the whole read failed: this is a
+  // PARTIAL success — the reachable hosts' rows are real and stay on screen — so it
+  // renders as a notice beside them, never instead of them. Before this existed an
+  // unreachable host's sessions were merged away into a clean empty 200 and the page
+  // asserted "Nothing runnable on the selected hosts yet" while a whole machine's
+  // history had been silently dropped (the WARDEN-89 false-empty, cross-host form).
+  const [unreachableHosts, setUnreachableHosts] = useState<string[]>([]);
   // Cross-host "All Sessions" pagination (WARDEN-176). `hasMoreSessions` mirrors
   // the server's `hasMore` so Load-more converges; `loadingMoreSessions` gates
   // the button.
@@ -270,7 +278,7 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
       // WARDEN-1188: read through the extracted seam, which gates on `r.ok` and
       // parses with the right tolerance per leg. It THROWS on failure, so a
       // backend failure can no longer arrive here disguised as an empty list.
-      const { sessions, hasMore } = await readAllSessionsPage(
+      const { sessions, hasMore, unreachableHosts: down } = await readAllSessionsPage(
         await fetch(`/api/claude-sessions-all?offset=0&limit=${ALL_SESSIONS_PAGE}`),
       );
       // A genuinely empty result stays empty and still renders the existing
@@ -278,6 +286,10 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
       // failure takes the catch below.
       setAllSessions(sessions);
       setHasMoreSessions(hasMore);
+      // Replaced (not merged) on a page-1 refresh: this is a fresh reading of the
+      // fleet, so a host that has come back up must clear its notice. `[]` on a
+      // healthy fleet, so the notice disappears exactly when the fleet recovers.
+      setUnreachableHosts(down);
     } catch (error) {
       console.error('[claude-sessions-all] Failed:', error);
       // Record the failure instead of seating `[]`. Note what is NOT done here:
@@ -298,10 +310,15 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
     setLoadingMoreSessions(true);
     setSessionsError(null);
     try {
-      const { sessions: next, hasMore } = await readAllSessionsPage(
+      const { sessions: next, hasMore, unreachableHosts: down } = await readAllSessionsPage(
         await fetch(`/api/claude-sessions-all?offset=${allSessions.length}&limit=${ALL_SESSIONS_PAGE}`),
       );
       setHasMoreSessions(hasMore);
+      // Also replaced rather than merged: the server re-reads the WHOLE fleet for
+      // every page, so this is the newest reading of which hosts are down — a host
+      // that recovered between pages must not stay named, and one that has just gone
+      // down must be named even though page 1 saw it fine.
+      setUnreachableHosts(down);
       setAllSessions((prev) => {
         const seen = new Set(prev.map((s) => `${s.host}:${s.id}`));
         return [...prev, ...next.filter((s) => !seen.has(`${s.host}:${s.id}`))];
@@ -352,6 +369,47 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
     if (selected && selected.length) return selected;
     return usualHosts.length ? usualHosts : hosts;
   }, [selected, usualHosts, hosts]);
+
+  // The partial-fleet notice (WARDEN-1200). Names the machines whose sessions are
+  // MISSING from the list below, using the same label resolver the host chips and
+  // row tags use, so the user recognises the machine by the name they gave it.
+  //
+  // SCOPED TO `effective`, and that intersection is load-bearing rather than
+  // cosmetic. The server computes `unreachableHosts` over the ENTIRE fleet
+  // (`[LOCAL, ...cfg.hosts]`, server.js) and never sees the host selection — the
+  // client sends only offset/limit. Everything else on this page is scoped to the
+  // selection (`items` drops rows with `if (!sel.has(s.host)) continue`), so an
+  // unscoped notice would speak about machines the user deliberately excluded. Two
+  // concrete lies that scoping removes, the second serious:
+  //   - rows present: "1 host unreachable (box9)" about a DESELECTED box9 — the
+  //     list is not incomplete with respect to what the user asked for;
+  //   - empty leg: with only a genuinely-empty (local) selected and a DESELECTED
+  //     box9 down, the notice would REPLACE the truthful "Nothing runnable on the
+  //     selected hosts yet" and assert incompleteness caused by a host the user is
+  //     not looking at. That is a false-ERROR over a truthful emptiness — the exact
+  //     mirror `toggleHost`'s WARDEN-1188 comment names, and just as much a lie
+  //     about the user's machines as the false-empty this ticket removes.
+  // The intersection also subsumes the staleness question: `fetchAllSessions` runs
+  // only on mount, so `unreachableHosts` persists across selection changes, but
+  // deselecting the dead host retires its notice on the next render — which is why
+  // `toggleHost` deliberately does NOT clear this state the way it clears
+  // `sessionsError` (see the note there).
+  //
+  // It is also what makes the token rollup and "load more" honest: both `totals`
+  // and `hasMore` are computed server-side over the hosts that ANSWERED (the rows
+  // on the unreachable machine are, unavoidably, on that machine), so the counts
+  // and the pagination boundary are knowably partial whenever this is non-null.
+  // Rather than silently presenting partial numbers as complete, we say so.
+  const unreachableNotice = useMemo(() => {
+    // Only the unreachable hosts the user is actually LOOKING at can make the
+    // list they are looking at incomplete.
+    const relevant = unreachableHosts.filter((h) => effective.includes(h));
+    if (relevant.length === 0) return null;
+    const names = relevant
+      .map((h) => hostLabelFor(h, hostLabels) || (h === THIS_MACHINE ? 'this machine' : h))
+      .join(', ');
+    return `${relevant.length} host${relevant.length > 1 ? 's' : ''} unreachable (${names}) — this list may be incomplete`;
+  }, [unreachableHosts, effective, hostLabels]);
 
   // On mount (≡ "on open"): refresh history sessions and discover selected remote
   // hosts so live items populate. Fire-and-forget — chats update flows back as each
@@ -416,6 +474,18 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
     // is a false-ERROR, the exact mirror of the false-empty this ticket removes,
     // and it is just as much a lie about the user's machines.
     setSessionsError(null);
+    // WARDEN-1200: `unreachableHosts` is deliberately NOT cleared here, and that is
+    // a decision rather than an omission. It is not the same kind of state as
+    // `sessionsError`: that one is a stale WHOLE-READ verdict which no longer
+    // describes anything once the selection moves, so it must be dropped. This one
+    // is a still-true per-HOST fact ("box9 did not answer the last read"), and it is
+    // consumed through an intersection with `effective` (see `unreachableNotice`),
+    // so a selection change re-scopes it on the next render for free: deselect the
+    // dead host and its notice retires; reselect it and the notice — still true —
+    // comes back. Clearing it here would instead DISCARD a true fact about a host
+    // the user just chose to look at, re-opening the false-empty on the very
+    // selection most likely to be affected. It is replaced wholesale by the next
+    // `fetchAllSessions`, which is the reading that can actually refute it.
     setSelected((prev) => {
       const base = prev && prev.length ? prev : effective;
       const next = base.includes(h) ? base.filter((x) => x !== h) : [...base, h];
@@ -628,7 +698,24 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
           ) : searchLoading && filtered.length === 0 ? (
             [1, 2, 3].map((i) => <SessionRowSkeleton key={i} />)
           ) : filtered.length === 0 ? (
-            <div className="text-xs text-muted-foreground p-4 text-center" role={!query && effective.length > 0 && sessionsError ? 'status' : undefined}>
+            /* WARDEN-1200: the live-region gate admits `unreachableNotice` as well as
+               `sessionsError`. When the notice REPLACES 'Nothing runnable' — the
+               headline case this ticket exists to close — the text swapping in is
+               exactly as much a change of claim about the user's fleet as the error
+               line is, so a screen-reader user must hear it. The sibling
+               `sessionsError` is already announced at BOTH render sites (here and
+               beside the rows below); this now matches. Still `undefined` on the
+               static messages ('Select at least one host', 'Nothing runnable'),
+               which are steady-state copy rather than events.
+
+               NOTE the comment form: this is a ternary BRANCH slot, i.e. JavaScript
+               expression context, not JSX children. The brace-wrapped comment form
+               is NOT a comment at all here — it parses as an empty object literal
+               followed by a JSX element, giving the branch two expressions and
+               collapsing the parse (7 errors, build exit 2). Use a bare block
+               comment in this position; the brace-wrapped form is only correct
+               inside JSX children, as in the sibling WARDEN-1188 comment below. */
+            <div className="text-xs text-muted-foreground p-4 text-center" role={!query && effective.length > 0 && (sessionsError || unreachableNotice) ? 'status' : undefined}>
               {/* WARDEN-1188 / WARDEN-89: a backend failure is NOT "nothing runnable".
                   The error branch sits INSIDE the no-query, hosts-selected leg so the
                   two sibling messages are preserved exactly: a content query still
@@ -636,14 +723,25 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
                   endpoint, not this one), and an empty host selection still reports
                   'Select at least one host'. Only the confident claim about the
                   user's machines gives way — and only when the request actually
-                  failed, so a genuine 200 with zero sessions still renders it. */}
+                  failed, so a genuine 200 with zero sessions still renders it.
+
+                  WARDEN-1200 adds the third case, and it is the headline false claim
+                  this ticket exists to close: the read SUCCEEDED (so `sessionsError`
+                  is null) but a host was unreachable and its sessions were merged
+                  away, leaving an empty list the page would otherwise report as a
+                  FACT about the user's fleet. It sits BELOW `sessionsError` — a
+                  whole-read failure is the more severe claim and keeps precedence —
+                  and ABOVE 'Nothing runnable', which now renders only when the fleet
+                  was genuinely, fully readable and genuinely had nothing. */}
               {query
                 ? 'No matches across selected hosts'
                 : effective.length === 0
                   ? 'Select at least one host'
                   : sessionsError
                     ? `Could not load sessions — ${sessionsError}`
-                    : 'Nothing runnable on the selected hosts yet'}
+                    : unreachableNotice
+                      ? unreachableNotice
+                      : 'Nothing runnable on the selected hosts yet'}
             </div>
           ) : (
             filtered.map((it) => (
@@ -680,6 +778,24 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
               that with `.trim()`, and all three route back to `allSessions`), so
               a bare `!query` would gate this line off while the button it
               annotates is still rendered and still failing silently. */}
+          {/* WARDEN-1200: the partial-fleet notice's SECOND render site — the
+              rows-present case. This is the whole point of the ticket's chosen
+              shape: the hosts that ANSWERED keep their rows on screen and the
+              notice sits beside them, so the user loses nothing and is simply told
+              the list is incomplete. (Routing this through `sessionsError` instead
+              would have thrown in the reader, left `allSessions` at its initial
+              `[]`, and blanked a working list because one machine of many was
+              down.) Rendered INDEPENDENTLY of `sessionsError` rather than as an
+              else-branch: a load-more can genuinely fail while the fleet is also
+              partial, and both facts are true and separately actionable. Gated on
+              `!query.trim()` for the same reason the error line above is — while a
+              content query is active the list comes from the SEARCH endpoint, so
+              this endpoint's fleet coverage is not what the user is looking at. */}
+          {unreachableNotice && filtered.length > 0 && !query.trim() && (
+            <div role="status" className="text-xs text-amber-400/90 px-2 py-1 text-center">
+              {unreachableNotice}
+            </div>
+          )}
           {sessionsError && filtered.length > 0 && !query.trim() && (
             <div role="status" className="text-xs text-red-400/90 px-2 py-1 text-center">
               Could not load sessions — {sessionsError}

@@ -32,6 +32,18 @@ export interface AllSessionsPage {
   sessions: (ClaudeSession & { host: string })[];
   /** The server's `hasMore` for this window — whether a further page exists. */
   hasMore: boolean;
+  /**
+   * Hosts the server could not REACH while assembling this page (WARDEN-1200).
+   * `[]` — never undefined — when the fleet was fully reachable, so the caller
+   * reads one shape on every path.
+   *
+   * ⚠ This is a PARTIAL-SUCCESS channel and must never be conflated with `error`.
+   * The page it rides on is real data from the hosts that DID answer; the caller
+   * renders it as a notice ALONGSIDE those rows, never instead of them. Routing it
+   * through the throw below would blank a working list because one machine of many
+   * was down — swapping a false-empty for a false-total-failure.
+   */
+  unreachableHosts: string[];
 }
 
 /**
@@ -70,19 +82,33 @@ export interface AllSessionsPage {
  * in `web/src/lib/api.ts`.
  *
  * Note the 2xx-`body.error` leg inside `readListResponse` is INERT on this route:
- * the handler (src/server.js:1423-1442) emits no `error` key on any path. It is
+ * the handler (src/server.js:1461-1512) emits no `error` key on any path. It is
  * harmless — and it is NOT described here as a live failure channel, because it
  * is not one. Only the STATUS leg and the parse legs do real work for this route.
  *
+ * ⚠ AND IT MUST STAY INERT — that is a load-bearing property, not an accident
+ * (WARDEN-1200). A partial fleet (some hosts answered, one was unreachable) is
+ * reported by the server as `unreachableHosts`, a SEPARATE key, precisely because
+ * `error` throws here and the caller's `catch` deliberately never seats a list
+ * (OpenChatBrowserPage.tsx `fetchAllSessions`). Had the server signalled a downed
+ * host with `error`, a first load with one host of many down would render
+ * "Could not load sessions" INSTEAD of the rows the reachable hosts returned —
+ * trading a false-empty for a false-total-failure. `error` means the WHOLE read
+ * failed; `unreachableHosts` means it partly succeeded, and the two travel on
+ * different rails on purpose.
+ *
  * `totals` is deliberately not returned: the component does not read it (its only
- * occurrence there is a comment).
+ * occurrence there is a comment). Note it — and `hasMore` — are computed by the
+ * server over the SURVIVING hosts only, so when `unreachableHosts` is non-empty
+ * both are knowably partial; that is exactly what the caller's notice discloses.
  *
  * @param res the Response (only `ok` / `status` / `json` are read, so a plain
  *            object stands in for one under test)
- * @returns the page's sessions + `hasMore` on success — `sessions: []` ONLY for a
- *          genuinely empty 200
+ * @returns the page's sessions + `hasMore` + `unreachableHosts` on success —
+ *          `sessions: []` ONLY for a genuinely empty 200
  * @throws  Error whenever the response failed (non-2xx); also propagates the
- *          `.json()` rejection of a truncated 2xx body
+ *          `.json()` rejection of a truncated 2xx body. NEVER for a merely
+ *          partial fleet.
  */
 export async function readAllSessionsPage(
   res: Pick<Response, 'ok' | 'status'> & { json: () => Promise<unknown> },
@@ -107,5 +133,13 @@ export async function readAllSessionsPage(
   // Coerced the way the call sites did (`!!j.hasMore`), so an omitted or junk
   // value reads as "no further page" exactly as before.
   const { record } = readResponse(res, body, 'sessions');
-  return { sessions: items, hasMore: !!record.hasMore };
+  // The partial-fleet channel (WARDEN-1200), read off the SAME body and narrowed
+  // the same defensive way the list is: anything that is not an array of strings
+  // degrades to `[]` rather than reaching the caller, which renders these as host
+  // names. An omitted key (the healthy fleet — the server omits it entirely) is
+  // therefore `[]`, so the caller has one shape to read and no `undefined` guard.
+  const unreachableHosts = Array.isArray(record.unreachableHosts)
+    ? record.unreachableHosts.filter((h): h is string => typeof h === 'string' && !!h)
+    : [];
+  return { sessions: items, hasMore: !!record.hasMore, unreachableHosts };
 }

@@ -124,10 +124,17 @@ test('`hasMore` is coerced exactly as the call sites did (`!!j.hasMore`)', async
 test('`totals` is ignored rather than leaking into the page shape', async () => {
   // The component does not read `totals` (its only occurrence there is a comment),
   // so the seam deliberately does not return it.
+  //
+  // WARDEN-1200 added `unreachableHosts` to this key set — a deliberate, in-scope
+  // widening, not a leak: unlike `totals` the component DOES read it, to render the
+  // partial-fleet notice. The exhaustive key assertion is kept (rather than relaxed
+  // to a `totals`-only check) precisely so any FUTURE field must come here and
+  // justify itself the way this one is doing.
   const page = await readAllSessionsPage(
     res(true, 200, resolves({ sessions: SESSIONS, hasMore: false, totals: { local: 12 } })),
   );
-  assert.deepEqual(Object.keys(page).sort(), ['hasMore', 'sessions']);
+  assert.deepEqual(Object.keys(page).sort(), ['hasMore', 'sessions', 'unreachableHosts']);
+  assert.equal(page.totals, undefined, 'the field this test exists for is still not returned');
 });
 
 // --- 3. Non-2xx: the failure must be DISTINGUISHABLE from emptiness -----------
@@ -478,5 +485,282 @@ test('changing the host selection CLEARS a stale error (no false-ERROR)', () => 
     body,
     /setSessionsError\(\s*null\s*\)/,
     'toggleHost must clear a stale sessionsError, or a resolved failure outlives the request',
+  );
+});
+
+// --- 9. The PARTIAL-fleet channel (WARDEN-1200) ------------------------------
+//
+// A DIFFERENT failure mode from everything above, and the distinction is the whole
+// point. Sections 3-7 are about a read that FAILED — the response carries no usable
+// data, so throwing is right and the caller keeps whatever was already on screen.
+// This section is about a read that PARTLY SUCCEEDED: some hosts answered with real
+// rows, one could not be reached and its sessions were merged away server-side.
+//
+// The seam must carry that fact WITHOUT throwing. Routing it through the `error` rail
+// would make `fetchAllSessions`'s catch fire, and that catch deliberately never calls
+// `setAllSessions` — so on a FIRST load (`allSessions` initialises to `[]`) the page
+// would render "Could not load sessions" instead of the rows the reachable hosts
+// genuinely returned. That is a false-TOTAL-failure replacing a false-empty: the user
+// loses working data they can currently see. Hence a separate, non-throwing key.
+
+test('a partial fleet returns the reachable hosts rows AND names the dead host — NO throw', async () => {
+  // THE load-bearing test of this section: it is exactly the case the rejected
+  // top-level-`error` shape would have broken.
+  const page = await readAllSessionsPage(
+    res(true, 200, resolves({ sessions: SESSIONS, hasMore: false, unreachableHosts: ['box9'] })),
+  );
+
+  assert.deepEqual(page.sessions, SESSIONS, 'the rows that DID arrive must survive intact');
+  assert.deepEqual(page.unreachableHosts, ['box9'], 'the dropped machine is named, not swallowed');
+});
+
+test('a fully-reachable fleet reads as `[]` — the server omits the key entirely', async () => {
+  // The healthy path. The server sends no `unreachableHosts` at all when nothing is
+  // down (keeping a healthy body byte-identical to pre-WARDEN-1200), so the seam must
+  // normalise the absence to `[]` rather than leaking `undefined` at the caller, which
+  // renders `.length` on it unguarded.
+  const page = await readAllSessionsPage(res(true, 200, resolves({ sessions: SESSIONS, hasMore: false })));
+
+  assert.deepEqual(page.unreachableHosts, [], 'an omitted key is "nothing is down", never undefined');
+});
+
+test('an EMPTY fleet reading is still distinguishable from a partial one', async () => {
+  // The headline false claim this ticket exists to close, stated as a data
+  // distinction. Before the fix these two responses were byte-identical on the wire —
+  // both `{sessions: []}` — so the page rendered "Nothing runnable on the selected
+  // hosts yet" for both: a confident factual claim about the user's machines, made
+  // while a whole machine's history had been silently dropped.
+  const genuinelyEmpty = await readAllSessionsPage(res(true, 200, resolves({ sessions: [] })));
+  const partiallyBlind = await readAllSessionsPage(
+    res(true, 200, resolves({ sessions: [], unreachableHosts: ['box9'] })),
+  );
+
+  assert.deepEqual(genuinelyEmpty.sessions, partiallyBlind.sessions, 'the LISTS are identical…');
+  assert.deepEqual(genuinelyEmpty.unreachableHosts, [], '…and only this field tells them apart');
+  assert.deepEqual(partiallyBlind.unreachableHosts, ['box9']);
+});
+
+test('a junk `unreachableHosts` degrades to [] rather than reaching the render', async () => {
+  // The caller `.map()`s these into host labels and joins them into a sentence, so a
+  // non-list — or a list with non-string members — must never get that far. Narrowed
+  // with the same defensiveness the `sessions` list already gets.
+  for (const junk of ['box9', 42, null, {}]) {
+    const page = await readAllSessionsPage(res(true, 200, resolves({ sessions: [], unreachableHosts: junk })));
+    assert.deepEqual(page.unreachableHosts, [], `a non-array (${JSON.stringify(junk)}) must not leak`);
+  }
+
+  const mixed = await readAllSessionsPage(
+    res(true, 200, resolves({ sessions: [], unreachableHosts: ['box9', null, '', 7, 'box8'] })),
+  );
+  assert.deepEqual(mixed.unreachableHosts, ['box9', 'box8'], 'non-string members are dropped, real hosts kept');
+});
+
+test('a partial fleet does NOT suppress a genuine hard failure', async () => {
+  // Precedence guard. `unreachableHosts` is additive disclosure, not an override: a
+  // non-2xx is still a failed read and must still throw, even if the body happens to
+  // carry the new key. The two channels are independent, and the harder one wins.
+  await assert.rejects(
+    () => readAllSessionsPage(res(false, 502, resolves({ sessions: [], unreachableHosts: ['box9'] }))),
+    /502/,
+    'a 502 is a failed read whatever else the body says',
+  );
+});
+
+// --- 10. Static guards on the partial-fleet RENDER (WARDEN-1200) --------------
+//
+// Same rationale as section 8: the notice lives in React state inside the .tsx and
+// this repo has no DOM runner, so these pin the INVARIANT via source guards.
+
+test('the partial-fleet notice does NOT ride the throwing `sessionsError` state', () => {
+  // The correction that defines this ticket's shape. If the notice were assigned into
+  // `sessionsError`, the empty-leg render would say "Could not load sessions — …" for
+  // a fleet that partly worked, and the rows-present line would colour a partial
+  // success as a failure. It must have its OWN state.
+  assert.match(page, /setUnreachableHosts\(/, 'the partial-fleet fact needs its own state setter');
+  const body = functionBody('const fetchAllSessions');
+  assert.match(body, /setUnreachableHosts\(/, 'the success path must record which hosts were missing');
+
+  // Scoped to the TRY leg deliberately. The `catch` below it SHOULD seat an error —
+  // that is section 8's invariant and it stays true — so asserting over the whole
+  // function would fire on correct code. What must not happen is the SUCCESS path
+  // treating a partial fleet as a failed read.
+  const tryLeg = body.slice(body.indexOf('try {'), body.indexOf('} catch'));
+  assert.ok(tryLeg.length > 0, 'could not isolate the try leg — this guard needs updating');
+  assert.match(tryLeg, /setUnreachableHosts\(/, 'the partial fleet is recorded on the SUCCESS path');
+  assert.doesNotMatch(
+    tryLeg,
+    /setSessionsError\(\s*(?!null)/,
+    'the SUCCESS path must never seat an error — a partial fleet is not a failed read',
+  );
+});
+
+test('the notice REPLACES "Nothing runnable" when the surviving fleet is empty', () => {
+  // The headline false claim, pinned at the render. An empty list plus a downed host
+  // must not render a confident claim about the user's machines. The unreachable
+  // branch must be consulted BEFORE that sentence.
+  const src = stripAllComments(page);
+  assert.match(
+    src,
+    /unreachable[\s\S]{0,200}Nothing runnable on the selected hosts yet/i,
+    'the partial-fleet branch must precede the confident empty sentence',
+  );
+  assert.match(page, /Nothing runnable on the selected hosts yet/,
+    'and the sentence itself survives for a fleet that was genuinely, fully readable');
+});
+
+test('the notice ALSO renders beside surviving rows (not only in the empty leg)', () => {
+  // The reachability lesson section 6 records, applied to the new channel: a render
+  // site inside the `filtered.length === 0` leg alone is invisible in exactly the case
+  // this ticket is about — some hosts answered, so there ARE rows on screen.
+  const src = stripAllComments(page);
+  const elseBranch = src.indexOf('filtered.map(');
+  assert.ok(elseBranch > 0, 'the list branch marker moved — this guard needs updating');
+
+  const outside = src.slice(elseBranch);
+  assert.match(
+    outside,
+    /unreachable[\s\S]{0,120}filtered\.length\s*>\s*0/i,
+    'the rows-present notice site is missing — with rows on screen the empty leg '
+      + 'can never render, so the partial fleet would go undisclosed in its own core case',
+  );
+});
+
+test('the rows-present notice is announced (role="status")', () => {
+  // Consistent with the error line beside it: a claim that the list on screen is
+  // incomplete is exactly the kind of thing a screen-reader user must not miss.
+  const src = stripAllComments(page);
+  const at = src.search(/unreachableNotice\s*&&\s*filtered\.length\s*>\s*0/);
+  assert.ok(at > 0, 'the rows-present notice site is missing');
+  assert.match(src.slice(at, at + 400), /role="status"/, 'the notice must carry role="status"');
+});
+
+// ---------------------------------------------------------------------------
+// §11 — SCOPING (WARDEN-1200 rework, code review on PR #518)
+//
+// ⚠️ READ THIS BEFORE TRUSTING ANY GUARD IN §10 OR §11.
+//
+// OUTER BOUND, AND IT IS WIDER THAN "these don't render the DOM": THESE GUARDS DO
+// NOT ESTABLISH THAT THE COMPONENT COMPILES — OR THAT IT IS SYNTACTICALLY VALID
+// JAVASCRIPT AT ALL. `page` is read with `readFileSync(..., 'utf8')` and matched as
+// a STRING; no web test parses, compiles, or evaluates the component. This is not a
+// theoretical limit — it was measured on this very ticket (PR #518, round 2): a
+// braced JSX comment was placed in a ternary BRANCH slot, which is expression
+// context, so it parsed as an empty object literal beside a JSX element and the file
+// stopped compiling with 7 errors. ALL FOUR new negative-controlled guards below
+// went GREEN on that unbuildable file, and the whole web suite reported 213/213,
+// because a regex asserting `(sessionsError || unreachableNotice)` appears in the
+// source matches happily on a file the compiler rejects.
+//
+// ONLY `npm run build` (i.e. `tsc -b`) OR `npx tsc -p tsconfig.app.json --noEmit`
+// ESTABLISHES THAT. Do NOT use a bare `npx tsc --noEmit` from `web/` to make a
+// "types are clean" claim: `web/tsconfig.json` is a SOLUTION-STYLE config
+// (`"files": []` + `references`), and `--noEmit` does not follow project references,
+// so it compiles an EMPTY PROGRAM and exits 0 unconditionally. Measured here:
+// `npx tsc --noEmit --listFiles | grep -c OpenChatBrowserPage` → 0 (yet exit 0),
+// against `-p tsconfig.app.json` → 1, i.e. this component is in the program under
+// the app config and in NO program under the root one. A green result from the root
+// config is vacuous, and any "tsc clean" line derived from it means nothing.
+//
+// Beyond compilation, these are STATIC SOURCE REGEXES, not a DOM render. They can
+// pin that a branch EXISTS and that branches are ORDERED correctly relative to one
+// another; they fundamentally CANNOT pin that a branch is SCOPED correctly, because
+// scoping is a property of the values flowing through at runtime and nothing here
+// evaluates the component. That distinction is not academic: the §10 guard
+// `/unreachable[\s\S]{0,200}Nothing runnable/` was GREEN on the first submission of
+// this ticket while the notice was derived from `unreachableHosts` alone, and it
+// stayed green through all three scoping/announcement defects the review caught —
+// it was confirming the ORDER of a branch whose CONTENT was wrong.
+//
+// So the guards below pin the SHAPE OF THE DERIVATION (the intersection is present,
+// `effective` is in the dependency list) rather than the rendered string. That is a
+// genuinely weaker claim than a DOM assertion would be, and it is deliberately the
+// strongest one available in a repo with no DOM runner. Do not over-trust them: a
+// future change that keeps the intersection but feeds it the wrong set would pass.
+// ---------------------------------------------------------------------------
+
+test('the notice is SCOPED to the selected hosts, not the whole fleet', () => {
+  // The server computes `unreachableHosts` over `[LOCAL, ...cfg.hosts]` and never
+  // sees the selection — the client sends only offset/limit. Everything else on this
+  // page is scoped to `effective` (`items` drops rows with `!sel.has(...)`), so an
+  // unscoped notice speaks about machines the user deliberately excluded. The
+  // serious case is the empty leg: with a deselected host down and the selected
+  // hosts genuinely empty, an unscoped notice SUPPRESSES the truthful "Nothing
+  // runnable" and asserts incompleteness caused by a host the user is not looking
+  // at — a false-ERROR over a truthful emptiness, the exact mirror `toggleHost`'s
+  // WARDEN-1188 comment names.
+  const src = stripAllComments(page);
+  const at = src.search(/const\s+unreachableNotice\s*=\s*useMemo/);
+  assert.ok(at > 0, 'the unreachableNotice memo is missing — this guard needs updating');
+  const memo = src.slice(at, at + 900);
+
+  assert.match(
+    memo,
+    /unreachableHosts\s*\.\s*filter\s*\([\s\S]{0,80}effective\s*\.\s*includes/,
+    'the notice must intersect `unreachableHosts` with `effective` before rendering — '
+      + 'an unscoped notice is a claim about machines the user is not looking at',
+  );
+  assert.doesNotMatch(
+    memo,
+    /if\s*\(\s*unreachableHosts\.length\s*===\s*0\s*\)\s*return null/,
+    'the early return must test the INTERSECTED set, not the raw fleet-wide list',
+  );
+});
+
+test('the notice memo recomputes when the host selection changes', () => {
+  // Scoping is only honoured if the memo actually re-runs on a selection change.
+  // `fetchAllSessions` runs on mount only, so `unreachableHosts` is stable across
+  // toggles — `effective` is the ONLY input that moves, and omitting it from the
+  // deps would freeze the notice at its mount-time scope and silently restore the
+  // unscoped bug for the entire life of the page.
+  const src = stripAllComments(page);
+  const at = src.search(/const\s+unreachableNotice\s*=\s*useMemo/);
+  assert.ok(at > 0, 'the unreachableNotice memo is missing');
+  const deps = src.slice(at, at + 1200).match(/\}\s*,\s*\[([^\]]*)\]\s*\)/);
+  assert.ok(deps, 'could not isolate the memo dependency list — this guard needs updating');
+  assert.match(deps[1], /\beffective\b/, '`effective` must be a dependency of the notice memo');
+  assert.match(deps[1], /\bunreachableHosts\b/, '`unreachableHosts` must remain a dependency');
+});
+
+test('the empty-leg notice is announced (role="status")', () => {
+  // The headline case: when the notice REPLACES "Nothing runnable", the text
+  // swapping in is exactly as much a change of claim about the user's fleet as the
+  // error line is. The sibling `sessionsError` is announced at BOTH render sites;
+  // the notice must match, or a screen-reader user gets nothing in the one branch
+  // this ticket exists to correct.
+  const src = stripAllComments(page);
+  const at = src.search(/role=\{[^}]*sessionsError[^}]*\}/);
+  assert.ok(at > 0, 'the empty-leg role gate is missing — this guard needs updating');
+  const gate = src.slice(at, src.indexOf('}', at) + 1);
+  assert.match(
+    gate,
+    /unreachableNotice/,
+    'the empty-leg live-region gate must admit `unreachableNotice` as well as '
+      + '`sessionsError` — when the notice replaces "Nothing runnable" it is a new '
+      + 'claim about the fleet and must be announced',
+  );
+});
+
+test('toggling the host selection does NOT discard the unreachable set', () => {
+  // A DECISION, pinned so it cannot be silently reversed. `sessionsError` is a stale
+  // WHOLE-READ verdict that stops describing anything once the selection moves, so
+  // `toggleHost` clears it. `unreachableHosts` is a still-true per-HOST fact, and it
+  // is consumed through the `effective` intersection above — so a selection change
+  // re-scopes it for free (deselect the dead host, the notice retires; reselect it,
+  // the notice returns). Clearing it here would DISCARD a true fact about a host the
+  // user just chose to look at, re-opening the false-empty on exactly the selection
+  // most likely to be affected. Only the next `fetchAllSessions` can refute it.
+  const src = stripAllComments(page);
+  const at = src.search(/const\s+toggleHost\s*=/);
+  assert.ok(at > 0, 'toggleHost is missing — this guard needs updating');
+  const body = src.slice(at, at + 700);
+
+  assert.match(body, /setSessionsError\(\s*null\s*\)/,
+    'the stale whole-read verdict is still cleared (WARDEN-1188 behaviour preserved)');
+  assert.doesNotMatch(
+    body,
+    /setUnreachableHosts\(/,
+    'toggleHost must not clear `unreachableHosts` — the notice is re-scoped by its '
+      + 'intersection with `effective`, and dropping the set would discard a true '
+      + 'per-host fact about a machine the user may have just selected',
   );
 });
