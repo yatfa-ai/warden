@@ -698,15 +698,23 @@ export function OpenChatBrowserPage({ onClose, hosts, chats, onOpenChat, onResum
           ) : searchLoading && filtered.length === 0 ? (
             [1, 2, 3].map((i) => <SessionRowSkeleton key={i} />)
           ) : filtered.length === 0 ? (
-            {/* WARDEN-1200: the live-region gate admits `unreachableNotice` as well as
-                `sessionsError`. When the notice REPLACES 'Nothing runnable' — the
-                headline case this ticket exists to close — the text swapping in is
-                exactly as much a change of claim about the user's fleet as the error
-                line is, so a screen-reader user must hear it. The sibling
-                `sessionsError` is already announced at BOTH render sites (here and
-                beside the rows below); this now matches. Still `undefined` on the
-                static messages ('Select at least one host', 'Nothing runnable'),
-                which are steady-state copy rather than events. */}
+            /* WARDEN-1200: the live-region gate admits `unreachableNotice` as well as
+               `sessionsError`. When the notice REPLACES 'Nothing runnable' — the
+               headline case this ticket exists to close — the text swapping in is
+               exactly as much a change of claim about the user's fleet as the error
+               line is, so a screen-reader user must hear it. The sibling
+               `sessionsError` is already announced at BOTH render sites (here and
+               beside the rows below); this now matches. Still `undefined` on the
+               static messages ('Select at least one host', 'Nothing runnable'),
+               which are steady-state copy rather than events.
+
+               NOTE the comment form: this is a ternary BRANCH slot, i.e. JavaScript
+               expression context, not JSX children. The brace-wrapped comment form
+               is NOT a comment at all here — it parses as an empty object literal
+               followed by a JSX element, giving the branch two expressions and
+               collapsing the parse (7 errors, build exit 2). Use a bare block
+               comment in this position; the brace-wrapped form is only correct
+               inside JSX children, as in the sibling WARDEN-1188 comment below. */
             <div className="text-xs text-muted-foreground p-4 text-center" role={!query && effective.length > 0 && (sessionsError || unreachableNotice) ? 'status' : undefined}>
               {/* WARDEN-1188 / WARDEN-89: a backend failure is NOT "nothing runnable".
                   The error branch sits INSIDE the no-query, hosts-selected leg so the

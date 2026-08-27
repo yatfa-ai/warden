@@ -639,11 +639,33 @@ test('the rows-present notice is announced (role="status")', () => {
 //
 // ⚠️ READ THIS BEFORE TRUSTING ANY GUARD IN §10 OR §11.
 //
-// These are STATIC SOURCE REGEXES, not a DOM render. They can pin that a branch
-// EXISTS and that branches are ORDERED correctly relative to one another; they
-// fundamentally CANNOT pin that a branch is SCOPED correctly, because scoping is a
-// property of the values flowing through at runtime and nothing here evaluates the
-// component. That distinction is not academic: the §10 guard
+// OUTER BOUND, AND IT IS WIDER THAN "these don't render the DOM": THESE GUARDS DO
+// NOT ESTABLISH THAT THE COMPONENT COMPILES — OR THAT IT IS SYNTACTICALLY VALID
+// JAVASCRIPT AT ALL. `page` is read with `readFileSync(..., 'utf8')` and matched as
+// a STRING; no web test parses, compiles, or evaluates the component. This is not a
+// theoretical limit — it was measured on this very ticket (PR #518, round 2): a
+// braced JSX comment was placed in a ternary BRANCH slot, which is expression
+// context, so it parsed as an empty object literal beside a JSX element and the file
+// stopped compiling with 7 errors. ALL FOUR new negative-controlled guards below
+// went GREEN on that unbuildable file, and the whole web suite reported 213/213,
+// because a regex asserting `(sessionsError || unreachableNotice)` appears in the
+// source matches happily on a file the compiler rejects.
+//
+// ONLY `npm run build` (i.e. `tsc -b`) OR `npx tsc -p tsconfig.app.json --noEmit`
+// ESTABLISHES THAT. Do NOT use a bare `npx tsc --noEmit` from `web/` to make a
+// "types are clean" claim: `web/tsconfig.json` is a SOLUTION-STYLE config
+// (`"files": []` + `references`), and `--noEmit` does not follow project references,
+// so it compiles an EMPTY PROGRAM and exits 0 unconditionally. Measured here:
+// `npx tsc --noEmit --listFiles | grep -c OpenChatBrowserPage` → 0 (yet exit 0),
+// against `-p tsconfig.app.json` → 1, i.e. this component is in the program under
+// the app config and in NO program under the root one. A green result from the root
+// config is vacuous, and any "tsc clean" line derived from it means nothing.
+//
+// Beyond compilation, these are STATIC SOURCE REGEXES, not a DOM render. They can
+// pin that a branch EXISTS and that branches are ORDERED correctly relative to one
+// another; they fundamentally CANNOT pin that a branch is SCOPED correctly, because
+// scoping is a property of the values flowing through at runtime and nothing here
+// evaluates the component. That distinction is not academic: the §10 guard
 // `/unreachable[\s\S]{0,200}Nothing runnable/` was GREEN on the first submission of
 // this ticket while the notice was derived from `unreachableHosts` alone, and it
 // stayed green through all three scoping/announcement defects the review caught —
