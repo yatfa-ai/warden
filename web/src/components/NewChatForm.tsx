@@ -7,6 +7,7 @@ import { postJson } from '@/lib/api';
 import { loadUi } from '@/lib/storage';
 import type { Chat } from '@/lib/types';
 import { groupByHost, summarizeHostLoad, resourceTone, type HostLoadSummary } from '@/lib/healthUtils';
+import { mergeHostList } from '@/lib/hostList';
 
 const THIS_MACHINE = '(local)';
 
@@ -125,7 +126,14 @@ export function NewChatForm({ onSpawned }: { onSpawned: (chat: Chat) => void }) 
     fetch('/api/ssh-hosts')
       .then((r) => r.json())
       .then((j) => {
-        const hosts: string[] = j.hosts || [];
+        // WARDEN-1202: union ~/.ssh/config aliases (`hosts`) with the real
+        // configured fleet (`configured` = cfg.hosts). Reading only `hosts` meant
+        // a host added by typing its name in Settings (WARDEN-940, which by design
+        // performs no ssh-config membership test) was absent from this list — so
+        // the reset below fired on it, silently undoing a stored default host on
+        // EVERY open and re-seeding cwd + preset. The reset must test against the
+        // full set, not just the discovered one.
+        const hosts: string[] = mergeHostList(j);
         setSshHosts(hosts);
         // Graceful fallback: a stored default host that's no longer configured
         // (removed from SSH hosts / no longer detected) must never leave a
