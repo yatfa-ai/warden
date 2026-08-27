@@ -5,6 +5,7 @@ import { loadUi, saveUi, initialWorkspace, mergeRecentlyClosed, DEFAULT_TERMINAL
 import { clampSidebarWidth, clampObserverWidth, clampLayoutWidths, HEALTH_WIDTH } from '@/lib/layout';
 import { displayName, type HostLabels } from '@/lib/chatDisplay';
 import { HostLabelsContext } from '@/lib/hostLabels';
+import { mergeHostList } from '@/lib/hostList';
 import { applyTheme, listenSystemThemeChange, resolveThemeId, resolveTerminalThemeId, type Theme, type ThemeId, type TerminalColorScheme } from '@/lib/theme';
 import { applyDensity, type Density } from '@/lib/density';
 import { type TimestampFormat } from '@/lib/formatTimestamp';
@@ -665,7 +666,12 @@ function App() {
   // dots back to "unknown". Live data itself is advanced by refreshDiscoveredHosts().
   const applyCatalog = useCallback(async (silent: boolean) => {
     if (!silent) setLoading(true);
-    fetch('/api/ssh-hosts').then((r) => r.json()).then((j) => setSshHosts(j.hosts || [])).catch((error) => console.error('[ssh-hosts] Failed:', error));
+    // WARDEN-1202: /api/ssh-hosts returns BOTH ~/.ssh/config aliases (`hosts`) and
+    // the real configured fleet (`configured` = cfg.hosts). Reading only `hosts`
+    // dropped every host added by typing its name in Settings (WARDEN-940), so it
+    // got no sidebar row and no Open Chat scope chip. mergeHostList unions them,
+    // de-duplicated and with '(local)' filtered (consumers prepend THIS_MACHINE).
+    fetch('/api/ssh-hosts').then((r) => r.json()).then((j) => setSshHosts(mergeHostList(j))).catch((error) => console.error('[ssh-hosts] Failed:', error));
     try {
       const cr = await fetch('/api/chats');
       const diskChats: Chat[] = (await cr.json()).chats || [];
