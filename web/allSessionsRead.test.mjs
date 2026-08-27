@@ -124,10 +124,17 @@ test('`hasMore` is coerced exactly as the call sites did (`!!j.hasMore`)', async
 test('`totals` is ignored rather than leaking into the page shape', async () => {
   // The component does not read `totals` (its only occurrence there is a comment),
   // so the seam deliberately does not return it.
+  //
+  // WARDEN-1200 added `unreachableHosts` to this key set — a deliberate, in-scope
+  // widening, not a leak: unlike `totals` the component DOES read it, to render the
+  // partial-fleet notice. The exhaustive key assertion is kept (rather than relaxed
+  // to a `totals`-only check) precisely so any FUTURE field must come here and
+  // justify itself the way this one is doing.
   const page = await readAllSessionsPage(
     res(true, 200, resolves({ sessions: SESSIONS, hasMore: false, totals: { local: 12 } })),
   );
-  assert.deepEqual(Object.keys(page).sort(), ['hasMore', 'sessions']);
+  assert.deepEqual(Object.keys(page).sort(), ['hasMore', 'sessions', 'unreachableHosts']);
+  assert.equal(page.totals, undefined, 'the field this test exists for is still not returned');
 });
 
 // --- 3. Non-2xx: the failure must be DISTINGUISHABLE from emptiness -----------
@@ -479,4 +486,150 @@ test('changing the host selection CLEARS a stale error (no false-ERROR)', () => 
     /setSessionsError\(\s*null\s*\)/,
     'toggleHost must clear a stale sessionsError, or a resolved failure outlives the request',
   );
+});
+
+// --- 9. The PARTIAL-fleet channel (WARDEN-1200) ------------------------------
+//
+// A DIFFERENT failure mode from everything above, and the distinction is the whole
+// point. Sections 3-7 are about a read that FAILED — the response carries no usable
+// data, so throwing is right and the caller keeps whatever was already on screen.
+// This section is about a read that PARTLY SUCCEEDED: some hosts answered with real
+// rows, one could not be reached and its sessions were merged away server-side.
+//
+// The seam must carry that fact WITHOUT throwing. Routing it through the `error` rail
+// would make `fetchAllSessions`'s catch fire, and that catch deliberately never calls
+// `setAllSessions` — so on a FIRST load (`allSessions` initialises to `[]`) the page
+// would render "Could not load sessions" instead of the rows the reachable hosts
+// genuinely returned. That is a false-TOTAL-failure replacing a false-empty: the user
+// loses working data they can currently see. Hence a separate, non-throwing key.
+
+test('a partial fleet returns the reachable hosts rows AND names the dead host — NO throw', async () => {
+  // THE load-bearing test of this section: it is exactly the case the rejected
+  // top-level-`error` shape would have broken.
+  const page = await readAllSessionsPage(
+    res(true, 200, resolves({ sessions: SESSIONS, hasMore: false, unreachableHosts: ['box9'] })),
+  );
+
+  assert.deepEqual(page.sessions, SESSIONS, 'the rows that DID arrive must survive intact');
+  assert.deepEqual(page.unreachableHosts, ['box9'], 'the dropped machine is named, not swallowed');
+});
+
+test('a fully-reachable fleet reads as `[]` — the server omits the key entirely', async () => {
+  // The healthy path. The server sends no `unreachableHosts` at all when nothing is
+  // down (keeping a healthy body byte-identical to pre-WARDEN-1200), so the seam must
+  // normalise the absence to `[]` rather than leaking `undefined` at the caller, which
+  // renders `.length` on it unguarded.
+  const page = await readAllSessionsPage(res(true, 200, resolves({ sessions: SESSIONS, hasMore: false })));
+
+  assert.deepEqual(page.unreachableHosts, [], 'an omitted key is "nothing is down", never undefined');
+});
+
+test('an EMPTY fleet reading is still distinguishable from a partial one', async () => {
+  // The headline false claim this ticket exists to close, stated as a data
+  // distinction. Before the fix these two responses were byte-identical on the wire —
+  // both `{sessions: []}` — so the page rendered "Nothing runnable on the selected
+  // hosts yet" for both: a confident factual claim about the user's machines, made
+  // while a whole machine's history had been silently dropped.
+  const genuinelyEmpty = await readAllSessionsPage(res(true, 200, resolves({ sessions: [] })));
+  const partiallyBlind = await readAllSessionsPage(
+    res(true, 200, resolves({ sessions: [], unreachableHosts: ['box9'] })),
+  );
+
+  assert.deepEqual(genuinelyEmpty.sessions, partiallyBlind.sessions, 'the LISTS are identical…');
+  assert.deepEqual(genuinelyEmpty.unreachableHosts, [], '…and only this field tells them apart');
+  assert.deepEqual(partiallyBlind.unreachableHosts, ['box9']);
+});
+
+test('a junk `unreachableHosts` degrades to [] rather than reaching the render', async () => {
+  // The caller `.map()`s these into host labels and joins them into a sentence, so a
+  // non-list — or a list with non-string members — must never get that far. Narrowed
+  // with the same defensiveness the `sessions` list already gets.
+  for (const junk of ['box9', 42, null, {}]) {
+    const page = await readAllSessionsPage(res(true, 200, resolves({ sessions: [], unreachableHosts: junk })));
+    assert.deepEqual(page.unreachableHosts, [], `a non-array (${JSON.stringify(junk)}) must not leak`);
+  }
+
+  const mixed = await readAllSessionsPage(
+    res(true, 200, resolves({ sessions: [], unreachableHosts: ['box9', null, '', 7, 'box8'] })),
+  );
+  assert.deepEqual(mixed.unreachableHosts, ['box9', 'box8'], 'non-string members are dropped, real hosts kept');
+});
+
+test('a partial fleet does NOT suppress a genuine hard failure', async () => {
+  // Precedence guard. `unreachableHosts` is additive disclosure, not an override: a
+  // non-2xx is still a failed read and must still throw, even if the body happens to
+  // carry the new key. The two channels are independent, and the harder one wins.
+  await assert.rejects(
+    () => readAllSessionsPage(res(false, 502, resolves({ sessions: [], unreachableHosts: ['box9'] }))),
+    /502/,
+    'a 502 is a failed read whatever else the body says',
+  );
+});
+
+// --- 10. Static guards on the partial-fleet RENDER (WARDEN-1200) --------------
+//
+// Same rationale as section 8: the notice lives in React state inside the .tsx and
+// this repo has no DOM runner, so these pin the INVARIANT via source guards.
+
+test('the partial-fleet notice does NOT ride the throwing `sessionsError` state', () => {
+  // The correction that defines this ticket's shape. If the notice were assigned into
+  // `sessionsError`, the empty-leg render would say "Could not load sessions — …" for
+  // a fleet that partly worked, and the rows-present line would colour a partial
+  // success as a failure. It must have its OWN state.
+  assert.match(page, /setUnreachableHosts\(/, 'the partial-fleet fact needs its own state setter');
+  const body = functionBody('const fetchAllSessions');
+  assert.match(body, /setUnreachableHosts\(/, 'the success path must record which hosts were missing');
+
+  // Scoped to the TRY leg deliberately. The `catch` below it SHOULD seat an error —
+  // that is section 8's invariant and it stays true — so asserting over the whole
+  // function would fire on correct code. What must not happen is the SUCCESS path
+  // treating a partial fleet as a failed read.
+  const tryLeg = body.slice(body.indexOf('try {'), body.indexOf('} catch'));
+  assert.ok(tryLeg.length > 0, 'could not isolate the try leg — this guard needs updating');
+  assert.match(tryLeg, /setUnreachableHosts\(/, 'the partial fleet is recorded on the SUCCESS path');
+  assert.doesNotMatch(
+    tryLeg,
+    /setSessionsError\(\s*(?!null)/,
+    'the SUCCESS path must never seat an error — a partial fleet is not a failed read',
+  );
+});
+
+test('the notice REPLACES "Nothing runnable" when the surviving fleet is empty', () => {
+  // The headline false claim, pinned at the render. An empty list plus a downed host
+  // must not render a confident claim about the user's machines. The unreachable
+  // branch must be consulted BEFORE that sentence.
+  const src = stripAllComments(page);
+  assert.match(
+    src,
+    /unreachable[\s\S]{0,200}Nothing runnable on the selected hosts yet/i,
+    'the partial-fleet branch must precede the confident empty sentence',
+  );
+  assert.match(page, /Nothing runnable on the selected hosts yet/,
+    'and the sentence itself survives for a fleet that was genuinely, fully readable');
+});
+
+test('the notice ALSO renders beside surviving rows (not only in the empty leg)', () => {
+  // The reachability lesson section 6 records, applied to the new channel: a render
+  // site inside the `filtered.length === 0` leg alone is invisible in exactly the case
+  // this ticket is about — some hosts answered, so there ARE rows on screen.
+  const src = stripAllComments(page);
+  const elseBranch = src.indexOf('filtered.map(');
+  assert.ok(elseBranch > 0, 'the list branch marker moved — this guard needs updating');
+
+  const outside = src.slice(elseBranch);
+  assert.match(
+    outside,
+    /unreachable[\s\S]{0,120}filtered\.length\s*>\s*0/i,
+    'the rows-present notice site is missing — with rows on screen the empty leg '
+      + 'can never render, so the partial fleet would go undisclosed in its own core case',
+  );
+});
+
+test('the rows-present notice is announced (role="status")', () => {
+  // Consistent with the error line beside it: a claim that the list on screen is
+  // incomplete is exactly the kind of thing a screen-reader user must not miss.
+  const src = stripAllComments(page);
+  const at = src.search(/unreachableNotice\s*&&\s*filtered\.length\s*>\s*0/);
+  assert.ok(at > 0, 'the rows-present notice site is missing');
+  assert.match(src.slice(at, at + 400), /role="status"/, 'the notice must carry role="status"');
 });

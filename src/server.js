@@ -1469,14 +1469,49 @@ app.get('/api/claude-sessions-all', async (req, res) => {
   const perHost = Math.min(ALL_SESSIONS_MAX_PER_HOST, offset + limit + 1);
   const hosts = [LOCAL, ...cfg.hosts];
   const results = await Promise.allSettled(hosts.map(async (host) => {
-    const sessions = host === LOCAL ? await localClaudeSessions(perHost) : await remoteClaudeSessions(host, perHost);
-    return { host, sessions };
+    // The REMOTE leg reads through the detail sibling so a transport failure stays
+    // DISTINGUISHABLE from "this host has no sessions" (WARDEN-1200). The bare
+    // `remoteClaudeSessions` returns [] for both, and merging that [] away produced
+    // a clean 200 whose empty list the browser renders as "Nothing runnable on the
+    // selected hosts yet" — a confident factual claim about the user's fleet, made
+    // while a whole machine's history had been silently dropped.
+    //
+    // The frozen-array contract on `remoteClaudeSessions` (claudeSessions.js) is
+    // NOT widened here: its own comment directs a caller that needs to tell the two
+    // apart to this sibling, so switching this one call site is compliance with it.
+    // The budget sweep still consumes the bare array unchanged.
+    //
+    // Scope: REMOTE only. `localClaudeSessions` is a filesystem read, not a
+    // transport, so `isTransportFailure` has no meaning for it and it can never be
+    // reported unreachable (the same scoping WARDEN-1196 applied on the sibling
+    // route). A remote host that answers with a non-zero exit and real stdout is a
+    // COMMAND failure — `isTransportFailure` returns false on non-empty stdout — so
+    // it still degrades to the pre-existing empty list and is NOT named unreachable.
+    if (host === LOCAL) return { host, sessions: await localClaudeSessions(perHost), unreachable: false };
+    const { sessions, unreachable } = await remoteClaudeSessionsDetail(host, perHost);
+    return { host, sessions, unreachable };
   }));
-  const buckets = results
-    .filter((r) => r.status === 'fulfilled')
-    .map((r) => ({ host: r.value.host, sessions: r.value.sessions }));
+  const settled = results.filter((r) => r.status === 'fulfilled').map((r) => r.value);
+  const buckets = settled.map(({ host, sessions }) => ({ host, sessions }));
+  const unreachableHosts = settled.filter((b) => b.unreachable).map((b) => b.host);
   const { sessions, hasMore, totals } = mergeAndPaginateSessions(buckets, offset, limit);
-  res.json({ sessions, hasMore, totals });
+  // `unreachableHosts` is ADDITIVE and OMITTED when the fleet is fully reachable, so
+  // a healthy response is byte-identical to before this change.
+  //
+  // Deliberately NOT a top-level `error` key, even though the sibling single-host
+  // route uses one. The client seam throws on a 2xx carrying `error`
+  // (web/src/lib/allSessionsApi.ts) and OpenChatBrowserPage's catch never seats a
+  // list — so on a first load with one host down, an `error` here would render
+  // "Could not load sessions" INSTEAD of the rows the reachable hosts did return.
+  // That is the WARDEN-1196 criterion-4 over-correction: replacing a false-empty
+  // with a false-total-failure. `error` is a whole-read-failed channel; a partial
+  // fleet is a partial SUCCESS and needs its own, non-throwing channel.
+  //
+  // It is also what makes `totals`/`hasMore` honest. Both are computed over the
+  // SURVIVING buckets only (mergeAndPaginateSessions) — unavoidable, since the
+  // missing rows are on the machine we could not read — so the client can now know
+  // the rollup and the pagination are partial instead of trusting them blindly.
+  res.json({ sessions, hasMore, totals, ...(unreachableHosts.length ? { unreachableHosts } : {}) });
 });
 
 // GET /api/budget — the cached token-spend budget snapshot (WARDEN-415). Cheap
