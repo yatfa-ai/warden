@@ -243,6 +243,126 @@ describe('createChatCatalogCache — the in-memory catalogue owner (WARDEN-1206)
     });
   });
 
+  // ---- criterion 4, ACROSS a catalog refresh ------------------------------
+  //
+  // The audit gap that let two defects through a 27-test suite: every hostState
+  // assertion above follows a refreshHost or an in-flight state, so NOTHING
+  // pinned what a routine /api/chats tick does to a settled slot. It did two
+  // wrong things, and both are ordinary rather than contrived — the client's
+  // visible-tick auto-refresh re-pulls /api/chats on its own (web/src/App.tsx).
+
+  describe('a catalog refresh must not corrupt what we already know per host', () => {
+    it('a host we looked at and found EMPTY stays "known" across a catalog refresh', async () => {
+      // The regression: a /api/chats tick used to drop the empty slot, silently
+      // downgrading "we looked and there is nothing there" back to "we have not
+      // looked yet" — destroying the distinction criterion 4 exists to create.
+      const discover = fakeDiscover({ 'empty-host': [] });
+      const cache = createChatCatalogCache({ discover, catalog: fakeCatalog([]) });
+
+      await cache.refreshHost('empty-host', {});
+      assert.strictEqual(cache.hostState('empty-host').known, true, 'precondition: we looked');
+
+      await cache.refreshCatalog({}); // the ordinary /api/chats tick
+
+      const after = cache.hostState('empty-host');
+      assert.strictEqual(after.known, true,
+        'a settled "there is nothing there" must survive a routine catalog refresh');
+      assert.deepStrictEqual(after.chats, []);
+      assert.strictEqual(typeof after.at, 'number', 'a known slot keeps a freshness stamp');
+    });
+
+    it('a host we have NEVER looked at is still absent after a catalog refresh', async () => {
+      // The inverse of the fix: keeping empty slots must not mint phantom ones.
+      const cache = createChatCatalogCache({
+        discover: fakeDiscover({}), catalog: fakeCatalog([tmuxChat('h1', 'a')]),
+      });
+
+      await cache.refreshCatalog({});
+
+      assert.strictEqual(cache.hostState('h1').known, true, 'the disk introduced h1');
+      assert.strictEqual(cache.hostState('never-seen').known, false,
+        'an unmentioned host must stay "we have not looked", not become a known empty');
+    });
+
+    it('a live-discovered host the disk read never mentions keeps its OWN at and source', async () => {
+      // The regression: `at` was computed once and applied to every surviving
+      // host with source hardcoded to 'catalog', so a no-op refresh advanced the
+      // module's only freshness signal and relabelled live ssh data as disk data.
+      let clock = 1000;
+      const discover = fakeDiscover({ h1: [yatfaChat('h1', 'w1')] });
+      const cache = createChatCatalogCache({
+        now: () => clock, discover, catalog: fakeCatalog([]), // disk knows nothing of h1
+      });
+
+      await cache.refreshHost('h1', {});
+      assert.deepStrictEqual(
+        { at: cache.hostState('h1').at, source: cache.hostState('h1').source },
+        { at: 1000, source: 'discover' }, 'precondition: landed live at t=1000');
+
+      clock = 9999;
+      await cache.refreshCatalog({});
+
+      const after = cache.hostState('h1');
+      assert.strictEqual(after.at, 1000,
+        'nothing about h1 was re-read, so its freshness must NOT advance');
+      assert.strictEqual(after.source, 'discover',
+        'its chats came over ssh, so it must not claim a disk provenance');
+      assert.deepStrictEqual(ids(after.chats), ['h1:w1'], 'and the chats themselves survive');
+    });
+
+    it('a host the disk read DID contribute to IS restamped (the positive case)', async () => {
+      // The other half: skipping the restamp for untouched hosts must not stop a
+      // genuinely re-read host from recording that it was just re-read.
+      let clock = 1000;
+      const discover = fakeDiscover({ h1: [tmuxChat('h1', 'a')] });
+      const cache = createChatCatalogCache({
+        now: () => clock, discover, catalog: fakeCatalog([tmuxChat('h1', 'a')]),
+      });
+
+      await cache.refreshHost('h1', {});
+      clock = 9999;
+      await cache.refreshCatalog({});
+
+      const after = cache.hostState('h1');
+      assert.strictEqual(after.at, 9999, 'the disk DID speak about h1, so freshness advances');
+      assert.strictEqual(after.source, 'catalog', '...and the provenance is now the disk');
+    });
+
+    it('an emptied host holds a slot but contributes NOTHING to snapshot()', async () => {
+      // Keeping empty slots must stay invisible to the ~10 flat-array read
+      // sites: criterion 7 is unaffected by criterion 4's fix.
+      const discover = fakeDiscover({ 'empty-host': [] });
+      const cache = createChatCatalogCache({
+        discover, catalog: fakeCatalog([tmuxChat('h1', 'a')]),
+      });
+
+      await cache.refreshHost('empty-host', {});
+      await cache.refreshCatalog({});
+
+      assert.deepStrictEqual(ids(cache.snapshot()), ['h1:a'],
+        'an empty known slot adds no entries to the flat array');
+    });
+
+    it('a host whose disk chats all disappear stays known, as an empty answer', async () => {
+      // The tmux-chats-removed path: the host was real and we still know it, we
+      // just know it now holds nothing. That is an ANSWER, not an absence.
+      let listing = [tmuxChat('h1', 'a')];
+      const cache = createChatCatalogCache({
+        discover: fakeDiscover({}), catalog: fakeCatalog(() => listing),
+      });
+
+      await cache.refreshCatalog({});
+      assert.deepStrictEqual(ids(cache.snapshot()), ['h1:a'], 'precondition: h1 had a chat');
+
+      listing = []; // the disk no longer lists anything for h1
+      await cache.refreshCatalog({});
+
+      assert.deepStrictEqual(cache.snapshot(), [], 'the stale chat is gone from the flat read');
+      assert.strictEqual(cache.hostState('h1').known, true,
+        'but we still know h1 — "it has nothing" is a different answer from "we never looked"');
+    });
+  });
+
   // ---- criterion 5: the lastActivity carry-forward, now structural ---------
 
   describe('lastActivity carry-forward (WARDEN-245), applied by the owner on every refresh', () => {

@@ -170,13 +170,43 @@ export function createChatCatalogCache({
     // kept yatfa chats lead — mirroring the old `[...yatfa, ...catalogChats]`.
     const order = [...new Set([...slots.keys(), ...incoming.keys()])];
     const at = now();
+    const prevSlots = new Map(slots);
     slots.clear();
     for (const host of order) {
       const yatfa = kept.get(host) || [];
       const fresh = carryLastActivity(prevActivity, incoming.get(host) || []);
       const merged = [...yatfa, ...fresh];
-      if (!merged.length) continue; // a host with nothing left holds no slot
-      slots.set(host, { chats: merged, at, source: 'catalog' });
+      const prev = prevSlots.get(host);
+
+      // A KNOWN HOST KEEPS ITS SLOT EVEN WHEN IT ENDS UP EMPTY. Dropping it here
+      // would silently downgrade "we looked and there is nothing there"
+      // (known: true, chats: []) back to "we have not looked yet"
+      // (known: false) — destroying the very distinction hostState exists to
+      // draw, on the most ordinary sequence there is: click a host with zero
+      // sessions (/api/discover → a legitimate empty answer), then let the
+      // client's visible-tick auto-refresh re-pull /api/chats. The reference
+      // model behaves the same way: createHostStatusCache only ever deletes an
+      // entry in its RECONCILE step, for a host that is no longer configured —
+      // never as a side effect of a refresh finding nothing. An empty slot
+      // contributes nothing to snapshot(), so the flat-array shape is unchanged.
+      //
+      // Every host in `order` therefore holds a slot: it was either already
+      // known (keep it, empty or not), or the disk read just introduced it — in
+      // which case it has at least one chat by construction, since `incoming`
+      // only gains a key when a chat is pushed onto it.
+
+      // STAMP FRESHNESS ONLY FOR HOSTS THIS DISK READ ACTUALLY SPOKE ABOUT.
+      // `at` is the module's only freshness signal and `source` its provenance,
+      // so a host whose chats came from a live ssh discover — and which the disk
+      // read never mentions — must NOT be restamped as a fresh 'catalog' read.
+      // Doing so made a no-op refresh advance `at` and relabel live-discovered
+      // data as disk data, i.e. claim a recency and an origin it does not have.
+      const contributed = incoming.has(host);
+      slots.set(host, {
+        chats: merged,
+        at: contributed || !prev ? at : prev.at,
+        source: contributed || !prev ? 'catalog' : prev.source,
+      });
     }
 
     return { chats, errors };
@@ -214,9 +244,6 @@ export function createChatCatalogCache({
       if (!slot) return { host, known: false, checking, at: null, source: null, chats: [] };
       return { host, known: true, checking, at: slot.at, source: slot.source, chats: slot.chats };
     },
-
-    /** The hosts we hold a slot for, in catalogue order. */
-    hosts() { return [...slots.keys()]; },
 
     /** See the `refreshCatalog` definition above. */
     refreshCatalog,
