@@ -633,3 +633,112 @@ test('the rows-present notice is announced (role="status")', () => {
   assert.ok(at > 0, 'the rows-present notice site is missing');
   assert.match(src.slice(at, at + 400), /role="status"/, 'the notice must carry role="status"');
 });
+
+// ---------------------------------------------------------------------------
+// §11 — SCOPING (WARDEN-1200 rework, code review on PR #518)
+//
+// ⚠️ READ THIS BEFORE TRUSTING ANY GUARD IN §10 OR §11.
+//
+// These are STATIC SOURCE REGEXES, not a DOM render. They can pin that a branch
+// EXISTS and that branches are ORDERED correctly relative to one another; they
+// fundamentally CANNOT pin that a branch is SCOPED correctly, because scoping is a
+// property of the values flowing through at runtime and nothing here evaluates the
+// component. That distinction is not academic: the §10 guard
+// `/unreachable[\s\S]{0,200}Nothing runnable/` was GREEN on the first submission of
+// this ticket while the notice was derived from `unreachableHosts` alone, and it
+// stayed green through all three scoping/announcement defects the review caught —
+// it was confirming the ORDER of a branch whose CONTENT was wrong.
+//
+// So the guards below pin the SHAPE OF THE DERIVATION (the intersection is present,
+// `effective` is in the dependency list) rather than the rendered string. That is a
+// genuinely weaker claim than a DOM assertion would be, and it is deliberately the
+// strongest one available in a repo with no DOM runner. Do not over-trust them: a
+// future change that keeps the intersection but feeds it the wrong set would pass.
+// ---------------------------------------------------------------------------
+
+test('the notice is SCOPED to the selected hosts, not the whole fleet', () => {
+  // The server computes `unreachableHosts` over `[LOCAL, ...cfg.hosts]` and never
+  // sees the selection — the client sends only offset/limit. Everything else on this
+  // page is scoped to `effective` (`items` drops rows with `!sel.has(...)`), so an
+  // unscoped notice speaks about machines the user deliberately excluded. The
+  // serious case is the empty leg: with a deselected host down and the selected
+  // hosts genuinely empty, an unscoped notice SUPPRESSES the truthful "Nothing
+  // runnable" and asserts incompleteness caused by a host the user is not looking
+  // at — a false-ERROR over a truthful emptiness, the exact mirror `toggleHost`'s
+  // WARDEN-1188 comment names.
+  const src = stripAllComments(page);
+  const at = src.search(/const\s+unreachableNotice\s*=\s*useMemo/);
+  assert.ok(at > 0, 'the unreachableNotice memo is missing — this guard needs updating');
+  const memo = src.slice(at, at + 900);
+
+  assert.match(
+    memo,
+    /unreachableHosts\s*\.\s*filter\s*\([\s\S]{0,80}effective\s*\.\s*includes/,
+    'the notice must intersect `unreachableHosts` with `effective` before rendering — '
+      + 'an unscoped notice is a claim about machines the user is not looking at',
+  );
+  assert.doesNotMatch(
+    memo,
+    /if\s*\(\s*unreachableHosts\.length\s*===\s*0\s*\)\s*return null/,
+    'the early return must test the INTERSECTED set, not the raw fleet-wide list',
+  );
+});
+
+test('the notice memo recomputes when the host selection changes', () => {
+  // Scoping is only honoured if the memo actually re-runs on a selection change.
+  // `fetchAllSessions` runs on mount only, so `unreachableHosts` is stable across
+  // toggles — `effective` is the ONLY input that moves, and omitting it from the
+  // deps would freeze the notice at its mount-time scope and silently restore the
+  // unscoped bug for the entire life of the page.
+  const src = stripAllComments(page);
+  const at = src.search(/const\s+unreachableNotice\s*=\s*useMemo/);
+  assert.ok(at > 0, 'the unreachableNotice memo is missing');
+  const deps = src.slice(at, at + 1200).match(/\}\s*,\s*\[([^\]]*)\]\s*\)/);
+  assert.ok(deps, 'could not isolate the memo dependency list — this guard needs updating');
+  assert.match(deps[1], /\beffective\b/, '`effective` must be a dependency of the notice memo');
+  assert.match(deps[1], /\bunreachableHosts\b/, '`unreachableHosts` must remain a dependency');
+});
+
+test('the empty-leg notice is announced (role="status")', () => {
+  // The headline case: when the notice REPLACES "Nothing runnable", the text
+  // swapping in is exactly as much a change of claim about the user's fleet as the
+  // error line is. The sibling `sessionsError` is announced at BOTH render sites;
+  // the notice must match, or a screen-reader user gets nothing in the one branch
+  // this ticket exists to correct.
+  const src = stripAllComments(page);
+  const at = src.search(/role=\{[^}]*sessionsError[^}]*\}/);
+  assert.ok(at > 0, 'the empty-leg role gate is missing — this guard needs updating');
+  const gate = src.slice(at, src.indexOf('}', at) + 1);
+  assert.match(
+    gate,
+    /unreachableNotice/,
+    'the empty-leg live-region gate must admit `unreachableNotice` as well as '
+      + '`sessionsError` — when the notice replaces "Nothing runnable" it is a new '
+      + 'claim about the fleet and must be announced',
+  );
+});
+
+test('toggling the host selection does NOT discard the unreachable set', () => {
+  // A DECISION, pinned so it cannot be silently reversed. `sessionsError` is a stale
+  // WHOLE-READ verdict that stops describing anything once the selection moves, so
+  // `toggleHost` clears it. `unreachableHosts` is a still-true per-HOST fact, and it
+  // is consumed through the `effective` intersection above — so a selection change
+  // re-scopes it for free (deselect the dead host, the notice retires; reselect it,
+  // the notice returns). Clearing it here would DISCARD a true fact about a host the
+  // user just chose to look at, re-opening the false-empty on exactly the selection
+  // most likely to be affected. Only the next `fetchAllSessions` can refute it.
+  const src = stripAllComments(page);
+  const at = src.search(/const\s+toggleHost\s*=/);
+  assert.ok(at > 0, 'toggleHost is missing — this guard needs updating');
+  const body = src.slice(at, at + 700);
+
+  assert.match(body, /setSessionsError\(\s*null\s*\)/,
+    'the stale whole-read verdict is still cleared (WARDEN-1188 behaviour preserved)');
+  assert.doesNotMatch(
+    body,
+    /setUnreachableHosts\(/,
+    'toggleHost must not clear `unreachableHosts` — the notice is re-scoped by its '
+      + 'intersection with `effective`, and dropping the set would discard a true '
+      + 'per-host fact about a machine the user may have just selected',
+  );
+});
