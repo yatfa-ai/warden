@@ -22,7 +22,14 @@ import { buildGetResponse, applyConfigPut, afterSave, resetConfig } from './conf
 import { resolveConsent } from './telemetry-consent.cjs';
 import { applyCompanionToggle } from './companion.js';
 import * as collections from './collections.js';
-import { capturePanes, resolveChatWithRefresh, catalogChats, discoverHost, discoverAll } from './chats.js';
+// NOTE: `catalogChats` and `discoverHost` are deliberately NOT imported here.
+// Every in-memory catalogue read/write in this file goes through `chatCatalog`,
+// which owns the per-host slots, the freshness stamps, the in-flight dedup and
+// the lastActivity carry-forward (WARDEN-1206). Those two functions are the
+// owner's injected dependencies (src/chatCatalog.js). Keeping them out of scope
+// makes that single-owner invariant structural rather than a convention — the
+// same trick the `saveCatalog` note above plays for the disk catalogue.
+import { capturePanes, resolveChatWithRefresh, discoverAll } from './chats.js';
 import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn as spawnTmux, kill as killTmux, attachStream, probeSession } from './tmux.js';
 import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude, startConnectionPoolCleanup, validateHost } from './ssh.js';
 import {
@@ -42,6 +49,7 @@ import { getHealthState, groupByHealth, getHealthSummary } from './health.js';
 import { classifyPane, stripAnsi, matchWatchPatterns } from './agentState.js';
 import * as notify from './notify.js';
 import { createHostStatusCache } from './hostStatus.js';
+import { createChatCatalogCache } from './chatCatalog.js';
 import {
   probeReceiverCapabilities,
 } from './telemetry-capabilities.js';
@@ -110,57 +118,43 @@ if (fs.existsSync(DIST)) {
   ));
 }
 
-// chat cache + resolver
-let cache = [];
+// The in-memory chat catalogue. ONE owner (WARDEN-1206): per-host slots carrying
+// freshness, per-host in-flight refresh dedup, and the lastActivity carry-forward
+// applied STRUCTURALLY on every refresh. This replaced a bare `let cache = []`
+// rewritten wholesale at six sites, each of which had to remember to call a
+// `retainLastActivity` helper by hand. `snapshot()` is a flat chat array — the
+// same shape the old array had — and never awaits the network. See
+// src/chatCatalog.js; it is modelled on createHostStatusCache below.
+const chatCatalog = createChatCatalogCache();
 
 // Per-host connectivity cache behind GET /api/hosts/status (WARDEN-915), so that
 // request never waits on live SSH. See createHostStatusCache in src/hostStatus.js
 // for the model, and the route below for what it replaced.
 const hostStatusCache = createHostStatusCache();
 
-// Carry a chat's last-known lastActivity forward across a cache refresh
-// (WARDEN-245). Activity is captured for LIVE sessions only; when a session goes
-// inactive the fresh discover yields lastActivity === null, and a cache replace
-// would wipe the value the closed chat needs for Fleet Health recency ordering.
-// This fills any nextChat.lastActivity that is null/undefined with the prior
-// cached value for the same id (catalog chats additionally hydrate from the
-// persisted entry in chats.js; this covers yatfa chats, which have no catalog,
-// and is belt-and-suspenders for catalog chats too). Pure / no ssh.
-function retainLastActivity(prevCache, nextChats) {
-  if (!prevCache.length) return nextChats;
-  const prev = new Map();
-  for (const c of prevCache) {
-    if (c.lastActivity != null) prev.set(c.id, c.lastActivity);
-  }
-  if (!prev.size) return nextChats;
-  return nextChats.map((c) =>
-    (c.lastActivity == null && prev.has(c.id)) ? { ...c, lastActivity: prev.get(c.id) } : c
-  );
-}
-
 async function resolve(id) {
-  const result = await resolveChatWithRefresh(id, cache, async () => {
-    // Lazy mode: never do a full fleet discoverAll. Seed cache from disk (instant, zero
-    // ssh), then — only if the id carries a known "<host>:..." prefix — discover that one
-    // host. Bare container names (restored yatfa tabs) stay unresolved until the user
-    // clicks the host. resolveChatWithRefresh re-matches against the refreshed cache.
-    if (!cache.length) cache = (await catalogChats(cfg)).chats;
+  const result = await resolveChatWithRefresh(id, chatCatalog.snapshot(), async () => {
+    // Lazy mode: never do a full fleet discoverAll. Seed the catalogue from disk
+    // (instant, zero ssh), then — only if the id carries a known "<host>:..." prefix
+    // — discover that one host. Bare container names (restored yatfa tabs) stay
+    // unresolved until the user clicks the host. resolveChatWithRefresh re-matches
+    // against the refreshed snapshot.
+    await chatCatalog.seedIfEmpty(cfg);
     const colon = id.lastIndexOf(':');
     if (colon > 0) {
       const hostHint = id.slice(0, colon);
       if (hostHint === LOCAL || cfg.hosts.includes(hostHint)) {
-        const { chats } = await discoverHost(hostHint, cfg);
-        cache = [...cache.filter((c) => c.host !== hostHint), ...retainLastActivity(cache, chats)];
+        await chatCatalog.refreshHost(hostHint, cfg);
       }
     } else if (cfg.hosts.length) {
       // Bare name (e.g. a restored yatfa tab like "yatfa-worker") with no host hint.
       // Locate it across configured hosts so already-open remote panes resolve on app
       // start. Demand-driven + cached: runs at most once per unresolved bare name.
-      const settled = await Promise.allSettled(cfg.hosts.map((h) => discoverHost(h, cfg)));
-      const found = settled.filter((r) => r.status === 'fulfilled').flatMap((r) => r.value.chats);
-      cache = [...cache.filter((c) => !cfg.hosts.includes(c.host)), ...retainLastActivity(cache, found)];
+      // The owner dedups per host, so two panes resolving bare names concurrently
+      // share ONE fleet sweep instead of each starting their own (WARDEN-1206).
+      await chatCatalog.refreshHosts(cfg.hosts, cfg);
     }
-    return { chats: cache, errors: [] };
+    return { chats: chatCatalog.snapshot(), errors: [] };
   });
 
   if (result.chat) return { chat: result.chat };
@@ -192,22 +186,22 @@ const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 // Disk-only catalog list — instant, zero ssh (lazy mode). Live active/status are
 // resolved per host on demand via /api/discover.
 app.get('/api/chats', async (_req, res) => {
-  const { chats, errors } = await catalogChats(cfg);
-  // Refresh catalog (disk) chats in the cache but KEEP any lazily-discovered yatfa chats,
-  // so already-open remote panes keep streaming across list refreshes.
-  const yatfa = cache.filter((c) => c.kind === 'yatfa');
-  cache = [...yatfa, ...retainLastActivity(cache, chats)];
+  // Refreshes the catalog (disk) chats in the catalogue but KEEPS any lazily-discovered
+  // yatfa chats, so already-open remote panes keep streaming across list refreshes.
+  // That preservation is the owner's rule now, not this handler's (WARDEN-1206).
+  const { chats, errors } = await chatCatalog.refreshCatalog(cfg);
   res.json({ chats, errors });
 });
 
 // Discover ONE host on demand (user clicked it). Returns that host's chats with live
-// active/lastActivity and merges them into the cache.
+// active/lastActivity and merges them into the catalogue.
 app.get('/api/discover', async (req, res) => {
   const host = String(req.query.host || '');
   if (!host) return res.status(400).json({ error: 'missing ?host=' });
   try {
-    const { chats } = await discoverHost(host, cfg);
-    cache = [...cache.filter((c) => c.host !== host), ...retainLastActivity(cache, chats)];
+    // Concurrent clicks on the same host share ONE discover (the owner's per-host
+    // in-flight dedup); each still gets that host's chats back.
+    const chats = await chatCatalog.refreshHost(host, cfg);
     res.json({ host, chats });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -228,9 +222,10 @@ function cwdHostKey(cwd, host) { return `${cwd}\0${host}`; }
 // Health endpoint for fleet health monitoring
 app.get('/api/health', (_req, res) => {
   try {
-    // Cache-derived (zero ssh). Under lazy mode only discovered/catalog chats are present;
-    // catalog chats report UNKNOWN until their host is clicked.
-    const chats = cache;
+    // Catalogue-derived (zero ssh — snapshot() never awaits the network). Under lazy
+    // mode only discovered/catalog chats are present; catalog chats report UNKNOWN
+    // until their host is clicked.
+    const chats = chatCatalog.snapshot();
 
     // Per-agent token spend (WARDEN-466): join each live agent to its budget
     // session's lifetime token total so the cost dimension sits beside CPU/mem
@@ -380,12 +375,14 @@ app.get('/api/agent-states', async (req, res) => {
       .filter(Boolean);
     if (keys.length === 0) return res.json({ agents: [], total: 0, timestamp: Date.now() });
 
-    // Resolve pane keys → chats from the cache (zero ssh). Match on key OR id so a
-    // bare restored tab id resolves the same as a host-qualified key.
+    // Resolve pane keys → chats from the catalogue (zero ssh). Match on key OR id
+    // so a bare restored tab id resolves the same as a host-qualified key. One
+    // snapshot for the whole loop — it is a fresh array each call.
+    const known = chatCatalog.snapshot();
     const seen = new Set();
     const chats = [];
     for (const k of keys) {
-      const c = cache.find((x) => x.key === k || x.id === k);
+      const c = known.find((x) => x.key === k || x.id === k);
       if (c && !seen.has(c.key)) { seen.add(c.key); chats.push(c); }
     }
     if (chats.length === 0) return res.json({ agents: [], total: 0, timestamp: Date.now() });
@@ -424,7 +421,7 @@ app.get('/api/agent-states/fleet', async (req, res) => {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
-    const agents = await pollFleetStates(cache, cfg, {}, { excludeKeys });
+    const agents = await pollFleetStates(chatCatalog.snapshot(), cfg, {}, { excludeKeys });
     res.json({ agents, total: agents.length, timestamp: Date.now() });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -964,7 +961,7 @@ app.get('/api/collections/:id/agents', async (req, res) => {
     if (!collection) {
       return res.status(404).json({ error: 'Collection not found' });
     }
-    const chats = cache;
+    const chats = chatCatalog.snapshot();
     const agents = collections.getAgentsInCollection(collection, chats);
     res.json({ agents, count: agents.length });
   } catch (e) {
@@ -1236,7 +1233,8 @@ app.get('/api/search-pane', async (req, res) => {
   if (!query) return res.status(400).json({ error: 'query required' });
 
   const paneKeys = String(req.query.panes || '').split(',').filter(Boolean);
-  const chats = paneKeys.map((key) => cache.find((c) => c.key === key)).filter(Boolean);
+  const known = chatCatalog.snapshot();
+  const chats = paneKeys.map((key) => known.find((c) => c.key === key)).filter(Boolean);
 
   if (chats.length === 0) return res.json({ results: [], query });
 
@@ -2510,7 +2508,8 @@ streamWss.on('connection', (ws) => {
 
   const tickMonitor = async () => {
     if (!monitors.size) return;
-    const chats = [...monitors].map((k) => cache.find((c) => c.key === k)).filter(Boolean);
+    const known = chatCatalog.snapshot();
+    const chats = [...monitors].map((k) => known.find((c) => c.key === k)).filter(Boolean);
     if (!chats.length) return;
     let out;
     try { out = await capturePanes(chats, cfg); } catch { return; }
@@ -2558,9 +2557,9 @@ streamWss.on('connection', (ws) => {
       startMonitor();
       if (isNew) {
         // Subscribe this pane's host to pushed deltas (skip-on-tick gate). resolve()
-        // seeded the cache, so the chat is findable by key here. Fire-and-forget:
+        // seeded the catalogue, so the chat is findable by key here. Fire-and-forget:
         // until the delta arrives, capturePanes keeps polling (graceful bootstrap).
-        const chat = cache.find((c) => c.key === id || c.id === id);
+        const chat = chatCatalog.snapshot().find((c) => c.key === id || c.id === id);
         syncMonitorSubscription(chat, true);
       }
     }
@@ -2570,18 +2569,18 @@ streamWss.on('connection', (ws) => {
       monitors.delete(id);
       stopMonitorIfEmpty();
       if (wasPresent) {
-        const chat = cache.find((c) => c.key === id || c.id === id);
+        const chat = chatCatalog.snapshot().find((c) => c.key === id || c.id === id);
         syncMonitorSubscription(chat, false);
       }
     }
     else if (m.type === 'attach') {
       if (attaches.has(m.id)) return;
       // Lazy restore: if the client knows the host (stored when the pane was first
-      // opened), discover just that one host so resolve() hits cache — no all-hosts scan.
-      if (m.host && !cache.some((c) => c.key === m.id || c.id === m.id)) {
+      // opened), discover just that one host so resolve() hits the catalogue — no
+      // all-hosts scan.
+      if (m.host && !chatCatalog.has(m.id)) {
         try {
-          const { chats } = await discoverHost(String(m.host), cfg);
-          cache = [...cache.filter((c) => c.host !== m.host), ...retainLastActivity(cache, chats)];
+          await chatCatalog.refreshHost(String(m.host), cfg);
         } catch { /* fall through; resolve() still has a locate fallback */ }
       }
       const r = await resolve(String(m.id));
@@ -2674,13 +2673,14 @@ streamWss.on('connection', (ws) => {
     // companion.js). Best-effort + fire-and-forget: a transport hiccup here must
     // not block teardown, and capturePanes falls back to polling either way.
     if (isCompanionTransportEnabled()) {
+      const known = chatCatalog.snapshot();
       const byHost = {};
       for (const k of monitors) {
         // Match the monitor handler's key||id lookup so a host-prefixed monitor id
         // (chat.id) still resolves, and drop the ref by chat.KEY — subscribePanes
         // keys refs by chat.key (describePanes), so the add/drop stay balanced
         // whatever id form the client sent. (WARDEN-413 reviewer minor finding.)
-        const chat = cache.find((c) => c.key === k || c.id === k);
+        const chat = known.find((c) => c.key === k || c.id === k);
         if (chat && chat.host !== LOCAL) (byHost[chat.host] ||= []).push(chat.key);
       }
       for (const [host, keys] of Object.entries(byHost)) {
