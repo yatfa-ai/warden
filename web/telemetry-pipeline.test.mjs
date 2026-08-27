@@ -1827,4 +1827,283 @@ test('deliveryFailing introduces NO send-gating return in dispatch (grep guardra
   );
 });
 
+// ==========================================================================
+// WARDEN-1198 — deliveryFailing derives from WIRE outcomes ONLY
+// ==========================================================================
+// isDeliveryFailing was written (WARDEN-808) when the ring held exactly TWO
+// outcomes, 'ok' and 'dropped', so its `!== 'dropped'` bail genuinely meant "a
+// send succeeded". WARDEN-817 added a THIRD outcome, 'rejected' — an event
+// dropped PRE-SEND by the validator, recorded with attempts:0 / status:null
+// because it never reached the wire. The binary predicate read that as a broken
+// run, so ONE malformed event during a real receiver outage silently disarmed
+// the outage banner: the user was told telemetry was fine while the receiver was
+// still down. The derivation now takes its window over WIRE outcomes only
+// ('ok' | 'dropped') and IGNORES a non-wire outcome entirely — it neither arms
+// nor breaks a run, because it is evidence of nothing about reachability.
+//
+// The shape is an ALLOW-LIST of wire outcomes, not a deny-list of 'rejected', so
+// a fourth non-wire outcome added later is ignored by default rather than
+// silently re-introducing this bug.
+
+// An event whose message trips a validator that rejects ONLY this shape — the
+// "one malformed event mid-outage" trigger, driven through the REAL validate
+// seam rather than by hand-building ring entries.
+function rejectableEventAt(ts) {
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    type: 'error',
+    runtime: 'main',
+    timestamp: ts,
+    name: 'Error',
+    message: 'REJECT_ME',
+    frames: [],
+  };
+}
+
+// A validator that rejects exactly the events rejectableEventAt() produces and
+// accepts everything else — so a single test can interleave wire outcomes and
+// pre-send rejections through one pipeline.
+const rejectsMarkedEvents = (e) => !!e && e.message !== 'REJECT_ME';
+
+// --- the pure derivation: non-wire entries are skipped, not counted ----------
+
+test('isDeliveryFailing: a rejected entry does NOT break an all-drops run (the WARDEN-1198 defect)', () => {
+  const d = { outcome: 'dropped' };
+  const rj = { outcome: 'rejected' };
+  // The exact defect shape: 3 drops armed the banner, then one pre-send rejection
+  // cleared it while the receiver was still down.
+  assert.equal(isDeliveryFailing([d, d, d, rj], 3), true, 'a rejection is not a send outcome — the run stands');
+  // The realistic outage shape: rejections INTERLEAVED through a sustained outage.
+  assert.equal(isDeliveryFailing([d, rj, d, rj, d], 3), true, 'interleaved rejections do not reset the run');
+});
+
+test('isDeliveryFailing: a ring of ONLY rejected entries never arms (a rejection is evidence of nothing)', () => {
+  const rj = { outcome: 'rejected' };
+  assert.equal(isDeliveryFailing([rj, rj, rj], 3), false, 'no wire outcome ⇒ nothing is known about the receiver');
+  assert.equal(isDeliveryFailing([rj, rj, rj, rj, rj], 3), false, 'still no wire evidence, however many');
+});
+
+test('isDeliveryFailing: a rejection can NOT mask a heal — filtering must not over-warn', () => {
+  // The important NEGATIVE control. Removing rejections from the window must not
+  // resurrect an 'ok' that already broke the run: [d, d, ok, rj] has wire window
+  // [d, d, ok], which is healed. If this returned true the fix would have traded
+  // a false-clear for a false-alarm.
+  const d = { outcome: 'dropped' };
+  const ok = { outcome: 'ok' };
+  const rj = { outcome: 'rejected' };
+  assert.equal(isDeliveryFailing([d, d, ok, rj], 3), false, 'the ok still breaks the run through the rejection');
+  assert.equal(isDeliveryFailing([d, d, ok, rj, rj], 3), false, 'any number of trailing rejections change nothing');
+});
+
+test('isDeliveryFailing: fewer than N WIRE outcomes → false even when the ring is long', () => {
+  // The threshold counts SEND evidence, not ring length. A ring padded out to
+  // length by rejections has not accumulated enough wire history to arm.
+  const d = { outcome: 'dropped' };
+  const rj = { outcome: 'rejected' };
+  assert.equal(isDeliveryFailing([d, rj, rj, rj, d], 3), false, '5 entries but only 2 wire outcomes');
+});
+
+test('isDeliveryFailing: an unknown/garbage outcome is still not a wire outcome (never arm on garbage)', () => {
+  // The allow-list generalizes :1596's guarantee: a malformed/null seeded entry is
+  // not 'ok' or 'dropped', so it can never fill a window slot and arm a run.
+  const d = { outcome: 'dropped' };
+  assert.equal(isDeliveryFailing([d, d, { outcome: null }], 3), false, 'a null outcome cannot complete a run');
+  assert.equal(isDeliveryFailing([d, d, {}, null, 'nonsense'], 3), false, 'garbage never arms');
+  // And a FUTURE non-wire outcome is ignored by default rather than breaking the
+  // run — the durability property the allow-list buys over a deny-list.
+  assert.equal(
+    isDeliveryFailing([d, d, d, { outcome: 'some-future-non-wire-outcome' }], 3),
+    true,
+    'an unrecognized outcome is skipped, not read as a successful send',
+  );
+});
+
+// --- pipeline integration: driven through the REAL redact/validate/send seams -
+
+test('a validate-rejected event during an outage leaves the banner ARMED (and never reaches the wire)', () => {
+  // THE DEFECT, end to end. 3 drops arm the banner; then one malformed event is
+  // rejected pre-send while the receiver is STILL down. Before WARDEN-1198 this
+  // reported deliveryFailing:false — telemetry "fine" during a live outage.
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendSeq([DOWN_DROP, DOWN_DROP, DOWN_DROP]);
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(CONSENT.INCIDENTS),
+    redact,
+    validate: rejectsMarkedEvents,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(eventAt(1));
+  pipeline.record(eventAt(2));
+  pipeline.record(eventAt(3));
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, true, '3 drops → armed, receiver is down');
+  pipeline.record(rejectableEventAt(4)); // one malformed event mid-outage
+  assert.equal(
+    pipeline.getRuntimeStatus().deliveryFailing,
+    true,
+    'CRITICAL: the receiver is still down — a pre-send rejection must NOT clear the banner',
+  );
+  assert.deepEqual(
+    log.entries().map((e) => e.outcome),
+    ['dropped', 'dropped', 'dropped', 'rejected'],
+    'the rejection IS recorded (WARDEN-817 observability is preserved, not removed)',
+  );
+  const rejectedEntry = log.entries()[3];
+  assert.equal(rejectedEntry.attempts, 0, 'the rejected event never went to the wire');
+  assert.equal(rejectedEntry.status, null, 'the rejected event never went to the wire');
+  assert.equal(send.calls.length, 3, 'transport saw only the 3 real sends — the rejection was dropped pre-send');
+});
+
+test('a pipeline whose sends are ALL validate-rejected never arms deliveryFailing', () => {
+  // No event ever reaches the wire, so nothing is known about the receiver. A ring
+  // of rejections must not be read as a sustained delivery failure.
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = fakeSend();
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(CONSENT.INCIDENTS),
+    redact,
+    validate: rejectsMarkedEvents,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(rejectableEventAt(1));
+  pipeline.record(rejectableEventAt(2));
+  pipeline.record(rejectableEventAt(3));
+  pipeline.record(rejectableEventAt(4));
+  assert.equal(log.size(), 4, 'all four rejections are recorded');
+  assert.equal(send.calls.length, 0, 'nothing ever reached the wire');
+  assert.equal(
+    pipeline.getRuntimeStatus().deliveryFailing,
+    false,
+    'no wire evidence ⇒ no delivery-failure claim (must not false-alarm)',
+  );
+});
+
+test('rejections INTERLEAVED through a sustained outage still arm the banner', () => {
+  // The realistic shape: a malformed event or two arriving while the receiver is
+  // down. The wire window is [d, d, d] → armed.
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendSeq([DOWN_DROP]);
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(CONSENT.INCIDENTS),
+    redact,
+    validate: rejectsMarkedEvents,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(eventAt(1));            // dropped
+  pipeline.record(rejectableEventAt(2));  // rejected
+  pipeline.record(eventAt(3));            // dropped
+  pipeline.record(rejectableEventAt(4));  // rejected
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, false, 'only 2 wire drops so far — below threshold');
+  pipeline.record(eventAt(5));            // dropped → 3 wire drops
+  assert.deepEqual(
+    log.entries().map((e) => e.outcome),
+    ['dropped', 'rejected', 'dropped', 'rejected', 'dropped'],
+    'the interleaved ring shape',
+  );
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, true, 'the interleaved rejections did not reset the run');
+});
+
+test('a rejection after a HEAL does not re-arm the banner (the fix must not over-warn)', () => {
+  // The negative control, end to end: [dropped, dropped, ok, rejected]. The ok
+  // healed the run; filtering the rejection out must not resurrect the outage.
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendSeq([DOWN_DROP, DOWN_DROP, OK_RESULT]);
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(CONSENT.INCIDENTS),
+    redact,
+    validate: rejectsMarkedEvents,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+  });
+  pipeline.record(eventAt(1));            // dropped
+  pipeline.record(eventAt(2));            // dropped
+  pipeline.record(eventAt(3));            // ok → healed
+  assert.equal(pipeline.getRuntimeStatus().deliveryFailing, false, 'the ok healed it');
+  pipeline.record(rejectableEventAt(4));  // rejected
+  assert.deepEqual(
+    log.entries().map((e) => e.outcome),
+    ['dropped', 'dropped', 'ok', 'rejected'],
+    'the heal-then-reject ring shape',
+  );
+  assert.equal(
+    pipeline.getRuntimeStatus().deliveryFailing,
+    false,
+    'CRITICAL: the receiver is reachable — a rejection must not manufacture an outage',
+  );
+});
+
+// --- emit discipline across a rejection: no duplicate emit, no lost edge ------
+
+test('settle emit-on-change is UNCHANGED across a rejection — no duplicate emit, no lost edge', () => {
+  // The four call sites of isDeliveryFailing include the prev/next pair inside
+  // settle (:449/:474) that drives WARDEN-808's emit-on-change check. Both sides
+  // are computed with the SAME pure helper, so the fix moves them together. This
+  // asserts that mechanically rather than assuming it: a rejection produces NO
+  // settle at all (the rejection path returns before transport), and the drop that
+  // follows is a true→true no-op, so exactly ONE push exists across the whole run.
+  const log = createTransmissionLog({ clock: TLOG_CLOCK });
+  const send = sendSeq([DOWN_DROP]);
+  const spy = statusSpy();
+  const pipeline = createTelemetryPipeline({
+    consent: consentReturning(CONSENT.INCIDENTS),
+    redact,
+    validate: rejectsMarkedEvents,
+    send,
+    endpointUrl: TLOG_ENDPOINT,
+    transmissionLog: log,
+    onRuntimeStatus: spy,
+  });
+  pipeline.record(eventAt(1)); // drop 1 — below threshold, no push
+  pipeline.record(eventAt(2)); // drop 2 — below threshold, no push
+  assert.deepEqual(spy.calls, [], 'no push below threshold');
+  pipeline.record(eventAt(3)); // drop 3 — false→true → ONE push (the edge)
+  assert.deepEqual(spy.calls, [{ drifted: false, deliveryFailing: true }], 'the arm edge fired exactly once');
+  pipeline.record(rejectableEventAt(4)); // rejected — never enters settle
+  assert.deepEqual(
+    spy.calls,
+    [{ drifted: false, deliveryFailing: true }],
+    'a rejection pushes nothing — and crucially does not push a spurious CLEAR',
+  );
+  pipeline.record(eventAt(5)); // drop 4 — true→true → no push (no duplicate emit)
+  assert.deepEqual(
+    spy.calls,
+    [{ drifted: false, deliveryFailing: true }],
+    'the drop after the rejection is a no-op transition — no duplicate emit, no re-arm edge',
+  );
+  // THE BRIDGE/PULL DIVERGENCE, closed. Before the fix getRuntimeStatus() said
+  // false while the last push said true, and the renderer only re-pulls on
+  // Settings mount — so the two stayed divergent until the next real send. They
+  // must now agree without adding a new emit site to the rejection path.
+  assert.equal(
+    pipeline.getRuntimeStatus().deliveryFailing,
+    spy.calls[spy.calls.length - 1].deliveryFailing,
+    'the Settings-mount pull agrees with the last value pushed to the renderer',
+  );
+});
+
+test('a rejection does not push a status, and the rejection path adds NO emit site (scope guardrail)', () => {
+  // Deliberately OUT of scope for WARDEN-1198: adding a status-push to the
+  // rejection path. Ignoring rejections in the derivation makes the value correct
+  // at BOTH getRuntimeStatus() and the next emit, so no new emit site is needed —
+  // and adding one would risk a no-op re-emit against the WARDEN-808 composite
+  // emit-on-change contract. This pins that decision mechanically.
+  const src = readFileSync(resolve(__dirname, '../electron/telemetry-pipeline.cjs'), 'utf8');
+  const rejectSite = src.indexOf("outcome: 'rejected'");
+  assert.ok(rejectSite > -1, 'the rejection record site is located');
+  // The region from the rejection record to its pre-send `return`.
+  const returnIdx = src.indexOf('return;', rejectSite);
+  assert.ok(returnIdx > rejectSite, 'the pre-send drop return follows the record');
+  const rejectionRegion = src.slice(rejectSite, returnIdx);
+  assert.ok(
+    !/emitRuntimeStatus\(/.test(rejectionRegion),
+    'the rejection path emits no status — the derivation fix alone keeps push and pull in agreement',
+  );
+});
+
 console.log(`\n✓ TELEMETRY PIPELINE TESTS PASS (${passed})`);

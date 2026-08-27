@@ -133,16 +133,29 @@ const DEFAULT_REPLAY_BUFFER_CAP = 64;
 // layer. This closes that one-sided trust bar.
 //
 // GUARDRAILS (do not flap, do not false-alarm):
-//   • SUSTAINED only — arms when the most recent `threshold` outcomes are ALL
-//     'dropped'. A single transient drop (threshold unreachable) does not arm,
-//     so a momentary blip never shows a failure banner.
+//   • SUSTAINED only — arms when the most recent `threshold` WIRE outcomes are
+//     ALL 'dropped'. A single transient drop (threshold unreachable) does not
+//     arm, so a momentary blip never shows a failure banner.
 //   • Self-heals the instant any 'ok' enters the window (an ok breaks the
 //     all-drops run) — unlike 415, which needs a manual Test-connection because
 //     a 415 cannot self-heal.
-//   • Fewer than `threshold` entries (incl. an EMPTY ring) → NOT armed, so a
-//     freshly-started receiver with no traffic never false-alarms.
-//   • A non-'dropped' outcome (an 'ok', or a malformed/null seeded entry) breaks
-//     the run — conservative: never arm on garbage.
+//   • Fewer than `threshold` WIRE entries (incl. an EMPTY ring) → NOT armed, so
+//     a freshly-started receiver with no traffic never false-alarms.
+//   • WIRE OUTCOMES ONLY (WARDEN-1198). The window is taken over entries that
+//     actually reached the transport — 'ok' and 'dropped' — because only those
+//     carry evidence about receiver REACHABILITY. Within that window an 'ok'
+//     breaks the run (self-heal), and a malformed/null seeded entry is not a
+//     wire outcome so it can never arm one — conservative: never arm on garbage.
+//   • A NON-WIRE outcome is IGNORED, neither arming nor breaking a run. Today
+//     that is 'rejected' (WARDEN-817): an event dropped PRE-SEND by the validator,
+//     recorded with attempts:0 / status:null because it never went to the wire.
+//     It is evidence of NOTHING about the receiver — a malformed event is equally
+//     rejected whether the receiver is healthy or unplugged — so reading one as
+//     "a send that wasn't dropped" silently cleared the banner mid-outage and told
+//     the user telemetry was fine while the receiver was still down (WARDEN-1198).
+//     Note the shape below: an ALLOW-LIST of wire outcomes, not a deny-list of
+//     'rejected', so a fourth non-wire outcome added later is ignored by default
+//     rather than silently re-introducing this bug.
 //
 // CRITICAL DISTINCTION from the 415 breaker: this is PURE OBSERVABILITY. It must
 // NEVER gate / pause sending. 415 is permanent (the receiver cannot accept this
@@ -152,11 +165,17 @@ const DEFAULT_REPLAY_BUFFER_CAP = 64;
 // what the status banner SHOWS; dispatch() never reads it. (Grep guardrail: the
 // new status introduces NO send-gating `return` in dispatch.)
 function isDeliveryFailing(entries, threshold) {
-  if (!Array.isArray(entries) || entries.length < threshold) return false;
-  // entries() returns oldest → newest; inspect only the most recent `threshold`.
-  const start = entries.length - threshold;
-  for (let i = start; i < entries.length; i++) {
-    if (!entries[i] || entries[i].outcome !== 'dropped') return false;
+  if (!Array.isArray(entries)) return false;
+  // WARDEN-1198 — narrow to WIRE outcomes first. An ALLOW-LIST ('ok' | 'dropped'),
+  // not a deny-list of 'rejected': anything that did not reach the transport
+  // carries no evidence about receiver reachability, so it is skipped entirely
+  // rather than counted as a broken run.
+  const wire = entries.filter((e) => e && (e.outcome === 'ok' || e.outcome === 'dropped'));
+  if (wire.length < threshold) return false;
+  // entries() returns oldest → newest; inspect only the most recent `threshold`
+  // WIRE outcomes.
+  for (let i = wire.length - threshold; i < wire.length; i++) {
+    if (wire[i].outcome !== 'dropped') return false;
   }
   return true;
 }
