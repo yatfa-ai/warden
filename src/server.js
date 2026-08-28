@@ -34,7 +34,14 @@ import { read as readPane, send as sendPane, sendKey, hasSession, resize, spawn 
 import { run, runLocalTmux, shellQuote, TMUX_BIN, detectClaude, startConnectionPoolCleanup, validateHost } from './ssh.js';
 import {
   parseJsonlHead, snippetFromLine,
-  localClaudeSessions, remoteClaudeSessions, remoteClaudeSessionsDetail,
+  // `remoteClaudeSessions` (the frozen bare-array variant) is deliberately NOT
+  // imported here any more: since WARDEN-1208 both fleet readers go through
+  // `sessionCache`, which fetches the richer detail variant and projects down.
+  // Its contract stays frozen and un-widened — it simply has no caller in this
+  // file. `remoteClaudeSessionsDetail` is still used directly by the SINGLE-host
+  // /api/claude-sessions route, which is a different read (one named host, no
+  // fan-out) and explicitly out of this slice's scope.
+  localClaudeSessions, remoteClaudeSessionsDetail,
   mergeAndPaginateSessions,
   readLocalSessionTranscript, buildSessionReadScript, parseSessionReadOutput,
 } from './claudeSessions.js';
@@ -50,6 +57,7 @@ import { classifyPane, stripAnsi, matchWatchPatterns } from './agentState.js';
 import * as notify from './notify.js';
 import { createHostStatusCache } from './hostStatus.js';
 import { createChatCatalogCache } from './chatCatalog.js';
+import { createSessionCache } from './sessionCache.js';
 import {
   probeReceiverCapabilities,
 } from './telemetry-capabilities.js';
@@ -126,6 +134,29 @@ if (fs.existsSync(DIST)) {
 // same shape the old array had — and never awaits the network. See
 // src/chatCatalog.js; it is modelled on createHostStatusCache below.
 const chatCatalog = createChatCatalogCache();
+
+// The cross-host Claude SESSION list. ONE owner (WARDEN-1208): per-host slots
+// carrying `{sessions, at, limit, unreachable}`, plus a per-host in-flight
+// promise so concurrent readers JOIN one enumeration instead of stacking two.
+//
+// This replaced TWO independent full-fleet fan-outs over the SAME rows: the
+// `/api/claude-sessions-all` route ran one ON THE REQUEST PATH (so the slowest
+// host set the pace for every host), and `tickBudget` ran an identical one every
+// 120s — its own comment already noted it reuses "the SAME functions
+// /api/claude-sessions-all uses". A user opening the session browser mid-sweep
+// paid a second full-fleet SSH sweep for rows the server was already fetching.
+//
+// Fetches go through `remoteClaudeSessionsDetail` (the `{sessions, unreachable}`
+// discriminator) rather than the bare `remoteClaudeSessions`, whose contract is
+// FROZEN (WARDEN-1196) — the sweep-facing read projects down to the array, so
+// that signature is not widened and the sweep does not start consuming
+// `unreachable`. See src/sessionCache.js; it is modelled on createHostStatusCache
+// below, exactly as chatCatalog is.
+const sessionCache = createSessionCache({
+  fetchLocal: (limit) => localClaudeSessions(limit),
+  fetchRemote: (host, limit) => remoteClaudeSessionsDetail(host, limit),
+  local: LOCAL,
+});
 
 // Per-host connectivity cache behind GET /api/hosts/status (WARDEN-915), so that
 // request never waits on live SSH. See createHostStatusCache in src/hostStatus.js
@@ -1466,32 +1497,38 @@ app.get('/api/claude-sessions-all', async (req, res) => {
   // and `hasMore` is computed honestly (clamped to bound remote SSH cost).
   const perHost = Math.min(ALL_SESSIONS_MAX_PER_HOST, offset + limit + 1);
   const hosts = [LOCAL, ...cfg.hosts];
-  const results = await Promise.allSettled(hosts.map(async (host) => {
-    // The REMOTE leg reads through the detail sibling so a transport failure stays
-    // DISTINGUISHABLE from "this host has no sessions" (WARDEN-1200). The bare
-    // `remoteClaudeSessions` returns [] for both, and merging that [] away produced
-    // a clean 200 whose empty list the browser renders as "Nothing runnable on the
-    // selected hosts yet" — a confident factual claim about the user's fleet, made
-    // while a whole machine's history had been silently dropped.
-    //
-    // The frozen-array contract on `remoteClaudeSessions` (claudeSessions.js) is
-    // NOT widened here: its own comment directs a caller that needs to tell the two
-    // apart to this sibling, so switching this one call site is compliance with it.
-    // The budget sweep still consumes the bare array unchanged.
-    //
-    // Scope: REMOTE only. `localClaudeSessions` is a filesystem read, not a
-    // transport, so `isTransportFailure` has no meaning for it and it can never be
-    // reported unreachable (the same scoping WARDEN-1196 applied on the sibling
-    // route). A remote host that answers with a non-zero exit and real stdout is a
-    // COMMAND failure — `isTransportFailure` returns false on non-empty stdout — so
-    // it still degrades to the pre-existing empty list and is NOT named unreachable.
-    if (host === LOCAL) return { host, sessions: await localClaudeSessions(perHost), unreachable: false };
-    const { sessions, unreachable } = await remoteClaudeSessionsDetail(host, perHost);
-    return { host, sessions, unreachable };
-  }));
-  const settled = results.filter((r) => r.status === 'fulfilled').map((r) => r.value);
+  // ONE OWNER (WARDEN-1208). This used to be a `Promise.allSettled` fan-out right
+  // here, which meant the route could not answer until the LAST host settled: one
+  // unreachable machine withheld every healthy host's rows for the duration of its
+  // 15s SSH timeout, and a page load landing near the 120s budget sweep re-fetched
+  // rows that sweep was already fetching. Both are now the cache's business — it
+  // serves each host from its own slot, joins an in-flight fetch rather than
+  // stacking a second one, and bounds how long a cold host may hold the response.
+  //
+  // WHAT DID NOT CHANGE, deliberately: the cache fetches the REMOTE leg through
+  // `remoteClaudeSessionsDetail`, so a transport failure stays DISTINGUISHABLE from
+  // "this host has no sessions" (WARDEN-1200) and `unreachableHosts` below is
+  // derived exactly as before. The bare `remoteClaudeSessions` contract is still
+  // FROZEN (WARDEN-1196) and still un-widened; the budget sweep now shares this
+  // cache but still consumes a plain array.
+  //
+  // Scope, unchanged: REMOTE only. `localClaudeSessions` is a filesystem read, not
+  // a transport, so `isTransportFailure` has no meaning for it and `(local)` can
+  // never be reported unreachable (the cache hard-codes `unreachable: false` on
+  // that leg). A remote host answering with a non-zero exit and real stdout is a
+  // COMMAND failure — `isTransportFailure` returns false on non-empty stdout — so
+  // it still degrades to the pre-existing empty list and is NOT named unreachable.
+  const settled = await sessionCache.snapshot(hosts, perHost);
   const buckets = settled.map(({ host, sessions }) => ({ host, sessions }));
   const unreachableHosts = settled.filter((b) => b.unreachable).map((b) => b.host);
+  // Hosts we have NOT SUCCESSFULLY READ YET — cold on this request, or still
+  // filling from a fetch another reader launched. Disclosed for the same reason
+  // `unreachableHosts` is: an empty session list renders as the confident sentence
+  // "Nothing runnable on the selected hosts yet", so a host we simply have not
+  // looked at must never be merged away as zero rows (the WARDEN-89 / WARDEN-1200
+  // false-empty defect). "We have not looked yet" and "we looked and it is empty"
+  // are different answers, and the wire now carries the difference.
+  const pendingHosts = settled.filter((b) => b.pending).map((b) => b.host);
   const { sessions, hasMore, totals } = mergeAndPaginateSessions(buckets, offset, limit);
   // `unreachableHosts` is ADDITIVE and OMITTED when the fleet is fully reachable, so
   // a healthy response is byte-identical to before this change.
@@ -1509,7 +1546,21 @@ app.get('/api/claude-sessions-all', async (req, res) => {
   // SURVIVING buckets only (mergeAndPaginateSessions) — unavoidable, since the
   // missing rows are on the machine we could not read — so the client can now know
   // the rollup and the pagination are partial instead of trusting them blindly.
-  res.json({ sessions, hasMore, totals, ...(unreachableHosts.length ? { unreachableHosts } : {}) });
+  //
+  // `pendingHosts` rides the SAME additive, non-throwing channel and for the same
+  // reason — both are partial-SUCCESS disclosures, never a whole-read failure. It
+  // is likewise OMITTED when every host answered, so a warm response is
+  // byte-identical to before this change. The two are deliberately separate keys:
+  // "I could not reach this machine" and "I have not looked at it yet" call for
+  // different words to a user and different behaviour from a client (the second
+  // resolves on its own, and is worth re-reading for).
+  res.json({
+    sessions,
+    hasMore,
+    totals,
+    ...(unreachableHosts.length ? { unreachableHosts } : {}),
+    ...(pendingHosts.length ? { pendingHosts } : {}),
+  });
 });
 
 // GET /api/budget — the cached token-spend budget snapshot (WARDEN-415). Cheap
@@ -2833,13 +2884,16 @@ function startLifecyclePoll() {
 // The backend owns the budget check on its OWN slow beat (BUDGET_INTERVAL_MS,
 // ~120s) — deliberately decoupled from the 2s monitor tick so it never joins the
 // per-tick capture cost. Each tick REUSES the existing per-session token totals
-// (localClaudeSessions / remoteClaudeSessions — the SAME functions
-// /api/claude-sessions-all uses; do NOT re-read transcripts with new logic),
+// (through `sessionCache`, the ONE owner of the cross-host session list since
+// WARDEN-1208 — the SAME rows /api/claude-sessions-all serves; do NOT re-read
+// transcripts with new logic, and do NOT add a second fan-out here: that
+// duplication is exactly what the cache was introduced to remove),
 // filters to sessions active in the configured window, sums their lifetime
 // totals (semantics documented in budget.js), and caches the pure
 // computeBudgetState result. /api/budget returns the cache — instant, no SSH —
 // so the frontend's progress surface + debounce check stay cheap. One
-// unreachable host degrades to "no spend from it" via Promise.allSettled; it
+// unreachable host degrades to "no spend from it" (the cache never rejects and
+// leaves a failed fetch's slot untouched); it
 // never fails the whole sweep.
 let budgetState = null;
 // Previous-sweep snapshot for the budget-breach webhook debounce (WARDEN-555).
@@ -2884,15 +2938,30 @@ async function tickBudget(deps = {}) {
     // returning the enriched header (cwd/summary + four token ints), identical
     // to /api/claude-sessions-all. We only need mtime + tokenUsage.total +
     // identity, so the same rows feed computeBudgetState directly.
-    const results = await Promise.allSettled(hosts.map(async (host) => {
-      const sessions = host === LOCAL
-        ? await localClaudeSessions(BUDGET_PER_HOST_LIMIT)
-        : await remoteClaudeSessions(host, BUDGET_PER_HOST_LIMIT);
-      return sessions.map((s) => ({ ...s, host }));
-    }));
-    const sessions = results
-      .filter((r) => r.status === 'fulfilled')
-      .flatMap((r) => r.value);
+    //
+    // ONE OWNER (WARDEN-1208). This used to be its OWN `Promise.allSettled`
+    // fan-out, duplicating the route's over the same rows on an unrelated beat —
+    // the duplication this comment block has always described ("the SAME
+    // functions /api/claude-sessions-all uses") but did not prevent. Both readers
+    // now share `sessionCache`, so a sweep landing near a page load costs ONE
+    // enumeration per host instead of two, and each warms the slots the other
+    // reads.
+    //
+    // `wait: true` is the slow-cadence mode: unlike the request path there is no
+    // user waiting, so this awaits every fetch it launches with NO settle bound
+    // and keeps the complete-rows behaviour the budget math has always had. A
+    // host that fails still degrades to "no spend from it" — the cache leaves a
+    // failed fetch's slot untouched and never rejects — exactly as the previous
+    // `allSettled` + fulfilled-filter did.
+    //
+    // PROJECTED DOWN TO A BARE ARRAY, deliberately. The cache fetches through the
+    // richer `remoteClaudeSessionsDetail` (that is how the route keeps its
+    // `unreachable` discriminator), but this sweep consumes only the rows, so the
+    // frozen `remoteClaudeSessions` contract (WARDEN-1196) is neither widened nor
+    // relied on here, and the sweep does NOT start consuming `unreachable` — that
+    // would be a behaviour change outside this slice.
+    const settled = await sessionCache.snapshot(hosts, BUDGET_PER_HOST_LIMIT, { wait: true });
+    const sessions = settled.flatMap(({ host, sessions: rows }) => rows.map((s) => ({ ...s, host })));
     budgetState = computeBudgetState(sessions, {
       now: Date.now(),
       windowMs,
