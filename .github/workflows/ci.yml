@@ -49,5 +49,8 @@ jobs:
             echo "SPECGUARD_RUN_ID=${{ github.run_id }}-${{ github.run_attempt }}"
           } >> "$GITHUB_ENV"
 
+      # Direct node invocation with a glob, flags first. `npm test` here is `node --test src` — a
+      # directory argument — which modern Node (24.19+, and 25) resolves as a module instead of
+      # scanning, so CI cannot use it; the glob form needs Node 22+, which 24 here satisfies.
       - name: Run the suite
-        run: npm test -- $SPECGUARD_REPORTER_ARGS
+        run: node --test $SPECGUARD_REPORTER_ARGS "src/**/*.test.js"
