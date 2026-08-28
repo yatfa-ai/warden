@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { createSessionCache, SESSION_CACHE_MAX_AGE_MS } from './sessionCache.js';
+import { createSessionCache, completeSessionRows, SESSION_CACHE_MAX_AGE_MS } from './sessionCache.js';
 
 /**
  * The cross-host session-list owner — WARDEN-1208.
@@ -572,12 +572,13 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
 
     it('projects to the bare rows the sweep consumes, with the flags available but unused', async () => {
       // The sweep maps rows and never reads `unreachable` — the frozen-contract
-      // boundary. This asserts the row shape it relies on.
+      // boundary. This asserts the row shape it relies on, through the REAL
+      // projection the sweep calls (`completeSessionRows`), not a local copy of it.
       const remote = fakeRemote({ h1: 2, dead: 'unreachable' });
       const { cache } = makeCache({ fetchLocal: fakeLocal(1), fetchRemote: remote });
 
       const snap = await cache.snapshot([LOCAL, 'h1', 'dead'], 100, { wait: true });
-      const flat = snap.flatMap(({ host, sessions }) => sessions.map((s) => ({ ...s, host })));
+      const flat = completeSessionRows(snap);
 
       assert.strictEqual(flat.length, 3, 'local 1 + h1 2 + dead 0 — an unreachable host contributes nothing');
       assert.ok(flat.every((s) => typeof s.id === 'string' && typeof s.mtime === 'number'),
@@ -598,6 +599,109 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
       assert.strictEqual(remote.countFor('h1'), 2, 'each sweep re-reads the fleet');
       assert.ok(SESSION_CACHE_MAX_AGE_MS < 120_000,
         'the freshness window must stay below the sweep cadence for the above to hold');
+    });
+  });
+
+  describe('completeSessionRows — a PENDING host contributes no rows to the budget math', () => {
+    // The consumer half of constraint 3, and the defect this projection exists to
+    // prevent. `snapshot` already discloses an under-filled slot as `pending`, but
+    // disclosure only helps if the consumer that cannot afford to ignore it reads
+    // it. The route deliberately KEEPS pending rows (it renders a list and
+    // discloses `pendingHosts` alongside); the sweep must DROP them, because it
+    // computes a NUMBER that gets cached for 120s and `computeBudgetState` cannot
+    // tell a truncated list from a complete one.
+
+    it('drops the rows of a sweep that JOINED a smaller in-flight route fetch', async () => {
+      // THE regression case, in its production shape: a slot holding REAL BUT
+      // TRUNCATED rows.
+      //
+      // ⚠ FIXTURE NOTE — the obvious way to write this test PASSES FOR THE WRONG
+      // REASON, and a mutation run caught it here. Gating the very FIRST fetch and
+      // racing a sweep against it does produce `pending: true`, but the slot is
+      // then COLD, so the host contributes zero rows whether the projection
+      // filters or not — deleting the `.filter()` from `completeSessionRows` left
+      // that version of this test green. The defect only bites when the slot
+      // EXISTS and is SHORT, so the fixture below builds exactly that: fill at 41,
+      // let it go stale, hold the REFRESH open, then have the sweep arrive.
+      let calls = 0;
+      const gate = openGate();
+      // Only the SECOND fetch is held open — the first must land to fill the slot.
+      const fetchRemote = async (host, limit) => {
+        calls += 1;
+        if (calls > 1) await gate.promise;
+        return { sessions: rows(host, 300).slice(0, limit), unreachable: false };
+      };
+      const { cache, tick } = makeCache({ fetchLocal: fakeLocal(0), fetchRemote, settleMs: 5 });
+
+      // 1. A page-1 route read lands, filling h1's slot at 41.
+      const warm = await cache.snapshot(['h1'], 41);
+      assert.strictEqual(warm[0].sessions.length, 41);
+
+      // 2. The slot goes stale, so the next read refreshes rather than serving it.
+      tick(SESSION_CACHE_MAX_AGE_MS + 1);
+
+      // 3. Another page-1 route read launches that refresh at 41 — held open.
+      const routeRead = cache.snapshot(['h1'], 41);
+      await new Promise((r) => setImmediate(r));
+
+      // 4. The 120s tick fires needing 100. It JOINS the in-flight 41 fetch, so it
+      //    may not wait on it (the join cannot satisfy it) and must not stack a
+      //    second ssh child — leaving it holding the previous REAL 41-row slot.
+      const sweep = await cache.snapshot(['h1'], 100, { wait: true });
+
+      // The cost this cache exists to remove must NOT come back as the price of
+      // the fix: excluding the host is a projection choice, never a re-fetch.
+      assert.strictEqual(calls, 2, 'still no extra ssh child — the fix must not reintroduce an enumeration');
+
+      assert.strictEqual(sweep[0].pending, true, 'precondition: the sweep is under-served');
+      assert.strictEqual(sweep[0].sessions.length, 41,
+        'precondition (the wrong-reason guard): the slot holds REAL rows, it is not merely cold');
+
+      // Rows are mtime-DESCENDING, so feeding those 41 to computeBudgetState would
+      // silently drop the spend of every window-active session past the 41st — and
+      // cache that wrong number for the next 120s.
+      assert.deepStrictEqual(completeSessionRows(sweep), [],
+        'a truncated host contributes NO rows — "no spend from it this tick", not under-counted spend');
+
+      gate.release();
+      // The route read, by contrast, KEEPS its rows: it got the window it asked
+      // for, and it renders a list rather than computing a number.
+      const route = await routeRead;
+      assert.strictEqual(route[0].pending, false);
+      assert.strictEqual(completeSessionRows(route).length, 41);
+    });
+
+    it('drops a COLD host, and never confuses it with a host that has no sessions', async () => {
+      // `known: false` (never looked) and `known: true, sessions: []` (looked, empty)
+      // are different facts. Both contribute zero rows to the budget — but only the
+      // second is a claim about the machine.
+      const gate = openGate();
+      const remote = fakeRemote({ cold: 5, empty: 0 }, { gate: new Map([['cold', gate.promise]]) });
+      const { cache } = makeCache({ fetchLocal: fakeLocal(0), fetchRemote: remote, settleMs: 1 });
+
+      const first = cache.snapshot(['cold', 'empty'], 100);
+      await new Promise((r) => setImmediate(r));
+      const joiner = byHost(await cache.snapshot(['cold', 'empty'], 100));
+
+      assert.strictEqual(joiner.cold.known, false, 'cold: we have not looked yet');
+      assert.strictEqual(joiner.empty.known, true, 'empty: we looked');
+      assert.deepStrictEqual(completeSessionRows([joiner.cold, joiner.empty]), [],
+        'neither contributes spend, for two different reasons');
+
+      gate.release();
+      await first;
+    });
+
+    it('keeps every row of a COMPLETE sweep — the projection filters, it does not truncate', async () => {
+      // The other half: the guard must not cost the sweep rows it legitimately has.
+      const remote = fakeRemote({ h1: 4, dead: 'unreachable' });
+      const { cache } = makeCache({ fetchLocal: fakeLocal(2), fetchRemote: remote });
+
+      const snap = await cache.snapshot([LOCAL, 'h1', 'dead'], 100, { wait: true });
+
+      assert.ok(snap.every((s) => !s.pending), 'precondition: an awaited sweep is complete');
+      assert.strictEqual(completeSessionRows(snap).length, 6,
+        'local 2 + h1 4; the unreachable host was already contributing nothing');
     });
   });
 });

@@ -382,10 +382,50 @@ export function createSessionCache({
         at: slot.at,
         limit: slot.limit,
         unreachable: slot.unreachable,
-        sessions: slot.sessions,
+        // COPIED, not the slot's own array. A caller that sorted or spliced the
+        // returned list in place would otherwise corrupt the cached rows for every
+        // later reader — a cross-reader bug with no local symptom, which is the
+        // kind an owner module exists to make impossible. The copy is shallow: the
+        // ROWS are shared, and that is deliberate (they are treated as immutable
+        // everywhere, and `snapshot`'s consumers already spread them). Cheap
+        // either way — this is an observability read, not a hot path.
+        sessions: slot.sessions.slice(),
       };
     },
   };
+}
+
+/**
+ * Flatten a `snapshot()` into host-tagged rows, EXCLUDING every host the cache
+ * reported `pending`. The projection for a consumer that needs COMPLETE rows.
+ *
+ * WHY THIS EXISTS AS A NAMED, EXPORTED STEP rather than an inline flatMap: the
+ * two readers of this cache want OPPOSITE things from a short slot, and the
+ * difference is easy to lose in a one-liner.
+ *
+ *   - The ROUTE wants the rows. It is rendering a list, a truncated list still
+ *     shows the user real sessions, and it discloses the gap separately as
+ *     `pendingHosts`. Dropping them would blank a host that did answer.
+ *   - The SWEEP wants them GONE. It is computing a NUMBER (fleet token spend),
+ *     and rows are mtime-DESCENDING, so a slot filled at a page-1 window (41)
+ *     when the sweep asked for 100 silently drops the oldest window-active
+ *     sessions' spend. `computeBudgetState` cannot tell a truncated list from a
+ *     complete one, and the result is cached for the next 120s. A wrong number
+ *     is strictly worse than a missing one — and worse than the pre-cache
+ *     behaviour, which always fanned out at the full 100.
+ *
+ * Excluding the host degrades it to "no spend from it this tick": the SAME
+ * pre-existing semantics an unreachable or failed host already gets, and it
+ * self-corrects on the next tick. Deliberately NOT a re-fetch — that would
+ * relaunch the duplicate ssh child this cache exists to remove.
+ *
+ * @param {Array<{host: string, sessions: Array<object>, pending: boolean}>} settled
+ * @returns {Array<object>} rows from complete hosts only, each tagged with `host`
+ */
+export function completeSessionRows(settled) {
+  return settled
+    .filter((entry) => !entry.pending)
+    .flatMap(({ host, sessions }) => sessions.map((s) => ({ ...s, host })));
 }
 
 /** A cancellable timer promise, so a settled race does not leave a pending

@@ -57,7 +57,7 @@ import { classifyPane, stripAnsi, matchWatchPatterns } from './agentState.js';
 import * as notify from './notify.js';
 import { createHostStatusCache } from './hostStatus.js';
 import { createChatCatalogCache } from './chatCatalog.js';
-import { createSessionCache } from './sessionCache.js';
+import { createSessionCache, completeSessionRows } from './sessionCache.js';
 import {
   probeReceiverCapabilities,
 } from './telemetry-capabilities.js';
@@ -1519,6 +1519,16 @@ app.get('/api/claude-sessions-all', async (req, res) => {
   // COMMAND failure — `isTransportFailure` returns false on non-empty stdout — so
   // it still degrades to the pre-existing empty list and is NOT named unreachable.
   const settled = await sessionCache.snapshot(hosts, perHost);
+  // Every host contributes its bucket, INCLUDING the ones we could not fully
+  // answer for. A cold host (`known: false`) contributes zero rows here — but it
+  // is contributing zero rows WHILE BEING DISCLOSED as `pendingHosts` below, which
+  // is what keeps that different from the false-empty defect. An under-filled host
+  // (joined a smaller in-flight fetch) contributes its REAL but possibly truncated
+  // rows, and is disclosed the same way: dropping them would blank a host that did
+  // answer, for a list the user can see. This is the OPPOSITE choice from the
+  // budget sweep, which drops pending hosts' rows entirely (`completeSessionRows`)
+  // — deliberately, because it computes a NUMBER that gets cached, and a truncated
+  // list would make it silently wrong rather than visibly partial.
   const buckets = settled.map(({ host, sessions }) => ({ host, sessions }));
   const unreachableHosts = settled.filter((b) => b.unreachable).map((b) => b.host);
   // Hosts we have NOT SUCCESSFULLY READ YET — cold on this request, or still
@@ -2961,7 +2971,30 @@ async function tickBudget(deps = {}) {
     // relied on here, and the sweep does NOT start consuming `unreachable` — that
     // would be a behaviour change outside this slice.
     const settled = await sessionCache.snapshot(hosts, BUDGET_PER_HOST_LIMIT, { wait: true });
-    const sessions = settled.flatMap(({ host, sessions: rows }) => rows.map((s) => ({ ...s, host })));
+    // PENDING HOSTS CONTRIBUTE NOTHING TO THE BUDGET MATH, and this projection is
+    // load-bearing rather than defensive.
+    //
+    // `wait: true` awaits every fetch this sweep LAUNCHES, but it cannot wait on
+    // one it merely JOINED at a smaller limit (launcher-only settle discipline,
+    // and a joined fetch fills the slot at ITS launcher's window). So when a
+    // page-1 route fetch — `perHost = offset + limit + 1`, typically 41 — is in
+    // flight as the 120s tick fires, this sweep can arrive holding a REAL but
+    // TRUNCATED 41-row slot for a host it asked 100 rows of. The cache tells us
+    // exactly that via `pending`.
+    //
+    // Those rows are mtime-DESCENDING, so on a host with more than 41 sessions
+    // active in the window the truncation silently DROPS spend, and the result is
+    // cached for the next 120s. That is a wrong NUMBER, not a slow response —
+    // strictly worse than the honest degradation, and worse than the pre-cache
+    // behaviour (which always fanned out at the full 100).
+    //
+    // `completeSessionRows` excludes those hosts, degrading each to "no spend from
+    // it this tick" — the SAME pre-existing semantics an unreachable or failed
+    // host already gets here, self-correcting on the next tick. The ROUTE
+    // deliberately does the OPPOSITE with the same flag (it keeps the rows and
+    // discloses `pendingHosts`), because it renders a list rather than computing a
+    // number; that divergence is documented on the helper.
+    const sessions = completeSessionRows(settled);
     budgetState = computeBudgetState(sessions, {
       now: Date.now(),
       windowMs,
