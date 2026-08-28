@@ -8,12 +8,21 @@
 // at all. A multi-second config GET (and the bounded retry behind it, WARDEN-828)
 // was therefore experienced as ten seconds of nothing.
 //
-// This seam replaces the full-pane gate with a PER-SECTION one, keyed off the
-// classification that already exists for the footer persistence label
-// (`CLIENT_PREF_SECTIONS`, WARDEN-870). It is imported — deliberately NOT
-// re-derived — so there is exactly one list of "which sections need the
-// backend" in the codebase.
-import { CLIENT_PREF_SECTIONS } from './sectionPersistence';
+// This seam replaces the full-pane gate with a PER-SECTION one. It keys off the
+// per-section dependency classification that lives in sectionPersistence.ts
+// (WARDEN-1210) — still imported, deliberately NOT re-derived — so there is
+// exactly ONE description of "which sections need what data" in the codebase.
+//
+// WARDEN-1210 measurement note: with a ~34-host fleet (30 slow/unreachable via
+// a fake ssh), GET /api/config stays at p50 2ms / p99 8ms while every fleet
+// sweep runs (0 event-loop stalls recorded by the server's own loop monitor),
+// and stays 2-12ms even while a worst-host-bound request is in flight — host
+// work does not measurably delay the config GET. The gate below therefore takes
+// ONLY config-load state as input: host-data availability is deliberately NOT a
+// gate input for ANY section (the hosts section and the new-chat picker degrade
+// in-section to configured hosts while discovery settles), so no amount of host
+// latency can hold a section hostage.
+import { sectionDataDependency, readsBackendConfig } from './sectionPersistence';
 
 /**
  * What the content pane should show for the active section.
@@ -47,7 +56,11 @@ export interface LoadState {
  * failed refetch must not replace them with an error state.
  */
 export function sectionGate(activeSection: string, { configLoaded, loadFailed }: LoadState): SectionGate {
-  if (CLIENT_PREF_SECTIONS.has(activeSection)) return 'ready';
+  // Per-section-accurate (WARDEN-1210): a section gates on the config GET ONLY
+  // if its dependency reads backend config. Client-pref sections (plain or with
+  // a degrading host picker) are ALWAYS 'ready'. Host-data availability is
+  // intentionally absent from LoadState — no section may wait on it.
+  if (!readsBackendConfig(sectionDataDependency(activeSection))) return 'ready';
   if (configLoaded) return 'ready';
   return loadFailed ? 'failed' : 'pending';
 }
