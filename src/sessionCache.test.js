@@ -230,7 +230,15 @@ describe('createSessionCache — the cross-host session-list owner (WARDEN-1208)
       // a competing second ssh child. So: no wait, and the short slot is DISCLOSED.
       const gate = openGate();
       const remote = fakeRemote({ h1: 300 }, { gate: new Map([['h1', gate.promise]]) });
-      const { cache } = makeCache({ fetchLocal: fakeLocal(0), fetchRemote: remote, settleMs: 5 });
+      // settleMs is LARGE, not 5: the route read races the settle window, and
+      // this test's completion must be driven by `gate.release()`, never by the
+      // timer. With a 5ms window the route read resolves cold (`sessions: []`)
+      // whenever the setImmediate + sweep snapshot below outlast 5ms of wall
+      // clock — which is exactly how CI on a slower runner failed it
+      // (`0 !== 41`): the route's value was frozen at the settle tick before the
+      // gate ever opened. The gate makes the ordering deterministic; a settle
+      // window larger than the test guarantees it can never be the winner.
+      const { cache } = makeCache({ fetchLocal: fakeLocal(0), fetchRemote: remote, settleMs: 60_000 });
 
       const routeRead = cache.snapshot(['h1'], 41);          // launches at 41, held open
       await new Promise((r) => setImmediate(r));             // let it register in-flight
