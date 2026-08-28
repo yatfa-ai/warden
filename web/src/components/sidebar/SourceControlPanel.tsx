@@ -119,11 +119,13 @@ export function SourceControlPanel({ chatId, gitInfo, onOpenDiff, onOpenConflict
   // focused-pane-changes / data-arrives transitions that gate the early return.
   const group = useMemo(() => groupGitFiles(gitInfo?.files), [gitInfo?.files]);
 
-  // No branch ⟺ the focused pane's cwd is not a git repo (fetchGitStatus stores
-  // an entry only when /api/git-status returns a branch), or the pane isn't
-  // focused / status hasn't landed yet. In all those cases render nothing — the
-  // section is the single place for git, so absent a repo there is nothing to
-  // show and no error to surface.
+  // No branch ⟺ the focused pane's cwd is not a git repo. The shared query
+  // (['git-status', key], WARDEN-1211) stores a SUCCESSFUL branch-less payload
+  // as valid data — never an error — and this panel's own !gitInfo?.branch
+  // gate below renders nothing for it. Also covers "pane isn't focused /
+  // status hasn't landed yet". In all those cases render nothing — the section
+  // is the single place for git, so absent a repo there is nothing to show and
+  // no error to surface.
   if (!gitInfo || !gitInfo.branch || !chatId) return null;
 
   const changedCount = gitInfo.files?.length ?? 0;
