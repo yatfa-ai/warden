@@ -1,0 +1,53 @@
+# Warden's node:test suite, on every push and pull request — and every run reports itself to
+# SpecGuard through the node:test reporter that specguard-ts ships. Node 24 matches release.yml;
+# `node --test src` (a directory argument) scans correctly there, while Node 25 resolves a
+# directory as a module and dies.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    env:
+      SPECGUARD_ENDPOINT: https://specguard.yatfa.com
+      # Repository-scoped ingest key for yatfa-ai/warden. Absent on fork pull requests — the
+      # telemetry step below is conditional on it.
+      SPECGUARD_API_KEY: ${{ secrets.SPECGUARD_API_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      # `npm ci` runs the specguard-ts git dependency's `prepare`, which builds the dist/ its
+      # reporter lives in.
+      - name: Install dependencies
+        run: npm ci
+
+      # The reporter never fails the suite; with no key (a fork pull request) the flags are absent
+      # and `npm test` runs exactly as before. Composing reporters requires a
+      # --test-reporter-destination per --test-reporter whenever more than one is given (enforced
+      # from Node 23; the pairing is valid on Node 24 here).
+      - name: Enable SpecGuard telemetry when a key is configured
+        if: env.SPECGUARD_API_KEY != ''
+        run: |
+          {
+            echo "SPECGUARD_REPORTER_ARGS=--test-reporter=spec --test-reporter-destination=stdout --test-reporter=./node_modules/specguard-ts/dist/node-test/reporter.js --test-reporter-destination=stdout"
+            echo "SPECGUARD_COMMIT_SHA=${{ github.event.pull_request.head.sha || github.sha }}"
+            echo "SPECGUARD_BRANCH=${{ github.head_ref || github.ref_name }}"
+            echo "SPECGUARD_RUN_ID=${{ github.run_id }}-${{ github.run_attempt }}"
+          } >> "$GITHUB_ENV"
+
+      - name: Run the suite
+        run: npm test -- $SPECGUARD_REPORTER_ARGS
