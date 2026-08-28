@@ -3383,6 +3383,18 @@ const BIN_PATH = path.join(
 );
 const canRunBinary = process.platform === 'linux' && process.arch === 'x64' && fs.existsSync(BIN_PATH);
 
+// "discover without docker" asserts the failure mode of a machine with NO working docker — a
+// machine whose daemon answers (GitHub runners ship one) is not that machine. Skipped rather
+// than failed: the environment being richer than the test's premise is not a product bug.
+const dockerAvailable = (() => {
+  try {
+    const r = spawnSync('docker', ['ps'], { encoding: 'utf8', timeout: 5000 });
+    return r.status === 0;
+  } catch {
+    return false;
+  }
+})();
+
 function realBinaryTransport() {
   const child = spawn(BIN_PATH, [], { stdio: ['pipe', 'pipe', 'pipe'] });
   const rl = readline.createInterface({ input: child.stdout });
@@ -3433,7 +3445,7 @@ function realBinaryTransport() {
     }
   });
 
-  it('discover without docker -> actionable error, not a crash', async () => {
+  (!dockerAvailable ? it : it.skip)('discover without docker -> actionable error, not a crash', async () => {
     const ch = new CompanionChannel('local-binary', realBinaryTransport());
     try {
       await assert.rejects(() => ch.call('discover', { session: 'agent' }, { timeout: 4000 }), (e) => {
