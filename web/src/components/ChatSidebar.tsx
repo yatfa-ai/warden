@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { toast } from 'sonner';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
@@ -45,11 +45,13 @@ import { WHATS_NEW_FETCH_LIMIT } from '@/lib/whatsNew';
 import type { SnoozeDuration } from '@/lib/snooze';
 import type { Chat, Collection, AgentStateRow } from '@/lib/types';
 import { StatusDot } from '@/components/StatusDot';
-import type { GitCommit, GitFile, ClaudeSession, DiffStat } from './sidebar/types';
+import type { GitCommit, ClaudeSession } from './sidebar/types';
 import { ChatRow, OpenPaneRow, ChatRowSkeleton, SessionRowSkeleton } from './sidebar/ChatRows';
 import { AgentFilterSortControls } from './sidebar/AgentFilterSortControls';
 import { UpdatedAgo, SectionToggle, SelectionActionBar } from './sidebar/SidebarBits';
 import { SourceControlPanel } from './sidebar/SourceControlPanel';
+import type { SourceControlGitInfo } from './sidebar/SourceControlPanel';
+import { useGitStatus, useInvalidateGitStatus } from '@/lib/gitStatusHooks';
 import { SessionTagChips, SessionTagFilterRow } from './sidebar/SessionTags';
 import { computeTagsInUse, filterSessionsByTags, addTag, removeTag } from '@/lib/sessionTags';
 import { readListBody, readListResponse, readResponse } from '@/lib/api';
@@ -251,7 +253,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
   // strict `=== false` gate must not be satisfied.
   const [hostSessions, setHostSessions] = useState<Record<string, { sessions: ClaudeSession[]; claudeAvailable?: boolean; error?: string | null }>>({});
   const [loadingHost, setLoadingHost] = useState<string | null>(null);
-  const [gitStatus, setGitStatus] = useState<Record<string, { branch: string | null; detached?: boolean; headSha?: string | null; headDate?: string | null; clean: boolean | null; cwd: string; files?: GitFile[]; ahead?: number | null; behind?: number | null; upstream?: string | null; inProgress?: { operation: string | null; detail?: string | null }; stashCount?: number | null; diffstat?: DiffStat | null; outgoingFiles?: string[] | null }>>({});
+
   // recent commit history (git log) per chatId — cached so re-expanding the badge is instant
   const [gitLog, setGitLog] = useState<Record<string, GitCommit[]>>({});
   const [gitLogLoading, setGitLogLoading] = useState<Record<string, boolean>>({});
@@ -363,45 +365,32 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
     setLoadingHost(null);
   };
 
-  // WARDEN-975: git status is fetched for the FOCUSED pane only, and the map is
-  // REPLACED (not merged) on every fetch so it holds at most that one entry. The old
-  // behaviour fanned a fetch per open pane into a merge-by-key map with no delete
-  // path, so a pane the human closed — or merely stopped looking at — kept a frozen
-  // entry feeding the (now removed) fleet chip/collision/triage rollups forever.
-  // Keying by chat id is retained because every /api/git-* route addresses the repo
-  // by it. (WARDEN-990 removed the second consumer, the FileViewer's co-editor finder.)
+  // WARDEN-1211: the focused pane's git status is now a READ of the SHARED
+  // per-agent cache (`['git-status', key]`, owned by lib/gitStatusQuery +
+  // lib/gitStatusHooks) — the same key Fleet Health's fan reads — so the two
+  // surfaces can no longer disagree about one agent, and an agent held by both
+  // costs ONE fetch, not two.
   //
-  // STALENESS GUARD (review fix): a whole-map replace is not order-safe the way the
-  // old merge-by-key was. Switching focus A → B issues fetch(A) then fetch(B) with no
-  // cancellation, and /api/git-status is an SSH round trip for a remote host, so A can
-  // resolve LAST. Without the guard that write leaves the map as `{A: statusA}` while
-  // the section reads gitStatus[focused === B] → undefined → SourceControlPanel returns
-  // null and the git section vanishes until the next catalog refresh — indistinguishable
-  // from "this pane has no repo". Sharper still on the branch-less path, where a late
-  // empty response wipes a good entry. So the LAST fetch issued wins: every response
-  // whose chatId is no longer the one we most recently requested is dropped before it
-  // touches state. A ref (not state) because it must be read/written synchronously
-  // across awaits without re-rendering or re-creating the callback.
-  const gitReqRef = useRef<string | null>(null);
-  const fetchGitStatus = useCallback(async (chatId: string) => {
-    gitReqRef.current = chatId;
-    try {
-      const r = await fetch(`/api/git-status?id=${encodeURIComponent(chatId)}`);
-      const j = await r.json();
-      if (gitReqRef.current !== chatId) return;  // a newer focus won the race — drop this response
-      if (j.branch) {
-        setGitStatus({ [chatId]: { branch: j.branch, detached: j.detached, headSha: j.headSha, headDate: j.headDate, clean: j.clean, cwd: j.cwd, files: j.files, ahead: j.ahead, behind: j.behind, upstream: j.upstream, inProgress: j.inProgress, stashCount: j.stashCount, diffstat: j.diffstat, outgoingFiles: j.outgoingFiles } });
-      } else {
-        // A non-git / branch-less focused pane clears the map rather than leaving the
-        // previously-focused repo's status on screen (the section reads gitStatus
-        // [focused], so a stale sibling entry would otherwise linger in memory).
-        setGitStatus({});
-      }
-    } catch (error) {
-      // Git status is non-critical, so just log it without showing a toast
-      console.error('[git-status] Failed:', error);
-    }
-  }, []);
+  // What replaced what (behaviours preserved, mechanism changed):
+  // - The old private `fetch('/api/git-status?id=…')` and the WARDEN-975
+  //   single-entry `gitStatus` map are GONE; `gitStatusQuery.data` is the fact.
+  // - LATE-RESPONSE GUARD (the old gitReqRef): inherent now. Each key's fetch
+  //   writes only its OWN cache entry and the section always reads the FOCUSED
+  //   key's entry — a late A response can never overwrite B's, so switching
+  //   focus A → B with A resolving last still leaves B on screen.
+  // - BRANCH-LESS → "no repo": kept as a CONSUMER-side read (finding A). The
+  //   shared fetcher's strict WARDEN-89 gate (`r.ok && !j.error`) routes an
+  //   unreachable/error agent to the query's error state; a SUCCESSFUL payload
+  //   with no `branch` is still a valid empty read — `gitInfo` stays undefined
+  //   and SourceControlPanel returns null (its `!gitInfo?.branch` gate), never
+  //   an error. The previously-focused repo's status cannot linger: the read is
+  //   keyed to `focused`, not a mutable map.
+  const gitStatusQuery = useGitStatus(focused);
+  const invalidateGitStatus = useInvalidateGitStatus();
+  // Git status is non-critical: log a settled fetch failure without a toast.
+  useEffect(() => {
+    if (gitStatusQuery.error) console.error('[git-status] Failed:', gitStatusQuery.error);
+  }, [gitStatusQuery.error]);
 
   // Recent commits. `limit` defaults to WHATS_NEW_FETCH_LIMIT (50) so the per-agent
   // "What's new since your last visit" marker counts every commit since the last
@@ -775,16 +764,14 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
     fetchCollections();
   }, []);
 
-  // WARDEN-975: git status is fetched for the FOCUSED pane ONLY — the single repo the
-  // git section describes. The former per-open-pane fan-out (one /api/git-status per
-  // pane, merged into a never-pruned map) is gone with the fleet surfaces it fed: it
-  // cost an SSH round trip per open pane on every catalog refresh to render badges
-  // that no longer exist, and its map kept closed panes' frozen entries alive. Re-runs
-  // on focus change AND on every catalog refresh (`chats`) so the section stays live
-  // while a pane stays focused. Read-only GET; fetchGitStatus replaces the map.
+  // WARDEN-975/1211: git status is fetched for the FOCUSED pane ONLY — the single
+  // repo the git section describes. On focus change the shared query mounts fresh
+  // (a new key has no cached entry → one fetch); on every catalog refresh (`chats`)
+  // this effect INVALIDATES the focused key so the section stays live while a pane
+  // stays focused — the same beat the old private fetch fired on. Read-only GET.
   useEffect(() => {
-    if (focused) fetchGitStatus(focused);
-  }, [focused, chats, fetchGitStatus]);
+    if (focused) invalidateGitStatus(focused);
+  }, [focused, chats, invalidateGitStatus]);
 
   const handleSpawned = (chat: Chat) => { onRefresh(); onOpenChat(chat.key || chat.id); setView({ kind: 'root' }); };
   const hosts = [THIS_MACHINE, ...sshHosts];
@@ -1341,7 +1328,7 @@ export function ChatSidebar({ chats, sshHosts, openPanes, recentlyClosed, focuse
               act on — or navigate to — any other pane. */}
           <SourceControlPanel
             chatId={focused}
-            gitInfo={focused ? gitStatus[focused] : undefined}
+            gitInfo={(focused ? gitStatusQuery.data : undefined) as SourceControlGitInfo | undefined}
             onOpenDiff={(path, staged) => { if (focused) setDiffTarget({ chatId: focused, path, staged }); }}
             onOpenConflict={(path) => { if (focused) setConflictTarget({ chatId: focused, path }); }}
             onOpenFile={(path) => { if (focused) setFileTarget({ chatId: focused, path }); }}
