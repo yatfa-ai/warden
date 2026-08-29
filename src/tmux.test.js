@@ -184,6 +184,42 @@ describe('tmux spawn() — exact new-session argv (WARDEN-386)', () => {
     assert.strictEqual(calls[0].args[cwdIdx + 1], 'C:\\work\\proj', 'cwd passed verbatim, not msys-translated');
   });
 
+  it('keeps a QUOTED path with spaces as one argv element (WARDEN-922)', async () => {
+    // resolveClaudeCmd quotes a resolved claude path that contains a space —
+    // routine on Windows (C:\Program Files\…\claude.cmd). A whitespace-only split
+    // would tear it into "C:\Program" + "Files\…", so `claude --resume <id>`
+    // would resolve to a real installed binary and then fail to launch.
+    const { fn, calls } = recordingRun();
+    const chat = {
+      host: '(local)',
+      session: 'resume-abc',
+      cwd: '',
+      cmd: '"C:\\Program Files\\npm\\claude.cmd" --resume abc123 --dangerously-skip-permissions',
+    };
+    await spawn(chat, {}, { runTmux: fn, isCompanionTransportEnabled: () => false });
+    assert.deepStrictEqual(calls[0].args, [
+      'new-session', '-d', '-s', 'resume-abc', '-x', '120', '-y', '32',
+      'C:\\Program Files\\npm\\claude.cmd', '--resume', 'abc123', '--dangerously-skip-permissions',
+    ]);
+  });
+
+  it('the quote-aware split applies to REMOTE hosts too — a deliberate change, not Windows-only (WARDEN-922)', async () => {
+    // Pinned because the change is easy to describe as "local Windows only" and it
+    // is not: tmux.js's spawn() has ONE cmd-splitting line for every host. For an
+    // unquoted cmd — every cmd this repo writes — the result is identical to the
+    // old `split(/\s+/)`. For a cmd containing double quotes it is NOT: the quotes
+    // now group the span and are consumed, where before they were shredded along
+    // with the spaces inside them. Both halves asserted, on a remote host.
+    const { fn, calls } = recordingRun();
+    const base = ['new-session', '-d', '-s', 's', '-x', '120', '-y', '32'];
+
+    await spawn({ host: 'prod-1', session: 's', cwd: '', cmd: 'claude --resume abc' }, {}, { runTmux: fn, isCompanionTransportEnabled: () => false });
+    assert.deepStrictEqual(calls[0].args, [...base, 'claude', '--resume', 'abc'], 'unquoted remote cmd splits exactly as before');
+
+    await spawn({ host: 'prod-1', session: 's', cwd: '', cmd: 'sh -c "echo hi there"' }, {}, { runTmux: fn, isCompanionTransportEnabled: () => false });
+    assert.deepStrictEqual(calls[1].args, [...base, 'sh', '-c', 'echo hi there'], 'quoted span is now ONE element (was 4 shredded ones)');
+  });
+
   it('omits -c when cwd is empty', async () => {
     const { fn, calls } = recordingRun();
     const chat = { host: 'prod-1', session: 's', cwd: '', cmd: 'claude' };

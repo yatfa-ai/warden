@@ -1,13 +1,43 @@
 // Transports for warden: run commands either over SSH (remote hosts) or locally
-// (this machine). tmux is required everywhere, so a "chat" is always a tmux
-// session; the only difference is whether tmux runs here or on a remote host.
+// (this machine). A "chat" is a tmux session everywhere EXCEPT local Windows,
+// which since WARDEN-922 spawns the native shell through ConPTY directly (no
+// tmux, no MSYS2, no forced bash) — see winsession.js. The local/remote branch
+// below is unchanged; only the local-Windows implementation of it moved.
 import { spawn, spawnSync } from 'node:child_process';
 import * as nodePty from 'node-pty';
 import fs from 'node:fs';
+import { isNativeLocal, runNative, attachNative } from './winsession.js';
 
 // POSIX single-quote. Safe for the local ssh arg layer and remote bash.
 export function shellQuote(s) {
   return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
+// Split a command STRING into argv, honoring double quotes.
+//
+// The chat's `cmd` is stored as a string and split into argv before it becomes
+// tmux/ConPTY arguments. A plain `split(/\s+/)` shreds any path containing a
+// space — which on Windows is the common case, not an edge case (`C:\Program
+// Files\…\claude.cmd`), so `claude --resume <id>` resolved to a real installed
+// binary and then failed to launch (WARDEN-922). Quoting is the only way to
+// express "this space is part of the path", so the splitter has to understand it.
+// Unquoted input splits exactly as before, so every existing caller is unchanged.
+export function splitCmd(str) {
+  const out = [];
+  let cur = '';
+  let quoted = false;
+  let has = false;
+  for (const ch of String(str)) {
+    if (ch === '"') { quoted = !quoted; has = true; continue; }
+    if (!quoted && /\s/.test(ch)) {
+      if (has) { out.push(cur); cur = ''; has = false; }
+      continue;
+    }
+    cur += ch;
+    has = true;
+  }
+  if (has) out.push(cur);
+  return out;
 }
 
 export const SSH_BASE_OPTS = [
@@ -600,14 +630,18 @@ export function attachPty(host, cmd, { cols = 100, rows = 30 } = {}) {
 
 // ---------------- local transport (this machine) ----------------
 
-// MSYS2 env for Windows tmux (no-op on Linux/macOS).
-export const LOCAL_ENV = process.platform === 'win32'
+// MSYS2 env for Windows tmux. Only applies to the LEGACY Windows tmux path
+// (WARDEN_WIN_TMUX=1); the native ConPTY path must NOT be handed an MSYS
+// environment — that is precisely what forced every local Windows terminal into
+// bash and broke Windows path handling (WARDEN-922). No-op on Linux/macOS.
+export const LOCAL_ENV = process.platform === 'win32' && !isNativeLocal()
   ? { ...process.env, MSYSTEM: process.env.MSYSTEM || 'MSYS' }
   : process.env;
 
-// Find tmux on this machine. Linux/macOS: 'tmux'. Windows: ABSOLUTE path preferred —
-// node-pty's winpty doesn't reliably resolve a bare 'tmux' from PATH when spawning
-// (it reports "File not found: "), so we use the full MSYS2 path.
+// Find tmux on this machine. Linux/macOS: 'tmux'. Windows (legacy path only):
+// ABSOLUTE path preferred — node-pty's winpty doesn't reliably resolve a bare
+// 'tmux' from PATH when spawning (it reports "File not found: "), so we use the
+// full MSYS2 path.
 //
 // Load-time one-shot (WARDEN-440): this `spawnSync('where', ...)` runs ONCE at
 // module import on win32. It is the documented "extreme necessity" exception to
@@ -615,8 +649,12 @@ export const LOCAL_ENV = process.platform === 'win32'
 // never block a request or timer, and it must resolve before any tmux op can be
 // issued. Synchronous here is safe; the hot local-tmux transport itself
 // (runLocalTmux) is fully async.
+//
+// SKIPPED entirely under the native Windows transport (WARDEN-922): there is no
+// tmux to find, so we neither probe for it nor pay the spawnSync at import.
 const TMUX_BIN = (() => {
   if (process.platform !== 'win32') return 'tmux';
+  if (isNativeLocal()) return '(native ConPTY)';
   const msys = 'C:/msys64/usr/bin/tmux.exe';
   if (fs.existsSync(msys)) return msys;
   try {
@@ -628,9 +666,12 @@ const TMUX_BIN = (() => {
 })();
 export { TMUX_BIN };
 
-// Windows cwd → MSYS path (C:\Users\foo → /c/Users/foo). Identity elsewhere.
+// Windows cwd → MSYS path (C:\Users\foo → /c/Users/foo). Identity elsewhere —
+// AND identity under the native Windows transport (WARDEN-922), where the cwd is
+// handed to ConPTY as a real Windows path and translating it would break it.
 export function toMsysPath(p) {
   if (process.platform !== 'win32' || !p) return p || '';
+  if (isNativeLocal()) return p;
   return p.replace(/^([A-Za-z]):[\\/]/, (_m, d) => `/${d.toLowerCase()}/`).replace(/\\/g, '/');
 }
 
@@ -647,6 +688,10 @@ export function toMsysPath(p) {
 // finite timeout, so an absent timeout never fires a 0ms kill). Shape mirrors
 // the remote `run()` path so runTmux's local and remote branches stay symmetric.
 export function runLocalTmux(args, opts = {}) {
+  // Native local Windows (WARDEN-922): the same tmux argv is executed against the
+  // in-process ConPTY session registry instead of an MSYS2 tmux binary. Same
+  // {ok, code, stdout, stderr} contract, so every caller is unchanged.
+  if (isNativeLocal()) return runNative(args, opts);
   return new Promise((resolve) => {
     const child = spawn(TMUX_BIN, args, { env: LOCAL_ENV, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
@@ -685,7 +730,13 @@ export function runLocalTmux(args, opts = {}) {
 }
 
 // Local live pane: spawn tmux attach in a local PTY (node-pty).
+//
+// Native local Windows (WARDEN-922): there is no tmux to attach to — the session
+// IS a node-pty already, so this returns a per-client VIEW of it (the identical
+// onData/onExit/write/resize/kill surface server.js drives). Detaching a client
+// does not end the session, matching `tmux attach` semantics.
 export function attachLocalTmux(args, { cols = 100, rows = 30 } = {}) {
+  if (isNativeLocal()) return attachNative(args, { cols, rows });
   const env = { ...LOCAL_ENV, LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' };
   return nodePty.spawn(TMUX_BIN, args, { cols, rows, env, useConpty: true });
 }
@@ -718,6 +769,47 @@ export function attachTmux(chat, args, { cols = 100, rows = 30 } = {}) {
   return attachPty(chat.host, prefix + 'tmux ' + args.map(shellQuote).join(' '), { cols, rows });
 }
 
+// Extensions Windows can actually LAUNCH — `.exe`/`.com` are executable images
+// CreateProcess runs directly, `.cmd`/`.bat` are scripts cmd.exe runs. Anything
+// else `where` reports (notably npm's extensionless POSIX shim and its `.ps1`
+// sibling) is not something ConPTY can start.
+const LAUNCHABLE_EXT = /\.(exe|com|cmd|bat)$/i;
+
+// Resolve a binary through the WINDOWS PATH (`where`), PATHEXT-aware. Returns an
+// absolute path to a LAUNCHABLE hit (see LAUNCHABLE_EXT — not merely the first
+// line; see the note at the resolve below), or null. Async (WARDEN-440): never
+// blocks the event loop. `deps.spawn` is a test seam so the Windows branch is
+// assertable from a Linux CI runner.
+export function whereWindows(bin, deps = {}) {
+  const sp = deps.spawn ?? spawn;
+  return new Promise((resolve) => {
+    let out = '';
+    let child;
+    try {
+      child = sp('where', [bin], { env: LOCAL_ENV, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch {
+      return resolve(null);
+    }
+    child.stdout.on('data', (d) => { out += d; });
+    child.on('error', () => resolve(null));
+    // 'close' (not 'exit') so stdout has fully drained before we read it.
+    child.on('close', (code) => {
+      if (code !== 0) return resolve(null);
+      const hits = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      // NOT simply `hits[0]`. `where` lists the EXACT-name match first, and npm on
+      // Windows drops three files in its prefix dir — `claude`, `claude.cmd`,
+      // `claude.ps1` — so the first line of the overwhelmingly common install is
+      // the EXTENSIONLESS POSIX shim (the same shape as the familiar
+      // `where npm` → `…\nodejs\npm` then `…\nodejs\npm.cmd`). That shim is not a
+      // launchable image: CreateProcess/ConPTY cannot run it, and handing it to
+      // cmd.exe would only work by accident, via cmd's implicit PATHEXT search.
+      // Choose the launchable entry explicitly instead — that is what makes
+      // buildLaunch's `.cmd` → %ComSpec% branch the branch that actually runs.
+      resolve(hits.find((p) => LAUNCHABLE_EXT.test(p)) || hits[0] || null);
+    });
+  });
+}
+
 // Find the `claude` binary on this machine / host → returns the full path or null.
 // claude is often in a dir added by .zshrc (e.g. ~/.local/bin), which `bash -lc`
 // (what tmux's shell runs) does NOT source — so we try zsh interactive login first.
@@ -731,6 +823,17 @@ export async function detectClaude(host, deps = {}) {
   if (host === '(local)') {
     const exe = process.env.CLAUDE_CODE_EXECPATH;
     if (exe && fs.existsSync(exe)) return exe;
+    // Windows (WARDEN-922): resolve through the WINDOWS PATH, not a Unix lookup.
+    // Two reasons the old `spawn('claude', ['--version'])` probe could not work
+    // here: (a) npm installs claude as a `claude.cmd` shim, which CreateProcess
+    // (and therefore child_process.spawn without a shell) cannot execute at all,
+    // so the probe reported "not found" on a machine where claude was installed;
+    // (b) the caller needs the FULL PATH — a bare `claude` is not launchable by
+    // ConPTY for the same .cmd reason. `where` gives us both, PATHEXT-aware, and
+    // costs one async spawn.
+    if (process.platform === 'win32') {
+      return whereWindows('claude', deps);
+    }
     // ASYNC spawn (WARDEN-440): `claude --version` is a Node CLI cold-start; a
     // synchronous spawnSync here held the event loop for its duration on every
     // /api/claude-sessions hit. stdio is ignored — we only care about exit status.
@@ -769,6 +872,18 @@ export async function detectClaude(host, deps = {}) {
 export function attachInteractiveTmux(chat, args) {
   // CLI: stdio-inherit. Local spawns tmux directly; remote goes over ssh.
   if (chat.host === '(local)') {
+    // Native local Windows (WARDEN-922): local sessions live INSIDE the Warden
+    // server process, so a separate CLI process has nothing to attach to. Say so
+    // plainly rather than failing with a confusing "tmux not found" — the web
+    // pane is the way in, and remote chats (still tmux) are unaffected.
+    if (isNativeLocal()) {
+      console.error(
+        'Local Windows chats run natively in the Warden process (no tmux), so `attach` from the CLI\n' +
+        'cannot reach them. Open the chat in the Warden dashboard instead (`warden ui`).\n' +
+        'Remote chats still attach normally: warden attach --host <host>',
+      );
+      return Promise.resolve(1);
+    }
     const child = spawn(TMUX_BIN, args, { stdio: 'inherit', env: LOCAL_ENV });
     return new Promise((res) => child.on('exit', (c) => res(c ?? 0)));
   }

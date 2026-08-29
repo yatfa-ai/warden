@@ -25,7 +25,13 @@ npm start
 # → http://localhost:7421
 ```
 
-**Requires tmux** — native on Linux/macOS. On Windows: install [MSYS2](https://www.msys2.org/) tmux and put `C:\msys64\usr\bin` on PATH.
+**Requires tmux** on Linux/macOS, and on every **remote** host you connect to (native package: `tmux`).
+**On Windows, local terminals need nothing extra** — they run natively through ConPTY (the same primitive
+VSCode's integrated terminal uses), so you get PowerShell/cmd rather than bash, and no MSYS2 install.
+Remote hosts you SSH into still need tmux on their side. (Local Windows sessions live in the Warden
+process and, like a VSCode terminal, don't survive Warden being closed; set `WARDEN_WIN_TMUX=1` to fall
+back to the old MSYS2-tmux behavior, or `WARDEN_WIN_SHELL=C:\path\to\shell.exe` to spawn a shell other
+than the auto-detected PowerShell/cmd.)
 
 **Requires Node.js 18+** (tested on v24).
 
