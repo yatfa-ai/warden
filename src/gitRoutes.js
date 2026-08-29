@@ -556,8 +556,12 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
     // literal `cwd: ''` and the catch used `cwd: chat.cwd || ''`; these are identical
     // on the no-cwd path (gitCwd returns '' only when chat.cwd is absent, so
     // `chat.cwd || ''` is '' there too — see gitCwd), so one function serves both.
+    // The git-status empty contract as a named function (WARDEN-1252): the handler's
+    // file-listing failure gate needs to emit the SAME shape as the no-cwd / catch
+    // paths, so both the `defaults` option and the gate spread one builder.
+    const gitStatusDefaults = (chat) => ({ branch: null, detached: false, headSha: null, headDate: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, upstream: null, inProgress: { operation: null, detail: null }, stashCount: null, diffstat: null, files: null, outgoingFiles: null });
     await withGitRepo(req, res, {
-      defaults: (chat) => ({ branch: null, detached: false, headSha: null, headDate: null, clean: null, cwd: chat.cwd || '', ahead: null, behind: null, upstream: null, inProgress: { operation: null, detail: null }, stashCount: null, diffstat: null, files: null, outgoingFiles: null }),
+      defaults: gitStatusDefaults,
       handler: async ({ chat, cwd, res }) => {
         // branch / status / ahead-behind / detached / stash all run via runGit: argv
         // (no shell) for the LOCAL transports, ssh for the remote ones — and for yatfa
@@ -574,6 +578,22 @@ export function createGitRouter({ resolve, readWorkingTreeFile, isBinaryFile, is
         // space (" M" = unstaged mod), so the output must NOT be trimmed as a
         // whole or the first file's path is corrupted. See parseGitStatusPorcelain.
         const files = parseGitStatusPorcelain(statusR.ok ? statusR.stdout : '');
+
+        // File-listing failure gate (WARDEN-1252): when `git status --porcelain`
+        // itself FAILS, its discarded exit status used to turn into an empty file
+        // list, an empty list into clean:true, and a dirty repo into a green
+        // "clean" badge — the worst kind of lie. The two legitimate empty cases
+        // (genuinely clean tree; unborn HEAD before the first commit) both exit 0
+        // with empty output, and a non-git cwd fails BOTH this probe and the branch
+        // probe, so the `branch` term (truthy ⟺ rev-parse resolved HEAD ⟺ we are
+        // inside a real repo) keys the gate to a REAL failure only: inside a repo
+        // where the branch probe succeeded, a failed status probe can only be a
+        // transport/permission break. Report the error contract (same shape as the
+        // no-cwd / catch paths) and return early — never a clean tree, never a 500.
+        if (branch && !statusR.ok) {
+          return res.json({ ...gitStatusDefaults(chat), error: 'git status failed' });
+        }
+
         const clean = files.length === 0;
 
         // ahead/behind upstream: @{u}...HEAD symmetric diff. Non-zero exit (no
