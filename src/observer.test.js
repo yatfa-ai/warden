@@ -81,8 +81,8 @@ describe('readChats (batched concurrent read)', () => {
     it('returns raw pane content per requested pane in one result (not a structured classification)', async () => {
       const chats = [worker(), planner()];
       const capturePanes = mock.fn(async (_cs) => ({
-        'myproject-worker': 'worker output line',
-        'myproject-planner': 'planner output line',
+        'host1:myproject-worker': 'worker output line',
+        'host1:myproject-planner': 'planner output line',
       }));
 
       const result = await readChats(['myproject-worker', 'myproject-planner'], false, [], chats, capturePanes, cfg);
@@ -91,7 +91,7 @@ describe('readChats (batched concurrent read)', () => {
       assert.strictEqual(result.chats.length, 2);
       // Each entry carries the RAW pane (a `pane` field) — read_chats returns
       // raw pane text per pane, not a structured/lossy classification.
-      const w = result.chats.find((c) => c.id === 'myproject-worker');
+      const w = result.chats.find((c) => c.id === 'host1:myproject-worker');
       assert.ok(w, 'worker entry present');
       assert.strictEqual(w.ok, true);
       assert.strictEqual(w.pane, 'worker output line');
@@ -106,7 +106,7 @@ describe('readChats (batched concurrent read)', () => {
       // WARDEN-88: a serial await-in-loop would call capturePanes once PER pane.
       // The batched design calls it exactly ONCE for N panes.
       const chats = [worker(), planner(), reviewer()];
-      const capturePanes = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.key, `pane-${c.key}`])));
+      const capturePanes = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.id, `pane-${c.key}`])));
 
       await readChats(['myproject-worker', 'myproject-planner', 'myproject-reviewer'], false, [], chats, capturePanes, cfg);
 
@@ -118,7 +118,7 @@ describe('readChats (batched concurrent read)', () => {
 
     it('dedupes ids that resolve to the same pane', async () => {
       const chats = [worker()];
-      const capturePanes = mock.fn(async (cs) => ({ [cs[0].key]: 'only pane' }));
+      const capturePanes = mock.fn(async (cs) => ({ [cs[0].id]: 'only pane' }));
 
       // 'myproject-worker' (exact container) and 'worker' (role) both hit the same chat.
       const result = await readChats(['myproject-worker', 'worker'], false, [], chats, capturePanes, cfg);
@@ -129,12 +129,12 @@ describe('readChats (batched concurrent read)', () => {
 
     it('resolves a manual/tmux chat (container null) by session', async () => {
       const chat = tmuxChat();
-      const capturePanes = mock.fn(async (cs) => ({ [cs[0].key]: 'manual pane text' }));
+      const capturePanes = mock.fn(async (cs) => ({ [cs[0].id]: 'manual pane text' }));
 
       const result = await readChats(['manual-session'], false, [], [chat], capturePanes, cfg);
 
       assert.strictEqual(result.count, 1);
-      assert.strictEqual(result.chats[0].id, 'manual-session');
+      assert.strictEqual(result.chats[0].id, '(local):manual-session');
       assert.strictEqual(result.chats[0].pane, 'manual pane text');
     });
   });
@@ -144,14 +144,14 @@ describe('readChats (batched concurrent read)', () => {
       const worker_ = worker();
       const planner_ = planner();
       const reviewer_ = reviewer(); // not open
-      const capturePanes = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.key, `pane-${c.key}`])));
+      const capturePanes = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.id, `pane-${c.key}`])));
 
       const result = await readChats(['myproject-reviewer'], true,
         ['myproject-worker', 'myproject-planner'], [worker_, planner_, reviewer_], capturePanes, cfg);
 
       // ids is ignored under open_only; only the two open tabs are read.
       assert.strictEqual(result.count, 2);
-      assert.deepStrictEqual(result.chats.map((c) => c.id).sort(), ['myproject-planner', 'myproject-worker']);
+      assert.deepStrictEqual(result.chats.map((c) => c.id).sort(), ['host1:myproject-planner', 'host1:myproject-worker']);
       assert.strictEqual(capturePanes.mock.calls[0].arguments[0].length, 2);
     });
 
@@ -180,7 +180,7 @@ describe('readChats (batched concurrent read)', () => {
       const chats = [worker(), planner(), reviewer()];
       const capturePanes = mock.fn(async (cs) => {
         const out = {};
-        for (const c of cs) if (c.host !== 'host2') out[c.key] = `pane-${c.key}`;
+        for (const c of cs) if (c.host !== 'host2') out[c.id] = `pane-${c.key}`;
         return out;
       });
 
@@ -188,7 +188,7 @@ describe('readChats (batched concurrent read)', () => {
         ['myproject-worker', 'myproject-planner', 'myproject-reviewer'], false, [], chats, capturePanes, cfg);
 
       assert.strictEqual(result.chats.length, 3, 'all three requested panes yield an entry');
-      const failed = result.chats.find((c) => c.id === 'myproject-reviewer');
+      const failed = result.chats.find((c) => c.id === 'host2:myproject-reviewer');
       assert.ok(failed, 'the failed-host pane is still present — NOT dropped');
       assert.strictEqual(failed.ok, false);
       assert.strictEqual(failed.host, 'host2');
@@ -197,7 +197,7 @@ describe('readChats (batched concurrent read)', () => {
 
       const ok = result.chats.filter((c) => c.ok);
       assert.strictEqual(ok.length, 2);
-      assert.deepStrictEqual(ok.map((c) => c.id).sort(), ['myproject-planner', 'myproject-worker']);
+      assert.deepStrictEqual(ok.map((c) => c.id).sort(), ['host1:myproject-planner', 'host1:myproject-worker']);
       assert.strictEqual(result.summary.captureFailed, 1);
       assert.strictEqual(result.summary.read, 2);
     });
@@ -206,12 +206,12 @@ describe('readChats (batched concurrent read)', () => {
   describe('id resolution failures (surfaced per-id, not fatal)', () => {
     it('reports an unmatched id per-id while still reading the ids that resolve', async () => {
       const chats = [worker()];
-      const capturePanes = mock.fn(async (cs) => ({ [cs[0].key]: 'pane' }));
+      const capturePanes = mock.fn(async (cs) => ({ [cs[0].id]: 'pane' }));
 
       const result = await readChats(['myproject-worker', 'no-such-agent'], false, [], chats, capturePanes, cfg);
 
       assert.strictEqual(result.count, 1, 'the resolvable id is still read');
-      assert.strictEqual(result.chats[0].id, 'myproject-worker');
+      assert.strictEqual(result.chats[0].id, 'host1:myproject-worker');
       assert.ok(Array.isArray(result.errors) && result.errors.length === 1, 'the bad id is reported');
       assert.strictEqual(result.errors[0].id, 'no-such-agent');
       assert.ok(/no chat matches/.test(result.errors[0].error));
@@ -221,7 +221,7 @@ describe('readChats (batched concurrent read)', () => {
     it('reports an ambiguous id per-id (does not silently pick one)', async () => {
       const a = worker();
       const b = yatfaChat({ id: 'host2:other-worker', key: 'other-worker', container: 'other-worker', host: 'host2' });
-      const capturePanes = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.key, 'x'])));
+      const capturePanes = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.id, 'x'])));
 
       const result = await readChats(['worker'], false, [], [a, b], capturePanes, cfg);
 
@@ -242,12 +242,12 @@ describe('readChats (batched concurrent read)', () => {
     });
 
     it('ignores blank/non-string ids rather than treating them as a match', async () => {
-      const capturePanes = mock.fn(async (cs) => ({ [cs[0].key]: 'pane' }));
+      const capturePanes = mock.fn(async (cs) => ({ [cs[0].id]: 'pane' }));
       // mixed with a valid id; the blanks must not error or match.
       const result = await readChats(['', '  ', 'myproject-worker'], false, [], [worker()], capturePanes, cfg);
 
       assert.strictEqual(result.count, 1);
-      assert.strictEqual(result.chats[0].id, 'myproject-worker');
+      assert.strictEqual(result.chats[0].id, 'host1:myproject-worker');
       assert.strictEqual(capturePanes.mock.calls[0].arguments[0].length, 1);
     });
   });
@@ -256,7 +256,7 @@ describe('readChats (batched concurrent read)', () => {
     it('trims each pane to the last `lines` lines', async () => {
       const chat = worker();
       const longPane = Array.from({ length: 60 }, (_, i) => `line ${i}`).join('\n');
-      const capturePanes = mock.fn(async () => ({ [chat.key]: longPane }));
+      const capturePanes = mock.fn(async () => ({ [chat.id]: longPane }));
 
       const result = await readChats(['myproject-worker'], false, [], [chat], capturePanes, cfg, { lines: 5 });
 
@@ -267,7 +267,7 @@ describe('readChats (batched concurrent read)', () => {
 
     it('treats lines <= 0 as the minimum of 1 line', async () => {
       const chat = worker();
-      const capturePanes = mock.fn(async () => ({ [chat.key]: 'a\nb\nc' }));
+      const capturePanes = mock.fn(async () => ({ [chat.id]: 'a\nb\nc' }));
 
       const result = await readChats(['myproject-worker'], false, [], [chat], capturePanes, cfg, { lines: 0 });
 
@@ -276,7 +276,7 @@ describe('readChats (batched concurrent read)', () => {
 
     it('caps how many panes are captured and surfaces the overflow as skipped (no silent drop)', async () => {
       const chats = [worker(), planner(), reviewer()];
-      const capturePanes = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.key, `pane-${c.key}`])));
+      const capturePanes = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.id, `pane-${c.key}`])));
 
       const result = await readChats(
         ['myproject-worker', 'myproject-planner', 'myproject-reviewer'], false, [], chats, capturePanes, cfg,
@@ -300,7 +300,7 @@ describe('readChats (batched concurrent read)', () => {
       // sibling and preserves the same fidelity rather than stripping like summarize.
       const chat = worker();
       const pane = '\x1b[31mError: build failed\x1b[0m\nRunning setup.';
-      const capturePanes = mock.fn(async () => ({ [chat.key]: pane }));
+      const capturePanes = mock.fn(async () => ({ [chat.id]: pane }));
 
       const result = await readChats(['myproject-worker'], false, [], [chat], capturePanes, cfg);
 
@@ -411,7 +411,7 @@ describe('Observer _execTool dispatch (end-to-end via injected I/O)', () => {
   }
 
   it('read_chats success: routes a known id through readChats with the injected capturePanes', async () => {
-    const capturePanes = mock.fn(async (chats) => ({ [chats[0].key]: 'worker pane content' }));
+    const capturePanes = mock.fn(async (chats) => ({ [chats[0].id]: 'worker pane content' }));
     const obs = new Observer(cfg, { io: makeIo({ capturePanes }) });
     obs.openTabs = [];
     obs.lastChats = [yatfaChat()];
@@ -422,7 +422,7 @@ describe('Observer _execTool dispatch (end-to-end via injected I/O)', () => {
     // _execTool wired this._io.capturePanes into readChats end-to-end.
     assert.strictEqual(capturePanes.mock.callCount(), 1, 'dispatch reached the injected capturePanes, not the live import');
     assert.strictEqual(result.count, 1);
-    assert.strictEqual(result.chats[0].id, 'myproject-worker');
+    assert.strictEqual(result.chats[0].id, 'host1:myproject-worker');
     assert.strictEqual(result.chats[0].pane, 'worker pane content',
       'pane content flows all the way back through readChats');
   });
@@ -804,7 +804,7 @@ describe('WARDEN-166 readTranscriptPhase (local-filesystem branch)', () => {
 describe('WARDEN-166 readChats changed_only + observedState', () => {
   it('attaches observedState while keeping entries RAW (no state field on entries)', async () => {
     const chat = yatfaChat();
-    const capturePanes = mock.fn(async (cs) => ({ [cs[0].key]: 'raw pane' }));
+    const capturePanes = mock.fn(async (cs) => ({ [cs[0].id]: 'raw pane' }));
     const res = await readChats(['myproject-worker'], false, [], [chat], capturePanes, cfg);
     assert.ok(res.observedState, 'observedState side-channel present');
     assert.ok(!('state' in res.chats[0]), 'result entries stay raw — no classification fields');
@@ -818,19 +818,19 @@ describe('WARDEN-166 readChats changed_only + observedState', () => {
     });
     const chats = [worker, researcher];
     const panes = { 'myproject-worker': 'same content', 'myproject-researcher': 'same content' };
-    const capturePanes = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.key, panes[c.key]])));
+    const capturePanes = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.id, panes[c.key]])));
 
     // Baseline to seed the cache.
     const base = await readChats(['myproject-worker', 'myproject-researcher'], false, [], chats, capturePanes, cfg);
 
     // Only the worker pane changes.
     const panes2 = { 'myproject-worker': 'CHANGED content', 'myproject-researcher': 'same content' };
-    const capturePanes2 = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.key, panes2[c.key]])));
+    const capturePanes2 = mock.fn(async (cs) => Object.fromEntries(cs.map((c) => [c.id, panes2[c.key]])));
     const res = await readChats(['myproject-worker', 'myproject-researcher'], false, [], chats, capturePanes2, cfg,
       { changed_only: true }, undefined, base.observedState);
 
     const readIds = res.chats.filter((c) => c.ok).map((c) => c.id);
-    assert.deepStrictEqual(readIds, ['myproject-worker'], 'only the changed pane is returned');
+    assert.deepStrictEqual(readIds, ['host1:myproject-worker'], 'only the changed pane is returned');
     assert.strictEqual(res.changedOnly, true);
   });
 });

@@ -579,7 +579,8 @@ export function parseCaptureSentinels(stdout) {
 }
 
 // Capture tmux pane content from multiple chats concurrently.
-// Groups by host to minimize SSH round-trips. Returns a map of chat key -> pane content.
+// Groups by host to minimize SSH round-trips. Returns a map of HOST-QUALIFIED
+// chat id (c.id, `${host}:${name}`) -> pane content. (WARDEN-1223)
 // `deps` is a test seam (defaults to {} in production, where capturePanesViaCompanion
 // bootstraps the real SSH channel) forwarded to the companion transport so the
 // WARDEN-413 skip path is drivable end-to-end with a fake channel. (WARDEN-413)
@@ -587,6 +588,22 @@ export async function capturePanes(chats, cfg = {}, deps = {}) {
   const byHost = {};
   for (const c of chats) (byHost[c.host] ||= []).push(c);
   const out = {};
+  // WARDEN-1223: the result map is keyed by the HOST-QUALIFIED chat id (c.id,
+  // `${host}:${name}`), never the bare `key`. Within one host the bare key is
+  // unique (it is a container or tmux session name), but two hosts may each run
+  // a same-named session — keying the flat map on the bare name collapses them
+  // into one slot, so one agent is badged from the other's terminal and the
+  // second host's capture failure is masked by the first host's entry. Each
+  // per-host capture below still runs on bare keys (the sentinel/script and
+  // companion contracts are unchanged — the bare key IS unique per host); this
+  // helper is where a host-local result is promoted to the host-qualified slot.
+  const mergeHost = (host, panes) => {
+    for (const c of byHost[host] || []) {
+      if (panes && Object.prototype.hasOwnProperty.call(panes, c.key)) {
+        out[c.id] = panes[c.key];
+      }
+    }
+  };
   await Promise.all(Object.entries(byHost).map(async ([host, list]) => {
     if (host === LOCAL) {
       // WARDEN-440: capture each LOCAL pane via async runLocalTmux, concurrently.
@@ -598,7 +615,7 @@ export async function capturePanes(chats, cfg = {}, deps = {}) {
       // off-thread, so HTTP/WS/timers stay responsive during monitor ticks.
       await Promise.all(list.map(async (c) => {
         const r = await runLocalTmux(['capture-pane', '-t', c.session || c.container, '-p', '-e', '-S', '-60', '-E', '-']);
-        if (r.ok) out[c.key] = r.stdout;
+        if (r.ok) out[c.id] = r.stdout;
       }));
       return;
     }
@@ -617,17 +634,17 @@ export async function capturePanes(chats, cfg = {}, deps = {}) {
       // within PANE_DELTA_FRESH_MS and capturePanes resumes polling, so a frozen
       // push can never freeze the UI. The cache is in-memory only.
       if (hasFreshPaneDelta(host)) {
-        Object.assign(out, readPaneDeltas(host, list.map((c) => c.key)));
+        mergeHost(host, readPaneDeltas(host, list.map((c) => c.key)));
         return;
       }
       const r = await capturePanesViaCompanion(host, list, cfg, {}, deps);
-      if (r.ok) Object.assign(out, r.panes);
+      if (r.ok) mergeHost(host, r.panes);
       return;
     }
     const script = buildCaptureScript(list);
     const res = await runWithPool(host, script, { timeout: 15000 }, cfg);
     if (!res.ok) return;
-    Object.assign(out, parseCaptureSentinels(res.stdout));
+    mergeHost(host, parseCaptureSentinels(res.stdout));
   }));
   return out;
 }

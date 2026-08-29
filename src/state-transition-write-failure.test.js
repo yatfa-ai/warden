@@ -37,11 +37,14 @@ const STUCK_LINE = 'stuck loop repeating the same output line over and over agai
 const stuckPane = Array(7).fill(STUCK_LINE).join('\n'); // last3 === prev3, >50 chars → stuck
 
 const yatfa = (key, container = key) => ({
-  key, container, session: null, host: 'hostA', role: 'worker', project: 'p', name: key, active: true,
+  id: `hostA:${key}`, key, container, session: null, host: 'hostA', role: 'worker', project: 'p', name: key, active: true,
 });
 
 // capturePanes seam: serves `panesByKey`; an ABSENT key → capture_failed.
-const capture = (panesByKey) => async (_chats, _cfg, _deps) => panesByKey;
+// capturePanes is keyed by the HOST-QUALIFIED id (WARDEN-1223); the fixture serves bare keys.
+const capture = (panesByKey) => async (chats, _cfg, _deps) => Object.fromEntries(chats
+        .filter((c) => Object.prototype.hasOwnProperty.call(panesByKey, c.key))
+        .map((c) => [c.id, panesByKey[c.key]]));
 
 // Let any escaped rejection reach the process-level handler before we assert.
 const settle = () => new Promise((r) => setTimeout(r, 50));

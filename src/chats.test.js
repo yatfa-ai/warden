@@ -37,7 +37,7 @@ function uniqueSession() {
   let savedEnv;
 
   function makeLocalChat(session) {
-    return { host: '(local)', key: session, container: null, session };
+    return { host: '(local)', id: `(local):${session}`, key: session, container: null, session };
   }
 
   // For these tests runLocalTmux captures from a REAL detached tmux session.
@@ -60,12 +60,14 @@ function uniqueSession() {
     const name = uniqueSession();
     try {
       await withSession(name, async () => {
-        const out = await capturePanes([makeLocalChat(name)], {});
+        const chat = makeLocalChat(name);
+        const out = await capturePanes([chat], {});
         // The capture succeeded via the LOCAL path — proving the companion (which
-        // refuses (local) hosts) was NOT consulted.
-        assert.ok(out[name], `LOCAL pane was captured: ${JSON.stringify(Object.keys(out))}`);
-        assert.ok(out[name].includes('WARDEN_LOCAL_MARKER_7'),
-          `captured the marker; got:\n${out[name]}`);
+        // refuses (local) hosts) was NOT consulted. Keyed by the HOST-QUALIFIED id
+        // (WARDEN-1223).
+        assert.ok(out[chat.id], `LOCAL pane was captured: ${JSON.stringify(Object.keys(out))}`);
+        assert.ok(out[chat.id].includes('WARDEN_LOCAL_MARKER_7'),
+          `captured the marker; got:\n${out[chat.id]}`);
       })();
     } finally {
       if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
@@ -79,9 +81,10 @@ function uniqueSession() {
     const name = uniqueSession();
     try {
       await withSession(name, async () => {
-        const out = await capturePanes([makeLocalChat(name)], {});
-        assert.ok(out[name], 'default LOCAL capture works');
-        assert.ok(out[name].includes('WARDEN_LOCAL_MARKER_7'));
+        const chat = makeLocalChat(name);
+        const out = await capturePanes([chat], {});
+        assert.ok(out[chat.id], 'default LOCAL capture works');
+        assert.ok(out[chat.id].includes('WARDEN_LOCAL_MARKER_7'));
       })();
     } finally {
       if (savedEnv === undefined) delete process.env.WARDEN_COMPANION_TRANSPORT;
@@ -105,12 +108,14 @@ function uniqueSession() {
       spawnSync(TMUX_BIN, ['send-keys', '-t', n, `MARK_${n}`], { encoding: 'utf8' });
     }
     try {
-      const out = await capturePanes(names.map(makeLocalChat), {});
+      const chats = names.map(makeLocalChat);
+      const out = await capturePanes(chats, {});
       // Every pane must be present and carry its own marker — proving the
-      // concurrent fan-out populated each key, not just one.
-      for (const n of names) {
-        assert.ok(out[n], `pane ${n} was captured (got keys: ${JSON.stringify(Object.keys(out))})`);
-        assert.ok(out[n].includes(`MARK_${n}`), `pane ${n} carries its own marker; got:\n${out[n]}`);
+      // concurrent fan-out populated each key, not just one. Keys are the
+      // HOST-QUALIFIED ids (WARDEN-1223).
+      for (const c of chats) {
+        assert.ok(out[c.id], `pane ${c.id} was captured (got keys: ${JSON.stringify(Object.keys(out))})`);
+        assert.ok(out[c.id].includes(`MARK_${c.key}`), `pane ${c.id} carries its own marker; got:\n${out[c.id]}`);
       }
     } finally {
       for (const n of names) spawnSync(TMUX_BIN, ['kill-session', '-t', n], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'ignore'] });
@@ -144,11 +149,12 @@ describe('capturePanes renders companion hosts from the pushed delta cache (WARD
     applyPaneDelta('prod', { event: 'paneDelta', panes: { 'p-worker': 'IDLE PANE CONTENT' } });
     assert.ok(hasFreshPaneDelta('prod'), 'precondition: host has a fresh delta');
 
-    const out = await capturePanes([{ host: 'prod', key: 'p-worker', container: 'p-worker', session: 'agent' }], {});
+    const out = await capturePanes([{ host: 'prod', id: 'prod:p-worker', key: 'p-worker', container: 'p-worker', session: 'agent' }], {});
 
     // The cached content came back — proving capturePanes read the cache and never
-    // called capturePanesViaCompanion (which would have hit a real channel).
-    assert.deepStrictEqual(out, { 'p-worker': 'IDLE PANE CONTENT' });
+    // called capturePanesViaCompanion (which would have hit a real channel). The
+    // map is keyed by the HOST-QUALIFIED id (WARDEN-1223).
+    assert.deepStrictEqual(out, { 'prod:p-worker': 'IDLE PANE CONTENT' });
     // And the cache is unchanged (read is non-destructive).
     assert.deepStrictEqual(readPaneDeltas('prod', ['p-worker']), { 'p-worker': 'IDLE PANE CONTENT' });
   });
@@ -156,10 +162,34 @@ describe('capturePanes renders companion hosts from the pushed delta cache (WARD
   it('only the requested keys are returned; a key absent from the cache stays missing', async () => {
     applyPaneDelta('prod', { event: 'paneDelta', panes: { a: 'AAA' } }); // b never pushed
     const out = await capturePanes([
-      { host: 'prod', key: 'a', container: 'a', session: 'agent' },
-      { host: 'prod', key: 'b', container: 'b', session: 'agent' },
+      { host: 'prod', id: 'prod:a', key: 'a', container: 'a', session: 'agent' },
+      { host: 'prod', id: 'prod:b', key: 'b', container: 'b', session: 'agent' },
     ], {});
-    assert.deepStrictEqual(out, { a: 'AAA' }, 'b is missing (cache miss) -> caller capture_failed handling, unchanged');
+    assert.deepStrictEqual(out, { 'prod:a': 'AAA' }, 'b is missing (cache miss) -> caller capture_failed handling, unchanged');
+  });
+
+  it('WARDEN-1223: two hosts running a SAME-NAMED session each get their own capture slot', async () => {
+    // The defect: the flat capture map was keyed on the bare session name, so
+    // hostA's pane overwrote hostB's and a capture failure on one host was
+    // masked by the other. With host-qualified keying both slots coexist.
+    applyPaneDelta('hostA', { event: 'paneDelta', panes: { 'same-name': 'HOST_A TERMINAL' } });
+    applyPaneDelta('hostB', { event: 'paneDelta', panes: { 'same-name': 'HOST_B TERMINAL' } });
+    assert.ok(hasFreshPaneDelta('hostA') && hasFreshPaneDelta('hostB'), 'precondition: both hosts fresh');
+
+    const chats = [
+      { host: 'hostA', id: 'hostA:same-name', key: 'same-name', container: 'same-name', session: 'agent' },
+      { host: 'hostB', id: 'hostB:same-name', key: 'same-name', container: 'same-name', session: 'agent' },
+    ];
+    const out = await capturePanes(chats, {});
+    assert.deepStrictEqual(out, {
+      'hostA:same-name': 'HOST_A TERMINAL',
+      'hostB:same-name': 'HOST_B TERMINAL',
+    }, 'each host-qualified slot carries its OWN terminal output');
+
+    // A capture failure on a host (no key in its host-local result) does not
+    // borrow the sibling host's entry: the slot is simply missing → capture_failed.
+    const onlyGhost = await capturePanes([{ host: 'hostB', id: 'hostB:ghost', key: 'ghost', container: 'ghost', session: 'agent' }], {});
+    assert.deepStrictEqual(onlyGhost, {}, 'a host with no captured pane yields a MISSING slot, never the sibling host\'s content');
   });
 
   it('a host with NO fresh delta is not read from the cache (would poll instead)', async () => {

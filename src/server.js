@@ -409,12 +409,18 @@ app.get('/api/agent-states', async (req, res) => {
     // Resolve pane keys → chats from the catalogue (zero ssh). Match on key OR id
     // so a bare restored tab id resolves the same as a host-qualified key. One
     // snapshot for the whole loop — it is a fresh array each call.
+    // WARDEN-1223: a bare key can name a session on MORE THAN ONE host — collect
+    // EVERY match (deduped by the host-qualified id) so each host's agent is
+    // captured and classified from its own terminal instead of only the first
+    // catalogue entry winning.
     const known = chatCatalog.snapshot();
     const seen = new Set();
     const chats = [];
     for (const k of keys) {
-      const c = known.find((x) => x.key === k || x.id === k);
-      if (c && !seen.has(c.key)) { seen.add(c.key); chats.push(c); }
+      for (const c of known) {
+        if (c.key !== k && c.id !== k) continue;
+        if (!seen.has(c.id)) { seen.add(c.id); chats.push(c); }
+      }
     }
     if (chats.length === 0) return res.json({ agents: [], total: 0, timestamp: Date.now() });
 
@@ -548,7 +554,10 @@ export async function logStateTransition(map, key, state, meta, appendFn) {
 // rejects — but it MUST still be awaited, or the promise is dropped again.
 async function logAgentState(c, state) {
   if (!c.container) return; // manual/tmux chats carry no timeline row (heatmap case 1)
-  return logStateTransition(lastLoggedState, c.key, state, {
+  // WARDEN-1223: the transition-diff baseline is keyed by the HOST-QUALIFIED id —
+  // the bare key names two different agents when two hosts run a same-named
+  // session, and a per-name baseline attributes one agent's transition to the other.
+  return logStateTransition(lastLoggedState, c.id, state, {
     id: c.container || c.session,
     host: c.host,
     container: c.container ?? null,
@@ -571,7 +580,10 @@ export function __resetLastLoggedStateForTest() {
 // projection of a chat — no I/O, no state.
 function agentRowBase(c) {
   return {
-    id: c.container || c.session,
+    // WARDEN-1223: `id` is the HOST-QUALIFIED chat id, NOT the bare
+    // container/session name — rebinding it to the bare name collapses two
+    // same-named sessions on different hosts into one agent row.
+    id: c.id,
     key: c.key,
     host: c.host,
     project: c.project,
@@ -600,7 +612,7 @@ async function classifyCapturedPanes(chats, panes, cfg = {}) {
     // A MISSING key means capturePanes silently dropped this chat (host SSH
     // failed → `if (!res.ok) return;` per host). Surface it as capture_failed so
     // the badge can still name the agent instead of omitting it (WARDEN-89).
-    if (!Object.prototype.hasOwnProperty.call(panes, c.key)) {
+    if (!Object.prototype.hasOwnProperty.call(panes, c.id)) {
       // WARDEN-788: capture_failed is a genuine state change (reachable →
       // unreachable) with historical value ("when was this host down?"), logged
       // for container-bearing yatfa agents so the timeline can render an
@@ -609,7 +621,7 @@ async function classifyCapturedPanes(chats, panes, cfg = {}) {
       out.push({ ...base, state: 'capture_failed', captureError: true, signal: null });
       continue;
     }
-    const clean = stripAnsi(panes[c.key] || '');
+    const clean = stripAnsi(panes[c.id] || '');
     const { state, signal } = classifyPane(clean, c);
     // WARDEN-540: user-authored output-pattern alerts. Run the matcher over the SAME
     // already-cleaned text classifyPane read (a sibling pure function — zero new SSH
@@ -708,8 +720,12 @@ export async function pollAgentStates(chats, cfg = {}, deps = {}) {
 // stripAnsi path so classification semantics are identical to the open-pane poll — no
 // divergent heuristics. Exported (and deps-injected) for the cost-gate test. (WARDEN-571)
 export async function pollFleetStates(chats, cfg = {}, deps = {}, opts = {}) {
+  // The caller's open ∪ watched pane keys may be BARE keys or host-qualified ids
+  // (the client sends what it stored; WARDEN-1223: a bare key can name a session
+  // on more than one host, so exclude on EITHER identity to avoid re-classifying
+  // a pane the 30s poll already owns).
   const exclude = new Set((opts.excludeKeys || []));
-  const fleet = (Array.isArray(chats) ? chats : []).filter((c) => c && c.key && !exclude.has(c.key));
+  const fleet = (Array.isArray(chats) ? chats : []).filter((c) => c && c.key && !exclude.has(c.key) && !exclude.has(c.id));
   // Partition the fleet: companion-eligible (REMOTE + companion transport on) vs the
   // rest. The companion path is the ONLY capture path the sweep is allowed to use, so
   // anything that would require a raw SSH capture (LOCAL tmux, or the companion flag
@@ -1265,18 +1281,30 @@ app.get('/api/search-pane', async (req, res) => {
 
   const paneKeys = String(req.query.panes || '').split(',').filter(Boolean);
   const known = chatCatalog.snapshot();
-  const chats = paneKeys.map((key) => known.find((c) => c.key === key)).filter(Boolean);
-
+  // WARDEN-1223: a bare key can name a session on more than one host — collect
+  // EVERY catalogue match (deduped by the host-qualified id), so search results
+  // are attributed to the chat whose terminal actually matched, per host.
+  const chats = [];
+  const seenIds = new Set();
+  for (const key of paneKeys) {
+    for (const c of known) {
+      if (c.key !== key && c.id !== key) continue;
+      if (!seenIds.has(c.id)) { seenIds.add(c.id); chats.push(c); }
+    }
+  }
   if (chats.length === 0) return res.json({ results: [], query });
 
   try {
     const captures = await capturePanes(chats, cfg);
     const results = [];
 
-    for (const [key, content] of Object.entries(captures)) {
+    // capturePanes is keyed by the host-qualified id (WARDEN-1223); attribute each
+    // captured pane to ITS chat (host + name), not the first same-named one.
+    for (const [id, content] of Object.entries(captures)) {
       const lines = content.split('\n');
-      const chat = chats.find((c) => c.key === key);
+      const chat = chats.find((c) => c.id === id);
       if (!chat) continue;
+      const key = chat.key;
 
       const lowerQuery = query.toLowerCase();
       lines.forEach((line, idx) => {
@@ -2570,12 +2598,34 @@ streamWss.on('connection', (ws) => {
   const tickMonitor = async () => {
     if (!monitors.size) return;
     const known = chatCatalog.snapshot();
-    const chats = [...monitors].map((k) => known.find((c) => c.key === k)).filter(Boolean);
+    // WARDEN-1223: a bare monitor id can name a session on more than one host —
+    // resolve EVERY catalogue match (key or id), deduped by the host-qualified
+    // id, so each host's pane is captured from its own terminal instead of the
+    // first same-named catalogue entry winning.
+    const chats = [];
+    const seenIds = new Set();
+    for (const k of monitors) {
+      for (const c of known) {
+        if (c.key !== k && c.id !== k) continue;
+        if (!seenIds.has(c.id)) { seenIds.add(c.id); chats.push(c); }
+      }
+    }
     if (!chats.length) return;
     let out;
     try { out = await capturePanes(chats, cfg); } catch { return; }
-    for (const [k, pane] of Object.entries(out)) {
-      send({ type: 'snapshot', id: k, pane });
+    // capturePanes is keyed by the host-qualified id. The CLIENT registered its
+    // snapshot handler under the id IT sent (bare key or qualified id), so each
+    // capture is echoed back under every monitor id that names that chat — the
+    // wire contract is unchanged, while the CONTENT now comes from the right
+    // host's terminal (WARDEN-1223).
+    for (const [capId, pane] of Object.entries(out)) {
+      const chat = chats.find((c) => c.id === capId);
+      if (!chat) continue;
+      for (const m of monitors) {
+        if (m === chat.key || m === chat.id) {
+          send({ type: 'snapshot', id: m, pane, host: chat.host, name: chat.name });
+        }
+      }
       // Snapshot logging disabled due to performance: 2s intervals create 300K+ events/pane/7 days
       // appendEvent({ type: 'snapshot', id: k, host: chats.find(c => c.key === k)?.host, container: chats.find(c => c.key === k)?.container });
     }
@@ -3241,7 +3291,10 @@ async function tickAttention(deps = {}) {
     // ones) so recovery re-arms the one-shot and capture_failed rows don't get
     // stuck firing on every sweep once capture recovers.
     prevAttentionStates = new Map(
-      agents.filter((a) => a && typeof a.state === 'string').map((a) => [a.key, a.state]),
+      // WARDEN-1223: baseline keyed by the HOST-QUALIFIED identity
+      // (notify.attentionRowKey) — per agent, not per bare name, so a one-shot
+      // notification is never attributed to a same-named agent on another host.
+      agents.filter((a) => a && typeof a.state === 'string').map((a) => [notify.attentionRowKey(a), a.state]),
     );
   } catch {
     // A transient capture failure leaves the previous baseline in place (no
