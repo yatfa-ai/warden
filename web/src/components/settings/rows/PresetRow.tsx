@@ -10,6 +10,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Trash2 } from 'lucide-react';
 import { type CustomPreset, PRESET_NAME_MAX } from '@/lib/storage';
+import { decideDraftNameCommit, decideDraftValueCommit } from './draftCommit';
 
 export function PresetRow({
   preset,
@@ -36,9 +37,9 @@ export function PresetRow({
   }, [preset.cmd]);
 
   const commitName = () => {
-    const trimmed = nameDraft.trim();
-    if (trimmed && trimmed !== preset.name) {
-      if (!onRename(preset.name, trimmed)) setNameDraft(preset.name); // revert on rejection
+    const decision = decideDraftNameCommit(nameDraft, preset.name);
+    if (decision.commit) {
+      if (!onRename(preset.name, decision.value)) setNameDraft(preset.name); // revert on rejection
     } else {
       setNameDraft(preset.name); // empty or unchanged → revert
     }
@@ -49,9 +50,9 @@ export function PresetRow({
   // the whole preset on next reload (silent data loss). Empty on commit reverts
   // to the last saved value, so the field is editable but never goes dangling.
   const commitCmd = () => {
-    const trimmed = cmdDraft.trim();
-    if (trimmed) {
-      onCmdChange(preset.name, trimmed);
+    const decision = decideDraftValueCommit(cmdDraft);
+    if (decision.commit) {
+      onCmdChange(preset.name, decision.value);
     } else {
       setCmdDraft(preset.cmd); // empty → revert
     }
